@@ -89,10 +89,26 @@ fn published(ctx: &egui::Context) -> Option<Panes> {
     ctx.data(|d| d.get_temp::<Panes>(panes_id())).filter(|p| now.saturating_sub(p.pass) <= 1)
 }
 
-/// Record this pass's panes of comp `comp` (see [`Panes`]).
+fn drawn_id() -> egui::Id {
+    egui::Id::unique("viewer-panes-drawn")
+}
+
+/// Whether the viewer laid out its panes (it does in every pass it is drawn) since the last
+/// call, which resets it: the main window asks once per pass of its own, after its panels. Not
+/// by pass number: egui numbers each window's passes apart, and a Composition panel floated into
+/// a window of its own draws in that window's passes, which run inside the main window's.
+pub(super) fn take_drawn(ctx: &egui::Context) -> bool {
+    ctx.data_mut(|d| d.remove_temp::<bool>(drawn_id())).unwrap_or(false)
+}
+
+/// Record this pass's panes of comp `comp` (see [`Panes`]), and that the viewer was drawn
+/// ([`take_drawn`]).
 pub(super) fn publish(ctx: &egui::Context, comp: ItemId, active: usize, panes: Vec<(usize, Rect)>, corners: Vec<Rect>) {
     let pass = ctx.cumulative_pass_nr();
-    ctx.data_mut(|d| d.insert_temp(panes_id(), Panes { comp: comp.0, pass, active, panes, corners }));
+    ctx.data_mut(|d| {
+        d.insert_temp(panes_id(), Panes { comp: comp.0, pass, active, panes, corners });
+        d.insert_temp(drawn_id(), true);
+    });
 }
 
 /// A press in an inactive pane of the viewer drawn in `viewer` makes it the active pane before the
@@ -132,19 +148,21 @@ pub(super) fn pre_activate(app: &mut EffectcraftApp, ui: &egui::Ui, cid: ItemId,
 
 /// Each layout position of a 2- or 4-view layout keeps its own picture framing: when the active
 /// position or the comp changed since the last pass, the framing in `zoom` and `pan` is stored for
-/// the position it belonged to and the active position's comes out. One view keeps its framing,
-/// as before (whichever position it shows).
+/// the position it belonged to, in any layout, and in a 2- or 4-view layout the active position's
+/// comes out. One view keeps its framing, as before (whichever position it shows).
 pub(super) fn sync_framing(app: &mut EffectcraftApp, cid: ItemId) {
     let now = (cid.0, active_pos(app, cid));
     let several = app.session.state.view_layout > 1;
     let v = &mut app.ui.viewer;
-    if let Some((_, was)) = v.framed.filter(|f| several && *f != now) {
+    if let Some((_, was)) = v.framed.filter(|f| *f != now) {
         if let Some(slot) = v.pane_frames.get_mut(was) {
             *slot = PaneFrame { zoom: v.zoom, pan: v.pan };
         }
-        let next = v.pane_frames.get(now.1).copied().unwrap_or_default();
-        v.zoom = next.zoom;
-        v.pan = next.pan;
+        if several {
+            let next = v.pane_frames.get(now.1).copied().unwrap_or_default();
+            v.zoom = next.zoom;
+            v.pan = next.pan;
+        }
     }
     v.framed = Some(now);
 }
@@ -287,5 +305,66 @@ mod tests {
         assert_eq!(run(&ctx, true), Some(7));
         assert_eq!(run(&ctx, false), Some(7), "the next pass routes its press by them");
         assert_eq!(run(&ctx, false), None, "not drawn for a pass: gone");
+    }
+
+    /// The viewer of a Composition panel floated into a window of its own draws in that window's
+    /// passes (an egui viewport, which numbers its passes apart from the main window's). The
+    /// check after the main window's panels must still see it drawn and keep its side panes'
+    /// frames: they lost them on every frame, and in a full cache each landed frame went at once.
+    #[test]
+    fn a_viewer_in_a_floating_window_keeps_its_side_panes_frames() {
+        use crate::frames::{FrameKey, RemoteDone, RemoteFrame, RemoteFrames, RemoteJob};
+        /// A frame renderer that hands every frame back at once.
+        struct Lands;
+        impl RemoteFrames for Lands {
+            fn slots(&self) -> usize {
+                1
+            }
+            fn start(&self, _: RemoteJob, done: RemoteDone) {
+                done(Ok(RemoteFrame { width: 2, height: 2, rgba: vec![0; 16], ms: 0.0 }));
+            }
+        }
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        app.frames.set_remote(Some(std::sync::Arc::new(Lands)));
+        let ctx = egui::Context::default();
+        let window = egui::ViewportId::from_hash_of("floating-composition-panel");
+        let pass = |app: &EffectcraftApp, viewport: egui::ViewportId, viewer_drawn: bool| {
+            let mut viewports = egui::ViewportIdMap::default();
+            viewports.insert(viewport, egui::ViewportInfo::default());
+            let raw = egui::RawInput { viewport_id: viewport, viewports, ..Default::default() };
+            let mut out = ctx.run_ui(raw, |ui| {
+                if viewer_drawn {
+                    publish(ui.ctx(), ItemId(1), 3, vec![(3, Rect::from_min_size(pos2(0.0, 0.0), vec2(10.0, 10.0)))], vec![]);
+                }
+                // (the main window's draw_inner, after its panels)
+                if viewport == egui::ViewportId::ROOT {
+                    super::super::upkeep(app, ui.ctx());
+                }
+            });
+            out.textures_delta.clear();
+        };
+        // The main window has drawn passes of its own: the two windows' pass numbers differ.
+        for _ in 0..3 {
+            pass(&app, egui::ViewportId::ROOT, false);
+        }
+        // Side pane 0 waits for its frame, which has landed.
+        let k = FrameKey { revision: 1, content: 1, comp: 1, frame: 0, scale: 1000, view: 7, opts: 0 };
+        app.frames.request_pane(&app.render_source(), k, ItemId(1), effectcraft_engine::time::Tick::ZERO, Default::default(), 0);
+        app.frames.dispatch_remote();
+        assert!(app.frames.is_cached(&k));
+        let kept = |app: &EffectcraftApp| {
+            let budget = app.frames.budget();
+            app.frames.set_budget(0);
+            let kept = app.frames.is_cached(&k);
+            app.frames.set_budget(budget);
+            kept
+        };
+        // The viewer draws in its window, then the main window ends its pass.
+        pass(&app, window, true);
+        pass(&app, egui::ViewportId::ROOT, false);
+        assert!(kept(&app), "the side pane still waits for its frame: an empty budget keeps it");
+        // A frame in which the viewer is not drawn anywhere.
+        pass(&app, egui::ViewportId::ROOT, false);
+        assert!(!kept(&app), "the viewer was not drawn: no side pane waits for a frame");
     }
 }

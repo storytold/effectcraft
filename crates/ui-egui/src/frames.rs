@@ -357,7 +357,8 @@ impl Cache {
     /// The frames the side panes wait for, until each pane has drawn its own: the frame it asked
     /// for and the newest earlier revision of it that has landed. Never evicted, and not counted
     /// against the budgets, so side panes never push the viewer's or the preview's frames out (at
-    /// most eight frames, two for each layout position).
+    /// most six frames, two for each side pane: other positions wait for none, see
+    /// [`Frames::retain_panes`]).
     fn waited_for(&self, k: &FrameKey) -> bool {
         self.panes.iter().chain(&self.landed).any(|p| p.as_ref() == Some(k))
     }
@@ -1570,7 +1571,8 @@ impl Frames {
     /// Queue the frame the side pane at layout position `pos` (0 to 3) of a 2- or 4-view layout
     /// shows. It renders as prefetch does. It never goes to the disk cache. The RAM cache keeps
     /// it, and the newest earlier revision of it that lands meanwhile, until the pane asks for
-    /// another frame or has drawn this one ([`Frames::release_pane`]).
+    /// another frame, has drawn this one ([`Frames::release_pane`]) or is no longer drawn
+    /// ([`Frames::retain_panes`]).
     pub fn request_pane(&self, src: &RenderSource, key: FrameKey, comp: ItemId, t: Tick, opts: RenderOpts, pos: usize) {
         let Ok(pos) = u8::try_from(pos) else { return };
         if usize::from(pos) >= 4 {
@@ -1591,6 +1593,25 @@ impl Frames {
         }
         c.evict_to_budget();
         c.evict_gpu();
+    }
+
+    /// Side panes show at layout positions `side` only (this viewer pass): the cache keeps no
+    /// frame for any other position. A position the layout hides, the active one, or one of a
+    /// viewer no longer drawn would never draw the frame it asked for, so never release it.
+    pub fn retain_panes(&self, side: &[usize]) {
+        let Ok(mut c) = self.cache.lock() else { return };
+        let c = &mut *c;
+        let mut released = false;
+        for (pos, (slot, landed)) in c.panes.iter_mut().zip(c.landed.iter_mut()).enumerate() {
+            if !side.contains(&pos) && (slot.is_some() || landed.is_some()) {
+                (*slot, *landed) = (None, None);
+                released = true;
+            }
+        }
+        if released {
+            c.evict_to_budget();
+            c.evict_gpu();
+        }
     }
 
     /// Queue the frame the viewer is showing: it jumps ahead of every prefetch job.
@@ -1800,8 +1821,10 @@ impl Frames {
             };
             // The GPU compositor here keeps the frame on the GPU, but runs layer effects on the
             // CPU (this thread can't wait for readbacks): frames with effects go to workers
-            // that render them on their own GPU.
-            let gpu_here = job.src.gpu.is_some() && job.src.gpu_display && !(remote.gpu() && comp_has_effects(&job.src.project, job.comp));
+            // that render them on their own GPU. A side pane's frame always goes to the workers:
+            // here it would render on the interface thread again.
+            let gpu_here =
+                job.pane.is_none() && job.src.gpu.is_some() && job.src.gpu_display && !(remote.gpu() && comp_has_effects(&job.src.project, job.comp));
             if gpu_here {
                 let t0 = web_time::Instant::now();
                 // (A frame kept on the GPU is not written to the disk cache: its files are not

@@ -287,6 +287,10 @@ pub struct ViewerState {
     /// active shows its own frame only once that has come).
     #[serde(skip)]
     pub(crate) shown_for: Option<(u64, usize)>,
+    /// The key of the frame on screen and the comp region it was rendered for (the region of
+    /// interest or the Extended Viewer's area; None: the whole comp), as the viewer showed it.
+    #[serde(skip)]
+    pub(crate) shown_region: Option<(crate::frames::FrameKey, Option<[f64; 4]>)>,
 }
 
 /// One layout position's picture framing: magnification (None = fit) and pan, as in
@@ -327,6 +331,7 @@ impl Default for ViewerState {
             pane_frames: Default::default(),
             framed: None,
             shown_for: None,
+            shown_region: None,
         }
     }
 }

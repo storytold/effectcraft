@@ -25,6 +25,10 @@ pub(super) fn aux_views(
         panes = vec![(active, full)];
     }
     let main = panes.iter().find(|(pos, _)| *pos == active).map_or(full, |(_, r)| *r);
+    // A position with no side pane in this pass (the layout hides it, or it is the active one)
+    // waits for no frame: it would never draw the frame it asked for, so never release it.
+    let side: Vec<usize> = panes.iter().map(|(pos, _)| *pos).filter(|pos| *pos != active).collect();
+    app.frames.retain_panes(&side);
     let ctx = ui.ctx().clone();
     // The active pane draws no view selector: one left open would be open again when the pane
     // is a side pane again.
@@ -162,14 +166,19 @@ pub(super) fn aux_views(
 /// empty frame. The viewer keeps no texture of that frame: the newly active pane's frame comes in
 /// a texture of its own, its side-pane picture standing in meanwhile (`multiview::stand_in`). A
 /// half-float frame (the display pass draws it) is not handed over, nor a frame of a region (the
-/// region of interest, the Extended Viewer's area): a side pane draws the whole comp.
+/// region of interest, the Extended Viewer's area), also one turned off while its frame is still
+/// on screen: a side pane draws the whole comp. Only a frame the viewer showed as the whole comp's
+/// is handed over.
 pub(super) fn hand_over(app: &mut EffectcraftApp, ctx: &egui::Context, cid: effectcraft_engine::project::ItemId) {
     let Some((comp, old)) = app.ui.viewer.shown_for else { return };
     let shown = multiview::shown_positions(app, cid, app.session.state.view_layout.max(1));
-    if comp != cid.0 || old == multiview::active_pos(app, cid) || !shown.contains(&old) || app.viewer_region(cid).is_some() {
+    if comp != cid.0 || old == multiview::active_pos(app, cid) || !shown.contains(&old) {
         return;
     }
     let Some((on_screen, key)) = app.viewer_shown else { return };
+    if app.ui.viewer.shown_region != Some((key, None)) {
+        return;
+    }
     let tex = match (&app.viewer_native, &app.viewer_tex) {
         (Some((id, k, _)), _) if on_screen == Some(*id) && *k == key => app.viewer_native.take().map(|(id, _, f)| PaneTex::Gpu { id, _frame: f }),
         (_, Some((h, k, _))) if on_screen == Some(h.id()) && *k == key => app.viewer_tex.take().map(|(h, _, _)| PaneTex::Cpu(h)),

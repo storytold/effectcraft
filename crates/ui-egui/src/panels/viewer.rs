@@ -133,6 +133,15 @@ pub(crate) fn stand_in(app: &EffectcraftApp, ctx: &egui::Context, cid: effectcra
     multiview::stand_in(app, ctx, cid)
 }
 
+/// After the main window's panels, once per pass of its own: a viewer not drawn since the last
+/// check (its panel closed or behind another tab, no comp open), in the main window or in a
+/// window of its own, has no side pane, so no layout position waits for a frame.
+pub(crate) fn upkeep(app: &EffectcraftApp, ctx: &egui::Context) {
+    if !multiview::take_drawn(ctx) {
+        app.frames.retain_panes(&[]);
+    }
+}
+
 pub fn comp_to_screen(ctx: &egui::Context, p: [f32; 2]) -> Option<Pos2> {
     let m: ViewerMap = ctx.data(|d| d.get_temp(map_id()))?;
     Some(m.to_screen([p[0] as f64, p[1] as f64]))
@@ -429,8 +438,10 @@ fn phase_frame(app: &mut EffectcraftApp, v: &mut Vw<'_>) {
             s.revision = k.revision;
         }
         // The frame on screen is the active pane's, also when that pane became active on the
-        // frame already there (two panes on the same view and magnification).
+        // frame already there (two panes on the same view and magnification). It covers the
+        // current region: the region is part of the key's view.
         app.ui.viewer.shown_for = Some((cid.0, multiview::active_pos(app, cid)));
+        app.ui.viewer.shown_region = Some((k, app.viewer_region(cid)));
     }
     if app.ui.viewer.transparency_grid {
         checker(&painter, comp_rect);

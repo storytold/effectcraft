@@ -584,6 +584,92 @@ fn a_frame_a_side_pane_drew_leaves_the_cache_as_any_other() {
     assert!(!kept, "an empty budget took the Top pane's frame too");
 }
 
+/// A side pane that leaves the layout, or whose viewer closes, before it draws the frame it asked
+/// for no longer waits for that frame: it would never draw it, so the cache kept it over its
+/// budget until a purge.
+#[test]
+fn a_pane_that_leaves_waits_for_no_frame() {
+    use effectcraft_ui_egui::dock::PanelKind;
+    use effectcraft_ui_egui::panels::viewer::shown_frame_key;
+    for leave in ["one view", "viewer closed"] {
+        let (mut h, _) = harness(4);
+        let cid = h.state().session.active_comp_id().unwrap();
+        let drawn = shown_frame_key(&h.ctx, cid, 0).unwrap_or_else(|| panic!("the Top pane drew a frame"));
+        // The panes ask for the frame at 1 s, which lands before they draw it.
+        h.state_mut().session.execute("time.set", json!({"time": 1.0})).unwrap();
+        h.step();
+        idle(&h);
+        let s = &h.state().session;
+        let frame = s.project.comp(cid).unwrap().frame_rate.frame_at(s.time());
+        let asked = effectcraft_ui_egui::frames::FrameKey { frame, ..drawn };
+        assert!(h.state().frames.is_cached(&asked), "{leave}: the Top pane's frame at 1 s landed");
+        match leave {
+            "one view" => drop(h.state_mut().session.execute("view.layout", json!({"views": 1})).unwrap()),
+            _ => h.state_mut().close_panel(PanelKind::Composition),
+        }
+        h.step();
+        assert_ne!(shown_frame_key(&h.ctx, cid, 0), Some(asked), "{leave}: the Top pane did not draw it");
+        let frames = &h.state().frames;
+        let budget = frames.budget();
+        frames.set_budget(0);
+        let kept = frames.is_cached(&asked);
+        frames.set_budget(budget);
+        assert!(!kept, "{leave}: an empty budget took that frame too");
+    }
+}
+
+/// A position keeps the framing it had when it stopped being the one that takes the input, also
+/// when that happened in one view (a comp switch): back in four views it gets that framing back,
+/// not an older one. One view itself keeps its framing across comps.
+#[test]
+fn a_position_keeps_its_framing_through_one_view() {
+    let (mut h, _) = harness(4);
+    let first = h.state().session.active_comp_id().unwrap();
+    h.state_mut().session.execute("view.activatePane", json!({"position": 0})).unwrap();
+    h.run_steps(2);
+    h.state_mut().ui.viewer.zoom = Some(2.0);
+    h.run_steps(2);
+    h.state_mut().session.execute("view.layout", json!({"views": 1})).unwrap();
+    h.run_steps(2);
+    // Comp B, whose bottom-right position takes the input.
+    h.state_mut().session.execute("comp.new", json!({"name": "B", "width": 640, "height": 360, "duration": 2})).unwrap();
+    h.run_steps(2);
+    assert_eq!(h.state().ui.viewer.zoom, Some(2.0), "one view keeps its framing in comp B");
+    h.state_mut().ui.viewer.zoom = Some(3.0);
+    h.run_steps(2);
+    h.state_mut().session.execute("view.layout", json!({"views": 4})).unwrap();
+    h.run_steps(2);
+    h.state_mut().session.execute("comp.open", json!({"comp": first.0})).unwrap();
+    h.run_steps(2);
+    assert_eq!(views(&h).active(), 0);
+    assert_eq!(h.state().ui.viewer.zoom, Some(2.0), "the Top position's framing from before one view");
+    assert_eq!(h.state().ui.viewer.pane_frames[3].zoom, Some(3.0), "the bottom-right position keeps comp B's");
+}
+
+/// A frame of a region of interest that is turned off is still a region's frame until the whole
+/// comp's lands: a pane made active meanwhile does not hand it to the pane that was active.
+#[test]
+fn a_region_frame_still_on_screen_is_not_handed_over() {
+    let (mut h, _) = harness(4);
+    h.state_mut().session.execute("view.setRegionOfInterest", json!({"rect": [100, 50, 200, 100]})).unwrap();
+    settle(&mut h);
+    let main = rect_of(&h, "viewer.pane.3");
+    let in_main = |h: &Harness<'_, EffectcraftApp>| images(h).into_iter().filter(|(_, b)| main.contains_rect(*b)).map(|(t, _)| t).collect::<Vec<_>>();
+    let region = *in_main(&h).first().unwrap_or_else(|| panic!("the active pane draws the region's frame"));
+    let at = empty_point(&h, 0);
+    h.event(Event::PointerMoved(at));
+    h.step();
+    // Off, and a press in the Top pane in the next pass, before the whole comp's frame is shown.
+    h.state_mut().session.execute("view.setRegionOfInterest", json!({"rect": null})).unwrap();
+    h.event(Event::PointerButton { pos: at, button: PointerButton::Middle, pressed: true, modifiers: Modifiers::NONE });
+    h.step();
+    assert_eq!(views(&h).active(), 0);
+    let side = in_main(&h);
+    assert!(!side.contains(&region), "the bottom-right pane does not draw the region's frame as its picture: {side:?}");
+    h.event(Event::PointerButton { pos: at, button: PointerButton::Middle, pressed: false, modifiers: Modifiers::NONE });
+    settle(&mut h);
+}
+
 /// The interface thread's step with the 4-view layout on the 3D Showcase demo while the time
 /// changes every frame (the side panes rendered there before #3845). Run by hand:
 /// `cargo test --release -p effectcraft-ui-egui --test it four_view_frame_time -- --ignored --nocapture`.

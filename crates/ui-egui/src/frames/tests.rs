@@ -3658,3 +3658,65 @@ fn a_side_panes_remote_frame_skips_the_remote_disk_cache() {
     let sent: Vec<bool> = keys.0.lock().unwrap().iter().map(Option::is_some).collect();
     assert_eq!(sent, [false, true], "the pane's frame has no disk key, prefetch has one");
 }
+
+/// #3845: only the layout positions that show a side pane in this viewer pass wait for frames.
+/// A position the layout hides, the active one or a closed viewer's never draws the frame it
+/// asked for, so it never released it.
+#[test]
+fn only_positions_that_show_a_side_pane_wait_for_frames() {
+    let mut f = Frames::default();
+    f.set_remote(Some(Arc::new(Idle)));
+    f.set_budget(4 * 16);
+    let at = |frame| key(1, frame, 0);
+    f.request_urgent(&idle_source(), at(0), ItemId(1), Tick::ZERO, RenderOpts::default());
+    for frame in 0..4 {
+        insert(&f, at(frame));
+    }
+    let (p0, p1) = (FrameKey { view: 7, ..at(20) }, FrameKey { view: 8, ..at(20) });
+    for (pos, k) in [(0, p0), (1, p1)] {
+        f.request_pane(&idle_source(), k, ItemId(1), Tick::ZERO, RenderOpts::default(), pos);
+        insert_pane(&f, k);
+    }
+    f.retain_panes(&[1, 2]);
+    assert!(!f.is_cached(&p0), "position 0 shows no side pane: its frame went");
+    assert!(f.is_cached(&p1), "position 1's stays");
+    assert_eq!(f.cached_frames(&at(0)), [0, 1, 2, 3], "not the viewer's");
+    f.retain_panes(&[]);
+    assert!(!f.is_cached(&p1), "no side pane at all");
+}
+
+/// #3845, browser build: with frame workers (a remote renderer), a side pane's frame goes to them
+/// even when the GPU compositor here could keep it on the GPU. That path renders on the interface
+/// thread (`pump`), which the viewer's frames may take but the side panes must not.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_side_panes_frame_goes_to_the_frame_workers_not_the_local_gpu() {
+    use effectcraft_engine::render::Backend;
+    let Some(gpu) = Gpu::headless() else {
+        eprintln!("side-pane remote route test skipped: no adapter");
+        return;
+    };
+    struct Started(Mutex<usize>);
+    impl RemoteFrames for Started {
+        fn slots(&self) -> usize {
+            2
+        }
+        fn start(&self, _: RemoteJob, _: RemoteDone) {
+            *self.0.lock().unwrap() += 1;
+        }
+    }
+    let mut session = effectcraft_engine::Session::default();
+    session.execute("comp.new", serde_json::json!({"width": 16, "height": 16, "duration": 1})).unwrap();
+    let comp = session.active_comp_id().unwrap();
+    session.execute("layer.newSolid", serde_json::json!({"color": "#ff0000"})).unwrap();
+    let started = Arc::new(Started(Mutex::default()));
+    let mut f = Frames::default();
+    f.set_remote(Some(started.clone()));
+    let src = RenderSource { project: session.project.clone(), gpu: Some(gpu), gpu_display: true, ..idle_source() };
+    let pane = FrameKey { comp: comp.0, view: 7, ..key(1, 0, 0) };
+    let opts = RenderOpts { backend: Backend::Gpu, ..Default::default() };
+    f.request_pane(&src, pane, comp, Tick::ZERO, opts, 0);
+    f.dispatch_remote();
+    assert!(!f.is_cached(&pane), "the side pane's frame was not rendered here");
+    assert_eq!(*started.0.lock().unwrap(), 1, "it went to the frame workers");
+}
