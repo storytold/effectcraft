@@ -1062,12 +1062,13 @@ pub const EFFECTS: &[EffectMap] = &[
     fx("ADBE HDR ToneMap", "ec.utility.hdrcompression", &[pm(1, K::FloatSlider, "amount", Conv::Plain { valid_max: 100.0 })]),
     // Echo (`echo-*`): Echo Time in seconds (valid -30 000..30 000), Number Of Echoes an integer
     // (valid 0..30 000), Starting Intensity 0..1, Decay (valid 0..100, slider 0..1), Echo
-    // Operator. EffectCraft's Echo uses at most 255 echoes and a Decay up to 1.
+    // Operator. EffectCraft's Echo uses an Echo Time within 30 s, at most 255 echoes and a Decay up
+    // to 1.
     fx(
         "ADBE Echo",
         "ec.time.echo",
         &[
-            pm(1, K::FloatSlider, "echoTime", Conv::Plain { valid_max: 30000.0 }),
+            pm_limited(1, K::FloatSlider, "echoTime", Conv::Plain { valid_max: 30000.0 }, -30.0, 30.0),
             pm_limited(2, K::IntSlider, "numberOfEchoes", Conv::Plain { valid_max: 30000.0 }, 0.0, 255.0),
             pm(3, K::FloatSlider, "startingIntensity", Conv::Plain { valid_max: 1.0 }),
             pm_limited(4, K::FloatSlider, "decay", Conv::Plain { valid_max: 100.0 }, 0.0, 1.0),
