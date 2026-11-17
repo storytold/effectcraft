@@ -222,6 +222,10 @@ const MAX_CUBE_ROWS: usize = 65_536 + 256 * 256 * 256;
 
 /// Parse `.cube` text (TITLE, LUT_1D_SIZE, LUT_3D_SIZE, DOMAIN_MIN/MAX, data red-fastest).
 pub fn parse_cube(text: &str) -> Option<Lut> {
+    parse_cube_limited(text, MAX_CUBE_ROWS)
+}
+
+fn parse_cube_limited(text: &str, max_rows: usize) -> Option<Lut> {
     let mut lut = Lut { n1: 0, d1: vec![], n3: 0, d3: vec![], dmin: [0.0; 3], dmax: [1.0; 3] };
     let mut rows: Vec<[f32; 3]> = Vec::new();
     let three = |it: &mut std::str::SplitWhitespace| -> Option<[f32; 3]> {
@@ -264,10 +268,11 @@ pub fn parse_cube(text: &str) -> Option<Lut> {
             }
             k if k.starts_with(|c: char| c.is_ascii_alphabetic()) => continue,
             _ => {
-                if rows.len() == MAX_CUBE_ROWS {
+                if rows.len() == max_rows {
                     return None;
                 }
                 let row = three(&mut it)?;
+                // Make buffer growth fallible before push can allocate.
                 rows.try_reserve(1).ok()?;
                 rows.push(row);
             }
@@ -719,10 +724,11 @@ mod tests {
 
     #[test]
     fn cube_row_collection_is_bounded() {
-        // Beyond the largest 3D table plus the largest 1D shaper in Cube LUT 1.0.
-        let count = 256 * 256 * 256 + 65_536 + 1;
-        let text = format!("LUT_1D_SIZE {count}\n{}", "0 0 0\n".repeat(count));
-        assert!(parse_cube(&text).is_none());
+        assert_eq!(MAX_CUBE_ROWS, 65_536 + 256 * 256 * 256);
+        let text = "LUT_1D_SIZE 2\n0 0 0\n1 1 1\n";
+        let lut = parse_cube_limited(text, 2).unwrap();
+        assert_eq!(lut.d1, vec![[0.0; 3], [1.0; 3]]);
+        assert!(parse_cube_limited("LUT_1D_SIZE 3\n0 0 0\n0.5 0.5 0.5\n1 1 1\n", 2).is_none());
     }
 
     #[test]
