@@ -485,7 +485,7 @@ mod tests {
     #[test]
     fn polystar_huge_points_is_bounded() {
         for star in [true, false] {
-            let p = polystar(star, 1e30, [0.0, 0.0], 0.0, 10.0, 20.0, 0.0, 0.0);
+            let p = polystar(Polystar { star, points: 1e30, pos: [0.0, 0.0], rotation: 0.0, inner: 10.0, outer: 20.0, inner_round: 0.0, outer_round: 0.0 });
             assert!(p.elements().len() <= 2 * 100_000 + 2);
         }
     }
