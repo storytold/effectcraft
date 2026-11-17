@@ -138,3 +138,8 @@ sync_github_name = true
 
 [people.andreaaazo]
 sync_github_name = true
+
+[people.trmosala]
+real_name = "Tiisetso Mosala"
+display_name = "Tiisetso Mosala"
+sync_github_name = false
