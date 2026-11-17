@@ -264,6 +264,202 @@ fn effect_header_arrows_leave_viewer_text_editing_alone() {
     assert_eq!(h.state().ui.fx_closed.iter().copied().collect::<Vec<_>>(), vec![fx], "with the edit over, Left collapses the effect");
 }
 
+/// The x and y of `lid`'s Position, which the arrows' layer nudge moves.
+fn position(h: &Harness<'_, EffectcraftApp>, lid: LayerId) -> [f64; 2] {
+    let p = layer(&h.state().session, lid.0).props.prop("transform/position").unwrap().value.as_vec3();
+    [p[0], p[1]]
+}
+
+/// #3585: plain Down / Up select the next / previous effect, a collapsed one too, and stop at the
+/// last / first one without nudging the layer. Only the selection changes: not the document, the
+/// time, the history or what is open.
+#[test]
+fn effect_header_down_and_up_select_the_next_and_previous_effect() {
+    let (mut h, lid, [(first, _), (second, _), (third, _)]) = header_arrow_harness();
+    let at = rect_of(&h, &format!("effectControls.effect.{first}.name")).center();
+    click(&mut h, at);
+    assert_eq!(h.state().session.state.selected_props, vec![(lid, first)]);
+    h.state_mut().ui.fx_closed.insert(second);
+    let project = serde_json::to_value(&h.state().session.project).unwrap();
+    let time = h.state().session.time();
+    let history = (h.state().session.history.undo.len(), h.state().session.history.redo.len());
+    let closed = h.state().ui.fx_closed.clone();
+    let (down, up) = (egui::Key::ArrowDown, egui::Key::ArrowUp);
+    for (key, want) in [(down, second), (down, third), (down, third), (up, second), (up, first), (up, first)] {
+        header_arrow_key(&mut h, key, egui::Modifiers::NONE);
+        assert_eq!(h.state().session.state.selected_props, vec![(lid, want)], "{key:?}");
+        assert_eq!(serde_json::to_value(&h.state().session.project).unwrap(), project, "{key:?}: the layer is not nudged");
+        assert_eq!(h.state().session.time(), time, "{key:?}");
+        assert_eq!((h.state().session.history.undo.len(), h.state().session.history.redo.len()), history, "{key:?}: no undo step");
+        assert_eq!(h.state().ui.fx_closed, closed, "{key:?}: nothing opens or closes");
+        assert_eq!(h.state().ui.focused, PanelKind::EffectControls);
+    }
+}
+
+/// #3585: with several effects selected, Down goes on from the lowest one and Up from the highest,
+/// leaving one effect selected. Headers of other layers, stale ids and parameters don't count.
+#[test]
+fn effect_header_down_and_up_go_on_from_the_ends_of_a_multiple_selection() {
+    let (mut h, lid, [(first, _), (second, prop), (third, _)]) = header_arrow_harness();
+    for (picked, key, want) in [
+        (vec![(lid, second), (lid, first)], egui::Key::ArrowDown, third),
+        (vec![(lid, third), (lid, second)], egui::Key::ArrowUp, first),
+        (vec![(lid, first), (lid, third)], egui::Key::ArrowDown, third),
+        (vec![(lid, first), (lid, third)], egui::Key::ArrowUp, first),
+        (vec![(LayerId(0), first), (lid, u64::MAX), (lid, prop), (lid, second)], egui::Key::ArrowDown, third),
+    ] {
+        h.state_mut().session.state.selected_props = picked.clone();
+        header_arrow_key(&mut h, key, egui::Modifiers::NONE);
+        assert_eq!(h.state().session.state.selected_props, vec![(lid, want)], "{picked:?} {key:?}");
+    }
+    // A shift-click range, picked from the third effect up to the first, as a user would.
+    let at = rect_of(&h, &format!("effectControls.effect.{third}.name")).center();
+    click(&mut h, at);
+    let at = rect_of(&h, &format!("effectControls.effect.{first}.name")).center();
+    h.event(egui::Event::ModifiersChanged(egui::Modifiers::SHIFT));
+    click(&mut h, at);
+    h.event(egui::Event::ModifiersChanged(Default::default()));
+    h.step();
+    assert_eq!(h.state().session.state.selected_props.len(), 3, "the range is selected");
+    header_arrow_key(&mut h, egui::Key::ArrowUp, egui::Modifiers::NONE);
+    assert_eq!(h.state().session.state.selected_props, vec![(lid, first)]);
+}
+
+/// #3585: without an effect header selected on the panel's layer, or with the panel or the
+/// keyboard elsewhere, plain Up / Down keep nudging the layer (or go to whoever owns the keys),
+/// and the effect selection stays.
+#[test]
+fn effect_header_down_and_up_leave_the_nudge_and_other_keyboard_owners_alone() {
+    let (mut h, lid, [(first, _), (second, prop), _]) = header_arrow_harness();
+    // A parameter, a stale header and another layer's header: the layer moves down, then up.
+    let picked = vec![(lid, prop), (lid, u64::MAX), (LayerId(0), first)];
+    h.state_mut().session.state.selected_props = picked.clone();
+    let y = position(&h, lid)[1];
+    header_arrow_key(&mut h, egui::Key::ArrowDown, egui::Modifiers::NONE);
+    // (One pixel at the viewer's magnification.)
+    let step = position(&h, lid)[1] - y;
+    assert!(step > 0.0, "Down still nudges the layer");
+    header_arrow_key(&mut h, egui::Key::ArrowUp, egui::Modifiers::NONE);
+    assert!((position(&h, lid)[1] - y).abs() < 1e-6, "Up still nudges the layer");
+    assert_eq!(h.state().session.state.selected_props, picked);
+
+    // With an effect selected: Shift nudges ten pixels, Cmd/Ctrl keeps its own meaning.
+    h.state_mut().session.state.selected_props = vec![(lid, second)];
+    header_arrow_key(&mut h, egui::Key::ArrowDown, egui::Modifiers::SHIFT);
+    assert!((position(&h, lid)[1] - (y + 10.0 * step)).abs() < 1e-6, "Shift+Down nudges ten pixels");
+    header_arrow_key(&mut h, egui::Key::ArrowUp, egui::Modifiers::SHIFT);
+    assert!((position(&h, lid)[1] - y).abs() < 1e-6);
+    header_arrow_key(&mut h, egui::Key::ArrowDown, egui::Modifiers::COMMAND);
+    assert_eq!(h.state().session.state.selected_props, vec![(lid, second)], "Cmd/Ctrl+Down keeps the effect selection");
+
+    // Another panel, a dialog, the context menu and the rename field own the arrows.
+    let stays = |h: &mut Harness<'_, EffectcraftApp>, why: &str| {
+        for key in [egui::Key::ArrowDown, egui::Key::ArrowUp] {
+            header_arrow_key(h, key, egui::Modifiers::NONE);
+            assert_eq!(h.state().session.state.selected_props, vec![(lid, second)], "{why}: {key:?}");
+        }
+    };
+    h.state_mut().ui.focused = PanelKind::Composition;
+    stays(&mut h, "another panel");
+    h.state_mut().ui.focused = PanelKind::EffectControls;
+    h.state_mut().dialog = Some(effectcraft_ui_egui::Dialog::About);
+    stays(&mut h, "a dialog");
+    h.state_mut().dialog = None;
+    h.run_steps(3);
+    let at = rect_of(&h, &format!("effectControls.effect.{second}.name")).center();
+    h.event(egui::Event::PointerMoved(at));
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Secondary, pressed, modifiers: egui::Modifiers::NONE });
+        h.step();
+    }
+    h.run_steps(2);
+    assert!(egui::Popup::is_any_open(&h.ctx), "the effect context menu is open");
+    stays(&mut h, "the context menu");
+    header_arrow_key(&mut h, egui::Key::Escape, egui::Modifiers::NONE);
+    h.run_steps(3);
+    double_click(&mut h, at);
+    h.run_steps(3);
+    assert!(h.state().auto.find(&format!("effectControls.effect.{second}.nameEdit")).is_some(), "the rename field is open");
+    stays(&mut h, "the rename field");
+    assert!(h.state().auto.find(&format!("effectControls.effect.{second}.nameEdit")).is_some());
+}
+
+/// #3585: a hidden Effect Controls (closed, under a maximized frame, behind Home) with the focus
+/// left on it doesn't take Up / Down: they nudge the layer.
+#[test]
+fn effect_header_down_and_up_ignore_a_hidden_panel() {
+    for hidden in ["closed", "maximized", "home"] {
+        let (mut h, lid, [(fx, _), _, _]) = header_arrow_harness();
+        h.state_mut().session.state.selected_props = vec![(lid, fx)];
+        match hidden {
+            "closed" => h.state_mut().close_panel(PanelKind::EffectControls),
+            "maximized" => h.state_mut().toggle_maximize(PanelKind::Composition),
+            _ => h.state_mut().ui.start_screen = true,
+        }
+        h.run_steps(2);
+        assert_eq!(h.state().ui.focused, PanelKind::EffectControls, "{hidden}: stale focus is preserved");
+        let y = position(&h, lid)[1];
+        header_arrow_key(&mut h, egui::Key::ArrowDown, egui::Modifiers::NONE);
+        assert_eq!(h.state().session.state.selected_props, vec![(lid, fx)], "{hidden}");
+        assert!(position(&h, lid)[1] > y, "{hidden}: Down still nudges the layer");
+    }
+}
+
+/// #3585: locked to a layer that isn't selected, Effect Controls' arrows act on the effects it
+/// shows: Down / Up select among them and Left / Right close and open them.
+#[test]
+fn effect_header_arrows_act_on_the_locked_layer() {
+    let (mut h, lid, [(first, _), (second, _), _]) = header_arrow_harness();
+    let comp = h.state().session.active_comp_id().unwrap().0;
+    let other = h.state_mut().session.execute("layer.newSolid", json!({"name": "Other", "color": "#202020"})).unwrap()["layer"].as_u64().unwrap();
+    h.state_mut().ui.effect_controls_lock = Some(effectcraft_ui_egui::state::EffectControlsLock { comp, layer: lid.0 });
+    h.state_mut().session.state.selected_layers = vec![LayerId(other)];
+    h.state_mut().session.state.selected_props = vec![(lid, first)];
+    h.state_mut().ui.focused = PanelKind::EffectControls;
+    h.run_steps(3);
+    assert!(shows_effect(&h, first), "the locked panel shows the first layer");
+    header_arrow_key(&mut h, egui::Key::ArrowDown, egui::Modifiers::NONE);
+    assert_eq!(h.state().session.state.selected_props, vec![(lid, second)]);
+    header_arrow_key(&mut h, egui::Key::ArrowLeft, egui::Modifiers::NONE);
+    assert_eq!(h.state().ui.fx_closed.iter().copied().collect::<Vec<_>>(), vec![second], "Left closes the locked layer's effect");
+    header_arrow_key(&mut h, egui::Key::ArrowRight, egui::Modifiers::NONE);
+    assert!(h.state().ui.fx_closed.is_empty());
+}
+
+/// #3585: a long effect list scrolls so the effect Down / Up picks stays in view.
+#[test]
+fn effect_header_down_and_up_scroll_the_picked_effect_into_view() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Long", "width": 32, "height": 18, "frameRate": 30, "duration": 2})).unwrap();
+    let lid = s.execute("layer.newSolid", json!({"name": "Controls", "color": "#40b080"})).unwrap()["layer"].as_u64().unwrap();
+    let fx: Vec<u64> =
+        (0..16).map(|_| s.execute("effect.apply", json!({"layers": [lid], "effect": "Point Control"})).unwrap()["effects"][0].as_u64().unwrap()).collect();
+    s.state.selected_props = vec![(LayerId(lid), fx[0])];
+    let mut app = EffectcraftApp::new(s);
+    app.show_panel(PanelKind::EffectControls);
+    app.toggle_maximize(PanelKind::EffectControls);
+    app.ui.focused = PanelKind::EffectControls;
+    let mut h = Harness::builder().with_size(egui::vec2(800.0, 300.0)).with_step_dt(1.0 / 60.0).build_eframe(|_| app);
+    h.run_steps(4);
+    let panel = rect_of(&h, "panel.EffectControls");
+    let last = fx[fx.len() - 1];
+    assert!(!panel.contains_rect(rect_of(&h, &format!("effectControls.effect.{last}"))), "the last effect starts out of view");
+    for _ in 1..fx.len() {
+        header_arrow_key(&mut h, egui::Key::ArrowDown, egui::Modifiers::NONE);
+        h.run_steps(2);
+        let (_, uid) = h.state().session.state.selected_props[0];
+        assert!(panel.contains_rect(rect_of(&h, &format!("effectControls.effect.{uid}"))), "Down keeps effect {uid} in view");
+    }
+    assert_eq!(h.state().session.state.selected_props, vec![(LayerId(lid), last)]);
+    for _ in 1..fx.len() {
+        header_arrow_key(&mut h, egui::Key::ArrowUp, egui::Modifiers::NONE);
+        h.run_steps(2);
+        let (_, uid) = h.state().session.state.selected_props[0];
+        assert!(panel.contains_rect(rect_of(&h, &format!("effectControls.effect.{uid}"))), "Up keeps effect {uid} in view");
+    }
+    assert_eq!(h.state().session.state.selected_props, vec![(LayerId(lid), fx[0])]);
+}
+
 #[test]
 fn effect_controls_widgets_register_automation_ids() {
     let (app, x) = app();
