@@ -2,7 +2,7 @@
 //! keyed with them. They hash derived `Debug` text, so `tests::analysis_signature` pins keys
 //! those releases saved: if a type change alters this text, write that part out here.
 
-use effectcraft_project::{Footage, ItemId, ItemKind, Layer, LayerSource, Project, Uid};
+use effectcraft_project::{Footage, GroupKind, ItemId, ItemKind, Layer, LayerSource, ParamUi, Project, PropGroup, Uid};
 
 use super::fnv;
 
@@ -41,10 +41,37 @@ pub(crate) fn input_key_of(mut s: String, layer: &Layer, uid: Uid) -> String {
             if g.uid == uid {
                 break;
             }
-            s.push_str(&format!("{g:?}"));
+            s.push_str(&effect_text(g));
         }
     }
     format!("{:016x}", fnv(&s))
+}
+
+/// The slider ranges 0.22–0.24 gave effect parameters whose range has changed since, as
+/// (effect, parameter path, [min, max, slider min, slider max], decimals). Those releases hashed
+/// each effect's UI hints into the Roto Brush Input Key, and opening a project replaces an
+/// instance's hints with the current ones, so [`effect_text`] puts these back. A range change
+/// above a Roto Brush would otherwise drop the analysis such a key kept: add a row with it.
+#[rustfmt::skip]
+const SLIDERS_0_24: &[(&str, &str, [f64; 4], u8)] = &[
+    ("ec.blur.gaussian", "blurriness", [0.0, 3000.0, 0.0, 50.0], 1),
+];
+
+/// An effect instance as 0.22–0.24 wrote it into a Roto Brush Input Key: its derived `Debug`,
+/// with the [`SLIDERS_0_24`] ranges in place of today's.
+pub(crate) fn effect_text(g: &PropGroup) -> String {
+    let GroupKind::Effect { effect } = &g.kind else { return format!("{g:?}") };
+    let mut rows = SLIDERS_0_24.iter().filter(|r| r.0 == effect).peekable();
+    if rows.peek().is_none() {
+        return format!("{g:?}");
+    }
+    let mut g = g.clone();
+    for &(_, path, [min, max, slider_min, slider_max], decimals) in rows {
+        if let Some(p) = g.prop_mut(path).filter(|p| matches!(p.ui, ParamUi::Slider { .. })) {
+            p.ui = ParamUi::Slider { min, max, slider_min, slider_max, decimals };
+        }
+    }
+    format!("{g:?}")
 }
 
 /// A footage item as 0.23–0.24 wrote it into a signature (without `placed_page` before 0.23),
