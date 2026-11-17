@@ -12248,7 +12248,7 @@ mod hebrew_night04_timeline_text_markers_tests {
             let value = matches[0];
             assert!(value.chars().any(|c| ('א'..='ת').contains(&c)), "Not Hebrew: {english:?}");
             assert_eq!(english.matches("{}").count(), value.matches("{}").count(), "Placeholder mismatch: {english:?}");
-            assert!(!value.chars().any(|c| matches!(c, '\\u{202a}' | '\\u{202b}' | '\\u{202c}' | '\\u{202d}' | '\\u{202e}' | '\\u{2066}' | '\\u{2067}' | '\\u{2068}' | '\\u{2069}')), "BiDi control in: {english:?}");
+            assert!(!value.chars().any(|c| matches!(c, '\u{202a}' | '\u{202b}' | '\u{202c}' | '\u{202d}' | '\u{202e}' | '\u{2066}' | '\u{2067}' | '\u{2068}' | '\u{2069}')), "BiDi control in: {english:?}");
         }
     }
 }
