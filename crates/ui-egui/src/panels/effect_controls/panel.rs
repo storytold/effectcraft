@@ -1,39 +1,54 @@
-use super::common::{Actions, PARAM_NAME_X, ROW, effect_active, prune_lock, shown_layer};
+use super::common::{Actions, PARAM_NAME_X, ROW, effect_active, prune_lock, shown_layer, shown_layer_id};
 use super::editors::{curves_editor, editor_height, histogram_only, levels_editor, object_matte_editor, roto_editor, warp_editor};
 use super::rows::{FxScope, group_rows, toggle_closed};
 use super::{Align2, Color32, EffectcraftApp, EvalCtx, GroupKind, Icon, Layer, PropGroup, Rect, Sense, Stroke, Tokens, json, pos2, vec2, widgets};
 use crate::dock::{PanelKind, WorkspaceExt as _};
 
-/// Plain Right / Left Arrow expand / collapse the selected effects, as in After Effects, before
-/// the arrows' layer nudge runs. Only while Effect Controls has the focus and is on screen: the
-/// front tab of its frame, drawn last frame (a maximized frame hides every other frame and every
-/// floating window), not behind Home. With no effect header selected the arrows still nudge.
-pub(crate) fn handle_disclosure_key(app: &mut EffectcraftApp, key: egui::Key) -> bool {
+/// Plain arrows in Effect Controls, as in After Effects, before their layer nudge runs: Right /
+/// Left expand / collapse the selected effects, and Down / Up select the next / previous effect
+/// in the stacking order, from the lowest / highest selected one, stopping at the last / first.
+/// Only while Effect Controls has the focus and is on screen: the front tab of its frame, drawn
+/// last frame (a maximized frame hides every other frame and every floating window), not behind
+/// Home. Only the effect headers selected on the layer the panel shows (the locked one when it is
+/// locked) count: with none the arrows still nudge.
+pub(crate) fn handle_arrow_key(app: &mut EffectcraftApp, key: egui::Key) -> bool {
+    use egui::Key::{ArrowDown, ArrowLeft, ArrowRight, ArrowUp};
     let panel = PanelKind::EffectControls;
     if app.ui.focused != panel
         || app.ui.start_screen
         || app.session.state.text_edit.is_some()
         || !app.ui.dock.is_visible(panel)
         || !app.dock_rects.iter().any(|(p, _)| *p == panel)
-        || !matches!(key, egui::Key::ArrowLeft | egui::Key::ArrowRight)
+        || !matches!(key, ArrowLeft | ArrowRight | ArrowUp | ArrowDown)
     {
         return false;
     }
-    let Some(comp) = app.session.active_comp() else { return false };
-    let Some(layer) = app.session.state.selected_layers.first().and_then(|id| comp.layer(*id)) else { return false };
-    let Some(effects) = layer.effects() else { return false };
-    let mut handled = false;
-    for g in effects.groups() {
-        if matches!(&g.kind, GroupKind::Effect { .. }) && app.session.state.selected_props.contains(&(layer.id, g.uid)) {
-            if key == egui::Key::ArrowLeft {
-                app.ui.fx_closed.insert(g.uid);
-            } else {
-                app.ui.fx_closed.remove(&g.uid);
+    let Some(layer_id) = shown_layer_id(app) else { return false };
+    let Some(effects) = app.session.active_comp().and_then(|c| c.layer(layer_id)).and_then(|l| l.effects()) else { return false };
+    let headers: Vec<u64> = effects.groups().filter(|g| matches!(&g.kind, GroupKind::Effect { .. })).map(|g| g.uid).collect();
+    let selected = &app.session.state.selected_props;
+    let picked: Vec<usize> = headers.iter().enumerate().filter(|(_, u)| selected.contains(&(layer_id, **u))).map(|(i, _)| i).collect();
+    let (Some(&top), Some(&bottom)) = (picked.first(), picked.last()) else { return false };
+    match key {
+        ArrowUp | ArrowDown => {
+            // Clamped at the ends, where the key still doesn't nudge the layer.
+            let to = if key == ArrowUp { top.saturating_sub(1) } else { bottom.saturating_add(1).min(headers.len().saturating_sub(1)) };
+            if let Some(&uid) = headers.get(to) {
+                // A selection, as a click on the header makes it: no undo step.
+                app.session.state.selected_props = vec![(layer_id, uid)];
             }
-            handled = true;
+        }
+        _ => {
+            for uid in picked.iter().filter_map(|i| headers.get(*i)) {
+                if key == ArrowLeft {
+                    app.ui.fx_closed.insert(*uid);
+                } else {
+                    app.ui.fx_closed.remove(uid);
+                }
+            }
         }
     }
-    handled
+    true
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -403,7 +403,7 @@ fn handle_shortcuts_impl(app: &mut EffectcraftApp, ctx: &egui::Context, tab_only
         if app.dialog.is_some() {
             continue;
         }
-        if !mods.any() && crate::panels::effect_controls::handle_disclosure_key(app, key) {
+        if !mods.any() && crate::panels::effect_controls::handle_arrow_key(app, key) {
             ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, key));
             continue;
         }
