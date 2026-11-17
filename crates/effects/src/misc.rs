@@ -786,7 +786,8 @@ pub fn specs() -> Vec<EffectSpec> {
             "Radial Blur",
             "Blur & Sharpen",
             vec![
-                p("amount", "Amount", num(10.0), slider(0.0, 100.0, 0.0, 100.0, 1)),
+                // After Effects accepts 0..1000; its slider shows 0..100 (#3467).
+                p("amount", "Amount", num(10.0), slider(0.0, 1000.0, 0.0, 100.0, 1)),
                 p("center", "Center", Value::Vec2([0.5, 0.5]), ParamUi::Point),
                 p("type", "Type", Value::Enum(0), popup(&["Spin", "Zoom"])),
                 // Our blur is always fully anti-aliased; the choice is kept for compatibility.
@@ -1144,6 +1145,30 @@ mod tests {
         for (x, ae) in [(2, 2.0), (1917, 253.0)] {
             let p = o.img.get(x, 540);
             assert!((p[0] * 255.0 - ae).abs() <= 2.0 && (p[3] - 1.0).abs() < 1e-4, "x {x}: {p:?} vs AE {ae}");
+        }
+    }
+
+    /// Spin and Zoom at both ends of Amount (0..1000) and both Antialiasing settings give finite
+    /// colours over an opaque layer and keep it opaque (#3467).
+    #[test]
+    fn radial_blur_is_finite_across_the_amount_range() {
+        let mut img = effectcraft_raster::Image::new(48, 40);
+        img.rows_mut().for_each(|(y, row)| {
+            for (x, px) in row.iter_mut().enumerate() {
+                *px = [x as f32 / 47.0, y as f32 / 39.0, 0.5, 1.0];
+            }
+        });
+        for ty in 0..2 {
+            for aa in 0..2 {
+                for amount in [0.0, 100.0, 200.0, 1000.0] {
+                    let vals = [("amount", num(amount)), ("type", Value::Enum(ty)), ("center", Value::Vec2([10.0, 30.0])), ("antialiasing", Value::Enum(aa))];
+                    let o = run_fx("ec.blur.radial", &vals, img.clone(), 0.0, EffectEnv::default());
+                    assert_eq!((o.img.width, o.img.height), (48, 40));
+                    for p in &o.img.data {
+                        assert!(p.iter().all(|v| v.is_finite()) && (p[3] - 1.0).abs() < 1e-5, "type {ty} aa {aa} amount {amount}: {p:?}");
+                    }
+                }
+            }
         }
     }
 
