@@ -11,7 +11,7 @@ use crate::dock::{PanelKind, WorkspaceExt as _};
 /// last frame (a maximized frame hides every other frame and every floating window), not behind
 /// Home. Only the effect headers selected on the layer the panel shows (the locked one when it is
 /// locked) count: with none the arrows still nudge.
-pub(crate) fn handle_arrow_key(app: &mut EffectcraftApp, key: egui::Key) -> bool {
+pub(crate) fn handle_arrow_key(app: &mut EffectcraftApp, ctx: &egui::Context, key: egui::Key) -> bool {
     use egui::Key::{ArrowDown, ArrowLeft, ArrowRight, ArrowUp};
     let panel = PanelKind::EffectControls;
     if app.ui.focused != panel
@@ -36,6 +36,7 @@ pub(crate) fn handle_arrow_key(app: &mut EffectcraftApp, key: egui::Key) -> bool
             if let Some(&uid) = headers.get(to) {
                 // A selection, as a click on the header makes it: no undo step.
                 app.session.state.selected_props = vec![(layer_id, uid)];
+                reveal_effect(ctx, uid);
             }
         }
         _ => {
@@ -49,6 +50,17 @@ pub(crate) fn handle_arrow_key(app: &mut EffectcraftApp, key: egui::Key) -> bool
         }
     }
     true
+}
+
+/// The effect header the next Effect Controls pass scrolls into view.
+fn reveal_id() -> egui::Id {
+    egui::Id::unique("ec-reveal")
+}
+
+/// Scroll Effect Controls so effect `uid`'s header is in view, once it has been laid out.
+fn reveal_effect(ctx: &egui::Context, uid: u64) {
+    ctx.data_mut(|d| d.insert_temp(reveal_id(), uid));
+    ctx.request_repaint();
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -449,7 +461,18 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         actions.extend(crate::menus::menu_contents(app, ui, "Effect"));
     });
     let content_h = y + scroll.offset - body.min.y;
+    let offset = scroll.offset;
     scroll.end(ui, &mut app.auto, "effectControls.scroll", content_h, &t);
+    // Up / Down picked an effect: bring its header into view from the next pass (after `end`,
+    // which stores this pass's offset).
+    if let Some(uid) = ctx.data_mut(|d| d.remove_temp::<u64>(reveal_id()))
+        && let Some(&(_, top)) = tops.iter().find(|(u, _)| *u == uid)
+    {
+        // (With the 4-point gap above the first header.)
+        let top = top - body.min.y + offset;
+        widgets::PanelScroll::reveal(&ctx, egui::Id::unique("ec-scroll"), top - 4.0, top + ROW + 2.0, body.height());
+        ctx.request_repaint();
+    }
     drop_payload(ui, rect, &p, &t, layer.id.0, &mut actions);
     if ui.input(|i| i.pointer.primary_down()) && actions.iter().any(|(id, _)| id == "prop.set") {
         app.ui.viewer.property_interacting = true;

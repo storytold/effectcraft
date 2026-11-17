@@ -426,6 +426,40 @@ fn effect_header_arrows_act_on_the_locked_layer() {
     assert!(h.state().ui.fx_closed.is_empty());
 }
 
+/// #3585: a long effect list scrolls so the effect Down / Up picks stays in view.
+#[test]
+fn effect_header_down_and_up_scroll_the_picked_effect_into_view() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Long", "width": 32, "height": 18, "frameRate": 30, "duration": 2})).unwrap();
+    let lid = s.execute("layer.newSolid", json!({"name": "Controls", "color": "#40b080"})).unwrap()["layer"].as_u64().unwrap();
+    let fx: Vec<u64> =
+        (0..16).map(|_| s.execute("effect.apply", json!({"layers": [lid], "effect": "Point Control"})).unwrap()["effects"][0].as_u64().unwrap()).collect();
+    s.state.selected_props = vec![(LayerId(lid), fx[0])];
+    let mut app = EffectcraftApp::new(s);
+    app.show_panel(PanelKind::EffectControls);
+    app.toggle_maximize(PanelKind::EffectControls);
+    app.ui.focused = PanelKind::EffectControls;
+    let mut h = Harness::builder().with_size(egui::vec2(800.0, 300.0)).with_step_dt(1.0 / 60.0).build_eframe(|_| app);
+    h.run_steps(4);
+    let panel = rect_of(&h, "panel.EffectControls");
+    let last = fx[fx.len() - 1];
+    assert!(!panel.contains_rect(rect_of(&h, &format!("effectControls.effect.{last}"))), "the last effect starts out of view");
+    for _ in 1..fx.len() {
+        header_arrow_key(&mut h, egui::Key::ArrowDown, egui::Modifiers::NONE);
+        h.run_steps(2);
+        let (_, uid) = h.state().session.state.selected_props[0];
+        assert!(panel.contains_rect(rect_of(&h, &format!("effectControls.effect.{uid}"))), "Down keeps effect {uid} in view");
+    }
+    assert_eq!(h.state().session.state.selected_props, vec![(LayerId(lid), last)]);
+    for _ in 1..fx.len() {
+        header_arrow_key(&mut h, egui::Key::ArrowUp, egui::Modifiers::NONE);
+        h.run_steps(2);
+        let (_, uid) = h.state().session.state.selected_props[0];
+        assert!(panel.contains_rect(rect_of(&h, &format!("effectControls.effect.{uid}"))), "Up keeps effect {uid} in view");
+    }
+    assert_eq!(h.state().session.state.selected_props, vec![(LayerId(lid), fx[0])]);
+}
+
 #[test]
 fn effect_controls_widgets_register_automation_ids() {
     let (app, x) = app();
