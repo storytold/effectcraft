@@ -5,7 +5,7 @@ use effectcraft_geom::{Mat3, vec2};
 use effectcraft_keyframe::Value;
 use effectcraft_path::{FillRule, Join};
 use effectcraft_project::{FeatherFalloff, GroupKind, Layer, MaskMode, MaskMotionBlur};
-use effectcraft_raster::{Mask, box_blur};
+use effectcraft_raster::{Mask, box_blur_mask};
 use rayon::prelude::*;
 
 use crate::eval::EvalCtx;
@@ -255,13 +255,11 @@ fn feathered(sp: &effectcraft_keyframe::ShapePath, m: &Mat3, (w, h): (u32, u32),
     };
     if blurred {
         // Separable box passes (the corner of a feathered rect is the product of its edges).
-        let mut img = cov.to_image();
         for (rx, ry) in gx.radii.into_iter().zip(gy.radii) {
             if rx > 0 || ry > 0 {
-                img = box_blur(&img, rx, ry, 1, false);
+                cov = box_blur_mask(&cov, rx, ry);
             }
         }
-        cov = Mask::from_alpha(&img);
     }
     if grid.is_some() {
         cov = crop(&cov, gx, gy, w, h);
