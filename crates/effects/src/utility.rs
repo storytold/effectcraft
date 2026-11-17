@@ -169,6 +169,10 @@ pub struct Lut {
     pub dmax: [f32; 3],
 }
 
+// Cube LUT Specification 1.0 §§6–7 permits at most 65,536 1D rows and a 256³
+// lattice. Allow their sum for combined shaper + 3D files, regardless of header order.
+const MAX_CUBE_ROWS: usize = 65_536 + 256 * 256 * 256;
+
 /// Parse `.cube` text (TITLE, LUT_1D_SIZE, LUT_3D_SIZE, DOMAIN_MIN/MAX, data red-fastest).
 pub fn parse_cube(text: &str) -> Option<Lut> {
     let mut lut = Lut { n1: 0, d1: vec![], n3: 0, d3: vec![], dmin: [0.0; 3], dmax: [1.0; 3] };
@@ -212,7 +216,14 @@ pub fn parse_cube(text: &str) -> Option<Lut> {
                 lut.dmax = [hi; 3];
             }
             k if k.starts_with(|c: char| c.is_ascii_alphabetic()) => continue,
-            _ => rows.push(three(&mut it)?),
+            _ => {
+                if rows.len() == MAX_CUBE_ROWS {
+                    return None;
+                }
+                let row = three(&mut it)?;
+                rows.try_reserve(1).ok()?;
+                rows.push(row);
+            }
         }
     }
     if lut.n3 > 256 {
@@ -223,8 +234,8 @@ pub fn parse_cube(text: &str) -> Option<Lut> {
     if (lut.n1 == 0 && lut.n3 == 0) || lut.n1 == 1 || lut.n3 == 1 || Some(rows.len()) != need1.checked_add(need3) {
         return None;
     }
-    lut.d1 = rows[..need1].to_vec();
-    lut.d3 = rows[need1..].to_vec();
+    lut.d1 = rows.get(..need1)?.to_vec();
+    lut.d3 = rows.get(need1..)?.to_vec();
     Some(lut)
 }
 
@@ -489,6 +500,27 @@ mod tests {
         assert_eq!(out.img, img);
         let out = run("ec.utility.applylut", &[("lut", Value::Str("/nonexistent/path.cube".into()))], img.clone());
         assert_eq!(out.img, img);
+    }
+
+    #[test]
+    fn cube_accepts_maximum_1d_shaper_with_3d_table() {
+        let text = format!("LUT_1D_SIZE 65536\nLUT_3D_SIZE 2\n{}", "0 0 0\n".repeat(65_536 + 8));
+        let lut = parse_cube(&text).unwrap();
+        assert_eq!(lut.d1.len(), 65_536);
+        assert_eq!(lut.d3.len(), 8);
+        // Keep the parser's existing tolerance for headers following data.
+        let text = format!("{}LUT_1D_SIZE 2\nLUT_3D_SIZE 2\n", "0 0 0\n".repeat(10));
+        let lut = parse_cube(&text).unwrap();
+        assert_eq!(lut.d1, vec![[0.0; 3]; 2]);
+        assert_eq!(lut.d3, vec![[0.0; 3]; 8]);
+    }
+
+    #[test]
+    fn cube_row_collection_is_bounded() {
+        // Beyond the largest 3D table plus the largest 1D shaper in Cube LUT 1.0.
+        let count = 256 * 256 * 256 + 65_536 + 1;
+        let text = format!("LUT_1D_SIZE {count}\n{}", "0 0 0\n".repeat(count));
+        assert!(parse_cube(&text).is_none());
     }
 
     #[test]
