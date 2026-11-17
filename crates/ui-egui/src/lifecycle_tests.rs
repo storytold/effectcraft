@@ -284,10 +284,12 @@ fn restart_to_update_with_the_startup_prompt_open_leaves_the_window_open() {
         ..Default::default()
     });
     assert!(updater.managed().is_none(), "the launcher manages this copy, so it ignored the offer");
-    while !updater.prompt_open() {
+    // The offer's thread asks for one repaint after it answers, so one wait and one tick suffice.
+    if !updater.prompt_open() {
         wait.recv().unwrap();
         updater.tick(&offer_ctx);
     }
+    assert!(updater.prompt_open(), "the offer opens the startup prompt");
     app.updates_rt.manual_window_open = true;
     assert!(!asks_to_close(&ctx, |ctx| updates_ui::restart_to_update(&mut app.updates_rt, ctx, false)), "the prompt carries the restart");
     assert!(!app.updates_rt.manual_window_open, "the result dialog closes");

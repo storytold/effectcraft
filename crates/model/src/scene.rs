@@ -111,7 +111,8 @@ pub(crate) fn to_model(mut scene: cm::Scene, missing: MissingNormals, image: &dy
     let mut transform_left_out = false;
     let mut tref = |t: Option<cm::TextureRef>| -> Option<TexRef> {
         let t = t?;
-        transform_left_out |= t.transform.is_some_and(|x| x != cm::UvTransform::default());
+        // Compared by value, so a negative zero still counts as the identity.
+        transform_left_out |= t.transform.is_some_and(|x| x.offset != [0.0; 2] || x.rotation != 0.0 || x.scale != [1.0; 2]);
         let texture = ensure_texture(&scene, &decoded, t, &mut textures, &mut texture_of, &mut pixels_left, &mut warnings)?;
         Some(TexRef { texture, uv_set: t.uv_set })
     };
@@ -476,6 +477,8 @@ mod tests {
         };
         assert!(warned(Some(cm::UvTransform { offset: [0.5, 0.0], ..cm::UvTransform::default() })));
         assert!(!warned(Some(cm::UvTransform::default())));
+        // A negative zero offset or rotation is still the identity.
+        assert!(!warned(Some(cm::UvTransform { offset: [-0.0, 0.0], rotation: -0.0, ..cm::UvTransform::default() })));
         assert!(!warned(None));
     }
 }
