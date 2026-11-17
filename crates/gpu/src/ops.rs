@@ -181,11 +181,14 @@ fn curve_id(s: Option<effectcraft_color::ColorSpace>) -> u32 {
 /// Colour conversion on straight colour (`render::color::convert`).
 pub fn convert(e: &mut Enc, img: &GpuImage, c: &Conversion) -> GpuImage {
     let mut p = Params::default();
-    p.u[0] = [curve_id(c.decode), c.matrix.is_some() as u32, curve_id(c.encode), 0];
+    p.u[0] = [curve_id(c.decode), c.matrix.is_some() as u32, curve_id(c.encode), c.hlg_ootf.is_some() as u32];
     if let Some(m) = c.matrix {
         for i in 0..3 {
             p.f[i] = [m[i][0], m[i][1], m[i][2], 0.0];
         }
+    }
+    if let Some(g) = c.hlg_ootf {
+        p.f[3][0] = g;
     }
     let out = e.scratch(img.width, img.height);
     e.pixels("convert", &p, img, None, &out, None);

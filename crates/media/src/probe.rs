@@ -203,6 +203,7 @@ pub(crate) fn footage_from_info(path: &str, info: &filmcraft_media::MediaInfo) -
         (None, Some(a)) => a.codec.clone(),
         _ => String::new(),
     };
+    let color_profile = v.and_then(|v| profile_of(&v.color));
     Footage {
         path: path.to_string(),
         kind,
@@ -220,7 +221,9 @@ pub(crate) fn footage_from_info(path: &str, info: &filmcraft_media::MediaInfo) -
         codec,
         missing: false,
         sequence: Vec::new(),
-        color_profile: v.and_then(|v| profile_of(&v.color)),
+        color_profile,
+        // HLG video (phone HDR recordings) is shown in SDR projects as an SDR display shows it.
+        tone_map_hdr: color_profile == Some(effectcraft_project::ColorSpace::Rec2100Hlg),
         // counted in video frames, so only with a video stream
         file_timecode: v.and(info.start_timecode),
         ..Default::default()
@@ -450,6 +453,43 @@ mod tests {
         for (primaries, transfer, want) in rows {
             let c = filmcraft_color::ColorInfo { primaries, transfer, ..filmcraft_color::ColorInfo::REC709 };
             assert_eq!(profile_of(&c), want, "{primaries:?} + {transfer:?}");
+        }
+    }
+
+    /// HLG video imports with Interpret Footage ▸ Tone Map HDR to SDR on; other video (PQ too)
+    /// with it off.
+    #[test]
+    fn hlg_video_imports_tone_mapped() {
+        use filmcraft_color::{Primaries, Transfer};
+        let footage = |primaries, transfer| {
+            let video = filmcraft_media::VideoStreamInfo {
+                width: 16,
+                height: 9,
+                frame_rate: Default::default(),
+                par: (1, 1),
+                codec: "HEVC".into(),
+                pixel_format: String::new(),
+                color: filmcraft_color::ColorInfo { primaries, transfer, ..filmcraft_color::ColorInfo::REC709 },
+                has_alpha: false,
+                bitrate: None,
+                hdr: None,
+                color_assumed: None,
+            };
+            let info = filmcraft_media::MediaInfo {
+                name: "clip.mov".into(),
+                kind: filmcraft_media::MediaKind::Movie,
+                duration: filmcraft_time::Tick::ZERO,
+                video: Some(video),
+                audio_streams: Vec::new(),
+                container: "mov".into(),
+                start_timecode: None,
+                file_size: None,
+            };
+            footage_from_info("/m/clip.mov", &info)
+        };
+        assert!(footage(Primaries::Bt2020, Transfer::Hlg).tone_map_hdr_applies());
+        for (primaries, transfer) in [(Primaries::Bt2020, Transfer::Pq), (Primaries::Bt2020, Transfer::Bt709), (Primaries::Bt709, Transfer::Bt709)] {
+            assert!(!footage(primaries, transfer).tone_map_hdr, "{primaries:?} + {transfer:?}");
         }
     }
 

@@ -239,6 +239,15 @@ pub struct Footage {
     /// colour profile, Interpret As Linear Light and the working space don't apply.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub preserve_rgb: bool,
+    /// Interpret Footage ▸ Color ▸ Tone Map HDR to SDR: Rec. 2100 HLG footage is converted for
+    /// a standard-dynamic-range output as an SDR display shows HLG video (HLG 100% at SDR white,
+    /// as Apple's players render phone HDR recordings), with or without a working space
+    /// ([`Footage::tone_map_hdr_applies`]). Off, a working space takes it with the BT.2408
+    /// reference white at 1.0, and without one its values enter as stored. Import turns it on
+    /// for HLG footage; footage saved without it reads as off, so older projects keep their
+    /// pixels.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub tone_map_hdr: bool,
     /// Interpret Footage ▸ Cineon Settings (DPX and Cineon files only; [`Footage::cineon_applies`]).
     #[serde(default, skip_serializing_if = "is_default")]
     pub cineon: CineonSettings,
@@ -306,6 +315,7 @@ impl Default for Footage {
             invert_alpha: false,
             linear_light: false,
             preserve_rgb: false,
+            tone_map_hdr: false,
             cineon: CineonSettings::default(),
             data: None,
             layer: None,
@@ -334,6 +344,13 @@ impl Footage {
     /// Interpret As Linear Light applies (Preserve RGB passes the file's values through).
     pub fn linear_light_applies(&self) -> bool {
         self.linear_light && !self.preserve_rgb
+    }
+
+    /// Tone Map HDR to SDR applies to the footage: it is on, the footage's profile is Rec. 2100
+    /// HLG and Preserve RGB doesn't pass the file's values through. (It takes effect only where
+    /// the output is SDR: `render::color::Pipe::media_in`.)
+    pub fn tone_map_hdr_applies(&self) -> bool {
+        self.tone_map_hdr && self.color_profile == Some(ColorSpace::Rec2100Hlg) && !self.preserve_rgb
     }
 
     /// How long the footage plays: its duration times Interpret Footage ▸ Loop.

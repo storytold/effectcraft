@@ -278,6 +278,7 @@ fn footage_interpretation_and_durations_that_are_not_written_are_reported() {
     reported(&with(Footage { alpha: effectcraft_project::AlphaMode::Premultiplied, ..still.clone() }), LossCategory::FootageItems, "alpha interpretation");
     reported(&with(Footage { pixel_aspect: 2.0, ..still.clone() }), LossCategory::FootageItems, "pixel aspect");
     reported(&with(Footage { loop_count: 3, ..still.clone() }), LossCategory::FootageItems, "loop count");
+    reported(&with(Footage { tone_map_hdr: true, ..still.clone() }), LossCategory::FootageItems, "Tone Map HDR to SDR");
     let clip = Footage { path: "C:/x/a.mp4".into(), kind: FootageKind::Video, frame_rate: FrameRate::new(25, 1), duration: secs(0.0), ..still };
     reported(&with(clip), LossCategory::FootageItems, "written as 1 frame");
 }

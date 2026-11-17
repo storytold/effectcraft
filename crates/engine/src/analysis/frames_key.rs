@@ -298,6 +298,7 @@ impl Text {
             invert_alpha,
             linear_light,
             preserve_rgb,
+            tone_map_hdr,
             cineon,
             data,
             page,
@@ -357,6 +358,11 @@ impl Text {
         self.field("invertAlpha", invert_alpha);
         self.field("linearLight", linear_light);
         self.field("preserveRgb", preserve_rgb);
+        // Written only when on, so the keys of footage saved before the switch existed (and of
+        // any footage it is off for) stay what they were.
+        if *tone_map_hdr {
+            self.field("toneMapHdr", tone_map_hdr);
+        }
         self.cineon(cineon);
         self.opt("data", data.as_ref(), |t, d| t.str("text", d));
         self.field("page", page);

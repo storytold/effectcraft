@@ -7,7 +7,13 @@
 //!   survive in 32 bpc. 16 bpc uses After Effects' 0..32768 range.
 //! * **Working space** (colour management). Footage is converted from its colour profile (its
 //!   metadata, else sRGB) into the working space; the top-level comp output is converted from
-//!   the working space to the sRGB display. Without a working space nothing is converted.
+//!   the working space to the sRGB display. Without a working space nothing is converted, but
+//!   HLG footage for SDR (below).
+//! * **HLG footage for SDR** (Interpret Footage ▸ Tone Map HDR to SDR, on for HLG imports):
+//!   Rec. 2100 HLG footage is converted as an SDR display shows it, with HLG 100% at SDR white
+//!   ([`Conversion::hlg_to_sdr`]), whenever the output is SDR: into the working space, or
+//!   without one into the Working Gamma's encoding (its values would otherwise be used as if
+//!   they were sRGB). HDR output spaces keep the scene-light conversion.
 //! * **Linearize Working Space**: the working space is linear light, so sources (footage and
 //!   the colours of solids, text and shapes, which are authored in the working space's encoding)
 //!   are linearised before masks and effects, and everything runs in linear.
@@ -85,10 +91,25 @@ impl Pipe {
     }
 
     /// Footage `f` from its colour profile (`None` = sRGB) → working space; nothing for
-    /// Preserve RGB, whose values enter the working space as the file stores them.
+    /// Preserve RGB, whose values enter the working space as the file stores them. HLG footage
+    /// with Tone Map HDR to SDR converts for the SDR output ([`Pipe::tone_maps_hdr`]), also
+    /// without a working space: to the Working Gamma's curve then.
     pub fn media_in(&self, f: &Footage) -> Option<Conversion> {
+        if self.tone_maps_hdr(f) {
+            return Some(match self.space {
+                Some(ws) => Conversion::hlg_to_sdr(ws, self.linear),
+                None => Conversion::hlg_to_sdr(self.curve(), false),
+            });
+        }
         let ws = self.space.filter(|_| !f.preserve_rgb)?;
         Conversion::new(f.color_profile.unwrap_or(ColorSpace::Srgb), false, ws, self.linear)
+    }
+
+    /// Footage `f` is converted from HLG for SDR ([`Footage::tone_map_hdr_applies`]): the output
+    /// is SDR, as it always is without a working space, and so is the working space. HDR output
+    /// spaces (Rec. 2100 PQ / HLG) take HLG as scene light, the BT.2408 reference white at 1.0.
+    pub fn tone_maps_hdr(&self, f: &Footage) -> bool {
+        f.tone_map_hdr_applies() && self.space.is_none_or(|ws| !ws.is_hdr() && !self.out.is_hdr())
     }
 
     /// Authored colours (solids, text, shapes) → working space: linearised in a linear working

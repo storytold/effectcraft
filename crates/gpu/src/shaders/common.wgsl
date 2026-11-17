@@ -602,6 +602,15 @@ fn hlg_encode(l: f32) -> f32 {
     return HLG_A * log(12.0 * e - HLG_B) + HLG_C;
 }
 
+// The BT.2100 HLG OOTF (effectcraft_color::space::hlg_ootf): scene light as curve 4 decodes it
+// (1.0 = the BT.2408 reference white) → display light with HLG 100% at 1.0, Fd = E · Ys^(γ−1)
+// on BT.2020 luminance, mirrored for negative luminance.
+fn hlg_ootf(c: vec3<f32>, gamma: f32) -> vec3<f32> {
+    let e = c * HLG_REF;
+    let ys = abs(0.2627 * e.x + 0.6780 * e.y + 0.0593 * e.z);
+    return e * select(0.0, pow(ys, gamma - 1.0), ys > 0.0);
+}
+
 fn curve_decode(curve: u32, v: f32) -> f32 {
     let a = abs(v);
     var l = a;

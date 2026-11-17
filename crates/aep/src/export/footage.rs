@@ -189,6 +189,7 @@ pub(crate) fn plan_footage(name: &str, f: &Footage, col: &mut Collector) -> Opti
         (f.fields != d.fields, "field order"),
         (f.linear_light != d.linear_light, "Interpret As Linear Light"),
         (f.preserve_rgb != d.preserve_rgb, "Preserve RGB"),
+        (f.tone_map_hdr != d.tone_map_hdr, "Tone Map HDR to SDR"),
         (f.cineon != d.cineon, "Cineon settings"),
     ];
     for (_, setting) in unwritten.iter().filter(|(on, _)| *on) {

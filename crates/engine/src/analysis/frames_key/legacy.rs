@@ -12,6 +12,9 @@ use super::fnv;
 pub(crate) fn signatures(p: &Project, comp: ItemId, layer: &Layer) -> Vec<String> {
     let src = match &layer.source {
         LayerSource::Footage { item } | LayerSource::Solid { item } | LayerSource::Comp { item } => match p.item(*item).map(|i| &i.kind) {
+            // Footage those releases saved reads with Tone Map HDR to SDR off. Turned on, HLG
+            // footage renders other frames than theirs, so none of their keys is kept.
+            Some(ItemKind::Footage(f)) if f.tone_map_hdr => return Vec::new(),
             Some(ItemKind::Footage(f)) => {
                 let mut out = Vec::with_capacity(4);
                 for missing in [false, true] {
@@ -86,6 +89,9 @@ impl std::fmt::Debug for FootageText<'_> {
             invert_alpha,
             linear_light,
             preserve_rgb,
+            // Those releases had no Tone Map HDR to SDR (`signatures` makes no footage
+            // signature while it is on).
+            tone_map_hdr: _,
             cineon,
             data,
             page,

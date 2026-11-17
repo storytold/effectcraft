@@ -313,3 +313,29 @@ fn nested_values_are_written_as_fixed_words() {
     }
     assert_eq!(keys.len(), MaskMode::ALL.len() * 3);
 }
+
+/// Interpret Footage ▸ Tone Map HDR to SDR changes the frames: written into the key while it is
+/// on (and only then, so keys of footage it is off for stay as they were), and a key 0.24 saved
+/// doesn't match footage it is on for: those releases rendered it off.
+#[test]
+fn tone_map_hdr_is_keyed_while_on() {
+    let mut s = open(ANALYSED_0_24);
+    let before = saved(&s);
+    s.execute_checked("file.interpretFootage", json!({"item": 1, "toneMapHdr": true})).unwrap();
+    let layer = s.project.comp(COMP).unwrap().layer(CLIP).unwrap();
+    let text = crate::analysis::frames_key::signature_text(&s.project, COMP, layer);
+    assert!(text.contains(";preserveRgb=false;toneMapHdr=true;cineon;"), "{text}");
+    assert!(saved(&s).iter().all(|(data, _)| data.is_empty()), "{:?}", saved(&s));
+    s.execute_checked("edit.undo", json!({})).unwrap();
+    assert_eq!(saved(&s), before);
+    // Saved with the switch on next to keys 0.24 wrote: they are for other frames.
+    let on = ANALYSED_0_24.replacen(r#""color_profile":"Rec709""#, r#""color_profile":"Rec709","tone_map_hdr":true"#, 1);
+    assert_ne!(on, ANALYSED_0_24);
+    let mut s = open(&on);
+    add_to_render_queue(&mut s);
+    assert!(saved(&s).iter().all(|(data, _)| data.is_empty()), "{:?}", saved(&s));
+    // Off, the same file keeps them.
+    let mut s = open(&on.replacen(r#""tone_map_hdr":true"#, r#""tone_map_hdr":false"#, 1));
+    add_to_render_queue(&mut s);
+    assert!(saved(&s).iter().all(|(data, _)| !data.is_empty()), "{:?}", saved(&s));
+}

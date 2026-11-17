@@ -385,3 +385,112 @@ fn output_linear_decodes_with_the_output_curve() {
         assert!((got - want).abs() <= 1e-5 * want, "{lin:?}");
     }
 }
+
+/// Interpret Footage ▸ Tone Map HDR to SDR: `Pipe::media_in` converts Rec. 2100 HLG footage as
+/// an SDR display shows it when the switch is on, Preserve RGB is off and the output is SDR, in
+/// managed and unmanaged projects. Otherwise the conversion is what it was before the switch.
+#[test]
+fn media_in_converts_hlg_for_sdr_outputs_only() {
+    use effectcraft_color::Conversion;
+    use effectcraft_project::ProjectSettings;
+    let pipe = |ws: Option<ColorSpace>, linearize: bool, out: Option<ColorSpace>, gamma: f64| {
+        crate::color::Pipe::of(&ProjectSettings { working_space: ws, linearize, output_space: out, working_gamma: gamma, ..Default::default() })
+    };
+    let hlg = Footage { tone_map_hdr: true, ..footage(Some(ColorSpace::Rec2100Hlg)) };
+    let sdr = |ws, linear| Some(Conversion::hlg_to_sdr(ws, linear));
+    // Unmanaged projects are SDR: into the Working Gamma's encoding.
+    assert_eq!(pipe(None, false, None, 2.2).media_in(&hlg), sdr(ColorSpace::Srgb, false));
+    assert_eq!(pipe(None, false, None, 2.4).media_in(&hlg), sdr(ColorSpace::Rec709, false));
+    assert_eq!(pipe(None, false, Some(ColorSpace::Rec2100Pq), 2.2).media_in(&hlg), sdr(ColorSpace::Srgb, false), "unmanaged: no output space");
+    // Managed with an SDR output: into the working space, linear when it is.
+    for out in [None, Some(ColorSpace::Rec709), Some(ColorSpace::DisplayP3), Some(ColorSpace::Rec2020)] {
+        assert_eq!(pipe(Some(ColorSpace::Srgb), false, out, 2.2).media_in(&hlg), sdr(ColorSpace::Srgb, false), "{out:?}");
+        assert_eq!(pipe(Some(ColorSpace::Rec709), true, out, 2.2).media_in(&hlg), sdr(ColorSpace::Rec709, true), "{out:?}");
+        assert_eq!(pipe(Some(ColorSpace::AcesCg), false, out, 2.2).media_in(&hlg), sdr(ColorSpace::AcesCg, true), "{out:?}");
+    }
+    // HDR outputs keep HLG as scene light (the BT.2408 reference white at 1.0), and so does an HDR
+    // working space (which only a hand-edited project has).
+    for out in [ColorSpace::Rec2100Hlg, ColorSpace::Rec2100Pq] {
+        let p = pipe(Some(ColorSpace::Rec2020), false, Some(out), 2.2);
+        assert_eq!(p.media_in(&hlg), Conversion::new(ColorSpace::Rec2100Hlg, false, ColorSpace::Rec2020, false), "{out:?}");
+        let p = pipe(Some(out), false, None, 2.2);
+        assert_eq!(p.media_in(&hlg), Conversion::new(ColorSpace::Rec2100Hlg, false, out, false), "{out:?} working space");
+    }
+    // Switch off, Preserve RGB, or a profile other than HLG: as before.
+    let off = Footage { tone_map_hdr: false, ..hlg.clone() };
+    let preserve = Footage { preserve_rgb: true, ..hlg.clone() };
+    let pq = Footage { color_profile: Some(ColorSpace::Rec2100Pq), ..hlg.clone() };
+    let untagged = Footage { color_profile: None, ..hlg.clone() };
+    for gamma in [2.2, 2.4] {
+        let p = pipe(None, false, None, gamma);
+        for f in [&off, &preserve, &pq, &untagged] {
+            assert_eq!(p.media_in(f), None, "{gamma} {:?} {} {}", f.color_profile, f.tone_map_hdr, f.preserve_rgb);
+        }
+    }
+    let p = pipe(Some(ColorSpace::Srgb), false, None, 2.2);
+    assert_eq!(p.media_in(&off), Conversion::new(ColorSpace::Rec2100Hlg, false, ColorSpace::Srgb, false));
+    assert_eq!(p.media_in(&pq), Conversion::new(ColorSpace::Rec2100Pq, false, ColorSpace::Srgb, false));
+    assert_eq!(p.media_in(&untagged), None);
+    assert_eq!(p.media_in(&preserve), None);
+}
+
+/// HLG footage made into an SDR picture: a frame of HLG R'G'B' signals with 8-bit levels
+/// ([`FootageSource::frame8`]) the 8 bpc fast path would otherwise take as they are.
+struct HlgSignals {
+    asked8: std::sync::atomic::AtomicUsize,
+}
+
+impl HlgSignals {
+    const SIGNALS: [[f32; 3]; 4] = [[0.25; 3], [0.75; 3], [0.68, 0.55, 0.47], [0.40, 0.52, 0.30]];
+}
+
+impl FootageSource for HlgSignals {
+    fn frame(&self, _: ItemId, f: &Footage, _: Tick) -> Option<Arc<Image>> {
+        let mut img = Image::new(f.width, f.height);
+        for (i, p) in img.data.iter_mut().enumerate() {
+            let c = Self::SIGNALS[(i % f.width as usize) * Self::SIGNALS.len() / f.width as usize];
+            *p = [c[0], c[1], c[2], 1.0];
+        }
+        Some(Arc::new(img))
+    }
+    fn frame8(&self, item: ItemId, f: &Footage, t: Tick, _: FloatCurve) -> Option<Arc<crate::disk_cache::Frame8>> {
+        self.asked8.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let img = self.frame(item, f, t)?;
+        let rgba = img.data.iter().flat_map(|p| effectcraft_raster::quantize_px_u8(*p)).collect();
+        Some(Arc::new(crate::disk_cache::Frame8 { width: img.width, height: img.height, rgba }))
+    }
+}
+
+/// Every footage path converts tone-mapped HLG footage: the 8 bpc 8-bit-levels path and the
+/// shared decoded picture (GPU) step aside for it, and the frame is the conversion of the
+/// signals at every depth. With the switch off, unmanaged footage takes both paths as before.
+#[test]
+fn hlg_footage_converts_on_every_footage_path() {
+    use effectcraft_color::Conversion;
+    use std::sync::atomic::Ordering;
+    for depth in [BitDepth::Bpc8, BitDepth::Bpc16, BitDepth::Bpc32] {
+        for (ws, tone_map) in [(None, true), (Some(ColorSpace::Srgb), true), (None, false)] {
+            let (mut p, cid, comp) = setup(depth);
+            p.settings.working_space = ws;
+            let f = Footage { tone_map_hdr: tone_map, ..footage(Some(ColorSpace::Rec2100Hlg)) };
+            let fid = p.add_item("F", Label::Aqua, None, ItemKind::Footage(f));
+            let l = build::layer(&mut p, &comp, "F", LayerSource::Footage { item: fid }, (40, 20), None);
+            p.comp_mut(cid).unwrap().layers.push(l);
+            let src = HlgSignals { asked8: Default::default() };
+            let r = Renderer::new(&p, &src, RenderOpts::default());
+            let frame = r.comp_frame(cid, Tick::ZERO);
+            let label = format!("{depth:?} {ws:?} tone map {tone_map}");
+            let ctx = r.eval_ctx(cid, Tick::ZERO).unwrap();
+            let picture = r.footage_picture(&ctx, &ctx.comp.layers[0]);
+            assert_eq!(picture.is_some(), depth == BitDepth::Bpc32 && !tone_map, "{label}: shared picture");
+            assert_eq!(src.asked8.load(Ordering::Relaxed) > 0, depth == BitDepth::Bpc8 && !tone_map, "{label}: 8-bit levels");
+            let c = Conversion::hlg_to_sdr(ColorSpace::Srgb, false);
+            for (k, signal) in HlgSignals::SIGNALS.into_iter().enumerate() {
+                let want = if tone_map { c.apply(signal) } else { signal };
+                let want = crate::color::Pipe::of(&p.settings).quantize_px([want[0], want[1], want[2], 1.0]);
+                let got = frame.get(5 + 10 * k as i64, 10);
+                assert!((0..3).all(|i| (got[i] - want[i]).abs() < 1e-5), "{label}, signal {signal:?}: {got:?}, want {want:?}");
+            }
+        }
+    }
+}

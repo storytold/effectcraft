@@ -625,6 +625,116 @@ mod tests {
         assert!(frame_to_rgba8(&wide, AlphaOp::new(AlphaMode::Straight, [0.0; 3])).is_none());
     }
 
+    /// iPhone-style HLG video, decoded and rendered: 10-bit BT.2020 Y'CbCr in limited range, eight
+    /// flat 8 px patches with known HLG R'G'B' signals. With Interpret Footage ▸ Tone Map HDR to
+    /// SDR on, every patch is within 6 codes of Apple's SDR rendering of them (`avconvert` of the
+    /// clip) and every grey within 2: unmanaged and with an sRGB working space at 8, 16 and 32
+    /// bpc, and with Rec. 709 at 8 bpc. Off, the project renders what it rendered before the
+    /// switch existed: the signal as it is unmanaged, BT.2408 reference white (clipping from 75%)
+    /// managed. Preserve RGB renders the signal either way.
+    #[test]
+    fn hlg_video_renders_as_apple_renders_it_in_sdr() {
+        use effectcraft_color::{ColorSpace, Label};
+        use effectcraft_project::{BitDepth, Comp, FootageKind, ItemId, ItemKind, LayerSource, Project, build};
+        use effectcraft_render::{FootageSource, RenderOpts, Renderer};
+        use effectcraft_time::{FrameRate, Tick};
+        // HLG R'G'B' 0.25, 0.50, 0.75 and 1.00 grey, skin (0.68, 0.55, 0.47), foliage (0.40, 0.52,
+        // 0.30), denim (0.28, 0.31, 0.45) and bark (0.76, 0.75, 0.71) as Y'CbCr codes; Apple's SDR
+        // rendering; and the default project's and the sRGB 8 bpc project's before the switch.
+        #[rustfmt::skip]
+        const PATCHES: [([u16; 3], [i32; 3], [i32; 3], [i32; 3]); 8] = [
+            ([283, 512, 512], [55, 55, 55], [64, 64, 64], [79, 79, 79]),
+            ([502, 512, 512], [98, 98, 98], [127, 127, 127], [152, 152, 152]),
+            ([721, 512, 512], [154, 154, 154], [191, 191, 191], [255, 255, 255]),
+            ([940, 512, 512], [254, 254, 254], [255, 255, 255], [255, 255, 255]),
+            ([572, 460, 573], [152, 98, 86], [173, 140, 120], [246, 160, 139]),
+            ([480, 428, 466], [64, 102, 50], [102, 133, 76], [99, 162, 83]),
+            ([336, 578, 494], [50, 63, 94], [72, 79, 115], [78, 98, 142]),
+            ([721, 493, 518], [161, 152, 141], [194, 191, 181], [255, 254, 231]),
+        ];
+        let (w, h) = (8 * PATCHES.len(), 2);
+        let plane = |k: usize, n: usize, step: usize| Arc::new((0..n).map(|x| PATCHES[x * step / 8].0[k]).collect::<Vec<u16>>());
+        let frame = VideoFrame {
+            width: w as u32,
+            height: h as u32,
+            data: PixelData::Yuv16 {
+                planes: [plane(0, w, 1).repeat(h).into(), plane(1, w / 2, 2), plane(2, w / 2, 2)],
+                chroma: Chroma::C420,
+                bits: 10,
+                alpha: None,
+            },
+            color: filmcraft_color::ColorInfo {
+                matrix: Matrix::Bt2020Ncl,
+                transfer: filmcraft_color::Transfer::Hlg,
+                primaries: filmcraft_color::Primaries::Bt2020,
+                range: Range::Limited,
+            },
+            par: (1, 1),
+            pts: filmcraft_time::Tick::ZERO,
+        };
+        struct Decoded(Arc<Image>);
+        impl FootageSource for Decoded {
+            fn frame(&self, _: ItemId, _: &Footage, _: Tick) -> Option<Arc<Image>> {
+                Some(self.0.clone())
+            }
+        }
+        let src = Decoded(Arc::new(frame_to_image(&frame, AlphaOp::new(AlphaMode::Ignore, [0.0; 3]))));
+        let render = |ws: Option<ColorSpace>, depth: BitDepth, f: &Footage| -> Vec<[i32; 3]> {
+            let mut p = Project::default();
+            (p.settings.working_space, p.settings.bit_depth) = (ws, depth);
+            let comp = Comp::new(w as u32, h as u32, FrameRate::FPS_30, Tick::from_seconds_f64(1.0));
+            let cid = p.add_item("Comp", Label::Sandstone, None, ItemKind::Comp(comp.clone().into()));
+            let fid = p.add_item("hlg.mov", Label::Aqua, None, ItemKind::Footage(f.clone()));
+            let l = build::layer(&mut p, &comp, "hlg.mov", LayerSource::Footage { item: fid }, (w as u32, h as u32), None);
+            p.comp_mut(cid).expect("comp").layers.push(l);
+            let img = Renderer::new(&p, &src, RenderOpts::default()).comp_frame(cid, Tick::ZERO);
+            (0..PATCHES.len()).map(|k| img.get(8 * k as i64 + 4, 1)).map(|c| [0, 1, 2].map(|i| (c[i].clamp(0.0, 1.0) * 255.0).round() as i32)).collect()
+        };
+        let hlg = Footage {
+            path: "/m/hlg.mov".into(),
+            kind: FootageKind::Video,
+            width: w as u32,
+            height: h as u32,
+            duration: Tick::from_seconds_f64(1.0),
+            has_video: true,
+            alpha: AlphaMode::Ignore,
+            color_profile: Some(ColorSpace::Rec2100Hlg),
+            tone_map_hdr: true,
+            ..Default::default()
+        };
+        let off = Footage { tone_map_hdr: false, ..hlg.clone() };
+        let near = |got: &[[i32; 3]], col: fn(&([u16; 3], [i32; 3], [i32; 3], [i32; 3])) -> [i32; 3], tol: [i32; 2], label: &str| {
+            for (k, (g, patch)) in got.iter().zip(&PATCHES).enumerate() {
+                let want = col(patch);
+                let tol = if want[0] == want[1] && want[1] == want[2] { tol[0] } else { tol[1] };
+                assert!((0..3).all(|i| (g[i] - want[i]).abs() <= tol), "{label}, patch {k}: {g:?}, want {want:?} ± {tol}");
+            }
+        };
+        let cases = [
+            (None, BitDepth::Bpc8),
+            (None, BitDepth::Bpc16),
+            (None, BitDepth::Bpc32),
+            (Some(ColorSpace::Srgb), BitDepth::Bpc8),
+            (Some(ColorSpace::Srgb), BitDepth::Bpc16),
+            (Some(ColorSpace::Srgb), BitDepth::Bpc32),
+            (Some(ColorSpace::Rec709), BitDepth::Bpc8),
+        ];
+        for (ws, depth) in cases {
+            let label = format!("{ws:?} {depth:?}");
+            near(&render(ws, depth, &hlg), |p| p.1, [2, 6], &format!("{label}, tone mapped"));
+            // Preserve RGB: the signal, whatever the switch (Rec. 709 converts it to the sRGB
+            // output).
+            for f in [&hlg, &off].into_iter().filter(|_| ws != Some(ColorSpace::Rec709)) {
+                near(&render(ws, depth, &Footage { preserve_rgb: true, ..f.clone() }), |p| p.2, [1, 1], &format!("{label}, Preserve RGB"));
+            }
+        }
+        // Off: as before (within the rounding of an encoder in the clip the columns were measured on).
+        for depth in [BitDepth::Bpc8, BitDepth::Bpc16, BitDepth::Bpc32] {
+            near(&render(None, depth, &off), |p| p.2, [1, 1], &format!("unmanaged {depth:?}, off"));
+        }
+        near(&render(Some(ColorSpace::Srgb), BitDepth::Bpc8, &off), |p| p.3, [1, 1], "sRGB 8 bpc, off");
+    }
+
     /// `cargo test -p effectcraft-media --lib bench -- --ignored --nocapture`
     #[test]
     #[ignore]

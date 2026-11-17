@@ -287,6 +287,11 @@ fn interpret_footage_form(s: &effectcraft_engine::Session, proxy: bool, base: &m
         Field::bool("preserveRgb", "Preserve RGB", f.preserve_rgb),
         Field::bool("linearLight", "Interpret As Linear Light", f.linear_light),
     ];
+    // Color ▸ Tone Map HDR to SDR, after the profile it applies to (Rec. 2100 HLG footage).
+    if f.color_profile == Some(effectcraft_engine::project::ColorSpace::Rec2100Hlg) {
+        let at = fields.iter().position(|x| x.key == "colorProfile").map_or(fields.len(), |i| i + 1);
+        fields.insert(at, Field::bool("toneMapHdr", "Tone Map HDR to SDR", f.tone_map_hdr));
+    }
     // Color ▸ Cineon Settings (DPX and Cineon files). The converted points show in the
     // footage's Units, and `pointUnits` reads them back in those units when Units changes.
     if f.is_cineon_file() {
@@ -1271,6 +1276,58 @@ mod tests {
         let Some(FieldKind::Note(text)) = note else { panic!("no sequence note: {note:?}") };
         assert!(text.contains("2 missing frames (3–4)") && text.contains("the previous frame is held"), "{text}");
         assert!(!text.contains("color bars"), "{text}");
+    }
+
+    /// Interpret Footage ▸ Color shows Tone Map HDR to SDR for Rec. 2100 HLG footage only, with
+    /// an automation id, and OK sets it through `file.interpretFootage`.
+    #[test]
+    fn interpret_footage_shows_tone_map_hdr_for_hlg() {
+        use effectcraft_engine::project::{ColorSpace, Footage, FootageKind, ItemKind};
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx, &app.tokens, crate::i18n::language(&app));
+        let clip = |profile: Option<ColorSpace>| {
+            ItemKind::Footage(Footage {
+                path: "/m/clip.mov".into(),
+                kind: FootageKind::Video,
+                width: 4,
+                height: 4,
+                has_video: true,
+                color_profile: profile,
+                tone_map_hdr: profile == Some(ColorSpace::Rec2100Hlg),
+                ..Default::default()
+            })
+        };
+        let project = std::sync::Arc::make_mut(&mut app.session.project);
+        let hlg = project.add_item("hlg.mov", Default::default(), None, clip(Some(ColorSpace::Rec2100Hlg)));
+        let pq = project.add_item("pq.mov", Default::default(), None, clip(Some(ColorSpace::Rec2100Pq)));
+        let keys = |app: &EffectcraftApp| app.dialog_state.form.fields.iter().map(|f| f.key.clone()).collect::<Vec<_>>();
+        app.session.state.project_selection = vec![pq];
+        assert!(open_form(&mut app, "file.interpretFootage", &json!({})));
+        assert!(!keys(&app).iter().any(|k| k == "toneMapHdr"), "{:?}", keys(&app));
+        app.session.state.project_selection = vec![hlg];
+        assert!(open_form(&mut app, "file.interpretFootage", &json!({})));
+        let k = keys(&app);
+        let at = k.iter().position(|k| k == "toneMapHdr").unwrap_or_else(|| panic!("no toneMapHdr: {k:?}"));
+        assert_eq!(k[at - 1], "colorProfile", "{k:?}");
+        assert!(matches!(app.dialog_state.form.fields[at].kind, FieldKind::Bool(true)));
+        ctx.run_ui(Default::default(), |ui| {
+            app.auto.begin_frame();
+            crate::panels::dialogs::show(&mut app, ui.ctx());
+        })
+        .textures_delta
+        .clear();
+        assert!(app.auto.find("form.field.toneMapHdr").is_some());
+        // Unticked, OK turns it off.
+        app.dialog_state.form.fields[at].kind = FieldKind::Bool(false);
+        let params = app.dialog_state.form.params();
+        assert_eq!(params["toneMapHdr"], false, "{params}");
+        app.session.execute("file.interpretFootage", params).unwrap();
+        let Some(ItemKind::Footage(f)) = app.session.project.item(hlg).map(|i| &i.kind) else { panic!("not footage") };
+        assert!(!f.tone_map_hdr && f.color_profile == Some(ColorSpace::Rec2100Hlg));
+        // Opened again, the box shows it off.
+        assert!(open_form(&mut app, "file.interpretFootage", &json!({})));
+        assert!(matches!(app.dialog_state.form.fields[at].kind, FieldKind::Bool(false)), "{:?}", keys(&app));
     }
 
     /// Interpret Footage shows Cineon Settings for DPX footage only. The converted points show in

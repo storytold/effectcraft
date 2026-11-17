@@ -336,6 +336,7 @@ pub fn footage_metadata(f: &Footage) -> Value {
         "colorProfile": f.color_profile.map(|c| format!("{c:?}")).unwrap_or_else(|| "sRGB (default)".into()),
         "linearLight": f.linear_light,
         "preserveRgb": f.preserve_rgb,
+        "toneMapHdr": f.tone_map_hdr,
         "fields": format!("{:?}", f.fields),
         "sequenceFiles": f.sequence.len(),
         "dataRows": f.data.as_ref().map(|d| d.lines().count().saturating_sub(1)),
