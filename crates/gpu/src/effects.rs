@@ -608,7 +608,7 @@ fn pointwise(e: &mut Enc, id: &str, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
                 (f("opacity") as f32 / 100.0).clamp(0.0, 1.0),
                 (sh * effectcraft_effects::NOISE_CELL * b.scale).max(1.0) as f32,
             ];
-            p.f[3] = [(f("subSettings/subInfluence") as f32 / 100.0).clamp(0.0, 1.0), 1.0 / sub as f32, 0.0, 0.0];
+            p.f[3] = [(f("subSettings/subInfluence") as f32 / 100.0).clamp(0.0, 1.0), 1.0 / sub as f32, effectcraft_effects::OCTAVE_SCALE_MAX, 0.0];
         }
         _ => return None,
     }

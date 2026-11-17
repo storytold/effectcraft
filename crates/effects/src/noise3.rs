@@ -65,6 +65,27 @@ pub const NOISE_SOFT_LINEAR: u32 = 2;
 /// correlation length), not 100 px.
 pub const NOISE_CELL: f64 = 2.0 / 3.0;
 
+/// Bound on an octave's frequency and on its Perspective Offset depth (and their inverses).
+/// Unbounded, at Sub Scaling 10000 and Complexity 20 they would reach 100^±19, and Perspective
+/// Offset or Turbulence Factor multiplying the offset by the depth overflowed to infinity (NaN
+/// noise, #3486). Sub Scaling 10..100 never reaches the bound (10^19 at most). Both stay each
+/// other's inverse inside it, so an octave's offset in lattice cells is unchanged; an octave this
+/// far out is a constant (or sub-pixel noise) across any layer either way.
+pub const OCTAVE_SCALE_MAX: f32 = 1e20;
+
+/// Bound on an octave's scaled Offset Turbulence in pixels, so a huge offset times the depth stays
+/// finite. Times a frequency of at least 1 / [`OCTAVE_SCALE_MAX`], over cells of at most about
+/// 6700 px (Scale 10000 %), it is still over 10^12 lattice cells, past where the lattice index
+/// saturates (2^31), so the output is the same.
+const OCTAVE_OFFSET_MAX: f32 = 1e36;
+
+/// The next octave's (frequency, depth) from this one's, for a Sub Scaling ratio `s`.
+#[inline]
+fn next_octave(f: f32, depth: f32, s: f32) -> (f32, f32) {
+    let lo = 1.0 / OCTAVE_SCALE_MAX;
+    ((f / s).clamp(lo, OCTAVE_SCALE_MAX), (depth * s).clamp(lo, OCTAVE_SCALE_MAX))
+}
+
 fn spec(id: &'static str, name: &'static str, params: Vec<ParamSpec>, render: crate::RenderFn) -> EffectSpec {
     EffectSpec { id, name, category: "Noise & Grain", params, render, gpu: false, float: true }
 }
@@ -275,6 +296,23 @@ impl Fractal {
         }
     }
 
+    /// Octave `of`'s origin in pixels, at Perspective Offset `depth`: Perspective Offset moves finer
+    /// (farther) layers less; turbulence makes them drift faster. The scaled offset stays within
+    /// ±[`OCTAVE_OFFSET_MAX`] (#3486).
+    #[inline]
+    fn octave_origin(&self, of: f32, depth: f32) -> [f32; 2] {
+        let k = if self.perspective { depth } else { 1.0 } * (1.0 + self.turbulence * of);
+        let mut org = self.origin;
+        if k != 1.0 {
+            let d = |i: usize| ((self.origin[i] - self.center[i]) * k).clamp(-OCTAVE_OFFSET_MAX, OCTAVE_OFFSET_MAX);
+            org = [self.center[0] + d(0), self.center[1] + d(1)];
+        }
+        if !self.center_subscale {
+            org = [org[0] + self.sub_offset[0] * of, org[1] + self.sub_offset[1] * of];
+        }
+        org
+    }
+
     /// Raw fractal value (before contrast / overflow) at pixel centre (x, y).
     pub(crate) fn raw(&self, x: f32, y: f32) -> f32 {
         let n_oct = self.octaves.ceil() as usize;
@@ -285,16 +323,7 @@ impl Fractal {
         for o in 0..n_oct {
             let w = if o + 1 == n_oct && frac > 0.0 { frac } else { 1.0 };
             let of = o as f32;
-            // This layer's origin: Perspective Offset moves finer (farther) layers less;
-            // turbulence makes them drift faster.
-            let k = if self.perspective { depth } else { 1.0 } * (1.0 + self.turbulence * of);
-            let mut org = self.origin;
-            if k != 1.0 {
-                org = [self.center[0] + (self.origin[0] - self.center[0]) * k, self.center[1] + (self.origin[1] - self.center[1]) * k];
-            }
-            if !self.center_subscale {
-                org = [org[0] + self.sub_offset[0] * of, org[1] + self.sub_offset[1] * of];
-            }
+            let org = self.octave_origin(of, depth);
             let (dx, dy) = (x - org[0], y - org[1]);
             let (mut u, mut v) = ((dx * cr + dy * sr) / self.size[0], (-dx * sr + dy * cr) / self.size[1]);
             if self.sub_rotation != 0.0 {
@@ -324,8 +353,7 @@ impl Fractal {
             sum += n * amp * w;
             norm += amp * w;
             amp *= self.influence;
-            f /= self.sub_scaling;
-            depth *= self.sub_scaling;
+            (f, depth) = next_octave(f, depth, self.sub_scaling);
         }
         if self.kind == 7 { best } else { sum / norm.max(1e-6) }
     }
@@ -377,22 +405,14 @@ pub fn fractal_gpu(ctx: &EffectCtx, offset: [f64; 2], scale: f64, turbulent: boo
     for o in 0..n_oct {
         let w = if o + 1 == n_oct && frac > 0.0 { frac } else { 1.0 };
         let of = o as f32;
-        let k = if fr.perspective { depth } else { 1.0 } * (1.0 + fr.turbulence * of);
-        let mut org = fr.origin;
-        if k != 1.0 {
-            org = [fr.center[0] + (fr.origin[0] - fr.center[0]) * k, fr.center[1] + (fr.origin[1] - fr.center[1]) * k];
-        }
-        if !fr.center_subscale {
-            org = [org[0] + fr.sub_offset[0] * of, org[1] + fr.sub_offset[1] * of];
-        }
+        let org = fr.octave_origin(of, depth);
         let (s, c) = (fr.sub_rotation * of).sin_cos();
         let evo = fr.evolution * (1.0 + fr.turbulence * of);
         let dk = if fr.kind == 6 { 0.5 + of * 0.35 } else { 1.0 };
         octaves.push([org[0], org[1], s, c, f, amp, w, evo, of * 7.31, dk]);
         norm += amp * w;
         amp *= fr.influence;
-        f /= fr.sub_scaling;
-        depth *= fr.sub_scaling;
+        (f, depth) = next_octave(f, depth, fr.sub_scaling);
     }
     let cycle = fr.cycle.map(|c| {
         let t = fr.evolution.rem_euclid(c);
@@ -492,6 +512,24 @@ mod tests {
             for (x, y) in [(1e30, -1e30), (f32::MAX, f32::MIN), (3e9, 2.5e9)] {
                 let n = typed_noise(x, y, 1e12, 7, noise_type);
                 assert!(n.is_finite(), "type {noise_type} at ({x}, {y}): {n}");
+            }
+        }
+    }
+
+    /// #3486: octave frequency and depth stay each other's inverse and finite at 20 octaves of
+    /// either end of Sub Scaling, and are unchanged inside the old 10..100 range.
+    #[test]
+    fn octave_scales_stay_finite_and_inverse() {
+        for s in [0.1f32, 0.56, 1.0, 2.0, 100.0] {
+            let (mut f, mut depth, (mut f0, mut d0)) = (1.0f32, 1.0f32, (1.0f32, 1.0f32));
+            for _ in 0..19 {
+                (f, depth) = next_octave(f, depth, s);
+                (f0, d0) = (f0 / s, d0 * s);
+                assert!(f.is_finite() && depth.is_finite() && f > 0.0 && depth > 0.0, "{s}: {f} {depth}");
+                assert!((f * depth - 1.0).abs() < 1e-3, "{s}: {f} × {depth}");
+                if s <= 1.0 {
+                    assert_eq!((f, depth), (f0, d0), "{s}");
+                }
             }
         }
     }
