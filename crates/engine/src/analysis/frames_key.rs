@@ -137,16 +137,16 @@ pub(crate) fn analysis_key_matches(
     }
     let old = before.comp(comp).and_then(|c| c.layer(layer.id)).filter(|l| l.props.find_group(uid).is_some());
     match old {
-        Some(old) => key_matches(before, comp, old, saved, |s, _| key(s)) && analysis_key(before, comp, old, uid) == now,
-        None => key_matches(after, comp, layer, saved, |s, _| key(s)),
+        Some(old) => key_matches(before, comp, old, saved, |_, s, _| key(s)) && analysis_key(before, comp, old, uid) == now,
+        None => key_matches(after, comp, layer, saved, |_, s, _| key(s)),
     }
 }
 
 /// Whether `saved`, a key saved with an analysis of `layer`, is for the layer's current frames.
 /// `key` makes such a key from a signature of the given era. A key an earlier release saved for
 /// the same frames matches too: keep it rather than rewrite it (analysing writes today's).
-pub(crate) fn key_matches(p: &Project, comp: ItemId, layer: &Layer, saved: &str, key: impl Fn(String, Era) -> String) -> bool {
-    key(signature(p, comp, layer), Era::Current) == saved || legacy::signatures(p, comp, layer).into_iter().any(|s| key(s, Era::Legacy) == saved)
+pub(crate) fn key_matches(p: &Project, comp: ItemId, layer: &Layer, saved: &str, key: impl Fn(&Project, String, Era) -> String) -> bool {
+    key(p, signature(p, comp, layer), Era::Current) == saved || legacy::signatures(p, comp, layer).into_iter().any(|s| key(p, s, Era::Legacy) == saved)
 }
 
 /// The text a key is hashed from. Fields are `name=value;`; strings are quoted and escaped, so

@@ -69,6 +69,13 @@ pub struct Project {
     /// Render Queue preferences (Notify, storage overflow folders).
     #[serde(default, skip_serializing_if = "render_queue::RenderQueuePrefs::is_default")]
     pub render_prefs: render_queue::RenderQueuePrefs,
+    /// The UI hints (ranges, popup options…) properties had in the file this project was opened
+    /// from, where opening took this release's hints instead: the upgrade that runs on opening
+    /// refreshes an effect instance's hints from its current spec. Keys saved by 0.24 and earlier
+    /// hashed the hints the file stored, so they are kept — taking a new range must not drop a
+    /// saved analysis (#3460). By property uid, which is unique in a project.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub saved_ui: BTreeMap<Uid, ParamUi>,
 }
 
 #[cfg(test)]

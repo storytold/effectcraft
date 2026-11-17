@@ -261,6 +261,7 @@ pub fn upgrade_effects(p: &mut Project) {
         }
     }
     let mut next = p.next_id;
+    let mut saved_ui = std::collections::BTreeMap::new();
     for (cid, it) in p.items.iter_mut() {
         let effectcraft_project::ItemKind::Comp(c) = &mut it.kind else { continue };
         for l in &mut std::sync::Arc::make_mut(c).layers {
@@ -281,7 +282,9 @@ pub fn upgrade_effects(p: &mut Project) {
                 let effectcraft_project::Node::Group(g) = n else { continue };
                 let effectcraft_project::GroupKind::Effect { effect } = &g.kind else { continue };
                 if let Some(spec) = effectcraft_effects::find(effect) {
+                    let hints = ui_hints(g);
                     effectcraft_effects::migrate::upgrade_instance(spec, g, &mut effectcraft_project::build::Ids(&mut next), size);
+                    note_ui_changes(&hints, g, &mut saved_ui);
                     if to_effect_space {
                         effectcraft_effects::migrate::to_effect_space(spec, g, size, d, &clone_d);
                     }
@@ -289,6 +292,42 @@ pub fn upgrade_effects(p: &mut Project) {
             }
         }
     }
+    for (uid, ui) in saved_ui {
+        p.saved_ui.entry(uid).or_insert(ui);
+    }
     p.next_id = next;
     p.schema = effectcraft_project::SCHEMA_VERSION;
+}
+
+/// Every property's UI hint under `g`, by uid, before [`upgrade_effects`] refreshes them.
+fn ui_hints(g: &effectcraft_project::PropGroup) -> Vec<(effectcraft_project::Uid, effectcraft_project::ParamUi)> {
+    let mut out = vec![];
+    collect_ui(g, &mut out);
+    out
+}
+
+fn collect_ui(g: &effectcraft_project::PropGroup, out: &mut Vec<(effectcraft_project::Uid, effectcraft_project::ParamUi)>) {
+    for child in &g.children {
+        match child {
+            effectcraft_project::Node::Prop(p) => out.push((p.uid, p.ui.clone())),
+            effectcraft_project::Node::Group(sub) => collect_ui(sub, out),
+        }
+    }
+}
+
+/// Keep the UI hints `upgrade_instance` replaced: a key saved by 0.24 or earlier hashed the ones
+/// the file stored, so taking a new range must not drop the analysis that key kept (#3460). The
+/// first hint recorded for a property is the one kept, so a later release's range does not
+/// replace the file's.
+fn note_ui_changes(
+    before: &[(effectcraft_project::Uid, effectcraft_project::ParamUi)],
+    g: &effectcraft_project::PropGroup,
+    saved: &mut std::collections::BTreeMap<effectcraft_project::Uid, effectcraft_project::ParamUi>,
+) {
+    let after = ui_hints(g);
+    for (uid, old) in before {
+        if !saved.contains_key(uid) && after.iter().any(|(u, ui)| u == uid && ui != old) {
+            saved.insert(*uid, old.clone());
+        }
+    }
 }

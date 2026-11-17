@@ -2,7 +2,9 @@
 //! keyed with them. They hash derived `Debug` text, so `tests::analysis_signature` pins keys
 //! those releases saved: if a type change alters this text, write that part out here.
 
-use effectcraft_project::{Footage, ItemId, ItemKind, Layer, LayerSource, Project, Uid};
+use std::collections::BTreeMap;
+
+use effectcraft_project::{Footage, ItemId, ItemKind, Layer, LayerSource, Node, ParamUi, Project, PropGroup, Uid};
 
 use super::fnv;
 
@@ -31,8 +33,10 @@ pub(crate) fn signatures(p: &Project, comp: ItemId, layer: &Layer) -> Vec<String
     vec![signature_with_source(p, comp, layer, &src)]
 }
 
-/// A Roto Brush Input Key as 0.22–0.24 made it from a [`signatures`] entry.
-pub(crate) fn input_key_of(mut s: String, layer: &Layer, uid: Uid) -> String {
+/// A Roto Brush Input Key as 0.22–0.24 made it from a [`signatures`] entry. `saved_ui` holds the
+/// UI hints the opened file stored, which those releases hashed: an upgrade since may have taken
+/// a new range for a parameter above the instance (#3460).
+pub(crate) fn input_key_of(mut s: String, layer: &Layer, uid: Uid, saved_ui: &BTreeMap<Uid, ParamUi>) -> String {
     if let Some(m) = layer.masks() {
         s.push_str(&format!("{m:?}"));
     }
@@ -41,10 +45,35 @@ pub(crate) fn input_key_of(mut s: String, layer: &Layer, uid: Uid) -> String {
             if g.uid == uid {
                 break;
             }
-            s.push_str(&format!("{g:?}"));
+            s.push_str(&group_text(g, saved_ui));
         }
     }
     format!("{:016x}", fnv(&s))
+}
+
+/// An effect instance's text as those releases hashed it: its derived `Debug`, with the UI hints
+/// the file stored put back where a later release took a new range. A range never changes pixels,
+/// so it must not drop the analysis such a key kept (#3460).
+fn group_text(g: &PropGroup, saved_ui: &BTreeMap<Uid, ParamUi>) -> String {
+    if saved_ui.is_empty() {
+        return format!("{g:?}");
+    }
+    let mut text = g.clone();
+    restore_ui(&mut text, saved_ui);
+    format!("{text:?}")
+}
+
+fn restore_ui(g: &mut PropGroup, saved_ui: &BTreeMap<Uid, ParamUi>) {
+    for child in &mut g.children {
+        match child {
+            Node::Prop(p) => {
+                if let Some(ui) = saved_ui.get(&p.uid) {
+                    p.ui = ui.clone();
+                }
+            }
+            Node::Group(sub) => restore_ui(sub, saved_ui),
+        }
+    }
 }
 
 /// A footage item as 0.23–0.24 wrote it into a signature (without `placed_page` before 0.23),

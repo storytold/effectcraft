@@ -5,7 +5,7 @@ use effectcraft_effects::camera_tracker::{TRACKS, TRACKS_KEY};
 use effectcraft_effects::roto::{FROZEN, INPUT_KEY};
 use effectcraft_effects::warp_stab::{ANALYSIS, ANALYSIS_KEY};
 use effectcraft_keyframe::Value;
-use effectcraft_project::{ItemId, LayerId, Project};
+use effectcraft_project::{ItemId, LayerId, ParamUi, Project};
 use serde_json::json;
 
 use crate::Session;
@@ -91,6 +91,24 @@ fn analyses_saved_by_0_24_survive_edits_that_keep_their_frames() {
     assert_eq!(saved(&s)[2].0, "");
     s.execute_checked("edit.undo", json!({})).unwrap();
     assert_eq!(saved(&s), before);
+}
+
+/// #3460: opening a project takes the current range for every effect instance, and keeps the
+/// range the file stored: that hint is part of the text a key saved by 0.24 hashed, so the Roto
+/// Brush's key still matches after a range is widened.
+#[test]
+fn taking_a_new_range_keeps_the_hint_the_file_stored() {
+    let s = open(ANALYSED_0_24);
+    let layer = s.project.comp(COMP).unwrap().layer(CLIP).unwrap();
+    let blur =
+        layer.effects().and_then(|fx| fx.groups().find(|g| g.match_id == "ec.blur.gaussian")).expect("the fixture draws a Gaussian Blur above the Roto Brush");
+    let pr = blur.get("blurriness").expect("Gaussian Blur has Blurriness");
+    // The instance takes this release's range (0..30000 since #3460) …
+    assert!(matches!(pr.ui, ParamUi::Slider { max, .. } if max == 30000.0), "{:?}", pr.ui);
+    // … and keeps the range the file stored, which the 0.24 key hashed.
+    let stored = ParamUi::Slider { min: 0.0, max: 3000.0, slider_min: 0.0, slider_max: 50.0, decimals: 1 };
+    assert_eq!(s.project.saved_ui.get(&pr.uid), Some(&stored), "the file's hint is kept");
+    assert_eq!(saved(&s)[2], ("saved frozen".into(), ROTO_INPUT_0_24.into()), "the key that hashed it still matches");
 }
 
 /// The text keys are made from today, written field by field (#3536). It changes only when this

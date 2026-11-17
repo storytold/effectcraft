@@ -229,9 +229,9 @@ pub(crate) fn sync(before: &Project, after: &mut Project) -> Vec<(ItemId, LayerI
                 let old = before.comp(*cid).and_then(|bc| bc.layer(l.id)).and_then(|ol| ol.props.find_group(g.uid));
                 let saved_key = str_of(g, INPUT_KEY);
                 // Keep a matching old key: the frozen cache itself also hashes that key.
-                let key_of = |s, era| match era {
+                let key_of = |p: &Project, s, era| match era {
                     Era::Current => frames_key::input_key_of(s, l, g.uid),
-                    Era::Legacy => frames_key::legacy::input_key_of(s, l, g.uid),
+                    Era::Legacy => frames_key::legacy::input_key_of(s, l, g.uid, &p.saved_ui),
                 };
                 if !frames_key::key_matches(after, *cid, l, &saved_key, key_of) {
                     set.push((*cid, l.id, g.uid, key));
