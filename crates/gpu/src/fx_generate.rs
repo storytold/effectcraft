@@ -107,7 +107,7 @@ fn radial_blur(e: &mut Enc, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
         if zoom {
             data.push(effectcraft_raster::radial_blur_zoom_scale(i, amount) as f32);
         } else {
-            let (s, c) = effectcraft_raster::radial_blur_spin_angle(i, amount).to_radians().sin_cos();
+            let (s, c) = effectcraft_raster::radial_blur_spin_degrees(i, amount).to_radians().sin_cos();
             data.extend([s as f32, c as f32]);
         }
     }

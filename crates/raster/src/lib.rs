@@ -18,7 +18,7 @@ use effectcraft_color::{BlendMode, blend_pixel};
 use rayon::prelude::*;
 
 pub use blur::{
-    RADIAL_BLUR_SAMPLES, box_blur, directional_blur, gaussian_blur, gaussian_blur_exact, gaussian_is_exact, radial_blur, radial_blur_spin_angle,
+    RADIAL_BLUR_SAMPLES, box_blur, directional_blur, gaussian_blur, gaussian_blur_exact, gaussian_is_exact, radial_blur, radial_blur_spin_degrees,
     radial_blur_zoom_scale,
 };
 pub use channels3d::AuxChannels;

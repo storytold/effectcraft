@@ -310,14 +310,15 @@ fn radial_blur_t(i: usize) -> f64 {
 }
 
 /// Spin sample `i`'s rotation in degrees for a spin of `amount` degrees.
-pub fn radial_blur_spin_angle(i: usize, amount: f64) -> f64 {
+pub fn radial_blur_spin_degrees(i: usize, amount: f64) -> f64 {
     radial_blur_t(i) * amount
 }
 
 /// Zoom sample `i`'s scale about the centre for a zoom of `amount` (a fraction of the distance
 /// to the centre): evenly over `1 ± amount / 2`. Past a spread of 2 (Radial Blur's Amount 200)
 /// that would reach below 0 and sample the point mirrored through the centre, so the samples
-/// spread evenly from the centre (0) to `1 + amount / 2` instead (#3467).
+/// spread evenly from the centre (0) to `1 + |amount| / 2` instead (#3467). That wider shape is
+/// EffectCraft's; After Effects has not been measured past Amount 200.
 pub fn radial_blur_zoom_scale(i: usize, amount: f64) -> f64 {
     let t = radial_blur_t(i);
     if amount.abs() <= 2.0 {
@@ -342,7 +343,7 @@ pub fn radial_blur(img: &Image, center: (f64, f64), amount: f64, zoom: bool) -> 
                     let k = radial_blur_zoom_scale(i, amount);
                     (center.0 + vx * k, center.1 + vy * k)
                 } else {
-                    let (s, c) = radial_blur_spin_angle(i, amount).to_radians().sin_cos();
+                    let (s, c) = radial_blur_spin_degrees(i, amount).to_radians().sin_cos();
                     (center.0 + vx * c - vy * s, center.1 + vx * s + vy * c)
                 };
                 // Samples outside the image repeat its edge: After Effects' Radial Blur keeps a
