@@ -756,7 +756,7 @@ pub fn specs() -> Vec<EffectSpec> {
             "Gaussian Blur",
             "Blur & Sharpen",
             vec![
-                p("blurriness", "Blurriness", num(0.0), slider(0.0, 3000.0, 0.0, 50.0, 1)),
+                p("blurriness", "Blurriness", num(0.0), slider(0.0, 30000.0, 0.0, 50.0, 1)),
                 p("dimensions", "Blur Dimensions", Value::Enum(0), dims()),
                 p("repeatEdge", "Repeat Edge Pixels", Value::Bool(false), ParamUi::Checkbox),
             ],
@@ -1034,6 +1034,25 @@ mod tests {
         assert_ne!(row(1.2), row(1.6));
         assert_ne!(row(1.6), row(2.0));
         assert_ne!(row(2.0), row(2.4));
+    }
+
+    /// #3460: Blurriness goes up to After Effects' 30000. There the padding stays within the
+    /// effect pixel budget, every pixel stays finite, and Repeat Edge Pixels still repeats the
+    /// layer's edges: a layer white on the left and black on the right blurs to an even grey.
+    #[test]
+    fn gaussian_blur_at_the_highest_blurriness_is_bounded() {
+        for repeat in [false, true] {
+            let out = run_fx("ec.blur.gaussian", &[("blurriness", num(30000.0)), ("repeatEdge", Value::Bool(repeat))], edge(), 0.0, EffectEnv::default());
+            let (w, h) = (out.img.width, out.img.height);
+            assert!(u64::from(w) * u64::from(h) <= 16_777_216, "repeat {repeat}: {w} x {h}");
+            assert!(out.img.data.iter().flatten().all(|v| v.is_finite()), "repeat {repeat}");
+            if repeat {
+                assert_eq!((w, h), (40, 8));
+                for p in &out.img.data {
+                    assert!(p[..3].iter().all(|v| (v - 0.5).abs() < 0.01) && (p[3] - 1.0).abs() < 1e-4, "{p:?}");
+                }
+            }
+        }
     }
 
     #[test]

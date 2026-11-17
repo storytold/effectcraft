@@ -781,6 +781,14 @@ fn box_passes_with_a_radius_far_past_the_image_match_cpu() {
     }
 }
 
+/// #3460: Gaussian Blur's highest Blurriness, 30000, renders the same on the GPU as on the CPU,
+/// with the padding cut to the effect pixel budget and with Repeat Edge Pixels.
+#[test]
+fn gaussian_blur_at_the_highest_blurriness_matches_cpu() {
+    effect_case("ec.blur.gaussian", &[("blurriness", n(30000.0))]);
+    effect_case("ec.blur.gaussian", &[("blurriness", n(30000.0)), ("repeatEdge", Value::Bool(true))]);
+}
+
 #[test]
 fn gpu_effects_match_cpu() {
     // Sigma 3 px and up and even radii, so the half-scale pass stays on the GPU too (#1939).
