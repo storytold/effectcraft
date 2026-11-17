@@ -177,3 +177,62 @@ fn color_stabilizer_points_sample_size_and_stabilize() {
     assert_eq!(v(&g, "stabilize"), Value::Enum(2), "Curves");
     near(&g, "sampleSize", 25.0);
 }
+
+/// Linear Wipe with `opacity` (a value, or keys) as its Compositing Options' Effect Opacity, the
+/// way After Effects 26.5 stores it: `ADBE Effect Mask Opacity` in the value group's
+/// `ADBE Effect Built In Params` group, the percent as stored.
+fn wipe_with_opacity(opacity: Option<f64>, keyed: bool) -> Vec<u8> {
+    use crate::import::fx_inject::{bytes_with_effect, keyed_record, record, sspc, tdmn};
+    use effectcraft_aep::Chunk;
+    let fx = linear_wipe(vec![(1, 40.0)]);
+    bytes_with_effect(fx.match_name, |t| {
+        let mut s = sspc(&fx, t);
+        let Some(values) = s.children_mut().iter_mut().find(|c| c.is_list(b"tdgp")) else { panic!("value group") };
+        let mut options = vec![Chunk::data(*b"tdsb", 1u32.to_be_bytes().to_vec())];
+        if let Some(v) = opacity {
+            options.push(tdmn("ADBE Effect Mask Opacity"));
+            options.push(if keyed { keyed_record(t, &[(0, v), (1000, 100.0)]) } else { record(t, v) });
+        }
+        options.push(tdmn("ADBE Group End"));
+        let effectcraft_aep::Body::List { children, .. } = &mut values.body else { panic!("a LIST") };
+        children.push(tdmn("ADBE Effect Built In Params"));
+        children.push(Chunk::list(*b"tdgp", options));
+        s
+    })
+}
+
+/// Linear Wipe with the definitions After Effects 2026 wrote and the stored `values`.
+fn linear_wipe(values: Vec<(usize, f64)>) -> Fx {
+    Fx {
+        match_name: "ADBE Linear Wipe",
+        name: "Linear Wipe",
+        defs: vec![
+            slider(K::FixedSlider, "Transition Completion", 0.0, (0.0, 100.0)),
+            other(K::Angle, "Wipe Angle", Default::Number(90.0)),
+            slider(K::FixedSlider, "Feather", 0.0, (0.0, 32000.0)),
+        ],
+        values,
+        data: vec![],
+        keys: vec![],
+    }
+}
+
+/// An Effect Opacity other than 100 % is reported: EffectCraft applies effects fully, so the
+/// render differs from After Effects' (37 % in the After Effects 26.5 projects). 100 % or no
+/// record is not.
+#[test]
+fn effect_opacity_other_than_100_is_reported() {
+    use crate::import::fx_inject::import_bytes;
+    let (g, r) = import_bytes(&wipe_with_opacity(Some(37.0), false), "ec.transition.linearwipe");
+    assert!(g.is_some(), "the effect is still imported");
+    let found = losses(&r, LossCategory::Effects, "ADBE Linear Wipe");
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("Effect Opacity is 37 %"), "{found:?}");
+    let (_, r) = import_bytes(&wipe_with_opacity(Some(37.0), true), "ec.transition.linearwipe");
+    let found = losses(&r, LossCategory::Effects, "ADBE Linear Wipe");
+    assert!(found.len() == 1 && found[0].contains("Effect Opacity is keyed"), "{found:?}");
+    for quiet in [Some(100.0), None] {
+        let (_, r) = import_bytes(&wipe_with_opacity(quiet, false), "ec.transition.linearwipe");
+        assert_eq!(losses(&r, LossCategory::Effects, "ADBE Linear Wipe"), Vec::<String>::new(), "{quiet:?}");
+    }
+}

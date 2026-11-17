@@ -172,7 +172,7 @@ fn param_name(fx: &Fx, i: usize) -> String {
 
 /// The effect's `sspc`: its name, the parameter definitions (`parT`) and the stored values
 /// (`tdgp`), each value record copied from `template`.
-fn sspc(fx: &Fx, template: &Chunk<'_>) -> Chunk<'static> {
+pub fn sspc(fx: &Fx, template: &Chunk<'_>) -> Chunk<'static> {
     let n = fx.defs.len() + 2;
     let mut part = vec![
         Chunk::data(*b"parn", (n as u32).to_be_bytes().to_vec()),
