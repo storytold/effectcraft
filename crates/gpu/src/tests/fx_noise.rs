@@ -75,6 +75,8 @@ fn edge_preserving_blurs() {
 fn sharpen_and_unsharp_mask() {
     effect_case("ec.blur.sharpen", &[("amount", n(60.0))]);
     effect_case("ec.blur.sharpen", &[("amount", n(250.0))]);
+    // #3466: the top of After Effects' range (80 × the difference from the blur).
+    effect_case("ec.blur.sharpen", &[("amount", n(4000.0))]);
     effect_case("ec.blur.unsharp", &[("amount", n(120.0)), ("radius", n(4.0))]);
     effect_case("ec.blur.unsharp", &[("amount", n(80.0)), ("radius", n(2.5)), ("threshold", n(12.0))]);
 }

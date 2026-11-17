@@ -435,24 +435,50 @@ pub fn directional_blur(img: &Image, angle_deg: f64, length: f64) -> Image {
     out
 }
 
+/// Samples [`radial_blur`] averages per pixel at every amount, so the work per pixel stays the
+/// same up to Radial Blur's largest Amount (1000). The GPU path takes the same count.
+pub const RADIAL_BLUR_SAMPLES: usize = 32;
+
+/// Where sample `i` of [`RADIAL_BLUR_SAMPLES`] lies in the blur's spread, from −0.5 to 0.5.
+fn radial_blur_t(i: usize) -> f64 {
+    i as f64 / (RADIAL_BLUR_SAMPLES - 1) as f64 - 0.5
+}
+
+/// Spin sample `i`'s rotation in degrees for a spin of `amount` degrees.
+pub fn radial_blur_spin_degrees(i: usize, amount: f64) -> f64 {
+    radial_blur_t(i) * amount
+}
+
+/// Zoom sample `i`'s scale about the centre for a zoom of `amount` (a fraction of the distance
+/// to the centre): evenly over `1 ± amount / 2`. Past a spread of 2 (Radial Blur's Amount 200)
+/// that would reach below 0 and sample the point mirrored through the centre, so the samples
+/// spread evenly from the centre (0) to `1 + |amount| / 2` instead (#3467). That wider shape is
+/// EffectCraft's; After Effects has not been measured past Amount 200.
+pub fn radial_blur_zoom_scale(i: usize, amount: f64) -> f64 {
+    let t = radial_blur_t(i);
+    if amount.abs() <= 2.0 {
+        return 1.0 + t * amount;
+    }
+    (t + 0.5) * (1.0 + amount.abs() / 2.0)
+}
+
 /// Radial blur around `center`: `spin` (degrees) or zoom (`amount` as a fraction of distance).
 pub fn radial_blur(img: &Image, center: (f64, f64), amount: f64, zoom: bool) -> Image {
     if amount.abs() < 1e-6 {
         return img.clone();
     }
-    let n = 32usize;
+    let n = RADIAL_BLUR_SAMPLES;
     let mut out = Image::new(img.width, img.height);
     out.rows_mut().for_each(|(y, row)| {
         for (x, px) in row.iter_mut().enumerate() {
             let (vx, vy) = (x as f64 + 0.5 - center.0, y as f64 + 0.5 - center.1);
             let mut acc = [0.0f32; 4];
             for i in 0..n {
-                let t = i as f64 / (n - 1) as f64 - 0.5;
                 let (sx, sy) = if zoom {
-                    let k = 1.0 + t * amount;
+                    let k = radial_blur_zoom_scale(i, amount);
                     (center.0 + vx * k, center.1 + vy * k)
                 } else {
-                    let (s, c) = (t * amount).to_radians().sin_cos();
+                    let (s, c) = radial_blur_spin_degrees(i, amount).to_radians().sin_cos();
                     (center.0 + vx * c - vy * s, center.1 + vx * s + vy * c)
                 };
                 // Samples outside the image repeat its edge: After Effects' Radial Blur keeps a
@@ -471,6 +497,26 @@ pub fn radial_blur(img: &Image, center: (f64, f64), amount: f64, zoom: bool) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Zoom spreads up to 2 keep `1 ± spread / 2` exactly as before (#3467); wider ones run
+    /// from the centre (scale 0) out to `1 + spread / 2`, evenly and never below 0.
+    #[test]
+    fn radial_blur_zoom_scales_never_cross_the_centre() {
+        let n = RADIAL_BLUR_SAMPLES;
+        for amount in [0.2, 1.0, 2.0, -1.5] {
+            for i in 0..n {
+                let t = i as f64 / (n - 1) as f64 - 0.5;
+                assert_eq!(radial_blur_zoom_scale(i, amount), 1.0 + t * amount, "amount {amount} sample {i}");
+            }
+        }
+        for amount in [2.5, 10.0, -10.0] {
+            let k: Vec<f64> = (0..n).map(|i| radial_blur_zoom_scale(i, amount)).collect();
+            assert_eq!(k[0], 0.0, "amount {amount}");
+            assert!((k[n - 1] - (1.0 + amount.abs() / 2.0)).abs() < 1e-12, "amount {amount}: {k:?}");
+            let step = k[n - 1] / (n - 1) as f64;
+            assert!(k.windows(2).all(|w| (w[1] - w[0] - step).abs() < 1e-12), "amount {amount}: {k:?}");
+        }
+    }
 
     /// The sampled Gaussian pass as it was (one pixel at a time, bounds-checked taps): the
     /// row-wise passes must match it to the bit.

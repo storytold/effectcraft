@@ -781,7 +781,7 @@ pub fn specs() -> Vec<EffectSpec> {
             "Gaussian Blur",
             "Blur & Sharpen",
             vec![
-                p("blurriness", "Blurriness", num(0.0), slider(0.0, 3000.0, 0.0, 50.0, 1)),
+                p("blurriness", "Blurriness", num(0.0), slider(0.0, 30000.0, 0.0, 50.0, 1)),
                 p("dimensions", "Blur Dimensions", Value::Enum(0), dims()),
                 p("repeatEdge", "Repeat Edge Pixels", Value::Bool(false), ParamUi::Checkbox),
             ],
@@ -811,7 +811,8 @@ pub fn specs() -> Vec<EffectSpec> {
             "Radial Blur",
             "Blur & Sharpen",
             vec![
-                p("amount", "Amount", num(10.0), slider(0.0, 100.0, 0.0, 100.0, 1)),
+                // After Effects accepts 0..1000; its slider shows 0..100 (#3467).
+                p("amount", "Amount", num(10.0), slider(0.0, 1000.0, 0.0, 100.0, 1)),
                 p("center", "Center", Value::Vec2([0.5, 0.5]), ParamUi::Point),
                 p("type", "Type", Value::Enum(0), popup(&["Spin", "Zoom"])),
                 // Our blur is always fully anti-aliased; the choice is kept for compatibility.
@@ -819,7 +820,7 @@ pub fn specs() -> Vec<EffectSpec> {
             ],
             radial,
         ),
-        spec("ec.blur.sharpen", "Sharpen", "Blur & Sharpen", vec![p("amount", "Sharpen Amount", num(0.0), slider(0.0, 500.0, 0.0, 100.0, 0))], sharpen),
+        spec("ec.blur.sharpen", "Sharpen", "Blur & Sharpen", vec![p("amount", "Sharpen Amount", num(0.0), slider(0.0, 4000.0, 0.0, 100.0, 0))], sharpen),
         spec(
             "ec.blur.unsharp",
             "Unsharp Mask",
@@ -1127,6 +1128,68 @@ mod tests {
         }
     }
 
+    /// #3460: Blurriness goes up to After Effects' 30000. There the padding stays within the
+    /// effect pixel budget, every pixel stays finite, and Repeat Edge Pixels still repeats the
+    /// layer's edges: a layer white on the left and black on the right blurs to an even grey.
+    #[test]
+    fn gaussian_blur_at_the_highest_blurriness_is_bounded() {
+        for repeat in [false, true] {
+            let out = run_fx("ec.blur.gaussian", &[("blurriness", num(30000.0)), ("repeatEdge", Value::Bool(repeat))], edge(), 0.0, EffectEnv::default());
+            let (w, h) = (out.img.width, out.img.height);
+            assert!(f64::from(w) * f64::from(h) <= crate::pixel_budget(40.0, 8.0), "repeat {repeat}: {w} x {h}");
+            assert!(out.img.data.iter().flatten().all(|v| v.is_finite()), "repeat {repeat}");
+            if repeat {
+                assert_eq!((w, h), (40, 8));
+                for p in &out.img.data {
+                    assert!(p[..3].iter().all(|v| (v - 0.5).abs() < 0.01) && (p[3] - 1.0).abs() < 1e-4, "{p:?}");
+                }
+            }
+        }
+    }
+
+    /// #3466: Sharpen Amount takes After Effects' valid range, 0..4000, and keeps its 0..100
+    /// slider. `prop.set` and the value editors clamp to the hard range.
+    #[test]
+    fn sharpen_amount_takes_the_after_effects_range() {
+        let spec = crate::find("ec.blur.sharpen").unwrap();
+        let ui = &spec.params.iter().find(|p| p.id == "amount").unwrap().ui;
+        assert!(
+            matches!(ui, ParamUi::Slider { min, max, slider_min, slider_max, .. }
+                if *min == 0.0 && *max == 4000.0 && *slider_min == 0.0 && *slider_max == 100.0),
+            "{ui:?}"
+        );
+    }
+
+    /// #3466: at the new top of the range the render stays linear in Amount and finite on 32 bpc
+    /// over-range input: colour moves away from the blur by Amount / 50 of the difference
+    /// (2000 → 4000 doubles it), never below 0, and alpha is untouched.
+    #[test]
+    fn sharpen_is_linear_and_finite_up_to_amount_4000() {
+        let mut img = edge();
+        for y in 0..8 {
+            for x in 0..20 {
+                img.set(x, y, [1000.0, 1000.0, 1000.0, 1.0]);
+            }
+        }
+        let sharpen = |a: f64| run_fx("ec.blur.sharpen", &[("amount", num(a))], img.clone(), 0.0, EffectEnv::default()).img;
+        let (half, top) = (sharpen(2000.0), sharpen(4000.0));
+        for y in 0..8 {
+            for x in 0..40 {
+                let (i, h, t) = (img.get(x, y), half.get(x, y), top.get(x, y));
+                assert_eq!(t[3], i[3], "alpha at {x}");
+                for c in 0..3 {
+                    assert!(t[c].is_finite() && t[c] >= 0.0, "({x}, {y}): {t:?}");
+                    if t[c] > 0.0 && h[c] > 0.0 {
+                        let (dh, dt) = (h[c] - i[c], t[c] - i[c]);
+                        assert!((dt - 2.0 * dh).abs() <= 1e-3 * dt.abs().max(1.0), "({x}, {y}): {dh} {dt}");
+                    }
+                }
+            }
+        }
+        // The bright side of the edge moves 80 × its difference from the blur: far past 10 × the input.
+        assert!(top.get(19, 4)[0] > 1000.0 * 10.0, "{:?}", top.get(19, 4));
+    }
+
     #[test]
     fn fractional_box_blur_radius_is_continuous() {
         let row = |v| blurred_row("ec.blur.fastbox", "radius", v);
@@ -1235,6 +1298,52 @@ mod tests {
         for (x, ae) in [(2, 2.0), (1917, 253.0)] {
             let p = o.img.get(x, 540);
             assert!((p[0] * 255.0 - ae).abs() <= 2.0 && (p[3] - 1.0).abs() < 1e-4, "x {x}: {p:?} vs AE {ae}");
+        }
+    }
+
+    /// Amount takes After Effects' valid range up to 1000 (#3467), Zoom 1000 a spread of 10.
+    /// Zoom samples along the ray from the centre through the pixel, never past the centre: on a
+    /// layer white left of the centre and black right of it, the right half stays black (scales
+    /// below 0 sampled the white half mirrored through the centre). Both Antialiasing settings (the
+    /// renderer does not read it yet; the test keeps both covered).
+    #[test]
+    fn radial_blur_zoom_at_the_largest_amount_stays_on_its_side_of_the_centre() {
+        let mut img = effectcraft_raster::Image::filled(64, 32, [0.0, 0.0, 0.0, 1.0]);
+        img.rows_mut().for_each(|(_, row)| row.iter_mut().take(32).for_each(|px| *px = [1.0, 1.0, 1.0, 1.0]));
+        for aa in 0..2 {
+            let vals = [("amount", num(1000.0)), ("type", Value::Enum(1)), ("center", Value::Vec2([32.5, 16.5])), ("antialiasing", Value::Enum(aa))];
+            let o = run_fx("ec.blur.radial", &vals, img.clone(), 0.0, EffectEnv::default());
+            for y in 0..32 {
+                for x in 33..64 {
+                    let p = o.img.get(x, y);
+                    assert!(p[0].abs() < 1e-5 && (p[3] - 1.0).abs() < 1e-5, "aa {aa} ({x}, {y}): {p:?}");
+                }
+            }
+        }
+    }
+
+    /// Spin and Zoom at both ends of Amount (0..1000) and both Antialiasing settings give finite
+    /// colours over an opaque layer and keep it opaque (#3467). It guards the newly accepted
+    /// values; it passed before the Zoom fix too.
+    #[test]
+    fn radial_blur_is_finite_across_the_amount_range() {
+        let mut img = effectcraft_raster::Image::new(48, 40);
+        img.rows_mut().for_each(|(y, row)| {
+            for (x, px) in row.iter_mut().enumerate() {
+                *px = [x as f32 / 47.0, y as f32 / 39.0, 0.5, 1.0];
+            }
+        });
+        for ty in 0..2 {
+            for aa in 0..2 {
+                for amount in [0.0, 100.0, 200.0, 1000.0] {
+                    let vals = [("amount", num(amount)), ("type", Value::Enum(ty)), ("center", Value::Vec2([10.0, 30.0])), ("antialiasing", Value::Enum(aa))];
+                    let o = run_fx("ec.blur.radial", &vals, img.clone(), 0.0, EffectEnv::default());
+                    assert_eq!((o.img.width, o.img.height), (48, 40));
+                    for p in &o.img.data {
+                        assert!(p.iter().all(|v| v.is_finite()) && (p[3] - 1.0).abs() < 1e-5, "type {ty} aa {aa} amount {amount}: {p:?}");
+                    }
+                }
+            }
         }
     }
 
