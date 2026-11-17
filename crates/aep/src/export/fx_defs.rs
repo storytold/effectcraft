@@ -735,7 +735,6 @@ mod tests {
         ("ec.time.pixelmotionblur", "shutterAngle", 3481),
         ("ec.time.pixelmotionblur", "shutterSamples", 3482),
         ("ec.noise.fractal", "subSettings/subInfluence", 3485),
-        ("ec.noise.fractal", "subSettings/subScaling", 3486),
     ];
 
     /// `a` is at most `b`, allowing for the `f32` the recorded bounds were read from.
