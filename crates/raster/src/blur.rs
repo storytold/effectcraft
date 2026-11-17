@@ -188,31 +188,42 @@ pub fn gaussian_blur(img: &Image, sigma_x: f64, sigma_y: f64, repeat: bool) -> I
 /// padding cut to its pixel budget), which [`gaussian_blur`] leaves far too faint once the
 /// boxes are wider than the buffer. A line costs O(length) whatever the sigma.
 pub fn gaussian_blur_unbounded(img: &Image, sigma_x: f64, sigma_y: f64) -> Image {
-    let (w, h) = (img.width as usize, img.height as usize);
-    let mut out = img.clone();
-    if w == 0 || h == 0 {
-        return out;
+    gaussian_blur_unbounded_at(img, sigma_x, sigma_y, [0, 0], img.width, img.height)
+}
+
+/// [`gaussian_blur_unbounded`] of `img` moved by `shift` pixels, seen through a `width` ×
+/// `height` window at the origin: output `(x, y)` is the blurred plane at
+/// `(x − shift[0], y − shift[1])`. Nothing is cut before the blur, so the tails of content
+/// that lands outside the window still reach into it.
+pub fn gaussian_blur_unbounded_at(img: &Image, sigma_x: f64, sigma_y: f64, shift: [i64; 2], width: u32, height: u32) -> Image {
+    let (w, h, ow, oh) = (img.width as usize, img.height as usize, width as usize, height as usize);
+    if w == 0 || h == 0 || ow == 0 || oh == 0 {
+        return Image::new(width, height);
     }
-    if let Some(r) = unbounded_radii(sigma_x) {
-        out.data.par_chunks_mut(w).for_each(|row| boxes_unbounded(row, &r));
-    }
-    if let Some(r) = unbounded_radii(sigma_y) {
-        let cols: Vec<Vec<Px>> = (0..w)
-            .into_par_iter()
-            .map(|x| {
-                let mut col: Vec<Px> = out.data.iter().skip(x).step_by(w).copied().collect();
-                boxes_unbounded(&mut col, &r);
-                col
-            })
-            .collect();
-        out.data.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
-            for (o, col) in row.iter_mut().zip(&cols) {
-                if let Some(v) = col.get(y) {
-                    *o = *v;
-                }
+    let (rx, ry) = (unbounded_radii(sigma_x).unwrap_or_default(), unbounded_radii(sigma_y).unwrap_or_default());
+    // Horizontal: each source row into a row of the window's width.
+    let mut rows = vec![[0.0f32; 4]; ow.saturating_mul(h)];
+    rows.par_chunks_mut(ow).zip(img.data.par_chunks(w)).for_each(|(o, src)| boxes_unbounded(src, &rx, shift[0], o));
+    // Vertical: each of those columns into a column of the window's height.
+    let cols: Vec<Vec<Px>> = (0..ow)
+        .into_par_iter()
+        .map(|x| {
+            let col: Vec<Px> = rows.iter().skip(x).step_by(ow).copied().collect();
+            let mut o = vec![[0.0f32; 4]; oh];
+            boxes_unbounded(&col, &ry, shift[1], &mut o);
+            o
+        })
+        .collect();
+    // At most three buffers at once: the rows go before the output comes.
+    drop(rows);
+    let mut out = Image::new(width, height);
+    out.data.par_chunks_mut(ow).enumerate().for_each(|(y, row)| {
+        for (o, col) in row.iter_mut().zip(&cols) {
+            if let Some(v) = col.get(y) {
+                *o = *v;
             }
-        });
-    }
+        }
+    });
     out
 }
 
@@ -231,32 +242,36 @@ fn unbounded_radii(sigma: f64) -> Option<Vec<i64>> {
     (!radii.is_empty()).then_some(radii)
 }
 
-/// Transparent-edged box passes of radii `r` (one to three, none zero) over `line`, as if it
-/// went on with zeros.
+/// Transparent-edged box passes of radii `r` (up to three, none zero) over `line`, as if it
+/// went on with zeros, moved by `shift`: `out[x]` is the blurred line at `x − shift`.
 ///
 /// One box is a difference of prefix sums, `(S(x + r) − S(x − r − 1)) / (2r + 1)`, so `k` boxes
-/// are `2^k` signed terms of the `k`-th prefix sum `Sk`. Before the line every `Sk` is 0; past
-/// it, `j = m − n + 1` steps on with `T` the line's total, they are polynomials:
-/// `S1(m) = T`, `S2(m) = S2(n − 1) + j·T`, `S3(m) = S3(n − 1) + j·S2(n − 1) + T·j(j + 1)/2`.
-/// The sums are `f64`. `Sk` grows like `n^k`, so the cancelling terms leave a rounding error
-/// near `ε·n^k / (2r + 1)^k` of the values: under 1e-8 for any line a blur too wide for its
-/// buffer runs on.
-fn boxes_unbounded(line: &mut [Px], r: &[i64]) {
+/// are `2^k` signed terms of the `k`-th prefix sum `Sk` (`S0` is the line). Before the line
+/// every `Sk` is 0; past it, `j = m − n + 1` steps on with `T` the line's total, they are
+/// polynomials: `S0(m) = 0`, `S1(m) = T`, `S2(m) = S2(n − 1) + j·T`,
+/// `S3(m) = S3(n − 1) + j·S2(n − 1) + T·j(j + 1)/2`. The sums are `f64`. `Sk` grows like `n^k`,
+/// so the cancelling terms leave a rounding error near `ε·n^k / (2r + 1)^k` of the values:
+/// under 1e-8 for any line a blur too wide for its buffer runs on.
+fn boxes_unbounded(line: &[Px], r: &[i64], shift: i64, out: &mut [Px]) {
     let (n, k) = (line.len(), r.len());
     let Ok(n_i) = i64::try_from(n) else { return };
-    if n == 0 || !(1..=3).contains(&k) {
+    if n == 0 || k > 3 {
         return;
     }
     // sums[o] = the (o + 1)-th prefix sum so far.
     let mut sums = [[0.0f64; 4]; 3];
     let mut sk = Vec::with_capacity(n);
-    for p in line.iter() {
+    for p in line {
+        let v = p.map(f64::from);
         for c in 0..4 {
-            sums[0][c] += f64::from(p[c]);
+            sums[0][c] += v[c];
             sums[1][c] += sums[0][c];
             sums[2][c] += sums[1][c];
         }
-        sk.push(sums[k - 1]);
+        sk.push(match k {
+            0 => v,
+            _ => sums[k - 1],
+        });
     }
     let at = |m: i64| -> [f64; 4] {
         if m < 0 {
@@ -267,24 +282,25 @@ fn boxes_unbounded(line: &mut [Px], r: &[i64]) {
         }
         let j = (m - n_i + 1) as f64;
         std::array::from_fn(|c| match k {
+            0 => 0.0,
             1 => sums[0][c],
             2 => sums[1][c] + j * sums[0][c],
             _ => sums[2][c] + j * sums[1][c] + sums[0][c] * j * (j + 1.0) / 2.0,
         })
     };
-    // The shifts and signs: each box adds `S(x + r)` and subtracts `S(x − r − 1)`.
+    // The offsets and signs: each box adds `S(x + r)` and subtracts `S(x − r − 1)`.
     let terms: Vec<(i64, f64)> = (0..1usize << k)
         .map(|bits| {
-            r.iter().enumerate().fold((0i64, 1.0f64), |(shift, sign), (b, &ri)| {
-                if bits >> b & 1 == 0 { (shift.saturating_add(ri), sign) } else { (shift.saturating_sub(ri.saturating_add(1)), -sign) }
+            r.iter().enumerate().fold((0i64.saturating_sub(shift), 1.0f64), |(at, sign), (b, &ri)| {
+                if bits >> b & 1 == 0 { (at.saturating_add(ri), sign) } else { (at.saturating_sub(ri.saturating_add(1)), -sign) }
             })
         })
         .collect();
     let norm: f64 = r.iter().map(|&ri| 2.0 * ri as f64 + 1.0).product();
-    for (x, o) in (0i64..).zip(line.iter_mut()) {
+    for (x, o) in (0i64..).zip(out.iter_mut()) {
         let mut v = [0.0f64; 4];
-        for &(shift, sign) in &terms {
-            let s = at(x.saturating_add(shift));
+        for &(offset, sign) in &terms {
+            let s = at(x.saturating_add(offset));
             for c in 0..4 {
                 v[c] += sign * s[c];
             }
@@ -630,6 +646,36 @@ mod tests {
         let r = box_radii(10.0, 3);
         assert_eq!(r.len(), 3);
         assert!(r.iter().all(|&v| (7..=10).contains(&v)), "{r:?}");
+    }
+
+    /// #3464: moving the image before [`gaussian_blur_unbounded`] and blurring it moved with
+    /// [`gaussian_blur_unbounded_at`] agree, also when the move puts all of it outside the window
+    /// (its tails still reach in) and along an axis that isn't blurred.
+    #[test]
+    fn unbounded_gaussian_at_a_shift_matches_blurring_the_moved_image() {
+        let mut img = Image::new(6, 5);
+        for (i, p) in img.data.iter_mut().enumerate() {
+            let v = ((i * 37) % 11) as f32 / 11.0;
+            *p = [v, 0.5 * v, 1.0 - v, 1.0];
+        }
+        let (ow, oh) = (14u32, 9u32);
+        for (sx, sy, shift) in [(3.0, 2.0, [4i64, 2i64]), (5.0, 0.0, [-3, 1]), (12.0, 12.0, [-20, 16]), (8.0, 8.0, [25, -12])] {
+            let got = gaussian_blur_unbounded_at(&img, sx, sy, shift, ow, oh);
+            // The moved image in a canvas large enough to hold it and the window, blurred.
+            let off = [40i64, 40i64];
+            let mut canvas = Image::new(100, 100);
+            for y in 0..img.height {
+                for x in 0..img.width {
+                    let (cx, cy) = (i64::from(x) + shift[0] + off[0], i64::from(y) + shift[1] + off[1]);
+                    canvas.set(cx as u32, cy as u32, img.get(i64::from(x), i64::from(y)));
+                }
+            }
+            let want = gaussian_blur_unbounded(&canvas, sx, sy).crop(off[0], off[1], ow, oh);
+            assert!(got.data.iter().flatten().any(|v| *v > 1e-4), "{shift:?}: something reaches the window");
+            for (a, b) in got.data.iter().flatten().zip(want.data.iter().flatten()) {
+                assert!((a - b).abs() <= 1e-5, "σ ({sx}, {sy}) {shift:?}: {a} vs {b}");
+            }
+        }
     }
 
     /// #3464: a sigma past any buffer, or infinite, blurs as the widest one does: finite, no
