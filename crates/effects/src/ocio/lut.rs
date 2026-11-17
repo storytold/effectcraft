@@ -68,7 +68,7 @@ pub fn parse_3dl(text: &str) -> Option<Lut> {
             }
             continue;
         }
-        let v: Vec<f64> = l.split_whitespace().filter_map(|t| t.parse().ok()).collect();
+        let v: Vec<f64> = l.split_whitespace().filter_map(|t| t.parse().ok()).take(MAX_LATTICE + 1).collect();
         if v.len() > 3 && mesh.is_none() && rows.is_empty() {
             // The mesh length is the lattice side: refuse one no lattice reader accepts (#3830).
             if v.len() > MAX_LATTICE {
