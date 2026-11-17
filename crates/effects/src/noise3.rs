@@ -65,6 +65,12 @@ pub const NOISE_SOFT_LINEAR: u32 = 2;
 /// correlation length), not 100 px.
 pub const NOISE_CELL: f64 = 2.0 / 3.0;
 
+/// Sub Scaling (percent, After Effects' valid 10..10000) as the size ratio of each octave to the
+/// one before it. Above 1 each octave is larger than the last.
+pub fn sub_scaling_ratio(percent: f64) -> f64 {
+    (percent / 100.0).clamp(0.1, 100.0)
+}
+
 /// Bound on an octave's frequency and on its Perspective Offset depth (and their inverses).
 /// Unbounded, at Sub Scaling 10000 and Complexity 20 they would reach 100^±19, and Perspective
 /// Offset or Turbulence Factor multiplying the offset by the depth overflowed to infinity (NaN
@@ -109,7 +115,7 @@ fn params(turbulent: bool) -> Vec<ParamSpec> {
         p("transform/perspectiveOffset", "Perspective Offset", Value::Bool(false), ParamUi::Checkbox),
         p("complexity", "Complexity", num(6.0), slider(1.0, 20.0, 1.0, 10.0, 1)),
         p("subSettings/subInfluence", "Sub Influence (%)", num(70.0), slider(0.0, 100.0, 25.0, 100.0, 1)),
-        p("subSettings/subScaling", "Sub Scaling", num(56.0), slider(10.0, 100.0, 25.0, 100.0, 1)),
+        p("subSettings/subScaling", "Sub Scaling", num(56.0), slider(10.0, 10000.0, 25.0, 100.0, 1)),
     ];
     if !turbulent {
         v.extend([
@@ -217,7 +223,8 @@ pub(crate) struct Fractal {
     pub perspective: bool,
     pub octaves: f32,
     pub influence: f32,
-    /// Sub Scaling as a fraction (each layer is this much smaller).
+    /// Sub Scaling as a size ratio ([`sub_scaling_ratio`]: each octave is this much the size of the
+    /// one before).
     pub sub_scaling: f32,
     pub sub_rotation: f32,
     /// Sub Offset in pixels.
@@ -269,7 +276,7 @@ impl Fractal {
             perspective: pr.b("transform/perspectiveOffset"),
             octaves: pr.f("complexity").clamp(1.0, 20.0) as f32,
             influence: (pr.f("subSettings/subInfluence") as f32 / 100.0).clamp(0.0, 1.0),
-            sub_scaling: (pr.f("subSettings/subScaling") as f32 / 100.0).clamp(0.1, 1.0),
+            sub_scaling: sub_scaling_ratio(pr.f("subSettings/subScaling")) as f32,
             sub_rotation: (pr.f("subSettings/subRotation") as f32).to_radians(),
             sub_offset: [(so[0] * b.scale) as f32, (so[1] * b.scale) as f32],
             center_subscale: pr.b("subSettings/centerSubscale"),
@@ -707,6 +714,50 @@ mod tests {
         let t0 = run("ec.noise.turbulent", &[("evolution", num(200.0)), ("evolutionOptions/turbulenceFactor", num(0.0))]);
         let t1 = run("ec.noise.turbulent", &[("evolution", num(200.0)), ("evolutionOptions/turbulenceFactor", num(2.0))]);
         assert_ne!(t0, t1);
+    }
+
+    /// #3486: Sub Scaling takes After Effects' 10..10000 for both effects (the slider still shows
+    /// 25..100), and the renderer uses values above 100 instead of capping them there.
+    #[test]
+    fn sub_scaling_takes_the_after_effects_range() {
+        for id in ["ec.noise.fractal", "ec.noise.turbulent"] {
+            let ui = &crate::find(id).unwrap().params.iter().find(|p| p.id == "subSettings/subScaling").unwrap().ui;
+            assert!(
+                matches!(ui, ParamUi::Slider { min, max, slider_min, slider_max, .. }
+                    if *min == 10.0 && *max == 10000.0 && *slider_min == 25.0 && *slider_max == 100.0),
+                "{id}: {ui:?}"
+            );
+            let at = |v: f64| run(id, &[("subSettings/subScaling", num(v))]);
+            assert_ne!(at(100.0), at(200.0), "{id}: 200 renders as 100");
+            assert_ne!(at(200.0), at(10000.0), "{id}: 10000 renders as 200");
+        }
+    }
+
+    /// #3486: above 100 %, each octave is larger than the last, so its scale grows as Sub
+    /// Scaling^octave (100^19 at Complexity 20). Perspective Offset and Turbulence Factor multiply
+    /// the offset by that, which overflowed to infinity and drew NaN, also for a huge offset. At
+    /// 10 % the lattice coordinates pass the i32 range, whose neighbour index overflowed.
+    #[test]
+    fn extreme_sub_scaling_stays_finite() {
+        for id in ["ec.noise.fractal", "ec.noise.turbulent"] {
+            for sub in [10.0, 100.0, 9999.0, 10000.0] {
+                for (perspective, offset) in [(false, [-3000.0, 2500.0]), (true, [-3000.0, 2500.0]), (true, [1e17, -1e17])] {
+                    let mut vals = vec![
+                        ("subSettings/subScaling", num(sub)),
+                        ("complexity", num(20.0)),
+                        ("transform/perspectiveOffset", Value::Bool(perspective)),
+                        ("transform/offset", Value::Vec2(offset)),
+                        ("evolution", num(200.0)),
+                        ("blendingMode", Value::Enum(BLEND_NONE)),
+                    ];
+                    if id == "ec.noise.turbulent" {
+                        vals.push(("evolutionOptions/turbulenceFactor", num(10.0)));
+                    }
+                    let img = run(id, &vals);
+                    assert!(img.data.iter().flatten().all(|c| c.is_finite()), "{id} sub {sub} perspective {perspective} offset {offset:?}: non-finite output");
+                }
+            }
+        }
     }
 
     /// Turbulent Basic Fractal Noise drawn alone at `w` × `h`.
