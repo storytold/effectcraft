@@ -483,9 +483,18 @@ pub fn decode_limit(floor: usize, need: usize) -> usize {
         if DECODE_LIMIT.load(Ordering::SeqCst) == 0 && DECODE_UNANSWERED.load(Ordering::Relaxed) < DECODE_ASKS {
             let source = *DECODE_SOURCE.lock().unwrap_or_else(PoisonError::into_inner);
             match source.and_then(|read| read()) {
-                Some(bytes) => store_decode_limit(bytes),
+                // (only while nothing set a limit meanwhile: the session's figure, set during the
+                // reading, is newer than this one)
+                Some(bytes) => {
+                    if DECODE_LIMIT.compare_exchange(0, bytes, Ordering::SeqCst, Ordering::SeqCst).is_ok() && bytes != 0 {
+                        DECODE_GENERATION.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
                 None => {
                     DECODE_UNANSWERED.fetch_add(1, Ordering::Relaxed);
+                    // (a request refused for its size before this reading is asked again, so the
+                    // reading left is not shut out by that refusal)
+                    DECODE_GENERATION.fetch_add(1, Ordering::SeqCst);
                 }
             }
         }
@@ -957,6 +966,47 @@ mod tests {
         assert_eq!(decode_limit_generation(), before, "the same figure is no change");
         set_decode_limit(Some(500));
         assert_ne!(decode_limit_generation(), before);
+        set_decode_limit(None);
+        set_decode_limit_source(None);
+    }
+
+    /// The session sets its figure while the system is being read (the reading takes up to a
+    /// second).
+    fn ram_says_after_the_session_set_its_figure() -> Option<usize> {
+        set_decode_limit(Some(12));
+        Some(48)
+    }
+
+    /// #3750 review: a limit the session sets while the system's memory is being read stays;
+    /// the older reading does not replace it.
+    #[test]
+    fn a_limit_set_during_the_reading_is_not_replaced_by_it() {
+        let _serial = PROCESS_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+        set_decode_limit(None);
+        set_decode_limit_source(Some(ram_says_after_the_session_set_its_figure));
+        assert_eq!(decode_limit(1, 100), 12, "the session's figure set during the reading stays");
+        assert_eq!(decode_limit(1, 100), 12);
+        set_decode_limit(None);
+        set_decode_limit_source(None);
+    }
+
+    /// #3750 review: a reading that gave no answer makes earlier refusals for size out of date,
+    /// so the second reading is asked for by the next request instead of being shut out.
+    #[test]
+    fn a_reading_without_answer_makes_earlier_refusals_out_of_date() {
+        let _serial = PROCESS_SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+        set_decode_limit(None);
+        set_decode_limit_source(Some(ram_unknown));
+        let before = decode_limit_generation();
+        assert_eq!(decode_limit(100, 200), 100);
+        let after_first = decode_limit_generation();
+        assert_ne!(after_first, before, "a refusal made before the failed reading is out of date");
+        assert_eq!(decode_limit(100, 200), 100);
+        let after_second = decode_limit_generation();
+        assert_ne!(after_second, after_first);
+        // No reading is left: the generation stays, and a refusal is kept.
+        assert_eq!(decode_limit(100, 200), 100);
+        assert_eq!(decode_limit_generation(), after_second, "no reading, no change");
         set_decode_limit(None);
         set_decode_limit_source(None);
     }
