@@ -32,8 +32,22 @@ pub fn parse_spi1d(text: &str) -> Option<Lut> {
 /// Parse a Sony Imageworks `.spi3d` lattice: `SPILUT 1.0`, `3 3`, the sizes, then one
 /// `r g b  R G B` line per lattice point (indices, then the colour).
 pub fn parse_spi3d(text: &str) -> Option<Lut> {
+    if !spi3d_rows_present(text) {
+        return None;
+    }
     let value = craft_cms::sony_lut::parse_spi3d(text)?;
     Some(Lut { n1: 0, d1: vec![], n3: value.size, d3: value.values, dmin: [0.0; 3], dmax: [1.0; 3] })
+}
+
+/// Whether a `.spi3d` file has at least as many rows as its header's lattice claims. The shared
+/// reader reserves the whole lattice before it reads a row, so a short file is turned away
+/// first (#3831). Counting stops at the claimed volume; nothing is allocated.
+pub(super) fn spi3d_rows_present(text: &str) -> bool {
+    let mut lines = text.lines().map(str::trim).filter(|l| !l.is_empty()).skip(2);
+    let Some(n) = lines.next().and_then(|l| l.split_whitespace().next()?.parse::<usize>().ok()) else {
+        return false;
+    };
+    n.checked_pow(3).is_some_and(|count| lines.take(count).count() == count)
 }
 
 /// Parse an Autodesk `.3dl` lattice (integers, blue fastest; an optional input-mesh line).
@@ -56,8 +70,15 @@ pub fn parse_3dl(text: &str) -> Option<Lut> {
         }
         let v: Vec<f64> = l.split_whitespace().filter_map(|t| t.parse().ok()).collect();
         if v.len() > 3 && mesh.is_none() && rows.is_empty() {
+            // The mesh length is the lattice side: refuse one no lattice reader accepts (#3830).
+            if v.len() > MAX_LATTICE {
+                return None;
+            }
             mesh = Some(v);
         } else if v.len() == 3 {
+            if rows.len() >= MAX_LATTICE.pow(3) {
+                return None;
+            }
             rows.push([v[0], v[1], v[2]]);
         } else {
             return None;
@@ -75,7 +96,7 @@ pub fn parse_3dl(text: &str) -> Option<Lut> {
         Some(m) => m.len(),
         None => (rows.len() as f64).cbrt().round() as usize,
     };
-    if n < 2 || rows.len() != n * n * n {
+    if !(2..=MAX_LATTICE).contains(&n) || n.checked_pow(3) != Some(rows.len()) {
         return None;
     }
     let maxv = rows.iter().flat_map(|r| r.iter()).fold(0.0f64, |m, &v| m.max(v));
@@ -92,7 +113,7 @@ pub fn parse_3dl(text: &str) -> Option<Lut> {
     Some(Lut { n1: 0, d1: vec![], n3: n, d3, dmin: [0.0; 3], dmax: [1.0; 3] })
 }
 
-/// Largest lattice side the lattice readers accept (`.spi3d`, `.csp`).
+/// Largest lattice side the lattice readers accept (`.spi3d`, `.csp`, `.3dl`).
 const MAX_LATTICE: usize = 129;
 /// Most entries of a 1D table (interpolated by index, so capped like the lattices: 2²⁴).
 const MAX_1D: usize = 1 << 24;
