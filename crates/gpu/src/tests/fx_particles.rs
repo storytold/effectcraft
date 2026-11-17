@@ -141,7 +141,22 @@ fn ball_action_pixel_polly_scatterize() {
         0.0,
         0.0,
     );
-    case("ec.sim.ccballaction", &[("gridSpacing", n(2.0)), ("ballSize", n(80.0)), ("instabilityState", n(45.0)), ("twistProperty", e(2))], 0.0, 0.0);
+    case("ec.sim.ccballaction", &[("gridSpacing", n(2.0)), ("ballSize", n(80.0)), ("scatterMotion", n(45.0)), ("twistProperty", e(2))], 0.0, 0.0);
+    // #3197: Shading (flat, weaker, stronger, lit from the other side), Coloring, Displace.
+    for shading in [0.0, -30.0, -100.0, 60.0, 1e45] {
+        case("ec.sim.ccballaction", &[("ballSize", n(80.0)), ("shading", n(shading))], 0.0, 0.0);
+    }
+    for coloring in [0, 2] {
+        case("ec.sim.ccballaction", &[("ballSize", n(80.0)), ("coloring", e(coloring))], 0.0, 0.0);
+    }
+    for prop in [3, 6, 8] {
+        case(
+            "ec.sim.ccballaction",
+            &[("ballSize", n(80.0)), ("rotationAxis", e(1)), ("rotation", n(30.0)), ("displace", n(40.0)), ("displaceProperty", e(prop))],
+            0.0,
+            0.0,
+        );
+    }
     for object in 0..4 {
         case("ec.sim.ccpixelpolly", &[("object", e(object)), ("gridSpacing", n(6.0))], 0.6, 0.0);
     }
