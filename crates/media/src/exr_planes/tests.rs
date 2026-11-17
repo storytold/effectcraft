@@ -887,8 +887,10 @@ fn a_merged_decode_too_large_leaves_each_request_that_fits_its_planes() {
     // Before the first request's decode reads: the second request joins it.
     let (tx, rx) = std::sync::mpsc::channel();
     let joined = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let merged_seen = Arc::new(std::sync::atomic::AtomicBool::new(false));
     {
-        let (store, source, index, second, joined) = (store.clone(), source.clone(), index.clone(), second.clone(), joined.clone());
+        let (store, source, index, second, joined, merged_seen) =
+            (store.clone(), source.clone(), index.clone(), second.clone(), joined.clone(), merged_seen.clone());
         let hook: Hook = Arc::new(move |_: &str| {
             if joined.swap(true, Ordering::SeqCst) {
                 return;
@@ -907,6 +909,7 @@ fn a_merged_decode_too_large_leaves_each_request_that_fits_its_planes() {
                     .and_then(|e| e.flight.clone())
                     .is_some_and(|f| second.ids.iter().all(|id| f.state().want.ids.contains(id)));
                 if merged {
+                    merged_seen.store(true, Ordering::SeqCst);
                     break;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(2));
@@ -918,7 +921,7 @@ fn a_merged_decode_too_large_leaves_each_request_that_fits_its_planes() {
     let got_second = rx.recv_timeout(std::time::Duration::from_secs(20)).unwrap();
     set_before_read(path, None);
     assert!(joined.load(Ordering::SeqCst));
-    assert!(decodes_of(path).first().is_some_and(|d| d.channels.len() == 14), "merged first: {:?}", decodes_of(path));
+    assert!(merged_seen.load(Ordering::SeqCst), "the second request joined the first one's decode");
     let got_first = got_first.expect("the picture alone fits");
     let got_second = got_second.expect("the passes alone fit");
     assert!(picture.iter().all(|id| got_first.contains(id)), "{got_first:?}");
@@ -1176,7 +1179,7 @@ fn decoded_planes_are_kept_on_disk_and_read_back_exactly() {
     set_disk_cache(None);
     let copies = DISK_COPIES.lock().unwrap().iter().filter(|p| **p == g.path).count();
     assert_eq!(copies, 0, "no plane copied for a cache it can't go in");
-    assert!(DISK_COPIES.lock().unwrap().iter().any(|p| *p == f.path), "copied while it could");
+    assert!(DISK_COPIES.lock().unwrap().contains(&f.path), "copied while it could");
     let from_disk: Vec<bool> = decodes_of(&f.path).iter().map(|d| d.from_disk).collect();
     assert_eq!(from_disk, [false, false, true, false]);
     let _ = std::fs::remove_dir_all(&dir);
@@ -1593,7 +1596,8 @@ fn the_picture_planes_are_not_kept_beside_the_picture() {
 /// system can't give the memory for the copy, the set stays as it was (nothing aborts).
 #[test]
 fn a_shared_set_stays_whole_when_its_copy_finds_no_memory() {
-    let bytes: Arc<[u8]> = write(vec![part(None, &[("R", true), ("G", true), ("B", true), ("A", true), ("Z", false)], (16, 8), Compression::ZIP1)], (16, 8)).into();
+    let bytes: Arc<[u8]> =
+        write(vec![part(None, &[("R", true), ("G", true), ("B", true), ("A", true), ("Z", false)], (16, 8), Compression::ZIP1)], (16, 8)).into();
     let path = "/3750-slim-no-memory.exr";
     let source = ExrSource::Bytes(bytes);
     let store = PlaneStore::new(CACHE_BUDGET);
@@ -1651,7 +1655,8 @@ fn a_frame_of_another_size_is_read_whole_under_a_region() {
     let before = decodes_of(path).len();
     let rows = Renderer::new(&p, &fresh(), opts).comp_frame(cid, Tick::ZERO);
     assert_eq!(bits(&rows), bits(&whole));
-    assert!(decodes_of(path).get(before..).unwrap_or_default().iter().all(|d| d.stats.lines == SIZE.1), "read whole");
+    let after = decodes_of(path).get(before..).unwrap_or_default().to_vec();
+    assert!(!after.is_empty() && after.iter().all(|d| d.stats.lines == SIZE.1), "read whole: {after:?}");
 }
 
 /// #3271 review (#3301): a remembered failure belongs to the file as it was. A file that was

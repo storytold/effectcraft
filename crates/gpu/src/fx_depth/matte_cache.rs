@@ -107,20 +107,23 @@ fn plane_within(a: &Arc<AuxChannels>, layer: &str, sel: &[u32], output: CryptoOu
         if bytes > max_bytes && (budget == usize::MAX || bytes > budget) {
             return made;
         }
-        c.entries.push(Entry { aux: Arc::downgrade(a), key: key.clone(), plane: made.clone(), used: memory::tick(), cost_us });
+        // Whether it can stay once every plane nobody holds is dropped: the planes renders hold
+        // stay whatever the limits, so with them it must fit the entry limit, and the byte limit
+        // unless it is over that on its own (kept for the common budget to trim, as above).
+        // Else it is handed out but not kept (and nothing is dropped for it), so the cache never
+        // stays over its limits once the renders let go.
+        let held: Vec<usize> = c.entries.iter().filter(|e| Arc::strong_count(&e.plane) > 1).map(|e| e.plane.bytes()).collect();
+        let held_bytes = held.iter().fold(0usize, |t, b| t.saturating_add(*b));
+        if held.len() >= MAX_ENTRIES || (bytes <= max_bytes && held_bytes.saturating_add(bytes) > max_bytes) {
+            return made;
+        }
+        c.entries.push(Entry { aux: Arc::downgrade(a), key, plane: made.clone(), used: memory::tick(), cost_us });
         loop {
             let total: usize = c.entries.iter().map(|e| e.plane.bytes()).fold(0, usize::saturating_add);
             if c.entries.len() <= 1 || (c.entries.len() <= MAX_ENTRIES && total <= max_bytes) {
                 break;
             }
-            let Some(i) = oldest(&c) else {
-                // Renders hold every plane kept: the new one is handed out, not kept, so the
-                // cache never stays over its limits once they let go.
-                if let Some(i) = c.entries.iter().position(|e| e.of(a) && e.key == key) {
-                    c.entries.swap_remove(i);
-                }
-                return made;
-            };
+            let Some(i) = oldest(&c) else { break };
             c.entries.swap_remove(i);
         }
     }

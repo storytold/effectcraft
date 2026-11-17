@@ -1203,18 +1203,37 @@ fn decode(path: &str, source: &ExrSource, flight: &Arc<Flight>, base: Option<Arc
             // (only planes that cost more to decode again than to read back, #3301)
             let bytes = fresh.iter().map(|(_, _, p)| p.len().saturating_mul(std::mem::size_of::<f32>())).fold(0, usize::saturating_add);
             if !fresh.is_empty() && d.pays_off(bytes, read_took) {
-                // (copies, each owned by its write: a queued write never keeps the store's set;
-                // a plane the system can't give the memory for is left out)
-                let planes: Vec<(u128, String, Vec<f32>)> = fresh
-                    .par_iter()
-                    .filter_map(|(k, name, plane)| {
-                        let copy = copy_plane(plane)?;
-                        #[cfg(test)]
-                        DISK_COPIES.lock().unwrap_or_else(PoisonError::into_inner).push(path.to_string());
-                        Some((*k, (*name).clone(), copy))
-                    })
-                    .collect();
-                d.put_planes(w as u32, h as u32, planes, &entry, since);
+                // Copied a job at a time, just before the job is queued (copies, each owned by its
+                // write: a queued write never keeps the store's set); once the queue refuses a
+                // job, the rest isn't copied. A plane the system can't give the memory for is
+                // left out.
+                let most = d.plane_job_bytes();
+                let mut rest = fresh.as_slice();
+                while !rest.is_empty() {
+                    let (mut n, mut job_bytes) = (0usize, 0usize);
+                    while let Some((_, _, p)) = rest.get(n) {
+                        let b = p.len().saturating_mul(std::mem::size_of::<f32>());
+                        if n > 0 && job_bytes.saturating_add(b) > most {
+                            break;
+                        }
+                        job_bytes = job_bytes.saturating_add(b);
+                        n += 1;
+                    }
+                    let (job, tail) = rest.split_at(n.min(rest.len()));
+                    rest = tail;
+                    let planes: Vec<(u128, String, Vec<f32>)> = job
+                        .par_iter()
+                        .filter_map(|(k, name, plane)| {
+                            let copy = copy_plane(plane)?;
+                            #[cfg(test)]
+                            DISK_COPIES.lock().unwrap_or_else(PoisonError::into_inner).push(path.to_string());
+                            Some((*k, (*name).clone(), copy))
+                        })
+                        .collect();
+                    if !d.put_planes(w as u32, h as u32, planes, &entry, since) {
+                        break;
+                    }
+                }
             }
         }
     }

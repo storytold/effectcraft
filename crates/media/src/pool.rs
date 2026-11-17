@@ -1667,9 +1667,7 @@ impl Inner {
             use crate::exr_planes::Picture;
             let extra = lock(&self.aux_footage).plan(&footage.path);
             let picture = match loc.key.rows {
-                Some(rows) if extra.is_none() => {
-                    crate::exr_planes::picture_rows(path, &self.exr_source(path), op, rows, (footage.width, footage.height))
-                }
+                Some(rows) if extra.is_none() => crate::exr_planes::picture_rows(path, &self.exr_source(path), op, rows, (footage.width, footage.height)),
                 _ => crate::exr_planes::picture(path, &self.exr_source(path), op, extra.as_ref()),
             };
             match picture {
