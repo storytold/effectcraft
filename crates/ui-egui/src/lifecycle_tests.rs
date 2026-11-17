@@ -264,14 +264,30 @@ fn restart_to_update_with_nothing_unsaved_leaves_the_close_to_the_updater() {
 fn restart_to_update_with_the_startup_prompt_open_leaves_the_window_open() {
     let ctx = egui::Context::default();
     let mut app = app_with_comp();
-    app.updates_rt.updater.offer(craft_update::Release {
+    // The updater reads the installed files for an offer on a thread of its own, which asks the
+    // context the updater keeps for a repaint after it answers; the next tick opens the prompt.
+    let offer_ctx = egui::Context::default();
+    let (answered, wait) = std::sync::mpsc::channel();
+    offer_ctx.set_repaint_observer(move |info| {
+        if info.delay.is_zero() {
+            let _ = answered.send(());
+        }
+    });
+    let updater = &mut app.updates_rt.updater;
+    // Keeps `offer_ctx` for the offer's thread.
+    updater.tick(&offer_ctx);
+    updater.offer(craft_update::Release {
         tag: "v99.0.0".into(),
         version: craft_update::parse_version("99.0.0"),
         name: "EffectCraft 99.0.0".into(),
         html_url: "https://github.com/storytold/effectcraft/releases/tag/v99.0.0".into(),
         ..Default::default()
     });
-    assert!(app.updates_rt.updater.prompt_open());
+    assert!(updater.managed().is_none(), "the launcher manages this copy, so it ignored the offer");
+    while !updater.prompt_open() {
+        wait.recv().unwrap();
+        updater.tick(&offer_ctx);
+    }
     app.updates_rt.manual_window_open = true;
     assert!(!asks_to_close(&ctx, |ctx| updates_ui::restart_to_update(&mut app.updates_rt, ctx, false)), "the prompt carries the restart");
     assert!(!app.updates_rt.manual_window_open, "the result dialog closes");
