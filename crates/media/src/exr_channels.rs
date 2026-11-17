@@ -296,12 +296,15 @@ mod tests {
     #[test]
     fn a_header_asking_for_too_much_memory_is_refused() {
         use exr::prelude::*;
+        // (another test raises the process-wide decode limit far above the request: not now)
+        let _only = crate::exr_read::LIMIT_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let list: Vec<AnyChannel<FlatSamples>> = (0..40).map(|i| AnyChannel::new(format!("pass{i:02}.Y").as_str(), FlatSamples::F32(vec![0.5]))).collect();
         let layer = Layer::new((1, 1), LayerAttributes::default(), Encoding::FAST_LOSSLESS, AnyChannels::sort(list.into()));
         let bytes = file(vec![layer], IntegerBounds::new((0, 0), (16384, 16384)));
         let mut src = std::io::Cursor::new(bytes.as_slice());
         let index = crate::exr_index::build(&mut src, FileStamp::Virtual).unwrap();
-        let all = ReadRequest::full((0..index.channels.len()).collect());
+        // (the fixed limit, whatever the process-wide one)
+        let all = ReadRequest { max_bytes: crate::exr_read::MAX_DECODE_BYTES, ..ReadRequest::full((0..index.channels.len()).collect()) };
         match read_planes(&mut src, &index, &all).0 {
             Err(crate::exr_read::ReadError::TooLarge(why)) => assert!(why.contains("16384×16384") && why.contains("GB"), "{why}"),
             Err(e) => panic!("readable: {e:?}"),

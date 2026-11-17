@@ -162,6 +162,10 @@ pub(crate) enum Refused {
     /// The decode stopped (it panicked, or the file couldn't be opened just then): not
     /// remembered, the next request decodes again.
     Stopped,
+    /// The planes held don't fit the limit with the ones missing, but the request fits alone:
+    /// the store lets the held ones go first, then the request is read on its own (so the held
+    /// and the new planes are never in memory together). Ask again.
+    LetGo,
 }
 
 /// A decode in progress: what it reads (until it starts reading) and its outcome.
@@ -555,7 +559,11 @@ impl PlaneStore {
             // A decode thread doesn't wait (see `wait`), but takes over a decode still queued:
             // the planes are decoded once, here, and handed to the request that queued them.
             if may_not_wait() && flight.claim() {
-                return Step::Done(decode_claimed(path, source, &flight, index, want));
+                return match decode_claimed(path, source, &flight, index, want) {
+                    // (the store lets the held planes go when the asker ends the decode)
+                    Err(Refused::LetGo) => Step::Again { retry: true },
+                    r => Step::Done(r),
+                };
             }
             return match self.wait(&flight) {
                 Waited::Got(Ok(b)) if b.covers(index, want) => {
@@ -564,7 +572,7 @@ impl PlaneStore {
                 }
                 // Not all it asks for: ask again (the next decode reads what is missing).
                 Waited::Got(Ok(_)) => Step::Again { retry: false },
-                Waited::Got(Err(Refused::Cancelled | Refused::Forgotten | Refused::Stopped)) => Step::Again { retry: true },
+                Waited::Got(Err(Refused::Cancelled | Refused::Forgotten | Refused::Stopped | Refused::LetGo)) => Step::Again { retry: true },
                 // Too large with what other requests added to it: this request alone may fit.
                 Waited::Got(Err(Refused::TooLarge(_))) if flight.asks_beyond(index, want) => Step::Again { retry: true },
                 Waited::Got(Err(e)) => Step::Done(Err(e)),
@@ -590,7 +598,7 @@ impl PlaneStore {
                 crate::reads::note(b.file.clone());
                 Step::Done(Ok(b))
             }
-            Ok(_) | Err(Refused::Forgotten | Refused::Stopped) => Step::Again { retry: true },
+            Ok(_) | Err(Refused::Forgotten | Refused::Stopped | Refused::LetGo) => Step::Again { retry: true },
             // (as a waiter: this request alone may fit)
             Err(Refused::TooLarge(_)) if flight.asks_beyond(index, want) => Step::Again { retry: true },
             Err(e) => Step::Done(Err(e)),
@@ -723,8 +731,19 @@ impl PlaneStore {
                 e.bytes = 0;
                 e.cost_us = 0;
             }
+            // (the planes held go first, then the request is read on its own)
+            Err(Refused::LetGo) => {
+                if flight.base.as_ref().is_some_and(|base| e.batch.as_ref().is_some_and(|b| Arc::ptr_eq(b, base))) {
+                    e.batch = None;
+                    e.bytes = 0;
+                    e.cost_us = 0;
+                }
+            }
             // (memory refused just now: another request may get it)
             Err(Refused::Cancelled | Refused::Forgotten | Refused::Stopped | Refused::NoMemory(_)) => {}
+        }
+        if let (Err(Refused::LetGo), Some(base)) = (&outcome, &flight.base) {
+            st.held.retain(|(p, h)| !(p == path && Arc::ptr_eq(h, base)));
         }
         let grown = st.entries.iter().find(|e| e.path == path).map_or(0, |e| e.bytes.saturating_sub(had));
         Self::drop_oldest(&mut st, self.budget(), CACHE_FILES, Some(path));
@@ -919,6 +938,9 @@ fn decode_claimed(path: &str, source: &ExrSource, flight: &Arc<Flight>, index: &
             crate::reads::note(b.file.clone());
             Ok(b)
         }
+        // (memory the system refused just now is not asked for again at once, see `NoMemory`;
+        // planes held to let go first are let go by the store, not read beside in a copy)
+        Err(e @ (Refused::NoMemory(_) | Refused::LetGo)) => Err(e),
         _ => copy(path, source, index, want),
     }
 }
@@ -1077,19 +1099,20 @@ fn decode(path: &str, source: &ExrSource, flight: &Arc<Flight>, base: Option<Arc
         want.ids.iter().copied().collect()
     };
     let wanted: Vec<usize> = wanted.into_iter().filter(|i| *i < index.channels.len()).collect();
-    let mut base = base.filter(|b| Arc::ptr_eq(&b.index, &index));
-    let mut missing: Vec<usize> = wanted.iter().copied().filter(|id| !base.as_ref().is_some_and(|b| b.ids.binary_search(id).is_ok())).collect();
+    let base = base.filter(|b| Arc::ptr_eq(&b.index, &index));
+    let missing: Vec<usize> = wanted.iter().copied().filter(|id| !base.as_ref().is_some_and(|b| b.ids.binary_search(id).is_ok())).collect();
     let (w, h) = index.size();
     // The planes the request ends with (those held plus those missing, whether they come from the
     // disk cache or the file) must fit the limit, asked before any of them is allocated (#3749).
     // The planes held are only kept for later requests: when they don't fit with the missing
-    // ones, they are let go and the request is read on its own.
+    // ones, they are let go and the request is read on its own. The store lets them go first
+    // (`LetGo`), so they are not in memory while the request is read.
     if !missing.is_empty() {
         let held = base.as_ref().map_or(0, |b| b.ids.len());
         let together = crate::exr_read::check_total(w, h, held.saturating_add(missing.len()), cap_of(path));
         if together.is_err() && base.is_some() {
-            base = None;
-            missing = wanted.clone();
+            crate::exr_read::check_total(w, h, wanted.len(), cap_of(path)).map_err(|e| refused(path, e))?;
+            return Err(Refused::LetGo);
         }
         if base.is_none() {
             crate::exr_read::check_total(w, h, missing.len(), cap_of(path)).map_err(|e| refused(path, e))?;
@@ -1339,7 +1362,8 @@ pub(crate) fn picture(path: &str, source: &ExrSource, op: AlphaOp, extra: Option
             }
             // (never the whole file's decode: the memory isn't there for it either)
             Err(Refused::TooLarge(why) | Refused::NoMemory(why)) => return Picture::Done(Err(why)),
-            Err(Refused::Cancelled | Refused::Forgotten) => return Picture::Cancelled,
+            // (`LetGo` is asked again inside the store; never here)
+            Err(Refused::Cancelled | Refused::Forgotten | Refused::LetGo) => return Picture::Cancelled,
             // (the whole file's decode says why)
             Err(Refused::Stopped | Refused::Unreadable) => return Picture::Legacy,
         };

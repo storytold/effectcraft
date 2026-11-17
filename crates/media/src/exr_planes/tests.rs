@@ -12,7 +12,7 @@ use exr::prelude::{
 };
 
 use super::*;
-use crate::exr_read::ExrSource;
+use crate::exr_read::{ExrSource, LIMIT_TESTS};
 
 /// A deterministic sample for pixel `i` of channel `c` (an `A` channel gets 0..=1).
 fn value(i: usize, c: usize, alpha: bool) -> f32 {
@@ -1716,10 +1716,6 @@ fn a_failed_picture_leaves_the_other_channels_readable() {
     assert!(rest.aux.get("Z").is_some());
 }
 
-/// The tests that move the process-wide decode limit take turns (it also dates the remembered
-/// refusals).
-static LIMIT_TESTS: Mutex<()> = Mutex::new(());
-
 /// #3749: a read over the fixed floor is allowed up to what the system's memory gives (the
 /// session's figure), never under the floor, and refused with a reason beyond it. The floor is
 /// small here: the real one is 8 GiB.
@@ -1808,6 +1804,37 @@ fn channels_added_to_the_planes_held_count_toward_the_limit() {
     // Everything at once is five planes: refused, however it is asked.
     let everything = Want { all: true, ids: (0..5).collect() };
     assert!(matches!(store.get(path, &source, &index, &everything, Use::Other).err(), Some(Refused::TooLarge(_))));
+}
+
+/// #3750 review: when the planes held are let go because they don't fit the limit with the ones
+/// a request adds, they are let go before the request is read: the held planes and the new ones
+/// are never in memory together (the store, the decode and its flight all let go of them). Also
+/// for a picture's planes held for its effects.
+#[test]
+fn planes_let_go_are_gone_before_the_request_is_read() {
+    let path = "/3750-let-go-before-read.exr";
+    // Room for four planes: the picture fits, one more with it is five.
+    set_cap(path, 4 * 8 * 8 * 4);
+    let store = PlaneStore::new(CACHE_BUDGET);
+    let source = ExrSource::Bytes(picture_and_depth().into());
+    let index = crate::exr_index::get(path, &source).unwrap();
+    let picture = Want { all: false, ids: index.picture_ids().into_iter().collect() };
+    let held = Arc::downgrade(&store.get(path, &source, &index, &picture, Use::Picture).expect("the picture fits"));
+    assert!(held.upgrade().is_some() && store.is_held(path), "kept for the effects");
+    // Each decode that reads notes whether the picture's planes are still in memory.
+    let alive = Arc::new(Mutex::new(Vec::new()));
+    {
+        let (alive, held) = (alive.clone(), held.clone());
+        let hook: Hook = Arc::new(move |_: &str| alive.lock().unwrap().push(held.upgrade().is_some()));
+        set_before_read(path, Some(hook));
+    }
+    let rest = Want { all: true, ids: Default::default() };
+    let depth = store.get(path, &source, &index, &rest, Use::Other).expect("the depth plane fits alone");
+    set_before_read(path, None);
+    assert!(depth.aux.get("Z").is_some() && depth.aux.get("R").is_none());
+    let alive = alive.lock().unwrap().clone();
+    assert_eq!(alive.last(), Some(&false), "the picture's planes were gone when the depth plane was read: {alive:?}");
+    assert_eq!(decodes_of(path).last().map(|d| d.channels.len()), Some(1), "the depth plane alone was read");
 }
 
 /// #3749 (#3301 review): planes the disk cache gives back count toward the limit of a request
@@ -1933,6 +1960,47 @@ fn memory_the_system_cannot_give_is_neither_retried_nor_remembered() {
     assert!(store.get(path, &source, &index, &want, Use::Other).is_ok(), "not remembered: the memory is there now");
     assert_eq!(asked.load(Ordering::SeqCst), 1);
     set_read_error(path, None);
+}
+
+/// #3750 review: a decode thread that took over a queued decode the system has no memory for
+/// hands the refusal to the request that queued it and answers its own request with it too: the
+/// file is read once, not again at once for a copy.
+#[test]
+fn a_claimed_decode_without_memory_is_not_read_again() {
+    let path = "/3750-claimed-no-memory.exr";
+    let source = ExrSource::Bytes(picture_and_depth().into());
+    let store = Arc::new(PlaneStore::new(CACHE_BUDGET));
+    let index = crate::exr_index::get(path, &source).unwrap();
+    let want = Want { all: true, ids: (0..5).collect() };
+    let asked = no_memory_when(path, |_| true);
+    let threads = crate::pool::decode_threads().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    // When the asker queues its decode: a decode thread asks for the same planes.
+    {
+        let (store, source, index, want, tx) = (store.clone(), source.clone(), index.clone(), want.clone(), tx.clone());
+        let hook: Hook = Arc::new(move |_: &str| {
+            let (store, source, index, want, tx) = (store.clone(), source.clone(), index.clone(), want.clone(), tx.clone());
+            threads.spawn(move || {
+                let _ = tx.send(store.get(path, &source, &index, &want, Use::Other).err());
+            });
+        });
+        QUEUING.lock().unwrap().push((path.to_string(), hook));
+    }
+    // The queued job waits until that decode thread claimed it.
+    let hold: Hook = Arc::new(|p: &str| {
+        let claims = CLAIMS.lock().unwrap();
+        let _ = CLAIM_SIGNAL.wait_timeout_while(claims, std::time::Duration::from_secs(10), |c| !c.iter().any(|c| c == p));
+    });
+    STARTING.lock().unwrap().push((path.to_string(), hold));
+    let queued = store.get(path, &source, &index, &want, Use::Other).err();
+    let claimed = rx.recv_timeout(std::time::Duration::from_secs(20)).unwrap();
+    QUEUING.lock().unwrap().retain(|(p, _)| p != path);
+    STARTING.lock().unwrap().retain(|(p, _)| p != path);
+    set_read_error(path, None);
+    assert!(CLAIMS.lock().unwrap().iter().any(|p| p == path), "claimed");
+    assert!(matches!(&claimed, Some(Refused::NoMemory(_))), "{claimed:?}");
+    assert!(matches!(&queued, Some(Refused::NoMemory(_))), "{queued:?}");
+    assert_eq!(asked.load(Ordering::SeqCst), 1, "read once, not again for a copy");
 }
 
 /// #3749 review: a picture whose channels the system has no memory for just now is read alone

@@ -229,6 +229,11 @@ pub(crate) const MAX_DECODE_BYTES: usize = 8 << 30;
 #[cfg(not(target_pointer_width = "64"))]
 pub(crate) const MAX_DECODE_BYTES: usize = 512 << 20;
 
+/// The tests that move the process-wide decode limit, or rely on it, take turns (it also dates
+/// the remembered refusals).
+#[cfg(test)]
+pub(crate) static LIMIT_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// What a failed `craft-exr` read means here. Memory the system refused just now is
 /// [`ReadError::OutOfMemory`]: the plane store doesn't remember it (another request may
 /// succeed), but doesn't read it again at once nor fall back to decoding the whole file
