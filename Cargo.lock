@@ -1305,7 +1305,7 @@ source = "git+https://github.com/storytold/craft-libs?rev=808730f49b9637b7909fe2
 [[package]]
 name = "craft-exr"
 version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=5a7a63a21dd03dd1a2bc6c308a3a6ce818caae87#5a7a63a21dd03dd1a2bc6c308a3a6ce818caae87"
+source = "git+https://github.com/storytold/craft-libs?rev=5fd8db24b1c952a480f90dbda4544660cbee1af8#5fd8db24b1c952a480f90dbda4544660cbee1af8"
 dependencies = [
  "exr",
  "flate2",
