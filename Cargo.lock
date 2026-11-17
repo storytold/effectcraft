@@ -2293,6 +2293,7 @@ dependencies = [
  "effectcraft-raster",
  "kurbo",
  "linesweeper",
+ "log",
  "tiny-skia 0.12.0",
 ]
 
