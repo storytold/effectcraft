@@ -138,3 +138,7 @@ sync_github_name = true
 
 [people.andreaaazo]
 sync_github_name = true
+
+[people.Jaap42]
+real_name = "Jaap Nauta"
+display_name = "BureauNauta.nl"

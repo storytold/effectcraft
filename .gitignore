@@ -9,3 +9,6 @@ __pycache__/
 
 # After Effects test corpus fetched by `cargo xtask aep-corpus`
 /corpus/
+
+# Local runnable build and settings
+/run/

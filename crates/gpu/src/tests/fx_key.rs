@@ -158,6 +158,9 @@ fn channel_effects() {
     // #1797: the constant sources at the end of the menu, where the GPU's order could drift from
     // the CPU's (Full On, Full Off, Half On).
     effect_case("ec.channel.shiftchannels", &[("takeRedFrom", e(8)), ("takeGreenFrom", e(9)), ("takeBlueFrom", e(10))]);
+    effect_case("ec.channel.channelsoffset", &[]);
+    effect_case("ec.channel.channelsoffset", &[("offsetX", n(8.0)), ("offsetY", n(-5.0))]);
+    effect_case("ec.channel.channelsoffset", &[("offsetX", n(3.25)), ("offsetY", n(1.5))]);
     effect_case("ec.channel.removecolormatting", &[("backgroundColor", c(0.3, 0.5, 0.7))]);
     effect_case("ec.channel.removecolormatting", &[("backgroundColor", c(0.8, 0.2, 0.1)), ("clipHdr", off())]);
     for op in [0, 2, 3, 4, 8, 10, 12] {
