@@ -29,6 +29,8 @@ effectcraft-helper-host = { workspace = true }
 [dev-dependencies]
 serde_json = { workspace = true }
 tempfile = { workspace = true }
+# Writes the movies of the Dolby Vision tests.
+craft-media = { workspace = true }
 effectcraft-psd = { workspace = true }
 effectcraft-svg = { workspace = true }
 effectcraft-pdf = { workspace = true }

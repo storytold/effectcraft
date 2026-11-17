@@ -143,6 +143,11 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
             if status == "matched" && let Some(path) = accepted.first() {
                 let mut new = old.clone();
                 new.path = path.clone();
+                // The Dolby Vision configuration describes the file, not its interpretation, and
+                // matching doesn't compare it: the new file's is taken.
+                if let Some(Ok(probed)) = probes.get(path) {
+                    new.dolby_vision = probed.dolby_vision;
+                }
                 if old.kind == FootageKind::Sequence {
                     new.sequence = sequence_at(old, path).ok_or_else(|| "sequence changed during search; run the search again".to_string())?;
                 }
@@ -288,6 +293,19 @@ mod tests {
         assert_eq!(key(&s), original_key);
         s.execute("edit.redo", json!({})).unwrap();
         assert_eq!(get(&s, id), expected);
+    }
+
+    /// The relinked item says what Dolby Vision configuration the file it now names carries, not
+    /// what the missing one did.
+    #[test]
+    fn relink_takes_the_dolby_vision_configuration_of_the_new_file() {
+        let dir = Fixture::new();
+        let (mut s, id, mut old) = setup(&dir, "plate.png");
+        old.dolby_vision = Some(effectcraft_project::DolbyVisionInfo { profile: 8, level: 4, compatibility: 4 });
+        Arc::make_mut(&mut s.project).item_mut(id).unwrap().kind = ItemKind::Footage(old.clone());
+        let new = dir.file("new/plate.png", b"valid");
+        assert_eq!(search(&mut s, &dir, false)["relinked"], 1);
+        assert_eq!(get(&s, id), Footage { path: new, missing: false, dolby_vision: None, ..old });
     }
 
     #[test]

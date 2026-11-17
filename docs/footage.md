@@ -145,6 +145,25 @@ value; the others, like any other layers, are stored as 3 and up in the file's n
 another file). The popup lists them in Effect Controls and the timeline; scripts and
 `prop.get` still see the three standard options.
 
+## Dolby Vision movies
+
+Phones record HDR video with a Dolby Vision layer on top of an HEVC stream an ordinary player
+can show (on an iPhone, an HLG one). EffectCraft shows that base layer and leaves the Dolby
+Vision metadata out. The Project panel's details, Interpret Footage and the Metadata panel say
+which configuration a movie carries, for example `Dolby Vision 8.4 (HLG base layer)`: profile 8,
+with a base layer compatible with HLG (the second number: 1 HDR10, 2 SDR, 4 HLG, 6 Ultra HD
+Blu-ray).
+
+A Dolby Vision stream without such a base layer (profile 5) has
+no picture EffectCraft can show, and File ▸ Import refuses it with a message naming the profile.
+A movie that stores its Dolby Vision video in a `dvh1` or `dvhe` track (rather than `hvc1`, as an
+iPhone does) imports with a warning (the browser version gives none) and shows no picture:
+this build's decoder doesn't read those tracks yet.
+
+Agents: `item.metadata` and `mediaBrowser.fileInfo` report it as `dolbyVision`, and the saved
+footage keeps `dolby_vision` (`profile`, `level`, `compatibility`). `file.import` lists a refused
+file in `errors` and the warning in `warnings`.
+
 ## Replacing and reloading
 
 Importing a layered file as a composition refreshes the decoded sources used by its layers,

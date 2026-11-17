@@ -3,6 +3,7 @@
 mod background_presets;
 mod cryptomatte_pick;
 mod determinism;
+mod dolby_vision;
 mod exr_layers;
 mod footage_reload;
 mod gif_animates;

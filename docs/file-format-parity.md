@@ -60,7 +60,7 @@ trips and renders, checked by tests, not against After Effects), **partial** (na
 | Format | After Effects | Read | Write | Fidelity / notes |
 |---|---|---|---|---|
 | MP4 / MOV with H.264 | R/W | yes | yes (own encoder, + AAC) | decoder bit-exact on conformance streams (FilmCraft) |
-| HEVC (H.265) | R/W | yes | yes (MP4 `hvc1`, Main / Main 10) | encoder bit-exact with ffmpeg's decode; no B-frames / SAO, larger files |
+| HEVC (H.265) | R/W | yes | yes (MP4 `hvc1`, Main / Main 10) | encoder bit-exact with ffmpeg's decode; no B-frames / SAO, larger files. Dolby Vision: the configuration shows in the footage information (`Dolby Vision 8.4 (HLG base layer)`) and the base layer is what's shown, without the Dolby Vision metadata; profile 5 (no HDR10, SDR or HLG base layer) is refused at import; `dvh1` / `dvhe` entries import with a warning (none in the browser) and no picture until FilmCraft's decoder reads them (#3799) |
 | AV1 | R | yes | yes (MP4 `av01`, WebM) | beyond After Effects' export; no B-frames / CDEF |
 | Apple ProRes (422 family, 4444) | R/W | yes | yes | alpha final-run syntax checked in exported MOVs (#293); 4444 colour tag wrong (#340); no ProRes RAW |
 | WebM / Matroska (VP9, AV1, Opus) | R (limited) | yes, incl. VP9 alpha | yes | beyond After Effects |

@@ -107,7 +107,8 @@ pub trait Importer: Send + Sync {
     /// ([`sequence`]): it groups numbered stills and probes their first file here.
     fn probe(&self, path: &str) -> std::result::Result<effectcraft_project::Footage, String>;
     /// [`probe`](Self::probe), and what the import left out of the file (a 3D model's textures
-    /// over the limits), which the import shows the user.
+    /// over the limits) or can't show (Dolby Vision video this build can't decode), which the
+    /// import shows the user.
     fn probe_noting(&self, path: &str) -> std::result::Result<(effectcraft_project::Footage, Option<String>), String> {
         self.probe(path).map(|f| (f, None))
     }

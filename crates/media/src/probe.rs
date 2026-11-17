@@ -3,7 +3,8 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use effectcraft_project::{AlphaMode, Footage, FootageKind};
+use craft_media::isobmff::{DolbyVisionConfig, FourCc};
+use effectcraft_project::{AlphaMode, DolbyVisionInfo, Footage, FootageKind};
 use effectcraft_time::{FrameRate, Tick};
 use image::metadata::Orientation;
 
@@ -33,6 +34,7 @@ pub fn probe(path: impl AsRef<Path>) -> Result<Footage> {
         turn_footage(&mut f, turn);
         correct_rate(&mut f, header.as_deref().and_then(video_rate));
         trim_to_edits(&mut f, header.as_deref().and_then(video_shown));
+        note_dolby_vision(&mut f, header.as_deref().and_then(video_dolby_vision))?;
         return Ok(f);
     }
     let bytes = crate::read_regular_file(path).map_err(|e| MediaError::Io(format!("{}: {e}", path.display())))?;
@@ -53,16 +55,16 @@ fn side_file_reader(model: &Path) -> impl Fn(&str) -> Option<Vec<u8>> + use<> {
 }
 
 thread_local! {
-    /// What the last model probed on this thread left out (see [`probe_noting`]).
-    static MODEL_WARNING: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+    /// What the last file probed on this thread left out or can't show (see [`probe_noting`]).
+    static PROBE_WARNING: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
 }
 
-/// [`probe`], and what the import left out of the file (a 3D model's textures over the limits),
-/// for the user.
+/// [`probe`], and what the import left out of the file (a 3D model's textures over the limits) or
+/// can't show (Dolby Vision video FilmCraft reads no codec in), for the user.
 pub fn probe_noting(path: impl AsRef<Path>) -> Result<(Footage, Option<String>)> {
-    MODEL_WARNING.with(|w| w.borrow_mut().take());
+    PROBE_WARNING.with(|w| w.borrow_mut().take());
     let f = probe(path)?;
-    Ok((f, MODEL_WARNING.with(|w| w.borrow_mut().take())))
+    Ok((f, PROBE_WARNING.with(|w| w.borrow_mut().take())))
 }
 
 /// Probe a 3D model (glTF 2.0 / OBJ / STL / FBX): a [`FootageKind::Model`] item whose duration is its
@@ -70,7 +72,7 @@ pub fn probe_noting(path: impl AsRef<Path>) -> Result<(Footage, Option<String>)>
 pub fn probe_model(path: &str, bytes: &[u8], resolve: &dyn Fn(&str) -> Option<Vec<u8>>) -> Result<Footage> {
     let m = effectcraft_model::load(path, bytes, resolve).map_err(|e| MediaError::Decode(format!("{path}: {e}")))?;
     let s = m.summary();
-    MODEL_WARNING.with(|w| *w.borrow_mut() = (!m.warnings.is_empty()).then(|| format!("{path}: {}", m.warnings.join("; "))));
+    PROBE_WARNING.with(|w| *w.borrow_mut() = (!m.warnings.is_empty()).then(|| format!("{path}: {}", m.warnings.join("; "))));
     let dur = s.animations.iter().map(|a| a.1).fold(0.0f64, f64::max);
     let codec = match effectcraft_model::format_of(path) {
         Some("obj") => "OBJ",
@@ -132,6 +134,7 @@ pub fn probe_bytes(path: &str, bytes: Arc<[u8]>) -> Result<Footage> {
     let turn = video_turn(&bytes);
     let rate = video_rate(&bytes);
     let shown = video_shown(&bytes);
+    let dolby_vision = video_dolby_vision(&bytes);
     // A WAV's cue points and XMP markers become the footage's markers.
     let markers = crate::wav_markers::read(&bytes);
     let src = filmcraft_codecs::open_bytes(&name, bytes)?;
@@ -140,6 +143,7 @@ pub fn probe_bytes(path: &str, bytes: Arc<[u8]>) -> Result<Footage> {
     turn_footage(&mut f, turn);
     correct_rate(&mut f, rate);
     trim_to_edits(&mut f, shown);
+    note_dolby_vision(&mut f, dolby_vision)?;
     Ok(f)
 }
 
@@ -158,8 +162,13 @@ fn trim_to_edits(f: &mut Footage, shown: Option<Tick>) {
 /// `None` without edits, or with an empty edit (a delayed start keeps the reader's duration).
 fn video_shown(bytes: &[u8]) -> Option<Tick> {
     let file = craft_media::isobmff::open(bytes).ok()?;
-    let t = file.tracks.iter().find(|t| t.kind == craft_media::isobmff::TrackKind::Video && !t.samples.is_empty())?;
-    edits_shown(&t.edits, file.timescale)
+    edits_shown(&shown_video_track(&file)?.edits, file.timescale)
+}
+
+/// The video track FilmCraft decodes: the first with samples, a sample description and a
+/// timescale (it can't play the others).
+fn shown_video_track(file: &craft_media::isobmff::Mp4File) -> Option<&craft_media::isobmff::Track> {
+    file.tracks.iter().find(|t| t.kind == craft_media::isobmff::TrackKind::Video && !t.samples.is_empty() && !t.entries.is_empty() && t.timescale > 0)
 }
 
 fn edits_shown(edits: &[craft_media::isobmff::Edit], timescale: u32) -> Option<Tick> {
@@ -168,6 +177,44 @@ fn edits_shown(edits: &[craft_media::isobmff::Edit], timescale: u32) -> Option<T
     }
     let units = edits.iter().try_fold(0u64, |acc, e| acc.checked_add(e.segment_duration))?;
     Some(Tick::from_units(i64::try_from(units).ok()?, i64::from(timescale)))
+}
+
+/// The codec FilmCraft names a video stream it reads no codec in (craft-media's
+/// `CodecConfig::Unknown`): none of its decoders takes it.
+const UNREAD_CODEC: &str = "unknown";
+
+/// The Dolby Vision configuration of an MP4/MOV movie's video and the type of the sample entry
+/// holding it (`dvh1`, `hvc1`…). `None` without one, for other containers and for files
+/// craft-media can't read. The track is the one FilmCraft shows ([`shown_video_track`]); the
+/// header of a fragmented movie lists no samples (they are in its fragments), and its first
+/// video track describes it.
+fn video_dolby_vision(bytes: &[u8]) -> Option<(DolbyVisionConfig, FourCc)> {
+    let file = craft_media::isobmff::open(bytes).ok()?;
+    let t = shown_video_track(&file).or_else(|| file.tracks.iter().find(|t| t.kind == craft_media::isobmff::TrackKind::Video && !t.entries.is_empty()))?;
+    let entry = t.entries.first()?;
+    Some((entry.video.as_ref()?.dolby_vision.clone()?, entry.format))
+}
+
+/// Records movie `f`'s Dolby Vision configuration (`dv`: it and the type of the sample entry
+/// holding it, from [`video_dolby_vision`]). A stream without a base layer that shows without
+/// the Dolby Vision metadata (profile 5) is refused: EffectCraft shows only the base layer, and
+/// that one's colours make a picture only through the metadata. While FilmCraft, which decodes
+/// the movie, reads no codec in its track (`dvh1` and `dvhe` entries, until its craft-media reads
+/// them as HEVC), [`probe_noting`] says why the footage shows no picture.
+fn note_dolby_vision(f: &mut Footage, dv: Option<(DolbyVisionConfig, FourCc)>) -> Result<()> {
+    let Some((config, format)) = dv.filter(|_| f.has_video) else { return Ok(()) };
+    if !config.base_layer_compatible() {
+        return Err(MediaError::Unsupported(format!(
+            "Dolby Vision profile {} has no HDR10, SDR or HLG base layer, so EffectCraft can't show it",
+            config.profile()
+        )));
+    }
+    f.dolby_vision = Some(DolbyVisionInfo { profile: config.profile(), level: config.level(), compatibility: config.bl_signal_compatibility_id() });
+    if f.codec == UNREAD_CODEC {
+        let why = format!("{}: Dolby Vision video in a {} track can't be decoded by this build yet, so it shows no picture", f.path, format.0.escape_ascii());
+        PROBE_WARNING.with(|w| *w.borrow_mut() = Some(why));
+    }
+    Ok(())
 }
 
 /// A movie's frame rate as its frame durations average to ([`video_rate`]), where the reader's
@@ -359,7 +406,7 @@ pub(crate) fn video_turn(bytes: &[u8]) -> Orientation {
 /// reads right.
 fn video_rate(bytes: &[u8]) -> Option<FrameRate> {
     let file = craft_media::isobmff::open(bytes).ok()?;
-    let t = file.tracks.iter().find(|t| t.kind == craft_media::isobmff::TrackKind::Video && !t.samples.is_empty())?;
+    let t = shown_video_track(&file)?;
     averaged_rate(t.timescale, t.samples.iter().take(240).map(|s| s.duration))
 }
 
@@ -500,6 +547,78 @@ mod tests {
         assert_eq!(averaged_rate(u32::MAX, [u32::MAX, u32::MAX - 1, 1, 0].into_iter()), None);
         assert_eq!(averaged_rate(u32::MAX, [u32::MAX; 300].into_iter()), None);
         assert_eq!(video_rate(b"not a movie"), None);
+    }
+
+    /// A movie's video with the Dolby Vision configuration `dv` (from a `format` entry), as
+    /// FilmCraft names its codec.
+    fn noted(codec: &str, dv: Option<DolbyVisionConfig>, format: &[u8; 4]) -> (Result<Footage>, Option<String>) {
+        PROBE_WARNING.with(|w| w.borrow_mut().take());
+        let mut f = Footage { path: "/m/clip.mov".into(), kind: FootageKind::Video, has_video: true, codec: codec.into(), ..Footage::default() };
+        let r = note_dolby_vision(&mut f, dv.map(|c| (c, FourCc(*format)))).map(|()| f);
+        (r, PROBE_WARNING.with(|w| w.borrow_mut().take()))
+    }
+
+    fn config(profile: u8, bl_present: bool, compatibility: u8) -> Option<DolbyVisionConfig> {
+        DolbyVisionConfig::new(profile, 4, true, false, bl_present, compatibility).ok()
+    }
+
+    /// A base layer that shows without the Dolby Vision metadata (HDR10, SDR, HLG, Ultra HD
+    /// Blu-ray) is imported and recorded; without one (profile 5, compatibility 0, or no base
+    /// layer at all) the import is refused, naming the profile. Whatever entry type holds it.
+    #[test]
+    fn dolby_vision_without_a_compatible_base_layer_is_refused() {
+        for (profile, compatibility) in [(8, 1), (8, 2), (8, 4), (7, 6), (9, 2), (10, 4)] {
+            for format in [b"hvc1", b"dvh1"] {
+                let (r, _) = noted("HEVC", config(profile, true, compatibility), format);
+                let f = r.unwrap_or_else(|e| panic!("{profile}.{compatibility} in {format:?}: {e}"));
+                assert_eq!(f.dolby_vision, Some(DolbyVisionInfo { profile, level: 4, compatibility }));
+            }
+        }
+        for (profile, bl_present, compatibility) in [(5, true, 0), (8, true, 0), (8, true, 3), (8, true, 15), (8, false, 4), (127, true, 15)] {
+            for format in [b"hvc1", b"dvh1", b"dvhe"] {
+                let (r, warning) = noted("HEVC", config(profile, bl_present, compatibility), format);
+                let e = r.expect_err("refused").to_string();
+                assert!(e.contains(&format!("Dolby Vision profile {profile} has no HDR10, SDR or HLG base layer")), "{e}");
+                assert_eq!(warning, None);
+            }
+        }
+    }
+
+    /// Without a configuration (none in the file, or one craft-media reads as none: truncated,
+    /// oversized or repeated) the movie imports as before.
+    #[test]
+    fn a_missing_or_malformed_dolby_vision_configuration_changes_nothing() {
+        let (r, warning) = noted("HEVC", None, b"hvc1");
+        assert_eq!(r.unwrap().dolby_vision, None);
+        assert_eq!(warning, None);
+        let record = config(8, true, 4).unwrap().record().to_vec();
+        for bad in [&record[..4], &[record.as_slice(), &[0]].concat()] {
+            let (r, _) = noted("HEVC", DolbyVisionConfig::from_box(FourCc(*b"dvvC"), bad), b"hvc1");
+            assert_eq!(r.unwrap().dolby_vision, None);
+        }
+        // Audio-only footage keeps no video configuration.
+        let mut f = Footage { kind: FootageKind::Audio, has_video: false, ..Footage::default() };
+        note_dolby_vision(&mut f, config(5, true, 0).map(|c| (c, FourCc(*b"dvh1")))).unwrap();
+        assert_eq!(f.dolby_vision, None);
+    }
+
+    /// The import says why compatible Dolby Vision video has no picture while FilmCraft reads no
+    /// codec in its track, and stops saying it once FilmCraft reads one: it goes by FilmCraft's
+    /// answer, not by the entry type.
+    #[test]
+    fn undecodable_dolby_vision_video_is_reported_until_filmcraft_reads_its_codec() {
+        let (r, warning) = noted("unknown", config(8, true, 4), b"dvh1");
+        assert!(r.unwrap().dolby_vision.is_some());
+        let warning = warning.expect("a warning");
+        assert!(warning.starts_with("/m/clip.mov: Dolby Vision video in a dvh1 track can't be decoded by this build yet"), "{warning}");
+        // An entry type from the file is shown escaped, never as control characters.
+        let (_, warning) = noted("unknown", config(8, true, 4), b"dv\x00\n");
+        assert!(warning.as_deref().is_some_and(|w| w.contains(r"in a dv\x00\n track")), "{warning:?}");
+        for (codec, format) in [("HEVC", b"dvh1"), ("HEVC", b"dvhe"), ("HEVC", b"hvc1")] {
+            let (r, warning) = noted(codec, config(8, true, 4), format);
+            assert!(r.unwrap().dolby_vision.is_some());
+            assert_eq!(warning, None, "{codec} in {format:?}");
+        }
     }
 
     /// A 150-megapixel still (a medium-format frame) is not refused for its size: only its (absent)

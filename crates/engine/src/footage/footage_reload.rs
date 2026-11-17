@@ -198,6 +198,7 @@ fn refreshed(s: &Session, f: &Footage, probed: Footage) -> Footage {
         return nf;
     }
     nf.codec = probed.codec;
+    nf.dolby_vision = probed.dolby_vision;
     nf.has_video = probed.has_video;
     nf.has_audio = probed.has_audio;
     // The markers the file carries now (a WAV's cue points), for Update Markers From Source.
