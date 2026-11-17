@@ -68,6 +68,7 @@ const ROWS: &[(u32, &str, &str, f64, f64)] = &[
     (3492, "ec.distort.ccpowerpin", "expandBottom", -200.0, 1000.0),
     (3486, "ec.noise.fractal", "subSettings/subScaling", 10.0, 10000.0),
     (3486, "ec.noise.turbulent", "subSettings/subScaling", 10.0, 10000.0),
+    (3466, "ec.blur.sharpen", "amount", 0.0, 4000.0),
 ];
 
 fn path(effect: &str, param: &str) -> String {
@@ -166,6 +167,23 @@ fn projects_saved_with_the_narrower_ranges_open_with_the_new_ones() {
         assert_eq!(read(&mut s2, low, e, p), lo, "#{issue} {e} {p}");
         set(&mut s2, low, e, p, hi);
         assert_eq!(read(&mut s2, low, e, p), hi, "#{issue} {e} {p}");
+    }
+}
+
+/// #3466: Sharpen Amount clamps just outside After Effects' 0..4000, and an undo after a
+/// clamped set restores the value from before it.
+#[test]
+fn sharpen_amount_clamps_outside_the_after_effects_range() {
+    let (mut s, l, _) = session();
+    let (e, p) = ("ec.blur.sharpen", "amount");
+    for (v, want) in [(4001.0, 4000.0), (-1.0, 0.0)] {
+        set(&mut s, l, e, p, 1000.0);
+        assert_eq!(set(&mut s, l, e, p, v), json!(want), "{v}: prop.set reply");
+        assert_eq!(read(&mut s, l, e, p), want, "{v}");
+        assert!(s.undo());
+        assert_eq!(read(&mut s, l, e, p), 1000.0, "{v}: undo");
+        assert!(s.redo());
+        assert_eq!(read(&mut s, l, e, p), want, "{v}: redo");
     }
 }
 
