@@ -882,6 +882,23 @@ fn frames_count_type_sets_the_project_frame_count() {
     assert_eq!(s.project.settings.frame_start, 0);
 }
 
+/// `CompItem.motionBlurAdaptiveSampleLimit` reads and writes the comp's Adaptive Sample Limit, 16 to 256.
+#[test]
+fn comp_motion_blur_adaptive_sample_limit() {
+    let mut s = session();
+    let o = ok(
+        &mut s,
+        "var c = app.project.items.addComp('c', 64, 64, 1, 2, 24); var a = c.motionBlurAdaptiveSampleLimit; c.motionBlurAdaptiveSampleLimit = 64; [a, c.motionBlurAdaptiveSampleLimit].join('|')",
+    );
+    assert_eq!(o.result, json!("128|64"));
+    // Outside 16 to 256 the engine's clamp applies.
+    let o = ok(
+        &mut s,
+        "var c = app.project.items.addComp('d', 64, 64, 1, 2, 24); c.motionBlurAdaptiveSampleLimit = 1000; var hi = c.motionBlurAdaptiveSampleLimit; c.motionBlurAdaptiveSampleLimit = 2; [hi, c.motionBlurAdaptiveSampleLimit].join('|')",
+    );
+    assert_eq!(o.result, json!("256|16"));
+}
+
 #[test]
 fn console_keeps_variables() {
     let mut s = session();
