@@ -891,12 +891,12 @@ fn comp_motion_blur_adaptive_sample_limit() {
         "var c = app.project.items.addComp('c', 64, 64, 1, 2, 24); var a = c.motionBlurAdaptiveSampleLimit; c.motionBlurAdaptiveSampleLimit = 64; [a, c.motionBlurAdaptiveSampleLimit].join('|')",
     );
     assert_eq!(o.result, json!("128|64"));
-    // Outside 16 to 256 the engine's clamp applies.
+    // Outside 16 to 256 the value is clamped, a negative one too.
     let o = ok(
         &mut s,
-        "var c = app.project.items.addComp('d', 64, 64, 1, 2, 24); c.motionBlurAdaptiveSampleLimit = 1000; var hi = c.motionBlurAdaptiveSampleLimit; c.motionBlurAdaptiveSampleLimit = 2; [hi, c.motionBlurAdaptiveSampleLimit].join('|')",
+        "var c = app.project.items.addComp('d', 64, 64, 1, 2, 24); c.motionBlurAdaptiveSampleLimit = 1000; var hi = c.motionBlurAdaptiveSampleLimit; c.motionBlurAdaptiveSampleLimit = 2; var lo = c.motionBlurAdaptiveSampleLimit; c.motionBlurAdaptiveSampleLimit = 64; c.motionBlurAdaptiveSampleLimit = -1; [hi, lo, c.motionBlurAdaptiveSampleLimit].join('|')",
     );
-    assert_eq!(o.result, json!("256|16"));
+    assert_eq!(o.result, json!("256|16|16"), "a negative write clamps to 16, not ignored");
 }
 
 #[test]
