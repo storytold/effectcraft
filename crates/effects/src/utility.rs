@@ -483,7 +483,7 @@ mod tests {
         // A hostile size must be rejected, not overflow `n3^3` or `n1 + n3^3`.
         assert!(parse_cube("LUT_3D_SIZE 4294967296\n0 0 0\n").is_none());
         assert!(parse_cube(&format!("LUT_3D_SIZE {}\n0 0 0\n", usize::MAX)).is_none());
-        assert!(parse_cube(&format!("LUT_1D_SIZE {}\nLUT_3D_SIZE 2\n0 0 0\n", usize::MAX)).is_none());
+        assert!(parse_cube(&format!("LUT_1D_SIZE {}\nLUT_3D_SIZE 2\n{}", usize::MAX, "0 0 0\n".repeat(7))).is_none());
         let img = test_img();
         let out = run("ec.utility.applylut", &[("lut", Value::Str("LUT_3D_SIZE 3\n0 0 0\n".into()))], img.clone());
         assert_eq!(out.img, img);
