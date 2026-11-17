@@ -24,6 +24,9 @@ fn radial_blur() {
     effect_case("ec.blur.radial", &[("amount", n(12.0))]);
     effect_case("ec.blur.radial", &[("amount", n(30.0)), ("type", e(1)), ("center", pt(20.3, 14.7))]);
     effect_case("ec.blur.radial", &[("amount", n(-45.0)), ("center", pt(50.0, 30.0))]);
+    // Amount's largest value, 1000 (#3467): Spin over ±500°, Zoom from the centre outwards.
+    effect_case("ec.blur.radial", &[("amount", n(1000.0)), ("center", pt(20.3, 14.7))]);
+    effect_case("ec.blur.radial", &[("amount", n(1000.0)), ("type", e(1)), ("center", pt(20.3, 14.7)), ("antialiasing", e(1))]);
 }
 
 #[test]
