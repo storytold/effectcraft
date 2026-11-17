@@ -1485,9 +1485,9 @@ dependencies = [
 [[package]]
 name = "craft-svg"
 version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=006ed3d965d5f3b77829b87a43eacd5ca0b4f997#006ed3d965d5f3b77829b87a43eacd5ca0b4f997"
+source = "git+https://github.com/storytold/craft-libs?rev=af9985523a079c9e25c638003dbd9aa09fa4d254#af9985523a079c9e25c638003dbd9aa09fa4d254"
 dependencies = [
- "craft-xml 0.1.0 (git+https://github.com/storytold/craft-libs?rev=006ed3d965d5f3b77829b87a43eacd5ca0b4f997)",
+ "craft-xml 0.1.0 (git+https://github.com/storytold/craft-libs?rev=af9985523a079c9e25c638003dbd9aa09fa4d254)",
  "flate2",
  "kurbo",
  "quick-xml 0.41.0",
@@ -1660,16 +1660,6 @@ dependencies = [
 [[package]]
 name = "craft-xml"
 version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=006ed3d965d5f3b77829b87a43eacd5ca0b4f997#006ed3d965d5f3b77829b87a43eacd5ca0b4f997"
-dependencies = [
- "quick-xml 0.41.0",
- "serde",
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "craft-xml"
-version = "0.1.0"
 source = "git+https://github.com/storytold/craft-libs?rev=57288edafdc45552e30481cc649021de446abfa0#57288edafdc45552e30481cc649021de446abfa0"
 dependencies = [
  "quick-xml 0.41.0",
@@ -1681,6 +1671,16 @@ dependencies = [
 name = "craft-xml"
 version = "0.1.0"
 source = "git+https://github.com/storytold/craft-libs?rev=82062077bba679ba5236e2d1a391f02d1533cbab#82062077bba679ba5236e2d1a391f02d1533cbab"
+dependencies = [
+ "quick-xml 0.41.0",
+ "serde",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "craft-xml"
+version = "0.1.0"
+source = "git+https://github.com/storytold/craft-libs?rev=af9985523a079c9e25c638003dbd9aa09fa4d254#af9985523a079c9e25c638003dbd9aa09fa4d254"
 dependencies = [
  "quick-xml 0.41.0",
  "serde",
@@ -2293,6 +2293,7 @@ dependencies = [
  "effectcraft-raster",
  "kurbo",
  "linesweeper",
+ "log",
  "tiny-skia 0.12.0",
 ]
 
