@@ -634,7 +634,8 @@ fn straight(px: vec4<f32>) -> vec3<f32> {
 //  9 Gradient Ramp   f[0] = (sx, sy, ex, ey); f[1] = start colour; f[2] = end colour;
 //                    f[3] = (len2, scatter, blend); u[0] = (_, radial, seed)
 // 10 Fractal Noise   f[0] = (contrast, brightness, scale x, frac); f[1] = (ox, oy, sr, cr);
-//                    f[2] = (evo, blend, opacity, scale y); f[3] = (sub influence, 1 / sub scaling);
+//                    f[2] = (evo, blend, opacity, scale y); f[3] = (sub influence, 1 / sub scaling,
+//                    OCTAVE_SCALE_MAX);
 //                    u[0] = (_, kind, n_oct, seed); u[1] = (invert, overflow, normal blend)
 @compute @workgroup_size(16, 16)
 fn pointwise(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -872,6 +873,7 @@ fn pointwise(@builtin(global_invocation_id) gid: vec3<u32>) {
             let scale_y = P.f[2].w;
             let infl = P.f[3].x;
             let fmul = P.f[3].y;
+            let fmax = P.f[3].z;
             let frac = P.f[0].w;
             let ox = P.f[1].x;
             let oy = P.f[1].y;
@@ -904,7 +906,8 @@ fn pointwise(@builtin(global_invocation_id) gid: vec3<u32>) {
                 sum += n * amp * w;
                 norm += amp * w;
                 amp *= infl;
-                f *= fmul;
+                // noise3::next_octave: the frequency stays within OCTAVE_SCALE_MAX (#3486).
+                f = clamp(f * fmul, 1.0 / fmax, fmax);
             }
             var val = sum / max(norm, 1e-6);
             val = (val - 0.5) * contrast + 0.5 + brightness;
