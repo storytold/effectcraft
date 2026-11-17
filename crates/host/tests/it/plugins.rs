@@ -438,3 +438,39 @@ fn abi_v2_plugins_render_with_real_neighbour_frames() {
     assert!((p[0] - 0.25).abs() < 0.01, "the next frame's red, with no previous frame: {p:?}");
     assert!((p[1] - 2.0 / 8.0).abs() < 0.01, "only the next frame is valid: {p:?}");
 }
+
+/// A plug-in built against a newer ABI imports `ec.source_at`, which this loader refuses. The
+/// failure has to name the import, because that message is what a user sees when the effect does
+/// not appear in the menu — the app logs these per-file errors at startup.
+#[test]
+fn a_plugin_importing_source_at_fails_with_a_named_import() {
+    let dir = std::env::temp_dir().join(format!("ec_sa_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let manifest = r#"{"api":2,"id":"org.test.host.source_at","name":"Needs source_at","category":"Test Plug-ins","version":"1","params":[],"imports":["source_at"]}"#;
+    let len = manifest.len();
+    let escaped = manifest.replace('"', "\\\"");
+    let wat = format!(
+        r#"(module
+  (import "ec" "source_at" (func (param i32 f64 i32 i32 i32) (result i32)))
+  (memory (export "memory") 2)
+  (data (i32.const 16) "{escaped}")
+  (func (export "ec_api_version") (result i32) i32.const 2)
+  (func (export "ec_manifest_ptr") (result i32) i32.const 16)
+  (func (export "ec_manifest_len") (result i32) i32.const {len})
+  (func (export "ec_alloc") (param i32) (result i32) i32.const 1024)
+  (func (export "ec_render2") (param i32 i32 i32 i32 i32 f64 f64 i32 i32 i32 f64 f64) (result i32) i32.const 0))"#
+    );
+    let file = dir.join("needs-source-at.wasm");
+    std::fs::write(&file, wat).unwrap();
+    let (mut s, _l) = setup();
+    // A folder load returns the failure instead of erroring, which is the path the app takes at
+    // startup and then logs.
+    let r = s.execute("effect.plugins.load", json!({"folder": dir.to_string_lossy()})).unwrap();
+    assert!(r["loaded"].as_array().unwrap().is_empty(), "{r}");
+    let errs = r["errors"].as_array().unwrap();
+    assert_eq!(errs.len(), 1, "{r}");
+    let msg = errs[0]["error"].as_str().unwrap();
+    assert!(msg.contains("source_at"), "the error must name the import: {msg}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
