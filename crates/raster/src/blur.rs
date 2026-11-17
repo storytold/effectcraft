@@ -702,6 +702,25 @@ mod tests {
         assert!(r.iter().all(|&v| (7..=10).contains(&v)), "{r:?}");
     }
 
+    /// #3816: a sigma past what `i64` holds (from an expression or a file value) gives the
+    /// radii of the largest sigma that blurs, not an overflow; NaN doesn't blur.
+    #[test]
+    fn huge_sigma_radii_are_capped() {
+        let cap = box_radii(1e8, 3);
+        for sigma in [1e9, 1e300, f64::MAX, f64::INFINITY] {
+            assert_eq!(box_radii(sigma, 3), cap, "sigma {sigma}");
+        }
+        assert_eq!(box_radii(f64::NAN, 3), vec![0; 3]);
+        let mut img = Image::new(5, 5);
+        img.set(2, 2, [1.0; 4]);
+        for sigma in [1e9, f64::INFINITY] {
+            for repeat in [false, true] {
+                let b = gaussian_blur(&img, sigma, sigma, repeat);
+                assert!(b.data.iter().flatten().all(|v| v.is_finite()), "sigma {sigma} repeat {repeat}");
+            }
+        }
+    }
+
     /// #3464: moving the image before [`gaussian_blur_unbounded`] and blurring it moved with
     /// [`gaussian_blur_unbounded_at`] agree, also when the move puts all of it outside the window
     /// (its tails still reach in) and along an axis that isn't blurred.

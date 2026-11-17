@@ -822,6 +822,14 @@ fn gaussian_blur_at_the_highest_blurriness_matches_cpu() {
     effect_case("ec.blur.gaussian", &[("blurriness", n(30000.0)), ("repeatEdge", Value::Bool(true))]);
 }
 
+/// #3816: the GPU blur's box radii stay bounded for a sigma past what `i64` holds, as the CPU's do.
+#[test]
+fn gpu_box_radii_for_a_huge_sigma_match_cpu() {
+    for sigma in [10.0, 1e9, f64::INFINITY, f64::NAN] {
+        assert_eq!(crate::effects::box_radii(sigma, 3), effectcraft_effects::util::box_radii(sigma, 3), "sigma {sigma}");
+    }
+}
+
 #[test]
 fn gpu_effects_match_cpu() {
     // Sigma 3 px and up and even radii, so the half-scale pass stays on the GPU too (#1939).
