@@ -794,7 +794,7 @@ pub fn specs() -> Vec<EffectSpec> {
             ],
             radial,
         ),
-        spec("ec.blur.sharpen", "Sharpen", "Blur & Sharpen", vec![p("amount", "Sharpen Amount", num(0.0), slider(0.0, 500.0, 0.0, 100.0, 0))], sharpen),
+        spec("ec.blur.sharpen", "Sharpen", "Blur & Sharpen", vec![p("amount", "Sharpen Amount", num(0.0), slider(0.0, 4000.0, 0.0, 100.0, 0))], sharpen),
         spec(
             "ec.blur.unsharp",
             "Unsharp Mask",
@@ -1034,6 +1034,49 @@ mod tests {
         assert_ne!(row(1.2), row(1.6));
         assert_ne!(row(1.6), row(2.0));
         assert_ne!(row(2.0), row(2.4));
+    }
+
+    /// #3466: Sharpen Amount takes After Effects' valid range, 0..4000, and keeps its 0..100
+    /// slider. `prop.set` and the value editors clamp to the hard range.
+    #[test]
+    fn sharpen_amount_takes_the_after_effects_range() {
+        let spec = crate::find("ec.blur.sharpen").unwrap();
+        let ui = &spec.params.iter().find(|p| p.id == "amount").unwrap().ui;
+        assert!(
+            matches!(ui, ParamUi::Slider { min, max, slider_min, slider_max, .. }
+                if *min == 0.0 && *max == 4000.0 && *slider_min == 0.0 && *slider_max == 100.0),
+            "{ui:?}"
+        );
+    }
+
+    /// #3466: at the new top of the range the render stays linear in Amount and finite on 32 bpc
+    /// over-range input: colour moves away from the blur by Amount / 50 of the difference
+    /// (2000 → 4000 doubles it), never below 0, and alpha is untouched.
+    #[test]
+    fn sharpen_is_linear_and_finite_up_to_amount_4000() {
+        let mut img = edge();
+        for y in 0..8 {
+            for x in 0..20 {
+                img.set(x, y, [1000.0, 1000.0, 1000.0, 1.0]);
+            }
+        }
+        let sharpen = |a: f64| run_fx("ec.blur.sharpen", &[("amount", num(a))], img.clone(), 0.0, EffectEnv::default()).img;
+        let (half, top) = (sharpen(2000.0), sharpen(4000.0));
+        for y in 0..8 {
+            for x in 0..40 {
+                let (i, h, t) = (img.get(x, y), half.get(x, y), top.get(x, y));
+                assert_eq!(t[3], i[3], "alpha at {x}");
+                for c in 0..3 {
+                    assert!(t[c].is_finite() && t[c] >= 0.0, "({x}, {y}): {t:?}");
+                    if t[c] > 0.0 && h[c] > 0.0 {
+                        let (dh, dt) = (h[c] - i[c], t[c] - i[c]);
+                        assert!((dt - 2.0 * dh).abs() <= 1e-3 * dt.abs().max(1.0), "({x}, {y}): {dh} {dt}");
+                    }
+                }
+            }
+        }
+        // The bright side of the edge moves 80 × its difference from the blur: far past 10 × the input.
+        assert!(top.get(19, 4)[0] > 1000.0 * 10.0, "{:?}", top.get(19, 4));
     }
 
     #[test]
