@@ -250,6 +250,57 @@ fn power_pin_unstretch_expands_pinned_region() {
     assert!(maxd(&id.img, &im) < 1e-4);
 }
 
+/// #3492: an Expansion side moves that edge of the source rectangle by a percent of the layer
+/// size. Below -100 % it crosses the opposite edge, so the rectangle flips: Top -200 and Bottom
+/// -100 take rows 40 down to 0 of a 20-row layer, a mirrored copy squeezed into the bottom half
+/// (the top half samples below the layer and is transparent). -100 for both would mirror the
+/// whole layer.
+#[test]
+fn power_pin_expansion_below_minus_100_flips_the_source() {
+    let im = img(20, 20);
+    let o = run("ec.distort.ccpowerpin", &[("expandTop", num(-200.0)), ("expandBottom", num(-100.0))], im.clone(), &[]);
+    assert_eq!((o.img.width, o.img.height), (20, 20));
+    // Output row 15: v = 15.5 / 20, source y = 40 - 40 v = 9 (between rows 8 and 9).
+    let px = o.img.get(10, 15);
+    assert!((px[1] - 8.5 / 20.0).abs() < 1e-3, "{px:?}");
+    assert_eq!(o.img.get(10, 5)[3], 0.0);
+    let both = run("ec.distort.ccpowerpin", &[("expandTop", num(-100.0)), ("expandBottom", num(-100.0))], im.clone(), &[]);
+    // Source y = 20 - 20 v = 4.5, row 4's centre.
+    let px = both.img.get(10, 15);
+    assert!((px[1] - 4.0 / 20.0).abs() < 1e-3, "{px:?}");
+}
+
+/// #3492: the buffer is sized by the pins alone, and Expansions at the ends of -200..1000 render
+/// finite images: all sides at either end, flipped sources, a zero-size source (Top -50, Bottom
+/// -50), and Unstretch, which divides by the source size (a zero size renders transparent).
+#[test]
+fn power_pin_is_finite_at_the_expansion_extremes() {
+    let im = img(24, 16);
+    let pins = [("topLeft", pt(3.0, -4.0)), ("topRight", pt(26.0, 2.0)), ("bottomRight", pt(20.0, 18.0)), ("bottomLeft", pt(-2.0, 14.0))];
+    let sides = ["expandTop", "expandLeft", "expandRight", "expandBottom"];
+    let cases: &[[f64; 4]] =
+        &[[-200.0; 4], [1000.0; 4], [-50.0, 0.0, 0.0, -50.0], [0.0, -200.0, -200.0, 0.0], [-200.0, 1000.0, -200.0, 1000.0], [-100.0, -150.0, 50.0, -200.0]];
+    for unstretch in [false, true] {
+        for perspective in [100.0, 40.0] {
+            let mut base: Vec<(&str, Value)> = pins.to_vec();
+            base.push(("unstretch", Value::Bool(unstretch)));
+            base.push(("perspective", num(perspective)));
+            let size = |o: &Buf| (o.img.width, o.img.height);
+            let neutral = size(&run("ec.distort.ccpowerpin", &base, im.clone(), &[]));
+            for ex in cases {
+                let mut set = base.clone();
+                set.extend(sides.iter().zip(ex).map(|(s, v)| (*s, num(*v))));
+                let o = run("ec.distort.ccpowerpin", &set, im.clone(), &[]);
+                let at = format!("{ex:?} unstretch {unstretch} perspective {perspective}");
+                assert_eq!(size(&o), neutral, "{at}");
+                for p in &o.img.data {
+                    assert!(p.iter().all(|c| c.is_finite()) && (0.0..=1.0).contains(&p[3]), "{at}: {p:?}");
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn split_opens_a_gap() {
     let im = img(40, 30);

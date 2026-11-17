@@ -218,6 +218,12 @@ fn twirl_legacy_ripple_pulse_power_pin() {
     // Perspective below 100 %: blended toward the bilinear inverse.
     effect_case("ec.distort.ccpowerpin", &[("topRight", pt(80.0, -6.0)), ("bottomLeft", pt(-4.0, 50.0)), ("perspective", n(0.0))]);
     effect_case("ec.distort.ccpowerpin", &[("topLeft", pt(12.0, 6.0)), ("bottomRight", pt(75.0, 30.0)), ("perspective", n(40.0)), ("expandTop", n(15.0))]);
+    // #3492: Expansion down to -200 flips the source rectangle; zero size at Top -50 / Bottom -50.
+    effect_case("ec.distort.ccpowerpin", &[("topRight", pt(80.0, -6.0)), ("expandTop", n(-200.0)), ("expandBottom", n(-100.0)), ("expandLeft", n(-150.0))]);
+    effect_case(
+        "ec.distort.ccpowerpin",
+        &[("bottomLeft", pt(-4.0, 50.0)), ("perspective", n(40.0)), ("expandTop", n(-50.0)), ("expandBottom", n(-50.0)), ("expandRight", n(-200.0))],
+    );
 }
 
 #[test]
