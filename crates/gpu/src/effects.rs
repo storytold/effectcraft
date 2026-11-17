@@ -596,7 +596,7 @@ fn pointwise(e: &mut Enc, id: &str, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
             let (ox, oy) = b.to_px(pr.v2("transform/offset"));
             let s = f("transform/scale");
             let (sw, sh) = if pr.b("transform/uniformScaling") { (s, s) } else { (f("transform/scaleWidth"), f("transform/scaleHeight")) };
-            let sub = (f("subSettings/subScaling") / 100.0).clamp(0.1, 1.0);
+            let sub = effectcraft_effects::sub_scaling_ratio(f("subSettings/subScaling"));
             p.u[0] = [10, kind, octaves.ceil() as u32, f("evolutionOptions/seed") as u32 ^ 0x51ed];
             p.u[1] = [pr.b("invert") as u32, pr.e("overflow"), mode, 0];
             p.f[0] = [
@@ -612,7 +612,7 @@ fn pointwise(e: &mut Enc, id: &str, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
                 (f("opacity") as f32 / 100.0).clamp(0.0, 1.0),
                 (sh * effectcraft_effects::NOISE_CELL * b.scale).max(1.0) as f32,
             ];
-            p.f[3] = [(f("subSettings/subInfluence") as f32 / 100.0).clamp(0.0, 1.0), 1.0 / sub as f32, 0.0, 0.0];
+            p.f[3] = [(f("subSettings/subInfluence") as f32 / 100.0).clamp(0.0, 1.0), 1.0 / sub as f32, effectcraft_effects::OCTAVE_SCALE_MAX, 0.0];
         }
         _ => return None,
     }
