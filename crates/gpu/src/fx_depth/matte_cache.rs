@@ -107,13 +107,20 @@ fn plane_within(a: &Arc<AuxChannels>, layer: &str, sel: &[u32], output: CryptoOu
         if bytes > max_bytes && (budget == usize::MAX || bytes > budget) {
             return made;
         }
-        c.entries.push(Entry { aux: Arc::downgrade(a), key, plane: made.clone(), used: memory::tick(), cost_us });
+        c.entries.push(Entry { aux: Arc::downgrade(a), key: key.clone(), plane: made.clone(), used: memory::tick(), cost_us });
         loop {
             let total: usize = c.entries.iter().map(|e| e.plane.bytes()).fold(0, usize::saturating_add);
             if c.entries.len() <= 1 || (c.entries.len() <= MAX_ENTRIES && total <= max_bytes) {
                 break;
             }
-            let Some(i) = oldest(&c) else { break };
+            let Some(i) = oldest(&c) else {
+                // Renders hold every plane kept: the new one is handed out, not kept, so the
+                // cache never stays over its limits once they let go.
+                if let Some(i) = c.entries.iter().position(|e| e.of(a) && e.key == key) {
+                    c.entries.swap_remove(i);
+                }
+                return made;
+            };
             c.entries.swap_remove(i);
         }
     }
@@ -121,13 +128,14 @@ fn plane_within(a: &Arc<AuxChannels>, layer: &str, sel: &[u32], output: CryptoOu
     made
 }
 
-/// The entry to drop next: one whose channels are gone, else the least recently used of those
-/// no render holds now (dropping one in use would free nothing yet).
+/// The entry to drop next, of those no render holds now (dropping one in use would free nothing
+/// yet): one whose channels are gone, else the least recently used.
 fn oldest(c: &Cache) -> Option<usize> {
+    let free = |e: &Entry| Arc::strong_count(&e.plane) == 1;
     c.entries
         .iter()
-        .position(Entry::gone)
-        .or_else(|| c.entries.iter().enumerate().filter(|(_, e)| Arc::strong_count(&e.plane) == 1).min_by_key(|(_, e)| e.used).map(|(i, _)| i))
+        .position(|e| e.gone() && free(e))
+        .or_else(|| c.entries.iter().enumerate().filter(|(_, e)| free(e)).min_by_key(|(_, e)| e.used).map(|(i, _)| i))
 }
 
 /// The planes in the common memory budget.
@@ -163,6 +171,12 @@ pub(crate) fn plane_held_to(a: &Arc<AuxChannels>, layer: &str, sel: &[u32], outp
 #[cfg(test)]
 pub(crate) fn made() -> u64 {
     lock().made
+}
+
+/// Whether `p` is kept (tests).
+#[cfg(test)]
+pub(crate) fn keeps(p: &Arc<CryptoPlane>) -> bool {
+    lock().entries.iter().any(|e| Arc::ptr_eq(&e.plane, p))
 }
 
 /// Planes kept now (tests).

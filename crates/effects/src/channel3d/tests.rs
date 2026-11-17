@@ -397,10 +397,10 @@ fn box_filter_survives_hostile_scales() {
     // A layer claiming 1000 × its file's size at a tiny render scale: few output pixels, but the
     // filter would visit 6.3e7 layer pixels; left unscaled, at once.
     tiny.scale = 1e-3;
-    let t = std::time::Instant::now();
     let p = crypto_plane(&tiny, "CryptoObject", &[crypto_hash("cube")], CryptoOutput::Matte, 1e-3);
     assert_eq!(p.data.len(), 9 * 7);
-    assert!(t.elapsed() < std::time::Duration::from_secs(1));
+    assert!(box_size(9, 7, 1e-3, 1e-3, MAX_BOX_PIXELS).is_none(), "the filter's work is refused, not done");
+    assert!(box_size(9, 7, 1.0, 0.5, MAX_BOX_PIXELS).is_some(), "an ordinary half resolution is filtered");
 }
 
 /// #3301 review: a source whose layer has more pixels than a filtered plane may have (a 16K

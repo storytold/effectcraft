@@ -728,27 +728,49 @@ fn crypto_box(src: CryptoPlane, s: f64) -> CryptoPlane {
     crypto_box_within(src, s, MAX_BOX_PIXELS)
 }
 
-/// [`crypto_box`] with a result of at most `max_out` pixels. The filter's work, a visit of every
-/// layer pixel, is bounded by the source's size alone, which is in memory already: a 16K source
-/// at half resolution is filtered, not looked up nearest-neighbour.
-fn crypto_box_within(src: CryptoPlane, s: f64, max_out: usize) -> CryptoPlane {
-    if !(src.scale.is_finite() && src.scale > 0.0) {
-        return src;
+/// The sizes of a box filter of a source plane to a render scale.
+struct BoxSize {
+    /// Layer pixels per output pixel.
+    k: f64,
+    /// The layer's width in pixels.
+    lw: usize,
+    /// The layer's height in pixels.
+    lh: usize,
+    /// The result's width in pixels.
+    dw: usize,
+    /// The result's height in pixels.
+    dh: usize,
+}
+
+/// [`BoxSize`] of a filter of a `width` × `height` source at `scale` to render scale `s` whose
+/// result has at most `max_out` pixels, or `None` where the plane stays unscaled. The filter
+/// visits every layer pixel and may visit at most four per source pixel, so a footage item
+/// claiming a far larger size than its file is left unscaled.
+fn box_size(width: u32, height: u32, scale: f64, s: f64, max_out: usize) -> Option<BoxSize> {
+    if !(scale.is_finite() && scale > 0.0) {
+        return None;
     }
     // (layer pixels per output pixel; a whole number when it is one within rounding, so a
     // third resolution averages exactly three by three pixels)
     let k = 1.0 / s;
     let k = if (k - k.round()).abs() < 1e-9 * k { k.round() } else { k };
-    let (lw, lh) = ((src.width as f64 / src.scale).ceil(), (src.height as f64 / src.scale).ceil());
+    let (lw, lh) = ((width as f64 / scale).ceil(), (height as f64 / scale).ceil());
     let (dw, dh) = ((lw / k * (1.0 - 1e-12)).ceil(), (lh / k * (1.0 - 1e-12)).ceil());
-    // (the filter visits every layer pixel: at most four per source pixel; a footage item
-    // claiming a far larger size than its file is left unscaled)
-    let work = (src.width as usize).saturating_mul(src.height as usize).saturating_mul(4);
+    let work = (width as usize).saturating_mul(height as usize).saturating_mul(4);
     let fits = |v: f64| v.is_finite() && v >= 0.0 && v <= work as f64;
     if !(fits(lw) && fits(lh) && fits(dw) && fits(dh)) || (dw * dh) as usize > work.min(max_out) || (lw * lh) as usize > work {
-        return src;
+        return None;
     }
-    let (lw, lh, dw, dh) = (lw as usize, lh as usize, dw as usize, dh as usize);
+    Some(BoxSize { k, lw: lw as usize, lh: lh as usize, dw: dw as usize, dh: dh as usize })
+}
+
+/// [`crypto_box`] with a result of at most `max_out` pixels. The filter's work, a visit of every
+/// layer pixel, is bounded by the source's size alone, which is in memory already: a 16K source
+/// at half resolution is filtered, not looked up nearest-neighbour.
+fn crypto_box_within(src: CryptoPlane, s: f64, max_out: usize) -> CryptoPlane {
+    let Some(BoxSize { k, lw, lh, dw, dh }) = box_size(src.width, src.height, src.scale, s, max_out) else {
+        return src;
+    };
     let ch = src.output.channels();
     let n = dw.saturating_mul(dh).saturating_mul(ch);
     let mut data = Vec::new();

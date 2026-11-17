@@ -412,6 +412,39 @@ fn a_plane_over_the_byte_limit_is_kept_only_under_a_budget() {
     assert!(Arc::ptr_eq(&first, &again), "a budget that holds it: kept");
 }
 
+/// #3750 review: a plane a render still holds is not offered to the memory accountant, even
+/// once its frame's channels are gone (dropping it would free nothing while the render holds it).
+#[test]
+fn a_held_plane_of_gone_channels_is_not_offered() {
+    use crate::fx_depth::matte_cache;
+    use effectcraft_effects::CryptoOutput;
+    crate::tests::hold_gpu_lock();
+    let gone = Arc::new(aux_scene(70, 44, 1.0));
+    let held = matte_cache::plane(&gone, "CryptoObject", &[crypto_hash("beta")], CryptoOutput::Matte, 1.0);
+    drop(gone);
+    let holder = matte_cache::holder();
+    // (everything nobody holds goes; at most as many rounds as planes kept)
+    for _ in 0..=matte_cache::kept() {
+        if holder.drop_oldest() == 0 {
+            break;
+        }
+    }
+    assert!(matte_cache::keeps(&held), "the held plane was offered and dropped");
+}
+
+/// #3750 review: when renders hold every plane kept, a new plane is handed out but not kept, so
+/// the cache never stays over its entry limit (32) once they let go.
+#[test]
+fn the_entry_limit_holds_while_renders_hold_every_plane() {
+    use crate::fx_depth::matte_cache;
+    use effectcraft_effects::CryptoOutput;
+    crate::tests::hold_gpu_lock();
+    let a = Arc::new(aux_scene(70, 44, 1.0));
+    let held: Vec<_> = (0..40u32).map(|i| matte_cache::plane_held_to(&a, "CryptoObject", &[i], CryptoOutput::Matte, usize::MAX, usize::MAX)).collect();
+    assert!(matte_cache::kept() <= 32, "{} planes kept", matte_cache::kept());
+    drop(held);
+}
+
 #[test]
 fn extractor() {
     case("ec.3d.extractor", &[("red", Value::Str("Z".into())), ("green", Value::Str("UV.U".into())), ("whitePoint", n(1000.0))]);

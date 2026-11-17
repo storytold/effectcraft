@@ -868,6 +868,63 @@ fn a_picture_too_large_with_its_channels_is_read_alone() {
     assert_eq!(d.last().map(|d| d.channels.len()), Some(4), "{d:?}");
 }
 
+/// #3750 review: two requests that each fit under the read's limit, merged into one decode that
+/// doesn't, each get their planes: a refusal for the merged size is not handed to a request
+/// whose own planes fit (they are read again for it alone).
+#[test]
+fn a_merged_decode_too_large_leaves_each_request_that_fits_its_planes() {
+    let bytes: Arc<[u8]> = single_part_zips().into();
+    let path = "/3750-merged-too-large.exr";
+    let source = ExrSource::Bytes(bytes);
+    let store = Arc::new(PlaneStore::new(CACHE_BUDGET));
+    let index = crate::exr_index::get(path, &source).unwrap();
+    let picture: BTreeSet<usize> = index.picture_ids().into_iter().collect();
+    let first = Want { all: false, ids: picture.clone() };
+    // (10 passes: with the picture's 4 planes 14, over the limit of 12)
+    let passes: BTreeSet<usize> = (0..index.channels.len()).filter(|i| !picture.contains(i)).take(10).collect();
+    let second = Want { all: false, ids: passes.clone() };
+    set_cap(path, 12 * SIZE.0 * SIZE.1 * 4);
+    // Before the first request's decode reads: the second request joins it.
+    let (tx, rx) = std::sync::mpsc::channel();
+    let joined = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let (store, source, index, second, joined) = (store.clone(), source.clone(), index.clone(), second.clone(), joined.clone());
+        let hook: Hook = Arc::new(move |_: &str| {
+            if joined.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            let (s, src, idx, want, tx) = (store.clone(), source.clone(), index.clone(), second.clone(), tx.clone());
+            std::thread::spawn(move || {
+                let _ = tx.send(s.get(path, &src, &idx, &want, Use::Other).map(|b| b.ids.clone()));
+            });
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while std::time::Instant::now() < until {
+                let merged = store
+                    .lock()
+                    .entries
+                    .iter()
+                    .find(|e| e.path == path)
+                    .and_then(|e| e.flight.clone())
+                    .is_some_and(|f| second.ids.iter().all(|id| f.state().want.ids.contains(id)));
+                if merged {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        });
+        set_before_read(path, Some(hook));
+    }
+    let got_first = store.get(path, &source, &index, &first, Use::Other).map(|b| b.ids.clone());
+    let got_second = rx.recv_timeout(std::time::Duration::from_secs(20)).unwrap();
+    set_before_read(path, None);
+    assert!(joined.load(Ordering::SeqCst));
+    assert!(decodes_of(path).first().is_some_and(|d| d.channels.len() == 14), "merged first: {:?}", decodes_of(path));
+    let got_first = got_first.expect("the picture alone fits");
+    let got_second = got_second.expect("the passes alone fit");
+    assert!(picture.iter().all(|id| got_first.contains(id)), "{got_first:?}");
+    assert!(passes.iter().all(|id| got_second.contains(id)), "{got_second:?}");
+}
+
 /// #474: at most CACHE_FILES entries are kept, however small.
 #[test]
 fn the_store_keeps_a_bounded_number_of_files() {
@@ -1109,7 +1166,17 @@ fn decoded_planes_are_kept_on_disk_and_read_back_exactly() {
     dc.flush();
     pool.forget(&f.path);
     pool.aux(ItemId(1), &f, Tick::ZERO).unwrap();
+    // #3750 review: a disk cache too small for one plane gets no copies of the planes at all.
+    dc.flush();
+    dc.set_max_bytes(1024);
+    let small = dir.join("crypto_0002.exr");
+    std::fs::write(&small, multipart()).unwrap();
+    let g = crate::probe(&small).unwrap();
+    pool.aux(ItemId(2), &g, Tick::ZERO).unwrap();
     set_disk_cache(None);
+    let copies = DISK_COPIES.lock().unwrap().iter().filter(|p| **p == g.path).count();
+    assert_eq!(copies, 0, "no plane copied for a cache it can't go in");
+    assert!(DISK_COPIES.lock().unwrap().iter().any(|p| *p == f.path), "copied while it could");
     let from_disk: Vec<bool> = decodes_of(&f.path).iter().map(|d| d.from_disk).collect();
     assert_eq!(from_disk, [false, false, true, false]);
     let _ = std::fs::remove_dir_all(&dir);
@@ -1520,6 +1587,71 @@ fn the_picture_planes_are_not_kept_beside_the_picture() {
     let Picture::Done(Ok(_)) = picture(path, &source, op, None) else { panic!("a picture") };
     assert!(shared().kept(path).is_none());
     forget(path);
+}
+
+/// #3750 review: slimming a set someone else still holds copies the planes it keeps; when the
+/// system can't give the memory for the copy, the set stays as it was (nothing aborts).
+#[test]
+fn a_shared_set_stays_whole_when_its_copy_finds_no_memory() {
+    let bytes: Arc<[u8]> = write(vec![part(None, &[("R", true), ("G", true), ("B", true), ("A", true), ("Z", false)], (16, 8), Compression::ZIP1)], (16, 8)).into();
+    let path = "/3750-slim-no-memory.exr";
+    let source = ExrSource::Bytes(bytes);
+    let store = PlaneStore::new(CACHE_BUDGET);
+    let index = crate::exr_index::get(path, &source).unwrap();
+    let all = Want { all: true, ids: index.picture_ids().into_iter().collect() };
+    let whole = store.get(path, &source, &index, &all, Use::Other).unwrap();
+    let z: BTreeSet<usize> = index.aux_ids().into_iter().collect();
+    COPIES_REFUSED.lock().unwrap().push(path.to_string());
+    // (`whole` is still held here: the planes kept would be copied)
+    store.keep_only(path, whole.clone(), &z);
+    COPIES_REFUSED.lock().unwrap().retain(|p| p != path);
+    let kept = store.lock().entries.iter().find(|e| e.path == path).and_then(|e| e.batch.clone());
+    assert!(kept.is_some_and(|k| Arc::ptr_eq(&k, &whole)), "the whole set is kept");
+    // With memory for the copy: the kept channel alone.
+    store.keep_only(path, whole.clone(), &z);
+    assert_eq!(store.kept(path).map(|(n, _)| n), Some(vec!["Z".to_string()]));
+}
+
+/// #3750 review: a frame of another size than its footage's (a sequence frame larger than the
+/// first, shown scaled) is read whole under a region of interest, so the region shows what the
+/// whole frame shows; the region's rows are of the footage's size, not of that frame.
+#[test]
+fn a_frame_of_another_size_is_read_whole_under_a_region() {
+    use effectcraft_project::{Comp, ItemKind, LayerSource, Project, build};
+    use effectcraft_render::{RenderOpts, Renderer};
+    use effectcraft_time::FrameRate;
+    struct Whole<'a>(&'a crate::MediaPool);
+    impl FootageSource for Whole<'_> {
+        fn frame(&self, item: ItemId, f: &Footage, t: Tick) -> Option<Arc<Image>> {
+            self.0.frame(item, f, t)
+        }
+        fn frame_with(&self, item: ItemId, f: &Footage, t: Tick, size: Option<(u32, u32)>, float: FloatCurve) -> Option<Arc<Image>> {
+            self.0.frame_with(item, f, t, size, float)
+        }
+    }
+    let bytes: Arc<[u8]> = single_part_zips().into();
+    let path = "/3750-roi-other-size.exr";
+    let fresh = || {
+        let pool = crate::MediaPool::new();
+        pool.add_bytes(path, bytes.clone());
+        pool
+    };
+    // (the footage's size is half the file's: a later, larger frame)
+    let mut f = crate::probe_bytes(path, bytes.clone()).unwrap();
+    f.width = SIZE.0 as u32 / 2;
+    f.height = SIZE.1 as u32 / 2;
+    let mut p = Project::default();
+    let comp = Comp::new(96, 96, FrameRate::FPS_30, Tick::from_seconds_f64(1.0));
+    let cid = p.add_item("Comp", effectcraft_color::Label::Sandstone, None, ItemKind::Comp(comp.clone().into()));
+    let fid = p.add_item("plate", effectcraft_color::Label::Aqua, None, ItemKind::Footage(f));
+    let l = build::layer(&mut p, &comp, "plate", LayerSource::Footage { item: fid }, (SIZE.0 as u32 / 2, SIZE.1 as u32 / 2), None);
+    p.comp_mut(cid).unwrap().layers = vec![l].into();
+    let opts = RenderOpts { roi: Some([30.0, 40.0, 30.0, 8.0]), ..Default::default() };
+    let whole = Renderer::new(&p, &Whole(&fresh()), opts).comp_frame(cid, Tick::ZERO);
+    let before = decodes_of(path).len();
+    let rows = Renderer::new(&p, &fresh(), opts).comp_frame(cid, Tick::ZERO);
+    assert_eq!(bits(&rows), bits(&whole));
+    assert!(decodes_of(path).get(before..).unwrap_or_default().iter().all(|d| d.stats.lines == SIZE.1), "read whole");
 }
 
 /// #3271 review (#3301): a remembered failure belongs to the file as it was. A file that was
