@@ -2982,6 +2982,57 @@ const HEBREW: &[(&str, &str)] = &[
     ("Reset", "איפוס"),
     ("All six face cameras turn together; the scene is not changed.", "כל שש מצלמות הפאות מסתובבות יחד; הסצנה אינה משתנה."),
 
+    // Night L04: real Native timeline, text/typography, marker and composition controls.
+    ("(no composition)", "(אין קומפוזיציה)"),
+    ("Add a shape, fill, stroke or path operation", "הוסף פעולה של צורה, מילוי, קו מתאר או נתיב"),
+    ("Add:", "הוסף:"),
+    ("Double-click to edit the comment", "לחץ פעמיים לעריכת ההערה"),
+    ("Drag to change", "גרור לשינוי"),
+    ("Drag to slip the source", "גרור להזזת המקור בציר הזמן"),
+    ("Effects", "אפקטים"),
+    ("Enable Expression", "הפעל ביטוי"),
+    ("Expression Language Menu", "תפריט שפת הביטויים"),
+    ("Expression pick whip: drag onto a property", "קישור ביטוי: גרור אל מאפיין"),
+    ("Expression:", "ביטוי:"),
+    ("Hide This", "הסתר פריט זה"),
+    ("Inverted", "הפוך"),
+    ("Layer Styles", "סגנונות שכבה"),
+    ("Markers", "סמנים"),
+    ("Open in Essential Graphics", "פתח בגרפיקה חיונית"),
+    ("Parent pick whip: drag onto a layer", "קישור שכבת אב: גרור אל שכבה"),
+    ("Per Layer", "לכל שכבה"),
+    ("Property pick whip: drag onto a property", "קישור מאפיין: גרור אל מאפיין"),
+    ("Property: {}", "מאפיין: {}"),
+    ("Search", "חיפוש"),
+    ("Show Layer Name", "הצג שם שכבה"),
+    ("Show Source Name", "הצג שם מקור"),
+    ("Time", "זמן"),
+    ("Toggle Switches / Modes", "החלף בין מתגים למצבים"),
+    ("Total Offset", "היסט כולל"),
+    ("Transform", "שינוי צורה"),
+    ("Variable Font Axes: {}", "צירי גופן משתנה: {}"),
+    ("Align Layers to:", "יישור שכבות אל:"),
+    ("Distribute Layers:", "פיזור שכבות:"),
+    ("Ligatures", "ליגטורות"),
+    ("No matching fonts", "לא נמצאו גופנים תואמים"),
+    ("Rescan Fonts", "סרוק גופנים מחדש"),
+    ("Select a text layer", "בחר שכבת טקסט"),
+    ("Stylistic Sets", "ערכות סגנוניות"),
+    ("Variable Font Axes", "צירי גופן משתנה"),
+    ("Variable fonts only", "גופנים משתנים בלבד"),
+    ("Comment:", "הערה:"),
+    ("Cue Point", "נקודת ציון"),
+    ("Event", "אירוע"),
+    ("Frame Target:", "מסגרת יעד:"),
+    ("Label:", "תווית:"),
+    ("Navigation", "ניווט"),
+    ("Parameter Name:", "שם פרמטר:"),
+    ("Protected Region", "אזור מוגן"),
+    ("Time:", "זמן:"),
+    ("Value:", "ערך:"),
+    ("Composition Mini-Flowchart", "תרשים זרימה מוקטן של הקומפוזיציה"),
+    ("No nested compositions", "אין קומפוזיציות מקוננות"),
+
 ];
 
 /// Swedish (`sv`), written from the English source.
@@ -12127,6 +12178,77 @@ mod hebrew_night04_live_effectcraft_controls_tests {
             assert!(translated.chars().any(|ch| ('א'..='ת').contains(&ch)), "No Hebrew glyph in {english:?}");
             assert_eq!(english.matches("{}").count(), translated.matches("{}").count(), "Placeholder mismatch in {english:?}");
             assert!(!translated.chars().any(|ch| matches!(ch, '\u{202a}' | '\u{202b}' | '\u{202c}' | '\u{202d}' | '\u{202e}' | '\u{2066}' | '\u{2067}' | '\u{2068}' | '\u{2069}')), "Directional control in {english:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod hebrew_night04_timeline_text_markers_tests {
+    use super::HEBREW;
+
+    #[test]
+    fn native_timeline_typography_markers_and_precomp_keep_hebrew_and_values() {
+        for english in [
+            "(no composition)",
+            "Add a shape, fill, stroke or path operation",
+            "Add:",
+            "Double-click to edit the comment",
+            "Drag to change",
+            "Drag to slip the source",
+            "Effects",
+            "Enable Expression",
+            "Expression Language Menu",
+            "Expression pick whip: drag onto a property",
+            "Expression:",
+            "Hide This",
+            "Inverted",
+            "Layer Styles",
+            "Markers",
+            "Open in Essential Graphics",
+            "Parent pick whip: drag onto a layer",
+            "Per Layer",
+            "Property pick whip: drag onto a property",
+            "Property: {}",
+            "Search",
+            "Show Layer Name",
+            "Show Source Name",
+            "Time",
+            "Toggle Switches / Modes",
+            "Total Offset",
+            "Transform",
+            "Variable Font Axes: {}",
+            "Align Layers to:",
+            "Distribute Layers:",
+            "Ligatures",
+            "No matching fonts",
+            "Rescan Fonts",
+            "Select a text layer",
+            "Stylistic Sets",
+            "Variable Font Axes",
+            "Variable fonts only",
+            "Comment:",
+            "Cue Point",
+            "Event",
+            "Frame Target:",
+            "Label:",
+            "Navigation",
+            "Parameter Name:",
+            "Protected Region",
+            "Time:",
+            "Value:",
+            "Composition Mini-Flowchart",
+            "No nested compositions",
+        ] {
+            let matches: Vec<&str> = HEBREW
+                .iter()
+                .filter(|(key, _)| *key == english)
+                .map(|(_, value)| *value)
+                .collect();
+            assert_eq!(matches.len(), 1, "Missing/duplicate Hebrew key: {english:?}");
+            let value = matches[0];
+            assert!(value.chars().any(|c| ('א'..='ת').contains(&c)), "Not Hebrew: {english:?}");
+            assert_eq!(english.matches("{}").count(), value.matches("{}").count(), "Placeholder mismatch: {english:?}");
+            assert!(!value.chars().any(|c| matches!(c, '\\u{202a}' | '\\u{202b}' | '\\u{202c}' | '\\u{202d}' | '\\u{202e}' | '\\u{2066}' | '\\u{2067}' | '\\u{2068}' | '\\u{2069}')), "BiDi control in: {english:?}");
         }
     }
 }
