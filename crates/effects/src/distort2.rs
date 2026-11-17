@@ -85,11 +85,24 @@ const TURBULENT_PINNING: [&str; 15] = [
     "Pin Bottom Locked",
 ];
 
+/// The largest Amount, in buffer pixels, Turbulent Displace displaces by: 2^24, exact in f32.
+/// Only an expression gets past the -10000..10000 hard range. At this bound nearly every sample
+/// already lands far outside any buffer, and the padding and the CPU and GPU samplers' integer
+/// pixel positions (the gradient kinds move up to 2.5 × Amount) stay in range.
+const TURBULENT_MAX_AMOUNT_PX: f64 = 16_777_216.0;
+
+/// Turbulent Displace's Amount at `scale`, in buffer pixels, bounded to
+/// ±[`TURBULENT_MAX_AMOUNT_PX`]; `None` when nothing moves (zero, or not a number). Shared with
+/// the GPU path.
+pub fn turbulent_amount_px(ctx: &EffectCtx, scale: f64) -> Option<f64> {
+    let amount = ctx.params.f("amount") * scale;
+    (amount.abs() >= 1e-9).then(|| amount.clamp(-TURBULENT_MAX_AMOUNT_PX, TURBULENT_MAX_AMOUNT_PX))
+}
+
 fn turbulent_displace(ctx: &EffectCtx, mut b: Buf) -> Buf {
-    let amount = ctx.params.f("amount") * b.scale;
-    if amount.abs() < 1e-9 {
+    let Some(amount) = turbulent_amount_px(ctx, b.scale) else {
         return b;
-    }
+    };
     // TURBULENT_KINDS order: the "Smoother" variants (3, 4, 5) use a gentler octave falloff.
     let kind = ctx.params.e("displacement");
     let size = (ctx.params.f("size") * b.scale).max(1.0);
@@ -1018,6 +1031,46 @@ mod tests {
         let amount = spec.params.iter().find(|p| p.id == "amount").unwrap();
         let ParamUi::Slider { min, max, slider_min, slider_max, .. } = amount.ui else { panic!("{:?}", amount.ui) };
         assert_eq!((min, max, slider_min, slider_max), (-10000.0, 10000.0, -200.0, 200.0));
+    }
+
+    /// #3469: at either end of Amount's range, with every displacement kind, resized or not and
+    /// pinned or not, the output stays finite, in its alpha range and within the padding budget.
+    #[test]
+    fn turbulent_displace_extreme_amounts_stay_finite_and_bounded() {
+        let img = test_img(32, 24);
+        // Resize Layer grows the buffer to the padding budget (16 Mpx here), so it runs with two
+        // kinds; the rest stay layer-sized.
+        let cases = (0..9).flat_map(|kind| [(kind, 0, 0.0), (kind, 1, 0.0), (kind, 8, 0.0)]).chain([(0, 3, 1.0), (4, 14, 1.0)]);
+        for amount in [-10000.0, 10000.0] {
+            for (kind, pin, resize) in cases.clone() {
+                let set = [("amount", num(amount)), ("displacement", Value::Enum(kind)), ("pinning", Value::Enum(pin)), ("resizeLayer", num(resize))];
+                let o = run("ec.distort.turbulentdisplace", &set, img.clone());
+                let what = format!("amount {amount} kind {kind} pinning {pin} resize {resize}");
+                assert!(o.img.data.iter().all(|p| p.iter().all(|v| v.is_finite()) && (0.0..=1.0 + 1e-5).contains(&p[3])), "{what}");
+                let area = u64::from(o.img.width) * u64::from(o.img.height);
+                assert!(area <= 16_777_216, "{what}: {}x{}", o.img.width, o.img.height);
+            }
+        }
+    }
+
+    /// #3469: an Amount past the hard range, which only an expression produces, renders without
+    /// overflowing the padding or the sampler's pixel positions and stays finite (a plain, a
+    /// gradient and the cross kind; unpinned, pinned and locked); one that is not a number leaves
+    /// the layer as it is.
+    #[test]
+    fn turbulent_displace_unbounded_amounts_do_not_crash() {
+        let img = test_img(32, 24);
+        let cases = [0, 1, 8].into_iter().flat_map(|kind| [(kind, 0, 0.0), (kind, 1, 0.0), (kind, 11, 0.0)]).chain([(0, 1, 1.0)]);
+        for amount in [1e12, -1e300, f64::MAX, f64::INFINITY, f64::NEG_INFINITY] {
+            for (kind, pin, resize) in cases.clone() {
+                let set = [("amount", num(amount)), ("displacement", Value::Enum(kind)), ("pinning", Value::Enum(pin)), ("resizeLayer", num(resize))];
+                let o = run("ec.distort.turbulentdisplace", &set, img.clone());
+                assert!(o.img.data.iter().all(|p| p.iter().all(|v| v.is_finite())), "{amount} kind {kind} pinning {pin} resize {resize}");
+            }
+        }
+        for resize in [0.0, 1.0] {
+            assert_eq!(run("ec.distort.turbulentdisplace", &[("amount", num(f64::NAN)), ("resizeLayer", num(resize))], img.clone()).img, img);
+        }
     }
 
     #[test]
