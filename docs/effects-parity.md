@@ -64,6 +64,7 @@ the GPU is performance, not parity.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-17 | minor | Gaussian Blur: Blurriness takes After Effects' recorded valid range 0..30000 (was 0..3000; default and 0..50 slider unchanged). Padding stays within the effect pixel budget at the top of the range (CPU and GPU), and Roto Brush analyses 0.24 saved below a Gaussian Blur still match (#3460) |
 | 2026-11-17 | minor | Turbulent Displace: Amount takes After Effects' recorded valid range, −10000..10000 (default and the −200..200 slider unchanged). Past it (an expression's value) Amount is bounded to 2^24 px and a NaN Amount leaves the layer unchanged, so padding and sampling stay finite (CPU and GPU). Locked pinning on a layer under a pixel across no longer crashes |
 | 2026-11-17 | minor | Fractal and Turbulent Noise: Sub Scaling takes After Effects' 10..10000 (slider and default unchanged), and above 100 each octave is larger than the last instead of being capped at 100; octave scales stay finite at Complexity 20 (CPU and GPU) |
 | 2026-11-17 | minor | CC Power Pin: Expansion (Top, Left, Right, Bottom) takes After Effects' minimum of −200 % (hard range −200..1000; defaults and sliders unchanged). When two opposite sides add up to less than −100 % the source rectangle flips (CPU and GPU) |
