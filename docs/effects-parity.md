@@ -64,6 +64,7 @@ the GPU is performance, not parity.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-17 | minor | Fractal and Turbulent Noise: Sub Scaling takes After Effects' 10..10000 (slider and default unchanged), and above 100 each octave is larger than the last instead of being capped at 100; octave scales stay finite at Complexity 20 (CPU and GPU) |
 | 2026-11-17 | minor | CC Power Pin: Expansion (Top, Left, Right, Bottom) takes After Effects' minimum of −200 % (hard range −200..1000; defaults and sliders unchanged). When two opposite sides add up to less than −100 % the source rectangle flips (CPU and GPU) |
 | 2026-11-17 | minor | Sharpen: Amount takes After Effects' recorded valid range, 0..4000 (was 0..500; default and the 0..100 slider unchanged). Sharpen stays linear in Amount and finite up to 4000, CPU and GPU agree there |
 | 2026-11-12 | minor | Parameters take After Effects' recorded valid ranges (hard range; defaults and sliders unchanged): Levels (Individual Controls) levels −10000..10000 and Gamma from 0; 4-Color Gradient Blend to 10000 and Jitter to 500 %; Change Color Hue Transform ±1800°; Noise HLS (and Auto) amounts to 1000 % and Grain Size from 0; Grid Border to 2000; Venetian Blinds Width 1..32000 and Feather to 32000; Radial Wipe Feather to 32000; Scatter Amount to 1000; Beam thicknesses to 4000; Transform Scale ±30000 %; Turbulent Displace Random Seed to 100000. A test checks every mapped parameter's range against the recorded table (CPU and GPU) |

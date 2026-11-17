@@ -138,6 +138,24 @@ fn turbulent_noise() {
     effect_case("ec.noise.turbulent", &[("fractalType", e(7)), ("noiseType", e(0)), ("transform/perspectiveOffset", on()), ("opacity", n(70.0))]);
 }
 
+/// #3486: Sub Scaling above 100 % on both GPU paths (the `pointwise` kernel for the plain
+/// settings, `fxn_fractal` for Perspective Offset and Turbulent Noise), up to After Effects'
+/// 10000 at the highest Complexity.
+#[test]
+fn fractal_noise_sub_scaling_above_100() {
+    for sub in [200.0, 10000.0] {
+        effect_case("ec.noise.fractal", &[("subSettings/subScaling", n(sub)), ("complexity", n(20.0))]);
+        effect_case(
+            "ec.noise.fractal",
+            &[("subSettings/subScaling", n(sub)), ("complexity", n(20.0)), ("transform/perspectiveOffset", on()), ("evolution", n(90.0))],
+        );
+        effect_case(
+            "ec.noise.turbulent",
+            &[("subSettings/subScaling", n(sub)), ("complexity", n(20.0)), ("evolution", n(120.0)), ("evolutionOptions/turbulenceFactor", n(10.0))],
+        );
+    }
+}
+
 #[test]
 fn fractal_noise_other_modes() {
     effect_case("ec.noise.fractal", &[("noiseType", e(3)), ("fractalType", e(4)), ("blendingMode", e(3))]);
