@@ -518,6 +518,7 @@ impl EffectcraftApp {
                     }
                 }
                 DocAction::Close(id) => crate::menus::invoke(self, &ctx, "comp.close", json!({"comp": id})),
+                DocAction::CloseOthers(id) => crate::menus::invoke(self, &ctx, "comp.closeOthers", json!({"comp": id})),
             };
             if let Err(error) = result {
                 self.ui.status = error;

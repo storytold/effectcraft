@@ -532,6 +532,8 @@ pub enum DocAction {
     Activate(u64),
     /// Close comp `id`'s Timeline (its ×, or a middle click).
     Close(u64),
+    /// Close every other comp's Timeline and keep comp `id`'s (the tab's context menu).
+    CloseOthers(u64),
 }
 
 /// Room around a tab's label, as craft-ui gives its dock tabs.
@@ -635,6 +637,15 @@ pub fn doc_tabs(
                 painter.galley(pos2(tab.min.x + TAB_PADDING * 0.5, mid - galley.size().y * 0.5), galley.clone(), color);
             },
         );
+        // Right-click: Close Other Timeline Panels, available while another comp's Timeline is open.
+        crate::widgets::context_menu(&resp, |ui| {
+            let item = ui.add_enabled(docs.len() > 1, egui::Button::new(crate::i18n::tr("Close Other Timeline Panels")));
+            reg.add_response(&format!("panel.tab.{timeline}.{}.closeOthers", doc.id), &item, "Close Other Timeline Panels");
+            if item.clicked() {
+                out.push(DocAction::CloseOthers(doc.id));
+                ui.close();
+            }
+        });
         let resp = if galley.elided { resp.on_hover_text(&doc.title) } else { resp };
         reg.add_response(&format!("panel.tab.{timeline}.{}", doc.id), &resp, &doc.title);
         // After the tab, so the × takes the clicks over it.
