@@ -235,6 +235,12 @@ impl Flight {
         self.take(CLAIMED)
     }
 
+    /// The decode asked for more than `want` (other requests added to it): a refusal for its
+    /// size may not hold for `want` alone.
+    fn asks_beyond(&self, index: &ExrIndex, want: &Want) -> bool {
+        !asks_at_least(index, want, &self.state().want)
+    }
+
     fn claimed(&self) -> bool {
         self.phase.load(std::sync::atomic::Ordering::SeqCst) == CLAIMED
     }
@@ -545,6 +551,8 @@ impl PlaneStore {
                 // Not all it asks for: ask again (the next decode reads what is missing).
                 Waited::Got(Ok(_)) => Step::Again { retry: false },
                 Waited::Got(Err(Refused::Cancelled | Refused::Forgotten | Refused::Stopped)) => Step::Again { retry: true },
+                // Too large with what other requests added to it: this request alone may fit.
+                Waited::Got(Err(Refused::TooLarge(_))) if flight.asks_beyond(index, want) => Step::Again { retry: true },
                 Waited::Got(Err(e)) => Step::Done(Err(e)),
                 Waited::Cancelled => Step::Done(Err(Refused::Cancelled)),
                 // A copy, kept nowhere.
@@ -569,13 +577,16 @@ impl PlaneStore {
                 Step::Done(Ok(b))
             }
             Ok(_) | Err(Refused::Forgotten | Refused::Stopped) => Step::Again { retry: true },
+            // (as a waiter: this request alone may fit)
+            Err(Refused::TooLarge(_)) if flight.asks_beyond(index, want) => Step::Again { retry: true },
             Err(e) => Step::Done(Err(e)),
         }
     }
 
     /// Keep only the channels `keep` of the planes `b` of `path` (a picture converted: the pool
     /// keeps the picture, its planes would be a second copy of it); nothing when none is left.
-    /// The set is trimmed in place when nobody else holds it, else the kept planes are copied.
+    /// The set is trimmed in place when nobody else holds it, else the kept planes are copied;
+    /// when the system can't give the memory for that copy, the set stays as it was.
     pub(crate) fn keep_only(&self, path: &str, b: Arc<Batch>, keep: &BTreeSet<usize>) {
         if b.ids.iter().all(|id| keep.contains(id)) {
             return;
@@ -589,24 +600,38 @@ impl PlaneStore {
             e.bytes = 0;
         }
         st.held.retain(|(p, h)| !(p == path && Arc::ptr_eq(h, &b)));
-        let slim = match Arc::try_unwrap(b) {
-            Ok(mut owned) => {
-                let mut aux = Arc::try_unwrap(owned.aux).unwrap_or_else(|shared| AuxChannels::clone(&shared));
-                let channels = std::mem::take(&mut aux.channels);
-                aux.channels = owned.ids.iter().zip(channels).filter(|(id, _)| keep.contains(id)).map(|(_, c)| c).collect();
-                owned.ids.retain(|id| keep.contains(id));
-                aux.listed = owned.index.channels.iter().map(|c| c.name.clone()).collect();
-                owned.aux = Arc::new(aux);
-                owned
-            }
-            Err(shared) => {
-                let mut aux = AuxChannels::new(shared.aux.width, shared.aux.height, shared.aux.scale);
-                aux.manifests = shared.aux.manifests.clone();
-                aux.aliases = shared.aux.aliases.clone();
-                aux.listed = shared.index.channels.iter().map(|c| c.name.clone()).collect();
-                aux.channels = shared.ids.iter().zip(&shared.aux.channels).filter(|(id, _)| keep.contains(id)).map(|(_, c)| c.clone()).collect();
-                let ids = shared.ids.iter().copied().filter(|id| keep.contains(id)).collect();
-                Batch { index: shared.index.clone(), ids, all: shared.all, aux: Arc::new(aux), file: shared.file.clone() }
+        let slimmed = match Arc::try_unwrap(b) {
+            Ok(mut owned) => match Arc::try_unwrap(owned.aux) {
+                Ok(mut aux) => {
+                    let channels = std::mem::take(&mut aux.channels);
+                    aux.channels = owned.ids.iter().zip(channels).filter(|(id, _)| keep.contains(id)).map(|(_, c)| c).collect();
+                    owned.ids.retain(|id| keep.contains(id));
+                    aux.listed = owned.index.channels.iter().map(|c| c.name.clone()).collect();
+                    owned.aux = Arc::new(aux);
+                    Ok(owned)
+                }
+                Err(shared_aux) => {
+                    owned.aux = shared_aux;
+                    match slim_copy(path, &owned, keep) {
+                        Some(slim) => Ok(slim),
+                        None => Err(Arc::new(owned)),
+                    }
+                }
+            },
+            Err(shared) => slim_copy(path, &shared, keep).ok_or(shared),
+        };
+        let slim = match slimmed {
+            Ok(slim) => slim,
+            // (no memory for the copy: the set stays as it was)
+            Err(whole) => {
+                if let Some(e) = st.entries.get_mut(at) {
+                    e.bytes = whole.bytes();
+                    e.batch = Some(whole.clone());
+                }
+                if held {
+                    st.held.push_back((path.to_string(), whole));
+                }
+                return;
             }
         };
         if slim.ids.is_empty() {
@@ -800,6 +825,38 @@ impl PlaneStore {
         self.lock().held.iter().any(|(p, _)| p == path)
     }
 }
+
+/// The channels `keep` of `b` (of `path`) in a set of their own, the planes copied; `None` when
+/// the system can't give the memory for a copy.
+fn slim_copy(path: &str, b: &Batch, keep: &BTreeSet<usize>) -> Option<Batch> {
+    #[cfg(test)]
+    if COPIES_REFUSED.lock().unwrap_or_else(PoisonError::into_inner).iter().any(|p| p == path) {
+        return None;
+    }
+    let _ = path;
+    let mut aux = AuxChannels::new(b.aux.width, b.aux.height, b.aux.scale);
+    aux.manifests = b.aux.manifests.clone();
+    aux.aliases = b.aux.aliases.clone();
+    aux.listed = b.index.channels.iter().map(|c| c.name.clone()).collect();
+    for (id, (name, plane)) in b.ids.iter().zip(&b.aux.channels) {
+        if keep.contains(id) {
+            let mut copy = Vec::new();
+            copy.try_reserve_exact(plane.len()).ok()?;
+            copy.extend_from_slice(plane);
+            aux.channels.push((name.clone(), copy));
+        }
+    }
+    let ids = b.ids.iter().copied().filter(|id| keep.contains(id)).collect();
+    Some(Batch { index: b.index.clone(), ids, all: b.all, aux: Arc::new(aux), file: b.file.clone() })
+}
+
+/// One path per plane copied for the disk cache (tests).
+#[cfg(test)]
+pub(crate) static DISK_COPIES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Paths whose planes [`slim_copy`] finds no memory for (tests).
+#[cfg(test)]
+pub(crate) static COPIES_REFUSED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 /// This thread may not wait for planes: a decode thread (#3270: a decode doesn't depend on the
 /// requests waiting for it; an owner on a frame worker queues its decode on these threads, and
@@ -1015,22 +1072,38 @@ fn decode(path: &str, source: &ExrSource, flight: &Arc<Flight>, base: Option<Arc
     // Kept on disk for the next time, each channel read from the file in an entry of its own,
     // encoded on the disk cache's writer thread (a file from memory, which can't be checked
     // later, isn't).
-    if let Some(d) = &disk {
+    // (a plane larger than the disk cache may hold, or a cache taking no writes now, is not
+    // copied at all)
+    let plane_bytes = w.saturating_mul(h).saturating_mul(std::mem::size_of::<f32>());
+    if let Some(d) = disk.as_ref().filter(|d| d.accepts_writes() && plane_bytes as u64 <= d.limit_bytes()) {
         let mut files = effectcraft_render::reads::ReadFiles::default();
         files.add(batch.file.clone());
         if let Some(entry) = effectcraft_render::disk_cache::EntryFiles::of(&files, None) {
-            // (copies, each owned by its write: a queued write never keeps the store's set)
-            let planes: Vec<(u128, String, Vec<f32>)> = to_read
-                .par_iter()
+            // The planes read now that the disk cache doesn't hold yet.
+            let fresh: Vec<(u128, &String, &Vec<f32>)> = to_read
+                .iter()
                 .filter_map(|id| {
                     let (name, plane) = batch.aux.channels.get(batch.ids.binary_search(id).ok()?)?;
-                    Some((key(name), name.clone(), plane.clone()))
+                    let k = key(name);
+                    (!d.contains(effectcraft_render::disk_cache::Kind::Plane, k)).then_some((k, name, plane))
                 })
                 .collect();
             // (only planes that cost more to decode again than to read back, #3301)
-            let bytes = planes.iter().map(|(_, _, p)| p.len().saturating_mul(std::mem::size_of::<f32>())).fold(0, usize::saturating_add);
-            let took_us = read_took;
-            if d.pays_off(bytes, took_us) {
+            let bytes = fresh.iter().map(|(_, _, p)| p.len().saturating_mul(std::mem::size_of::<f32>())).fold(0, usize::saturating_add);
+            if !fresh.is_empty() && d.pays_off(bytes, read_took) {
+                // (copies, each owned by its write: a queued write never keeps the store's set;
+                // a plane the system can't give the memory for is left out)
+                let planes: Vec<(u128, String, Vec<f32>)> = fresh
+                    .par_iter()
+                    .filter_map(|(k, name, plane)| {
+                        let mut copy = Vec::new();
+                        copy.try_reserve_exact(plane.len()).ok()?;
+                        copy.extend_from_slice(plane);
+                        #[cfg(test)]
+                        DISK_COPIES.lock().unwrap_or_else(PoisonError::into_inner).push(path.to_string());
+                        Some((*k, (*name).clone(), copy))
+                    })
+                    .collect();
                 d.put_planes(w as u32, h as u32, planes, &entry, since);
             }
         }
@@ -1230,16 +1303,22 @@ fn picture_fits(path: &str, index: &ExrIndex) -> Result<(), String> {
     Err(format!("its {w}×{h} OpenEXR picture needs {:.1} GB of memory, more than the {:.1} GB one file may use", gb(need), gb(most)))
 }
 
-/// The picture of the OpenEXR at `path` (as [`picture`]) of only the display rows `rows`: those
-/// rows are read (with 1-line chunks exactly those lines, else the chunks holding them) and
-/// converted, the others stay empty (#3271: a region of interest). Read for this request alone,
-/// not kept in the store or on disk (the pool keeps the picture under a key naming the rows).
-pub(crate) fn picture_rows(path: &str, source: &ExrSource, op: AlphaOp, rows: (i64, i64)) -> Picture {
+/// The picture of the OpenEXR at `path` (as [`picture`]) of only the display rows `rows` of the
+/// footage's `nominal` size: those rows are read (with 1-line chunks exactly those lines, else
+/// the chunks holding them) and converted, the others stay empty (#3271: a region of interest).
+/// Read for this request alone, not kept in the store or on disk (the pool keeps the picture
+/// under a key naming the rows). A file of another size than `nominal` (a sequence frame larger
+/// than the first) is shown scaled, so its rows are not those: it is read whole.
+pub(crate) fn picture_rows(path: &str, source: &ExrSource, op: AlphaOp, rows: (i64, i64), nominal: (u32, u32)) -> Picture {
     let (index, opened) = match exr_index::get_opened(path, source) {
         Ok(ix) => ix,
         Err(IndexError::Unsupported(why)) => return Picture::Done(Err(why.to_string())),
         Err(_) => return Picture::Legacy,
     };
+    if index.size() != (nominal.0 as usize, nominal.1 as usize) {
+        drop(opened);
+        return picture(path, source, op, None);
+    }
     if let Err(why) = picture_fits(path, &index) {
         return Picture::Done(Err(why));
     }

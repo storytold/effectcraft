@@ -71,6 +71,14 @@ enum Pixels {
 }
 
 impl Pixels {
+    /// Nobody but the cache holds the pixels: dropping them frees their memory.
+    fn unshared(&self) -> bool {
+        match self {
+            Pixels::F32(img) => Arc::strong_count(img) == 1,
+            Pixels::Q8(f) => Arc::strong_count(f) == 1,
+        }
+    }
+
     fn bytes(&self) -> usize {
         match self {
             Pixels::F32(img) => img.data.len() * std::mem::size_of::<Px>(),
@@ -199,13 +207,17 @@ impl Lru {
             }
         }
     }
-    /// The least recently used frame it may drop (the newest always stays) and its last use.
+    /// The least recently used frame it may drop and its last use: not the newest (it always
+    /// stays) and not one whose pixels someone else holds (dropping it would free nothing yet).
     fn oldest(&self) -> Option<(&Key, u64)> {
         if self.map.len() <= 1 {
             return None;
         }
-        let (_, k) = self.order.first_key_value()?;
-        Some((k, self.map.get(k)?.used))
+        let newest = self.order.last_key_value().map(|(s, _)| *s);
+        self.order.iter().filter(|(s, _)| Some(**s) != newest).find_map(|(_, k)| {
+            let e = self.map.get(k)?;
+            e.img.unshared().then_some((k, e.used))
+        })
     }
     /// Drop the least recently used frame it may drop; the bytes freed.
     fn drop_oldest(&mut self) -> usize {
@@ -335,6 +347,14 @@ impl CacheState {
         self.forgotten.insert(path.into(), self.generation);
     }
 
+    /// Note that every file was let go (Purge): whatever a request or decode that started before
+    /// makes is stale, and none of them is joined.
+    fn forgot_all(&mut self) {
+        self.generation = self.generation.saturating_add(1);
+        self.forgotten.clear();
+        self.stale_before = self.generation;
+    }
+
     /// The whole still `key` decoded recently, with the files it was decoded from, if it is
     /// still kept.
     fn recent(&mut self, key: &Key) -> Option<(Arc<Image>, Arc<ReadFiles>)> {
@@ -376,6 +396,12 @@ impl CacheState {
     /// memory holder's).
     fn held_bytes(&self) -> usize {
         self.lru.bytes.saturating_add(self.lru.spare_bytes()).saturating_add(self.recent_bytes())
+    }
+
+    /// The oldest whole still in [`CacheState::recent`] that nobody else holds (dropping one in
+    /// use would free nothing yet).
+    fn oldest_recent(&self) -> Option<usize> {
+        self.recent.iter().position(|r| Arc::strong_count(&r.img) == 1)
     }
 
     /// The bytes of the whole stills [`CacheState::recent`] holds.
@@ -796,6 +822,8 @@ impl MediaPool {
         c.lru = Lru::default();
         c.recent.clear();
         c.last.clear();
+        // (a decode in flight keeps nothing, and later requests don't join it)
+        c.forgot_all();
         c.forgets = c.forgets.wrapping_add(1);
         drop(c);
         // Decoded GIFs sit outside the frame budget; Purge frees them too.
@@ -1639,7 +1667,9 @@ impl Inner {
             use crate::exr_planes::Picture;
             let extra = lock(&self.aux_footage).plan(&footage.path);
             let picture = match loc.key.rows {
-                Some(rows) if extra.is_none() => crate::exr_planes::picture_rows(path, &self.exr_source(path), op, rows),
+                Some(rows) if extra.is_none() => {
+                    crate::exr_planes::picture_rows(path, &self.exr_source(path), op, rows, (footage.width, footage.height))
+                }
                 _ => crate::exr_planes::picture(path, &self.exr_source(path), op, extra.as_ref()),
             };
             match picture {
@@ -1749,7 +1779,7 @@ impl effectcraft_render::memory::MemoryHolder for Inner {
         }
         let frame =
             c.lru.oldest().and_then(|(k, _)| c.lru.map.get(k)).map(|e| Candidate { used: e.used, bytes: e.bytes, cost_us: e.cost_us, protected: false });
-        let still = c.recent.front().map(|r| Candidate { used: r.used, bytes: r.bytes.max(1), cost_us: 0, protected: false });
+        let still = c.oldest_recent().and_then(|i| c.recent.get(i)).map(|r| Candidate { used: r.used, bytes: r.bytes.max(1), cost_us: 0, protected: false });
         match (frame, still) {
             (Some(f), Some(s)) => Some(if s.used < f.used { s } else { f }),
             (f, s) => f.or(s),
@@ -1761,10 +1791,11 @@ impl effectcraft_render::memory::MemoryHolder for Inner {
             return c.lru.drop_spare();
         }
         let frame = c.lru.oldest().map(|(_, t)| t);
-        let still = c.recent.front().map(|r| r.used);
-        match (frame, still) {
-            (Some(f), Some(s)) if s < f => c.recent.pop_front().map_or(0, |r| r.bytes.max(1)),
-            (None, Some(_)) => c.recent.pop_front().map_or(0, |r| r.bytes.max(1)),
+        let at = c.oldest_recent();
+        let still = at.and_then(|i| c.recent.get(i)).map(|r| r.used);
+        match (frame, still, at) {
+            (Some(f), Some(s), Some(i)) if s < f => c.recent.remove(i).map_or(0, |r| r.bytes.max(1)),
+            (None, Some(_), Some(i)) => c.recent.remove(i).map_or(0, |r| r.bytes.max(1)),
             _ => c.lru.drop_oldest(),
         }
     }
@@ -2181,6 +2212,35 @@ mod tests {
         assert_eq!(holder.drop_oldest(), px);
         assert_eq!(holder.bytes(), frames, "the frames stay until the buffers are gone");
         assert_eq!(holder.drop_oldest(), px + 64, "then the oldest frame");
+    }
+
+    /// #3750 review: a frame or whole still whose pixels someone else holds is not offered to the
+    /// accountant (dropping it would free nothing yet): what goes is what nobody else holds.
+    #[test]
+    fn frames_and_stills_held_elsewhere_are_not_offered() {
+        let pool = MediaPool::unregistered(usize::MAX);
+        let holder = pool.memory_holder();
+        let px = 256 * std::mem::size_of::<Px>();
+        let k = |i| Key { path: "a".into(), frame: i, interp: 0, matte: [0; 3], size: (0, 0), nominal: (0, 0), rows: None, q8: false };
+        let held = Arc::new(Image::new(16, 16));
+        let held_still = Arc::new(Image::new(8, 8));
+        {
+            let mut c = lock(&pool.inner.cache);
+            c.lru.insert(k(0), Pixels::F32(held.clone()), Arc::default(), usize::MAX);
+            c.lru.insert(k(1), Pixels::F32(Arc::new(Image::new(16, 16))), Arc::default(), usize::MAX);
+            c.lru.insert(k(2), Pixels::F32(Arc::new(Image::new(16, 16))), Arc::default(), usize::MAX);
+            // (two whole stills, older than every frame: the held one first)
+            let stamp = c.lru.clock;
+            c.recent.push_back(Recent { key: k(8), img: held_still.clone(), files: Arc::default(), bytes: 64 * 16, stamp, used: 0 });
+            c.recent.push_back(Recent { key: k(9), img: Arc::new(Image::new(4, 4)), files: Arc::default(), bytes: 16 * 16, stamp, used: 0 });
+        }
+        assert_eq!(holder.drop_oldest(), 16 * 16, "the still nobody holds");
+        assert_eq!(holder.drop_oldest(), px + 64, "the oldest frame nobody holds");
+        assert!(holder.oldest().is_none(), "the rest is held elsewhere, or the newest frame");
+        let c = lock(&pool.inner.cache);
+        assert!(c.lru.map.contains_key(&k(0)) && c.recent.iter().any(|r| Arc::ptr_eq(&r.img, &held_still)));
+        drop(c);
+        drop((held, held_still));
     }
 
     /// A frame kept as 8-bit levels is its own entry beside the float one, counted at 4 bytes
@@ -2655,6 +2715,39 @@ mod tests {
         pool.frame_at(&f, Tick::ZERO).unwrap();
         assert_eq!(pool.stats().decodes, 1, "and its picture was kept");
         *lock(&pool.inner.gate) = None;
+    }
+
+    /// #3750 review: a decode running when the frames are cleared (Purge) keeps nothing: its
+    /// frame doesn't come back into the cache after Purge emptied it.
+    #[test]
+    fn a_decode_running_across_purge_keeps_nothing() {
+        let pool = MediaPool::new();
+        let f = plate(&pool, "/purge.exr");
+        let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let go = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        {
+            let (started, go) = (started.clone(), go.clone());
+            // The decode waits (2 s at most) until the frames were cleared, then decodes the file.
+            *lock(&pool.inner.gate) = Some(Arc::new(move || {
+                started.store(true, Ordering::SeqCst);
+                let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+                while !go.load(Ordering::SeqCst) && std::time::Instant::now() < until {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                None
+            }));
+        }
+        std::thread::scope(|s| {
+            let decoding = s.spawn(|| pool.frame_at(&f, Tick::ZERO));
+            while !started.load(Ordering::SeqCst) {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            pool.clear_frames();
+            go.store(true, Ordering::SeqCst);
+            assert!(decoding.join().unwrap().is_ok(), "the request still gets its picture");
+        });
+        *lock(&pool.inner.gate) = None;
+        assert_eq!(pool.stats().frames, 0, "nothing kept after Purge");
     }
 
     /// Forgotten paths are remembered per path and boundedly: past [`MAX_FORGOTTEN`], everything

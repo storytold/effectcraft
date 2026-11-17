@@ -126,7 +126,7 @@ const FORMAT_F16_FILES: u8 = 3;
 /// Layer entries: their source files ([`EntryFiles`]), then the buffer. The format before it
 /// (0, without files) reads as a miss and is deleted.
 const FORMAT_LAYER_FILES: u8 = 4;
-/// Plane entries: their source file ([`EntryFiles`]), then one named plane ([`encode_plane`]).
+/// Plane entries: their source file ([`EntryFiles`]), then one named plane ([`encode_plane_after`]).
 /// (5, several `f32` planes per entry, reads as a miss and is deleted.)
 const FORMAT_PLANES_FILES: u8 = 6;
 
@@ -357,7 +357,16 @@ impl Payload {
             Payload::FrameF16(w, h, rgba, files) => one(key, &|| with_files(&files, encode_frame_f16(w, h, &rgba))),
             Payload::Planes(w, h, planes, files) => {
                 for (key, name, plane) in planes {
-                    one(key, &|| with_files(&files, encode_plane(w, h, &name, &plane)));
+                    if cache.contains(kind, key) {
+                        continue;
+                    }
+                    let mut entry = Vec::new();
+                    files.encode(&mut entry);
+                    // (no memory for the encoder just now: the entry isn't written, and the
+                    // plane is decoded from its file next time)
+                    if let Some(entry) = encode_plane_after(entry, w, h, &name, &plane) {
+                        cache.write_format(kind, key, format, &entry);
+                    }
                 }
             }
             Payload::Lz4(raw) => one(key, &|| lz4_flex::compress_prepend_size(&raw)),
@@ -1736,6 +1745,10 @@ fn decompress_checked(p: &[u8], expected: Option<usize>) -> Option<Vec<u8>> {
 /// `n` copies of `v`, or `None` when the system can't give the memory: a cache entry read back
 /// then counts as a miss.
 fn zeroed<T: Copy>(n: usize, v: T) -> Option<Vec<T>> {
+    #[cfg(test)]
+    if n.saturating_mul(std::mem::size_of::<T>()) > NO_MEMORY_OVER.with(std::cell::Cell::get) {
+        return None;
+    }
     let mut out = Vec::new();
     out.try_reserve_exact(n).ok()?;
     out.resize(n, v);
@@ -1795,13 +1808,20 @@ fn decode_frame_f16(p: &[u8]) -> Option<FrameF16> {
     Some(FrameF16 { width: w, height: h, rgba })
 }
 
-/// A plane entry's pixels (`plane`, named `name`, of `w` x `h`): width, height, the name
-/// (length and UTF-8 bytes) and the sample type, then the samples' bytes shuffled into byte
-/// planes (the first bytes of all samples, then the second...), LZ4-compressed. Type 1: half
-/// floats, when every value is one exactly (a half channel: half the bytes); type 2: `f32`
-/// (bit-exact: Cryptomatte IDs are float bit patterns).
+/// [`encode_plane_after`] alone (tests).
+#[cfg(test)]
 fn encode_plane(w: u32, h: u32, name: &str, plane: &[f32]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(64);
+    encode_plane_after(Vec::new(), w, h, name, plane).unwrap_or_default()
+}
+
+/// A plane entry's pixels (`plane`, named `name`, of `w` x `h`) appended to `out` (the entry's
+/// source files): width, height, the name (length and UTF-8 bytes) and the sample type, then the
+/// samples' bytes shuffled into byte planes (the first bytes of all samples, then the
+/// second...), LZ4-compressed. Type 1: half floats, when every value is one exactly (a half
+/// channel: half the bytes); type 2: `f32` (bit-exact: Cryptomatte IDs are float bit patterns).
+/// The scratch memory and the result are taken fallibly: `None` when the system can't give them.
+fn encode_plane_after(mut out: Vec<u8>, w: u32, h: u32, name: &str, plane: &[f32]) -> Option<Vec<u8>> {
+    out.try_reserve(64).ok()?;
     out.extend_from_slice(&w.to_le_bytes());
     out.extend_from_slice(&h.to_le_bytes());
     let name = name.as_bytes();
@@ -1809,14 +1829,14 @@ fn encode_plane(w: u32, h: u32, name: &str, plane: &[f32]) -> Vec<u8> {
     out.extend_from_slice(&(len as u16).to_le_bytes());
     out.extend_from_slice(name.get(..len).unwrap_or_default());
     let n = plane.len();
-    let mut halves = vec![half::f16::ZERO; n];
+    let mut halves = zeroed(n, half::f16::ZERO)?;
     half::slice::HalfFloatSliceExt::convert_from_f32_slice(halves.as_mut_slice(), plane);
     // (NaNs stay `f32`: their payloads must come back as they were)
     let exact = halves.iter().zip(plane).all(|(h, v)| !v.is_nan() && h.to_f32().to_bits() == v.to_bits());
     // Shuffled straight from the samples' bits into byte planes.
     let shuffled = if exact {
         out.push(1);
-        let mut s = vec![0u8; n.saturating_mul(2)];
+        let mut s = zeroed(n.checked_mul(2)?, 0u8)?;
         let (lo, hi) = s.split_at_mut(n);
         for ((l, hb), x) in lo.iter_mut().zip(hi.iter_mut()).zip(&halves) {
             [*l, *hb] = x.to_bits().to_le_bytes();
@@ -1825,7 +1845,7 @@ fn encode_plane(w: u32, h: u32, name: &str, plane: &[f32]) -> Vec<u8> {
     } else {
         drop(halves);
         out.push(2);
-        let mut s = vec![0u8; n.saturating_mul(4)];
+        let mut s = zeroed(n.checked_mul(4)?, 0u8)?;
         let (b0, rest) = s.split_at_mut(n);
         let (b1, rest) = rest.split_at_mut(n);
         let (b2, b3) = rest.split_at_mut(n);
@@ -1834,11 +1854,25 @@ fn encode_plane(w: u32, h: u32, name: &str, plane: &[f32]) -> Vec<u8> {
         }
         s
     };
-    out.extend_from_slice(&lz4_flex::compress_prepend_size(&shuffled));
-    out
+    // (as `lz4_flex::compress_prepend_size`: the size, then the block)
+    let most = lz4_flex::block::get_maximum_output_size(shuffled.len());
+    out.try_reserve_exact(most.checked_add(4)?).ok()?;
+    out.extend_from_slice(&u32::try_from(shuffled.len()).ok()?.to_le_bytes());
+    let at = out.len();
+    out.resize(at.checked_add(most)?, 0);
+    let len = lz4_flex::block::compress_into(&shuffled, out.get_mut(at..)?).ok()?;
+    out.truncate(at.saturating_add(len));
+    Some(out)
 }
 
-/// The name and plane of a plane entry's pixels ([`encode_plane`]) of `expect` (width, height);
+/// Allocations [`zeroed`] refuses on this thread: those over this many bytes (tests: memory the
+/// system can't give).
+#[cfg(test)]
+thread_local! {
+    static NO_MEMORY_OVER: std::cell::Cell<usize> = const { std::cell::Cell::new(usize::MAX) };
+}
+
+/// The name and plane of a plane entry's pixels ([`encode_plane_after`]) of `expect` (width, height);
 /// `None` when damaged or of another size.
 fn decode_plane(p: &[u8], expect: (u32, u32)) -> Option<(String, Vec<f32>)> {
     let u32_at = |at: usize| Some(u32::from_le_bytes(p.get(at..at + 4)?.try_into().ok()?));
@@ -2358,6 +2392,25 @@ mod tests {
         assert!(dc.contains(Kind::Plane, 9));
         assert!(dc.get_plane(9, w, h).is_none());
         assert!(!dc.contains(Kind::Plane, 9), "deleted");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #3750 review: a plane write whose encoder can't get its scratch memory (the half or
+    /// shuffled buffer of a 16K plane) writes no entry and goes on, instead of aborting; with the
+    /// memory it is written.
+    #[test]
+    fn a_plane_write_without_memory_for_its_encoder_is_skipped() {
+        let dir = tmpdir("planes-no-memory");
+        let dc = DiskCache::open(&dir, 1 << 30).unwrap();
+        let (files, _) = plane_source(&dir.join("src"));
+        let job = |key: u128| Payload::Planes(16, 8, vec![(key, "A.R".to_string(), vec![0.5f32; 128])], files.clone());
+        // (this thread's allocations through the encoder's scratch over 64 bytes are refused)
+        NO_MEMORY_OVER.with(|c| c.set(64));
+        job(1).write(&dc, Kind::Plane, 1, FORMAT_PLANES_FILES);
+        NO_MEMORY_OVER.with(|c| c.set(usize::MAX));
+        assert!(!dc.contains(Kind::Plane, 1), "no entry without the encoder's memory");
+        job(2).write(&dc, Kind::Plane, 2, FORMAT_PLANES_FILES);
+        assert!(dc.get_plane(2, 16, 8).is_some(), "written with it");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

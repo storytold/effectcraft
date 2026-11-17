@@ -1259,10 +1259,12 @@ impl<'a> Renderer<'a> {
         if comp_reads_pixels(ctx) || !self.footage.reads_rows(f, ctx.source_time(layer)) {
             return None;
         }
-        let inv = ctx.world_matrix(layer).inverse()?;
+        // (the transform the compositor places the 2D layer with: a 3D parent's matrix projected
+        // to the comp's plane)
+        let inv = ctx.layer_to_comp(layer).0.inverse()?;
         let ys: Vec<f64> = [[roi[0], roi[1]], [roi[0] + roi[2], roi[1]], [roi[0], roi[1] + roi[3]], [roi[0] + roi[2], roi[1] + roi[3]]]
             .iter()
-            .map(|p| inv.apply(effectcraft_geom::vec3(p[0], p[1], 0.0)).y)
+            .map(|p| inv.apply(effectcraft_geom::vec2(p[0], p[1])).y)
             .collect();
         let (lo, hi) = ys.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), y| (lo.min(*y), hi.max(*y)));
         if !lo.is_finite() || !hi.is_finite() {
@@ -1273,8 +1275,7 @@ impl<'a> Renderer<'a> {
         // pixels are 1/scale footage rows), plus the region's rounding to output pixels: one
         // output pixel is `k / scale` footage rows, `k` the footage rows per comp pixel.
         let s = self.opts.scale.max(1e-3);
-        let k =
-            [effectcraft_geom::vec3(1.0, 0.0, 0.0), effectcraft_geom::vec3(0.0, 1.0, 0.0)].iter().map(|v| inv.apply_vec(*v).length()).fold(1.0f64, f64::max);
+        let k = [effectcraft_geom::vec2(1.0, 0.0), effectcraft_geom::vec2(0.0, 1.0)].iter().map(|v| inv.apply_vec(*v).length()).fold(1.0f64, f64::max);
         if !k.is_finite() {
             return None;
         }

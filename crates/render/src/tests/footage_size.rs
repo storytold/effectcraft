@@ -225,6 +225,50 @@ fn a_footage_layer_read_by_rows_is_not_the_shared_picture() {
     assert!(whole_layer.footage_rows(&ctx, &comp.layers[0], f).is_none(), "whole layer: the whole frame");
 }
 
+/// #3750 review: a 2D footage layer under a 3D parent (a null turned 60° about X) is placed by
+/// its world matrix projected to the comp's plane, which halves its height: the comp's rows 0..10
+/// show its rows 0..20, and those are read (inverting the unprojected matrix gave rows 0..5).
+#[test]
+fn rows_under_a_3d_parent_follow_the_projected_layer() {
+    struct Rows;
+    impl FootageSource for Rows {
+        fn frame(&self, item: ItemId, f: &Footage, t: Tick) -> Option<Arc<Image>> {
+            Clip { sizes: None }.frame(item, f, t)
+        }
+        fn frame_rows(&self, item: ItemId, f: &Footage, t: Tick, _: Option<(u32, u32)>, _: crate::FloatCurve, _: (i64, i64)) -> Option<Arc<Image>> {
+            Clip { sizes: None }.frame(item, f, t)
+        }
+        fn reads_rows(&self, _: &Footage, _: Tick) -> bool {
+            true
+        }
+    }
+    use effectcraft_keyframe::Value;
+    let (mut p, cid) = project(BitDepth::Bpc32, false);
+    let Some(LayerSource::Footage { item }) = p.comp(cid).map(|c| c.layers[0].source.clone()) else { panic!("footage layer") };
+    if let Some(ItemKind::Footage(f)) = p.item_mut(item).map(|it| &mut it.kind) {
+        f.kind = FootageKind::Still;
+        f.path = "/still.exr".into();
+    }
+    let comp = p.comp(cid).unwrap().clone();
+    let mut null = build::layer(&mut p, &comp, "Null", LayerSource::Null, (100, 100), None);
+    null.switches.three_d = true;
+    null.props.prop_mut("transform/anchor").unwrap().value = Value::Vec3([0.0, 0.0, 0.0]);
+    null.props.prop_mut("transform/position").unwrap().value = Value::Vec3([0.0, 0.0, 0.0]);
+    null.props.prop_mut("transform/rotationX").unwrap().value = Value::Scalar(60.0);
+    let mut l = comp.layers[0].clone();
+    // (the layer's own transform is the identity: its anchor at its position)
+    l.props.prop_mut("transform/position").unwrap().value = Value::Vec3([48.0, 27.0, 0.0]);
+    l.props.prop_mut("transform/anchor").unwrap().value = Value::Vec3([48.0, 27.0, 0.0]);
+    l.parent = Some(null.id);
+    p.comp_mut(cid).unwrap().layers = vec![l, null].into();
+    let comp = p.comp(cid).unwrap();
+    let ctx = crate::EvalCtx::new(&p, cid, comp, Tick::ZERO);
+    let region = Renderer::new(&p, &Rows, RenderOpts { roi: Some([0.0, 0.0, 96.0, 10.0]), ..Default::default() });
+    let Some(ItemKind::Footage(f)) = p.item(item).map(|it| &it.kind) else { panic!("footage") };
+    let rows = region.footage_rows(&ctx, &comp.layers[0], f).expect("read by rows");
+    assert!(rows.0 == 0 && rows.1 >= 20, "rows 0..20 and the warp's reach: {rows:?}");
+}
+
 /// #3271 review: a render's channel reads (an effect's EXR channels) are called off with the
 /// render like its frame reads: they run under the render's cancel flag (a decode stops between
 /// batches), and once it is set they don't start.
