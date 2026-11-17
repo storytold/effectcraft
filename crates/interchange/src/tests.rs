@@ -34,6 +34,7 @@ fn info(kind: filmcraft_media::MediaKind, video: bool, audio: bool) -> filmcraft
             codec: "png".into(),
             pixel_format: String::new(),
             color: Default::default(),
+            color_assumed: None,
             has_alpha: false,
             bitrate: None,
             hdr: None,
@@ -60,7 +61,7 @@ fn media(p: &mut fp::Project, name: &str, path: &str, kind: filmcraft_media::Med
         proxy: None,
         identity: None,
     };
-    p.add_item(name, fp::Label::Iris, fp::ItemKind::Media(clip), bin)
+    p.add_item(name, fp::Label::Iris, fp::ItemKind::Media(Box::new(clip)), bin)
 }
 
 fn rate() -> filmcraft_time::FrameRate {
@@ -881,4 +882,18 @@ fn import_finds_each_clips_transitions_without_scanning_the_track() {
     // A middle clip reaches over both of its transitions' handles.
     let mid = m.layers.iter().find(|l| near(l.in_point, t(100.0 - 0.08))).expect("clip 250 extended into its incoming transition");
     assert!(near(mid.out_point, t(100.4 + 0.08)), "{}", mid.out_point.seconds());
+}
+
+#[test]
+fn edl_explicit_source_file_allows_the_same_path_as_an_outside_guess() {
+    let edl = b"TITLE: CUT\nFCM: NON-DROP FRAME\n\n001 A001 V C 00:00:00:00 00:00:01:00 00:00:00:00 00:00:01:00\n* FROM CLIP NAME: ../shared.mov\n\n002 A002 V C 00:00:00:00 00:00:01:00 00:00:01:00 00:00:02:00\n* FROM CLIP NAME: named.mov\n* SOURCE FILE: /shared.mov\n";
+    let mut asked = Vec::new();
+    let mut probe_all = |path: &str| {
+        asked.push(path.to_string());
+        probe(path)
+    };
+    let mut p = Project::default();
+    let opts = ImportOptions { name: "hand.edl".into(), edl_frame_rate: Some(25.0), base_dir: Some("/work".into()) };
+    import(&mut p, edl, None, &opts, &mut probe_all).unwrap();
+    assert_eq!(asked, ["/shared.mov"], "explicit SOURCE FILE permits the shared path, probed once");
 }
