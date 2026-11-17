@@ -194,14 +194,14 @@ pub fn gaussian_blur_unbounded(img: &Image, sigma_x: f64, sigma_y: f64) -> Image
         return out;
     }
     if let Some(r) = unbounded_radii(sigma_x) {
-        out.data.par_chunks_mut(w).for_each(|row| boxes_unbounded(row, r));
+        out.data.par_chunks_mut(w).for_each(|row| boxes_unbounded(row, &r));
     }
     if let Some(r) = unbounded_radii(sigma_y) {
         let cols: Vec<Vec<Px>> = (0..w)
             .into_par_iter()
             .map(|x| {
                 let mut col: Vec<Px> = out.data.iter().skip(x).step_by(w).copied().collect();
-                boxes_unbounded(&mut col, r);
+                boxes_unbounded(&mut col, &r);
                 col
             })
             .collect();
@@ -216,65 +216,71 @@ pub fn gaussian_blur_unbounded(img: &Image, sigma_x: f64, sigma_y: f64) -> Image
     out
 }
 
-/// [`gaussian_blur`]'s three box radii for `sigma`, or `None` where it doesn't blur (and for
-/// a sigma that isn't finite).
-fn unbounded_radii(sigma: f64) -> Option<[i64; 3]> {
-    if !(sigma > 0.05 && sigma.is_finite()) {
+/// Above this sigma (pixels) [`gaussian_blur_unbounded`] blurs as if it were this: far wider
+/// than any buffer ([`crate::MAX_PADDED_SIDE`]), and small enough for [`box_radii`]'s `i64`
+/// arithmetic (which overflows near 9e8).
+const UNBOUNDED_SIGMA_MAX: f64 = 1e7;
+
+/// [`gaussian_blur`]'s box radii for `sigma` without the zero ones (each an identity), or
+/// `None` where it doesn't blur (and for a sigma that isn't a number).
+fn unbounded_radii(sigma: f64) -> Option<Vec<i64>> {
+    if sigma.is_nan() || sigma <= 0.05 {
         return None;
     }
-    match box_radii(sigma, 3).as_slice() {
-        &[a, b, c] => Some([a, b, c].map(|r| i64::try_from(r).unwrap_or(i64::MAX / 8))),
-        _ => None,
-    }
+    let radii: Vec<i64> = box_radii(sigma.min(UNBOUNDED_SIGMA_MAX), 3).into_iter().filter_map(|r| i64::try_from(r).ok()).filter(|&r| r > 0).collect();
+    (!radii.is_empty()).then_some(radii)
 }
 
-/// Three transparent-edged box passes of radii `r` over `line`, as if it went on with zeros.
+/// Transparent-edged box passes of radii `r` (one to three, none zero) over `line`, as if it
+/// went on with zeros.
 ///
-/// One box is a difference of prefix sums, `(S(x + r) − S(x − r − 1)) / (2r + 1)`, so three are
-/// eight signed terms of the third prefix sum `S3`. Past the line's ends the prefix sums are
-/// polynomials: `S3(m) = 0` before it, and after it, `j = m − n + 1` steps on,
-/// `S3(m) = S3(n − 1) + j·S2(n − 1) + T·j(j + 1)/2` with `T` the line's total. The sums are
-/// `f64`: the eight terms cancel to a value `(2r + 1)³` times smaller.
-fn boxes_unbounded(line: &mut [Px], r: [i64; 3]) {
-    let n = line.len();
+/// One box is a difference of prefix sums, `(S(x + r) − S(x − r − 1)) / (2r + 1)`, so `k` boxes
+/// are `2^k` signed terms of the `k`-th prefix sum `Sk`. Before the line every `Sk` is 0; past
+/// it, `j = m − n + 1` steps on with `T` the line's total, they are polynomials:
+/// `S1(m) = T`, `S2(m) = S2(n − 1) + j·T`, `S3(m) = S3(n − 1) + j·S2(n − 1) + T·j(j + 1)/2`.
+/// The sums are `f64`. `Sk` grows like `n^k`, so the cancelling terms leave a rounding error
+/// near `ε·n^k / (2r + 1)^k` of the values: under 1e-8 for any line a blur too wide for its
+/// buffer runs on.
+fn boxes_unbounded(line: &mut [Px], r: &[i64]) {
+    let (n, k) = (line.len(), r.len());
     let Ok(n_i) = i64::try_from(n) else { return };
-    if n == 0 {
+    if n == 0 || !(1..=3).contains(&k) {
         return;
     }
-    let mut s3 = Vec::with_capacity(n);
-    let (mut s1, mut s2, mut acc) = ([0.0f64; 4], [0.0f64; 4], [0.0f64; 4]);
+    // sums[o] = the (o + 1)-th prefix sum so far.
+    let mut sums = [[0.0f64; 4]; 3];
+    let mut sk = Vec::with_capacity(n);
     for p in line.iter() {
         for c in 0..4 {
-            s1[c] += f64::from(p[c]);
-            s2[c] += s1[c];
-            acc[c] += s2[c];
+            sums[0][c] += f64::from(p[c]);
+            sums[1][c] += sums[0][c];
+            sums[2][c] += sums[1][c];
         }
-        s3.push(acc);
+        sk.push(sums[k - 1]);
     }
-    let (total, s2_end, s3_end) = (s1, s2, acc);
     let at = |m: i64| -> [f64; 4] {
         if m < 0 {
             return [0.0; 4];
         }
-        if let Some(v) = usize::try_from(m).ok().and_then(|i| s3.get(i)) {
+        if let Some(v) = usize::try_from(m).ok().and_then(|i| sk.get(i)) {
             return *v;
         }
         let j = (m - n_i + 1) as f64;
-        std::array::from_fn(|c| s3_end[c] + j * s2_end[c] + total[c] * j * (j + 1.0) / 2.0)
+        std::array::from_fn(|c| match k {
+            1 => sums[0][c],
+            2 => sums[1][c] + j * sums[0][c],
+            _ => sums[2][c] + j * sums[1][c] + sums[0][c] * j * (j + 1.0) / 2.0,
+        })
     };
-    // The eight shifts and signs: each box adds `S(x + r)` and subtracts `S(x − r − 1)`.
-    let mut terms = [(0i64, 1.0f64); 8];
-    for (k, t) in terms.iter_mut().enumerate() {
-        for (b, &ri) in r.iter().enumerate() {
-            if k >> b & 1 == 0 {
-                t.0 = t.0.saturating_add(ri);
-            } else {
-                t.0 = t.0.saturating_sub(ri.saturating_add(1));
-                t.1 = -t.1;
-            }
-        }
-    }
-    let norm: f64 = r.iter().map(|&ri| (2 * ri + 1) as f64).product();
+    // The shifts and signs: each box adds `S(x + r)` and subtracts `S(x − r − 1)`.
+    let terms: Vec<(i64, f64)> = (0..1usize << k)
+        .map(|bits| {
+            r.iter().enumerate().fold((0i64, 1.0f64), |(shift, sign), (b, &ri)| {
+                if bits >> b & 1 == 0 { (shift.saturating_add(ri), sign) } else { (shift.saturating_sub(ri.saturating_add(1)), -sign) }
+            })
+        })
+        .collect();
+    let norm: f64 = r.iter().map(|&ri| 2.0 * ri as f64 + 1.0).product();
     for (x, o) in (0i64..).zip(line.iter_mut()) {
         let mut v = [0.0f64; 4];
         for &(shift, sign) in &terms {
@@ -626,6 +632,20 @@ mod tests {
         assert!(r.iter().all(|&v| (7..=10).contains(&v)), "{r:?}");
     }
 
+    /// #3464: a sigma past any buffer, or infinite, blurs as the widest one does: finite, no
+    /// overflow in the radii. A NaN sigma leaves the axis alone.
+    #[test]
+    fn unbounded_gaussian_takes_any_sigma() {
+        let mut img = Image::new(9, 7);
+        img.set(4, 3, [1.0, 0.5, 0.25, 1.0]);
+        let wide = gaussian_blur_unbounded(&img, 1e7, 1e7);
+        for (sx, sy) in [(f64::INFINITY, f64::INFINITY), (1e300, 1e12)] {
+            assert_eq!(gaussian_blur_unbounded(&img, sx, sy).data, wide.data, "σ ({sx}, {sy})");
+        }
+        assert!(wide.data.iter().flatten().all(|v| v.is_finite()));
+        assert_eq!(gaussian_blur_unbounded(&img, f64::NAN, f64::NAN).data, img.data);
+    }
+
     /// #3464: [`gaussian_blur_unbounded`] is [`gaussian_blur`] on the image padded with enough
     /// transparency to hold every pass, cropped back: what a pass spreads past the edge comes
     /// back in the passes after it. Sigmas far wider than the image too, along each axis.
@@ -644,8 +664,11 @@ mod tests {
             (pattern(23, 17), 0.0, 6.0, 1e-4),
             (pattern(23, 17), 7.5, 3.2, 1e-4),
             (pattern(23, 17), 60.0, 45.0, 1e-4),
-            // The reference's f32 running sums drift over its 90 000-pixel line (by 1.5e-4 of
-            // the value against an f64 evaluation, which this matches to 1e-9).
+            // Zero radii (an identity) and one non-zero box among them.
+            (pattern(23, 17), 0.5, 0.0, 1e-6),
+            (pattern(23, 17), 0.0, 1.1, 1e-5),
+            // The reference's f32 running sums drift over its 90 000-pixel line (by about 1.5e-4
+            // of the value).
             (pattern(40, 1), 15000.0, 0.0, 1e-3),
             (pattern(1, 40), 0.0, 15000.0, 1e-3),
         ];
