@@ -47,11 +47,12 @@ pub(crate) fn input_key_of(mut s: String, layer: &Layer, uid: Uid) -> String {
     format!("{:016x}", fnv(&s))
 }
 
-/// The slider ranges 0.22–0.24 gave effect parameters whose range has changed since, as
+/// Slider ranges as 0.22–0.24 gave them, for parameters whose range has changed since, as
 /// (effect, parameter path, [min, max, slider min, slider max], decimals). Those releases hashed
 /// each effect's UI hints into the Roto Brush Input Key, and opening a project replaces an
 /// instance's hints with the current ones, so [`effect_text`] puts these back. A range change
 /// above a Roto Brush would otherwise drop the analysis such a key kept: add a row with it.
+/// Not every range changed since 0.24.1 has its row yet (#3815).
 #[rustfmt::skip]
 const SLIDERS_0_24: &[(&str, &str, [f64; 4], u8)] = &[
     ("ec.blur.gaussian", "blurriness", [0.0, 3000.0, 0.0, 50.0], 1),

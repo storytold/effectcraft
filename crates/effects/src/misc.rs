@@ -1044,7 +1044,7 @@ mod tests {
         for repeat in [false, true] {
             let out = run_fx("ec.blur.gaussian", &[("blurriness", num(30000.0)), ("repeatEdge", Value::Bool(repeat))], edge(), 0.0, EffectEnv::default());
             let (w, h) = (out.img.width, out.img.height);
-            assert!(u64::from(w) * u64::from(h) <= 16_777_216, "repeat {repeat}: {w} x {h}");
+            assert!(f64::from(w) * f64::from(h) <= crate::pixel_budget(40.0, 8.0), "repeat {repeat}: {w} x {h}");
             assert!(out.img.data.iter().flatten().all(|v| v.is_finite()), "repeat {repeat}");
             if repeat {
                 assert_eq!((w, h), (40, 8));
