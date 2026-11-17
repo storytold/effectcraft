@@ -3,7 +3,7 @@
 use effectcraft_color::luminance;
 use effectcraft_keyframe::Value;
 use effectcraft_project::ParamUi;
-use effectcraft_raster::{Image, gaussian_blur, hash_noise};
+use effectcraft_raster::{Image, gaussian_blur, gaussian_blur_unbounded, hash_noise};
 use rayon::prelude::*;
 
 use crate::{Buf, EffectCtx, EffectSpec, col, num, p, popup, slider};
@@ -283,6 +283,12 @@ fn glow(ctx: &EffectCtx, mut b: Buf) -> Buf {
     b
 }
 
+/// The margin Drop Shadow asks for around a layer: its Distance and its blur's reach (three
+/// boxes of radius about σ = Softness / 2), both in buffer pixels. Shared with the GPU path.
+pub fn drop_shadow_pad(dist: f64, soft: f64) -> u32 {
+    ((dist + soft * 1.5).ceil() as u32).saturating_add(2)
+}
+
 fn drop_shadow(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let color = ctx.params.color("color");
     let opacity = ctx.params.f("opacity") as f32 / 100.0;
@@ -290,9 +296,17 @@ fn drop_shadow(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let dist = ctx.params.f("distance") * b.scale;
     let soft = ctx.params.f("softness") * b.scale;
     let only = ctx.params.b("shadowOnly");
-    let pad = (dist + soft * 1.5).ceil() as u32 + 2;
+    let pad = drop_shadow_pad(dist, soft);
+    // Whether the buffer holds the whole blur. The pixel budget (#2261) cuts the margin of a
+    // large Softness (After Effects' range reaches 30000, #3464); the blur then goes on past the
+    // buffer's edge rather than dropping what reaches it, which would leave the shadow far too
+    // faint. An adjustment layer's buffer is the composition, as before.
+    let mut holds_blur = true;
     if !ctx.adjustment {
+        let (w0, h0) = (b.img.width, b.img.height);
         b.pad(pad);
+        let need = pad.saturating_mul(2);
+        holds_blur = b.img.width.saturating_sub(w0) >= need && b.img.height.saturating_sub(h0) >= need;
     }
     let (dx, dy) = (dir.sin() * dist, -dir.cos() * dist);
     let mut sh = Image::new(b.img.width, b.img.height);
@@ -304,7 +318,7 @@ fn drop_shadow(ctx: &EffectCtx, mut b: Buf) -> Buf {
         }
     });
     if soft > 0.0 {
-        sh = gaussian_blur(&sh, soft / 2.0, soft / 2.0, false);
+        sh = if holds_blur { gaussian_blur(&sh, soft / 2.0, soft / 2.0, false) } else { gaussian_blur_unbounded(&sh, soft / 2.0, soft / 2.0) };
     }
     if !only {
         sh.data.par_iter_mut().zip(b.img.data.par_iter()).for_each(|(s, o)| {
@@ -1034,6 +1048,30 @@ mod tests {
         assert_ne!(row(1.2), row(1.6));
         assert_ne!(row(1.6), row(2.0));
         assert_ne!(row(2.0), row(2.4));
+    }
+
+    /// #3464: past the padding budget (#2261) the shadow keeps its whole blur (σ = Softness / 2)
+    /// up to the buffer's edge. A 64 × 48 layer's shadow at its centre is the Gaussian's share
+    /// of the layer, less the 6 % three boxes' peak is under a Gaussian's; dropping what the
+    /// boxes spread past the buffer left it at 0.2 of that at 8000 and 0.001 at 30000.
+    #[test]
+    fn drop_shadow_keeps_its_blur_past_the_padding_budget() {
+        let (w, h) = (64u32, 48u32);
+        for softness in [500.0, 4000.0, 8000.0, 30000.0] {
+            let layer = effectcraft_raster::Image::filled(w, h, [1.0, 1.0, 1.0, 1.0]);
+            let vals = [("softness", num(softness)), ("opacity", num(100.0)), ("distance", num(0.0)), ("shadowOnly", Value::Bool(true))];
+            let out = run_fx("ec.perspective.dropshadow", &vals, layer, 0.0, EffectEnv::default());
+            assert!(out.img.data.iter().flatten().all(|v| v.is_finite()), "softness {softness}");
+            let sigma = softness / 2.0;
+            let share = |len: u32| {
+                let sum: f64 = (0..len).map(|i| (-((f64::from(i) + 0.5 - f64::from(len) / 2.0) / sigma).powi(2) / 2.0).exp()).sum();
+                sum / (sigma * (2.0 * std::f64::consts::PI).sqrt())
+            };
+            let want = share(w) * share(h);
+            let at = |v: f64, half: u32| (v + f64::from(half)) as i64;
+            let got = f64::from(out.img.get(at(out.offset[0], w / 2), at(out.offset[1], h / 2))[3]);
+            assert!((0.85..1.02).contains(&(got / want)), "softness {softness}: centre alpha {got}, Gaussian {want}");
+        }
     }
 
     #[test]

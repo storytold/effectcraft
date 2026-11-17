@@ -760,6 +760,39 @@ fn box_blur_horizontal_rows_match_cpu_beyond_256() {
     }
 }
 
+/// #3464: Drop Shadow's Softness reaches 30000. While the padded buffer holds the blur the GPU
+/// runs it (1000, the old maximum, on a 70 × 44 layer); once the pixel budget cuts the padding
+/// the CPU blurs past the buffer's edge, so the GPU hands the effect over and the render still
+/// matches, with and without Shadow Only.
+#[test]
+fn drop_shadow_large_softness_matches_cpu() {
+    effect_case("ec.perspective.dropshadow", &[("distance", n(6.0)), ("softness", n(1000.0)), ("opacity", n(100.0))]);
+    let Some(g) = gpu() else { return };
+    for only in [false, true] {
+        let vals = [("distance", n(6.0)), ("softness", n(30000.0)), ("opacity", n(100.0)), ("shadowOnly", Value::Bool(only))];
+        let spec = effectcraft_effects::find("ec.perspective.dropshadow").unwrap();
+        let mut params = effectcraft_effects::Params {
+            values: spec.params.iter().map(|ps| (ps.id.to_string(), effectcraft_effects::default_value(ps, [70.0, 44.0]))).collect(),
+        };
+        for (k, v) in &vals {
+            params.values.insert(k.to_string(), v.clone());
+        }
+        let ctx = effectcraft_effects::EffectCtx { params: &params, time: 0.0, layer_size: [70.0, 44.0], seed: 11, adjustment: false, env: Default::default() };
+        let buf = effectcraft_effects::Buf { img: pattern(7, 70, 44), offset: [0.0, 0.0], scale: 1.0 };
+        let step = effectcraft_render::FxStep { spec, ctx };
+        assert!(effectcraft_render::Accelerator::effects(g, &[step], &buf, None).is_none(), "the GPU hands a cut margin to the CPU");
+        for depth in [BitDepth::Bpc8, BitDepth::Bpc32] {
+            let mut s = Scene::new(depth);
+            let bg = s.solid([0.15, 0.1, 0.2], 97, 61);
+            s.push(bg);
+            let mut l = s.footage(70, 44);
+            s.effect(&mut l, "ec.perspective.dropshadow", &vals);
+            s.push(l);
+            check(&format!("drop shadow 30000 only {only} {depth:?}"), compare_at(&s, opts(), Tick::ZERO), 0.0);
+        }
+    }
+}
+
 #[test]
 fn gpu_effects_match_cpu() {
     // Sigma 3 px and up and even radii, so the half-scale pass stays on the GPU too (#1939).
