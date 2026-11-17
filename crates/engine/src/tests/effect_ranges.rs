@@ -162,6 +162,23 @@ fn projects_saved_with_the_narrower_ranges_open_with_the_new_ones() {
     }
 }
 
+/// #3466: Sharpen Amount clamps just outside After Effects' 0..4000, and an undo after a
+/// clamped set restores the value from before it.
+#[test]
+fn sharpen_amount_clamps_outside_the_after_effects_range() {
+    let (mut s, l, _) = session();
+    let (e, p) = ("ec.blur.sharpen", "amount");
+    for (v, want) in [(4001.0, 4000.0), (-1.0, 0.0)] {
+        set(&mut s, l, e, p, 1000.0);
+        assert_eq!(set(&mut s, l, e, p, v), json!(want), "{v}: prop.set reply");
+        assert_eq!(read(&mut s, l, e, p), want, "{v}");
+        assert!(s.undo());
+        assert_eq!(read(&mut s, l, e, p), 1000.0, "{v}: undo");
+        assert!(s.redo());
+        assert_eq!(read(&mut s, l, e, p), want, "{v}: redo");
+    }
+}
+
 /// The property at `path` (`group/param`) in an effect instance.
 fn prop_mut<'a>(g: &'a mut PropGroup, path: &str) -> Option<&'a mut effectcraft_project::Property> {
     match path.split_once('/') {
