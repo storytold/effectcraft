@@ -312,8 +312,13 @@ fn interpret_footage_form(s: &effectcraft_engine::Session, proxy: bool, base: &m
         }
     }
     // Color: what the file's Dolby Vision configuration says, and what is shown of it (read-only).
+    // Video the importer read no codec in has no picture yet; the import warning goes by the same
+    // answer (`Footage::codec_unread`).
     if let Some(dv) = f.dolby_vision {
-        fields.push(Field::note("dolbyVision", &format!("{}: the base layer is shown; the Dolby Vision metadata is not applied.", dv.label())));
+        let base = "the base layer is shown; the Dolby Vision metadata is not applied.";
+        let shown =
+            if f.codec_unread() { format!("this build can't decode this video yet, so it shows no picture. When it can, {base}") } else { base.to_string() };
+        fields.push(Field::note("dolbyVision", &format!("{}: {shown}", dv.label())));
     }
     // After Frame Rate: an image sequence's frames (a missing one holds the previous frame),
     // then Start Timecode.
@@ -1278,35 +1283,43 @@ mod tests {
     }
 
     /// Interpret Footage says what a movie's Dolby Vision configuration is, read-only (it is no
-    /// parameter of the command), and that only its base layer is shown; other footage has no such
-    /// line.
+    /// parameter of the command), and that only its base layer is shown, or that this build can't
+    /// decode its video yet when the importer read no codec in it; other footage has no such line.
     #[test]
     fn interpret_footage_shows_the_dolby_vision_configuration() {
-        use effectcraft_engine::project::{DolbyVisionInfo, Footage, FootageKind, ItemKind};
+        use effectcraft_engine::project::{DolbyVisionInfo, Footage, FootageKind, ItemKind, UNREAD_CODEC};
         let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
-        let movie = |dolby_vision| {
+        let movie = |codec: &str, dolby_vision| {
             ItemKind::Footage(Footage {
                 path: "/m/clip.mov".into(),
                 kind: FootageKind::Video,
                 width: 4,
                 height: 4,
                 has_video: true,
+                codec: codec.into(),
                 dolby_vision,
                 ..Default::default()
             })
         };
+        let iphone = Some(DolbyVisionInfo { profile: 8, level: 4, compatibility: 4 });
         let project = std::sync::Arc::make_mut(&mut app.session.project);
-        let dv = project.add_item("iphone.mov", Default::default(), None, movie(Some(DolbyVisionInfo { profile: 8, level: 4, compatibility: 4 })));
-        let plain = project.add_item("plain.mov", Default::default(), None, movie(None));
-        app.session.state.project_selection = vec![dv];
-        assert!(open_form(&mut app, "file.interpretFootage", &json!({})));
-        let note = app.dialog_state.form.fields.iter().find(|f| f.key == "dolbyVision").map(|f| f.kind.clone());
-        let Some(FieldKind::Note(text)) = note else { panic!("no Dolby Vision note: {note:?}") };
+        let hvc1 = project.add_item("iphone.mov", Default::default(), None, movie("HEVC", iphone));
+        let dvh1 = project.add_item("dvh1.mov", Default::default(), None, movie(UNREAD_CODEC, iphone));
+        let plain = project.add_item("plain.mov", Default::default(), None, movie("HEVC", None));
+        let note = |app: &mut EffectcraftApp, item| {
+            app.session.state.project_selection = vec![item];
+            assert!(open_form(app, "file.interpretFootage", &json!({})));
+            assert!(app.dialog_state.form.params().get("dolbyVision").is_none(), "{}", app.dialog_state.form.params());
+            app.dialog_state.form.fields.iter().find(|f| f.key == "dolbyVision").map(|f| f.kind.clone())
+        };
+        let Some(FieldKind::Note(text)) = note(&mut app, hvc1) else { panic!("no Dolby Vision note") };
         assert_eq!(text, "Dolby Vision 8.4 (HLG base layer): the base layer is shown; the Dolby Vision metadata is not applied.");
-        assert!(app.dialog_state.form.params().get("dolbyVision").is_none(), "{}", app.dialog_state.form.params());
-        app.session.state.project_selection = vec![plain];
-        assert!(open_form(&mut app, "file.interpretFootage", &json!({})));
-        assert!(!app.dialog_state.form.fields.iter().any(|f| f.key == "dolbyVision"));
+        let Some(FieldKind::Note(text)) = note(&mut app, dvh1) else { panic!("no Dolby Vision note") };
+        assert_eq!(
+            text,
+            "Dolby Vision 8.4 (HLG base layer): this build can't decode this video yet, so it shows no picture. When it can, the base layer is shown; the Dolby Vision metadata is not applied."
+        );
+        assert!(note(&mut app, plain).is_none());
     }
 
     /// Interpret Footage shows Cineon Settings for DPX footage only. The converted points show in

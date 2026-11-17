@@ -179,10 +179,6 @@ fn edits_shown(edits: &[craft_media::isobmff::Edit], timescale: u32) -> Option<T
     Some(Tick::from_units(i64::try_from(units).ok()?, i64::from(timescale)))
 }
 
-/// The codec FilmCraft names a video stream it reads no codec in (craft-media's
-/// `CodecConfig::Unknown`): none of its decoders takes it.
-const UNREAD_CODEC: &str = "unknown";
-
 /// The Dolby Vision configuration of an MP4/MOV movie's video and the type of the sample entry
 /// holding it (`dvh1`, `hvc1`…). `None` without one, for other containers and for files
 /// craft-media can't read. The track is the one FilmCraft shows ([`shown_video_track`]); the
@@ -210,7 +206,7 @@ fn note_dolby_vision(f: &mut Footage, dv: Option<(DolbyVisionConfig, FourCc)>) -
         )));
     }
     f.dolby_vision = Some(DolbyVisionInfo { profile: config.profile(), level: config.level(), compatibility: config.bl_signal_compatibility_id() });
-    if f.codec == UNREAD_CODEC {
+    if f.codec_unread() {
         let why = format!("{}: Dolby Vision video in a {} track can't be decoded by this build yet, so it shows no picture", f.path, format.0.escape_ascii());
         PROBE_WARNING.with(|w| *w.borrow_mut() = Some(why));
     }
@@ -607,12 +603,12 @@ mod tests {
     /// answer, not by the entry type.
     #[test]
     fn undecodable_dolby_vision_video_is_reported_until_filmcraft_reads_its_codec() {
-        let (r, warning) = noted("unknown", config(8, true, 4), b"dvh1");
+        let (r, warning) = noted(effectcraft_project::UNREAD_CODEC, config(8, true, 4), b"dvh1");
         assert!(r.unwrap().dolby_vision.is_some());
         let warning = warning.expect("a warning");
         assert!(warning.starts_with("/m/clip.mov: Dolby Vision video in a dvh1 track can't be decoded by this build yet"), "{warning}");
         // An entry type from the file is shown escaped, never as control characters.
-        let (_, warning) = noted("unknown", config(8, true, 4), b"dv\x00\n");
+        let (_, warning) = noted(effectcraft_project::UNREAD_CODEC, config(8, true, 4), b"dv\x00\n");
         assert!(warning.as_deref().is_some_and(|w| w.contains(r"in a dv\x00\n track")), "{warning:?}");
         for (codec, format) in [("HEVC", b"dvh1"), ("HEVC", b"dvhe"), ("HEVC", b"hvc1")] {
             let (r, warning) = noted(codec, config(8, true, 4), format);

@@ -160,7 +160,7 @@ fn dolby_vision_entries_record_it_and_warn_while_filmcraft_reads_no_codec() {
         assert_eq!(f.dolby_vision, Some(IPHONE), "{name}");
         let (g, _) = in_memory.unwrap_or_else(|e| panic!("{name} from memory: {e}"));
         assert_eq!(g.dolby_vision, Some(IPHONE), "{name} from memory");
-        if f.codec == "unknown" {
+        if f.codec_unread() {
             let warning = warning.unwrap_or_else(|| panic!("{name}: no warning"));
             assert!(warning.contains(&format!("Dolby Vision video in a {name} track can't be decoded by this build yet")), "{warning}");
         } else {
@@ -261,7 +261,7 @@ fn import_warns_while_dolby_vision_video_cannot_be_decoded() {
     let f = footage(&s, &r);
     assert_eq!(f.dolby_vision, Some(IPHONE));
     let warnings = r["warnings"].to_string();
-    if f.codec == "unknown" {
+    if f.codec_unread() {
         assert!(warnings.contains("import-dvh1.mov: Dolby Vision video in a dvh1 track can't be decoded by this build yet"), "{r}");
     } else {
         assert_eq!((f.codec.as_str(), &r["warnings"]), ("HEVC", &json!([])), "{r}");

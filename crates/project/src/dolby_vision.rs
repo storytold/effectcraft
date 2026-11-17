@@ -1,11 +1,28 @@
-//! What a movie's Dolby Vision configuration says, as the footage information shows it.
+//! What a movie's Dolby Vision configuration says, as the footage information shows it, and
+//! whether its video can be decoded.
 
 use serde::{Deserialize, Serialize};
 
+use crate::Footage;
+
+/// The codec the importer names a video stream it reads no codec in (craft-media's
+/// `CodecConfig::Unknown`, as FilmCraft, which decodes movies, labels it): none of its decoders
+/// takes it, so the footage shows no picture.
+pub const UNREAD_CODEC: &str = "unknown";
+
+impl Footage {
+    /// The importer read no codec in the footage's video ([`UNREAD_CODEC`]), so this build can't
+    /// decode it. Import warnings and the footage information go by this one answer, so they
+    /// change together once the decoder reads the stream.
+    pub fn codec_unread(&self) -> bool {
+        self.codec == UNREAD_CODEC
+    }
+}
+
 /// The Dolby Vision configuration of a movie's video (its `dvcC`, `dvvC` or `dvwC` box), read when
-/// probing ([`crate::Footage::dolby_vision`]). It only describes the file: the footage shows the
-/// stream's base layer, and the Dolby Vision metadata (RPUs, an enhancement layer) is not applied,
-/// so it never changes the footage's pixels.
+/// probing ([`crate::Footage::dolby_vision`]). It only describes the file: the footage is decoded
+/// as the stream's base layer, and the Dolby Vision metadata (RPUs, an enhancement layer) is not
+/// applied, so it never changes the footage's pixels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DolbyVisionInfo {
     /// The Dolby Vision profile (5, 7, 8, 9, 10, 20, …).
@@ -44,7 +61,6 @@ impl DolbyVisionInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Footage;
 
     fn dv(profile: u8, compatibility: u8) -> DolbyVisionInfo {
         DolbyVisionInfo { profile, level: 4, compatibility }
@@ -66,6 +82,17 @@ mod tests {
         ];
         for (info, want) in rows {
             assert_eq!(info.label(), want, "{info:?}");
+        }
+    }
+
+    /// Only the codec name the importer gives a stream it read no codec in says the video can't be
+    /// decoded; a named codec, or none at all (stills, data), doesn't.
+    #[test]
+    fn only_the_unread_codec_name_means_the_video_cannot_be_decoded() {
+        let with = |codec: &str| Footage { codec: codec.into(), ..Footage::default() };
+        assert!(with(UNREAD_CODEC).codec_unread());
+        for codec in ["HEVC", "H.264 (High)", "", "Unknown", "unknown video"] {
+            assert!(!with(codec).codec_unread(), "{codec:?}");
         }
     }
 

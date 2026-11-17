@@ -266,7 +266,7 @@ pub struct Footage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file_timecode: Option<i64>,
     /// The Dolby Vision configuration the movie's video carries, read when probing. It describes
-    /// the file and never changes its pixels: the base layer is shown.
+    /// the file and never changes its pixels: the base layer is what's decoded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dolby_vision: Option<DolbyVisionInfo>,
     /// Markers the file carries (a WAV's cue points and XMP markers), at footage time. A layer
