@@ -73,10 +73,10 @@ pub fn sub_scaling_ratio(percent: f64) -> f64 {
 
 /// Bound on an octave's frequency and on its Perspective Offset depth (and their inverses).
 /// Unbounded, at Sub Scaling 10000 and Complexity 20 they would reach 100^±19, and Perspective
-/// Offset or Turbulence Factor multiplying the offset by the depth overflowed to infinity (NaN
-/// noise, #3486). Sub Scaling 10..100 never reaches the bound (10^19 at most). Both stay each
-/// other's inverse inside it, so an octave's offset in lattice cells is unchanged; an octave this
-/// far out is a constant (or sub-pixel noise) across any layer either way.
+/// Offset multiplying the offset by the depth (and by Turbulence Factor's drift) overflowed to
+/// infinity (NaN noise, #3486). Sub Scaling 10..100 never reaches the bound (10^19 at most). Both
+/// stay each other's inverse inside it, so an octave's offset in lattice cells is unchanged; at a
+/// frequency of 1e-20 an octave spans under 1e-12 cells of any layer, so it has no detail either way.
 pub const OCTAVE_SCALE_MAX: f32 = 1e20;
 
 /// Bound on an octave's scaled Offset Turbulence in pixels, so a huge offset times the depth stays
@@ -532,7 +532,8 @@ mod tests {
             for _ in 0..19 {
                 (f, depth) = next_octave(f, depth, s);
                 (f0, d0) = (f0 / s, d0 * s);
-                assert!(f.is_finite() && depth.is_finite() && f > 0.0 && depth > 0.0, "{s}: {f} {depth}");
+                let lo = 1.0 / OCTAVE_SCALE_MAX;
+                assert!((lo..=OCTAVE_SCALE_MAX).contains(&f) && (lo..=OCTAVE_SCALE_MAX).contains(&depth), "{s}: {f} {depth}");
                 assert!((f * depth - 1.0).abs() < 1e-3, "{s}: {f} × {depth}");
                 if s <= 1.0 {
                     assert_eq!((f, depth), (f0, d0), "{s}");
