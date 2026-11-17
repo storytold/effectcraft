@@ -1,6 +1,6 @@
 //! #3845: every pane of a 2- or 4-view layout takes the press. A press in an inactive pane makes
 //! it the active pane, and the same press selects or drags there, through that pane's view (as in
-//! After Effects).
+//! After Effects). The side panes draw frames the background renderer made.
 
 use effectcraft_engine::Session;
 use effectcraft_engine::render::three_d::{View3D, Views3D};
@@ -317,6 +317,9 @@ fn a_newly_active_pane_never_shows_the_previous_panes_frame() {
     let now: Vec<egui::TextureId> = images(&h).into_iter().filter(|(_, b)| top.contains_rect(*b)).map(|(t, _)| t).collect();
     assert!(!now.contains(&main_frame), "the Top pane does not show the Active Camera pane's frame: {now:?} (that frame: {main_frame:?})");
     assert!(now.contains(&top_picture), "it shows its own last picture meanwhile: {now:?}");
+    // The bottom-right pane, a side pane now, starts with the frame it showed while active.
+    let side: Vec<egui::TextureId> = images(&h).into_iter().filter(|(_, b)| main.contains_rect(*b)).map(|(t, _)| t).collect();
+    assert!(side.contains(&main_frame), "the bottom-right pane shows its last frame until its own picture lands: {side:?}");
     h.event(Event::PointerButton { pos: at, button: PointerButton::Middle, pressed: false, modifiers: Modifiers::NONE });
     settle(&mut h);
     let now: Vec<egui::TextureId> = images(&h).into_iter().filter(|(_, b)| top.contains_rect(*b)).map(|(t, _)| t).collect();
@@ -438,4 +441,168 @@ fn one_view_keeps_its_framing_across_comps() {
     h.state_mut().session.execute("comp.open", json!({"comp": first.0})).unwrap();
     h.run_steps(3);
     assert_eq!(h.state().ui.viewer.zoom, Some(0.8), "and back in the first comp");
+}
+
+/// The side panes' frames come from the background renderer's cache, not from a render on the
+/// interface thread: a pane that changes view keeps drawing its last frame until the new view's
+/// frame has landed.
+#[test]
+fn side_panes_draw_frames_from_the_cache() {
+    use effectcraft_ui_egui::panels::viewer::shown_frame_key;
+    let (mut h, _) = harness(4);
+    let cid = h.state().session.active_comp_id().unwrap();
+    for p in [0, 1, 2] {
+        let k = shown_frame_key(&h.ctx, cid, p).unwrap_or_else(|| panic!("pane {p} drew a cached frame"));
+        assert!(h.state().frames.is_cached(&k), "pane {p}");
+    }
+    let old = shown_frame_key(&h.ctx, cid, 0).unwrap();
+    h.state_mut().session.execute("view.setPaneView", json!({"position": 0, "view": "left"})).unwrap();
+    h.step();
+    // The new view's frame was queued in that pass, not rendered there (a worker may have finished
+    // it since, so the queue's length is no steady signal).
+    assert_eq!(shown_frame_key(&h.ctx, cid, 0), Some(old), "the pane draws its last frame meanwhile");
+    settle(&mut h);
+    let new = shown_frame_key(&h.ctx, cid, 0).unwrap();
+    assert_ne!(new, old, "the pane moved on to the new view's frame once it landed");
+    assert!(h.state().frames.is_cached(&new));
+}
+
+/// A side pane never draws another comp's frame: after a switch to another comp it draws nothing
+/// until that comp's frame has landed, as the active pane does.
+#[test]
+fn side_panes_never_draw_another_comps_frame() {
+    use effectcraft_ui_egui::panels::viewer::shown_frame_key;
+    let (mut h, _) = harness(4);
+    let first = h.state().session.active_comp_id().unwrap();
+    assert!(shown_frame_key(&h.ctx, first, 0).is_some());
+    let top = rect_of(&h, "viewer.pane.0");
+    let first_picture: Vec<egui::TextureId> = images(&h).into_iter().filter(|(_, b)| top.contains_rect(*b)).map(|(t, _)| t).collect();
+    assert!(!first_picture.is_empty(), "the Top pane draws the first comp's picture");
+    h.state_mut().session.execute("comp.new", json!({"name": "B", "width": 320, "height": 240, "duration": 2})).unwrap();
+    let second = h.state().session.active_comp_id().unwrap();
+    for _ in 0..3 {
+        h.step();
+        // (until the new comp's frame lands; the pane's texture may take it in place after)
+        if shown_frame_key(&h.ctx, second, 0).is_none() {
+            let now: Vec<egui::TextureId> = images(&h).into_iter().filter(|(_, b)| top.contains_rect(*b)).map(|(t, _)| t).collect();
+            assert!(now.iter().all(|t| !first_picture.contains(t)), "pane 0 drew the first comp's picture in the new comp: {now:?}");
+        }
+    }
+    settle(&mut h);
+    assert_eq!(shown_frame_key(&h.ctx, second, 0).map(|k| k.comp), Some(second.0), "then the new comp's own frame");
+}
+
+/// With a region of interest the viewer's frame covers that region only: when another pane becomes
+/// active, the pane that was active does not start with it as its picture (stretched over the
+/// whole comp until its own frame lands).
+#[test]
+fn a_region_of_interest_frame_is_not_handed_to_a_side_pane() {
+    let (mut h, _) = harness(4);
+    h.state_mut().session.execute("view.setRegionOfInterest", json!({"rect": [100, 50, 200, 100]})).unwrap();
+    settle(&mut h);
+    let main = rect_of(&h, "viewer.pane.3");
+    let in_main = |h: &Harness<'_, EffectcraftApp>| images(h).into_iter().filter(|(_, b)| main.contains_rect(*b)).map(|(t, _)| t).collect::<Vec<_>>();
+    let region = *in_main(&h).first().unwrap_or_else(|| panic!("the active pane draws the region's frame"));
+    let at = empty_point(&h, 0);
+    h.event(Event::PointerMoved(at));
+    h.step();
+    h.event(Event::PointerButton { pos: at, button: PointerButton::Middle, pressed: true, modifiers: Modifiers::NONE });
+    h.step();
+    assert_eq!(views(&h).active(), 0);
+    let side = in_main(&h);
+    assert!(!side.contains(&region), "the bottom-right pane does not draw the region's frame as its picture: {side:?}");
+    h.event(Event::PointerButton { pos: at, button: PointerButton::Middle, pressed: false, modifiers: Modifiers::NONE });
+    settle(&mut h);
+}
+
+/// Wait, with no UI pass, until the frame workers have nothing queued or rendering.
+fn idle(h: &Harness<'_, EffectcraftApp>) {
+    let start = std::time::Instant::now();
+    while h.state().frames.inflight() > 0 {
+        assert!(start.elapsed() < std::time::Duration::from_secs(60), "the frame workers finish their frames");
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
+/// The side panes follow a drag in the active pane, as they did when they rendered on the
+/// interface thread: every pass of a drag that moves edits the comp, so a pane that took only the
+/// exact frame it asked for kept the picture from before the press until the pointer stopped.
+/// The pointer moves on every pass here; between passes every frame asked for lands.
+#[test]
+fn side_panes_follow_a_drag_in_the_active_pane() {
+    use effectcraft_ui_egui::panels::viewer::shown_frame_key;
+    let (mut h, solid) = harness(4);
+    let cid = h.state().session.active_comp_id().unwrap();
+    let before = shown_frame_key(&h.ctx, cid, 0).unwrap_or_else(|| panic!("the Top pane drew a frame"));
+    let a = centre(&h, &format!("viewer.anchor.{solid}"));
+    h.event(Event::PointerMoved(a));
+    h.step();
+    h.event(Event::PointerButton { pos: a, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+    h.step();
+    let mut to = a;
+    for _ in 0..24 {
+        to += egui::vec2(2.0, 0.0);
+        h.event(Event::PointerMoved(to));
+        h.step();
+        idle(&h);
+    }
+    let during = shown_frame_key(&h.ctx, cid, 0).unwrap();
+    h.event(Event::PointerButton { pos: to, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+    settle(&mut h);
+    assert_ne!(during.content, before.content, "the Top pane showed the layer moving before the release");
+    assert_eq!(views(&h).active(), 3);
+}
+
+/// A frame a side pane has drawn is not asked for again: it went from the cache (a purge, a full
+/// cache), the pane keeps its picture and nothing renders it again.
+#[test]
+fn a_frame_a_side_pane_drew_is_not_rendered_again() {
+    use effectcraft_ui_egui::panels::viewer::shown_frame_key;
+    let (mut h, _) = harness(4);
+    let cid = h.state().session.active_comp_id().unwrap();
+    let k = shown_frame_key(&h.ctx, cid, 0).unwrap_or_else(|| panic!("the Top pane drew a frame"));
+    h.state().frames.clear();
+    settle(&mut h);
+    assert_eq!(shown_frame_key(&h.ctx, cid, 0), Some(k), "the pane keeps its picture");
+    assert!(!h.state().frames.is_cached(&k), "and its frame was not rendered again");
+}
+
+/// Once a side pane has drawn its frame, the cache keeps it for the pane no more: the pane holds
+/// its own picture. (A 4-view layout at rest kept three frames over the RAM cache's budget.)
+#[test]
+fn a_frame_a_side_pane_drew_leaves_the_cache_as_any_other() {
+    use effectcraft_ui_egui::panels::viewer::shown_frame_key;
+    let (h, _) = harness(4);
+    let cid = h.state().session.active_comp_id().unwrap();
+    let k = shown_frame_key(&h.ctx, cid, 0).unwrap_or_else(|| panic!("the Top pane drew a frame"));
+    let frames = &h.state().frames;
+    assert!(frames.is_cached(&k));
+    let budget = frames.budget();
+    frames.set_budget(0);
+    let kept = frames.is_cached(&k);
+    frames.set_budget(budget);
+    assert!(!kept, "an empty budget took the Top pane's frame too");
+}
+
+/// The interface thread's step with the 4-view layout on the 3D Showcase demo while the time
+/// changes every frame (the side panes rendered there before #3845). Run by hand:
+/// `cargo test --release -p effectcraft-ui-egui --test it four_view_frame_time -- --ignored --nocapture`.
+#[test]
+#[ignore = "speed check, run by hand in release"]
+fn four_view_frame_time() {
+    let mut s = Session::default();
+    s.execute("file.openDemoProject", json!({})).unwrap();
+    s.execute("comp.open", json!({"comp": "3D Showcase"})).unwrap();
+    s.execute("view.layout", json!({"views": 4})).unwrap();
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
+    settle(&mut h);
+    let mut ms = vec![];
+    for f in 0..60 {
+        h.state_mut().session.execute("time.set", json!({"time": f as f64 / 24.0})).unwrap();
+        let t = std::time::Instant::now();
+        h.step();
+        ms.push(t.elapsed().as_secs_f64() * 1000.0);
+    }
+    ms.sort_by(f64::total_cmp);
+    println!("4-view step median {:.2} ms, p90 {:.2} ms", ms[30], ms[54]);
 }

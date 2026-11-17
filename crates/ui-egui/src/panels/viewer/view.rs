@@ -1,5 +1,6 @@
 use super::tools::draw_rigs;
 use super::{Align2, Color32, EffectcraftApp, EvalCtx, Rect, Sense, Stroke, StrokeKind, Tokens, View3D, json, multiview, pos2, three_d, vec2, vt, widgets};
+use crate::frames::{FrameImage, FrameKey};
 
 /// Lay out the panes of View ▸ Switch View Layout in `full`, draw the inactive ones and return
 /// the active pane's rectangle, where the viewer's pipeline runs. In a comp with 3D layers an
@@ -70,38 +71,54 @@ pub(super) fn aux_views(
         let frame = app.ui.viewer.pane_frames.get(pos).copied().unwrap_or_default();
         let (map, _) = multiview::fit_map(inner, [cw, ch], frame, app.ui.viewer.fit_up_to_100, ppp);
         let cr = Rect::from_min_size(map.origin, vec2(cw * map.zoom, ch * map.zoom));
-        let scale = (map.zoom * ppp).min(1.0) as f64;
+        let scale = pane_scale(map.zoom * ppp);
         // The Active Camera pane renders through the comp's own camera; the others through their
         // view camera.
         let through_active = v == View3D::ActiveCamera;
         let cam = if through_active { three_d::active_camera(&ectx) } else { views.cam(v, comp.width as f64, comp.height as f64).state() };
-        let key = {
-            use std::hash::{Hash, Hasher};
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            (app.session.revision, cid.0, t.0, pos, scale.to_bits(), format!("{cam:?}")).hash(&mut h);
-            h.finish()
-        };
+        // Rendered in the background, as a passive viewer's frame is: the pane draws its last
+        // picture until the frame it asked for lands.
         let id = egui::Id::unique(("viewer-aux", pos));
-        let cached: Option<(u64, u64, egui::TextureHandle)> = ctx.data(|d| d.get_temp(id));
-        let tex = match cached {
-            Some((k, _, tex)) if k == key => tex,
-            _ => {
-                let opts = effectcraft_engine::render::RenderOpts {
-                    scale,
-                    view: (comp.has_3d() && !through_active).then_some(cam),
-                    draft: true,
-                    ..Default::default()
-                };
-                let img = app.session.render(cid, t, opts);
-                let tex = crate::frames::load_fitted(&ctx, format!("viewer-aux-{pos}"), crate::frames::to_color_image(&img), egui::TextureOptions::LINEAR);
-                ctx.data_mut(|d| d.insert_temp(id, (key, cid.0, tex.clone())));
-                tex
+        let mut pic: PanePicture = ctx.data(|d| d.get_temp(id)).unwrap_or_default();
+        let drawn = pic.drawn.as_ref().map(|(k, _)| *k).filter(|k| k.comp == cid.0);
+        let (key, got) = app.pane_frame(cid, comp.frame_rate.frame_at(t), scale, (comp.has_3d() && !through_active).then_some(cam), pos, drawn);
+        let mut changed = false;
+        if let Some((k, img)) = got
+            && pane_step(k, drawn, pic.failed) == PaneStep::Convert
+        {
+            match pane_texture(app, &ctx, pos, img, pic.drawn.as_ref().map(|(_, tex)| tex)) {
+                Some(tex) => {
+                    // The frame it asked for: the pane holds it now, the cache need not keep it.
+                    if k == key {
+                        app.frames.release_pane(pos);
+                    }
+                    pic.drawn = Some((k, tex));
+                }
+                // Not tried again every UI frame: the next try is with another frame.
+                None => pic.failed = Some(k),
             }
-        };
+            changed = true;
+        }
+        // The frame drawn, asked for again at a later revision (an undo, an edit elsewhere): that
+        // revision is the one it is now, the lower bound of the frames that may replace it.
+        if let Some((k, _)) = pic.drawn.as_mut()
+            && *k == key
+            && k.revision < key.revision
+        {
+            k.revision = key.revision;
+            changed = true;
+        }
+        if changed {
+            ctx.data_mut(|d| d.insert_temp(id, pic.clone()));
+        }
+        // Never another comp's frame (after a comp switch), as the active pane does.
+        let drawn = pic.drawn.as_ref().filter(|(k, _)| k.comp == cid.0);
         let pp = p.with_clip_rect(inner);
         let b = comp.background;
         pp.rect_filled(cr, 0.0, Color32::from_rgb((b[0] * 255.0) as u8, (b[1] * 255.0) as u8, (b[2] * 255.0) as u8));
-        pp.image(tex.id(), cr, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+        if let Some((_, tex)) = drawn {
+            pp.image(tex.id(), cr, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+        }
         pp.rect_stroke(cr, 0.0, Stroke::new(1.0, Color32::from_black_alpha(160)), StrokeKind::Outside);
         if share && app.ui.viewer.safe_margins {
             for k in [0.9, 0.8] {
@@ -140,10 +157,48 @@ pub(super) fn aux_views(
     main
 }
 
+/// A pane of comp `cid` became active: the pane that was active, a side pane now, starts with
+/// the frame it showed (its own view's) as its picture until its draft lands, rather than with an
+/// empty frame. The viewer keeps no texture of that frame: the newly active pane's frame comes in
+/// a texture of its own, its side-pane picture standing in meanwhile (`multiview::stand_in`). A
+/// half-float frame (the display pass draws it) is not handed over, nor a frame of a region (the
+/// region of interest, the Extended Viewer's area): a side pane draws the whole comp.
+pub(super) fn hand_over(app: &mut EffectcraftApp, ctx: &egui::Context, cid: effectcraft_engine::project::ItemId) {
+    let Some((comp, old)) = app.ui.viewer.shown_for else { return };
+    let shown = multiview::shown_positions(app, cid, app.session.state.view_layout.max(1));
+    if comp != cid.0 || old == multiview::active_pos(app, cid) || !shown.contains(&old) || app.viewer_region(cid).is_some() {
+        return;
+    }
+    let Some((on_screen, key)) = app.viewer_shown else { return };
+    let tex = match (&app.viewer_native, &app.viewer_tex) {
+        (Some((id, k, _)), _) if on_screen == Some(*id) && *k == key => app.viewer_native.take().map(|(id, _, f)| PaneTex::Gpu { id, _frame: f }),
+        (_, Some((h, k, _))) if on_screen == Some(h.id()) && *k == key => app.viewer_tex.take().map(|(h, _, _)| PaneTex::Cpu(h)),
+        _ => None,
+    };
+    let Some(tex) = tex else { return };
+    app.viewer_shown = None;
+    app.viewer_image = None;
+    let id = egui::Id::unique(("viewer-aux", old));
+    let mut pic: PanePicture = ctx.data(|d| d.get_temp(id)).unwrap_or_default();
+    if let Some((_, prev)) = pic.drawn.replace((key, tex)) {
+        free_native(app, Some(&prev));
+    }
+    pic.failed = None;
+    ctx.data_mut(|d| d.insert_temp(id, pic));
+}
+
+/// The cache key of the frame the side pane at layout position `pos` draws of comp `cid` (for
+/// tests).
+#[doc(hidden)]
+pub fn shown_frame_key(ctx: &egui::Context, cid: effectcraft_engine::project::ItemId, pos: usize) -> Option<FrameKey> {
+    let pic: PanePicture = ctx.data(|d| d.get_temp(egui::Id::unique(("viewer-aux", pos))))?;
+    pic.drawn.map(|(k, _)| k).filter(|k| k.comp == cid.0)
+}
+
 /// The last picture the side pane at layout position `pos` drew of comp `cid` (None: none yet).
 pub(super) fn side_picture(ctx: &egui::Context, cid: effectcraft_engine::project::ItemId, pos: usize) -> Option<egui::TextureId> {
-    let cached: Option<(u64, u64, egui::TextureHandle)> = ctx.data(|d| d.get_temp(egui::Id::unique(("viewer-aux", pos))));
-    cached.filter(|(_, comp, _)| *comp == cid.0).map(|(_, _, tex)| tex.id())
+    let pic: PanePicture = ctx.data(|d| d.get_temp(egui::Id::unique(("viewer-aux", pos))))?;
+    pic.drawn.filter(|(k, _)| k.comp == cid.0).map(|(_, tex)| tex.id())
 }
 
 /// The popup id of the view selector of the pane at layout position `pos` (its automation ids
@@ -157,6 +212,108 @@ fn close_selector(ctx: &egui::Context, pos: usize) {
     let open = selector_id(pos).with("open");
     if ctx.data(|d| d.get_temp::<bool>(open)) == Some(true) {
         ctx.data_mut(|d| d.insert_temp(open, false));
+    }
+}
+
+/// The render scale of a side pane drawn at `pixels` screen pixels per comp pixel: in eighths, so
+/// resizing reuses frames, in (0, 1] whatever the magnification, as a passive viewer's.
+fn pane_scale(pixels: f32) -> f64 {
+    let eighths = (f64::from(pixels) * 8.0).ceil();
+    // (a hostile magnification, NaN too, renders the smallest frame)
+    if eighths.is_nan() { 1.0 / 8.0 } else { eighths.clamp(1.0, 8.0) / 8.0 }
+}
+
+/// What a side pane drew last: the frame's key and its texture, and the key of a frame it could
+/// not show.
+#[derive(Clone, Default)]
+struct PanePicture {
+    drawn: Option<(FrameKey, PaneTex)>,
+    failed: Option<FrameKey>,
+}
+
+/// A side pane's texture: pixels uploaded to egui, or a GPU frame registered as a native
+/// egui-wgpu texture (no readback), the pane's registration updated in place.
+#[derive(Clone)]
+enum PaneTex {
+    Cpu(egui::TextureHandle),
+    /// The frame is held so its texture outlives the registration.
+    Gpu {
+        id: egui::TextureId,
+        _frame: std::sync::Arc<effectcraft_gpu::DisplayFrame>,
+    },
+}
+
+impl PaneTex {
+    fn id(&self) -> egui::TextureId {
+        match self {
+            PaneTex::Cpu(h) => h.id(),
+            PaneTex::Gpu { id, .. } => *id,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum PaneStep {
+    /// Draw what the pane has.
+    Keep,
+    /// Make a texture of the new frame.
+    Convert,
+}
+
+/// Whether a pane makes a texture of the frame `wanted`, which landed: not when it already drew
+/// it (`drawn`) or could not show it before (`failed`: each frame is tried once).
+fn pane_step(wanted: FrameKey, drawn: Option<FrameKey>, failed: Option<FrameKey>) -> PaneStep {
+    if drawn == Some(wanted) || failed == Some(wanted) { PaneStep::Keep } else { PaneStep::Convert }
+}
+
+/// The texture of side pane `pos`'s frame `img`, after its last one, `old`: CPU frames are
+/// uploaded (into the old texture when it has their size), GPU frames become native egui-wgpu
+/// textures and are never read back. `None`: the frame cannot be shown (a GPU frame without
+/// egui-wgpu's device).
+fn pane_texture(app: &EffectcraftApp, ctx: &egui::Context, pos: usize, img: FrameImage, old: Option<&PaneTex>) -> Option<PaneTex> {
+    let smooth = app.session.prefs.viewer_zoom_smooth();
+    match crate::panels::viewers::cpu_passive_image(app, img, None) {
+        FrameImage::Cpu(c) => {
+            let max = crate::frames::max_texture_side(ctx);
+            let opts = super::zoom_texture_options(smooth);
+            let tex = match old {
+                Some(PaneTex::Cpu(h)) if h.size() == crate::frames::fitted_size(c.size, max) => {
+                    let mut h = h.clone();
+                    h.set(crate::frames::fit_texture((*c).clone(), max), opts);
+                    h
+                }
+                _ => {
+                    // After a GPU frame: its native texture goes back to egui-wgpu.
+                    free_native(app, old);
+                    crate::frames::load_fitted(ctx, format!("viewer-aux-{pos}"), (*c).clone(), opts)
+                }
+            };
+            Some(PaneTex::Cpu(tex))
+        }
+        FrameImage::Gpu(f) => {
+            let rs = app.wgpu.as_ref()?;
+            let view = f.texture.create_view(&Default::default());
+            let sampler = || super::zoom_sampler(smooth);
+            let mut ren = rs.renderer.write();
+            let id = match old {
+                // (a registration the renderer no longer has is made anew, not updated)
+                Some(PaneTex::Gpu { id, .. }) if ren.texture(id).is_some() => {
+                    ren.update_egui_texture_from_wgpu_texture_with_sampler_options(&rs.device, &view, sampler(), *id);
+                    *id
+                }
+                _ => ren.register_native_texture_with_sampler_options(&rs.device, &view, sampler()),
+            };
+            Some(PaneTex::Gpu { id, _frame: f })
+        }
+        // (`cpu_passive_image` makes 8-bit pixels of half-float frames)
+        FrameImage::CpuF16(_) => None,
+    }
+}
+
+/// Give the native egui-wgpu texture of a side pane's GPU frame back to the renderer.
+fn free_native(app: &EffectcraftApp, tex: Option<&PaneTex>) {
+    if let (Some(PaneTex::Gpu { id, .. }), Some(rs)) = (tex, &app.wgpu) {
+        rs.renderer.write().free_texture(id);
     }
 }
 
@@ -277,5 +434,97 @@ pub(crate) fn checker(p: &egui::Painter, r: Rect) {
         }
         y += s;
         row += 1;
+    }
+}
+
+#[cfg(test)]
+mod pane_tests {
+    use super::*;
+
+    fn key(frame: i64) -> FrameKey {
+        FrameKey { revision: 1, content: 2, comp: 3, frame, scale: 1000, view: 5, opts: 6 }
+    }
+
+    /// A side pane renders in eighths of the comp's size (so resizing reuses frames), never past
+    /// 100 % and never at zero, a negative or no scale (an agent's `ui.set {viewer: {zoom: -1}}`
+    /// stored for a side pane rendered at -2).
+    #[test]
+    fn a_pane_renders_in_eighths_between_an_eighth_and_full_size() {
+        assert_eq!([0.337, 0.79, 1.0, 5.0].map(pane_scale), [0.375, 0.875, 1.0, 1.0]);
+        assert_eq!([0.0, -1.0, f32::NAN, f32::NEG_INFINITY].map(pane_scale), [0.125; 4]);
+    }
+
+    #[test]
+    fn a_new_frame_is_converted_once() {
+        assert_eq!(pane_step(key(1), None, None), PaneStep::Convert);
+        assert_eq!(pane_step(key(1), Some(key(0)), None), PaneStep::Convert);
+        assert_eq!(pane_step(key(1), Some(key(1)), None), PaneStep::Keep);
+    }
+
+    #[test]
+    fn a_frame_that_failed_is_not_tried_every_ui_frame() {
+        assert_eq!(pane_step(key(1), Some(key(0)), Some(key(1))), PaneStep::Keep);
+        // A different frame is tried again.
+        assert_eq!(pane_step(key(2), Some(key(0)), Some(key(1))), PaneStep::Convert);
+    }
+
+    /// A side pane draws a GPU frame from its own texture, registered with egui-wgpu once and
+    /// updated in place. When its frames move to the CPU, the registration goes back to
+    /// egui-wgpu; it was kept until the window closed, one more each time. (The web build's frame
+    /// cache holds GPU frames, and CPU ones while the viewer shows a channel, an exposure, a
+    /// region of interest or the Extended Viewer, or for a frame the GPU cannot render.) Skips
+    /// without a GPU compositor.
+    #[test]
+    fn a_pane_gives_its_gpu_texture_back_when_its_frames_move_to_the_cpu() {
+        use eframe::wgpu;
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        if pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all())).is_empty() {
+            eprintln!("no wgpu adapter: skipping");
+            return;
+        }
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(800.0, 600.0))
+            .wgpu()
+            .build_eframe(|_| crate::EffectcraftApp::new(effectcraft_engine::Session::default()));
+        // GPU frames come once the compositor (built on a worker thread) is attached to the
+        // window's device.
+        h.step();
+        for _ in 0..3000 {
+            if !h.state().gpu_initializing() {
+                break;
+            }
+            h.step();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let Some(rs) = h.state().wgpu.clone() else {
+            eprintln!("no GPU compositor on the window's device: skipping");
+            return;
+        };
+        let gpu_frame = || {
+            let texture = rs.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("side pane test frame"),
+                size: wgpu::Extent3d { width: 4, height: 4, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            FrameImage::Gpu(std::sync::Arc::new(effectcraft_gpu::DisplayFrame { texture, width: 4, height: 4 }))
+        };
+        let registered = |id: egui::TextureId| rs.renderer.read().texture(&id).is_some();
+        let ctx = h.ctx.clone();
+        let app = h.state();
+        let first = pane_texture(app, &ctx, 0, gpu_frame(), None).unwrap_or_else(|| panic!("a GPU frame is shown"));
+        let PaneTex::Gpu { id, .. } = &first else { panic!("as a native texture") };
+        let id = *id;
+        assert!(registered(id));
+        let next = pane_texture(app, &ctx, 0, gpu_frame(), Some(&first)).unwrap_or_else(|| panic!("the next GPU frame is shown"));
+        assert_eq!(next.id(), id, "the next GPU frame updates the pane's registration");
+        let cpu = FrameImage::Cpu(std::sync::Arc::new(egui::ColorImage::new([4, 4], vec![Color32::RED; 16])));
+        let shown = pane_texture(app, &ctx, 0, cpu, Some(&next)).unwrap_or_else(|| panic!("a CPU frame is shown"));
+        assert!(matches!(shown, PaneTex::Cpu(_)));
+        assert!(!registered(id), "the GPU frame's registration went back to egui-wgpu");
     }
 }

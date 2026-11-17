@@ -221,6 +221,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     // that pane, through its view and with its framing, and takes the same press.
     multiview::pre_activate(app, ui, cid, rect);
     multiview::sync_framing(app, cid);
+    view::hand_over(app, &ctx, cid);
     let comp = app.session.project.comp_arc(cid).unwrap_or_else(|| effectcraft_engine::project::Comp::new(1920, 1080, Default::default(), Tick::ZERO).into());
     let comp_name = app.session.project.item(cid).map(|i| i.name.clone()).unwrap_or_default();
     let p = ui.painter().clone();
@@ -2105,6 +2106,8 @@ mod frame;
 mod geometry;
 mod gesture;
 mod multiview;
+#[doc(hidden)]
+pub use view::shown_frame_key;
 mod shapes;
 mod tools;
 mod view;
