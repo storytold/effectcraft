@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use effectcraft_color::Label;
 use effectcraft_export::render_queue::{ColorDepth, OutputFormat, OutputModule, RenderSettings, TimeSpan};
 use effectcraft_export::{Job, export};
-use effectcraft_project::{Comp, ItemId, ItemKind, LayerSource, Project, Solid, build};
+use effectcraft_project::{ColorSpace, Comp, ItemId, ItemKind, LayerSource, Project, Solid, build};
 use effectcraft_raster::Image;
 use effectcraft_render::{Accelerator, NoFootage, Renderer};
 use effectcraft_time::{FrameRate, Tick};
@@ -49,7 +49,7 @@ impl Accelerator for Fake {
     fn comp_frame(&self, r: &Renderer, comp: ItemId, t: Tick) -> Option<Image> {
         Some(r.comp_frame_cpu(comp, t))
     }
-    fn comp_frame_yuv420(&self, r: &Renderer, comp: ItemId, t: Tick, bg: [f32; 3]) -> Option<Vec<u8>> {
+    fn comp_frame_yuv420(&self, r: &Renderer, comp: ItemId, t: Tick, bg: [f32; 3], matrix: effectcraft_raster::yuv::Matrix) -> Option<Vec<u8>> {
         if !self.yuv {
             return None;
         }
@@ -62,7 +62,7 @@ impl Accelerator for Fake {
             self.asking.fetch_sub(1, Ordering::SeqCst);
             return None;
         }
-        Some(effectcraft_raster::yuv::yuv420_over(&r.comp_frame_cpu(comp, t), bg))
+        Some(effectcraft_raster::yuv::yuv420_over(&r.comp_frame_cpu(comp, t), bg, matrix))
     }
     fn frame_end(&self) {
         self.frame_ends.fetch_add(1, Ordering::SeqCst);
@@ -148,6 +148,22 @@ fn accelerator_planes_encode_like_the_cpu_conversion() {
         let img = pool.frame_at(&f, f.frame_rate.tick_of(k)).expect("decode frame");
         assert_eq!((img.width, img.height), (64, 48));
     }
+}
+
+#[test]
+fn accelerator_pq_planes_encode_like_the_cpu_conversion() {
+    let d = out_dir("h264-gpu-yuv-pq");
+    let (mut p, cid) = project();
+    p.settings.working_space = Some(ColorSpace::Srgb);
+    p.settings.output_space = Some(ColorSpace::Rec2100Pq);
+    let s = RenderSettings { time_span: TimeSpan::LengthOfComp, ..Default::default() };
+    let yuv = Fake::new(true, false, usize::MAX);
+    let rgba = Fake::new(false, false, usize::MAX);
+    let a = run(&p, cid, Some(&yuv), &s, &d.join("yuv.mp4"));
+    let b = run(&p, cid, Some(&rgba), &s, &d.join("rgba.mp4"));
+    let c = run(&p, cid, None, &s, &d.join("cpu.mp4"));
+    assert_eq!(yuv.yuv_frames.load(Ordering::SeqCst), 6);
+    assert!(a == b && b == c, "the three files differ");
 }
 
 #[test]

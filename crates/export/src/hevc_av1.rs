@@ -4,6 +4,7 @@
 
 use craft_media::isobmff::{Av1Config, CodecConfig, FourCc, HevcConfig, SampleEntry};
 use effectcraft_project::render_queue::{CodecProfile, OutputModule, RateControlMode, VideoCodecOptions};
+use effectcraft_raster::yuv::Matrix;
 use effectcraft_time::FrameRate;
 use rayon::prelude::*;
 
@@ -14,9 +15,10 @@ fn enc_err(e: impl std::fmt::Display) -> ExportError {
     ExportError::Encode(e.to_string())
 }
 
-/// BT.709 limited-range 4:2:0 planes at `bits` (8 or 10) from RGBA8 (2×2 chroma average;
+/// Limited-range 4:2:0 planes at `bits` (8 or 10) from RGBA8 (2×2 chroma average;
 /// alpha ignored). Chroma planes are `ceil(w/2)` × `ceil(h/2)`.
-pub(crate) fn rgba_to_yuv420_bits(rgba: &[u8], w: usize, h: usize, bits: u8, y: &mut Vec<u16>, u: &mut Vec<u16>, v: &mut Vec<u16>) {
+pub(crate) fn rgba_to_yuv420_bits(rgba: &[u8], (w, h): (usize, usize), bits: u8, matrix: Matrix, y: &mut Vec<u16>, u: &mut Vec<u16>, v: &mut Vec<u16>) {
+    let [kr, kg, kb, cb_div, cr_div] = matrix.coefficients();
     let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
     let scale = (1u32 << (bits - 8)) as f32;
     let (lo, hi) = (scale, 254.0 * scale + (scale - 1.0));
@@ -30,11 +32,11 @@ pub(crate) fn rgba_to_yuv420_bits(rgba: &[u8], w: usize, h: usize, bits: u8, y: 
             let src = &rgba[(cy * 2 + dy) * w * 4..][..w * 4];
             for x in 0..w {
                 let (r, g, b) = (src[x * 4] as f32 / 255.0, src[x * 4 + 1] as f32 / 255.0, src[x * 4 + 2] as f32 / 255.0);
-                let l = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+                let l = kr * r + kg * g + kb * b;
                 yr[dy * w + x] = ((16.0 + 219.0 * l) * scale).round().clamp(lo, hi) as u16;
                 let a = &mut acc[x / 2];
-                a.0 += (b - l) / 1.8556;
-                a.1 += (r - l) / 1.5748;
+                a.0 += (b - l) / cb_div;
+                a.1 += (r - l) / cr_div;
                 a.2 += 1.0;
             }
         }
@@ -84,7 +86,7 @@ pub(crate) fn hevc_config(w: u32, h: u32, rate: FrameRate, om: &OutputModule) ->
 impl Hevc {
     pub(crate) fn new(w: u32, h: u32, rate: FrameRate, om: &OutputModule, codes: Codes) -> Result<Hevc> {
         let mut cfg = hevc_config(w, h, rate, om);
-        (cfg.colour_primaries, cfg.transfer_characteristics, cfg.matrix_coeffs) = (codes.primaries, codes.transfer, codes.matrix);
+        (cfg.colour_primaries, cfg.transfer_characteristics, cfg.matrix_coeffs) = (codes.primaries, codes.transfer, codes.matrix.code());
         let bits = cfg.profile.bit_depth();
         let enc = craft_video::hevc::Encoder::new(cfg).map_err(enc_err)?;
         Ok(Hevc { enc, w, h, bits, codes, planes: Planes::default() })
@@ -101,7 +103,7 @@ impl VideoEncoder for Hevc {
     fn encode(&mut self, rgba: &[u8], _index: u64) -> Result<Vec<Packet>> {
         let (w, h) = (self.w as usize, self.h as usize);
         let p = &mut self.planes;
-        rgba_to_yuv420_bits(rgba, w, h, self.bits, &mut p.y, &mut p.u, &mut p.v);
+        rgba_to_yuv420_bits(rgba, (w, h), self.bits, self.codes.matrix, &mut p.y, &mut p.u, &mut p.v);
         let frame = craft_video::hevc::Frame { y: &p.y, u: &p.u, v: &p.v, y_stride: w, uv_stride: w.div_ceil(2) };
         let pk = self.enc.encode(&frame).map_err(enc_err)?;
         Ok(vec![Packet { data: pk.data, key: pk.keyframe, cto: 0 }])
@@ -140,7 +142,7 @@ pub(crate) fn av1_config(w: u32, h: u32, rate: FrameRate, om: &OutputModule) -> 
 impl Av1 {
     pub(crate) fn new(w: u32, h: u32, rate: FrameRate, om: &OutputModule, codes: Codes) -> Result<Av1> {
         let mut cfg = av1_config(w, h, rate, om);
-        (cfg.color_primaries, cfg.transfer_characteristics, cfg.matrix_coefficients) = (codes.primaries, codes.transfer, codes.matrix);
+        (cfg.color_primaries, cfg.transfer_characteristics, cfg.matrix_coefficients) = (codes.primaries, codes.transfer, codes.matrix.code());
         let bits = cfg.bit_depth;
         let enc = craft_video::av1::Encoder::new(cfg).map_err(enc_err)?;
         Ok(Av1 { enc, w, h, bits, codes, planes: Planes::default() })
@@ -161,7 +163,7 @@ impl VideoEncoder for Av1 {
     fn encode(&mut self, rgba: &[u8], _index: u64) -> Result<Vec<Packet>> {
         let (w, h) = (self.w as usize, self.h as usize);
         let p = &mut self.planes;
-        rgba_to_yuv420_bits(rgba, w, h, self.bits, &mut p.y, &mut p.u, &mut p.v);
+        rgba_to_yuv420_bits(rgba, (w, h), self.bits, self.codes.matrix, &mut p.y, &mut p.u, &mut p.v);
         let frame = craft_video::av1::Frame { y: &p.y, u: &p.u, v: &p.v, y_stride: w, uv_stride: w.div_ceil(2) };
         let pk = self.enc.encode(&frame).map_err(enc_err)?;
         Ok(vec![Packet { data: pk.data, key: pk.keyframe, cto: 0 }])
@@ -179,11 +181,26 @@ mod tests {
     fn ten_bit_planes_scale_eight_bit_ones() {
         let rgba = [255u8, 255, 255, 255, 0, 0, 0, 255, 255, 0, 0, 255, 0, 255, 0, 255];
         let (mut y, mut u, mut v) = (vec![], vec![], vec![]);
-        rgba_to_yuv420_bits(&rgba, 2, 2, 8, &mut y, &mut u, &mut v);
+        rgba_to_yuv420_bits(&rgba, (2, 2), 8, Matrix::Bt709, &mut y, &mut u, &mut v);
         assert_eq!((y[0], y[1]), (235, 16));
-        rgba_to_yuv420_bits(&rgba, 2, 2, 10, &mut y, &mut u, &mut v);
+        rgba_to_yuv420_bits(&rgba, (2, 2), 10, Matrix::Bt709, &mut y, &mut u, &mut v);
         assert_eq!((y[0], y[1]), (940, 64));
         assert_eq!(u.len(), 1);
+    }
+
+    #[test]
+    fn bt2020_ncl_code_values() {
+        for (rgb, eight, ten) in
+            [([255, 0, 0], [74, 97, 240], [294, 387, 960]), ([255, 255, 255], [235, 128, 128], [940, 512, 512]), ([0, 0, 0], [16, 128, 128], [64, 512, 512])]
+        {
+            let rgba = [rgb[0], rgb[1], rgb[2], 255].repeat(4);
+            let (mut y, mut u, mut v) = (vec![], vec![], vec![]);
+            for (bits, want) in [(8, eight), (10, ten)] {
+                rgba_to_yuv420_bits(&rgba, (2, 2), bits, Matrix::Bt2020Ncl, &mut y, &mut u, &mut v);
+                assert_eq!(y, vec![want[0]; 4]);
+                assert_eq!((u.clone(), v.clone()), (vec![want[1]], vec![want[2]]));
+            }
+        }
     }
 
     #[test]

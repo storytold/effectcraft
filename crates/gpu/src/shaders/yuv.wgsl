@@ -1,4 +1,4 @@
-// Finished frame → 8-bit BT.709 limited-range 4:2:0 (Y, U, V planes packed 4 bytes per word),
+// Finished frame → 8-bit limited-range 4:2:0 (Y, U, V planes packed 4 bytes per word),
 // composited over the comp background: the GPU twin of `Image::to_rgba8_over` followed by
 // export's `rgba_to_yuv420`, operation for operation (same order of float operations, the same
 // rounding: `as u8` truncation of `x * 255 + 0.5`, `f32::round` half away from zero).
@@ -7,6 +7,10 @@ struct YP {
     // width, height, chroma width, Y words
     size: vec4<u32>,
     bg: vec4<f32>,
+    // `Matrix::coefficients`: Kr, Kg, Kb and the Cb divisor, then the Cr divisor in `cr.x`.
+    // Uniforms, not constants, so one kernel serves both matrices.
+    coeff: vec4<f32>,
+    cr: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> Y: YP;
@@ -42,7 +46,7 @@ fn px(x: u32, y: u32) -> vec3<f32> {
 }
 
 fn luma(c: vec3<f32>) -> f32 {
-    return 0.2126 * c.x + 0.7152 * c.y + 0.0722 * c.z;
+    return Y.coeff.x * c.x + Y.coeff.y * c.y + Y.coeff.z * c.z;
 }
 
 fn y8(l: f32) -> u32 {
@@ -74,8 +78,8 @@ fn yuv420(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let l = luma(c);
                 let byte = q * 2u + dx;
                 yw[dy * 2u + byte / 4u] |= y8(l) << (8u * (byte % 4u));
-                a0 += (c.z - l) / 1.8556;
-                a1 += (c.x - l) / 1.5748;
+                a0 += (c.z - l) / Y.coeff.w;
+                a1 += (c.x - l) / Y.cr.x;
             }
         }
         let u = u32(clamp(round_pos(128.0 + 224.0 * a0 / 4.0), 1.0, 254.0));

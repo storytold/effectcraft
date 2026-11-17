@@ -43,17 +43,17 @@ const ROWS: &[Row] = &[
         codes: [12, 13, 1],
         names: ["smpte432", "iec61966-2-1", "bt709"],
     },
-    Row { name: "pq", working: SRGB, output: PQ, channels: Channels::Rgb, codes: [9, 16, 1], names: ["bt2020", "smpte2084", "bt709"] },
+    Row { name: "pq", working: SRGB, output: PQ, channels: Channels::Rgb, codes: [9, 16, 9], names: ["bt2020", "smpte2084", "bt2020nc"] },
     Row {
         name: "hlg",
         working: SRGB,
         output: Some(ColorSpace::Rec2100Hlg),
         channels: Channels::Rgb,
-        codes: [9, 18, 1],
-        names: ["bt2020", "arib-std-b67", "bt709"],
+        codes: [9, 18, 9],
+        names: ["bt2020", "arib-std-b67", "bt2020nc"],
     },
     Row { name: "aces", working: SRGB, output: Some(ColorSpace::AcesCg), channels: Channels::Rgb, codes: [2, 8, 1], names: ["unknown", "linear", "bt709"] },
-    Row { name: "pq_with_alpha", working: SRGB, output: PQ, channels: Channels::Rgba, codes: [9, 16, 1], names: ["bt2020", "smpte2084", "bt709"] },
+    Row { name: "pq_with_alpha", working: SRGB, output: PQ, channels: Channels::Rgba, codes: [9, 16, 9], names: ["bt2020", "smpte2084", "bt2020nc"] },
     Row { name: "alpha_matte", working: SRGB, output: PQ, channels: Channels::Alpha, codes: [1, 1, 1], names: BT709 },
 ];
 
