@@ -2026,7 +2026,7 @@ fn a_picture_without_memory_is_read_alone_or_refused_never_decoded_whole() {
         Picture::Done(Err(why)) => assert!(why.contains("no memory just now"), "{why}"),
         _ => panic!("refused with the reason"),
     }
-    match picture_rows(path, &source, op, (0, 4)) {
+    match picture_rows(path, &source, op, (0, 4), (8, 8)) {
         Picture::Done(Err(why)) => assert!(why.contains("no memory just now"), "{why}"),
         _ => panic!("rows refused with the reason"),
     }

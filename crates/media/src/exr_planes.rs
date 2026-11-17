@@ -560,8 +560,12 @@ impl PlaneStore {
             // the planes are decoded once, here, and handed to the request that queued them.
             if may_not_wait() && flight.claim() {
                 return match decode_claimed(path, source, &flight, index, want) {
-                    // (the store lets the held planes go when the asker ends the decode)
-                    Err(Refused::LetGo) => Step::Again { retry: true },
+                    // (the held planes go now, not only once the asker ends the decode: this
+                    // request asks again at once)
+                    Err(Refused::LetGo) => {
+                        Self::let_go(&mut self.lock(), path, &flight);
+                        Step::Again { retry: true }
+                    }
                     r => Step::Done(r),
                 };
             }
@@ -731,23 +735,28 @@ impl PlaneStore {
                 e.bytes = 0;
                 e.cost_us = 0;
             }
-            // (the planes held go first, then the request is read on its own)
-            Err(Refused::LetGo) => {
-                if flight.base.as_ref().is_some_and(|base| e.batch.as_ref().is_some_and(|b| Arc::ptr_eq(b, base))) {
-                    e.batch = None;
-                    e.bytes = 0;
-                    e.cost_us = 0;
-                }
-            }
-            // (memory refused just now: another request may get it)
-            Err(Refused::Cancelled | Refused::Forgotten | Refused::Stopped | Refused::NoMemory(_)) => {}
+            // (memory refused just now: another request may get it; the planes held go first,
+            // then the request is read on its own, below)
+            Err(Refused::Cancelled | Refused::Forgotten | Refused::Stopped | Refused::NoMemory(_) | Refused::LetGo) => {}
         }
-        if let (Err(Refused::LetGo), Some(base)) = (&outcome, &flight.base) {
-            st.held.retain(|(p, h)| !(p == path && Arc::ptr_eq(h, base)));
+        if matches!(outcome, Err(Refused::LetGo)) {
+            Self::let_go(&mut st, path, flight);
         }
         let grown = st.entries.iter().find(|e| e.path == path).map_or(0, |e| e.bytes.saturating_sub(had));
         Self::drop_oldest(&mut st, self.budget(), CACHE_FILES, Some(path));
         (outcome, grown)
+    }
+
+    /// Let the planes `flight` was asked to add to go ([`Refused::LetGo`]): the entry of `path`
+    /// and the pictures' held planes no longer keep them (unless the entry holds others by now).
+    fn let_go(st: &mut State, path: &str, flight: &Flight) {
+        let Some(base) = &flight.base else { return };
+        if let Some(e) = st.entries.iter_mut().find(|e| e.path == path && e.batch.as_ref().is_some_and(|b| Arc::ptr_eq(b, base))) {
+            e.batch = None;
+            e.bytes = 0;
+            e.cost_us = 0;
+        }
+        st.held.retain(|(p, h)| !(p == path && Arc::ptr_eq(h, base)));
     }
 
     /// Drop least recently used entries until the rest take at most `bytes` in at most `files`
