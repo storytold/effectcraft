@@ -158,7 +158,8 @@ pub fn typed_noise(x: f32, y: f32, z: f32, seed: u32, noise_type: u32) -> f32 {
     let (ix, iy, iz) = (x0 as i32, y0 as i32, z0 as i32);
     let l = |a: f32, b: f32, t: f32| a + (b - a) * t;
     let slice = |dz: i32| -> f32 {
-        let c = |dx: i32, dy: i32| lattice(ix + dx, iy + dy, iz + dz, seed);
+        // Coordinates past the i32 range saturate; the neighbours wrap, as on the GPU (#3486).
+        let c = |dx: i32, dy: i32| lattice(ix.wrapping_add(dx), iy.wrapping_add(dy), iz.wrapping_add(dz), seed);
         match noise_type {
             0 => c(0, 0),
             1 => l(l(c(0, 0), c(1, 0), tx), l(c(0, 1), c(1, 1), tx), ty),
@@ -481,6 +482,18 @@ mod tests {
 
     fn run(id: &str, vals: &[(&str, Value)]) -> Image {
         run_fx(id, vals, Image::filled(40, 24, [0.2, 0.4, 0.6, 1.0]), 0.0, EffectEnv::default()).img
+    }
+
+    /// #3486: lattice coordinates past the i32 range (an octave's frequency at Sub Scaling 10 % and
+    /// high Complexity) saturate, and their neighbours wrap instead of overflowing.
+    #[test]
+    fn noise_past_the_i32_range_is_finite() {
+        for noise_type in [0, 1, 2, 3] {
+            for (x, y) in [(1e30, -1e30), (f32::MAX, f32::MIN), (3e9, 2.5e9)] {
+                let n = typed_noise(x, y, 1e12, 7, noise_type);
+                assert!(n.is_finite(), "type {noise_type} at ({x}, {y}): {n}");
+            }
+        }
     }
 
     /// Evolution moves the noise at a constant rate: no ease in or out within a revolution.
