@@ -682,32 +682,9 @@ pub fn open_form(app: &mut EffectcraftApp, id: &str, p: &Value) -> bool {
                 ),
             ],
         ),
-        "file.interpretFootage" | "file.interpretProxy"
-            if !has(
-                p,
-                &[
-                    "frameRate",
-                    "alpha",
-                    "loop",
-                    "pixelAspect",
-                    "colorProfile",
-                    "fields",
-                    "invertAlpha",
-                    "matteColor",
-                    "linearLight",
-                    "startFrame",
-                    "logConversion",
-                    "cineonUnits",
-                    "pointUnits",
-                    "convertedBlack",
-                    "convertedWhite",
-                    "tenBitBlack",
-                    "tenBitWhite",
-                    "currentGamma",
-                    "highlightRolloff",
-                ],
-            ) =>
-        {
+        // Any setting given applies without the dialog (the dialog would send its own value for
+        // it); naming only the footage opens it.
+        "file.interpretFootage" | "file.interpretProxy" if p.as_object().is_none_or(|m| m.keys().all(|k| k == "items" || k == "item")) => {
             let proxy = id == "file.interpretProxy";
             let Some(form) = interpret_footage_form(s, proxy, &mut base) else { return false };
             form
@@ -1220,6 +1197,60 @@ mod tests {
         let done = app.session.job_log.last().unwrap();
         assert_eq!((done.status.as_str(), &done.result["path"]), ("done", &json!(path)));
         assert!(std::fs::read_to_string(&path).unwrap().contains("<xmeml"));
+    }
+
+    /// Interpret Footage parameters given explicitly apply without the dialog, through both
+    /// commands, and keep the values given: the dialog would send its own fields' values for
+    /// them (Tone Map HDR to SDR on for HLG footage that has it on, Preserve RGB off, the matte
+    /// colour, Start Timecode). Naming only the footage opens the dialog.
+    #[test]
+    fn interpretation_menu_applies_explicit_parameters_without_a_dialog() {
+        use effectcraft_engine::project::{ColorSpace, Footage, FootageKind, ItemKind, Proxy};
+        for command in ["file.interpretFootage", "file.interpretProxy"] {
+            let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+            let footage = Footage {
+                path: "/m/clip.mov".into(),
+                kind: FootageKind::Video,
+                width: 4,
+                height: 4,
+                has_video: true,
+                duration: effectcraft_engine::time::Tick::from_seconds_f64(1.0),
+                color_profile: Some(ColorSpace::Rec2100Hlg),
+                tone_map_hdr: true,
+                ..Default::default()
+            };
+            let project = std::sync::Arc::make_mut(&mut app.session.project);
+            let item = project.add_item("clip.mov", Default::default(), None, ItemKind::Footage(footage.clone()));
+            project.item_mut(item).unwrap().proxy = Some(Box::new(Proxy { footage, enabled: true }));
+            app.session.state.project_selection = vec![item];
+            let ctx = egui::Context::default();
+            for params in [
+                json!({"toneMapHdr": false}),
+                json!({"preserveRgb": true}),
+                json!({"premulColor": [1.0, 0.0, 0.0]}),
+                json!({"overrideStart": false}),
+                json!({"startTimecode": 25}),
+                json!({"guessAlpha": true}),
+            ] {
+                crate::menus::invoke(&mut app, &ctx, command, params.clone()).unwrap();
+                assert!(app.dialog.is_none(), "{command}: {params}");
+            }
+            let it = app.session.project.item(item).unwrap();
+            let footage = if command == "file.interpretProxy" {
+                &it.proxy.as_ref().unwrap().footage
+            } else {
+                let ItemKind::Footage(footage) = &it.kind else { panic!("not footage") };
+                footage
+            };
+            assert!(!footage.tone_map_hdr && footage.preserve_rgb, "{command}: {footage:?}");
+            assert_eq!((footage.premul_color, footage.start_timecode), ([1.0, 0.0, 0.0], Some(25)), "{command}");
+            // Naming only the footage opens the dialog, with either key.
+            for params in [json!({"items": [item.0]}), json!({"item": item.0})] {
+                app.dialog = None;
+                crate::menus::invoke(&mut app, &ctx, command, params.clone()).unwrap();
+                assert!(matches!(app.dialog, Some(Dialog::Form)), "{command}: {params}");
+            }
+        }
     }
 
     #[test]
