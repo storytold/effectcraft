@@ -62,7 +62,7 @@ pub fn parse_3dl(text: &str) -> Option<Lut> {
         }
         if l.starts_with(|c: char| c.is_ascii_alphabetic()) {
             // "Mesh <in bits> <out bits>" (Lustre header); other keywords are ignored.
-            let t: Vec<&str> = l.split_whitespace().collect();
+            let t: Vec<&str> = l.split_whitespace().take(3).collect();
             if t[0].eq_ignore_ascii_case("mesh") && t.len() >= 3 {
                 out_bits = t[2].parse().ok();
             }
