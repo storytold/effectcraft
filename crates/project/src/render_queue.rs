@@ -1378,7 +1378,7 @@ impl OutputModule {
             self.channels = Channels::Rgb;
         }
         if self.output.contains("[fileExtension]") {
-            if format.is_sequence() && !self.output.contains('#') {
+            if format.is_sequence() && frame_run(&self.output).is_none() {
                 self.output = self.output.replace(".[fileExtension]", "_[#####].[fileExtension]");
             } else if !format.is_sequence() && old.is_sequence() {
                 self.output = self.output.replace("_[#####]", "").replace("[#####]", "");
@@ -1386,7 +1386,7 @@ impl OutputModule {
             return;
         }
         let mut stem = format.output_stem(&self.output).to_string();
-        if format.is_sequence() && !stem.contains('#') {
+        if format.is_sequence() && frame_run(&stem).is_none() {
             stem.push_str("_[#####]");
         } else if !format.is_sequence() {
             stem = stem.replace("_[#####]", "").replace("[#####]", "");
@@ -1665,23 +1665,43 @@ pub fn expand_template(template: &str, format: OutputFormat, v: &TemplateVars) -
         .replace("[outputModuleName]", format.label())
 }
 
-/// Replace the first run of `#` (optionally in brackets, `[####]`) with the zero-padded frame
-/// number. Paths without a run get `_NNNNN` before the extension.
+/// Replace the frame-number run (see [`frame_run`]) with the zero-padded frame number. Paths
+/// without a run get `_NNNNN` before the extension.
 pub fn sequence_path(path: &str, frame: i64) -> String {
     let (before, width, after) = sequence_parts(path);
     format!("{before}{frame:0width$}{after}")
 }
 
+/// Where the frame number goes in a sequence output path: the byte range of the run of `#` it
+/// replaces (its brackets included when it has them) and the number of digits. The first run
+/// counts, except a bare run (`#`, `###`) in a folder's name, which is part of that name: a folder
+/// such as `D:\#_shots\` is common, and numbering it put every frame in a new folder of its own
+/// (`D:\0_shots\…`, `D:\1_shots\…`). A bracketed run still numbers a folder
+/// (`shot_[###]/f.png`).
+pub fn frame_run(path: &str) -> Option<(usize, usize, usize)> {
+    let name = path.rfind(['/', '\\']).map_or(0, |i| i + 1);
+    let bytes = path.as_bytes();
+    let mut i = 0;
+    while let Some(off) = path.get(i..).and_then(|rest| rest.find('#')) {
+        let start = i + off;
+        let len = bytes.get(start..).unwrap_or_default().iter().take_while(|b| **b == b'#').count();
+        let end = start + len;
+        let bracketed = start > 0 && bytes.get(start - 1) == Some(&b'[') && bytes.get(end) == Some(&b']');
+        if bracketed {
+            return Some((start - 1, end + 1, len));
+        }
+        if start >= name {
+            return Some((start, end, len));
+        }
+        i = end;
+    }
+    None
+}
+
 /// A sequence output path around its frame number: what comes before it, how many digits it is
 /// padded to and what comes after (`out/a_[#####].png` → `out/a_`, 5, `.png`).
 pub fn sequence_parts(path: &str) -> (String, usize, String) {
-    if let Some(start) = path.find('#') {
-        let len = path[start..].chars().take_while(|c| *c == '#').count();
-        let (mut a, mut b) = (start, start + len);
-        if a > 0 && path.as_bytes().get(a - 1) == Some(&b'[') && path.as_bytes().get(b) == Some(&b']') {
-            a -= 1;
-            b += 1;
-        }
+    if let Some((a, b, len)) = frame_run(path) {
         return (path[..a].to_string(), len, path[b..].to_string());
     }
     let p = std::path::Path::new(path);
@@ -1704,10 +1724,9 @@ pub fn sequence_frame(path: &str, candidate: &str) -> Option<i64> {
 /// the extension (`[compName].[fileExtension]` → `[compName]_1.[fileExtension]`,
 /// `[compName]_[#####].[fileExtension]` → `[compName]_1_[#####].[fileExtension]`).
 pub fn numbered_template(template: &str, n: u32) -> String {
-    let at = match template.find('#') {
-        Some(hash) => {
-            // The run's `[`, then the separator that sets it off from the name.
-            let run = if template[..hash].ends_with('[') { hash - 1 } else { hash };
+    let at = match frame_run(template) {
+        Some((run, _, _)) => {
+            // The separator that sets the run (its `[` included) off from the name.
             if template[..run].ends_with(['_', '-', '.', ' ']) { run - 1 } else { run }
         }
         None => {
@@ -1811,6 +1830,30 @@ mod tests {
         assert_eq!(sequence_frame("a_[#####].png", "a_00x42.png"), None);
         assert_eq!(sequence_frame("a_[#####].png", "a_.png"), None);
         assert_eq!(sequence_frame("a_[#####].png", "a_99999999999999999999.png"), None, "too big for a frame number");
+    }
+
+    /// A bare `#` in a folder's name is part of the name, not the frame number: rendering to
+    /// `D:\#_shots\a_[#####].png` wrote frame 5 to `D:\5_shots\a_[#####].png`, one new folder per
+    /// frame, and nothing where the user looked.
+    #[test]
+    fn a_hash_in_a_folder_name_is_not_the_frame_number() {
+        assert_eq!(sequence_path(r"D:\#_shots\v1\a_[#####].png", 5), r"D:\#_shots\v1\a_00005.png");
+        assert_eq!(sequence_path("/w/#1/a_###.png", 42), "/w/#1/a_042.png");
+        assert_eq!(sequence_path("/w/##/a.png", 3), "/w/##/a_00003.png", "no run in the name: the default");
+        // A bracketed run still numbers a folder, and only the first run is the frame number.
+        assert_eq!(sequence_path("f[######]/plate.png", 7), "f000007/plate.png");
+        assert_eq!(sequence_path("#a/shot_[###]/f_[#####].png", 7), "#a/shot_007/f_[#####].png");
+        for path in [r"D:\#_shots\a_[#####].png", "/w/##/a.png", "/w/#1/a_###.png"] {
+            assert_eq!(sequence_frame(path, &sequence_path(path, 12)), Some(12), "{path}");
+        }
+        assert_eq!(numbered_template("#_shots/[compName].[fileExtension]", 1), "#_shots/[compName]_1.[fileExtension]");
+        assert_eq!(numbered_template("#_shots/[compName]_[#####].[fileExtension]", 1), "#_shots/[compName]_1_[#####].[fileExtension]");
+        let mut m = OutputModule { output: "/w/#_shots/x.mov".into(), ..OutputModule::default() };
+        m.set_format(OutputFormat::PngSequence);
+        assert_eq!(m.output, "/w/#_shots/x_[#####].png");
+        m.output = "#_shots/[compName].[fileExtension]".into();
+        m.set_format(OutputFormat::TiffSequence);
+        assert_eq!(m.output, "#_shots/[compName]_[#####].[fileExtension]");
     }
 
     #[test]
