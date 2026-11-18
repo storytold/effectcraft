@@ -986,6 +986,21 @@ mod tests {
     }
 
     #[test]
+    fn mosaic_sharp_colors_tiles_end_on_whole_pixels() {
+        // 77 px in 70 tiles: tile 30 holds pixels 33..=34, tile 49 holds 53..=54. Floating-point
+        // tile edges picked 32 for x = 33 and 55 for x = 54.
+        assert_eq!(crate::mosaic_tile_last(33, 70, 77), 34);
+        assert_eq!(crate::mosaic_tile_last(54, 70, 77), 54);
+        // More tiles than pixels: every pixel is its own tile.
+        assert_eq!(crate::mosaic_tile_last(5, 40, 20), 5);
+        assert_eq!(crate::mosaic_tile_last(19, 7, 20), 19);
+        let img = ramp(77, 3);
+        let sharp = run_at("ec.stylize.mosaic", &[("horizontal", num(70.0)), ("vertical", num(1.0)), ("sharpColors", Value::Bool(true))], img.clone(), 0.0);
+        assert_eq!(sharp.img.get(33, 0), img.get(34, 2));
+        assert_eq!(sharp.img.get(54, 0), img.get(54, 2));
+    }
+
+    #[test]
     fn find_edges_and_emboss_blend_with_original() {
         let img = ramp(12, 12);
         for id in ["ec.stylize.findedges", "ec.stylize.emboss"] {
