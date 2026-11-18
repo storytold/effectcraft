@@ -74,13 +74,15 @@ fn changed_instance(id: &str) -> (Project, Vec<(String, Value)>) {
     let mut g = effectcraft_effects::instantiate(spec, &mut build::Ids(&mut next), spec.name, [1920.0, 1080.0]);
     p.next_id = next;
     let mut set = Vec::new();
-    for pm in map.params {
-        let Some(ps) = spec.params.iter().find(|ps| ps.id == pm.target) else { continue };
-        let Some(prop) = g.prop_mut(pm.target) else { continue };
-        if let Some(v) = changed(&prop.value, &ps.ui, pm.conv, pm.kind) {
-            prop.value = v.clone();
-            set.push((pm.target.to_string(), v));
-        }
+    // Every mapped parameter is changed, so none is skipped without notice (Conv::Skip holds no
+    // value).
+    for pm in map.params.iter().filter(|pm| !matches!(pm.conv, Conv::Skip)) {
+        let target = pm.target;
+        let ps = spec.params.iter().find(|ps| ps.id == target).unwrap_or_else(|| panic!("{id} {target}: not a parameter of the effect"));
+        let prop = g.prop_mut(target).unwrap_or_else(|| panic!("{id} {target}: no property"));
+        let v = changed(&prop.value, &ps.ui, pm.conv, pm.kind).unwrap_or_else(|| panic!("{id} {target}: no changed value for {:?}", pm.conv));
+        prop.value = v.clone();
+        set.push((target.to_string(), v));
     }
     assert!(!set.is_empty(), "{id}: no parameter changed");
     with_layer(&mut p, c, 0, |l| l.props.sub_mut("effects").expect("effects").children.push(Node::Group(g)));
