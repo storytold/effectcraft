@@ -124,11 +124,7 @@ pub fn nested_markers<'a>(project: &'a Project, comp_id: ItemId, comp: &Comp, la
     let backwards = matches!((frames.first(), frames.last()), (Some((_, a)), Some((_, b))) if b < a);
     let nfr = nc.frame_rate;
     let reaches = |src: Tick, m: Tick| {
-        if backwards {
-            nfr.tick_of(effectcraft_render::frame_position(src, nfr).0).0 <= m.0.saturating_add(eps)
-        } else {
-            src.0.saturating_add(eps) >= m.0
-        }
+        if backwards { nfr.tick_of(effectcraft_render::frame_position(src, nfr).0).0 <= m.0.saturating_add(eps) } else { src.0.saturating_add(eps) >= m.0 }
     };
     nc.markers
         .iter()
