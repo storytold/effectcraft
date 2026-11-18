@@ -32,7 +32,7 @@ craft-vectorcraft-format = { version = "0.1.0", git = "https://github.com/storyt
 # Shared plug-in runtime (RFC-0046): sandbox, manifest, permissions, bundles, the per-user store,
 # catalogs and installing from GitHub releases. Pinned to the reference fork until the upstream PR
 # lands; the upstream PR re-pins it.
-craft-plugin = { git = "https://github.com/Dasemu/craft-libs", rev = "93428fbe5d11b735365fa87068a9e1fc85fb3550" }
+craft-plugin = { git = "https://github.com/Dasemu/craft-libs", rev = "b9821a27936e4f8a5ef3ad30a9559ecb897c5cc4" }
 # craft-update: app-specific pretend versions apply to startup and manual checks.
 craft-update = { git = "https://github.com/storytold/craft-libs", version = "=0.1.0", rev = "5a7a63a21dd03dd1a2bc6c308a3a6ce818caae87", features = ["egui"] }
 # internal

@@ -358,8 +358,7 @@ struct Curl {
 
 impl Fetch for Curl {
     fn get(&mut self, url: &str, max: usize) -> std::result::Result<Option<Vec<u8>>, String> {
-        let api = url.starts_with("https://api.github.com/");
-        if !api {
+        if !catalog::is_api_url(url) {
             catalog::check_url(url, None)?;
         }
         let got = crate::library::curl(url, max as u64, &self.tmp)?;
@@ -372,13 +371,8 @@ impl Fetch for Curl {
         if !got.ok {
             return Err(format!("download failed: {}", got.stderr));
         }
-        if api {
-            if !got.end.starts_with("https://api.github.com/") {
-                return Err(format!("GitHub's API redirected to `{}`", got.end.chars().take(120).collect::<String>()));
-            }
-        } else {
-            catalog::check_redirect(&got.end)?;
-        }
+        // where it ended stays on GitHub's API for an API request, on its download hosts otherwise
+        catalog::check_redirect_for(url, &got.end)?;
         Ok(got.body)
     }
 }
