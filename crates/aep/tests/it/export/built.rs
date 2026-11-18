@@ -205,6 +205,35 @@ fn layer_header_fields() {
     assert_eq!(ids.len(), 4);
 }
 
+/// Lighter Color, Darker Color, Subtract and Divide are written with the codes After Effects
+/// stores for them (35-38, corpus `10_blend_modes`) and read back as the same modes. They used to
+/// be reported and written as Normal.
+#[test]
+fn the_newer_blend_modes_are_written_with_their_codes() {
+    let mut p = Project::default();
+    let c = add_comp(&mut p, "C", 100, 100, FrameRate::new(25, 1), 1.0, None);
+    let s = add_solid(&mut p, "Sol", 100, 100, [0.1, 0.2, 0.3], None);
+    let modes = [(BlendMode::LighterColor, 35u8), (BlendMode::DarkerColor, 36), (BlendMode::Subtract, 37), (BlendMode::Divide, 38)];
+    for _ in modes {
+        add_layer(&mut p, c, "L", LayerSource::Solid { item: s }, (100, 100));
+    }
+    for (i, (mode, _)) in modes.iter().enumerate() {
+        with_layer(&mut p, c, i, |l| l.blend_mode = *mode);
+    }
+    let r = export_all(&p);
+    assert!(r.report.is_lossless(), "{:?}", r.report.losses);
+    let file = parse(&r.bytes).expect("parse");
+    let view = effectcraft_aep::Project::new(&file).expect("project");
+    let comp = view.all_items().into_iter().find(|i| i.comp().is_some()).expect("comp");
+    let codes: Vec<_> = comp.comp().expect("c").layers().map(|l| l.header().expect("header").blend_mode).collect();
+    assert_eq!(codes, modes.iter().map(|(_, c)| AepBlend::Other(*c)).collect::<Vec<_>>());
+    let none = |_: &str| false;
+    let mut back = Project::default();
+    let res = effectcraft_aep::import::import(&mut back, &r.bytes, &effectcraft_aep::import::ImportOptions::new(&none)).expect("imports without losses");
+    let comp = res.comps.first().and_then(|id| back.comp(*id)).expect("comp");
+    assert_eq!(comp.layers.iter().map(|l| l.blend_mode).collect::<Vec<_>>(), modes.iter().map(|(m, _)| *m).collect::<Vec<_>>());
+}
+
 #[test]
 fn solids_and_items() {
     let mut p = Project::default();
