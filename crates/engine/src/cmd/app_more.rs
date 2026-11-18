@@ -424,7 +424,8 @@ pub fn system_report(s: &Session) -> Value {
     let gb = |b: u64| format!("{:.1} GB", b as f64 / (1u64 << 30) as f64);
     let export: Vec<&str> = s.exporter.as_ref().map(|e| e.formats().into_iter().map(|f| f.label()).collect()).unwrap_or_default();
     let gpu = s.accel.as_ref().map(|a| a.name());
-    let budgets = s.prefs.cache_budgets(mem.or(s.sys_memory));
+    // Report the budgets actually applied to this session, not a fresh reading it has not applied.
+    let budgets = s.prefs.cache_budgets(s.sys_memory);
     let mut issues = vec![];
     if gpu.is_none() {
         issues.push(match &s.accel_note {
@@ -449,6 +450,7 @@ pub fn system_report(s: &Session) -> Value {
         "gpuNote": if gpu.is_none() { s.accel_note.clone() } else { None },
         "windowGraphics": s.window_adapter,
         "caches": {"layer": gb(budgets.layer as u64), "footage": gb(budgets.media as u64), "preview": gb(budgets.preview as u64)},
+        "cacheBytes": {"layer": s.layer_cache.budget(), "footage": s.footage.cache_budget(), "previewLimit": budgets.preview, "capped": budgets.capped, "reduced": budgets.reduced},
         "import": IMPORT_FORMATS,
         "export": export,
         "logging": crate::logging::is_enabled(),
