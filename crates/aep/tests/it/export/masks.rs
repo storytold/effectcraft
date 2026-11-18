@@ -155,7 +155,7 @@ fn same_masks(a: &[PropGroup], b: &[PropGroup]) {
             }
             for (kx, ky) in px.keys.iter().zip(&py.keys) {
                 assert_eq!((kx.time, kx.in_interp, kx.out_interp, kx.label), (ky.time, ky.in_interp, ky.out_interp, ky.label), "{w} {id}");
-                if id == "feather" {
+                if id != "path" {
                     let near = |e: &[Ease], f: &[Ease]| {
                         e.len() == f.len() && e.iter().zip(f).all(|(a, b)| (a.speed - b.speed).abs() < 1e-9 && (a.influence - b.influence).abs() < 1e-9)
                     };
@@ -247,6 +247,46 @@ fn path_and_feather_keys_parse_back() {
 }
 
 #[test]
+fn opacity_and_expansion_keys_parse_back() {
+    let p = project(|l, n| {
+        add_mask(l, n, "Fade", ShapePath::rect([960.0, 540.0], 400.0, 200.0), MaskMode::Add, |g| {
+            let mut a = key(0.0, Value::Scalar(100.0));
+            a.out_interp = Interp::Bezier;
+            a.out_ease = vec![Ease { speed: -40.0, influence: 0.5 }];
+            let mut b = key(1.0, Value::Scalar(25.0));
+            b.in_interp = Interp::Bezier;
+            b.in_ease = vec![Ease { speed: -10.0, influence: 0.33 }];
+            b.label = 2;
+            g.get_mut("opacity").expect("opacity").keys = vec![a, b];
+            let mut c = key(0.5, Value::Scalar(0.0));
+            c.out_interp = Interp::Hold;
+            g.get_mut("expansion").expect("expansion").keys = vec![c, key(1.5, Value::Scalar(-10.0)), key(2.0, Value::Scalar(12.5))];
+        });
+    });
+    let res = export_all(&p);
+    assert!(res.report.is_lossless(), "{:?}", res.report.losses);
+    let file = parse(&res.bytes).expect("parse");
+    assert_eq!(write(&file).expect("write"), res.bytes);
+    let view = effectcraft_aep::Project::new(&file).expect("project");
+    let comp = view.all_items().into_iter().find_map(|i| i.comp()).expect("comp");
+    let layer = comp.layers().next().expect("layer");
+    let atoms = layer.mask_atoms();
+    let m = &atoms[0];
+    // Opacity is stored as a fraction (as After Effects does), its speeds too.
+    let Some(PropNode::Property(opacity)) = m.atom.get("ADBE Mask Opacity") else { panic!("opacity") };
+    let ok: Vec<_> = opacity.keys().expect("opacity keys").keyframes().collect();
+    assert_eq!(ok.iter().map(|k| k.value()).collect::<Vec<_>>(), [Some(vec![1.0]), Some(vec![0.25])]);
+    assert_eq!(ok[1].label(), Some(2));
+    let e = ok[0].ease_components().expect("ease");
+    assert!((e[0].out_speed + 0.4).abs() < 1e-9 && (e[0].out_influence - 0.5).abs() < 1e-9, "{e:?}");
+    let Some(PropNode::Property(offset)) = m.atom.get("ADBE Mask Offset") else { panic!("expansion") };
+    let xk: Vec<_> = offset.keys().expect("expansion keys").keyframes().collect();
+    assert_eq!(xk.iter().map(|k| k.value()).collect::<Vec<_>>(), [Some(vec![0.0]), Some(vec![-10.0]), Some(vec![12.5])]);
+    assert_eq!(xk[0].interpolation_out(), Some(Interpolation::Hold));
+    same_masks(&masks_of(&p), &masks_of(&reimport(&res.bytes)));
+}
+
+#[test]
 fn a_mask_on_a_small_solid_is_normalised_to_the_layer_size() {
     let mut p = Project::default();
     let c = add_comp(&mut p, "C", 1280, 720, FrameRate::new(25, 1), 2.0, None);
@@ -297,10 +337,10 @@ fn what_cannot_be_written_is_reported() {
     assert!(err.to_string().contains("masks"), "{err}");
     let res = export_all(&p);
     let r = &res.report;
-    // Off, Empty and NaN are not written; Keyed opacity (5 losses: keys, expression, lock,
-    // falloff, RotoBezier) and Bezier path (its ease is written, 599 / 700) are.
+    // Off, Empty and NaN are not written; Keyed opacity (4 losses: expression, lock, falloff,
+    // RotoBezier; its opacity keys are written) and Bezier path (its ease is written, 599 / 700) are.
     assert_eq!(r.exported.masks, 2, "{:?}", r.losses);
-    assert_eq!(r.count(LossCategory::Masks), 3 + 5, "{:?}", r.losses);
+    assert_eq!(r.count(LossCategory::Masks), 3 + 4, "{:?}", r.losses);
     assert_eq!(r.count(LossCategory::ApproximatedKeyframes), 0, "{:?}", r.losses);
     let back = reimport(&res.bytes);
     let m = masks_of(&back);

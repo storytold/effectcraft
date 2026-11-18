@@ -66,8 +66,12 @@ pub(crate) struct MaskPlan {
     pub feather_keys: Vec<KeyPlan>,
     /// A fraction; `None` at the default 1.
     pub opacity: Option<f64>,
+    /// Opacity keys, as fractions (the stored unit, ease speeds likewise).
+    pub opacity_keys: Vec<KeyPlan>,
     /// Pixels; `None` at the default 0.
     pub expansion: Option<f64>,
+    /// Expansion keys, in pixels.
+    pub expansion_keys: Vec<KeyPlan>,
 }
 
 fn mode_id(m: MaskMode) -> u32 {
@@ -253,12 +257,9 @@ fn plan_mask(g: &PropGroup, size: (u32, u32), cp: &CompPlan, what: &str, col: &m
             None
         }
     };
-    let feather_keys = feather_prop.map_or_else(Vec::new, |p| plan_feather_keys(&p.keys, cp, what, col));
+    let feather_keys = feather_prop.map_or_else(Vec::new, |p| plan_mask_keys(&p.keys, KeyUnit::FEATHER, cp, what, col));
     let scalar = |id: &str, default: f64, lo: f64, hi: f64, col: &mut Collector| -> Option<f64> {
         let p = g.get(id)?;
-        if !p.keys.is_empty() {
-            col.lose(LossCategory::Masks, format!("{what}: keys on Mask {id} are not written (no keyed prototype), the static value is"));
-        }
         let Value::Scalar(v) = p.value else { return None };
         match finite(v) {
             Some(v) if (lo..=hi).contains(&v) => ((v - default).abs() > 1e-12).then_some(v),
@@ -271,33 +272,56 @@ fn plan_mask(g: &PropGroup, size: (u32, u32), cp: &CompPlan, what: &str, col: &m
     let opacity = scalar("opacity", 100.0, 0.0, 100.0, col).map(|v| v / 100.0);
     // The record holds -32 000 to 32 000, as for the feather (`tduM`, 091).
     let expansion = scalar("expansion", 0.0, -MASK_LIMIT, MASK_LIMIT, col);
+    let keys_of = |id: &str, unit: KeyUnit, col: &mut Collector| g.get(id).map_or_else(Vec::new, |p| plan_mask_keys(&p.keys, unit, cp, what, col));
+    let opacity_keys = keys_of("opacity", KeyUnit::OPACITY, col);
+    let expansion_keys = keys_of("expansion", KeyUnit::EXPANSION, col);
     let name = cut_name(&g.name, 255, what, col);
-    Some(MaskPlan { name, mode: mode_id(mode), inverted, shape, path_keys, feather, feather_keys, opacity, expansion })
+    Some(MaskPlan { name, mode: mode_id(mode), inverted, shape, path_keys, feather, feather_keys, opacity, opacity_keys, expansion, expansion_keys })
 }
 
-/// Feather keys (plain template, two components, speed in pixels per second).
-fn plan_feather_keys(src: &[effectcraft_keyframe::Keyframe], cp: &CompPlan, what: &str, col: &mut Collector) -> Vec<KeyPlan> {
-    let keys = timed_keys(src, &cp.tb, what, "feather key", col);
+/// How the keys of a mask property are stored: the name in reports, the components, the shown
+/// unit per stored unit (opacity: percent shown, a fraction stored; ease speeds likewise, as the
+/// importer reads them) and the valid range of the shown value.
+#[derive(Clone, Copy)]
+struct KeyUnit {
+    name: &'static str,
+    dims: usize,
+    factor: f64,
+    range: (f64, f64),
+}
+
+impl KeyUnit {
+    const FEATHER: KeyUnit = KeyUnit { name: "feather", dims: 2, factor: 1.0, range: (0.0, MASK_LIMIT) };
+    const OPACITY: KeyUnit = KeyUnit { name: "opacity", dims: 1, factor: 100.0, range: (0.0, 100.0) };
+    const EXPANSION: KeyUnit = KeyUnit { name: "expansion", dims: 1, factor: 1.0, range: (-MASK_LIMIT, MASK_LIMIT) };
+}
+
+/// Keys of a mask's feather, opacity or expansion (plain template with `unit.dims` components,
+/// values and speeds in the stored unit).
+fn plan_mask_keys(src: &[effectcraft_keyframe::Keyframe], unit: KeyUnit, cp: &CompPlan, what: &str, col: &mut Collector) -> Vec<KeyPlan> {
+    let name = unit.name;
+    let keys = timed_keys(src, &cp.tb, what, &format!("{name} key"), col);
     let mut out = Vec::with_capacity(keys.len());
     let beyond = std::cell::Cell::new(false);
     for (u, k) in &keys {
         let Ok(time) = i32::try_from(*u) else {
-            col.lose(LossCategory::InvalidValues, format!("{what}: feather key time out of range, key dropped"));
+            col.lose(LossCategory::InvalidValues, format!("{what}: {name} key time out of range, key dropped"));
             continue;
         };
-        let value = match &k.value {
-            Value::Vec2([x, y]) => match (finite(*x), finite(*y)) {
-                (Some(x), Some(y)) if (0.0..=MASK_LIMIT).contains(&x) && (0.0..=MASK_LIMIT).contains(&y) => vec![x, y],
-                _ => {
-                    col.lose(LossCategory::InvalidValues, format!("{what}: a feather key that is not valid was dropped"));
-                    continue;
-                }
-            },
+        let shown: Vec<f64> = match (&k.value, unit.dims) {
+            (Value::Vec2(v), 2) => v.to_vec(),
+            (Value::Scalar(v), 1) => vec![*v],
             _ => {
-                col.lose(LossCategory::InvalidValues, format!("{what}: a feather key that is not a pair was dropped"));
+                col.lose(LossCategory::InvalidValues, format!("{what}: a {name} key of another type was dropped"));
                 continue;
             }
         };
+        let (lo, hi) = unit.range;
+        if !shown.iter().all(|v| v.is_finite() && (lo..=hi).contains(v)) {
+            col.lose(LossCategory::InvalidValues, format!("{what}: a {name} key that is not valid was dropped"));
+            continue;
+        }
+        let value: Vec<f64> = shown.iter().map(|v| v / unit.factor).collect();
         let code = |i: Interp| match i {
             Interp::Linear => 1u8,
             Interp::Bezier => 2,
@@ -309,7 +333,7 @@ fn plan_feather_keys(src: &[effectcraft_keyframe::Keyframe], cp: &CompPlan, what
                 return EaseSlot::default();
             }
             let e = crate::export::plan::key_ease(eases, i);
-            let speed = finite(e.speed).filter(|v| v.abs() <= 1e9).unwrap_or_else(|| {
+            let speed = finite(e.speed / unit.factor).filter(|v| v.abs() <= 1e9).unwrap_or_else(|| {
                 beyond.set(true);
                 0.0
             });
@@ -320,8 +344,8 @@ fn plan_feather_keys(src: &[effectcraft_keyframe::Keyframe], cp: &CompPlan, what
             value,
             in_interp,
             out_interp,
-            in_ease: (0..2).map(|i| ease(&k.in_ease, i, in_interp == 2)).collect(),
-            out_ease: (0..2).map(|i| ease(&k.out_ease, i, out_interp == 2)).collect(),
+            in_ease: (0..unit.dims).map(|i| ease(&k.in_ease, i, in_interp == 2)).collect(),
+            out_ease: (0..unit.dims).map(|i| ease(&k.out_ease, i, out_interp == 2)).collect(),
             spatial_in: [0.0; 3],
             spatial_out: [0.0; 3],
             spatial_auto: false,
@@ -329,7 +353,7 @@ fn plan_feather_keys(src: &[effectcraft_keyframe::Keyframe], cp: &CompPlan, what
             label: k.label.min(16),
         });
         if k.roving {
-            col.lose(LossCategory::ApproximatedKeyframes, format!("{what}: a roving feather key is written as a normal key"));
+            col.lose(LossCategory::ApproximatedKeyframes, format!("{what}: a roving {name} key is written as a normal key"));
         }
         col.exported.keyframes = col.exported.keyframes.saturating_add(1);
     }
@@ -355,6 +379,10 @@ pub(crate) struct MaskProtos {
     pub keyed_path: Chunk<'static>,
     /// The keyed Mask Feather property (`tdbs`, two 88-byte records).
     pub keyed_feather: Chunk<'static>,
+    /// The keyed Mask Opacity property (`tdbs`, one-component plain records).
+    pub keyed_opacity: Chunk<'static>,
+    /// The keyed Mask Expansion property (`tdbs`, one-component plain records).
+    pub keyed_offset: Chunk<'static>,
 }
 
 /// The limit of a mask's feather and expansion (`tduM` 32 000, 091).
@@ -390,7 +418,7 @@ fn path_key_records() -> Fixed {
 impl MaskProtos {
     /// The prototypes built in code (aep-format.md 3.8): the parade and atom groups, `mkif` with
     /// only its decoded fields (bytes 12..47 zero, read-back t-zmkif), the path, feather, opacity
-    /// and expansion records, and the keyed path and feather records.
+    /// and expansion records, and the keyed path, feather, opacity and expansion records.
     pub(crate) fn build() -> MaskProtos {
         use crate::export::synth::{KeyTemplate, NO_NAME, RecSpec, class, key_list, tdb4, tdbs, tdmn, tdsn};
         let state = || Chunk::data(*b"tdsb", 1u32.to_be_bytes().to_vec());
@@ -435,6 +463,8 @@ impl MaskProtos {
             group_end: tdmn(GROUP_END),
             keyed_path: path_rec(true),
             keyed_feather: tdbs(&feather, true, 25_600),
+            keyed_opacity: tdbs(&opacity, true, 25_600),
+            keyed_offset: tdbs(&offset, true, 25_600),
         }
     }
 }
@@ -483,7 +513,7 @@ fn build_atom(t: &MaskProtos, m: &MaskPlan, size: (u32, u32)) -> R<Chunk<'static
             }
             "ADBE Mask Feather" => {
                 if !m.feather_keys.is_empty() {
-                    node = keyed_feather(t, &m.feather_keys)?;
+                    node = keyed(&t.keyed_feather, 2, &m.feather_keys)?;
                     true
                 } else if let Some([x, y]) = m.feather {
                     set_cdat(&mut node, &[x, y])?;
@@ -491,6 +521,14 @@ fn build_atom(t: &MaskProtos, m: &MaskPlan, size: (u32, u32)) -> R<Chunk<'static
                 } else {
                     false
                 }
+            }
+            "ADBE Mask Opacity" if !m.opacity_keys.is_empty() => {
+                node = keyed(&t.keyed_opacity, 1, &m.opacity_keys)?;
+                true
+            }
+            "ADBE Mask Offset" if !m.expansion_keys.is_empty() => {
+                node = keyed(&t.keyed_offset, 1, &m.expansion_keys)?;
+                true
             }
             "ADBE Mask Opacity" => match m.opacity {
                 Some(v) => {
@@ -530,13 +568,14 @@ fn set_cdat(tdbs: &mut Chunk<'static>, values: &[f64]) -> R<()> {
     Ok(())
 }
 
-fn keyed_feather(t: &MaskProtos, keys: &[KeyPlan]) -> R<Chunk<'static>> {
-    let mut tdbs = t.keyed_feather.clone();
-    // The plain template with two components (208): 8 + 40 * 2 bytes.
-    let size = 88;
+/// A keyed record from its prototype: the plain template with `dims` components (208: 8 + 40 per
+/// component bytes per key).
+fn keyed(proto: &Chunk<'static>, dims: usize, keys: &[KeyPlan]) -> R<Chunk<'static>> {
+    let mut tdbs = proto.clone();
+    let size = 8 + 40 * dims;
     let mut ldat = Vec::with_capacity(size * keys.len());
     for k in keys {
-        ldat.extend(crate::export::emit::plain_record(2, k, size)?);
+        ldat.extend(crate::export::emit::plain_record(dims, k, size)?);
     }
     set_key_list(&mut tdbs, ldat, keys.len(), size)?;
     Ok(tdbs)
@@ -648,6 +687,8 @@ mod tests {
             feather_keys: Vec::new(),
             opacity: None,
             expansion: None,
+            opacity_keys: Vec::new(),
+            expansion_keys: Vec::new(),
         }
     }
 
