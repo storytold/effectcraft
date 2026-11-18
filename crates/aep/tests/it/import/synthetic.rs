@@ -1026,3 +1026,22 @@ fn french_levels_channel_aliases_cover_every_item() {
     // "Alpha" needs no alias: the same word in both languages.
     assert_eq!(popup_alias("alpha"), None);
 }
+
+#[test]
+fn preserve_transparency_is_imported_from_the_layer_header() {
+    // `ldta` byte 103 is 1 on a layer with Preserve Underlying Transparency on (After Effects
+    // 2026: solid, shape, text, precomp and 3D layers), 0 when it is off. It used to be dropped
+    // without a word: the layer drew over transparent areas below it.
+    let pt = |p: &Project| -> Vec<bool> { p.comps().flat_map(|(_, c)| c.layers.iter().map(|l| l.preserve_transparency)).collect() };
+    let (p, r) = run(SYNTHETIC, true);
+    r.unwrap();
+    assert!(!pt(&p).is_empty() && pt(&p).iter().all(|on| !on), "{:?}", pt(&p));
+    let on = mutate(&mut |c| {
+        if c.id == *b"ldta" {
+            set_data(c, 103, &[1]);
+        }
+    });
+    let (p, r) = run(&on, true);
+    r.unwrap();
+    assert!(pt(&p).iter().all(|on| *on), "{:?}", pt(&p));
+}
