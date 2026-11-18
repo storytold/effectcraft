@@ -267,19 +267,24 @@ fn level(v: f32, [ib, iw, g, ob, ow]: [f32; 5], (clip_b, clip_w): (bool, bool)) 
     if clip_w {
         t = t.min(1.0);
     }
-    levels_output(levels_gamma(t, g), ob, ow)
+    let mapped = ob + (ow - ob) * levels_gamma(t, g);
+    if mapped.is_finite() || t.is_nan() { mapped } else { level_beyond_f32(v, [ib, iw, g, ob, ow], (clip_b, clip_w)) }
 }
 
-fn levels_output(curve: f32, ob: f32, ow: f32) -> f32 {
-    let span = ow - ob;
-    let mapped = ob + span * curve;
-    if mapped.is_finite() || curve.is_nan() {
-        mapped
-    } else if span == 0.0 {
-        ob
-    } else {
-        f32::MAX.copysign(span) * curve.signum()
+fn level_beyond_f32(v: f32, [ib, iw, g, ob, ow]: [f32; 5], (clip_b, clip_w): (bool, bool)) -> f32 {
+    if ow == ob {
+        return ob;
     }
+    let mut t = (f64::from(v) - f64::from(ib)) / f64::from((iw - ib).max(1e-6));
+    if clip_b {
+        t = t.max(0.0);
+    }
+    if clip_w {
+        t = t.min(1.0);
+    }
+    let curve = t.abs().powf(1.0 / f64::from(g)).copysign(t);
+    let mapped = f64::from(ob) + (f64::from(ow) - f64::from(ob)) * curve;
+    mapped.clamp(-f64::from(f32::MAX), f64::from(f32::MAX)) as f32
 }
 
 const LEVELS_IDENTITY: [f32; 5] = [0.0, 1.0, 1.0, 0.0, 1.0];

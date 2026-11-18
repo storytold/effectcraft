@@ -7,7 +7,7 @@ use effectcraft_project::{BitDepth, Comp, ItemKind, LayerSource, build};
 use effectcraft_render::RenderOpts;
 use effectcraft_time::{FrameRate, Tick};
 
-use crate::tests::{Scene, c, check, compare_at, effect_case, effect_direct, n, opts, set};
+use crate::tests::{Scene, c, check, compare_at, effect_case, effect_direct, effect_direct_on, n, opts, set};
 
 fn e(v: u32) -> Value {
     Value::Enum(v)
@@ -72,6 +72,32 @@ fn levels_stays_finite_and_matches_the_cpu_with_clipping_off() {
         for adjustment in [false, true] {
             for out in effect_direct("ec.color.levels", &vals, adjustment) {
                 assert!(out.data.iter().flatten().all(|v| v.is_finite()), "{vals:?} adj {adjustment}");
+            }
+        }
+    }
+}
+
+#[test]
+fn levels_matches_the_cpu_at_the_edge_of_f32() {
+    let edge = [f32::from_bits(0x7f3f_ffff), f32::MAX, 0.0071313, -f32::MAX, 0.25];
+    let source = |w: u32, h: u32| {
+        let mut img = effectcraft_raster::Image::new(w, h);
+        for (i, px) in img.data.iter_mut().enumerate() {
+            *px = [edge[i % 5], edge[(i + 1) % 5], edge[(i + 2) % 5], 1.0];
+        }
+        img
+    };
+    let settings = [[0.0, 0.75, 10.0, 0.0, 1.0], [0.0, 0.0, 0.1, 0.0, 0.001], [0.0, 0.5, 10.0, 0.0, 1.0], [0.0, 0.5, 1.0, 0.0, 1.0]];
+    for prefix in ["", "red"] {
+        for values in settings {
+            let unclipped = levels_controls(prefix, values);
+            let clip_white =
+                [unclipped.clone(), vec![(if prefix.is_empty() { "clipToOutputWhite".into() } else { format!("{prefix}ClipToOutputWhite") }, e(1))]].concat();
+            for owned in [unclipped, clip_white] {
+                let vals: Vec<(&str, Value)> = owned.iter().map(|(id, v)| (id.as_str(), v.clone())).collect();
+                for out in effect_direct_on("ec.color.levels", &vals, false, source) {
+                    assert!(out.data.iter().flatten().all(|v| v.is_finite()), "{vals:?}");
+                }
             }
         }
     }

@@ -550,11 +550,35 @@ fn levels_saturates_only_where_the_output_would_overflow() {
     assert_eq!(level(0.6, [0.5, 0.5, 0.1, 1.0, 0.0], unclipped), -f32::MAX);
     assert_eq!(level(0.6, [0.5, 0.5, 0.1, 0.3, 0.3], unclipped), 0.3);
     assert_eq!(level(f32::MAX, [0.0, 0.5, 1.0, 0.0, 1.0], unclipped), f32::MAX);
+    assert_eq!(level(-f32::MAX, [0.0, 0.5, 1.0, 0.0, 1.0], unclipped), -f32::MAX);
     assert_eq!(level(f32::MAX, [0.0, 0.5, 1.0, 0.0, 1.0], (false, true)), 1.0);
     let finite_beyond_1e30 = [0.0, 0.0, 0.1, 0.0, 1.0];
     let want = levels_unbounded(0.004096, finite_beyond_1e30, unclipped);
     assert!(want.is_finite() && want > 1e35, "{want}");
     assert_eq!(level(0.004096, finite_beyond_1e30, unclipped).to_bits(), want.to_bits());
+}
+
+fn levels_exact(v: f32, settings: [f32; 5]) -> f64 {
+    let [ib, iw, g, ob, ow] = settings.map(f64::from);
+    let t = (f64::from(v) - ib) / (iw - ib).max(1e-6);
+    ob + (ow - ob) * t.abs().powf(1.0 / g).copysign(t)
+}
+
+#[test]
+fn levels_is_exact_where_only_an_intermediate_overflows() {
+    let unclipped = (false, false);
+    for (v, settings) in [
+        (f32::MAX, [0.0, 0.5, 10.0, 0.0, 1.0]),
+        (-f32::MAX, [0.0, 0.5, 10.0, 0.0, 1.0]),
+        (f32::from_bits(0x7f3f_ffff), [0.0, 0.75, 10.0, 0.0, 1.0]),
+        (0.0071313, [0.0, 0.0, 0.1, 0.0, 0.001]),
+        (0.0071313, [0.0, 0.0, 0.1, 0.0, -0.001]),
+    ] {
+        let want = levels_exact(v, settings);
+        let got = level(v, settings, unclipped);
+        assert!(got.is_finite() && got.abs() < f32::MAX, "{v} {settings:?}: {got}");
+        assert!(((f64::from(got) - want) / want).abs() < 1e-5, "{v} {settings:?}: {got} vs {want}");
+    }
 }
 
 #[test]

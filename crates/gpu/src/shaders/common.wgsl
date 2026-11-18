@@ -243,7 +243,8 @@ fn powz(x: f32, y: f32) -> f32 {
 }
 
 const F32_MAX: f32 = 0x1.fffffep+127f;
-const LEVELS_OVERFLOW_LOG2: f32 = 127.999;
+const LEVELS_DIRECT_LOG2: f32 = 126.0;
+const LEVELS_SATURATION_LOG2: f32 = 127.999;
 
 fn levels_gamma(t: f32, g: f32) -> f32 {
     if (t >= 0.0) {
@@ -252,16 +253,8 @@ fn levels_gamma(t: f32, g: f32) -> f32 {
     return -powz(-t, 1.0 / g);
 }
 
-fn levels_input_overflows(x: f32, d: f32) -> bool {
-    return d < 1.0 && abs(x) > F32_MAX * d;
-}
-
-fn levels_output_overflows(t: f32, g: f32, span: f32) -> bool {
-    if (abs(t) <= 1.0) {
-        return false;
-    }
-    let curve_log2 = log2(abs(t)) / g;
-    return max(curve_log2, curve_log2 + log2(abs(span))) > LEVELS_OVERFLOW_LOG2;
+fn levels_direct(t: f32, g: f32, ob: f32, ow: f32) -> f32 {
+    return ob + (ow - ob) * levels_gamma(t, g);
 }
 
 fn levels_level(v: f32, ib: f32, iw: f32, g: f32, ob: f32, ow: f32, clip_b: bool, clip_w: bool) -> f32 {
@@ -270,21 +263,29 @@ fn levels_level(v: f32, ib: f32, iw: f32, g: f32, ob: f32, ow: f32, clip_b: bool
     }
     let x = v - ib;
     let d = max(iw - ib, 1e-6);
-    let input_overflows = levels_input_overflows(x, d);
-    var t = sign(x) * F32_MAX;
-    if (!input_overflows) {
-        t = x / d;
+    var t_log2 = 0.0;
+    if (x != 0.0) {
+        t_log2 = log2(abs(x)) - log2(d);
     }
-    if (clip_b) {
-        t = max(t, 0.0);
+    let out_log2 = t_log2 / g + log2(abs(ow - ob));
+    if (t_log2 <= 0.0 || max(t_log2, max(t_log2 / g, out_log2)) < LEVELS_DIRECT_LOG2) {
+        var t = x / d;
+        if (clip_b) {
+            t = max(t, 0.0);
+        }
+        if (clip_w) {
+            t = min(t, 1.0);
+        }
+        return levels_direct(t, g, ob, ow);
     }
-    if (clip_w) {
-        t = min(t, 1.0);
+    if ((x > 0.0 && clip_w) || (x < 0.0 && clip_b)) {
+        return levels_direct(select(0.0, 1.0, x > 0.0), g, ob, ow);
     }
-    if ((input_overflows && abs(t) == F32_MAX) || levels_output_overflows(t, g, ow - ob)) {
-        return sign(t) * sign(ow - ob) * F32_MAX;
+    let direction = sign(x) * sign(ow - ob);
+    if (out_log2 >= LEVELS_SATURATION_LOG2) {
+        return direction * F32_MAX;
     }
-    return ob + (ow - ob) * levels_gamma(t, g);
+    return ob + direction * exp2(out_log2);
 }
 
 // Rust's f32::round (half away from zero; WGSL's round() is half to even). Decided by comparing
