@@ -26,7 +26,7 @@ pub(crate) struct Template {
     pub fset: Vec<Chunk<'static>>,
     /// The `FEE ` list that follows a composition item.
     pub fee: Chunk<'static>,
-    /// `tdmn`, `tdbs` pairs of the five Transform properties with a static value.
+    /// `tdmn`, `tdbs` pairs of the Transform properties ([`PropKind::ALL`]) with a static value.
     pub stat: Vec<Chunk<'static>>,
     /// The same with two keys.
     pub keyd: Vec<Chunk<'static>>,
@@ -75,6 +75,10 @@ fn transform_records(keyed: bool) -> Vec<Chunk<'static>> {
                 PropKind::Scale => RecSpec { dims: 3, template: KeyTemplate::Plain, class: class::LAYER_SCALAR, limits: Some((0.0, 0.0)), byte5: None },
                 PropKind::Rotation => RecSpec { dims: 1, template: KeyTemplate::Plain, class: class::LAYER_SCALAR, limits: None, byte5: None },
                 PropKind::Opacity => RecSpec { dims: 1, template: KeyTemplate::Plain, class: class::LAYER_SCALAR, limits: Some((0.0, 100.0)), byte5: None },
+                // As the layer skeletons hold them (`tree_defs`, `ADBE Position_0`).
+                PropKind::PositionX | PropKind::PositionY | PropKind::PositionZ => {
+                    RecSpec { dims: 1, template: KeyTemplate::Plain, class: class::LAYER_SCALAR, limits: Some((0.0, 0.0)), byte5: None }
+                }
             };
             [crate::export::synth::tdmn(k.match_name()), crate::export::synth::tdbs(&spec, keyed, 25_600)]
         })

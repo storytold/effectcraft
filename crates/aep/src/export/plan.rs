@@ -31,10 +31,26 @@ pub(crate) enum PropKind {
     Scale,
     Rotation,
     Opacity,
+    /// X, Y and Z Position of a Position whose dimensions are separated.
+    PositionX,
+    PositionY,
+    PositionZ,
 }
 
 impl PropKind {
-    pub const ALL: [PropKind; 5] = [PropKind::Anchor, PropKind::Position, PropKind::Scale, PropKind::Rotation, PropKind::Opacity];
+    pub const ALL: [PropKind; 8] = [
+        PropKind::Anchor,
+        PropKind::Position,
+        PropKind::Scale,
+        PropKind::Rotation,
+        PropKind::Opacity,
+        PropKind::PositionX,
+        PropKind::PositionY,
+        PropKind::PositionZ,
+    ];
+
+    /// The separated position dimensions.
+    pub const SEPARATED: [PropKind; 3] = [PropKind::PositionX, PropKind::PositionY, PropKind::PositionZ];
 
     /// The match name in the file.
     pub fn match_name(self) -> &'static str {
@@ -44,6 +60,9 @@ impl PropKind {
             PropKind::Scale => "ADBE Scale",
             PropKind::Rotation => "ADBE Rotate Z",
             PropKind::Opacity => "ADBE Opacity",
+            PropKind::PositionX => "ADBE Position_0",
+            PropKind::PositionY => "ADBE Position_1",
+            PropKind::PositionZ => "ADBE Position_2",
         }
     }
 
@@ -55,6 +74,9 @@ impl PropKind {
             PropKind::Scale => "scale",
             PropKind::Rotation => "rotation",
             PropKind::Opacity => "opacity",
+            PropKind::PositionX => "positionX",
+            PropKind::PositionY => "positionY",
+            PropKind::PositionZ => "positionZ",
         }
     }
 
@@ -62,7 +84,7 @@ impl PropKind {
     pub fn dims(self) -> usize {
         match self {
             PropKind::Anchor | PropKind::Position | PropKind::Scale => 3,
-            PropKind::Rotation | PropKind::Opacity => 1,
+            PropKind::Rotation | PropKind::Opacity | PropKind::PositionX | PropKind::PositionY | PropKind::PositionZ => 1,
         }
     }
 
@@ -924,6 +946,10 @@ fn plan_transform(layer: &Layer, src: &LayerSrc, comp: &Comp, source_size: (u32,
             if let Some(pp) = plan_prop(kind, None, p, at, cp, col) {
                 col.exported.properties += 1;
                 props.push(pp);
+            } else if PropKind::SEPARATED.contains(&kind) {
+                // A separated dimension at 0 is still written: its record marks the layer's
+                // Position as separated (`emit::put_properties`).
+                props.push(PropPlan { kind, value: vec![0.0], keys: Vec::new(), expr: None });
             }
         }
         // A camera's or light's block holds After Effects' own Position and point of interest:
@@ -939,6 +965,17 @@ fn plan_transform(layer: &Layer, src: &LayerSrc, comp: &Comp, source_size: (u32,
                     col.exported.properties += 1;
                 }
             }
+        }
+        // With its dimensions separated, After Effects keeps Position in X, Y and Z Position and
+        // the combined record in its default state (`emit::put_properties` marks it): the
+        // combined record holds the separated values, without the stale keys or expression.
+        if props.iter().any(|p| PropKind::SEPARATED.contains(&p.kind)) {
+            let value: Vec<f64> = PropKind::SEPARATED
+                .iter()
+                .map(|k| props.iter().find(|p| p.kind == *k).and_then(|p| p.value.first().copied()).unwrap_or(0.0))
+                .collect();
+            props.retain(|p| p.kind != PropKind::Position);
+            props.push(PropPlan { kind: PropKind::Position, value, keys: Vec::new(), expr: None });
         }
         for node in &tr.children {
             let id = node.match_id();
@@ -1289,7 +1326,7 @@ fn plan_prop(kind: PropKind, label: Option<&str>, p: &Property, at: PropAt<'_>, 
         PropKind::Anchor => vec![0.5, 0.5, 0.0],
         PropKind::Position => vec![f64::from(comp.width) / 2.0, f64::from(comp.height) / 2.0, 0.0],
         PropKind::Scale => vec![1.0, 1.0, 1.0],
-        PropKind::Rotation => vec![0.0],
+        PropKind::Rotation | PropKind::PositionX | PropKind::PositionY | PropKind::PositionZ => vec![0.0],
         PropKind::Opacity => vec![1.0],
     };
     // The project's value in the stored unit.
