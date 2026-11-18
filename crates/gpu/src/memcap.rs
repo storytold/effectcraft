@@ -76,8 +76,9 @@ impl MemCap {
 
     fn from_envs(cap_var: Option<&str>, upload_var: Option<&str>, device_type: wgpu::DeviceType, vram: Option<u64>) -> MemCap {
         let mut upload = upload_budget(upload_var, vram);
-        // An explicit cap is the user's: it does not grow with the cache, so a default budget
-        // is lowered to half of it (never below the former fixed 1.5 GiB); an explicit one stays.
+        // An explicit cap is the user's: it does not grow with the cache, so a default budget is
+        // kept at most at the larger of half the cap and the former fixed 1.5 GiB (it is never
+        // raised, and a smaller default stays as it is); an explicit budget stays.
         // A value that is not a number is treated as unset (with a warning), not as a cap.
         let cap = match explicit_cap(cap_var) {
             Some(cap) => {
@@ -364,24 +365,37 @@ fn nvidia_smi_output() -> Option<&'static str> {
     OUTPUT
         .get_or_init(|| {
             let out = run_with_timeout(std::ffi::OsStr::new("nvidia-smi"), &NVIDIA_SMI_ARGS, NVIDIA_SMI_TIMEOUT);
-            if out.is_none() {
-                log::debug!(target: "effectcraft_gpu", "nvidia-smi is missing, failed or took longer than {NVIDIA_SMI_TIMEOUT:?}: video memory unknown");
+            if let Err(why) = &out {
+                log::debug!(target: "effectcraft_gpu", "nvidia-smi gave no answer ({why:?}, timeout {NVIDIA_SMI_TIMEOUT:?}): video memory unknown");
             }
-            out
+            out.ok()
         })
         .as_deref()
 }
 
-/// How long a killed program may take to exit before it is left behind unreaped.
+/// How long the caller waits for a killed program to exit before a thread of its own reaps it.
 #[cfg(not(target_arch = "wasm32"))]
 const REAP_TIMEOUT: Duration = Duration::from_millis(200);
+
+/// Why [`run_with_timeout`] has no output.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, PartialEq, Eq)]
+enum NoOutput {
+    /// The program could not start, exited with an error, or its output could not be read.
+    Failed,
+    /// The program was still running at the timeout (it is killed).
+    TimedOut,
+    /// The program exited successfully, but its output was still open at the timeout (a process
+    /// it left behind holds it).
+    OutputOpen,
+}
 
 /// Runs `program` with `args` and returns its standard output when it exits successfully and its
 /// output ends within `timeout`, without a console window on Windows. The output is read on a
 /// thread of its own, so a process the program left behind holding the pipe open cannot hold the
 /// caller past the timeout. A program still running at the timeout is killed (see [`stop`]).
 #[cfg(not(target_arch = "wasm32"))]
-fn run_with_timeout(program: &std::ffi::OsStr, args: &[&str], timeout: Duration) -> Option<String> {
+fn run_with_timeout(program: &std::ffi::OsStr, args: &[&str], timeout: Duration) -> Result<String, NoOutput> {
     use std::io::Read;
     use std::process::{Command, Stdio};
     let mut cmd = Command::new(program);
@@ -393,7 +407,7 @@ fn run_with_timeout(program: &std::ffi::OsStr, args: &[&str], timeout: Duration)
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
     let start = std::time::Instant::now();
-    let mut child = cmd.spawn().ok()?;
+    let mut child = cmd.spawn().map_err(|_| NoOutput::Failed)?;
     let (tx, rx) = std::sync::mpsc::channel();
     let reader = child.stdout.take().and_then(|mut stdout| {
         std::thread::Builder::new()
@@ -405,37 +419,57 @@ fn run_with_timeout(program: &std::ffi::OsStr, args: &[&str], timeout: Duration)
             .ok()
     });
     if reader.is_none() {
-        stop(&mut child);
-        return None;
+        let _ = stop(child);
+        return Err(NoOutput::Failed);
     }
     loop {
         match child.try_wait() {
             Ok(Some(status)) if status.success() => break,
             Ok(None) if start.elapsed() < timeout => std::thread::sleep(Duration::from_millis(10)),
-            Ok(Some(_)) => return None,
-            _ => {
-                stop(&mut child);
-                return None;
+            Ok(Some(_)) => return Err(NoOutput::Failed),
+            Ok(None) => {
+                let _ = stop(child);
+                return Err(NoOutput::TimedOut);
+            }
+            Err(_) => {
+                let _ = stop(child);
+                return Err(NoOutput::Failed);
             }
         }
     }
-    rx.recv_timeout(timeout.saturating_sub(start.elapsed())).ok().flatten()
+    match rx.recv_timeout(timeout.saturating_sub(start.elapsed())) {
+        Ok(Some(out)) => Ok(out),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(NoOutput::OutputOpen),
+        Ok(None) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(NoOutput::Failed),
+    }
 }
 
-/// Kills `child` and collects its exit status, waiting at most [`REAP_TIMEOUT`] for it to exit
-/// (a process stuck in the driver may not die at once, and the caller must not wait for that).
-/// The exit status, or `None` when the program has not exited by then.
+/// Kills `child` and collects its exit status, so it is not left behind as a zombie. The caller
+/// waits at most [`REAP_TIMEOUT`] for that (a process stuck in the driver may not die at once);
+/// after that a thread of its own waits for the program (see [`reap_later`]). The exit status
+/// when the program exited within [`REAP_TIMEOUT`], otherwise the reaping thread.
 #[cfg(not(target_arch = "wasm32"))]
-fn stop(child: &mut std::process::Child) -> Option<std::process::ExitStatus> {
+fn stop(mut child: std::process::Child) -> Result<std::process::ExitStatus, Option<Reaper>> {
     let _ = child.kill();
     let start = std::time::Instant::now();
     loop {
         match child.try_wait() {
-            Ok(Some(status)) => return Some(status),
+            Ok(Some(status)) => return Ok(status),
             Ok(None) if start.elapsed() < REAP_TIMEOUT => std::thread::sleep(Duration::from_millis(5)),
-            _ => return None,
+            _ => return Err(reap_later(child)),
         }
     }
+}
+
+/// A thread that waits for a program to exit; it gives the exit status.
+#[cfg(not(target_arch = "wasm32"))]
+type Reaper = std::thread::JoinHandle<Option<std::process::ExitStatus>>;
+
+/// Waits for `child` to exit on a thread of its own, which collects its exit status. `None` when
+/// the thread cannot start: the child is then dropped (left unreaped, as it cannot be helped).
+#[cfg(not(target_arch = "wasm32"))]
+fn reap_later(mut child: std::process::Child) -> Option<Reaper> {
+    std::thread::Builder::new().name("nvidia-smi reaper".into()).spawn(move || child.wait().ok()).ok()
 }
 
 /// The memory in bytes of the NVIDIA GPU in `nvidia-smi` output (lines of `bus id, device id,
@@ -619,6 +653,9 @@ mod tests {
         assert_eq!((m.cap(), m.upload_budget()), (4 * GIB, 2 * GIB as usize));
         let m = MemCap::from_envs(Some("8"), None, d, Some(32 * GIB));
         assert_eq!((m.cap(), m.upload_budget()), (8 * MIB, 3 * GIB as usize / 2));
+        // The cap only lowers: a 2 GiB card's 768 MiB default stays under a 2 GiB cap.
+        let m = MemCap::from_envs(Some("2048"), None, d, Some(2 * GIB));
+        assert_eq!((m.cap(), m.upload_budget()), (2 * GIB, 768 * MIB as usize));
         let m = MemCap::from_envs(Some("0"), None, d, Some(32 * GIB));
         assert_eq!((m.cap(), m.upload_budget()), (0, 12 * GIB as usize));
         let m = MemCap::from_envs(None, Some("9000"), d, Some(32 * GIB));
@@ -721,16 +758,16 @@ mod tests {
     #[test]
     fn a_program_that_fails_or_hangs_gives_no_output() {
         let missing = std::ffi::OsStr::new("effectcraft-no-such-program-3731");
-        assert_eq!(run_with_timeout(missing, &NVIDIA_SMI_ARGS, Duration::from_secs(5)), None);
+        assert_eq!(run_with_timeout(missing, &NVIDIA_SMI_ARGS, Duration::from_secs(5)), Err(NoOutput::Failed));
         let me = std::env::current_exe().unwrap();
         // This test binary stands in for the program: listing tests succeeds and prints them,
         // an unknown flag exits with an error, and the sleeping test outlasts the timeout.
         let listed = run_with_timeout(me.as_os_str(), &["--list", "--exact", "memcap::tests::stand_in_for_a_hanging_program"], Duration::from_secs(20));
-        assert!(listed.is_some_and(|out| out.contains("stand_in_for_a_hanging_program")));
-        assert_eq!(run_with_timeout(me.as_os_str(), &["--no-such-flag-3731"], Duration::from_secs(20)), None);
+        assert!(listed.is_ok_and(|out| out.contains("stand_in_for_a_hanging_program")));
+        assert_eq!(run_with_timeout(me.as_os_str(), &["--no-such-flag-3731"], Duration::from_secs(20)), Err(NoOutput::Failed));
         let start = std::time::Instant::now();
         let hung = run_with_timeout(me.as_os_str(), &["--exact", "--ignored", "memcap::tests::stand_in_for_a_hanging_program"], Duration::from_millis(500));
-        assert_eq!(hung, None);
+        assert_eq!(hung, Err(NoOutput::TimedOut));
         // Well under the stand-in's 5 s: the caller did not wait for it to finish.
         assert!(start.elapsed() < Duration::from_secs(3), "waited {:?}", start.elapsed());
     }
@@ -757,26 +794,45 @@ mod tests {
         // The timeout leaves the stand-in time to start and exit; the left process sleeps 5 s.
         let out =
             run_with_timeout(me.as_os_str(), &["--exact", "--ignored", "memcap::tests::stand_in_that_leaves_its_output_open"], Duration::from_millis(2500));
-        assert_eq!(out, None);
+        // Not a stand-in that failed to start its left process (that exits with an error).
+        assert_eq!(out, Err(NoOutput::OutputOpen));
         assert!(start.elapsed() < Duration::from_millis(4500), "waited {:?}", start.elapsed());
     }
 
-    /// A program killed at the timeout is reaped (its exit status collected), within a bounded wait.
+    /// The hanging stand-in, its output discarded.
     #[cfg(not(target_arch = "wasm32"))]
-    #[test]
-    fn a_killed_program_is_reaped() {
+    fn hanging_stand_in() -> std::process::Child {
         let me = std::env::current_exe().unwrap();
-        let mut child = std::process::Command::new(me)
+        std::process::Command::new(me)
             .args(["--exact", "--ignored", "memcap::tests::stand_in_for_a_hanging_program"])
             .stdout(std::process::Stdio::null())
             .spawn()
-            .unwrap();
+            .unwrap()
+    }
+
+    /// A program killed at the timeout is reaped (its exit status collected): by the caller within
+    /// `REAP_TIMEOUT`, or else by a thread of its own, never left behind.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_killed_program_is_reaped() {
         let start = std::time::Instant::now();
-        // A loaded machine may take longer than one `REAP_TIMEOUT` to end the process.
-        let mut status = stop(&mut child);
-        while status.is_none() && start.elapsed() < Duration::from_secs(3) {
-            status = stop(&mut child);
-        }
+        let status = match stop(hanging_stand_in()) {
+            Ok(status) => Some(status),
+            Err(reaper) => reaper.expect("the reaper thread starts").join().unwrap(),
+        };
+        assert!(status.is_some_and(|s| !s.success()), "{status:?}");
+        assert!(start.elapsed() < Duration::from_secs(4), "waited {:?}", start.elapsed());
+    }
+
+    /// A killed program that has not exited when the caller stops waiting is reaped by a thread of
+    /// its own, which collects its exit status (#3737 review).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_program_that_exits_late_is_reaped_by_a_thread() {
+        let mut child = hanging_stand_in();
+        let _ = child.kill();
+        let start = std::time::Instant::now();
+        let status = reap_later(child).expect("the reaper thread starts").join().unwrap();
         assert!(status.is_some_and(|s| !s.success()), "{status:?}");
         assert!(start.elapsed() < Duration::from_secs(3), "waited {:?}", start.elapsed());
     }

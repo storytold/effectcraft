@@ -1533,8 +1533,16 @@ fn upload_budget_bounds_the_layer_textures_kept() {
         let img = g.render(&r, s.cid, Tick::from_seconds_f64(k as f64 / 30.0)).expect("the GPU renders the frame");
         (img.data, g.ctx.transfer_stats().upload_bytes - before)
     };
+    // The shared context's budget comes back when the test ends, also when a frame fails (#3737
+    // review): the GPU lock is held until this thread ends, so no other test sees the change.
+    struct Restore<'a>(&'a crate::GpuContext, usize);
+    impl Drop for Restore<'_> {
+        fn drop(&mut self) {
+            self.0.set_upload_budget(self.1);
+        }
+    }
+    let _restore = Restore(&g.ctx, g.ctx.upload_budget());
     // A budget that holds both 640 KB footprints, whatever EFFECTCRAFT_GPU_UPLOAD_MB says.
-    let inherited = g.ctx.upload_budget();
     g.ctx.set_upload_budget(64 << 20);
     let fits = effectcraft_render::cache::LayerCache::new(64 << 20);
     let (a, _) = frame(&fits, 0);
@@ -1544,7 +1552,6 @@ fn upload_budget_bounds_the_layer_textures_kept() {
     let tight = effectcraft_render::cache::LayerCache::new(64 << 20);
     let _ = frame(&tight, 0);
     let (c, up) = frame(&tight, 1);
-    g.ctx.set_upload_budget(inherited);
     assert_eq!(up_fits, 0, "static layers re-uploaded within a budget that fits them");
     assert!(up > 0, "over budget, the footprints must upload again");
     assert!(a == b && b == c, "the upload budget changed the frame");
@@ -1558,10 +1565,13 @@ fn upload_budget_bounds_the_layer_textures_kept() {
 #[test]
 fn upload_budget_comes_from_the_memory_rule() {
     const ENV: &str = "EFFECTCRAFT_GPU_UPLOAD_TEST_CHILD";
+    // What the child prints once its checks passed: a child without a GPU exits successfully too.
+    const CHECKED: &str = "upload budget child: checked";
     let tight = std::env::var_os(ENV).is_some();
     if !tight && std::env::var_os("EFFECTCRAFT_GPU_UPLOAD_MB").is_some() {
         return; // the caller set a budget of their own
     }
+    let mut child_checked = None;
     if !tight {
         // The child uses the GPU: tests of this process wait until it is done (#3737 review).
         hold_gpu_lock();
@@ -1572,9 +1582,15 @@ fn upload_budget_comes_from_the_memory_rule() {
             .args(["--exact", "tests::upload_budget_comes_from_the_memory_rule", "--nocapture"])
             .output()
             .expect("spawn child test process");
-        assert!(out.status.success(), "child test failed:\n{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        let (stdout, stderr) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        assert!(out.status.success(), "child test failed:\n{stdout}\n{stderr}");
+        child_checked = Some((stdout.contains(CHECKED), format!("{stdout}\n{stderr}")));
     }
     let Some(g) = gpu() else { return };
+    // This process has a GPU, so the child must have run its checks, not skipped them.
+    if let Some((checked, output)) = child_checked {
+        assert!(checked, "the child did not run its checks:\n{output}");
+    }
     let mut s = Scene::new(BitDepth::Bpc8);
     for i in 0..3 {
         let mut l = s.footage(600, 400); // 3.8 MB as RGBA f32 each
@@ -1595,6 +1611,7 @@ fn upload_budget_comes_from_the_memory_rule() {
     if tight {
         assert_eq!(g.ctx.upload_budget(), 1 << 20, "EFFECTCRAFT_GPU_UPLOAD_MB=1");
         assert!(up > 0, "layers over the budget must upload again");
+        println!("{CHECKED}");
     } else {
         assert_eq!(g.ctx.upload_budget(), g.ctx.upload_budget_from_rule());
         assert_eq!(up, 0, "layers within the budget re-uploaded");
