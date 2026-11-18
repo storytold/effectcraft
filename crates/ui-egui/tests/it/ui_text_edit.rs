@@ -291,6 +291,38 @@ fn opening_a_formatting_tab_keeps_the_text_selection() {
     assert!(doc.style_at(1).faux_bold && !doc.style_at(7).faux_bold, "only \"Hello\" is bold");
 }
 
+/// #3899: Alt+Down loosens the leading of the selected text and Alt+Up tightens it, by 2 px (10
+/// with the command key), from the 120% auto leading stands for; text outside the selection keeps
+/// its own. With no selection Alt+Up/Down still move the caret.
+#[test]
+fn alt_up_and_down_change_the_leading_of_the_selection() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Type", "width": 640, "height": 360, "duration": 2})).unwrap();
+    let lid =
+        s.execute("layer.newText", json!({"text": "Hello\nworld", "size": 80, "position": [60, 120], "justify": "left"})).unwrap()["layer"].as_u64().unwrap();
+    let mut h = harness(EffectcraftApp::new(s));
+    h.state_mut().show_panel(PanelKind::Composition);
+    h.run_steps(3);
+    h.state_mut().session.execute("text.edit", json!({"layer": lid})).unwrap();
+    h.state_mut().session.execute("text.setSelection", json!({"anchor": 0, "caret": 5})).unwrap();
+    h.run_steps(2);
+    let leading = |h: &Harness<'_, EffectcraftApp>, at: usize| layer_doc(&h.state().session, LayerId(lid)).unwrap().style_at(at).leading;
+    assert_eq!(leading(&h, 1), None, "auto to begin with");
+    key(&mut h, Key::ArrowDown, Modifiers::ALT);
+    assert_eq!(leading(&h, 1), Some(98.0), "96 (auto) + 2");
+    key(&mut h, Key::ArrowUp, Modifiers::ALT | Modifiers::COMMAND);
+    assert_eq!(leading(&h, 1), Some(88.0), "- 10 with the command key");
+    assert_eq!(leading(&h, 8), None, "the second line keeps its own");
+    assert_eq!(edited(&h), (lid, "Hello\nworld".into(), 0, 5), "the selection stays");
+    // A caret alone: the arrows move it, as before.
+    h.state_mut().session.execute("text.setSelection", json!({"anchor": 2, "caret": 2})).unwrap();
+    h.run_steps(1);
+    key(&mut h, Key::ArrowDown, Modifiers::ALT);
+    let (_, _, anchor, caret) = edited(&h);
+    assert!(anchor == caret && caret > 5, "the caret went down a line: {caret}");
+    assert_eq!(leading(&h, 1), Some(88.0));
+}
+
 /// #831: a click away and keys in one frame's input. The text gets the keys typed before the
 /// click and none after it; those later keys don't run as shortcuts either (Delete would remove a
 /// layer). From the next frame the keys are the app's: Space plays.
