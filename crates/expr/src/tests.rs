@@ -1447,6 +1447,11 @@ fn an_unknown_effects_parameters_are_read_by_name() {
     assert_close!(f.ev(f.b, ROT, "effect('Pseudo/0.25')('Speed')", 0.0).unwrap().as_f64(), 3.0);
     assert_close!(f.ev(f.b, ROT, "thisLayer('Effects')('Pseudo/0.25')('Speed')", 0.0).unwrap().as_f64(), 3.0);
     assert_close!(f.ev(f.b, ROT, "thisLayer('ADBE Effect Parade')('Pseudo/0.25')('Speed')", 0.0).unwrap().as_f64(), 3.0);
+    // A parameter by its After Effects match name, as presets write them.
+    assert_close!(f.ev(f.b, ROT, "effect('Settings')('Pseudo/0.25-0001')", 0.0).unwrap().as_f64(), 3.0);
+    assert_close!(f.ev(f.b, ROT, "effect('Pseudo/0.25')('Pseudo/0.25-0002') * 10", 0.0).unwrap().as_f64(), 20.0);
+    assert!(f.ev(f.b, ROT, "effect('Settings')('Pseudo/0.25-0009')", 0.0).is_err());
+    assert!(f.ev(f.b, ROT, "effect('Settings')('Pseudo/other-0001')", 0.0).is_err());
 }
 
 #[test]
