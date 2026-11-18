@@ -536,10 +536,15 @@ fn lattice(ix: i32, iy: i32, iz: i32, seed: u32) -> f32 {
     return f32(h & 0xffffu) / 65535.0;
 }
 
-const LATTICE_COORDINATE_MAX: f32 = 2147483648.0;
+const LATTICE_COORDINATE_MAX: f32 = 2147483520.0;
 
 fn lattice_coordinate(x: f32) -> f32 {
     return clamp(x, -LATTICE_COORDINATE_MAX, LATTICE_COORDINATE_MAX);
+}
+
+fn scaled_lattice_coordinate(x: f32, scale: f32) -> f32 {
+    let reach = 2.0 * LATTICE_COORDINATE_MAX / scale;
+    return lattice_coordinate(clamp(x, -reach, reach) * scale);
 }
 
 fn fade(t: f32) -> f32 {
@@ -908,7 +913,7 @@ fn pointwise(@builtin(global_invocation_id) gid: vec3<u32>) {
                 if (o + 1u == n_oct && frac > 0.0) {
                     w = frac;
                 }
-                var n = soft_linear_noise(lattice_coordinate(u * f), lattice_coordinate(v * f), evo + f32(o) * 7.31, seed + o);
+                var n = soft_linear_noise(scaled_lattice_coordinate(u, f), scaled_lattice_coordinate(v, f), evo + f32(o) * 7.31, seed + o);
                 let s = n * 2.0 - 1.0;
                 if (kind == 1u) {
                     n = 1.0 - s * s;

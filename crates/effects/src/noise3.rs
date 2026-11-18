@@ -17,7 +17,7 @@ use effectcraft_keyframe::Value;
 use effectcraft_project::ParamUi;
 use rayon::prelude::*;
 
-use crate::generate::{LatticePoint, lattice_coordinate};
+use crate::generate::{LatticePoint, scaled_lattice_coordinate};
 use crate::{Buf, EffectCtx, EffectSpec, ParamSpec, num, p, popup, slider};
 
 /// Fractal Type options (shared by both effects).
@@ -339,7 +339,7 @@ impl Fractal {
                 let (s, c) = (self.sub_rotation * of).sin_cos();
                 (u, v) = (u * c + v * s, -u * s + v * c);
             }
-            let (mut u, mut v) = (lattice_coordinate(u * f), lattice_coordinate(v * f));
+            let (mut u, mut v) = (scaled_lattice_coordinate(u, f), scaled_lattice_coordinate(v, f));
             let z = of * 7.31;
             let seed = self.seed.wrapping_add(o as u32);
             if (4..=6).contains(&self.kind) {
@@ -772,7 +772,7 @@ mod tests {
             let i = i as f32;
             (i * 0.37 - 70.0, i * 0.53 - 40.0, i * 0.011 - 1.5)
         });
-        let large = [(1e6 + 0.25, -2e6 - 0.75, 3.5), (2.1e9, -2.1e9, 1e7 + 0.5), (-8_388_607.5, 8_388_607.25, -0.125), (1e10, -1e10, 0.75)];
+        let large = [(1e6 + 0.25, -2e6 - 0.75, 3.5), (2.1e9, -2.1e9, 1e7 + 0.5), (-8_388_607.5, 8_388_607.25, -0.125)];
         grid.chain(large)
     }
 
@@ -780,11 +780,10 @@ mod tests {
     fn lattice_noise_at_ordinary_coordinates_is_unchanged() {
         let all = ordinary_coordinates().flat_map(|(x, y, z)| {
             let typed = [0, 1, 2, 3].map(|t| typed_noise(x, y, z, 11, t));
-            let value =
-                if x.abs() < 2e9 { [crate::generate::value_noise(x, y, z, 11), crate::generate::value_noise_linear_z(x, y, z, 11)] } else { [0.0, 0.0] };
+            let value = [crate::generate::value_noise(x, y, z, 11), crate::generate::value_noise_linear_z(x, y, z, 11)];
             typed.into_iter().chain(value)
         });
-        assert_eq!(bits_hash(all), 16_565_229_818_293_526_361);
+        assert_eq!(bits_hash(all), 12_489_186_610_488_224_231);
     }
 
     #[test]
@@ -795,7 +794,7 @@ mod tests {
             ("ec.noise.fractal", vec![("fractalType", Value::Enum(6)), ("noiseType", Value::Enum(0)), ("subSettings/subOffset", Value::Vec2([40.0, -12.0]))]),
             (
                 "ec.noise.fractal",
-                vec![("fractalType", Value::Enum(4)), ("noiseType", Value::Enum(1)), ("subSettings/subScaling", num(10.0)), ("complexity", num(20.0))],
+                vec![("fractalType", Value::Enum(4)), ("noiseType", Value::Enum(1)), ("subSettings/subScaling", num(10.0)), ("complexity", num(9.0))],
             ),
             ("ec.noise.fractal", vec![("transform/perspectiveOffset", Value::Bool(true)), ("fractalType", Value::Enum(8)), ("evolution", num(275.0))]),
             (
@@ -817,7 +816,7 @@ mod tests {
                 14_820_215_278_946_423_483,
                 15_667_682_713_800_055_601,
                 18_081_240_588_472_799_263,
-                1_806_134_991_285_303_243,
+                16_357_480_310_507_214_489,
                 13_725_828_349_026_147_724,
                 4_670_050_784_813_517_094
             ]

@@ -297,11 +297,17 @@ fn circle(ctx: &EffectCtx, mut b: Buf) -> Buf {
 
 // ---- value noise / fBm (our own lattice noise with quintic fade) ----
 
-pub const LATTICE_COORDINATE_MAX: f32 = 2_147_483_648.0;
+pub const LATTICE_COORDINATE_MAX: f32 = 2_147_483_520.0;
 
 #[inline]
 pub(crate) fn lattice_coordinate(x: f32) -> f32 {
     x.clamp(-LATTICE_COORDINATE_MAX, LATTICE_COORDINATE_MAX)
+}
+
+#[inline]
+pub(crate) fn scaled_lattice_coordinate(x: f32, scale: f32) -> f32 {
+    let reach = 2.0 * LATTICE_COORDINATE_MAX / scale;
+    lattice_coordinate(x.max(-reach).min(reach) * scale)
 }
 
 #[derive(Clone, Copy)]
@@ -700,6 +706,24 @@ mod generator_tests {
         let er =
             run_fx("ec.generate.circle", &[c, ("radius", num(10.0)), ("edge", Value::Enum(1)), ("edgeRadius", num(5.0))], red(), 0.0, EffectEnv::default());
         assert!(er.img.get(16, 16)[3] < 0.01 && er.img.get(23, 16)[3] > 0.99);
+    }
+
+    #[test]
+    fn lattice_bound_converts_exactly_to_i32() {
+        let cell = LATTICE_COORDINATE_MAX as i32;
+        assert_eq!(cell as f32, LATTICE_COORDINATE_MAX);
+        assert_eq!(f32::from_bits(LATTICE_COORDINATE_MAX.to_bits() + 1), 2_147_483_648.0);
+        assert_eq!(LatticePoint::new(f32::INFINITY, f32::NEG_INFINITY, 0.0).cell, [cell, -cell, 0]);
+    }
+
+    #[test]
+    fn scaled_lattice_coordinates_saturate_without_overflow() {
+        for scale in [1e-20, 1.0, 1e10, 1e20] {
+            assert_eq!(scaled_lattice_coordinate(1e30, scale), LATTICE_COORDINATE_MAX);
+            assert_eq!(scaled_lattice_coordinate(-1e30, scale), -LATTICE_COORDINATE_MAX);
+            let inside = 1e9 / scale;
+            assert_eq!(scaled_lattice_coordinate(inside, scale), inside * scale);
+        }
     }
 
     #[test]

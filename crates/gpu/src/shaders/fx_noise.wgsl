@@ -553,8 +553,8 @@ fn fxn_fractal(@builtin(global_invocation_id) gid: vec3<u32>) {
             u = u2;
         }
         let f = data[o + 4u];
-        u = lattice_coordinate(u * f);
-        v = lattice_coordinate(v * f);
+        u = scaled_lattice_coordinate(u, f);
+        v = scaled_lattice_coordinate(v, f);
         let z = data[o + 8u];
         let seed = P.u[0].w + oi;
         if (kind >= 4u && kind <= 6u) {

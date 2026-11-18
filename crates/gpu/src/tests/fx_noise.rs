@@ -156,12 +156,34 @@ fn fractal_noise_sub_scaling_above_100() {
     }
 }
 
+fn assert_cpu_render_is_finite(id: &str, vals: &[(&str, Value)]) {
+    let Some(spec) = effectcraft_effects::find(id) else { panic!("no effect {id}") };
+    let size = [70.0, 44.0];
+    let mut params =
+        effectcraft_effects::Params { values: spec.params.iter().map(|ps| (ps.id.to_string(), effectcraft_effects::default_value(ps, size))).collect() };
+    for (k, v) in vals {
+        params.values.insert(k.to_string(), v.clone());
+    }
+    let ctx = effectcraft_effects::EffectCtx { params: &params, time: 0.25, layer_size: size, seed: 11, adjustment: false, env: Default::default() };
+    let buf = effectcraft_effects::Buf { img: crate::tests::pattern(7, 70, 44), offset: [0.0, 0.0], scale: 1.0 };
+    let out = (spec.render)(&ctx, buf);
+    assert!(out.img.data.iter().flatten().all(|c| c.is_finite()), "{id} {vals:?}: non-finite CPU output");
+}
+
 #[test]
 fn fractal_noise_huge_offset() {
-    let huge = [("subSettings/subScaling", n(10.0)), ("complexity", n(20.0)), ("transform/offset", pt(1e25, 0.0))];
-    effect_case("ec.noise.fractal", &huge);
-    effect_case("ec.noise.fractal", &[huge.as_slice(), &[("transform/perspectiveOffset", on()), ("fractalType", e(4))]].concat());
-    effect_case("ec.noise.turbulent", &[huge.as_slice(), &[("evolutionOptions/turbulenceFactor", n(10.0))]].concat());
+    for x in [1e25, -1e25] {
+        let huge = [("subSettings/subScaling", n(10.0)), ("complexity", n(20.0)), ("transform/offset", pt(x, 0.0))];
+        let cases = [
+            ("ec.noise.fractal", huge.to_vec()),
+            ("ec.noise.fractal", [huge.as_slice(), &[("transform/perspectiveOffset", on()), ("fractalType", e(4))]].concat()),
+            ("ec.noise.turbulent", [huge.as_slice(), &[("evolutionOptions/turbulenceFactor", n(10.0))]].concat()),
+        ];
+        for (id, vals) in cases {
+            assert_cpu_render_is_finite(id, &vals);
+            effect_case(id, &vals);
+        }
+    }
 }
 
 #[test]
