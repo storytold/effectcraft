@@ -716,3 +716,38 @@ fn identifier_and_index_references_preserve_non_null_classes_exactly() {
         assert_eq!(out, bytes);
     }
 }
+#[test]
+fn shared_descriptor_nesting_preserves_the_application_boundary() {
+    use craft_psd::descriptor::{Descriptor as Shared, Value};
+    for count in [33, 64, 65] {
+        let mut value = Value::Integer(1);
+        for _ in 0..count {
+            value = Value::Descriptor(Shared::new("null").with("next", value));
+        }
+        let bytes = Shared::new("null").with("root", value).to_bytes();
+        let result = crate::descriptor::read_descriptor(&mut Reader::new(&bytes));
+        assert_eq!(result.is_ok(), count <= 64, "nested descriptor count {count}: {result:?}");
+    }
+}
+
+#[test]
+fn shared_placed_layer_adapter_normalizes_before_warp_classification() {
+    use craft_psd::descriptor::{Descriptor as Shared, Id, Value};
+    let warp = Shared::new("warp")
+        .with("warpStyle", Value::Enumerated { type_id: Id::new("warpStyle"), value: Id::new("warpArc") })
+        .with("warpValue", Value::Double(f64::NAN))
+        .with("warpPerspective", Value::Double(f64::INFINITY))
+        .with("warpPerspectiveOther", Value::Double(f64::NEG_INFINITY));
+    let quad = [f64::NAN, 0.0, 20.0, 0.0, 20.0, 10.0, 0.0, 10.0];
+    let descriptor = Shared::new("null").with("Trnf", Value::List(quad.into_iter().map(Value::Double).collect())).with("warp", Value::Descriptor(warp));
+    let mut bytes = b"soLD".to_vec();
+    bytes.extend_from_slice(&4u32.to_be_bytes());
+    bytes.extend_from_slice(&16u32.to_be_bytes());
+    bytes.extend_from_slice(&descriptor.to_bytes());
+    let shared = craft_psd::smart::SmartObject::from_placed_layer_data_with_limits(&bytes, crate::descriptor::PARSE_LIMITS).unwrap();
+    let object = crate::placed::from_craft_smart(shared);
+    assert_eq!(object.quad, [[0.0, 0.0], [20.0, 0.0], [20.0, 10.0], [0.0, 10.0]]);
+    assert!(object.warp.is_none(), "normalization must precede identity classification");
+    assert!(!object.needs_bake());
+    assert_eq!(object.map([10.0, 5.0], 20.0, 10.0), [10.0, 5.0]);
+}
