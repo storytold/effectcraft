@@ -5,6 +5,7 @@ use crate::pixels::srgb_encode;
 mod fixed_adjustments;
 mod integration;
 mod opt;
+mod scalar_blocks;
 mod section_divider;
 mod shared_corpus;
 mod tysh_prefix;

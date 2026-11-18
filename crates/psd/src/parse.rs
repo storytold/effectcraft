@@ -114,7 +114,7 @@ impl Psd {
             // A malformed optional block only loses that block's information.
             // Unsupported modern placement geometry must not silently become an
             // unwarped layer or fall back to a less expressive PlLd in either order.
-            match self.layer_block(&mut l, &b.key, &b.data) {
+            match self.layer_block(&mut l, b) {
                 Err(e @ Error::Unsupported(_)) if matches!(&b.key, b"SoLd" | b"SoLE") => return Err(e),
                 _ => {}
             }
@@ -140,7 +140,9 @@ impl Psd {
         }
     }
 
-    fn layer_block(&self, l: &mut Layer, key: &[u8; 4], b: &[u8]) -> Result<()> {
+    fn layer_block(&self, l: &mut Layer, block: &craft_psd::tagged::TaggedBlock) -> Result<()> {
+        let key = &block.key;
+        let b = block.data.as_slice();
         let mut r = Reader::new(b);
         match key {
             b"luni" => {
@@ -155,8 +157,16 @@ impl Psd {
                     l.name = name;
                 }
             }
-            b"lyid" => l.id = Some(r.u32()?),
-            b"iOpa" => l.fill_opacity = r.u8()?,
+            b"lyid" | b"iOpa" => {
+                use craft_psd::tagged::BlockData;
+                // Borrow the original block; short fields keep the previous value,
+                // while complete prefixes retain the shared parser's trailing-byte policy.
+                match block.parsed().transpose().map_err(|e| error(&e))? {
+                    Some(BlockData::LayerId(id)) => l.id = Some(id),
+                    Some(BlockData::FillOpacity(opacity)) => l.fill_opacity = opacity,
+                    _ => {}
+                }
+            }
             b"lsct" | b"lsdk" => {
                 use craft_psd::tagged::{SectionDivider, SectionType};
                 let divider = SectionDivider::from_bytes_recovering_blend(b).map_err(|e| error(&e))?;
