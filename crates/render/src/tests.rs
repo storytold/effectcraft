@@ -2069,8 +2069,9 @@ fn preserve_transparency_keeps_the_alpha_below() {
     }
 }
 
-/// With half opacity, Preserve Transparency mixes the layer's colour with the colour below by
-/// that opacity and keeps the alpha below.
+/// With half opacity, Preserve Transparency keeps the colour of the plain composite at the alpha
+/// below (After Effects 2026 lab `pt_stencil_iso`, see `blend_pixel_preserve`): red at 50 % over
+/// blue at 40 % composites to (0.5, 0, 0.2) at 0.7, which at 0.4 is (0.286, 0, 0.114).
 #[test]
 fn preserve_transparency_mixes_by_the_layer_opacity() {
     let (mut p, cid, comp) = setup();
@@ -2083,7 +2084,7 @@ fn preserve_transparency_mixes_by_the_layer_opacity() {
     c.layers.push(pt);
     c.layers.push(bg);
     let px = render_frame(&p, cid, Tick::ZERO, 1.0).get(100, 50);
-    for (got, want) in px.iter().zip([0.2, 0.0, 0.2, 0.4]) {
+    for (got, want) in px.iter().zip([0.5 * 0.4 / 0.7, 0.0, 0.2 * 0.4 / 0.7, 0.4]) {
         assert!((got - want).abs() < 1e-4, "{px:?}");
     }
 }

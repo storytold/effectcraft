@@ -123,26 +123,11 @@ fn matte(@builtin(global_invocation_id) gid: vec3<u32>) {
     textureStore(out, p, textureLoad(src, p, 0) * k);
 }
 
-// Preserve Transparency, step 1: `src` made opaque (straight colour, alpha 1); a transparent
-// pixel becomes opaque black (step 2 leaves it alone).
-@compute @workgroup_size(16, 16)
-fn opaque(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let dims = out_dims();
-    let p = vec2<i32>(gid.xy);
-    if (p.x >= dims.x || p.y >= dims.y) {
-        return;
-    }
-    let s = textureLoad(src, p, 0);
-    var o = vec4<f32>(0.0, 0.0, 0.0, 1.0);
-    if (s.w > 0.0) {
-        o = vec4<f32>(s.xyz / s.w, 1.0);
-    }
-    textureStore(out, p, o);
-}
-
-// Preserve Transparency, step 2: the layer blended onto the opaque colour below (`src`) × the
-// alpha below (`aux`); where `aux` is transparent it stays as it is
-// (`effectcraft_color::blend_pixel_preserve`).
+// Preserve Transparency: the layer composited as usual (`src`, unquantised) keeps its colour at
+// the alpha below (`aux`); stencil and silhouette modes (u[0].x) keep their plain result. Where
+// `aux` is transparent, or the composite left nothing, it stays as it is
+// (`effectcraft_color::blend_pixel_preserve`). Quantised to f[0].x levels when > 0
+// (f[0].y = 1 / levels), as `blend_full` quantises a plain composite.
 @compute @workgroup_size(16, 16)
 fn preserve(@builtin(global_invocation_id) gid: vec3<u32>) {
     let dims = out_dims();
@@ -151,11 +136,16 @@ fn preserve(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
     let below = textureLoad(aux, p, 0);
+    let b = textureLoad(src, p, 0);
     var o = below;
     if (below.w > 0.0) {
-        o = textureLoad(src, p, 0) * below.w;
+        if (is_stencil(P.u[0].x)) {
+            o = b;
+        } else if (b.w > 0.0) {
+            o = vec4<f32>(b.xyz * (below.w / b.w), below.w);
+        }
     }
-    textureStore(out, p, o);
+    store_q(p, o, P.f[0].x, P.f[0].y);
 }
 
 // Knockout: `src` × (1 − alpha of `aux`).

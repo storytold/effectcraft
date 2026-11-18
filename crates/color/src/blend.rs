@@ -368,19 +368,30 @@ fn non_separable(mode: BlendMode, cb: [f32; 3], cs: [f32; 3]) -> [f32; 3] {
     }
 }
 
-/// Composite `src` onto `dst` with Preserve Underlying Transparency: the layer is blended
-/// onto the colour below as if that were opaque, and the result keeps the alpha below (After
-/// Effects 2026: an opaque layer over a 30 % background comes out in the layer's colour at
-/// 30 %). Where nothing lies below, `dst` stays as it is. `src` must already include layer
-/// opacity, as for [`blend_pixel`].
+/// Composite `src` onto `dst` with Preserve Underlying Transparency: the layer is blended as
+/// usual and the result keeps its colour at the alpha below. After Effects 2026 lab renders: an
+/// opaque layer over a 30 % background comes out in the layer's colour at 30 %; a white layer at
+/// 50 % over (0.2, 0.4, 0.6) at 30 % gives (208, 220, 232) at alpha 77 (the plain composite's
+/// colour). Stencil and silhouette modes still cut the alpha below as without the switch (lab
+/// `pt_stencil_iso`: Stencil Alpha at 50 % over 30 % leaves 15 %; lab `pt_stencil`: it clears
+/// where the layer has no pixels). Where nothing lies below, or the blend leaves nothing, `dst`
+/// stays as it is. `src` must already include layer opacity, as for [`blend_pixel`].
 #[inline]
 pub fn blend_pixel_preserve(mode: BlendMode, dst: [f32; 4], src: [f32; 4], noise: f32) -> [f32; 4] {
     let a = dst[3];
     if a.is_nan() || a <= 0.0 {
         return dst;
     }
-    let r = blend_pixel(mode, [dst[0] / a, dst[1] / a, dst[2] / a, 1.0], src, noise);
-    [r[0] * a, r[1] * a, r[2] * a, r[3] * a]
+    let r = blend_pixel(mode, dst, src, noise);
+    if mode.is_stencil() {
+        return r;
+    }
+    let ra = r[3];
+    if ra.is_nan() || ra <= 0.0 {
+        return dst;
+    }
+    let k = a / ra;
+    [r[0] * k, r[1] * k, r[2] * k, a]
 }
 
 /// Composite one premultiplied source pixel over a premultiplied destination pixel.
@@ -556,15 +567,50 @@ mod tests {
 mod preserve_tests {
     use super::*;
 
+    fn near(got: [f32; 4], want: [f32; 4]) -> bool {
+        got.iter().zip(want).all(|(a, b)| (a - b).abs() < 1e-4)
+    }
+
     #[test]
     fn preserve_keeps_the_alpha_below() {
         // Opaque red over blue at 30 %: red at 30 %.
         let r = blend_pixel_preserve(BlendMode::Normal, [0.0, 0.0, 0.3, 0.3], [1.0, 0.0, 0.0, 1.0], 0.5);
-        assert!(r.iter().zip([0.3, 0.0, 0.0, 0.3]).all(|(a, b)| (a - b).abs() < 1e-6), "{r:?}");
+        assert!(near(r, [0.3, 0.0, 0.0, 0.3]), "{r:?}");
         // Nothing below: unchanged.
         assert_eq!(blend_pixel_preserve(BlendMode::Normal, [0.0; 4], [1.0, 0.0, 0.0, 1.0], 0.5), [0.0; 4]);
-        // Multiply onto white at 50 %: the layer's colour at 50 %.
+        // Opaque multiply onto white at 50 %: the layer's colour at 50 %.
         let r = blend_pixel_preserve(BlendMode::Multiply, [0.5, 0.5, 0.5, 0.5], [0.2, 0.4, 0.6, 1.0], 0.5);
-        assert!(r.iter().zip([0.1, 0.2, 0.3, 0.5]).all(|(a, b)| (a - b).abs() < 1e-6), "{r:?}");
+        assert!(near(r, [0.1, 0.2, 0.3, 0.5]), "{r:?}");
+    }
+
+    #[test]
+    fn preserve_keeps_the_colour_of_the_plain_composite() {
+        // After Effects 2026 (lab `pt_stencil_iso`, the Normal control): white at 50 % over
+        // (0.2, 0.4, 0.6) at 30 % gives (208, 220, 232) at alpha 77, the colour of the plain
+        // composite at the alpha below. Mixing by the layer opacity alone gave (153, 178, 204).
+        let dst = [0.2 * 0.3, 0.4 * 0.3, 0.6 * 0.3, 0.3];
+        let r = blend_pixel_preserve(BlendMode::Normal, dst, [0.5, 0.5, 0.5, 0.5], 0.5);
+        // 207.9, 219.7, 231.5: within one level of the 8-bit render.
+        let straight = [r[0] / r[3], r[1] / r[3], r[2] / r[3]].map(|v| v * 255.0);
+        assert!(straight.iter().zip([208.0, 220.0, 232.0]).all(|(a, b)| (a - b).abs() <= 1.0), "{straight:?}");
+        assert!((r[3] - 0.3).abs() < 1e-6, "{r:?}");
+    }
+
+    #[test]
+    fn preserve_leaves_stencil_and_silhouette_modes_cutting_the_alpha_below() {
+        // After Effects 2026 (lab `pt_stencil_iso`): a white layer at 50 % in Stencil Alpha,
+        // Silhouette Alpha or Stencil Luma mode with the switch on leaves 39, 38 and 39 of 77
+        // (about 30 % × 50 %); lab `pt_stencil`: a stencil clears where it has no pixels. The
+        // switch changes nothing for these modes.
+        let dst = [0.06, 0.12, 0.18, 0.3];
+        for mode in [BlendMode::StencilAlpha, BlendMode::SilhouetteAlpha, BlendMode::StencilLuma, BlendMode::SilhouetteLuma] {
+            for src in [[0.0; 4], [0.5, 0.5, 0.5, 0.5], [1.0; 4]] {
+                let (got, want) = (blend_pixel_preserve(mode, dst, src, 0.5), blend_pixel(mode, dst, src, 0.5));
+                assert!(near(got, want), "{mode:?} {src:?}: {got:?}, want {want:?}");
+            }
+            let a = blend_pixel_preserve(mode, dst, [0.5, 0.5, 0.5, 0.5], 0.5)[3];
+            assert!((a - 0.15).abs() < 1e-6, "{mode:?}: {a}");
+        }
+        assert_eq!(blend_pixel_preserve(BlendMode::StencilAlpha, dst, [0.0; 4], 0.5)[3], 0.0, "cut where the layer has no pixels");
     }
 }

@@ -460,10 +460,15 @@ fn classic3d(@builtin(global_invocation_id) gid: vec3<u32>) {
             n = hash_noise(u32(x), u32(y), pl.ints3.y);
         }
         if ((pl.ints.z & 2u) != 0u) {
-            // Preserve Transparency: blend onto the opaque colour below, keep the alpha below
-            // (`effectcraft_color::blend_pixel_preserve`).
+            // Preserve Transparency: the plain composite's colour at the alpha below; stencil
+            // and silhouette modes as usual (`effectcraft_color::blend_pixel_preserve`).
             if (d.w > 0.0) {
-                d = blend_pixel(mode, vec4<f32>(d.xyz / d.w, 1.0), s, n) * d.w;
+                let b = blend_pixel(mode, d, s, n);
+                if (is_stencil(mode)) {
+                    d = b;
+                } else if (b.w > 0.0) {
+                    d = vec4<f32>(b.xyz * (d.w / b.w), d.w);
+                }
             }
         } else {
             d = blend_pixel(mode, d, s, n);

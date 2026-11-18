@@ -562,6 +562,23 @@ fn masks_mattes_and_preserve_transparency() {
     }
 }
 
+/// At 8 bpc Preserve Transparency rounds once, after the alpha below is applied, as the CPU
+/// does: red at 14 % over black at alpha 5/255 is red 4/255 (0.14 × 5 / 0.1484 = 4.4 of 255).
+/// Rounding the composite first (red 36/255 at alpha 38/255) and again gave 5/255.
+#[test]
+fn preserve_transparency_rounds_once_at_8_bpc() {
+    let mut s = Scene::new(BitDepth::Bpc8);
+    let mut bg = s.solid([0.0, 0.0, 0.0], 50, 30);
+    set(&mut bg, "transform/opacity", Value::Scalar(5.0 / 255.0 * 100.0));
+    s.push(bg);
+    let mut pt = s.solid([1.0, 0.0, 0.0], 50, 30);
+    pt.preserve_transparency = true;
+    set(&mut pt, "transform/opacity", Value::Scalar(14.0));
+    s.push(pt);
+    let Some(d) = compare_at(&s, opts(), Tick::ZERO) else { return };
+    assert!(d.max < 0.5 / 255.0, "{d:?}");
+}
+
 #[test]
 fn motion_blur_accumulates_like_the_cpu() {
     for depth in [BitDepth::Bpc8, BitDepth::Bpc32] {
