@@ -707,7 +707,7 @@ fn put_properties(cx: &Cx<'_>, layr: &mut Chunk<'static>, lp: &LayerPlan, cp: &C
         let name = p.kind.match_name();
         let built = build_prop(cx, p, lp, cp)?;
         let tdmn = pairs.iter().find(|(n, _)| n == name.as_bytes()).and_then(|(_, v)| v.first().cloned()).unwrap_or_else(|| {
-            cx.t.stat.iter().chain(cx.t.keyd.iter()).find(|c| is_tdmn(c, name)).cloned().unwrap_or_else(|| Chunk::data(*b"tdmn", Vec::new()))
+            cx.t.stat.iter().chain(cx.t.keyd.iter()).find(|c| is_tdmn(c, name)).cloned().unwrap_or_else(|| crate::export::synth::tdmn(name))
         });
         let entry = vec![tdmn, built];
         if let Some(slot) = pairs.iter_mut().find(|(n, _)| n == name.as_bytes()) {
@@ -726,7 +726,10 @@ fn put_properties(cx: &Cx<'_>, layr: &mut Chunk<'static>, lp: &LayerPlan, cp: &C
 }
 
 fn build_prop(cx: &Cx<'_>, p: &PropPlan, lp: &LayerPlan, cp: &CompPlan) -> R<Chunk<'static>> {
-    let idx = PropKind::ALL.iter().position(|k| *k == p.kind).ok_or_else(|| tpl("unknown property kind"))?;
+    if p.kind == PropKind::Orientation {
+        return build_orientation(p, cp);
+    }
+    let idx = PropKind::ALL.iter().position(|k| *k == p.kind.prototype()).ok_or_else(|| tpl("unknown property kind"))?;
     let pool = if p.keys.is_empty() { &cx.t.stat } else { &cx.t.keyd };
     let tdbs = pool.get(idx * 2 + 1).ok_or_else(|| tpl("prototype missing"))?;
     let mut tdbs = tdbs.clone();
@@ -765,6 +768,55 @@ fn build_prop(cx: &Cx<'_>, p: &PropPlan, lp: &LayerPlan, cp: &CompPlan) -> R<Chu
         kids.insert(at, Chunk::data(*b"Utf8", text.as_bytes().to_vec()));
     }
     Ok(tdbs)
+}
+
+/// A 3D layer's Orientation (`rot3d` lab sample, aep-format.md 3.5): an `otst` holding its `tdbs`
+/// and an `otky` with one `otda` (three big-endian degrees) per key, or one for a static value.
+/// The static `tdbs` stores the degrees in its `cdat` little-endian, as After Effects 2026 does;
+/// a keyed one holds 80-byte records (the spatial layout with one component: time, sides, flags
+/// 0x0001, the ease at 24..56; its value is the key's `otda`).
+fn build_orientation(p: &PropPlan, cp: &CompPlan) -> R<Chunk<'static>> {
+    use crate::export::synth::{KeyTemplate, RecSpec};
+    const KEY: usize = 80;
+    let keyed = !p.keys.is_empty();
+    let spec = RecSpec { dims: 1, template: KeyTemplate::Plain, class: 0x0006_0007, limits: None, byte5: Some(0x07) };
+    let mut tdb4 = crate::export::synth::tdb4(&spec, keyed, cp.tb.timescale);
+    put_u8(&mut tdb4, 79, u8::from(!keyed))?;
+    if let Some((_, enabled)) = &p.expr {
+        put_u8(&mut tdb4, 76, 1)?;
+        put_u8(&mut tdb4, 77, 1)?;
+        put_u8(&mut tdb4, 120, 1)?;
+        put_u8(&mut tdb4, 119, u8::from(!*enabled))?;
+    }
+    let mut kids = vec![Chunk::data(*b"tdsb", 1u32.to_be_bytes().to_vec()), crate::export::synth::tdsn("-_0_/-"), Chunk::data(*b"tdb4", tdb4)];
+    let degrees = |v: &[f64]| -> Vec<u8> { (0..3).flat_map(|i| v.get(i).copied().unwrap_or(0.0).to_be_bytes()).collect() };
+    let otda: Vec<Chunk<'static>> = if keyed {
+        let mut ldat = Vec::with_capacity(KEY * p.keys.len());
+        for k in &p.keys {
+            let mut r = vec![0u8; KEY];
+            put_i32(&mut r, 0, k.time)?;
+            put_u8(&mut r, 4, k.in_interp)?;
+            put_u8(&mut r, 5, k.out_interp)?;
+            put_u16(&mut r, 6, 0x0001 | if k.roving { 0x0020 } else { 0 } | (u16::from(k.label) << 6))?;
+            let (i, o) = (k.in_ease.first().copied().unwrap_or_default(), k.out_ease.first().copied().unwrap_or_default());
+            put_f64(&mut r, 24, i.speed)?;
+            put_f64(&mut r, 32, i.influence)?;
+            put_f64(&mut r, 40, o.speed)?;
+            put_f64(&mut r, 48, o.influence)?;
+            ldat.extend(r);
+        }
+        let count = u32::try_from(p.keys.len()).map_err(|_| tpl("too many Orientation keys"))?;
+        kids.push(crate::export::synth::key_list(KEY as u32, count, ldat));
+        p.keys.iter().map(|k| Chunk::data(*b"otda", degrees(&k.value))).collect()
+    } else {
+        let cdat: Vec<u8> = (0..3).flat_map(|i| p.value.get(i).copied().unwrap_or(0.0).to_le_bytes()).collect();
+        kids.push(Chunk::data(*b"cdat", cdat));
+        vec![Chunk::data(*b"otda", degrees(&p.value))]
+    };
+    if let Some((text, _)) = &p.expr {
+        kids.push(Chunk::data(*b"Utf8", text.as_bytes().to_vec()));
+    }
+    Ok(Chunk::list(*b"otst", vec![Chunk::list(*b"tdbs", kids), Chunk::list(*b"otky", otda)]))
 }
 
 /// One keyframe record (`docs/aep-format.md`, 3.5).
