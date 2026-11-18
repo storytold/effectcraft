@@ -850,6 +850,24 @@ pub const EFFECTS: &[EffectMap] = &[
             pm(14, K::Popup, "blendingMode", Conv::Popup { default: 1, items: GRID_BLEND }),
         ],
     ),
+    // Checkerboard (lab fx-tile, After Effects 26.5): Grid's parameters without Border and
+    // Invert Grid; 6 and 9 are the Feather twirl-down markers.
+    fx(
+        "ADBE Checkerboard",
+        "ec.generate.checkerboard",
+        &[
+            pm(1, K::Point, "anchor", Conv::Point),
+            pm(2, K::Popup, "sizeFrom", Conv::Popup { default: 1, items: GRID_SIZE_FROM }),
+            pm(3, K::Point, "corner", Conv::Point),
+            pm(4, K::FixedSlider, "width", Conv::Plain { valid_max: 4000.0 }),
+            pm(5, K::FixedSlider, "height", Conv::Plain { valid_max: 4000.0 }),
+            pm(7, K::FixedSlider, "feather/featherWidth", Conv::Plain { valid_max: 400.0 }),
+            pm(8, K::FixedSlider, "feather/featherHeight", Conv::Plain { valid_max: 400.0 }),
+            pm(10, K::Color, "color", Conv::Color),
+            pm(11, K::FixedSlider, "opacity", Conv::Plain { valid_max: 100.0 }),
+            pm(12, K::Popup, "blendingMode", Conv::Popup { default: 1, items: GRID_BLEND }),
+        ],
+    ),
     // Sharpen (903, 904 E10).
     fx("ADBE Sharpen", "ec.blur.sharpen", &[pm(1, K::IntSlider, "amount", Conv::Plain { valid_max: 4000.0 })]),
     // Linear Color Key (903, 904 E11); 1 Preview has no data.
