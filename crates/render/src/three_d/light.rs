@@ -98,16 +98,18 @@ impl LightState {
             _ => 1.0,
         };
         if self.kind == LightKind::Spot {
+            // Full inside the inner angle (the cone half-angle less the feather share), none
+            // outside the half-angle, and a smoothstep between them over the cosine of the angle
+            // (lab `c3d` l16-l18, After Effects 26.5: within 1/255 at feather 50 and 100).
             let cos_a = (-l).dot(self.dir).clamp(-1.0, 1.0);
-            let a = cos_a.acos();
-            let outer = self.cone_half;
-            let inner = outer * (1.0 - self.feather);
-            k *= if a <= inner {
+            let outer = self.cone_half.cos();
+            let inner = (self.cone_half * (1.0 - self.feather)).cos();
+            k *= if cos_a >= inner {
                 1.0
-            } else if a >= outer {
+            } else if cos_a <= outer {
                 0.0
             } else {
-                let t = (a - inner) / (outer - inner).max(1e-9);
+                let t = (inner - cos_a) / (inner - outer).max(1e-9);
                 1.0 - t * t * (3.0 - 2.0 * t)
             };
         }
@@ -182,9 +184,11 @@ impl Material {
             metal: pct("metal", d.metal).clamp(0.0, 1.0),
         }
     }
-    /// Blinn-Phong exponent for Specular Shininess (0% → 1, 100% → 256).
+    /// Blinn-Phong exponent for Specular Shininess: the percentage itself (lab `c3d` l10 / l11,
+    /// After Effects 26.5: a half vector 30 degrees off the normal gives 0.866^5 at 5 % and
+    /// 0.866^40 at 40 %), at least 1.
     pub fn exponent(&self) -> f64 {
-        256f64.powf(self.shininess as f64).max(1.0)
+        (f64::from(self.shininess) * 100.0).max(1.0)
     }
 }
 

@@ -185,15 +185,15 @@ fn attenuation(l: u32, p: vec3<f32>) -> f32 {
         }
     }
     if (li.ints.x == 3u) {
+        // Smoothstep over the cosine of the angle (LightState::attenuation).
         let cos_a = clamp(dot(-tl.xyz, li.dir.xyz), -1.0, 1.0);
-        let a = acos_p(cos_a);
-        let outer = li.cone.x;
-        let inner = outer * (1.0 - li.cone.y);
-        if (a <= inner) {
-        } else if (a >= outer) {
+        let outer = cos(li.cone.x);
+        let inner = cos(li.cone.x * (1.0 - li.cone.y));
+        if (cos_a >= inner) {
+        } else if (cos_a <= outer) {
             k = 0.0;
         } else {
-            k *= smoothstep01((a - inner) / max(outer - inner, 1e-9));
+            k *= smoothstep01((inner - cos_a) / max(inner - outer, 1e-9));
         }
     }
     return k;
