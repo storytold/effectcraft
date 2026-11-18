@@ -374,6 +374,53 @@ fn time_reversed_keys_keep_their_own_bases() {
     assert_eq!((k[1].1.text.as_str(), k[1].1.fill), ("First", red), "the key that owns its red stays red");
 }
 
+/// A copy of a key that owns its red is added before it (a new key with the same value): the
+/// original keeps its own base and stays red, and the copy shares it. The copy used to take the
+/// original's base (the first key of that value in time order), leaving the original to follow
+/// the master to green.
+#[test]
+fn a_copy_added_before_an_owning_key_leaves_the_original_its_own_style() {
+    let red = [1.0, 0.0, 0.0, 1.0];
+    let (mut s, bubble, text, body, main, inst, uid) =
+        two_keys(|d| TextDoc { text: "First".into(), ..d }, |d| TextDoc { text: "Mine".into(), fill: [1.0, 0.0, 0.0, 1.0], ..d });
+    s.execute("layer.setText", json!({"comp": bubble.0, "layer": text, "fill": "#ff0000"})).unwrap();
+    let owner = key_docs(&s, main, inst, uid)[1].1.clone();
+    s.execute("time.set", json!({"time": 0.2})).unwrap();
+    set_doc(&mut s, inst, body, &owner);
+    let k = key_docs(&s, main, inst, uid);
+    assert_eq!((k.len(), k[1].1 == k[2].1), (3, true), "the new key is a copy of the owner");
+    s.execute("layer.setText", json!({"comp": bubble.0, "layer": text, "fill": "#00ff00"})).unwrap();
+    let k = key_docs(&s, main, inst, uid);
+    assert_eq!(k.iter().map(|k| k.1.text.as_str()).collect::<Vec<_>>(), vec!["First", "Mine", "Mine"]);
+    assert!(
+        k[0].0 < k[1].0 && k[1].0 < k[2].0 && (k[2].0 - 0.5).abs() < 1e-9,
+        "the copy sits before the owner: {:?}",
+        k.iter().map(|k| k.0).collect::<Vec<_>>()
+    );
+    assert_eq!(k[0].1.fill, [0.0, 1.0, 0.0, 1.0], "the follower turns green");
+    assert_eq!(k[2].1.fill, red, "the original keeps its own red");
+    assert_eq!(k[1].1.fill, red, "the copy of an owned red stays red");
+}
+
+/// A key is set to another key's value (one that owns its red): that other key keeps its own base
+/// and stays red. The key just set used to take that base (the first key of the value in time
+/// order), leaving the owner to follow the master to green.
+#[test]
+fn setting_a_key_to_another_keys_value_leaves_that_key_its_own_style() {
+    let red = [1.0, 0.0, 0.0, 1.0];
+    let (mut s, bubble, text, body, main, inst, uid) =
+        two_keys(|d| TextDoc { text: "First".into(), ..d }, |d| TextDoc { text: "Mine".into(), fill: [1.0, 0.0, 0.0, 1.0], ..d });
+    s.execute("layer.setText", json!({"comp": bubble.0, "layer": text, "fill": "#ff0000"})).unwrap();
+    let owner = key_docs(&s, main, inst, uid)[1].1.clone();
+    s.execute("time.set", json!({"time": 0.0})).unwrap();
+    set_doc(&mut s, inst, body, &owner);
+    let k = key_docs(&s, main, inst, uid);
+    assert_eq!((k.len(), k[0].1 == k[1].1), (2, true), "the first key now has the owner's value");
+    s.execute("layer.setText", json!({"comp": bubble.0, "layer": text, "fill": "#00ff00"})).unwrap();
+    let k = key_docs(&s, main, inst, uid);
+    assert_eq!((k[1].0, k[1].1.text.as_str(), k[1].1.fill), (0.5, "Mine", red), "the owner keeps its own red");
+}
+
 /// Precomps three deep, the outer comp created first (so visited first): the outer instance's
 /// override of the middle comp's control (which shows the inner text) follows a restyle of the
 /// inner text layer in the same edit.

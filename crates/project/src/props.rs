@@ -217,8 +217,10 @@ pub struct EssentialBase {
     /// The base of the property's value. For a keyframed override, the base a key without its
     /// own (a new key) starts from: the master as it was at the last sync.
     pub doc: Box<effectcraft_keyframe::TextDoc>,
-    /// A keyframed override: each key's own base, by key value and time, so what one key followed never
-    /// makes another key's own value count as following.
+    /// A keyframed override: each key's own base, found by the key's value (a value match beats a
+    /// time match; keys of equal value pair in time order) and else by its time, so what one key
+    /// followed never makes another key's own value count as following. The full rule (more keys
+    /// of a value than bases, copies) is on `essential::key_bases`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub keys: Vec<EssentialKeyBase>,
 }

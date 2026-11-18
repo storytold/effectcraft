@@ -716,15 +716,28 @@ fn mark_overrides(before: &Project, after: &mut Project) {
 
 /// Which base of `bases` (index) each of `keys` merges against: a key keeps the base recorded
 /// with its value ([`EssentialKeyBase::key`]) wherever it moved (a drag, Quick Offset, Time
-/// Reverse, a transform), follow records included. Keys of equal value pair with their bases in
-/// time order, so a move keeps them apart. A key whose value is not recorded (it was set since,
-/// or the base predates the record) takes the unclaimed base at its time; a key with neither
-/// (just added) gets none and starts from the master as it is now.
+/// Reverse, a transform), follow records included. A value match beats a time match. Keys of
+/// equal value pair with their bases in time order, so a move keeps them apart; when there are
+/// more keys of a value than bases recorded with it (a key was pasted, added or set to another
+/// key's value), the keys still at the time of a base of that value keep it first. A key whose
+/// value is not recorded (it was set since, or the base predates the record) takes the unclaimed
+/// base at its time; a key left without a base shares the base of the keys of equal value (it is
+/// a copy of them) when they all have the same one, else (just added) it starts from the master
+/// as it is now.
+///
+/// Keys carry no identity beyond time and value: two keys of equal value that trade times (Time
+/// Reverse) cannot be told apart, so the bases stay with the times.
 fn key_bases(keys: &[effectcraft_keyframe::Keyframe], bases: &[EssentialKeyBase]) -> Vec<Option<usize>> {
     let mut order: Vec<usize> = (0..bases.len()).collect();
     order.sort_by_key(|&j| bases.get(j).map(|b| b.time));
     let mut used = vec![false; bases.len()];
     let mut picks = vec![None; keys.len()];
+    fn text(k: &effectcraft_keyframe::Keyframe) -> Option<&effectcraft_keyframe::TextDoc> {
+        match &k.value {
+            Value::Text(d) => Some(&**d),
+            _ => None,
+        }
+    }
     let mut claim = |pick: &mut Option<usize>, ok: &dyn Fn(&EssentialKeyBase) -> bool| {
         if let Some(&j) = order.iter().find(|&&j| !used.get(j).copied().unwrap_or(true) && bases.get(j).is_some_and(ok)) {
             if let Some(u) = used.get_mut(j) {
@@ -734,13 +747,37 @@ fn key_bases(keys: &[effectcraft_keyframe::Keyframe], bases: &[EssentialKeyBase]
         }
     };
     for (k, pick) in keys.iter().zip(picks.iter_mut()) {
-        if let Value::Text(d) = &k.value {
-            claim(pick, &|b| b.key.as_deref() == Some(&**d));
+        let Some(d) = text(k) else { continue };
+        let n_keys = keys.iter().filter(|o| text(o) == Some(d)).count();
+        let n_bases = bases.iter().filter(|b| b.key.as_deref() == Some(d)).count();
+        if n_keys > n_bases {
+            claim(pick, &|b| b.time == k.time && b.key.as_deref() == Some(d));
+        }
+    }
+    for (k, pick) in keys.iter().zip(picks.iter_mut()) {
+        if pick.is_none()
+            && let Some(d) = text(k)
+        {
+            claim(pick, &|b| b.key.as_deref() == Some(d));
         }
     }
     for (k, pick) in keys.iter().zip(picks.iter_mut()) {
         if pick.is_none() {
             claim(pick, &|b| b.time == k.time);
+        }
+    }
+    for i in 0..keys.len() {
+        if picks.get(i).is_some_and(Option::is_some) {
+            continue;
+        }
+        let Some(d) = keys.get(i).and_then(text) else { continue };
+        let doc = |j: usize| bases.get(j).map(|b| &b.doc);
+        let mut twins = keys.iter().zip(&picks).filter_map(|(o, p)| p.filter(|_| text(o) == Some(d)));
+        let first = twins.next();
+        // Twins with different bases (one owns, one follows): which one this key copies is unknown.
+        let twin = first.filter(|&f| twins.all(|j| doc(j) == doc(f)));
+        if let Some(p) = picks.get_mut(i) {
+            *p = twin;
         }
     }
     picks
