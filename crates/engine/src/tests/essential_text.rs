@@ -257,6 +257,51 @@ fn keyframed_override_keeps_a_keys_own_fill_when_the_master_passes_through_it() 
     assert_eq!((k[1].text.as_str(), k[1].fill, k[1].size), ("Second", [0.0, 1.0, 0.0, 1.0], 70.0));
 }
 
+/// A blue master, an instance key that is explicitly red, the master turns red, the key moves to
+/// 1 s, the master turns green: the key stays red, as in a second instance whose key did not
+/// move. The moved key used to find no base at its new time and fall back to the master as it
+/// was then (red), so its own red counted as following and turned green.
+#[test]
+fn a_moved_key_keeps_its_own_fill_through_master_restyles() {
+    let (mut s, bubble, text, body, main, inst) = bubble(json!({"text": "Placeholder", "size": 54, "fill": "#0000ff"}));
+    let still = s.execute("layer.addItem", json!({"item": bubble.0})).unwrap()["layer"].as_u64().unwrap();
+    let (doc, _) = instance_value(&s, main, inst, body);
+    let red = [1.0, 0.0, 0.0, 1.0];
+    let mine = TextDoc { text: "Mine".into(), fill: red, ..doc };
+    let uid_of = |s: &Session, l: u64| child_uid(essential::group(s.project.comp(main).unwrap().layer(LayerId(l)).unwrap()).unwrap(), body);
+    let (uid, still_uid) = (uid_of(&s, inst), uid_of(&s, still));
+    s.edit("Keys", None, |p, _| {
+        for (l, u) in [(inst, uid), (still, still_uid)] {
+            let pr = p.comp_mut(main).unwrap().layer_mut(LayerId(l)).unwrap().props.find_mut(u).unwrap();
+            pr.keys = vec![effectcraft_keyframe::Keyframe::new(effectcraft_time::Tick::ZERO, KV::Text(Box::new(mine.clone())))];
+        }
+        Ok(())
+    })
+    .unwrap();
+    let key = |s: &Session, l: u64, u: u64| -> (effectcraft_time::Tick, TextDoc) {
+        let pr = s.project.comp(main).unwrap().layer(LayerId(l)).unwrap().props.find(u).unwrap();
+        assert_eq!(pr.keys.len(), 1);
+        match &pr.keys[0].value {
+            KV::Text(d) => (pr.keys[0].time, (**d).clone()),
+            o => panic!("{o:?}"),
+        }
+    };
+
+    s.execute("layer.setText", json!({"comp": bubble.0, "layer": text, "fill": "#ff0000"})).unwrap();
+    assert_eq!(key(&s, inst, uid).1.fill, red);
+
+    s.state.selected_keys = vec![crate::KeyRef { layer: LayerId(inst), prop: uid, time: effectcraft_time::Tick::ZERO }];
+    s.execute("keys.move", json!({"delta": 1.0})).unwrap();
+    let (time, _) = key(&s, inst, uid);
+    assert!((time.seconds() - 1.0).abs() < 1e-9, "the key moved to 1 s: {}", time.seconds());
+
+    s.execute("layer.setText", json!({"comp": bubble.0, "layer": text, "fill": "#00ff00"})).unwrap();
+    let (_, moved) = key(&s, inst, uid);
+    let (_, kept) = key(&s, still, still_uid);
+    assert_eq!((kept.text.as_str(), kept.fill), ("Mine", red), "the key that did not move stays red");
+    assert_eq!((moved.text.as_str(), moved.fill), ("Mine", red), "the moved key stays red");
+}
+
 /// Precomps three deep, the outer comp created first (so visited first): the outer instance's
 /// override of the middle comp's control (which shows the inner text) follows a restyle of the
 /// inner text layer in the same edit.

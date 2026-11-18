@@ -17,7 +17,8 @@
 //!   the attributes it changed itself; the others follow the master's restyles. A Set of an
 //!   overridden Source Text rebases what it changed ([`TextDoc::rebase`]), so the value set
 //!   stays the instance's own. A keyframed override has a base per key
-//!   ([`EssentialBase::keys`]). Ownership is kept per run and per paragraph: the base document
+//!   ([`EssentialBase::keys`]), found by key time; a key that an edit moves takes its base along.
+//!   Ownership is kept per run and per paragraph: the base document
 //!   carries the base each run (or paragraph) of the instance follows
 //!   ([`TextDoc::follow_runs`], [`TextDoc::follow_paras`], empty in projects saved before and
 //!   while every run has the base's), so a run the instance styled itself keeps its own base
@@ -710,12 +711,74 @@ fn mark_overrides(before: &Project, after: &mut Project) {
     }
 }
 
+/// Keys of an overridden Source Text that this edit moved (`before` → `after`) take their own
+/// base with them ([`EssentialBase::keys`], follow records included): the bases are found by key
+/// time, and a moved key without one fell back to the master as it is now, so what the key owned
+/// counted as following and a later restyle overwrote it. A base left at a time with no key goes
+/// to the key that now carries the value the key at that time had before the edit (a move, also
+/// onto another key); a base whose key's value is not known (a drag step from its start) goes to
+/// the first key, in time order, that has no base.
+fn move_key_bases(before: &Project, after: &mut Project) {
+    let mut moves: Vec<(ItemId, LayerId, Uid, Vec<EssentialKeyBase>)> = vec![];
+    for (cid, comp) in after.comps() {
+        for l in &comp.layers {
+            let Some(g) = group(l) else { continue };
+            let GroupKind::Essential { bases, .. } = &g.kind else { continue };
+            let old_g = before.comp(*cid).and_then(|c| c.layer(l.id)).and_then(group);
+            for b in bases.iter().filter(|b| !b.keys.is_empty()) {
+                let Some(p) = g.find(b.prop) else { continue };
+                if b.keys.iter().all(|kb| p.keys.iter().any(|k| k.time == kb.time)) {
+                    continue;
+                }
+                let old_keys = old_g.and_then(|og| og.find(b.prop)).map_or(&[][..], |op| op.keys.as_slice());
+                let old_value = |t| old_keys.iter().find(|k| k.time == t).map(|k| &k.value);
+                let mut keys = b.keys.clone();
+                let mut taken = vec![];
+                let mut stale: Vec<_> = keys.iter().map(|kb| kb.time).filter(|t| !p.keys.iter().any(|k| k.time == *t)).collect();
+                stale.sort();
+                for from in stale {
+                    let was = old_value(from);
+                    let to = p.keys.iter().map(|k| k.time).find(|&t| {
+                        let has_base = keys.iter().any(|kb| kb.time == t);
+                        let value = p.keys.iter().find(|k| k.time == t).map(|k| &k.value);
+                        !taken.contains(&t)
+                            && match was {
+                                // The key that now holds that value, unless it held it already.
+                                Some(v) => value == Some(v) && (!has_base || old_value(t) != Some(v)),
+                                None => !has_base,
+                            }
+                    });
+                    let Some(to) = to else { continue };
+                    // A key moved onto another one replaces it, base included.
+                    keys.retain(|kb| kb.time != to);
+                    if let Some(kb) = keys.iter_mut().find(|kb| kb.time == from) {
+                        kb.time = to;
+                    }
+                    taken.push(to);
+                }
+                if keys != b.keys {
+                    moves.push((*cid, l.id, b.prop, keys));
+                }
+            }
+        }
+    }
+    for (cid, lid, uid, keys) in moves {
+        if let Some(g) = after.comp_mut(cid).and_then(|c| c.layer_mut(lid)).and_then(|l| l.props.sub_mut(GROUP))
+            && let GroupKind::Essential { bases, .. } = &mut g.kind
+            && let Some(b) = bases.iter_mut().find(|b| b.prop == uid)
+        {
+            b.keys = keys;
+        }
+    }
+}
+
 /// After an edit: mark changed master properties as overridden, then add, update or remove the
 /// Essential Properties groups of every precomp layer so they match their comp's controls.
 pub fn sync_project(before: &Project, after: &mut Project) {
     sync_links(before, after);
     propagate_mirrors(before, after);
     mark_overrides(before, after);
+    move_key_bases(before, after);
     // A control can expose another instance's Essential Property (precomps nested in precomps),
     // and comps are visited in id order: an outer comp can be visited before the comp whose
     // group it reads changed. Passes repeat until nothing changes, bounded by this nesting depth.
