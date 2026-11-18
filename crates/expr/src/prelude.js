@@ -5,6 +5,25 @@
 // __rnd(...) seeded random. This file is evaluated once per runtime and is NOT passed through
 // the array-maths rewriter, so it uses plain JS operators.
 
+// String.prototype.substr(start, length) (ES3, Annex B): After Effects' expression engines have
+// it and published expressions use it (`comment.substr(-1)`); the engine here is built without
+// Annex B. Legacy length (not end-index) semantics; defined before the prototypes are frozen.
+if (typeof String.prototype.substr !== "function") {
+  Object.defineProperty(String.prototype, "substr", {
+    value: function (start, length) {
+      if (this === null || this === undefined) throw new TypeError("String.substr called on null or undefined");
+      var text = String(this), n = text.length;
+      var from = Number(start);
+      if (Number.isNaN(from)) from = 0;
+      from = from < 0 ? Math.max(n + Math.ceil(from), 0) : Math.min(Math.floor(from), n);
+      var count = length === undefined ? n - from : Number(length);
+      if (Number.isNaN(count) || count <= 0) return "";
+      return text.slice(from, from + count);
+    },
+    writable: true, configurable: true
+  });
+}
+
 var time = 0;
 var value = 0;
 var __S = null;
