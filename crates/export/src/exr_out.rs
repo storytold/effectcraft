@@ -12,38 +12,23 @@
 
 use std::io::{Seek, Write};
 
+use craft_exr::decode::{Compression, Result, SampleDepth};
 use effectcraft_project::render_queue::{ExrBitDepth, ExrCompression};
-use exr::meta::attribute::Chromaticities;
-use exr::prelude::{Blocks, Compression, Encoding, Image, Layer, LayerAttributes, LineOrder, SpecificChannels, Vec2, WritableImage, f16};
 
-/// The largest finite half float.
-const HALF_MAX: f32 = 65_504.0;
-
-/// A sample as half float: rounded to the nearest half (ties to even), held to ±65 504 so an
-/// over-range render doesn't turn into infinity. NaN stays NaN.
-fn to_half(v: f32) -> f16 {
-    f16::from_f32(v.clamp(-HALF_MAX, HALF_MAX))
-}
-
-/// The `exr` crate's compression for an Output Module setting.
+/// The `craft-exr` compression for an Output Module setting.
 pub fn compression(c: ExrCompression) -> Compression {
     match c {
-        ExrCompression::None => Compression::Uncompressed,
-        ExrCompression::Rle => Compression::RLE,
-        ExrCompression::Zips => Compression::ZIP1,
-        ExrCompression::Zip => Compression::ZIP16,
-        ExrCompression::Piz => Compression::PIZ,
-        ExrCompression::Pxr24 => Compression::PXR24,
+        ExrCompression::None => Compression::None,
+        ExrCompression::Rle => Compression::Rle,
+        ExrCompression::Zips => Compression::Zip1,
+        ExrCompression::Zip => Compression::Zip16,
+        ExrCompression::Piz => Compression::Piz,
+        ExrCompression::Pxr24 => Compression::Pxr24,
         ExrCompression::B44 => Compression::B44,
-        ExrCompression::B44a => Compression::B44A,
-        ExrCompression::Dwaa => Compression::DWAA(None),
-        ExrCompression::Dwab => Compression::DWAB(None),
+        ExrCompression::B44a => Compression::B44a,
+        ExrCompression::Dwaa => Compression::Dwaa,
+        ExrCompression::Dwab => Compression::Dwab,
     }
-}
-
-/// Scan lines, top to bottom, with compression `c`.
-fn encoding(c: ExrCompression) -> Encoding {
-    Encoding { compression: compression(c), blocks: Blocks::ScanLines, line_order: LineOrder::Increasing }
 }
 
 /// Write `w`×`h` RGBA pixels (`data`: four samples per pixel as they are to be written,
@@ -58,47 +43,12 @@ pub fn write_rgba<W: Write + Seek>(
     (w, h): (usize, usize),
     (c, depth): (ExrCompression, ExrBitDepth),
     chroma: Option<[[f32; 2]; 4]>,
-) -> exr::error::UnitResult {
-    let chroma = chroma.map(|[red, green, blue, white]| {
-        let v = |[x, y]: [f32; 2]| Vec2(x, y);
-        Chromaticities { red: v(red), green: v(green), blue: v(blue), white: v(white) }
-    });
-    let row = w.saturating_mul(4);
-    let px = move |p: Vec2<usize>| -> [f32; 4] {
-        let o = p.y().saturating_mul(row).saturating_add(p.x().saturating_mul(4));
-        match data.get(o..o.saturating_add(4)) {
-            Some(&[r, g, b, a]) => [r, g, b, a],
-            _ => [0.0; 4],
-        }
+) -> Result<()> {
+    let sample_depth = match depth {
+        ExrBitDepth::Float => SampleDepth::Float,
+        ExrBitDepth::Half => SampleDepth::Half,
     };
-    match depth {
-        ExrBitDepth::Float => {
-            let mut image = Image::from_layer(Layer::new(
-                (w, h),
-                LayerAttributes::default(),
-                encoding(c),
-                SpecificChannels::rgba(move |p: Vec2<usize>| {
-                    let [r, g, b, a] = px(p);
-                    (r, g, b, a)
-                }),
-            ));
-            image.attributes.chromaticities = chroma;
-            image.write().to_buffered(file)
-        }
-        ExrBitDepth::Half => {
-            let mut image = Image::from_layer(Layer::new(
-                (w, h),
-                LayerAttributes::default(),
-                encoding(c),
-                SpecificChannels::rgba(move |p: Vec2<usize>| {
-                    let [r, g, b, a] = px(p).map(to_half);
-                    (r, g, b, a)
-                }),
-            ));
-            image.attributes.chromaticities = chroma;
-            image.write().to_buffered(file)
-        }
-    }
+    craft_exr::decode::write_rgba(file, data, w as u32, h as u32, sample_depth, compression(c), chroma)
 }
 
 #[cfg(test)]
