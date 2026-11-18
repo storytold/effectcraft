@@ -107,13 +107,34 @@ fn filled(px: [f32; 4]) -> impl Fn(u32, u32) -> effectcraft_raster::Image + Copy
     move |w, h| effectcraft_raster::Image::filled(w, h, px)
 }
 
+fn levels_first_pixel(vals: &[(String, Value)], px: [f32; 4]) -> Vec<[f32; 4]> {
+    let vals: Vec<(&str, Value)> = vals.iter().map(|(id, v)| (id.as_str(), v.clone())).collect();
+    effect_direct_on("ec.color.levels", &vals, false, filled(px)).into_iter().map(|out| out.data[0]).collect()
+}
+
 #[test]
 fn levels_keeps_finite_results_near_f32_max_distinct() {
-    let owned = levels_controls("", [0.0, 1.0, 1.0, 1.0, 2.0]);
-    let vals: Vec<(&str, Value)> = owned.iter().map(|(id, v)| (id.as_str(), v.clone())).collect();
-    for out in effect_direct_on("ec.color.levels", &vals, false, filled([3.4006e38, 3.4022e38, f32::MAX, 1.0])) {
-        let [r, g, b, _] = out.data[0];
-        assert!([r, g, b].iter().all(|v| v.is_finite()) && 3.4e38 < r && r < g && g < f32::MAX && g <= b, "{:?}", out.data[0]);
+    let adjacent = [f32::from_bits(0x7f7f_fffd), f32::from_bits(0x7f7f_fffe), f32::MAX, 1.0];
+    for [r, g, b, _] in levels_first_pixel(&levels_controls("", [0.0, 1.0, 1.0, 1.0, 2.0]), adjacent) {
+        assert!([r, g, b].iter().all(|v| v.is_finite()) && r < g && g < b, "{r:e} {g:e} {b:e}");
+    }
+    for [r, g, b, _] in levels_first_pixel(&levels_controls("", [0.0, 1.0, 0.5, 0.0, 1.0]), [1.8440e19, 1.8445e19, 1.0, 1.0]) {
+        assert!([r, g, b].iter().all(|v| v.is_finite()) && 3.4e38 < r && r < g && g < f32::MAX, "{r:e} {g:e} {b:e}");
+    }
+}
+
+#[test]
+fn levels_keeps_a_finite_rgb_stage_for_the_channel_stage() {
+    let chained = [levels_controls("", [0.0, 0.0, 0.1, 0.0, 1.0]), levels_controls("red", [0.0, 1.0, 10.0, -1.0, -0.999])].concat();
+    for [r, ..] in levels_first_pixel(&chained, [0.0015, 0.0, 0.0, 1.0]) {
+        assert!((r - 0.4999808).abs() < 1e-4, "{r}");
+    }
+}
+
+#[test]
+fn levels_alpha_keeps_the_clamp_of_an_overflowing_curve() {
+    for [.., a] in levels_first_pixel(&levels_controls("alpha", [0.0, 0.0, 0.1, 0.0, 2e-38]), [0.004, 0.004, 0.004, 0.01]) {
+        assert_eq!(a, 1.0);
     }
 }
 

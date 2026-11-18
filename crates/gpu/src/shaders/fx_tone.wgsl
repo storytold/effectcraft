@@ -50,8 +50,20 @@ fn fxt_level(o: u32, v: f32) -> f32 {
 }
 
 fn fxt_level_restraight(q: vec4<f32>, straight: vec3<f32>) -> vec3<f32> {
-    let beyond_division = (abs(straight) >= vec3<f32>(0x1p+127f)) & vec3<bool>(q.w > 1e-6);
-    return select(fxt_straight(q), straight, beyond_division);
+    if (q.w <= 1e-6) {
+        return vec3<f32>(0.0);
+    }
+    var c = straight;
+    for (var i = 0u; i < 3u; i++) {
+        if (abs(straight[i]) < 0x1p+127f) {
+            c[i] = q[i] / q.w;
+        }
+    }
+    return c;
+}
+
+fn fxt_level_alpha(o: u32, v: f32) -> f32 {
+    return levels_alpha(v, data[o], data[o + 1u], data[o + 2u], data[o + 3u], data[o + 4u], data[o + 5u] != 0.0, data[o + 6u] != 0.0);
 }
 
 fn fxt_level_ident(o: u32) -> bool {
@@ -556,7 +568,7 @@ fn fxt_point(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
             var na = qa;
             if (!fxt_level_ident(28u)) {
-                na = clamp(fxt_level(28u, qa), 0.0, 1.0);
+                na = fxt_level_alpha(28u, qa);
             }
             o = vec4<f32>(oc * na, na);
         }

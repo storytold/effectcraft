@@ -582,6 +582,24 @@ fn levels_is_exact_where_only_an_intermediate_overflows() {
 }
 
 #[test]
+fn levels_alpha_keeps_the_clamp_of_an_overflowing_curve() {
+    let unclipped = (false, false);
+    assert_eq!(level_alpha(0.01, [0.0, 0.0, 0.1, 0.0, 1e-41], unclipped), 1.0);
+    assert_eq!(level_alpha(0.01, [0.0, 0.0, 0.1, 1e-41, 0.0], unclipped), 0.0);
+    assert_eq!(level_alpha(0.6, [0.5, 0.5, 0.1, 0.3, 0.3], unclipped), 0.3);
+    let vals = [
+        ("alphaInBlack", num(0.0)),
+        ("alphaInWhite", num(0.0)),
+        ("alphaGamma", num(0.1)),
+        ("alphaOutWhite", num(1e-41)),
+        ("alphaClipToOutputBlack", Value::Enum(0)),
+        ("alphaClipToOutputWhite", Value::Enum(0)),
+    ];
+    let out = px("ec.color.levels", &vals, [0.004, 0.004, 0.004, 0.01]);
+    assert!(close(out, [0.4, 0.4, 0.4, 1.0], 1e-6), "{out:?}");
+}
+
+#[test]
 fn levels_keeps_a_finite_rgb_stage_for_the_channel_stage() {
     let vals = [
         ("inBlack", num(0.0)),
