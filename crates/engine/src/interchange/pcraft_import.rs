@@ -11,6 +11,12 @@ use effectcraft_time::{FrameRate, Tick};
 // Each source group becomes a precomposition; match the renderer's nesting limit.
 const MAX_GROUP_DEPTH: usize = 16;
 
+/// A group whose blend mode is Pass Through: it becomes a precomposition with Collapse
+/// Transformations on, so its layers blend with the layers below the group.
+fn passes_through(layer: &InputLayer) -> bool {
+    layer.kind == "group" && layer.blend.as_deref().is_some_and(|b| b.eq_ignore_ascii_case("PassThrough") || b.eq_ignore_ascii_case("Pass Through"))
+}
+
 pub(crate) struct Document {
     outline: Outline,
     width: u32,
@@ -20,7 +26,7 @@ pub(crate) struct Document {
 /// Metadata only: source pixels remain media and are decoded when a frame needs them, as PSD
 /// footage is. Bound the number of project items before creating their property groups.
 pub(crate) fn read(bytes: &[u8]) -> Result<Document, String> {
-    if bytes.len() as u64 > 512 << 20 {
+    if bytes.len() as u64 > effectcraft_project::PCRAFT_MAX_INPUT {
         return Err("PhotoCraft bundle exceeds the 512 MiB input limit".into());
     }
     fn count(layers: &[InputLayer], depth: usize, nodes: &mut usize, pixels: &mut usize) -> Result<(), String> {
@@ -30,6 +36,10 @@ pub(crate) fn read(bytes: &[u8]) -> Result<Document, String> {
         for layer in layers {
             if depth == MAX_GROUP_DEPTH && layer.kind == "group" {
                 return Err("PhotoCraft groups exceed 16 levels; import as Footage for the saved composite".into());
+            }
+            // A pass-through group collapses into its parent only this deep in the renderer.
+            if depth > effectcraft_render::MAX_COLLAPSE_DEPTH && passes_through(layer) {
+                return Err("PhotoCraft pass-through groups exceed 13 levels; import as Footage for the saved composite".into());
             }
             *nodes += 1;
             if *nodes > 4096 {
@@ -147,7 +157,7 @@ fn build_comp(project: &mut Project, ctx: &mut Context, name: &str, layers: &[In
                 opacity.value = Value::Scalar(f64::from(input.opacity.filter(|v| v.is_finite()).unwrap_or(1.0).clamp(0.0, 1.0)) * 100.0);
             }
             if let Some(blend) = input.blend.as_deref() {
-                if input.kind == "group" && (blend.eq_ignore_ascii_case("PassThrough") || blend.eq_ignore_ascii_case("Pass Through")) {
+                if passes_through(input) {
                     layer.switches.collapse = true;
                 } else if let Some(mode) = BlendMode::from_name(blend) {
                     layer.blend_mode = mode;

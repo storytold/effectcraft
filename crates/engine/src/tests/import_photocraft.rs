@@ -290,7 +290,16 @@ fn photocraft_layer_buffers_are_bounded_before_decoding_pixels() {
 
 #[test]
 fn photocraft_group_nesting_stays_within_the_composition_renderer_limit() {
-    for (depth, blend) in [(16, "Normal"), (16, "PassThrough"), (17, "Normal"), (17, "PassThrough")] {
+    // Pass-through groups collapse into their parents only 13 levels deep in the renderer, so a
+    // deeper one is refused instead of blending as a flattened group.
+    let cases = [
+        (16, "Normal", None),
+        (13, "PassThrough", None),
+        (14, "PassThrough", Some("13 levels")),
+        (17, "Normal", Some("16 levels")),
+        (17, "PassThrough", Some("13 levels")),
+    ];
+    for (depth, blend, refused) in cases {
         let mut layers = json!([layer("Deep pixels", true, 1.0, "Normal", json!({"kind":"raster","surface":surface("0000ffff")}))]);
         for index in 0..depth {
             layers = json!([layer(&format!("Group {index}"), true, 1.0, blend, json!({"kind":"group","children":layers}))]);
@@ -299,15 +308,15 @@ fn photocraft_group_nesting_stays_within_the_composition_renderer_limit() {
         let mut s = Session { footage: std::sync::Arc::new(effectcraft_media::MediaPool::new()), ..Default::default() };
         let before = s.project.items.len();
         let result = s.execute("file.import", json!({"paths":[path],"importAs":"composition"})).unwrap();
-        if depth == 16 {
-            let comp = ItemId(result["comps"][0].as_u64().unwrap());
-            assert_eq!(s.render(comp, effectcraft_time::Tick::ZERO, Default::default()).data[0], [0.0, 0.0, 1.0, 1.0]);
-        } else {
+        if let Some(levels) = refused {
             assert_eq!(s.project.items.len(), before, "unsupported nesting must not create a composition with disappearing artwork");
             assert!(
-                result["errors"].as_array().unwrap().iter().any(|e| e.as_str().is_some_and(|e| e.contains("16 levels") && e.contains("Footage"))),
-                "{result}"
+                result["errors"].as_array().unwrap().iter().any(|e| e.as_str().is_some_and(|e| e.contains(levels) && e.contains("Footage"))),
+                "{depth} {blend}: {result}"
             );
+        } else {
+            let comp = ItemId(result["comps"][0].as_u64().unwrap());
+            assert_eq!(s.render(comp, effectcraft_time::Tick::ZERO, Default::default()).data[0], [0.0, 0.0, 1.0, 1.0], "{depth} {blend}");
         }
         std::fs::remove_file(path).unwrap();
     }
