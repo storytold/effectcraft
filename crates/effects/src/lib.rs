@@ -407,6 +407,56 @@ pub fn grow_sides(lo: [f64; 2], hi: [f64; 2], width: u32, height: u32) -> Option
     sides.iter().any(|&v| v != 0).then_some(sides)
 }
 
+/// Motion Tile's frame on a layer (not an adjustment): `layer` and `out` are the layer and output
+/// sizes in buffer pixels, `rounded` the output size on whole pixels and `grow` the left/top
+/// growth. Output Width / Height reach 30 000 % in projects After Effects saved: on a layer that
+/// would ask for an image of tens of gigabytes. The growth on every growing side is cut by one
+/// factor so each side keeps at most [`MAX_GROWN_SIDE`] pixels and the frame stays within the
+/// [`pixel_budget`], centred on the layer; the layer itself is never cut.
+fn capped_tile_frame(layer: [f64; 2], out: [f64; 2], rounded: (f64, f64), grow: [f64; 2]) -> (u32, u32, [f64; 2]) {
+    let finite = layer.iter().chain(out.iter()).chain(grow.iter()).all(|v| v.is_finite()) && rounded.0.is_finite() && rounded.1.is_finite();
+    if !finite {
+        return (1, 1, [0.0, 0.0]);
+    }
+    // A shrinking axis keeps its size; a growing one grows from the layer by `d · f`.
+    let base = [out[0].min(layer[0]), out[1].min(layer[1])];
+    let d = [(out[0] - layer[0]).max(0.0), (out[1] - layer[1]).max(0.0)];
+    let mut f = 1.0_f64;
+    for i in 0..2 {
+        if d[i] > 0.0 {
+            f = f.min((MAX_GROWN_SIDE - base[i]).max(0.0) / d[i]);
+        }
+    }
+    let budget = pixel_budget(layer[0], layer[1]);
+    if (base[0] + d[0] * f) * (base[1] + d[1] * f) > budget {
+        // (bw + dx·f)(bh + dy·f) = budget, solved for f.
+        let (a, b, c) = (d[0] * d[1], base[0] * d[1] + base[1] * d[0], base[0] * base[1] - budget);
+        let q = if a > 0.0 {
+            (-b + (b * b - 4.0 * a * c).max(0.0).sqrt()) / (2.0 * a)
+        } else if b > 0.0 {
+            -c / b
+        } else {
+            0.0
+        };
+        f = f.min(q);
+    }
+    let f = if f.is_finite() { f.clamp(0.0, 1.0) } else { 0.0 };
+    if f >= 1.0 {
+        return (rounded.0 as u32, rounded.1 as u32, grow);
+    }
+    // Centre on the whole-pixel side that is kept, not on the unrounded request.
+    let side = |i: usize, n: f64, g: f64| {
+        if d[i] > 0.0 {
+            let s = (base[i] + d[i] * f).floor().max(1.0);
+            (s, (s - layer[i]) * 0.5)
+        } else {
+            (n, g)
+        }
+    };
+    let ((w, gx), (h, gy)) = (side(0, rounded.0, grow[0]), side(1, rounded.1, grow[1]));
+    (w as u32, h as u32, [gx, gy])
+}
+
 /// The pixel box (min, max) enclosing the four points of a quad.
 pub fn quad_bounds(q: &[[f64; 2]; 4]) -> ([f64; 2], [f64; 2]) {
     let f = |i: usize, init: f64, g: fn(f64, f64) -> f64| q.iter().fold(init, |a, p| g(a, p[i]));
@@ -418,7 +468,7 @@ pub fn quad_bounds(q: &[[f64; 2]; 4]) -> ([f64; 2], [f64; 2]) {
 /// centre, on adjustment layers too, where the rectangle is the comp's and starts at the comp
 /// origin in the buffer below (After Effects; a Transform after it brings the tiles into view,
 /// #1727). An adjustment at 100 % keeps the buffer it was given; one whose frame would pass
-/// 16 384 pixels a side does too. On other layers each side stops at 16 384 pixels.
+/// 16 384 pixels a side does too. On other layers see [`capped_tile_frame`].
 pub fn motion_tile_frame(ctx: &EffectCtx, offset: [f64; 2], size: (u32, u32), scale: f64) -> (u32, u32, [f64; 2]) {
     let (lw, lh) = (ctx.layer_size[0], ctx.layer_size[1]);
     let (pw, ph) = (ctx.params.f("outputWidth"), ctx.params.f("outputHeight"));
@@ -427,13 +477,7 @@ pub fn motion_tile_frame(ctx: &EffectCtx, offset: [f64; 2], size: (u32, u32), sc
     let (nw, nh) = ((ow * scale).round().max(1.0), (oh * scale).round().max(1.0));
     let grow = [(ow - lw) * 0.5 * scale, (oh - lh) * 0.5 * scale];
     if !ctx.adjustment {
-        // Output Width / Height reach 30 000 % in projects After Effects saved: on a layer that
-        // would ask for an image of tens of gigabytes. Each side keeps at most
-        // [`MAX_GROWN_SIDE`] pixels, cut evenly about the centre.
-        let side = |n: f64, g: f64| if n.is_finite() && n <= MAX_GROWN_SIDE { (n, g) } else { (MAX_GROWN_SIDE, g - (n - MAX_GROWN_SIDE) * 0.5) };
-        let ((nw, gx), (nh, gy)) = (side(nw, grow[0]), side(nh, grow[1]));
-        let grow = [gx, gy].map(|g| if g.is_finite() { g } else { 0.0 });
-        return (nw as u32, nh as u32, grow);
+        return capped_tile_frame([lw * scale, lh * scale], [ow * scale, oh * scale], (nw, nh), grow);
     }
     // The grown rectangle's top-left in the buffer below, on whole pixels so the result lines
     // up with the comp again when the stack ends.

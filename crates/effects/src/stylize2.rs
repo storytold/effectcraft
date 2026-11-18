@@ -815,15 +815,29 @@ mod tests {
     #[test]
     fn motion_tile_output_size_is_capped_on_a_layer() {
         // Output 30 000 % (the most an After Effects project holds) on a 320x180 layer asked for
-        // a 96 000 x 54 000 image; each side stops at 16 384 pixels, cut about the centre.
-        let frame = |pct: f64| {
-            let params = Params { values: [("outputWidth", num(pct)), ("outputHeight", num(pct))].into_iter().map(|(k, v)| (k.to_string(), v)).collect() };
-            let ctx = EffectCtx { params: &params, time: 0.0, layer_size: [320.0, 180.0], seed: 1, adjustment: false, env: Default::default() };
-            crate::motion_tile_frame(&ctx, [0.0, 0.0], (320, 180), 1.0)
+        // a 96 000 x 54 000 image. Each side stopping at 16 384 pixels still left 16 384 x 16 384
+        // (4 GiB of RGBA f32); the frame now also stays within the effect pixel budget, centred
+        // on the layer, which is never cut.
+        let frame = |size: [f64; 2], pw: f64, ph: f64| {
+            let params = Params { values: [("outputWidth", num(pw)), ("outputHeight", num(ph))].into_iter().map(|(k, v)| (k.to_string(), v)).collect() };
+            let ctx = EffectCtx { params: &params, time: 0.0, layer_size: size, seed: 1, adjustment: false, env: Default::default() };
+            crate::motion_tile_frame(&ctx, [0.0, 0.0], (size[0] as u32, size[1] as u32), 1.0)
         };
-        assert_eq!(frame(30000.0), (16384, 16384, [(16384.0 - 320.0) / 2.0, (16384.0 - 180.0) / 2.0]));
-        // Below the cap nothing changes.
-        assert_eq!(frame(200.0), (640, 360, [160.0, 90.0]));
+        let budget = 16_777_216.0;
+        for (size, pw, ph) in
+            [([320.0, 180.0], 30000.0, 30000.0), ([321.0, 181.0], 29999.0, 30000.0), ([320.0, 180.0], 30000.0, 100.0), ([320.0, 180.0], 100.0, 30000.0)]
+        {
+            let (w, h, off) = frame(size, pw, ph);
+            assert!(f64::from(w) * f64::from(h) <= budget, "{size:?} {pw} {ph}: {w}x{h}");
+            assert!(w <= 16384 && h <= 16384, "{w}x{h}");
+            assert!(f64::from(w) >= size[0] && f64::from(h) >= size[1], "the layer is cut: {w}x{h}");
+            // Centred on the kept whole-pixel frame: the layer sits in the middle of it.
+            assert_eq!(off, [(f64::from(w) - size[0]) / 2.0, (f64::from(h) - size[1]) / 2.0]);
+        }
+        // A side that does not grow keeps its size; the other stops at 16 384 pixels.
+        assert_eq!(frame([320.0, 180.0], 30000.0, 100.0), (16384, 180, [(16384.0 - 320.0) / 2.0, 0.0]));
+        // Below the caps nothing changes.
+        assert_eq!(frame([320.0, 180.0], 200.0, 200.0), (640, 360, [160.0, 90.0]));
     }
 
     #[test]
