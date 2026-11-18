@@ -114,7 +114,7 @@ impl Psd {
             // A malformed optional block only loses that block's information.
             // Unsupported modern placement geometry must not silently become an
             // unwarped layer or fall back to a less expressive PlLd in either order.
-            match self.layer_block(&mut l, &b.key, &b.data) {
+            match self.layer_block(&mut l, b) {
                 Err(e @ Error::Unsupported(_)) if matches!(&b.key, b"SoLd" | b"SoLE") => return Err(e),
                 _ => {}
             }
@@ -140,7 +140,9 @@ impl Psd {
         }
     }
 
-    fn layer_block(&self, l: &mut Layer, key: &[u8; 4], b: &[u8]) -> Result<()> {
+    fn layer_block(&self, l: &mut Layer, block: &craft_psd::tagged::TaggedBlock) -> Result<()> {
+        let key = &block.key;
+        let b = block.data.as_slice();
         let mut r = Reader::new(b);
         match key {
             b"luni" => {
@@ -185,15 +187,21 @@ impl Psd {
                     d.obj("bounds").or_else(|| d.obj("boundingBox")).and_then(|o| Some([o.num("Left")?, o.num("Top ")?, o.num("Rght")?, o.num("Btom")?]));
                 l.text = Some(TextInfo { text, transform: t, style, bounds });
             }
-            b"lfx2" => {
-                let _ver = r.u32()?;
-                let _dver = r.u32()?;
-                l.effects = Some(descriptor::read_descriptor(&mut r)?);
-            }
-            b"SoCo" => {
-                let _ver = r.u32()?;
-                let d = descriptor::read_descriptor(&mut r)?;
-                l.fill = d.color("Clr ");
+            b"lfx2" | b"SoCo" | b"CgEd" => {
+                if let Some(parsed) = block.descriptor_prefix_recovering_versions_with_limits(descriptor::PARSE_LIMITS) {
+                    let d = descriptor::from_craft_descriptor(parsed.map_err(descriptor::desc_err)?);
+                    match key {
+                        b"lfx2" => l.effects = Some(d),
+                        b"SoCo" => l.fill = d.color("Clr "),
+                        _ => {
+                            l.adjustment = Some(Adjustment::BrightnessContrast {
+                                brightness: d.num("Brgh").unwrap_or(0.0),
+                                contrast: d.num("Cntr").unwrap_or(0.0),
+                                legacy: d.bool("useLegacy").unwrap_or(false),
+                            });
+                        }
+                    }
+                }
             }
             b"nvrt" => l.adjustment = Some(Adjustment::Invert),
             b"brit" | b"hue2" | b"hue " | b"levl" | b"expA" => {
@@ -205,15 +213,6 @@ impl Psd {
                         l.adjustment = Some(from_shared_adjustment(adjustment));
                     }
                 }
-            }
-            b"CgEd" => {
-                let _ver = r.u32()?;
-                let d = descriptor::read_descriptor(&mut r)?;
-                l.adjustment = Some(Adjustment::BrightnessContrast {
-                    brightness: d.num("Brgh").unwrap_or(0.0),
-                    contrast: d.num("Cntr").unwrap_or(0.0),
-                    legacy: d.bool("useLegacy").unwrap_or(false),
-                });
             }
             b"curv" | b"blnc" | b"post" | b"thrs" | b"selc" | b"mixr" | b"phfl" | b"vibA" | b"blwh" | b"grdm" | b"clrL" if l.adjustment.is_none() => {
                 l.adjustment = Some(Adjustment::Other(String::from_utf8_lossy(key).into_owned()));
