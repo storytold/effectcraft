@@ -430,3 +430,83 @@ them to the end (scripts and tests).
 [publishing-plugins.md](publishing-plugins.md) walks through it from an empty folder to a listed
 package: build, test, release on GitHub, the catalog entry and its fields, testing the entry with a
 local `file://` catalog, the pull request and its review, updates and removal.
+
+## Shared plug-ins (`.craftplugin`)
+
+EffectCraft also runs the plug-ins of the Craft apps' shared runtime, the `craft-plugin` crate of
+[craft-libs](https://github.com/storytold/craft-libs) (RFC-0046 in
+[craft-contrib](https://github.com/storytold/craft-contrib)): one bundle format (`.craftplugin`, a
+`craft-plugin.json` manifest and a WebAssembly module), one way to install from a file, a catalog or
+a GitHub repository's releases, and one store. Two kinds run here:
+
+* **Command plug-ins** (`"kind": "command"`, the shared kind): a module that acts on the project
+  only through EffectCraft's commands, the same ones the menus, the CLI, the control channel and
+  MCP run. Its manifest must name `effectcraft` in `apps` (`"apps": {"effectcraft": {"api": 6}}`);
+  a manifest that names no app, or only other apps, is refused. The ABI (host imports from
+  `craft`, the `craft_run` entry point, panels, settings) is in craft-plugin's README and its
+  `sandbox` module documentation.
+* **Effect plug-ins** (`"kind": "effect"`, EffectCraft's own kind): an [effect plug-in](#effect-plug-ins)
+  module (`ec_render`, WebAssembly ABI 1 or 2) in a bundle whose manifest has the effect's id and
+  `"apps": {"effectcraft": {"api": 1}}` (or 2, the WebAssembly ABI). It loads exactly as a `.wasm`
+  in the `Plug-ins` folder does; the bundle adds the shared manifest, the SHA-256 checks and
+  installing from GitHub.
+
+### Using them
+
+Effect ▸ Plug-ins lists the commands of the installed command plug-ins; a command with parameters
+asks for them first in a form made from its manifest. Effect ▸ Plug-ins ▸ Manage Plug-ins… lists
+what is installed (Remove, and a button per command) and installs:
+
+* **From File…**: a `.craftplugin` on your disk.
+* **From a GitHub repository**: type `owner/repo` (or `owner/repo@tag`). EffectCraft reads the
+  release through GitHub's API, downloads its one `.craftplugin` asset and checks it against the
+  `SHA256SUMS` asset of the same release (or GitHub's own digest).
+* **From a catalog**: add an `index.json` URL (`https://` on GitHub, or `file://` to test an entry),
+  then Review a package. Catalogs use the Plug-in Library's format with a package `kind` and
+  per-release `apps`; the Plug-in Library's own catalog is not read here.
+
+Every install shows a confirmation first, and nothing is written before you press Install: the
+plug-in, its kind, its source and the bundle's SHA-256, what it may do (read the project, or read
+and change it, and which commands), and — for a repository no catalog you use lists — that it is in
+no catalog. An update that asks for other permissions asks again.
+
+Installed plug-ins live in the `Plug-ins` folder next to the settings, one folder per plug-in named
+by a hash of its id (`Plug-ins/<32 hex digits>/`), with the bundle (named by its SHA-256) and
+`source.json` (where it came from). They load at start-up, each checked against its SHA-256. The
+Plug-in Library's packages (`Plug-ins/Library`) and loose `.wasm` files in `Plug-ins` are kept and
+loaded as before; the folders don't overlap. Plug-ins' settings and the catalogs added are kept in
+`plugin_settings.json` in the settings folder. The web build has no plug-ins store.
+
+### What a command plug-in may do
+
+* **One undo step.** A run is one step in the History panel, named after the plug-in; one Undo takes
+  it all back. A run that fails (a trap, an exhausted budget, a refused call it passes on, a
+  non-zero status) leaves the project, the selection and the undo history as they were.
+* **Read or write.** `"permissions": {"access": "read"}` plug-ins may run any allowed command that
+  leaves the project as it is: a call that changes it is undone and refused. `"commands"` narrows the
+  commands to a list (exact ids, or prefixes ending in `*`).
+* **Refused commands.** Whatever the manifest says, a plug-in never runs: plug-ins (`plugin.*`),
+  Undo and Redo, the undo history and the journal, files and projects (`file.*`), settings
+  (`prefs.*`, `shortcuts.*`, `playback.*`), windows and the application (`window.*`, `app.*`),
+  rendering (`render.*`, `renderQueue.*`), the clipboard, scripts and ScriptUI, `engine.batch`, the
+  Plug-in Library, effect plug-ins and helpers, trained models, background jobs, the Media Browser,
+  templates, Help and the tutorials, and the commands that read or write a file (saving frames,
+  animation and composition presets, Essential Graphics templates, guides, Blender export, camera
+  data import, relinking footage). A call whose parameters name a file or folder (`paths`, `file`,
+  `folder`-like keys; `path` for `anim.applyPreset` and `layer.newModel`) is refused; pass the
+  content instead. A call that would open a dialog, a panel or a web page is undone and refused.
+* **No files, network or clock.** The sandbox gives a module none of them, and caps its instructions,
+  memory, host calls and messages.
+* **Settings.** A plug-in keeps up to 64 KB of JSON settings (keys of at most 128 characters).
+* **Panels** (`ui_show`) are not shown in EffectCraft yet; `plugin.run` says so in its result.
+
+The MCP server refuses the `plugin.*` commands that install, update, remove or run plug-ins or read
+catalogs while automation is confined to folders (`--automation-read-root`), as it refuses scripts and the Plug-in Library.
+
+### Commands
+
+`plugin.list`, `plugin.install {path | data (base64) | repo | catalog + id, version?, review?, sha256?}`
+(`review: true` checks and describes the bundle without installing it; `sha256` then installs that
+reviewed bundle without downloading it again), `plugin.update {id?, apply?}`, `plugin.remove {id}`,
+`plugin.run {id, command?, params?, fuel?}`, `plugin.catalog.list {url?}`,
+`plugin.catalog.add {url, remove?}`. The CLI, the control channel and MCP reach them like any command.

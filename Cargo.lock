@@ -1196,6 +1196,14 @@ version = "0.1.0"
 source = "git+https://github.com/storytold/craft-libs?rev=5a7a63a21dd03dd1a2bc6c308a3a6ce818caae87#5a7a63a21dd03dd1a2bc6c308a3a6ce818caae87"
 
 [[package]]
+name = "craft-atomic"
+version = "0.1.0"
+source = "git+https://github.com/Dasemu/craft-libs?rev=93428fbe5d11b735365fa87068a9e1fc85fb3550#93428fbe5d11b735365fa87068a9e1fc85fb3550"
+dependencies = [
+ "rustix 1.1.5",
+]
+
+[[package]]
 name = "craft-audio"
 version = "0.1.0"
 source = "git+https://github.com/storytold/craft-libs?rev=5a7a63a21dd03dd1a2bc6c308a3a6ce818caae87#5a7a63a21dd03dd1a2bc6c308a3a6ce818caae87"
@@ -1431,6 +1439,19 @@ source = "git+https://github.com/storytold/craft-libs?rev=808730f49b9637b7909fe2
 dependencies = [
  "hayro-syntax",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "craft-plugin"
+version = "0.1.0"
+source = "git+https://github.com/Dasemu/craft-libs?rev=93428fbe5d11b735365fa87068a9e1fc85fb3550#93428fbe5d11b735365fa87068a9e1fc85fb3550"
+dependencies = [
+ "craft-atomic",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.21",
+ "wasmi",
 ]
 
 [[package]]
@@ -2039,6 +2060,7 @@ version = "0.24.1"
 dependencies = [
  "chrono",
  "craft-docpath",
+ "craft-plugin",
  "effectcraft-aep",
  "effectcraft-color",
  "effectcraft-effects",
@@ -2069,6 +2091,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",
+ "wat",
  "web-time",
 ]
 
@@ -7601,6 +7624,7 @@ checksum = "4f20f20e44f7e8aeb6744823ea9d869ede51e51be4fdaedede2852282e54d2d8"
 dependencies = [
  "bitflags 2.13.2",
  "indexmap",
+ "semver",
 ]
 
 [[package]]

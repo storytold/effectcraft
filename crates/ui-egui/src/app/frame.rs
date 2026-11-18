@@ -526,6 +526,7 @@ impl EffectcraftApp {
         panels::precomp::mini_flowchart(self, &ctx);
         panels::home::capture_thumbnail(self);
         panels::dialogs::show(self, &ctx);
+        panels::plugins::show(self, &ctx);
         updates_ui::show(self, &ctx);
         panels::scriptui_view::sync_panels(self);
         panels::scriptui_view::show_windows(self, &ctx);

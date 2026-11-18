@@ -356,6 +356,12 @@ fn run_desktop(reporter: &crash_report::Shutdown) -> eframe::Result {
                     if let Err(e) = session.execute("library.loadInstalled", json!({})) {
                         log::warn!("plug-in library: {e}");
                     }
+                    // Plug-ins installed through the shared plug-in store (<config>/Plug-ins/<hash>/):
+                    // command plug-ins for the Effect ▸ Plug-ins menu, effect plug-ins' effects.
+                    let shared = effectcraft_engine::plugin::load_installed(&mut session);
+                    for problem in shared["problems"].as_array().into_iter().flatten() {
+                        log::warn!("plug-ins: {problem}");
+                    }
                 }
                 start_helpers_if_opted_in(&mut session);
                 session.config = Some(std::sync::Arc::new(effectcraft_engine::config::DirConfig::new(dir)));

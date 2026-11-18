@@ -105,6 +105,9 @@ pub fn specs() -> Vec<CommandSpec> {
         fe!("comp.miniFlowchart", "Composition Mini-Flowchart", ["Composition"], Some("Tab"), "{}", has_comp),
         fe!("layer.openLayer", "Open Layer", ["Layer"], None, "{layer?}", has_layers),
         fe!("effect.manage", "Manage Effects...", ["Effect"], None, "{}", always),
+        // Effect ▸ Plug-ins ▸ Manage Plug-ins…: installed plug-ins, installing from a file, a GitHub
+        // repository or a catalog (the `plugin.*` commands).
+        fe!("plugin.manage", "Manage Plug-ins...", ["Effect", "Plug-ins"], None, "{}", always),
         fe!("anim.browsePresets", "Browse Presets...", ["Animation"], None, "{}", always),
         fe!("timeline.revealMask", "Reveal Created Mask", [], None, "{comp, layer, mask, projectEpoch} — engine-supplied creation identity", has_comp),
         // Project panel: delete the selected items without the prompt that Delete shows when

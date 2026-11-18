@@ -35,7 +35,7 @@ pub const CATALOG_URL: &str = "https://raw.githubusercontent.com/storytold/effec
 /// The catalog format this build reads.
 pub const CATALOG_SCHEMA: u32 = 1;
 /// Hosts plug-ins and catalogs may be downloaded from (release assets redirect to the last two).
-const HOSTS: &[&str] = &["github.com", "raw.githubusercontent.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com"];
+const HOSTS: &[&str] = craft_plugin::catalog::HOSTS;
 const MAX_CATALOG: u64 = 4 << 20;
 const MAX_MODULE: u64 = 64 << 20;
 const MAX_PACKAGES: usize = 10_000;
@@ -226,11 +226,8 @@ fn newer(a: &str, b: &str) -> bool {
 /// A package id that is also a safe folder name: letters, digits, `.`, `-`, `_`; no leading or
 /// trailing dot (Windows drops a trailing one, so `a.` would share `a`'s folder).
 pub fn valid_id(id: &str) -> bool {
-    (1..=100).contains(&id.len())
-        && !id.starts_with('.')
-        && !id.ends_with('.')
-        && !id.contains("..")
-        && id.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+    // The shared plug-in store and catalogs (craft-plugin) use the same rule.
+    craft_plugin::catalog::valid_package_id(id)
 }
 
 /// 64 hex digits.
@@ -403,40 +400,8 @@ enum Source {
 /// starts with two separators or holds a `\` (raw or percent-encoded), or a percent-encoded `/`,
 /// is refused: on Windows such a path can name a network share, and reading it contacts that host.
 fn file_url_path(url: &str) -> std::result::Result<PathBuf, String> {
-    let bad = |why: &str| format!("bad file URL `{url}`: {why}");
-    let rest = url.strip_prefix("file://").ok_or_else(|| bad("it doesn't start with file://"))?;
-    let rest = rest.strip_prefix("localhost").unwrap_or(rest);
-    if !rest.starts_with('/') {
-        return Err(bad("only local files can be read (file:///path)"));
-    }
-    let b = rest.as_bytes();
-    // `/C:/…` on Windows.
-    let rest =
-        if b.get(1).is_some_and(u8::is_ascii_alphabetic) && b.get(2) == Some(&b':') { rest.get(1..).ok_or_else(|| bad("bad drive letter"))? } else { rest };
-    let mut out = Vec::with_capacity(rest.len());
-    let mut bytes = rest.bytes();
-    while let Some(c) = bytes.next() {
-        if c == b'%' {
-            let hex = [bytes.next(), bytes.next()];
-            let [Some(hi), Some(lo)] = hex else { return Err(bad("a % isn't followed by two hex digits")) };
-            let byte =
-                std::str::from_utf8(&[hi, lo]).ok().and_then(|h| u8::from_str_radix(h, 16).ok()).ok_or_else(|| bad("a % isn't followed by two hex digits"))?;
-            if matches!(byte, b'/' | b'\\') {
-                return Err(bad("a percent-encoded / or \\ isn't allowed"));
-            }
-            out.push(byte);
-        } else {
-            out.push(c);
-        }
-    }
-    let path = String::from_utf8(out).map_err(|_| bad("the path isn't UTF-8"))?;
-    if path.contains('\\') {
-        return Err(bad("use / between folders, not \\"));
-    }
-    if path.starts_with("//") {
-        return Err(bad("network paths can't be read, only local files"));
-    }
-    Ok(PathBuf::from(path))
+    // craft-plugin's reading of local catalogs: the same rules (and no control characters).
+    craft_plugin::catalog::file_url_path(url)
 }
 
 /// Check `url` against the rules: `https://` on GitHub's hosts; `file://` when the catalog
@@ -467,59 +432,88 @@ fn fetch(src: &Source, max: u64, tmp_dir: &Path) -> std::result::Result<Vec<u8>,
             std::fs::read(p).map_err(|e| format!("cannot read {}: {e}", p.display()))
         }
         Source::Https(url) => {
-            std::fs::create_dir_all(tmp_dir).map_err(|e| format!("cannot create {}: {e}", tmp_dir.display()))?;
-            // Unique per download: sessions in one process may download at the same time.
-            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-            let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let tmp = tmp_dir.join(format!(".download-{}-{n}.part", std::process::id()));
-            // `-q` first: no ~/.curlrc; `--globoff`: `[]` and `{}` in a URL are literal.
-            let out = std::process::Command::new("curl")
-                .args([
-                    "-q",
-                    "--globoff",
-                    "-fsSL",
-                    "--proto",
-                    "=https",
-                    "--proto-redir",
-                    "=https",
-                    "--max-redirs",
-                    "5",
-                    "-w",
-                    "%{url_effective}",
-                    "--retry",
-                    "2",
-                    "--connect-timeout",
-                    "20",
-                    "--max-time",
-                    "900",
-                ])
-                .args(["--max-filesize", &max.to_string(), "-o"])
-                .arg(&tmp)
-                .arg(url)
-                .output()
-                .map_err(|e| format!("downloading needs curl ({e})"))?;
-            // The size is checked before reading: `--max-filesize` can't stop a stream of unknown length.
-            let too_big = std::fs::metadata(&tmp).is_ok_and(|m| m.len() > max);
-            let bytes = if too_big {
-                Err(format!("the download is larger than {} MB", max >> 20))
-            } else if out.status.success() {
-                // Redirects are followed, so check where the download ended up.
-                let end = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                match source(&end, None) {
-                    Ok(Source::Https(_)) => std::fs::read(&tmp).map_err(|e| format!("cannot read the download: {e}")),
-                    _ => Err(format!("`{url}` redirected to `{end}`, which isn't on GitHub")),
-                }
-            } else {
-                Err(format!("download failed: {}", String::from_utf8_lossy(&out.stderr).trim()))
-            };
-            let _ = std::fs::remove_file(&tmp);
-            let bytes = bytes?;
+            let got = curl(url, max, tmp_dir)?;
+            if got.too_big {
+                return Err(format!("the download is larger than {} MB", max >> 20));
+            }
+            if !got.ok {
+                return Err(format!("download failed: {}", got.stderr));
+            }
+            // Redirects are followed, so check where the download ended up.
+            if !matches!(source(&got.end, None), Ok(Source::Https(_))) {
+                return Err(format!("`{url}` redirected to `{}`, which isn't on GitHub", got.end));
+            }
+            let bytes = got.body.unwrap_or_default();
             if bytes.len() as u64 > max {
                 return Err(format!("the download is larger than {} MB", max >> 20));
             }
             Ok(bytes)
         }
     }
+}
+
+/// What one `curl` download answered ([`curl`]).
+pub(crate) struct Curl {
+    /// curl succeeded (an HTTP error status is a failure, `-f`).
+    pub ok: bool,
+    /// The HTTP status of the last response (0 when there was none).
+    pub status: u16,
+    /// Where redirects ended.
+    pub end: String,
+    /// The body, when curl succeeded and it is within the limit.
+    pub body: Option<Vec<u8>>,
+    /// The body went over the limit.
+    pub too_big: bool,
+    /// curl's error message.
+    pub stderr: String,
+}
+
+/// GET `url` (`https://` only, also after redirects) with the system's `curl`, at most `max`
+/// bytes, through a temporary file in `tmp_dir`. The Plug-in Library and the shared plug-in
+/// store's downloads ([`crate::plugin`]) both use it, so no networking code is linked in.
+pub(crate) fn curl(url: &str, max: u64, tmp_dir: &Path) -> std::result::Result<Curl, String> {
+    std::fs::create_dir_all(tmp_dir).map_err(|e| format!("cannot create {}: {e}", tmp_dir.display()))?;
+    // Unique per download: sessions in one process may download at the same time.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = tmp_dir.join(format!(".download-{}-{n}.part", std::process::id()));
+    // `-q` first: no ~/.curlrc; `--globoff`: `[]` and `{}` in a URL are literal.
+    let out = std::process::Command::new("curl")
+        .args([
+            "-q",
+            "--globoff",
+            "-fsSL",
+            "--proto",
+            "=https",
+            "--proto-redir",
+            "=https",
+            "--max-redirs",
+            "5",
+            "-w",
+            "%{http_code} %{url_effective}",
+            "--retry",
+            "2",
+            "--connect-timeout",
+            "20",
+            "--max-time",
+            "900",
+        ])
+        .args(["--max-filesize", &max.to_string(), "-o"])
+        .arg(&tmp)
+        .arg(url)
+        .output()
+        .map_err(|e| format!("downloading needs curl ({e})"))?;
+    // The size is checked before reading: `--max-filesize` can't stop a stream of unknown length.
+    let too_big = std::fs::metadata(&tmp).is_ok_and(|m| m.len() > max);
+    let written = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let (status, end) = match written.split_once(' ') {
+        Some((code, end)) => (code.parse().unwrap_or(0), end.trim().to_string()),
+        None => (0, written),
+    };
+    let ok = out.status.success();
+    let body = if ok && !too_big { Some(std::fs::read(&tmp).map_err(|e| format!("cannot read the download: {e}"))) } else { None };
+    let _ = std::fs::remove_file(&tmp);
+    Ok(Curl { ok, status, end, body: body.transpose()?, too_big, stderr: String::from_utf8_lossy(&out.stderr).trim().to_string() })
 }
 
 // ---------------------------------------------------------------- installed packages

@@ -689,6 +689,14 @@ pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: V
                 }
                 return r;
             }
+            // A plug-in command with parameters asks for them first; an install shows what the
+            // plug-in may do before anything is written (`panels::plugins`).
+            if id == "plugin.run" && crate::panels::plugins::open_params(app, &params) {
+                return Ok(json!({"dialog": id}));
+            }
+            if id == "plugin.install" && params.get("review").is_none() && params.get("sha256").is_none() && !no_params(&params) {
+                return crate::panels::plugins::review(app, params);
+            }
             if let Some(r) = file_dialog(app, id, &params) {
                 return r;
             }

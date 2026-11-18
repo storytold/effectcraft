@@ -29,6 +29,10 @@ craft-mesh = { version = "0.1.0", git = "https://github.com/storytold/craft-libs
 craft-aep = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "5a7a63a21dd03dd1a2bc6c308a3a6ce818caae87" }
 craft-doc = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "5a7a63a21dd03dd1a2bc6c308a3a6ce818caae87" }
 craft-vectorcraft-format = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "5a7a63a21dd03dd1a2bc6c308a3a6ce818caae87" }
+# Shared plug-in runtime (RFC-0046): sandbox, manifest, permissions, bundles, the per-user store,
+# catalogs and installing from GitHub releases. Pinned to the reference fork until the upstream PR
+# lands; the upstream PR re-pins it.
+craft-plugin = { git = "https://github.com/Dasemu/craft-libs", rev = "93428fbe5d11b735365fa87068a9e1fc85fb3550" }
 # craft-update: app-specific pretend versions apply to startup and manual checks.
 craft-update = { git = "https://github.com/storytold/craft-libs", version = "=0.1.0", rev = "5a7a63a21dd03dd1a2bc6c308a3a6ce818caae87", features = ["egui"] }
 # internal
@@ -76,6 +80,8 @@ rayon = "1"
 web-time = "1"
 gif = "0.14"
 proptest = "1"
+# WebAssembly text for plug-in tests (the version wasmi's `wat` feature already pulls in).
+wat = "1"
 
 # scripting (expressions)
 boa_engine = { version = "0.22", default-features = false }

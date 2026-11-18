@@ -19,6 +19,7 @@ mod home;
 mod interchange;
 pub mod menus;
 mod output_guard;
+pub mod plugin;
 pub mod preview;
 pub mod render_queue;
 pub mod replay;
@@ -222,6 +223,9 @@ pub struct Session {
     pub plugins_dir: Option<std::path::PathBuf>,
     /// The Plug-in Library's catalog, worker status and the packages this session loaded.
     pub library: library::Library,
+    /// Plug-ins installed through the shared plug-in runtime (`plugin.*`, [`plugin`]): command
+    /// plug-ins and bundled effect plug-ins, their settings and catalogs.
+    pub plugins: plugin::Runtime,
     /// ScriptUI windows and panels opened by scripts (see [`scriptui`]).
     pub script_ui: scriptui::ScriptUi,
     /// The last physical-memory reading (Settings ▸ Memory & CPU budgets); `None` = unknown
@@ -378,6 +382,7 @@ impl Default for Session {
             plugin_previewer: None,
             plugins_dir: None,
             library: Default::default(),
+            plugins: Default::default(),
             script_ui: scriptui::ScriptUi::default(),
             sys_memory: None,
             key_move: None,

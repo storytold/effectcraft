@@ -75,6 +75,15 @@ const REFUSED: &[&str] = &[
     "library.uninstall",
     "library.loadInstalled",
     "library.preview",
+    // The shared plug-in store (`plugin.*`) installs code that loads at every start, reads bundles
+    // and `file://` catalogs from paths it isn't checked against, and a plug-in's run makes calls
+    // this check never sees.
+    "plugin.install",
+    "plugin.update",
+    "plugin.remove",
+    "plugin.run",
+    "plugin.catalog.add",
+    "plugin.catalog.list",
     // Watch Folder renders the projects it finds to the outputs they name and writes status
     // files into the watched folder: neither is a path the agent gives, so neither is checked.
     "file.watchFolder",

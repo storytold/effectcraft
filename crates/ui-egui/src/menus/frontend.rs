@@ -539,6 +539,10 @@ pub fn frontend(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, p: Valu
             app.show_panel(PanelKind::EffectsPresets);
             Value::Null
         }
+        "plugin.manage" => {
+            crate::panels::plugins::open(app);
+            Value::Null
+        }
         "anim.browsePresets" => {
             app.ui.effects_search.clear();
             app.ui.effects_view.presets = true;
@@ -659,6 +663,10 @@ pub(super) fn file_dialog(app: &mut EffectcraftApp, id: &str, params: &Value) ->
         "effect.plugins.install" if params.get("bundle").is_some() => ("folder", Ask::Folder),
         "effect.plugins.install" if params.get("folder").is_none() && params.get("path").is_none() => ("path", Ask::Open(&["wasm"])),
         "effect.helpers.load" => ("path", Ask::Folder),
+        // Effect ▸ Plug-ins ▸ Manage Plug-ins ▸ From File…: a bundle, then its confirmation.
+        "plugin.install" if params.get("data").is_none() && !effectcraft_engine::plugin::is_download(params) => {
+            ("path", Ask::Open(&[effectcraft_engine::plugin::craft_plugin::BUNDLE_EXTENSION]))
+        }
         "file.replaceFootage" => ("path", Ask::Import(&[])),
         "file.relinkFootage" => ("folder", Ask::Folder),
         "file.collectFiles" => ("folder", Ask::Save("Collected Files".into())),
@@ -829,6 +837,10 @@ fn run_with_picked(app: &mut EffectcraftApp, id: &str, key: &str, params: &Value
     }
     let mut p = params.as_object().cloned().unwrap_or_default();
     p.insert(key.to_string(), v);
+    // A picked plug-in bundle is installed only after its confirmation.
+    if id == "plugin.install" {
+        return crate::panels::plugins::review(app, Value::Object(p));
+    }
     // Picked files import in the background, with the Importing card showing progress (#270).
     if matches!(id, "file.import" | "file.importMultiple") {
         p.insert("background".into(), Value::Bool(true));

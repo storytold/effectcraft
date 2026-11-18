@@ -119,8 +119,9 @@ fn batch(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"steps": results.len(), "results": results}))
 }
 
-/// Fold the undo steps recorded since the project was `snap` into one step called `label`.
-fn fold(s: &mut Session, snap: &Arc<effectcraft_project::Project>, label: &str) {
+/// Fold the undo steps recorded since the project was `snap` into one step called `label` (a batch,
+/// a plug-in run: [`crate::plugin::run`]).
+pub(crate) fn fold(s: &mut Session, snap: &Arc<effectcraft_project::Project>, label: &str) {
     let h = &mut s.history;
     let Some(start) = h.undo.iter().rposition(|(_, p)| Arc::ptr_eq(p, snap)) else { return };
     let first = h.undo[start].1.clone();

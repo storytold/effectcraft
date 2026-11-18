@@ -20,6 +20,7 @@ impl Session {
             }
         }
         crate::commands::scripts::load_script_settings(self);
+        crate::plugin::load_settings(self);
         self.prefs_changed();
         self.shortcuts_changed();
     }

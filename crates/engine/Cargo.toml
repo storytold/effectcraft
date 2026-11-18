@@ -11,6 +11,7 @@ workspace = true
 
 [dependencies]
 craft-docpath = { workspace = true }
+craft-plugin = { workspace = true }
 effectcraft-time = { workspace = true }
 effectcraft-geom = { workspace = true }
 effectcraft-color = { workspace = true }
@@ -46,3 +47,7 @@ exr = { workspace = true }
 same-file = { workspace = true }
 tempfile = { workspace = true }
 effectcraft-sam2 = { workspace = true }
+
+[dev-dependencies]
+# Plug-in modules written as WebAssembly text in the plug-in tests.
+wat = { workspace = true }

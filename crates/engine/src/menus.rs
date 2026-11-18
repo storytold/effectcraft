@@ -157,6 +157,23 @@ pub fn dynamic(s: &Session, name: &str, cx: &DynCtx) -> (Vec<MenuEntry>, Option<
                 .collect(),
             None,
         ),
+        // Effect ▸ Plug-ins: each command of the installed command plug-ins (as read when the
+        // `plugin.*` commands last ran: menus don't touch the disk).
+        "plugins" => (
+            s.plugins
+                .list()
+                .iter()
+                .filter(|p| p.is_command())
+                .flat_map(|p| {
+                    let many = p.manifest.commands.len() > 1;
+                    p.manifest.commands.iter().map(move |c| {
+                        let label = if many { format!("{}: {}", p.manifest.name, c.label) } else { p.manifest.name.clone() };
+                        dyn_entry(label, "plugin.run", json!({"id": p.manifest.id, "command": c.id}))
+                    })
+                })
+                .collect(),
+            Some("No Plug-ins Installed"),
+        ),
         // File ▸ Scripts: installed and sample scripts; the Window menu's ScriptUI panels.
         "scripts" | "scriptPanels" => {
             let panels = name == "scriptPanels";
@@ -1040,6 +1057,10 @@ Effect
   Load Plug-ins Through Helper... | effect.helpers.load
   Scan for Effect Helpers | effect.helpers.scan
   Plug-in Library... | prefs.open {"page":"library"}
+  Plug-ins
+    @dynamic:plugins
+    ---
+    Manage Plug-ins... | plugin.manage
   ---
   @effects
 Animation
