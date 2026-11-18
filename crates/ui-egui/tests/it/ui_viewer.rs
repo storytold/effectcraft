@@ -3185,17 +3185,35 @@ fn rotate_tool_shows_rotation_cursor() {
     // Windows draws Alias as the plain arrow, so there the viewer paints the glyph and hides the OS cursor.
     let want = if cfg!(windows) { egui::CursorIcon::None } else { egui::CursorIcon::Alias };
     assert_eq!(h.output().platform_output.cursor_icon, want, "W shows a rotation cursor over the viewer (#3864)");
-    // The glyph is white strokes/fills inside the 16 x 16 box around the pointer; nothing else there is pure white.
-    fn white_near(s: &egui::Shape, box_: egui::Rect) -> bool {
-        let white = |c: egui::Color32| c == egui::Color32::WHITE;
-        match s {
-            egui::Shape::Vec(v) => v.iter().any(|s| white_near(s, box_)),
-            egui::Shape::Path(p) => ((p.stroke.color == egui::epaint::ColorMode::Solid(egui::Color32::WHITE)) || white(p.fill)) && box_.contains_rect(p.visual_bounding_rect()),
-            _ => false,
+    // The glyph is the Rotate icon's white strokes/fills, centred on the pointer. Paint the expected one the same
+    // way in a scratch context and compare the point lists, so a different tool's glyph (or any other white path) fails.
+    fn white_paths(shapes: &[egui::epaint::ClippedShape], only_in: Option<egui::Rect>) -> Vec<Vec<egui::Pos2>> {
+        fn walk(s: &egui::Shape, only_in: Option<egui::Rect>, out: &mut Vec<Vec<egui::Pos2>>) {
+            match s {
+                egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, only_in, out)),
+                egui::Shape::Path(p)
+                    if (p.stroke.color == egui::epaint::ColorMode::Solid(egui::Color32::WHITE) || p.fill == egui::Color32::WHITE)
+                        && only_in.is_none_or(|r| r.contains_rect(p.visual_bounding_rect())) =>
+                {
+                    out.push(p.points.clone())
+                }
+                _ => {}
+            }
         }
+        let mut out = Vec::new();
+        shapes.iter().for_each(|c| walk(&c.shape, only_in, &mut out));
+        out
     }
-    let box_ = egui::Rect::from_center_size(p, egui::vec2(16.0, 16.0)).expand(2.0);
-    let glyph = h.output().shapes.iter().any(|c| white_near(&c.shape, box_));
+    let glyph_rect = egui::Rect::from_center_size(p, egui::vec2(16.0, 16.0));
+    let mut scratch = egui::Context::default().run_ui(egui::RawInput::default(), |ui| {
+        let painter = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::NULL));
+        effectcraft_ui_egui::icons::paint(&painter, glyph_rect, effectcraft_ui_egui::icons::Icon::Rotate, egui::Color32::WHITE);
+    });
+    scratch.textures_delta.clear();
+    let expected = white_paths(&scratch.shapes, None);
+    assert!(!expected.is_empty(), "the Rotate glyph has white geometry to compare");
+    let found = white_paths(&h.output().shapes, Some(glyph_rect.expand(2.0)));
+    let glyph = expected.iter().all(|e| found.contains(e));
     assert_eq!(glyph, cfg!(windows), "the rotation glyph is painted at the pointer on Windows only");
 }
 
