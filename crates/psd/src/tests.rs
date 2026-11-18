@@ -3,6 +3,7 @@ use super::*;
 use crate::pixels::srgb_encode;
 
 mod fixed_adjustments;
+mod fixed_writers;
 mod integration;
 mod opt;
 mod section_divider;
