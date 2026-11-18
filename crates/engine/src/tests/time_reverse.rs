@@ -287,6 +287,59 @@ fn projects_saved_with_the_old_time_reverse_layout_open_in_after_effects_layout(
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A 25 fps comp with the sequence reversed as Time-Reverse Layer made it before #3245 (one comp
+/// frame early) and no layout marker, as an older EffectCraft saved it: (session, comp, layer,
+/// the start time After Effects' layout gives the layer).
+fn old_reversed_project() -> (Session, ItemId, u64, Tick) {
+    let (mut s, cid, l) = scene(25);
+    s.execute("layer.timeReverse", json!({"layers": [l]})).unwrap();
+    let new_start = layer(&s, cid, l).start_time;
+    let fd = FrameRate::new(25, 1).frame_duration();
+    Arc::make_mut(&mut s.project).comp_mut(cid).unwrap().layer_mut(LayerId(l)).unwrap().start_time -= fd;
+    Arc::make_mut(&mut s.project).settings.reverse_layout = 0;
+    (s, cid, l, new_start)
+}
+
+/// Checks that a project made from a template saved before the layout marker gets the old reversed layers in After Effects' layout, and that saving and reopening it keeps them there.
+#[test]
+fn a_project_made_from_an_old_template_keeps_its_reversed_layers_when_reopened() {
+    let (mut s, cid, l, new_start) = old_reversed_project();
+    s.config = Some(Arc::new(crate::config::MemoryConfig::default()));
+    // The legacy template: saved from the project as it is (no marker, the layer one frame early).
+    let id = s.execute("templates.saveAs", json!({"name": "Old Reverse", "embedFootage": false})).unwrap()["id"].as_str().unwrap().to_string();
+    let dir = std::env::temp_dir().join(format!("ec-time-reverse-template-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("from-template.ecproj").to_string_lossy().to_string();
+    s.execute("file.newProject", json!({})).unwrap();
+    s.execute("templates.create", json!({"id": id, "projectPath": path})).unwrap();
+    let cid = s.state.active_comp.unwrap_or(cid);
+    assert_eq!(layer(&s, cid, l).start_time, new_start, "the project made from the template is in After Effects' layout");
+    assert_eq!(s.project.settings.reverse_layout, effectcraft_project::REVERSE_LAYOUT_AE);
+    // Saved by templates.create (projectPath), the next ordinary open leaves the layer where it was.
+    let r = s.execute("file.open", json!({"path": path})).unwrap();
+    let cid = s.state.active_comp.unwrap_or(cid);
+    assert_eq!(layer(&s, cid, l).start_time, new_start, "reopening does not move the layer one frame");
+    assert_eq!(r["reversedLayers"], json!({"moved": [], "unchanged": []}));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Checks that File > New Project with an old project file as its template (Settings > Project > New Project Loads Template) opens the reversed layers in After Effects' layout.
+#[test]
+fn a_new_project_from_an_old_project_template_opens_in_after_effects_layout() {
+    let (mut s, cid, l, new_start) = old_reversed_project();
+    let dir = std::env::temp_dir().join(format!("ec-time-reverse-new-template-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let tpl = dir.join("template.ecproj").to_string_lossy().to_string();
+    s.execute("file.saveAs", json!({"path": tpl})).unwrap();
+    s.prefs.project.use_template = true;
+    s.prefs.project.template_path = tpl;
+    s.execute("file.newProject", json!({})).unwrap();
+    assert!(s.path.is_none(), "an untitled project");
+    assert_eq!(s.project.comp(cid).unwrap().layer(LayerId(l)).unwrap().start_time, new_start);
+    assert_eq!(s.project.settings.reverse_layout, effectcraft_project::REVERSE_LAYOUT_AE);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Checks that a file carrying the layout marker reopens without moving or reporting any reversed layer.
 #[test]
 fn a_project_saved_since_the_fix_reopens_with_its_reversed_layers_untouched() {

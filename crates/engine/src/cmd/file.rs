@@ -20,6 +20,9 @@ fn new_project(s: &mut Session, _: &Value) -> Result<Value> {
         let text = String::from_utf8(bytes).map_err(|_| EngineError::Other("the new project template is not a project file".into()))?;
         let mut proj = Project::from_json(&text)?;
         crate::doc_path::resolve_footage(&mut proj, Some(&tpl));
+        // As in `file.open`: layers reversed by Time-Reverse Layer before #3245 were one comp
+        // frame early; the untitled project is saved with the layout marker.
+        super::layer_time::repair_old_time_reverse(&mut proj);
         s.replace_project(proj, None);
         s.stored_paths.add(&s.project, Some(&tpl));
         s.update_sentinel();
