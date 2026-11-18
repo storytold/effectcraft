@@ -6,6 +6,7 @@ mod fixed_adjustments;
 mod integration;
 mod opt;
 mod shared_corpus;
+mod tysh_prefix;
 mod unicode_name;
 
 fn gradient(w: u32, h: u32) -> Vec<[f32; 4]> {
