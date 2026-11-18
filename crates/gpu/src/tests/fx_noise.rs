@@ -165,6 +165,14 @@ fn fractal_noise_huge_offset() {
 }
 
 #[test]
+fn wgsl_lattice_coordinate_bound_is_the_cpu_bound() {
+    let declared = include_str!("../shaders/kernels.wgsl")
+        .lines()
+        .find_map(|line| line.strip_prefix("const LATTICE_COORDINATE_MAX: f32 = ")?.strip_suffix(';')?.parse::<f32>().ok());
+    assert_eq!(declared, Some(effectcraft_effects::LATTICE_COORDINATE_MAX));
+}
+
+#[test]
 fn fractal_noise_other_modes() {
     effect_case("ec.noise.fractal", &[("noiseType", e(3)), ("fractalType", e(4)), ("blendingMode", e(3))]);
     effect_case(

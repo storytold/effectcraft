@@ -17,7 +17,7 @@ use effectcraft_keyframe::Value;
 use effectcraft_project::ParamUi;
 use rayon::prelude::*;
 
-use crate::generate::lattice;
+use crate::generate::{LatticePoint, lattice_coordinate};
 use crate::{Buf, EffectCtx, EffectSpec, ParamSpec, num, p, popup, slider};
 
 /// Fractal Type options (shared by both effects).
@@ -84,6 +84,10 @@ pub const OCTAVE_SCALE_MAX: f32 = 1e20;
 /// 6700 px (Scale 10000 %), it is still over 10^12 lattice cells, past where the lattice index
 /// saturates (2^31), so the output is the same.
 const OCTAVE_OFFSET_MAX: f32 = 1e36;
+
+pub fn noise_offset_px(px: f64) -> f32 {
+    px.clamp(-f64::from(OCTAVE_OFFSET_MAX), f64::from(OCTAVE_OFFSET_MAX)) as f32
+}
 
 /// The next octave's (frequency, depth) from this one's, for a Sub Scaling ratio `s`.
 #[inline]
@@ -180,13 +184,11 @@ fn bspline(t: f32) -> [f32; 3] {
 pub fn typed_noise(x: f32, y: f32, z: f32, seed: u32, noise_type: u32) -> f32 {
     // Soft Linear's taps are centred on the nearest lattice point, the others start at the cell's.
     let h = if noise_type == NOISE_SOFT_LINEAR { 0.5 } else { 0.0 };
-    let (x0, y0, z0) = ((x + h).floor(), (y + h).floor(), z.floor());
-    let (tx, ty, fz) = (x + h - x0, y + h - y0, z - z0);
-    let (ix, iy, iz) = (x0 as i32, y0 as i32, z0 as i32);
+    let p = LatticePoint::new(x + h, y + h, z);
+    let [tx, ty, fz] = p.frac;
     let l = |a: f32, b: f32, t: f32| a + (b - a) * t;
     let slice = |dz: i32| -> f32 {
-        // Coordinates past the i32 range saturate; the neighbours wrap, as on the GPU (#3486).
-        let c = |dx: i32, dy: i32| lattice(ix.wrapping_add(dx), iy.wrapping_add(dy), iz.wrapping_add(dz), seed);
+        let c = |dx: i32, dy: i32| p.value(dx, dy, dz, seed);
         match noise_type {
             0 => c(0, 0),
             1 => l(l(c(0, 0), c(1, 0), tx), l(c(0, 1), c(1, 1), tx), ty),
@@ -271,14 +273,14 @@ impl Fractal {
             invert: pr.b("invert"),
             rot: rot.sin_cos(),
             size: [(sw * NOISE_CELL * b.scale).max(1.0) as f32, (sh * NOISE_CELL * b.scale).max(1.0) as f32],
-            origin: [ox as f32, oy as f32],
+            origin: [noise_offset_px(ox), noise_offset_px(oy)],
             center: [cx as f32, cy as f32],
             perspective: pr.b("transform/perspectiveOffset"),
             octaves: pr.f("complexity").clamp(1.0, 20.0) as f32,
             influence: (pr.f("subSettings/subInfluence") as f32 / 100.0).clamp(0.0, 1.0),
             sub_scaling: sub_scaling_ratio(pr.f("subSettings/subScaling")) as f32,
             sub_rotation: (pr.f("subSettings/subRotation") as f32).to_radians(),
-            sub_offset: [(so[0] * b.scale) as f32, (so[1] * b.scale) as f32],
+            sub_offset: [noise_offset_px(so[0] * b.scale), noise_offset_px(so[1] * b.scale)],
             center_subscale: pr.b("subSettings/centerSubscale"),
             evolution: pr.f("evolution") as f32 / 360.0,
             cycle,
@@ -337,7 +339,7 @@ impl Fractal {
                 let (s, c) = (self.sub_rotation * of).sin_cos();
                 (u, v) = (u * c + v * s, -u * s + v * c);
             }
-            let (mut u, mut v) = (u * f, v * f);
+            let (mut u, mut v) = (lattice_coordinate(u * f), lattice_coordinate(v * f));
             let z = of * 7.31;
             let seed = self.seed.wrapping_add(o as u32);
             if (4..=6).contains(&self.kind) {

@@ -297,8 +297,40 @@ fn circle(ctx: &EffectCtx, mut b: Buf) -> Buf {
 
 // ---- value noise / fBm (our own lattice noise with quintic fade) ----
 
+pub const LATTICE_COORDINATE_MAX: f32 = 2_147_483_648.0;
+
 #[inline]
-pub(crate) fn lattice(ix: i32, iy: i32, iz: i32, seed: u32) -> f32 {
+pub(crate) fn lattice_coordinate(x: f32) -> f32 {
+    x.clamp(-LATTICE_COORDINATE_MAX, LATTICE_COORDINATE_MAX)
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct LatticePoint {
+    cell: [i32; 3],
+    pub frac: [f32; 3],
+}
+
+impl LatticePoint {
+    #[inline]
+    pub(crate) fn new(x: f32, y: f32, z: f32) -> LatticePoint {
+        let axis = |c: f32| {
+            let c = lattice_coordinate(c);
+            let c0 = c.floor();
+            (c0 as i32, c - c0)
+        };
+        let ((ix, fx), (iy, fy), (iz, fz)) = (axis(x), axis(y), axis(z));
+        LatticePoint { cell: [ix, iy, iz], frac: [fx, fy, fz] }
+    }
+
+    #[inline]
+    pub(crate) fn value(&self, dx: i32, dy: i32, dz: i32, seed: u32) -> f32 {
+        let [ix, iy, iz] = self.cell;
+        lattice(ix.wrapping_add(dx), iy.wrapping_add(dy), iz.wrapping_add(dz), seed)
+    }
+}
+
+#[inline]
+fn lattice(ix: i32, iy: i32, iz: i32, seed: u32) -> f32 {
     let mut h =
         (ix as u32).wrapping_mul(0x27d4_eb2d) ^ (iy as u32).wrapping_mul(0x1656_67b1) ^ (iz as u32).wrapping_mul(0x9e37_79b9) ^ seed.wrapping_mul(0x85eb_ca6b);
     h ^= h >> 15;
@@ -328,11 +360,11 @@ pub fn value_noise_linear_z(x: f32, y: f32, z: f32, seed: u32) -> f32 {
 }
 
 fn value_noise_z(x: f32, y: f32, z: f32, seed: u32, ease_z: bool) -> f32 {
-    let (x0, y0, z0) = (x.floor(), y.floor(), z.floor());
-    let (fx, fy, fz) = (fade(x - x0), fade(y - y0), if ease_z { fade(z - z0) } else { z - z0 });
-    let (ix, iy, iz) = (x0 as i32, y0 as i32, z0 as i32);
+    let p = LatticePoint::new(x, y, z);
+    let [tx, ty, tz] = p.frac;
+    let (fx, fy, fz) = (fade(tx), fade(ty), if ease_z { fade(tz) } else { tz });
     let l = |a: f32, b: f32, t: f32| a + (b - a) * t;
-    let c = |dx: i32, dy: i32, dz: i32| lattice(ix + dx, iy + dy, iz + dz, seed);
+    let c = |dx: i32, dy: i32, dz: i32| p.value(dx, dy, dz, seed);
     let a = l(l(c(0, 0, 0), c(1, 0, 0), fx), l(c(0, 1, 0), c(1, 1, 0), fx), fy);
     let b = l(l(c(0, 0, 1), c(1, 0, 1), fx), l(c(0, 1, 1), c(1, 1, 1), fx), fy);
     l(a, b, fz)

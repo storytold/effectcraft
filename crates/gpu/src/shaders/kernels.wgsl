@@ -536,6 +536,12 @@ fn lattice(ix: i32, iy: i32, iz: i32, seed: u32) -> f32 {
     return f32(h & 0xffffu) / 65535.0;
 }
 
+const LATTICE_COORDINATE_MAX: f32 = 2147483648.0;
+
+fn lattice_coordinate(x: f32) -> f32 {
+    return clamp(x, -LATTICE_COORDINATE_MAX, LATTICE_COORDINATE_MAX);
+}
+
 fn fade(t: f32) -> f32 {
     return t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
 }
@@ -550,7 +556,10 @@ fn value_noise_linear_z(x: f32, y: f32, z: f32, seed: u32) -> f32 {
     return value_noise_z(x, y, z, seed, false);
 }
 
-fn value_noise_z(x: f32, y: f32, z: f32, seed: u32, ease_z: bool) -> f32 {
+fn value_noise_z(x_in: f32, y_in: f32, z_in: f32, seed: u32, ease_z: bool) -> f32 {
+    let x = lattice_coordinate(x_in);
+    let y = lattice_coordinate(y_in);
+    let z = lattice_coordinate(z_in);
     let x0 = floor(x);
     let y0 = floor(y);
     let z0 = floor(z);
@@ -598,12 +607,15 @@ fn soft_linear_slice(ix: i32, iy: i32, iz: i32, wx: vec3<f32>, wy: vec3<f32>, se
     return sum;
 }
 
-fn soft_linear_noise(x: f32, y: f32, z: f32, seed: u32) -> f32 {
-    let x0 = floor(x + 0.5);
-    let y0 = floor(y + 0.5);
+fn soft_linear_noise(x_in: f32, y_in: f32, z_in: f32, seed: u32) -> f32 {
+    let x = lattice_coordinate(x_in + 0.5);
+    let y = lattice_coordinate(y_in + 0.5);
+    let z = lattice_coordinate(z_in);
+    let x0 = floor(x);
+    let y0 = floor(y);
     let z0 = floor(z);
-    let wx = bspline(x + 0.5 - x0);
-    let wy = bspline(y + 0.5 - y0);
+    let wx = bspline(x - x0);
+    let wy = bspline(y - y0);
     let a = soft_linear_slice(i32(x0), i32(y0), i32(z0), wx, wy, seed);
     let b = soft_linear_slice(i32(x0), i32(y0), i32(z0) + 1, wx, wy, seed);
     let n = a + (b - a) * (z - z0);
@@ -896,7 +908,7 @@ fn pointwise(@builtin(global_invocation_id) gid: vec3<u32>) {
                 if (o + 1u == n_oct && frac > 0.0) {
                     w = frac;
                 }
-                var n = soft_linear_noise(u * f, v * f, evo + f32(o) * 7.31, seed + o);
+                var n = soft_linear_noise(lattice_coordinate(u * f), lattice_coordinate(v * f), evo + f32(o) * 7.31, seed + o);
                 let s = n * 2.0 - 1.0;
                 if (kind == 1u) {
                     n = 1.0 - s * s;
