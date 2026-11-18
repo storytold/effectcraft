@@ -8,7 +8,7 @@ use effectcraft_project::{BitDepth, Comp, ItemKind, LayerSource};
 use effectcraft_render::RenderOpts;
 use effectcraft_time::{FrameRate, Tick};
 
-use crate::tests::{Scene, c, check, compare_at, effect_case, n, opts, set};
+use crate::tests::{Scene, c, check, compare_at, direct_renders, effect_case, n, opts, set};
 
 fn e(v: u32) -> Value {
     Value::Enum(v)
@@ -156,18 +156,14 @@ fn fractal_noise_sub_scaling_above_100() {
     }
 }
 
-fn assert_cpu_render_is_finite(id: &str, vals: &[(&str, Value)]) {
-    let Some(spec) = effectcraft_effects::find(id) else { panic!("no effect {id}") };
-    let size = [70.0, 44.0];
-    let mut params =
-        effectcraft_effects::Params { values: spec.params.iter().map(|ps| (ps.id.to_string(), effectcraft_effects::default_value(ps, size))).collect() };
-    for (k, v) in vals {
-        params.values.insert(k.to_string(), v.clone());
+fn assert_direct_renders_are_finite(id: &str, vals: &[(&str, Value)]) {
+    for adjustment in [false, true] {
+        for r in direct_renders(id, vals, adjustment) {
+            for (side, out) in [("CPU", &r.cpu), ("GPU", &r.gpu)] {
+                assert!(out.img.data.iter().flatten().all(|c| c.is_finite()), "{id} {vals:?} adj {adjustment} scale {}: non-finite {side} output", r.scale);
+            }
+        }
     }
-    let ctx = effectcraft_effects::EffectCtx { params: &params, time: 0.25, layer_size: size, seed: 11, adjustment: false, env: Default::default() };
-    let buf = effectcraft_effects::Buf { img: crate::tests::pattern(7, 70, 44), offset: [0.0, 0.0], scale: 1.0 };
-    let out = (spec.render)(&ctx, buf);
-    assert!(out.img.data.iter().flatten().all(|c| c.is_finite()), "{id} {vals:?}: non-finite CPU output");
 }
 
 #[test]
@@ -180,7 +176,7 @@ fn fractal_noise_huge_offset() {
             ("ec.noise.turbulent", [huge.as_slice(), &[("evolutionOptions/turbulenceFactor", n(10.0))]].concat()),
         ];
         for (id, vals) in cases {
-            assert_cpu_render_is_finite(id, &vals);
+            assert_direct_renders_are_finite(id, &vals);
             effect_case(id, &vals);
         }
     }
