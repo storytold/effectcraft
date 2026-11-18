@@ -547,6 +547,8 @@ fn dof_blur_radius_is_bounded_for_degenerate_inputs() {
         let img = scene(2.0 * zoom(), 100.0, aperture);
         assert!(finite(&img), "aperture {aperture:e}: non-finite pixels");
         assert!(img.get(100, 50)[3] < 0.5, "aperture {aperture:e}: the layer should be spread out, not sharp ({})", img.get(100, 50)[3]);
+        // Spread out, not gone: some of it lands outside the 60 px solid (x 70-130).
+        assert!(img.get(100, 50)[3] > 0.0 && img.get(40, 50)[3] > 0.0, "aperture {aperture:e}: the blur should still cover the frame");
     }
 }
 
