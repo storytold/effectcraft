@@ -90,7 +90,9 @@ fn unsampled_codes_stay_reported() {
 /// After Effects 26.5).
 #[test]
 fn code_3_is_dissolve_or_dancing_dissolve_by_the_flag() {
-    for (flag, want) in [(0u8, BlendMode::Dissolve), (2, BlendMode::DancingDissolve)] {
+    // Byte 103 holds flags: bit 0 is Preserve Transparency, bit 1 Dancing Dissolve (After Effects
+    // 2026 lab sample `pt_dissolve`: 2, 0, 3 and 1 for the four combinations).
+    for (flag, want) in [(0u8, BlendMode::Dissolve), (1, BlendMode::Dissolve), (2, BlendMode::DancingDissolve), (3, BlendMode::DancingDissolve)] {
         let mut b = match crate::common::try_fixture(F906) {
             Some(b) => b,
             None => return,
