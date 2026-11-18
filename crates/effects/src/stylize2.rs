@@ -813,6 +813,20 @@ mod tests {
     }
 
     #[test]
+    fn motion_tile_output_size_is_capped_on_a_layer() {
+        // Output 30 000 % (the most an After Effects project holds) on a 320x180 layer asked for
+        // a 96 000 x 54 000 image; each side stops at 16 384 pixels, cut about the centre.
+        let frame = |pct: f64| {
+            let params = Params { values: [("outputWidth", num(pct)), ("outputHeight", num(pct))].into_iter().map(|(k, v)| (k.to_string(), v)).collect() };
+            let ctx = EffectCtx { params: &params, time: 0.0, layer_size: [320.0, 180.0], seed: 1, adjustment: false, env: Default::default() };
+            crate::motion_tile_frame(&ctx, [0.0, 0.0], (320, 180), 1.0)
+        };
+        assert_eq!(frame(30000.0), (16384, 16384, [(16384.0 - 320.0) / 2.0, (16384.0 - 180.0) / 2.0]));
+        // Below the cap nothing changes.
+        assert_eq!(frame(200.0), (640, 360, [160.0, 90.0]));
+    }
+
+    #[test]
     fn motion_tile_mirror_folds_stay_opaque() {
         // A fold that lands exactly on a pixel centre samples the source's geometric edge, where
         // the plain bilinear tap reaches half a texel into the transparent outside — a faint

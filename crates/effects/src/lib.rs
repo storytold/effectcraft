@@ -418,7 +418,7 @@ pub fn quad_bounds(q: &[[f64; 2]; 4]) -> ([f64; 2], [f64; 2]) {
 /// centre, on adjustment layers too, where the rectangle is the comp's and starts at the comp
 /// origin in the buffer below (After Effects; a Transform after it brings the tiles into view,
 /// #1727). An adjustment at 100 % keeps the buffer it was given; one whose frame would pass
-/// 16 384 pixels a side does too.
+/// 16 384 pixels a side does too. On other layers each side stops at 16 384 pixels.
 pub fn motion_tile_frame(ctx: &EffectCtx, offset: [f64; 2], size: (u32, u32), scale: f64) -> (u32, u32, [f64; 2]) {
     let (lw, lh) = (ctx.layer_size[0], ctx.layer_size[1]);
     let (pw, ph) = (ctx.params.f("outputWidth"), ctx.params.f("outputHeight"));
@@ -427,6 +427,12 @@ pub fn motion_tile_frame(ctx: &EffectCtx, offset: [f64; 2], size: (u32, u32), sc
     let (nw, nh) = ((ow * scale).round().max(1.0), (oh * scale).round().max(1.0));
     let grow = [(ow - lw) * 0.5 * scale, (oh - lh) * 0.5 * scale];
     if !ctx.adjustment {
+        // Output Width / Height reach 30 000 % in projects After Effects saved: on a layer that
+        // would ask for an image of tens of gigabytes. Each side keeps at most
+        // [`MAX_GROWN_SIDE`] pixels, cut evenly about the centre.
+        let side = |n: f64, g: f64| if n.is_finite() && n <= MAX_GROWN_SIDE { (n, g) } else { (MAX_GROWN_SIDE, g - (n - MAX_GROWN_SIDE) * 0.5) };
+        let ((nw, gx), (nh, gy)) = (side(nw, grow[0]), side(nh, grow[1]));
+        let grow = [gx, gy].map(|g| if g.is_finite() { g } else { 0.0 });
         return (nw as u32, nh as u32, grow);
     }
     // The grown rectangle's top-left in the buffer below, on whole pixels so the result lines
