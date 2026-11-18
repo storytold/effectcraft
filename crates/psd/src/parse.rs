@@ -144,7 +144,13 @@ impl Psd {
         let mut r = Reader::new(b);
         match key {
             b"luni" => {
-                let name = descriptor::read_unicode(&mut r)?;
+                // Shared framing rejects truncated counts/payloads before allocation. Only
+                // the first record belongs to this block; UTF-16 repair and naming stay local.
+                let units = craft_psd::unicode_names::records(b).next().ok_or(Error::Truncated)?;
+                let mut name: String = char::decode_utf16(units.as_chunks::<2>().0.iter().map(|v| u16::from_be_bytes(*v)))
+                    .map(|v| v.unwrap_or(char::REPLACEMENT_CHARACTER))
+                    .collect();
+                name.truncate(name.trim_end_matches('\0').len());
                 if !name.is_empty() {
                     l.name = name;
                 }
@@ -193,11 +199,14 @@ impl Psd {
                 l.fill = d.color("Clr ");
             }
             b"nvrt" => l.adjustment = Some(Adjustment::Invert),
-            b"brit" => {
-                let brightness = r.i16()? as f64;
-                let contrast = r.i16()? as f64;
-                if l.adjustment.is_none() {
-                    l.adjustment = Some(Adjustment::BrightnessContrast { brightness, contrast, legacy: true });
+            b"brit" | b"hue2" | b"hue " | b"levl" | b"expA" => {
+                if let Some(adjustment) = craft_psd::adjust::Adjustment::from_block(key, b) {
+                    let adjustment = adjustment.map_err(|e| error(&e))?;
+                    // Photoshop can write brit beside CgEd: retain Effect's first-only
+                    // brit policy while other complete typed blocks replace prior values.
+                    if key != b"brit" || l.adjustment.is_none() {
+                        l.adjustment = Some(from_shared_adjustment(adjustment));
+                    }
                 }
             }
             b"CgEd" => {
@@ -208,32 +217,6 @@ impl Psd {
                     contrast: d.num("Cntr").unwrap_or(0.0),
                     legacy: d.bool("useLegacy").unwrap_or(false),
                 });
-            }
-            b"hue2" | b"hue " => {
-                let _ver = r.u16()?;
-                let colorize = r.u8()? != 0;
-                r.skip(1)?;
-                let ch = (r.i16()? as f64, r.i16()? as f64, r.i16()? as f64);
-                let m = (r.i16()? as f64, r.i16()? as f64, r.i16()? as f64);
-                let (hue, saturation, lightness) = if colorize { ch } else { m };
-                l.adjustment = Some(Adjustment::HueSaturation { hue, saturation, lightness, colorize });
-            }
-            b"levl" => {
-                let _ver = r.u16()?;
-                let (ib, iw, ob, ow, g) = (r.i16()?, r.i16()?, r.i16()?, r.i16()?, r.i16()?);
-                l.adjustment =
-                    Some(Adjustment::Levels { in_black: ib as f64, in_white: iw as f64, gamma: g as f64 / 100.0, out_black: ob as f64, out_white: ow as f64 });
-            }
-            b"expA" => {
-                let _ver = r.u16()?;
-                let mut finite = |default: f64| -> Result<f64> {
-                    let v = f64::from(r.f32()?);
-                    Ok(if v.is_finite() { v } else { default })
-                };
-                let exposure = finite(0.0)?;
-                let offset = finite(0.0)?;
-                let gamma = finite(1.0)?;
-                l.adjustment = Some(Adjustment::Exposure { exposure, offset, gamma });
             }
             b"curv" | b"blnc" | b"post" | b"thrs" | b"selc" | b"mixr" | b"phfl" | b"vibA" | b"blwh" | b"grdm" | b"clrL" if l.adjustment.is_none() => {
                 l.adjustment = Some(Adjustment::Other(String::from_utf8_lossy(key).into_owned()));
@@ -514,4 +497,17 @@ fn error(e: &craft_psd::PsdError) -> Error {
 /// A Pascal string's bytes in the system (Mac Roman) encoding; ASCII covers the common case.
 fn mac_roman_string(b: &[u8]) -> String {
     b.iter().map(|&b| if b < 0x80 { b as char } else { super::read::mac_roman(b) }).collect()
+}
+
+/// App representation only; binary field framing belongs to craft-psd.
+fn from_shared_adjustment(value: craft_psd::adjust::Adjustment) -> Adjustment {
+    use craft_psd::adjust::Adjustment as Shared;
+    match value {
+        Shared::Invert => Adjustment::Invert,
+        Shared::BrightnessContrast { brightness, contrast, legacy } => Adjustment::BrightnessContrast { brightness, contrast, legacy },
+        Shared::HueSaturation { hue, saturation, lightness, colorize } => Adjustment::HueSaturation { hue, saturation, lightness, colorize },
+        Shared::Levels { in_black, in_white, gamma, out_black, out_white } => Adjustment::Levels { in_black, in_white, gamma, out_black, out_white },
+        Shared::Exposure { exposure, offset, gamma } => Adjustment::Exposure { exposure, offset, gamma },
+        Shared::Other(key) => Adjustment::Other(String::from_utf8_lossy(&key).into_owned()),
+    }
 }
