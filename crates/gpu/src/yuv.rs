@@ -1,7 +1,8 @@
-//! Export frames converted on the device to the H.264 encoder's input (8-bit BT.709 limited
+//! Export frames converted on the device to the H.264 encoder's input (8-bit limited
 //! range 4:2:0, see `shaders/yuv.wgsl`): a 4K frame reads back 12 MB of planes instead of
 //! 133 MB of RGBA f32, and the CPU skips `to_rgba8_over` + `rgba_to_yuv420`.
 
+use effectcraft_raster::yuv::Matrix;
 use wgpu::util::DeviceExt;
 
 use crate::context::{Enc, GpuImage};
@@ -77,7 +78,7 @@ pub(crate) fn fits_limits(w: u32, h: u32, limits: &wgpu::Limits) -> bool {
 /// Record the conversion of `img` over `bg` into a new `MAP_READ` buffer of
 /// [`planes_len`] bytes and submit it. `None`: the size is not [`supported`], exceeds the
 /// device's buffer limits, or buffer allocation failed.
-pub(crate) fn record(e: &mut Enc, yp: &YuvPipe, img: &GpuImage, bg: [f32; 3]) -> Option<wgpu::Buffer> {
+pub(crate) fn record(e: &mut Enc, yp: &YuvPipe, img: &GpuImage, bg: [f32; 3], matrix: Matrix) -> Option<wgpu::Buffer> {
     let (w, h) = (img.width, img.height);
     let g = e.g;
     if !supported(w, h) || !fits_limits(w, h, &g.device.limits()) {
@@ -85,13 +86,16 @@ pub(crate) fn record(e: &mut Enc, yp: &YuvPipe, img: &GpuImage, bg: [f32; 3]) ->
     }
     let cw = w / 2;
     let size = planes_len(w, h);
-    let mut params = [0u8; 32];
+    let mut params = [0u8; 64];
     // w * h fits in u32: both are at most the texture limit (16384).
     for (i, v) in [w, h, cw, w * h / 4].into_iter().enumerate() {
         params[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());
     }
     for (i, v) in [bg[0], bg[1], bg[2], 1.0].into_iter().enumerate() {
         params[16 + i * 4..16 + i * 4 + 4].copy_from_slice(&v.to_le_bytes());
+    }
+    for (i, v) in matrix.coefficients().into_iter().enumerate() {
+        params[32 + i * 4..32 + i * 4 + 4].copy_from_slice(&v.to_le_bytes());
     }
     let (out, stg, ub) = match crate::context::init_resource(&g.device, "yuv420 buffers", || {
         let out = g.device.create_buffer(&wgpu::BufferDescriptor {
@@ -144,20 +148,20 @@ pub(crate) fn record(e: &mut Enc, yp: &YuvPipe, img: &GpuImage, bg: [f32; 3]) ->
 }
 
 /// Convert `img` over `bg` and read the planes back, waiting for the device.
-pub(crate) fn convert(e: &mut Enc, yp: &YuvPipe, img: &GpuImage, bg: [f32; 3]) -> Option<Vec<u8>> {
-    let stg = record(e, yp, img, bg)?;
+pub(crate) fn convert(e: &mut Enc, yp: &YuvPipe, img: &GpuImage, bg: [f32; 3], matrix: Matrix) -> Option<Vec<u8>> {
+    let stg = record(e, yp, img, bg, matrix)?;
     let n = planes_len(img.width, img.height) as usize;
     e.g.read_buffer_after(&stg, e.last_submission(), n, n, 1).map_err(|err| log::error!(target: "effectcraft_gpu", "yuv420 readback: {err}")).ok()
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use effectcraft_raster::Image;
+    use effectcraft_raster::{Image, yuv::Matrix};
 
     /// The export's conversion (`to_rgba8_over` + `rgba_to_yuv420`), the reference the kernel
     /// is held to.
-    pub(crate) fn cpu(img: &Image, bg: [f32; 3]) -> Vec<u8> {
-        effectcraft_raster::yuv::yuv420_over(img, bg)
+    pub(crate) fn cpu(img: &Image, bg: [f32; 3], matrix: Matrix) -> Vec<u8> {
+        effectcraft_raster::yuv::yuv420_over(img, bg, matrix)
     }
 
     /// Premultiplied noise with some out-of-range values, opaque pixels, exact 8-bit levels and
@@ -193,8 +197,8 @@ pub(crate) mod tests {
     /// exactly. A hardware driver may contract multiply-adds or divide less exactly, which
     /// moves a value near a rounding boundary by one level (seen on an RTX 3090 under Vulkan):
     /// there every byte must be within one level and at most `budget` of them off (about 2–3×
-    /// the rate measured on the 3090). A wrong formula, rounding mode or NaN rule fails either
-    /// way on software adapters.
+    /// the rate measured for each matrix on hardware). A wrong formula, rounding mode or NaN
+    /// rule fails either way on software adapters.
     pub(crate) fn assert_parity(g: &crate::Gpu, got: &[u8], want: &[u8], budget: f64, what: &str) {
         assert_eq!(got.len(), want.len(), "{what}: length");
         let diff: Vec<usize> = (0..got.len()).filter(|&i| got[i] != want[i]).collect();
@@ -208,16 +212,25 @@ pub(crate) mod tests {
         assert!(diff.len() as f64 <= budget * got.len() as f64, "{what}: {} of {} bytes off by one", diff.len(), got.len());
     }
 
-    #[test]
-    fn yuv420_matches_cpu() {
+    fn matrix_matches_cpu(matrix: Matrix, budget: f64) {
         let Some(g) = crate::tests::gpu() else { return };
         let yp = super::YuvPipe::new(&g.ctx.device).expect("yuv420 pipe");
         for (w, h, bg) in [(264u32, 150u32, [0.05, 0.1, 0.2]), (8, 2, [1.0, 1.0, 1.0]), (1928, 6, [0.0, 0.0, 0.0])] {
             let img = noise(w, h, w ^ (h << 16));
             let src = g.ctx.upload_image(&img).expect("upload");
-            let got = super::convert(&mut crate::context::Enc::new(&g.ctx), &yp, &src, bg).expect("readback");
-            assert_parity(g, &got, &cpu(&img, bg), 0.00005, &format!("noise {w}x{h}"));
+            let got = super::convert(&mut crate::context::Enc::new(&g.ctx), &yp, &src, bg, matrix).expect("readback");
+            assert_parity(g, &got, &cpu(&img, bg, matrix), budget, &format!("noise {matrix:?} {w}x{h}"));
         }
+    }
+
+    #[test]
+    fn yuv420_matches_cpu() {
+        matrix_matches_cpu(Matrix::Bt709, 0.00005);
+    }
+
+    #[test]
+    fn bt2020_yuv420_matches_cpu() {
+        matrix_matches_cpu(Matrix::Bt2020Ncl, 0.00015);
     }
 
     #[test]
@@ -249,7 +262,7 @@ pub(crate) mod tests {
         let g = crate::Gpu::new(&adapter, device, queue).expect("limited Gpu");
         let yp = super::YuvPipe::new(&g.ctx.device).expect("yuv420 pipe");
         let src = g.ctx.upload_image(&noise(64, 64, 1)).expect("upload");
-        assert!(super::convert(&mut crate::context::Enc::new(&g.ctx), &yp, &src, [0.0; 3]).is_none());
+        assert!(super::convert(&mut crate::context::Enc::new(&g.ctx), &yp, &src, [0.0; 3], Matrix::Bt709).is_none());
         assert!(g.ctx.check_health().is_ok());
     }
 
@@ -258,7 +271,7 @@ pub(crate) mod tests {
         let Some(g) = crate::tests::gpu() else { return };
         let yp = super::YuvPipe::new(&g.ctx.device).expect("yuv420 pipe");
         let src = g.ctx.upload_image(&noise(12, 4, 3)).expect("upload");
-        assert!(super::convert(&mut crate::context::Enc::new(&g.ctx), &yp, &src, [0.0; 3]).is_none());
+        assert!(super::convert(&mut crate::context::Enc::new(&g.ctx), &yp, &src, [0.0; 3], Matrix::Bt709).is_none());
     }
 }
 
@@ -266,6 +279,7 @@ pub(crate) mod tests {
 mod accel_tests {
     use effectcraft_color::Label;
     use effectcraft_project::{BitDepth, Comp, ItemKind};
+    use effectcraft_raster::yuv::Matrix;
     use effectcraft_render::{Accelerator, Backend, RenderOpts, Renderer};
     use effectcraft_time::{FrameRate, Tick};
 
@@ -293,8 +307,10 @@ mod accel_tests {
         r.accel = Some(g);
         let bg = [0.2, 0.3, 0.4];
         let rgba = g.comp_frame(&r, s.cid, Tick::ZERO).expect("rgba frame");
-        let yuv = g.comp_frame_yuv420(&r, s.cid, Tick::ZERO, bg).expect("yuv frame");
-        super::tests::assert_parity(g, &yuv, &super::tests::cpu(&rgba, bg), 0.006, "comp frame");
+        for matrix in [Matrix::Bt709, Matrix::Bt2020Ncl] {
+            let yuv = g.comp_frame_yuv420(&r, s.cid, Tick::ZERO, bg, matrix).expect("yuv frame");
+            super::tests::assert_parity(g, &yuv, &super::tests::cpu(&rgba, bg, matrix), 0.006, &format!("comp frame {matrix:?}"));
+        }
     }
 
     #[test]
@@ -304,7 +320,7 @@ mod accel_tests {
         let mut r = Renderer::new(&s.p, &Pattern, RenderOpts { backend: Backend::Gpu, ..opts() });
         r.accel = Some(g);
         assert!(g.comp_frame(&r, s.cid, Tick::ZERO).is_some());
-        assert!(g.comp_frame_yuv420(&r, s.cid, Tick::ZERO, [0.0; 3]).is_none());
+        assert!(g.comp_frame_yuv420(&r, s.cid, Tick::ZERO, [0.0; 3], Matrix::Bt709).is_none());
     }
 
     #[test]
@@ -315,17 +331,18 @@ mod accel_tests {
         let s = scene(96, 60);
         let mut r = Renderer::new(&s.p, &Pattern, RenderOpts { backend: Backend::Gpu, ..opts() });
         r.accel = Some(&g);
-        assert!(g.comp_frame_yuv420(&r, s.cid, Tick::ZERO, [0.0; 3]).is_none());
+        assert!(g.comp_frame_yuv420(&r, s.cid, Tick::ZERO, [0.0; 3], Matrix::Bt709).is_none());
     }
 }
 
 #[cfg(test)]
 mod tie_tests {
-    use effectcraft_raster::Image;
+    use effectcraft_raster::{Image, yuv::Matrix};
 
-    fn lum(r: u8, g: u8, b: u8) -> f32 {
+    fn lum(r: u8, g: u8, b: u8, matrix: Matrix) -> f32 {
         let (r, g, b) = (r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0);
-        0.2126 * r + 0.7152 * g + 0.0722 * b
+        let [kr, kg, kb, _, _] = matrix.coefficients();
+        kr * r + kg * g + kb * b
     }
 
     fn px(p: [u8; 3]) -> [f32; 4] {
@@ -334,13 +351,13 @@ mod tie_tests {
 
     /// Opaque pixels whose Y (or whose 2×2 block's U or V) lands exactly on .5 in the CPU's f32
     /// math: a kernel that rounds ties the other way moves most of them.
-    #[test]
-    fn rounding_ties_match_cpu() {
+    fn rounding_ties(matrix: Matrix, y_budget: f64) {
+        let [_, _, _, cb_div, cr_div] = matrix.coefficients();
         let mut ties: Vec<[u8; 3]> = vec![];
         for r in 0..=255u8 {
             for g in 0..=255u8 {
                 for b in 0..=255u8 {
-                    let x = 16.0 + 219.0 * lum(r, g, b);
+                    let x = 16.0 + 219.0 * lum(r, g, b, matrix);
                     if x - x.floor() == 0.5 {
                         ties.push([r, g, b]);
                     }
@@ -361,9 +378,9 @@ mod tie_tests {
             let blk = [[rnd(), rnd(), rnd()], [rnd(), rnd(), rnd()], [rnd(), rnd(), rnd()], [rnd(), rnd(), rnd()]];
             let (mut a0, mut a1) = (0f32, 0f32);
             for p in blk {
-                let l = lum(p[0], p[1], p[2]);
-                a0 += (p[2] as f32 / 255.0 - l) / 1.8556;
-                a1 += (p[0] as f32 / 255.0 - l) / 1.5748;
+                let l = lum(p[0], p[1], p[2], matrix);
+                a0 += (p[2] as f32 / 255.0 - l) / cb_div;
+                a1 += (p[0] as f32 / 255.0 - l) / cr_div;
             }
             let u = 128.0 + 224.0 * a0 / 4.0;
             let v = 128.0 + 224.0 * a1 / 4.0;
@@ -371,7 +388,7 @@ mod tie_tests {
                 blocks.push(blk);
             }
         }
-        eprintln!("Y tie pixels: {}, chroma tie blocks: {}", ties.len(), blocks.len());
+        eprintln!("{matrix:?}: Y tie pixels: {}, chroma tie blocks: {}", ties.len(), blocks.len());
         assert!(!blocks.is_empty());
         let Some(g) = crate::tests::gpu() else { return };
         let yp = super::YuvPipe::new(&g.ctx.device).expect("yuv420 pipe");
@@ -382,8 +399,8 @@ mod tie_tests {
             *p = px(ties[i % ties.len()]);
         }
         let src = g.ctx.upload_image(&img).expect("upload");
-        let got = super::convert(&mut crate::context::Enc::new(&g.ctx), &yp, &src, [0.0; 3]).expect("readback");
-        super::tests::assert_parity(g, &got, &super::tests::cpu(&img, [0.0; 3]), 0.02, "Y ties");
+        let got = super::convert(&mut crate::context::Enc::new(&g.ctx), &yp, &src, [0.0; 3], matrix).expect("readback");
+        super::tests::assert_parity(g, &got, &super::tests::cpu(&img, [0.0; 3], matrix), y_budget, &format!("Y ties {matrix:?}"));
         let cw = 512usize;
         let rows = blocks.len().div_ceil(cw);
         let mut img = Image::new((cw * 2) as u32, (rows * 2) as u32);
@@ -397,7 +414,17 @@ mod tie_tests {
             }
         }
         let src = g.ctx.upload_image(&img).expect("upload");
-        let got = super::convert(&mut crate::context::Enc::new(&g.ctx), &yp, &src, [0.0; 3]).expect("readback");
-        super::tests::assert_parity(g, &got, &super::tests::cpu(&img, [0.0; 3]), 0.06, "chroma ties");
+        let got = super::convert(&mut crate::context::Enc::new(&g.ctx), &yp, &src, [0.0; 3], matrix).expect("readback");
+        super::tests::assert_parity(g, &got, &super::tests::cpu(&img, [0.0; 3], matrix), 0.06, &format!("chroma ties {matrix:?}"));
+    }
+
+    #[test]
+    fn rounding_ties_match_cpu() {
+        rounding_ties(Matrix::Bt709, 0.02);
+    }
+
+    #[test]
+    fn bt2020_rounding_ties_match_cpu() {
+        rounding_ties(Matrix::Bt2020Ncl, 0.05);
     }
 }

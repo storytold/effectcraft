@@ -7,6 +7,7 @@ use std::io::Write;
 use craft_media::isobmff::{Brand, ColorInfo, FourCc, Mp4Writer, PcmConfig, SampleEntry, TrackConfig, WriteSample, WriterOptions};
 use effectcraft_project::render_queue::{AudioFormat, Channels, OutputFormat, ProResProfile};
 use effectcraft_project::{Comp, ProjectSettings};
+use effectcraft_raster::yuv::Matrix;
 use effectcraft_time::{FrameRate, Tick};
 use rayon::prelude::*;
 
@@ -20,16 +21,18 @@ fn mux_err(e: impl std::fmt::Display) -> ExportError {
 }
 
 /// What a render's frames are, as ITU-T H.273 code points, for the `colr` box and the encoders'
-/// own colour description. The matrix is BT.709, the one every encoder here converts with
-/// (`rgba_to_yuv420`, `rgba_to_yuv_10` and `rgba_to_yuv420_bits` all use the 0.2126/0.7152/0.0722
-/// luma). Primaries and transfer follow the render path (`Pipe::output`): only a working space
-/// converts to the output space, so unmanaged frames pass through. sRGB output keeps transfer 1
-/// rather than 13 (#340), and an alpha matte is not in the output space.
+/// own colour description. The matrix is the one the frames are converted with: `rgba_to_yuv420`,
+/// `rgba_to_yuv_10`, `rgba_to_yuv420_bits` and the accelerator all take it from here, so the tag
+/// and the pixels cannot disagree. It is BT.2020 non-constant luminance for Rec. 2100 PQ and HLG,
+/// what readers of those expect (#2525), and BT.709 for everything else. Primaries and transfer
+/// follow the render path (`Pipe::output`): only a working space converts to the output space, so
+/// unmanaged frames pass through. sRGB output keeps transfer 1 rather than 13 (#340), and an alpha
+/// matte is not in the output space.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Codes {
     pub(crate) primaries: u8,
     pub(crate) transfer: u8,
-    pub(crate) matrix: u8,
+    pub(crate) matrix: Matrix,
 }
 
 pub(crate) fn output_codes(settings: &ProjectSettings, channels: Channels) -> Codes {
@@ -44,7 +47,11 @@ pub(crate) fn output_codes(settings: &ProjectSettings, channels: Channels) -> Co
         // H.273 has no code for the ACES primaries: unspecified, in linear light.
         Some(Space::AcesCg | Space::Aces2065) => (2, 8),
     };
-    Codes { primaries, transfer, matrix: 1 }
+    let matrix = match output {
+        Some(Space::Rec2100Pq | Space::Rec2100Hlg) => Matrix::Bt2020Ncl,
+        _ => Matrix::Bt709,
+    };
+    Codes { primaries, transfer, matrix }
 }
 
 /// Tag a video [`SampleEntry`] with the limited-range (16–235 luma, as every encoder here
@@ -53,7 +60,7 @@ pub(crate) fn output_codes(settings: &ProjectSettings, channels: Channels) -> Co
 /// colours (pure red came back as [232,0,1]).
 pub(crate) fn tag_nclx_limited(entry: &mut SampleEntry, c: Codes) {
     if let Some(v) = entry.video.as_mut() {
-        v.color = Some(ColorInfo::Nclx { primaries: c.primaries.into(), transfer: c.transfer.into(), matrix: c.matrix.into(), full_range: false });
+        v.color = Some(ColorInfo::Nclx { primaries: c.primaries.into(), transfer: c.transfer.into(), matrix: c.matrix.code().into(), full_range: false });
     }
 }
 
@@ -71,7 +78,7 @@ pub(crate) enum Pixels {
     Yuv420(Yuv420),
 }
 
-/// BT.709 limited-range 8-bit 4:2:0 planes ([`rgba_to_yuv420`], or Y then U and V from the
+/// Limited-range 8-bit 4:2:0 planes ([`rgba_to_yuv420`], or Y then U and V from the
 /// accelerator).
 pub(crate) enum Yuv420 {
     Planes { y: Vec<u8>, u: Vec<u8>, v: Vec<u8> },
@@ -79,9 +86,9 @@ pub(crate) enum Yuv420 {
 }
 
 impl Yuv420 {
-    fn from_rgba(rgba: &[u8], w: usize, h: usize) -> Yuv420 {
+    fn from_rgba(rgba: &[u8], w: usize, h: usize, matrix: Matrix) -> Yuv420 {
         let (mut y, mut u, mut v) = (vec![], vec![], vec![]);
-        rgba_to_yuv420(rgba, w, h, &mut y, &mut u, &mut v);
+        rgba_to_yuv420(rgba, w, h, matrix, &mut y, &mut u, &mut v);
         Yuv420::Planes { y, u, v }
     }
     fn slices(&self, w: usize, h: usize) -> (&[u8], &[u8], &[u8]) {
@@ -135,7 +142,7 @@ impl H264 {
         cfg.keyint = (rate.as_f64() * 2.0).round().max(1.0) as u32;
         let kbps = kbps.max(100);
         cfg.rate = craft_video::h264::RateControl::Vbr { target_kbps: kbps, max_kbps: kbps * 3 / 2 };
-        cfg.color = craft_video::h264::ColorConfig { primaries: codes.primaries, transfer: codes.transfer, matrix: codes.matrix, full_range: false };
+        cfg.color = craft_video::h264::ColorConfig { primaries: codes.primaries, transfer: codes.transfer, matrix: codes.matrix.code(), full_range: false };
         let enc = craft_video::h264::Encoder::new(cfg).map_err(enc)?;
         Ok(H264 { enc, w, h, rate, codes, y: vec![], u: vec![], v: vec![] })
     }
@@ -156,7 +163,7 @@ impl VideoEncoder for H264 {
     }
     fn encode(&mut self, rgba: &[u8], index: u64) -> Result<Vec<Packet>> {
         let (mut y, mut u, mut v) = (std::mem::take(&mut self.y), std::mem::take(&mut self.u), std::mem::take(&mut self.v));
-        rgba_to_yuv420(rgba, self.w as usize, self.h as usize, &mut y, &mut u, &mut v);
+        rgba_to_yuv420(rgba, self.w as usize, self.h as usize, self.codes.matrix, &mut y, &mut u, &mut v);
         let planes = Yuv420::Planes { y, u, v };
         let r = self.encode_yuv420(&planes, index);
         if let Yuv420::Planes { y, u, v } = planes {
@@ -193,13 +200,13 @@ struct ProRes {
     w: u32,
     h: u32,
     alpha: bool,
-    colr: ColorInfo,
+    codes: Codes,
 }
 
 /// The `colr` atom of a ProRes render ([`output_codes`]). MOV uses QuickTime's `nclc`, which has
 /// no range flag; ProRes frames are limited range.
 fn prores_colr(c: Codes) -> ColorInfo {
-    ColorInfo::Nclc { primaries: c.primaries.into(), transfer: c.transfer.into(), matrix: c.matrix.into() }
+    ColorInfo::Nclc { primaries: c.primaries.into(), transfer: c.transfer.into(), matrix: c.matrix.code().into() }
 }
 
 fn prores_profile(p: ProResProfile) -> craft_video::prores::Profile {
@@ -215,7 +222,7 @@ fn prores_profile(p: ProResProfile) -> craft_video::prores::Profile {
 }
 
 impl ProRes {
-    fn new(w: u32, h: u32, profile: ProResProfile, channels: Channels, colr: ColorInfo) -> ProRes {
+    fn new(w: u32, h: u32, profile: ProResProfile, channels: Channels, codes: Codes) -> ProRes {
         // Alpha needs a 4444 flavour.
         let profile = if channels == Channels::Rgba && !profile.is_4444() { ProResProfile::P4444 } else { profile };
         let profile = prores_profile(profile);
@@ -224,11 +231,8 @@ impl ProRes {
         cfg.encode_alpha = alpha;
         // The frame header carries the same H.273 codes as the `colr` atom, so readers that trust
         // either one agree.
-        if let ColorInfo::Nclc { primaries, transfer, matrix } = colr {
-            let code = |c| u8::try_from(c).unwrap_or(2);
-            cfg.color = craft_video::prores::ColorInfo { primaries: code(primaries), transfer: code(transfer), matrix: code(matrix) };
-        }
-        ProRes { enc: craft_video::prores::Encoder::with_config(cfg), profile, w, h, alpha, colr }
+        cfg.color = craft_video::prores::ColorInfo { primaries: codes.primaries, transfer: codes.transfer, matrix: codes.matrix.code() };
+        ProRes { enc: craft_video::prores::Encoder::with_config(cfg), profile, w, h, alpha, codes }
     }
     fn is_444(&self) -> bool {
         matches!(self.profile, craft_video::prores::Profile::P4444 | craft_video::prores::Profile::P4444Xq)
@@ -239,14 +243,14 @@ impl VideoEncoder for ProRes {
     fn sample_entry(&self) -> SampleEntry {
         let mut entry = SampleEntry::prores(FourCc(self.profile.fourcc()), self.w as u16, self.h as u16);
         if let Some(v) = entry.video.as_mut() {
-            v.color = Some(self.colr.clone());
+            v.color = Some(prores_colr(self.codes));
         }
         entry
     }
     fn encode(&mut self, rgba: &[u8], _index: u64) -> Result<Vec<Packet>> {
         let chroma = if self.is_444() { craft_video::prores::ChromaFormat::Yuv444 } else { craft_video::prores::ChromaFormat::Yuv422 };
         let mut fr = craft_video::prores::Frame::new(self.w, self.h, chroma, 10, self.alpha).map_err(enc)?;
-        rgba_to_yuv_10(rgba, self.w as usize, self.h as usize, self.is_444(), &mut fr.y, &mut fr.cb, &mut fr.cr);
+        rgba_to_yuv_10(rgba, (self.w as usize, self.h as usize), self.is_444(), self.codes.matrix, &mut fr.y, &mut fr.cb, &mut fr.cr);
         if let Some(a) = fr.alpha.as_mut() {
             for (d, s) in a.iter_mut().zip(rgba.as_chunks::<4>().0.iter()) {
                 *d = ((s[3] as u32 * 1023 + 127) / 255) as u16;
@@ -260,8 +264,9 @@ impl VideoEncoder for ProRes {
     }
 }
 
-/// BT.709 limited-range 10-bit 4:2:2 (horizontal chroma average) or 4:4:4 from RGBA8.
-fn rgba_to_yuv_10(rgba: &[u8], w: usize, h: usize, full_chroma: bool, y: &mut [u16], cb: &mut [u16], cr: &mut [u16]) {
+/// Limited-range 10-bit 4:2:2 (horizontal chroma average) or 4:4:4 from RGBA8.
+fn rgba_to_yuv_10(rgba: &[u8], (w, h): (usize, usize), full_chroma: bool, matrix: Matrix, y: &mut [u16], cb: &mut [u16], cr: &mut [u16]) {
+    let [kr, kg, kb, cb_div, cr_div] = matrix.coefficients();
     let cw = if full_chroma { w } else { w.div_ceil(2) };
     debug_assert!(y.len() >= w * h && rgba.len() >= w * h * 4);
     y.par_chunks_mut(w).zip(cb.par_chunks_mut(cw).zip(cr.par_chunks_mut(cw))).enumerate().for_each(|(row, (yr, (cbr, crr)))| {
@@ -270,10 +275,10 @@ fn rgba_to_yuv_10(rgba: &[u8], w: usize, h: usize, full_chroma: bool, y: &mut [u
         let mut vs = vec![0f32; w];
         for x in 0..w {
             let (r, g, b) = (src[x * 4] as f32 / 255.0, src[x * 4 + 1] as f32 / 255.0, src[x * 4 + 2] as f32 / 255.0);
-            let l = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+            let l = kr * r + kg * g + kb * b;
             yr[x] = (64.0 + 876.0 * l).round().clamp(4.0, 1019.0) as u16;
-            us[x] = (b - l) / 1.8556;
-            vs[x] = (r - l) / 1.5748;
+            us[x] = (b - l) / cb_div;
+            vs[x] = (r - l) / cr_div;
         }
         for cx in 0..cw {
             let (u, v) = if full_chroma {
@@ -348,21 +353,25 @@ pub(crate) async fn movie(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut St
         OutputFormat::Hevc => Box::new(crate::hevc_av1::Hevc::new(w, h, rate, job.output, codes)?),
         OutputFormat::Av1 => Box::new(crate::hevc_av1::Av1::new(w, h, rate, job.output, codes)?),
         OutputFormat::Uncompressed => Box::new(crate::uncompressed::Raw::new(w, h, channels == Channels::Rgba)?),
-        _ => Box::new(ProRes::new(w, h, job.output.prores_profile, if channels == Channels::Alpha { Channels::Rgb } else { channels }, prores_colr(codes))),
+        _ => Box::new(ProRes::new(w, h, job.output.prores_profile, if channels == Channels::Alpha { Channels::Rgb } else { channels }, codes)),
     };
     let brand = if matches!(fmt, OutputFormat::ProRes | OutputFormat::Uncompressed) { Brand::Mov } else { Brand::Mp4 };
     let batch = batch_size();
     let yuv = venc.takes_yuv420();
     let render = |_: u64, img: effectcraft_raster::Image| -> Pixels {
         let px = job.pixels(&img, comp, channels, w, h);
-        if yuv { Pixels::Yuv420(Yuv420::from_rgba(&px, w as usize, h as usize)) } else { Pixels::Rgba(px) }
+        if yuv { Pixels::Yuv420(Yuv420::from_rgba(&px, w as usize, h as usize, codes.matrix)) } else { Pixels::Rgba(px) }
     };
     // H.264 frames the accelerator can convert itself come back as planes (12 MB instead of
     // 133 MB of RGBA f32 read back at 4K); everything else renders and converts as before.
     // Deferred readbacks (a browser worker) keep their pass-based path: no blocking there.
     let gpu_yuv = yuv && channels == Channels::Rgb && !job.deferred();
     let batch_frames = async |ks: Vec<u64>| -> Vec<Pixels> {
-        if gpu_yuv { job.h264_frames(comp, ks, w, h, |p| Pixels::Yuv420(Yuv420::Packed(p)), render) } else { job.frames(comp, ks, render).await }
+        if gpu_yuv {
+            job.h264_frames(comp, ks, (w, h), codes.matrix, |p| Pixels::Yuv420(Yuv420::Packed(p)), render)
+        } else {
+            job.frames(comp, ks, render).await
+        }
     };
     let encode = |venc: &mut Box<dyn VideoEncoder>, px: &Pixels, index: u64| match px {
         Pixels::Rgba(rgba) => venc.encode(rgba, index),
@@ -506,7 +515,8 @@ mod tests {
     use super::*;
 
     /// The conversion as first written (per-pixel division and `f32::round`).
-    fn yuv420_reference(rgba: &[u8], w: usize, h: usize) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+    fn yuv420_reference(rgba: &[u8], w: usize, h: usize, matrix: Matrix) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        let [kr, kg, kb, cb_div, cr_div] = matrix.coefficients();
         let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
         let (mut y, mut u, mut v) = (vec![0u8; w * h], vec![0u8; cw * ch], vec![0u8; cw * ch]);
         for cy in 0..ch {
@@ -515,11 +525,11 @@ mod tests {
                 for x in 0..w {
                     let s = &rgba[(row * w + x) * 4..];
                     let (r, g, b) = (s[0] as f32 / 255.0, s[1] as f32 / 255.0, s[2] as f32 / 255.0);
-                    let l = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+                    let l = kr * r + kg * g + kb * b;
                     y[row * w + x] = (16.0 + 219.0 * l).round().clamp(1.0, 254.0) as u8;
                     let a = &mut acc[x / 2];
-                    a.0 += (b - l) / 1.8556;
-                    a.1 += (r - l) / 1.5748;
+                    a.0 += (b - l) / cb_div;
+                    a.1 += (r - l) / cr_div;
                     a.2 += 1.0;
                 }
             }
@@ -551,34 +561,50 @@ mod tests {
 
     #[test]
     fn yuv420_matches_the_reference() {
-        // Every 8-bit level in every channel, odd sizes, and pseudo-random pixels.
-        for (w, h) in [(1, 1), (2, 2), (3, 5), (17, 9), (64, 33)] {
-            let mut rgba = vec![0u8; w * h * 4];
-            let mut seed = (w * 31 + h) as u32;
-            for (i, b) in rgba.iter_mut().enumerate() {
-                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-                *b = if i % 7 == 0 { (i / 4 % 256) as u8 } else { (seed >> 24) as u8 };
+        for matrix in [Matrix::Bt709, Matrix::Bt2020Ncl] {
+            // Every 8-bit level in every channel, odd sizes, and pseudo-random pixels.
+            for (w, h) in [(1, 1), (2, 2), (3, 5), (17, 9), (64, 33)] {
+                let mut rgba = vec![0u8; w * h * 4];
+                let mut seed = (w * 31 + h) as u32;
+                for (i, b) in rgba.iter_mut().enumerate() {
+                    seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    *b = if i % 7 == 0 { (i / 4 % 256) as u8 } else { (seed >> 24) as u8 };
+                }
+                let (mut y, mut u, mut v) = (vec![], vec![], vec![]);
+                rgba_to_yuv420(&rgba, w, h, matrix, &mut y, &mut u, &mut v);
+                assert_eq!((y, u, v), yuv420_reference(&rgba, w, h, matrix), "{w}x{h}");
             }
+            let grey: Vec<u8> = (0..=255u8).flat_map(|g| [g, g, g, 255, g, 255 - g, g / 2, 255]).collect();
             let (mut y, mut u, mut v) = (vec![], vec![], vec![]);
-            rgba_to_yuv420(&rgba, w, h, &mut y, &mut u, &mut v);
-            assert_eq!((y, u, v), yuv420_reference(&rgba, w, h), "{w}x{h}");
+            rgba_to_yuv420(&grey, 512, 1, matrix, &mut y, &mut u, &mut v);
+            assert_eq!((y, u, v), yuv420_reference(&grey, 512, 1, matrix));
         }
-        let grey: Vec<u8> = (0..=255u8).flat_map(|g| [g, g, g, 255, g, 255 - g, g / 2, 255]).collect();
-        let (mut y, mut u, mut v) = (vec![], vec![], vec![]);
-        rgba_to_yuv420(&grey, 512, 1, &mut y, &mut u, &mut v);
-        assert_eq!((y, u, v), yuv420_reference(&grey, 512, 1));
+    }
+
+    #[test]
+    fn bt2020_ncl_ten_bit_code_values() {
+        for (rgb, want) in [([255, 0, 0], [294, 387, 960]), ([255, 255, 255], [940, 512, 512]), ([0, 0, 0], [64, 512, 512])] {
+            let rgba = [rgb[0], rgb[1], rgb[2], 255].repeat(4);
+            for full_chroma in [false, true] {
+                let n = if full_chroma { 4 } else { 2 };
+                let (mut y, mut cb, mut cr) = (vec![0; 4], vec![0; n], vec![0; n]);
+                rgba_to_yuv_10(&rgba, (2, 2), full_chroma, Matrix::Bt2020Ncl, &mut y, &mut cb, &mut cr);
+                assert_eq!(y, vec![want[0]; 4]);
+                assert_eq!((cb, cr), (vec![want[1]; n], vec![want[2]; n]));
+            }
+        }
     }
 
     #[test]
     fn yuv_of_primaries() {
         let rgba = [255u8, 255, 255, 255, 0, 0, 0, 255, 255, 0, 0, 255, 0, 255, 0, 255];
         let (mut y, mut u, mut v) = (vec![], vec![], vec![]);
-        rgba_to_yuv420(&rgba, 2, 2, &mut y, &mut u, &mut v);
+        rgba_to_yuv420(&rgba, 2, 2, Matrix::Bt709, &mut y, &mut u, &mut v);
         assert_eq!(y[0], 235);
         assert_eq!(y[1], 16);
         assert_eq!((u.len(), v.len()), (1, 1));
         let (mut y10, mut cb, mut cr) = (vec![0u16; 4], vec![0u16; 4], vec![0u16; 4]);
-        rgba_to_yuv_10(&rgba, 2, 2, true, &mut y10, &mut cb, &mut cr);
+        rgba_to_yuv_10(&rgba, (2, 2), true, Matrix::Bt709, &mut y10, &mut cb, &mut cr);
         assert_eq!(y10[0], 940);
         assert_eq!(y10[1], 64);
         assert_eq!(cb[0], 512);

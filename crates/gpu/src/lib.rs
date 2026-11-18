@@ -407,7 +407,7 @@ impl Accelerator for Gpu {
         img
     }
 
-    fn comp_frame_yuv420(&self, r: &Renderer, comp: ItemId, t: Tick, bg: [f32; 3]) -> Option<Vec<u8>> {
+    fn comp_frame_yuv420(&self, r: &Renderer, comp: ItemId, t: Tick, bg: [f32; 3], matrix: effectcraft_raster::yuv::Matrix) -> Option<Vec<u8>> {
         self.ctx.check_health().ok()?;
         if !self.ctx.can_readback() || self.ctx.deferred.is_some() {
             return None;
@@ -420,7 +420,7 @@ impl Accelerator for Gpu {
         let yp = self.ctx.yuv_pipe()?;
         let mut e = Enc::new(&self.ctx);
         let img = walk::render(&mut e, r, comp, t)?;
-        let planes = yuv::convert(&mut e, yp, &img, bg)?;
+        let planes = yuv::convert(&mut e, yp, &img, bg, matrix)?;
         // A device fault seen while the frame recorded makes the planes untrustworthy.
         self.ctx.check_health().ok()?;
         Some(planes)

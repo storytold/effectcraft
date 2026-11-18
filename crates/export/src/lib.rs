@@ -2,7 +2,7 @@
 //!
 //! | Format | Container / files | Video | Alpha | Audio |
 //! |---|---|---|---|---|
-//! | H.264 | MP4 | `craft_video::h264` High, 8-bit 4:2:0 BT.709 limited, VBR | no | AAC-LC (`craft_audio::aac`), mono/stereo |
+//! | H.264 | MP4 | `craft_video::h264` High, 8-bit 4:2:0 limited, BT.709 matrix (BT.2020 NCL for Rec. 2100 PQ/HLG output), VBR | no | AAC-LC (`craft_audio::aac`), mono/stereo |
 //! | ProRes | QuickTime MOV | FilmCraft ProRes 422 Proxy/LT/422/HQ, 10-bit; 4444/4444 XQ 4:4:4 | 4444 (16-bit alpha coding) | PCM 16/24-bit or 32-bit float, mono/stereo |
 //! | Uncompressed | QuickTime MOV (`raw `) | 8-bit RGB (depth 24, rows padded to even bytes) or ARGB (depth 32) | RGB + Alpha (straight or premultiplied) | PCM 16/24-bit or 32-bit float, mono/stereo |
 //! | PNG / JPEG / TIFF sequence | one file per frame | 8-bit | PNG, TIFF | — |

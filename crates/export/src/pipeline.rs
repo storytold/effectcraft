@@ -761,7 +761,7 @@ impl<'a> Cx<'a> {
     /// by the accelerator ([`effectcraft_render::Accelerator::comp_frame_yuv420`]). Only for
     /// frames that need nothing done after the render (progressive, at the project's depth, no
     /// crop or resize, rendered at exactly `w`×`h`). `None`: render it with [`Cx::frame`].
-    fn yuv420_frame(&self, comp: &Comp, i: u64, w: u32, h: u32, on: crate::JobRenderer) -> Option<Vec<u8>> {
+    fn yuv420_frame(&self, comp: &Comp, i: u64, w: u32, h: u32, matrix: effectcraft_raster::yuv::Matrix, on: crate::JobRenderer) -> Option<Vec<u8>> {
         if self.deferred() {
             return None;
         }
@@ -781,7 +781,7 @@ impl<'a> Cx<'a> {
         let t0 = Instant::now();
         let r = self.renderer_on(on);
         let a = r.active_accel()?;
-        let planes = a.comp_frame_yuv420(&r, self.job.comp, t, comp.background)?;
+        let planes = a.comp_frame_yuv420(&r, self.job.comp, t, comp.background, matrix)?;
         let (cw, ch) = (w.div_ceil(2) as usize, h.div_ceil(2) as usize);
         if planes.len() != w as usize * h as usize + 2 * cw * ch {
             return None;
@@ -801,15 +801,15 @@ impl<'a> Cx<'a> {
         &self,
         comp: &Comp,
         ks: Vec<u64>,
-        w: u32,
-        h: u32,
+        (w, h): (u32, u32),
+        matrix: effectcraft_raster::yuv::Matrix,
         planes: impl Fn(Vec<u8>) -> T + Sync + Send,
         fallback: impl Fn(u64, Image) -> T + Sync + Send,
     ) -> Vec<T> {
         // As in `frames`: once the GPU has stopped for good, the rest render in parallel.
         self.render_frames(
             ks,
-            |k, on| self.yuv420_frame(comp, k, w, h, on).ok_or_else(|| self.frame_on(comp, k, on)),
+            |k, on| self.yuv420_frame(comp, k, w, h, matrix, on).ok_or_else(|| self.frame_on(comp, k, on)),
             |k, r| match r {
                 Ok(p) => planes(p),
                 Err(img) => fallback(k, img),
