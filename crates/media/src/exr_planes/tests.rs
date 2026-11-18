@@ -1803,6 +1803,9 @@ fn channels_added_to_the_planes_held_count_toward_the_limit() {
     let depth = store.get(path, &source, &index, &rest, Use::Other).expect("the depth plane fits alone");
     assert!(depth.aux.get("Z").is_some());
     assert!(depth.aux.get("R").is_none(), "the picture's planes were let go: four held and one more are five");
+    // (nothing else holds the depth plane: let go, it is gone, see
+    // `planes_let_go_but_still_held_count_toward_the_limit`)
+    drop(depth);
     // The picture again: it fits alone, the depth plane is let go in turn.
     let again = store.get(path, &source, &index, &picture, Use::Other).expect("the picture fits alone");
     assert!(again.aux.get("R").is_some() && again.aux.get("Z").is_none());
@@ -1840,6 +1843,109 @@ fn planes_let_go_are_gone_before_the_request_is_read() {
     let alive = alive.lock().unwrap().clone();
     assert_eq!(alive.last(), Some(&false), "the picture's planes were gone when the depth plane was read: {alive:?}");
     assert_eq!(decodes_of(path).last().map(|d| d.channels.len()), Some(1), "the depth plane alone was read");
+}
+
+/// Notes, for each read of `path`'s planes, whether `old` was still in memory then.
+fn alive_at_reads(path: &str, old: std::sync::Weak<AuxChannels>) -> Arc<Mutex<Vec<bool>>> {
+    let alive = Arc::new(Mutex::new(Vec::new()));
+    let noted = alive.clone();
+    set_read_error(
+        path,
+        Some(Arc::new(move |_: &[usize]| {
+            noted.lock().unwrap().push(old.strong_count() > 0);
+            None
+        })),
+    );
+    alive
+}
+
+/// #3750 review: planes the store let go that a caller still holds (an effect, a Cryptomatte
+/// pick) are in memory: they count toward the limit, and a request that doesn't fit beside them
+/// is refused for now (not remembered) instead of read beside them; once they are gone it is
+/// read.
+#[test]
+fn planes_let_go_but_still_held_count_toward_the_limit() {
+    let path = "/3750-let-go-still-held.exr";
+    // Room for four planes: the picture fits, one more with it is five.
+    set_cap(path, 4 * 8 * 8 * 4);
+    let store = PlaneStore::new(CACHE_BUDGET);
+    let source = ExrSource::Bytes(picture_and_depth().into());
+    let index = crate::exr_index::get(path, &source).unwrap();
+    let picture = Want { all: false, ids: index.picture_ids().into_iter().collect() };
+    // A caller keeps the picture's planes.
+    let held = store.get(path, &source, &index, &picture, Use::Other).expect("the picture fits").aux.clone();
+    let alive = alive_at_reads(path, Arc::downgrade(&held));
+    let rest = Want { all: true, ids: Default::default() };
+    let refused = store.get(path, &source, &index, &rest, Use::Other).err();
+    assert!(matches!(&refused, Some(Refused::NoMemory(why)) if why.contains("still in use")), "{refused:?}");
+    drop(held);
+    let depth = store.get(path, &source, &index, &rest, Use::Other).expect("read once they are gone: not remembered");
+    set_read_error(path, None);
+    assert!(depth.aux.get("Z").is_some() && depth.aux.get("R").is_none());
+    let alive = alive.lock().unwrap().clone();
+    assert_eq!(alive, vec![false], "read once, after the planes held were gone");
+}
+
+/// #3750 review: a decode thread that took over a decode whose held planes are let go asks
+/// again while the request that queued the decode still holds them (its flight): it is refused
+/// for now rather than read beside them; that request reads once they are gone.
+#[test]
+fn a_claimed_decode_is_not_read_beside_the_planes_it_let_go() {
+    let path = "/3750-claimed-let-go.exr";
+    set_cap(path, 4 * 8 * 8 * 4);
+    let source = ExrSource::Bytes(picture_and_depth().into());
+    let store = Arc::new(PlaneStore::new(CACHE_BUDGET));
+    let index = crate::exr_index::get(path, &source).unwrap();
+    let picture = Want { all: false, ids: index.picture_ids().into_iter().collect() };
+    let old = Arc::downgrade(&store.get(path, &source, &index, &picture, Use::Other).expect("the picture fits").aux);
+    let alive = alive_at_reads(path, old.clone());
+    let rest = Want { all: true, ids: Default::default() };
+    let threads = crate::pool::decode_threads().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // When the asker queues its decode: a decode thread asks for the same planes.
+    {
+        let (store, source, index, rest, tx, done) = (store.clone(), source.clone(), index.clone(), rest.clone(), tx.clone(), done.clone());
+        let hook: Hook = Arc::new(move |_: &str| {
+            let (store, source, index, rest, tx, done) = (store.clone(), source.clone(), index.clone(), rest.clone(), tx.clone(), done.clone());
+            threads.spawn(move || {
+                let got = store.get(path, &source, &index, &rest, Use::Other);
+                done.store(true, Ordering::SeqCst);
+                let _ = tx.send(got.map(|b| b.ids.len()));
+            });
+        });
+        QUEUING.lock().unwrap().push((path.to_string(), hook));
+    }
+    // The queued job waits until that decode thread claimed it...
+    let hold: Hook = Arc::new(|p: &str| {
+        let claims = CLAIMS.lock().unwrap();
+        let _ = CLAIM_SIGNAL.wait_timeout_while(claims, std::time::Duration::from_secs(10), |c| !c.iter().any(|c| c == p));
+    });
+    STARTING.lock().unwrap().push((path.to_string(), hold));
+    // ...and the asker, handed the let-go, holds its flight (and the planes) until the decode
+    // thread has asked again.
+    {
+        let done = done.clone();
+        let wait: Hook = Arc::new(move |_: &str| {
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !done.load(Ordering::SeqCst) && std::time::Instant::now() < until {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        });
+        HANDED.lock().unwrap().push((path.to_string(), wait));
+    }
+    let asked = store.get(path, &source, &index, &rest, Use::Other).map(|b| b.ids.len());
+    let claimed = rx.recv_timeout(std::time::Duration::from_secs(20)).unwrap();
+    QUEUING.lock().unwrap().retain(|(p, _)| p != path);
+    STARTING.lock().unwrap().retain(|(p, _)| p != path);
+    HANDED.lock().unwrap().retain(|(p, _)| p != path);
+    set_read_error(path, None);
+    assert!(CLAIMS.lock().unwrap().iter().any(|p| p == path), "claimed");
+    assert!(matches!(&claimed, Err(Refused::NoMemory(why)) if why.contains("still in use")), "{claimed:?}");
+    assert_eq!(asked.ok(), Some(1), "the asker reads the depth plane once the picture's planes are gone");
+    assert!(old.upgrade().is_none());
+    let alive = alive.lock().unwrap().clone();
+    assert!(!alive.is_empty() && !alive.contains(&true), "no read beside the planes let go: {alive:?}");
 }
 
 /// #3749 (#3301 review): planes the disk cache gives back count toward the limit of a request

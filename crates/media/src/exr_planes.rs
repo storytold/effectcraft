@@ -77,9 +77,10 @@ fn asks_at_least(index: &ExrIndex, want: &Want, failed: &Want) -> bool {
     failed.ids.iter().all(|id| want.ids.contains(id) || aux.contains(id))
 }
 
-/// Decode `want` for this request alone (kept nowhere), noting the file it read.
-fn copy(path: &str, source: &ExrSource, index: &Arc<ExrIndex>, want: &Want) -> Result<Arc<Batch>, Refused> {
-    let b = run(path, source, &Flight::new(index.clone(), want.clone()), None, None);
+/// Decode `want` for this request alone (kept nowhere), noting the file it read. `live`: planes
+/// of the file let go but still in memory ([`PlaneStore::live`]).
+fn copy(path: &str, source: &ExrSource, index: &Arc<ExrIndex>, want: &Want, live: usize) -> Result<Arc<Batch>, Refused> {
+    let b = run(path, source, &Flight::new(index.clone(), want.clone(), live), None, None);
     if let Ok(b) = &b {
         crate::reads::note(b.file.clone());
     }
@@ -180,6 +181,10 @@ struct Flight {
     handed_ready: Condvar,
     /// What the store held when the decode was asked for (the decode adds to it).
     base: Option<Arc<Batch>>,
+    /// Planes of the file the store let go ([`Refused::LetGo`]) that are still in memory when the
+    /// decode was asked for: a caller holds them, or a decode that let them go hasn't ended yet
+    /// ([`PlaneStore::live`]). They count toward the limit with the planes read.
+    live: usize,
     /// The disk cache's drop generation before the file was opened for this request (#3191: a
     /// plane entry made of a file reloaded since is refused).
     since: u64,
@@ -215,11 +220,11 @@ struct FlightState {
 }
 
 impl Flight {
-    fn new(index: Arc<ExrIndex>, want: Want) -> Arc<Flight> {
-        Flight::with_base(index, want, None, drop_generation())
+    fn new(index: Arc<ExrIndex>, want: Want, live: usize) -> Arc<Flight> {
+        Flight::with_base(index, want, None, live, drop_generation())
     }
 
-    fn with_base(index: Arc<ExrIndex>, want: Want, base: Option<Arc<Batch>>, since: u64) -> Arc<Flight> {
+    fn with_base(index: Arc<ExrIndex>, want: Want, base: Option<Arc<Batch>>, live: usize, since: u64) -> Arc<Flight> {
         Arc::new(Flight {
             state: Mutex::new(FlightState { index, want, sealed: false, outcome: None }),
             ready: Condvar::new(),
@@ -227,6 +232,7 @@ impl Flight {
             handed: Mutex::new(None),
             handed_ready: Condvar::new(),
             base,
+            live,
             since,
             hints: filmcraft_media::cancel::Context::current(),
             asked: effectcraft_render::memory::tick(),
@@ -302,9 +308,18 @@ struct Entry {
     used: u64,
     /// What decoding its planes took, in microseconds (0: not decoded yet).
     cost_us: u64,
+    /// Planes the store let go ([`Refused::LetGo`]), held weakly, and how many: while something
+    /// still holds them they are in memory, and count toward a read's limit ([`Entry::live`]).
+    let_go: Vec<(std::sync::Weak<AuxChannels>, usize)>,
 }
 
 impl Entry {
+    /// The planes let go that are still in memory (forgetting those that are gone).
+    fn live(&mut self) -> usize {
+        self.let_go.retain(|(w, _)| w.strong_count() > 0);
+        self.let_go.iter().map(|(_, n)| *n).fold(0, usize::saturating_add)
+    }
+
     /// Dropping it would free nothing or lose work in progress: a decode runs, or planes are held.
     fn in_use(&self) -> bool {
         self.flight.is_some() || self.batch.as_ref().is_some_and(|b| Arc::strong_count(b) > 1 || Arc::strong_count(&b.aux) > 1)
@@ -417,6 +432,10 @@ pub(crate) static QUEUING: Mutex<Vec<(String, Hook)>> = Mutex::new(Vec::new());
 pub(crate) static STARTING: Mutex<Vec<(String, Hook)>> = Mutex::new(Vec::new());
 #[cfg(test)]
 pub(crate) static SENT: Mutex<Vec<(String, Hook)>> = Mutex::new(Vec::new());
+/// Run when the request that queued a decode a decode thread took over got its outcome, before
+/// it goes on (tests: holding that request while the decode thread asks again).
+#[cfg(test)]
+pub(crate) static HANDED: Mutex<Vec<(String, Hook)>> = Mutex::new(Vec::new());
 
 #[cfg(test)]
 fn run_hook(hooks: &Mutex<Vec<(String, Hook)>>, path: &str) {
@@ -516,7 +535,14 @@ impl PlaneStore {
                 Step::Again { retry } => retries += u32::from(retry),
             }
         }
-        copy(path, source, index, want)
+        copy(path, source, index, want, self.live(path))
+    }
+
+    /// The planes of `path` the store let go ([`Refused::LetGo`]) that are still in memory: a
+    /// caller holds them (an effect, a Cryptomatte pick), or a decode that let them go hasn't
+    /// ended yet (#3750 review). A read counts them with its own planes.
+    fn live(&self, path: &str) -> usize {
+        self.lock().entries.iter_mut().find(|e| e.path == path).map_or(0, Entry::live)
     }
 
     /// One round of [`PlaneStore::get`].
@@ -528,7 +554,7 @@ impl PlaneStore {
         let at = match st.entries.iter().position(|e| e.path == path) {
             Some(i) => i,
             None => {
-                st.entries.push(Entry { path: path.to_string(), batch: None, flight: None, failed: vec![], bytes: 0, used: clock, cost_us: 0 });
+                st.entries.push(Entry { path: path.to_string(), batch: None, flight: None, failed: vec![], bytes: 0, used: clock, cost_us: 0, let_go: vec![] });
                 st.entries.len() - 1
             }
         };
@@ -548,6 +574,7 @@ impl PlaneStore {
         }) {
             return Step::Done(Err(why.clone()));
         }
+        let live = e.live();
         if let Some(flight) = e.flight.clone() {
             {
                 let mut fs = flight.state();
@@ -559,7 +586,7 @@ impl PlaneStore {
             // A decode thread doesn't wait (see `wait`), but takes over a decode still queued:
             // the planes are decoded once, here, and handed to the request that queued them.
             if may_not_wait() && flight.claim() {
-                return match decode_claimed(path, source, &flight, index, want) {
+                return match decode_claimed(path, source, &flight, index, want, live) {
                     // (the held planes go now, not only once the asker ends the decode: this
                     // request asks again at once)
                     Err(Refused::LetGo) => {
@@ -581,13 +608,14 @@ impl PlaneStore {
                 Waited::Got(Err(Refused::TooLarge(_))) if flight.asks_beyond(index, want) => Step::Again { retry: true },
                 Waited::Got(Err(e)) => Step::Done(Err(e)),
                 Waited::Cancelled => Step::Done(Err(Refused::Cancelled)),
-                // A copy, kept nowhere.
-                Waited::No => Step::Done(copy(path, source, index, want)),
+                // A copy, kept nowhere (with the planes let go still in memory now: a decode
+                // that let them go may not have ended yet).
+                Waited::No => Step::Done(copy(path, source, index, want, self.live(path))),
             };
         }
         // This request decodes: what it asks for, minus what the store holds.
         let base = e.batch.clone().filter(|b| Arc::ptr_eq(&b.index, index));
-        let flight = Flight::with_base(index.clone(), want.clone(), base.clone(), since);
+        let flight = Flight::with_base(index.clone(), want.clone(), base.clone(), live, since);
         e.flight = Some(flight.clone());
         drop(st);
         #[cfg(test)]
@@ -755,6 +783,9 @@ impl PlaneStore {
             e.batch = None;
             e.bytes = 0;
             e.cost_us = 0;
+            // (still in memory while anything else holds them: counted until they are gone)
+            e.live();
+            e.let_go.push((Arc::downgrade(&base.aux), base.aux.channels.len()));
         }
         st.held.retain(|(p, h)| !(p == path && Arc::ptr_eq(h, base)));
     }
@@ -932,7 +963,7 @@ impl Drop for Handing<'_> {
 
 /// Decode a flight claimed by this thread (see [`Flight::claim`]) here, hand the outcome to the
 /// request that queued it, and answer this request with it (or a copy when it doesn't cover it).
-fn decode_claimed(path: &str, source: &ExrSource, flight: &Arc<Flight>, index: &Arc<ExrIndex>, want: &Want) -> Result<Arc<Batch>, Refused> {
+fn decode_claimed(path: &str, source: &ExrSource, flight: &Arc<Flight>, index: &Arc<ExrIndex>, want: &Want, live: usize) -> Result<Arc<Batch>, Refused> {
     #[cfg(test)]
     {
         CLAIMS.lock().unwrap_or_else(PoisonError::into_inner).push(path.to_string());
@@ -950,7 +981,7 @@ fn decode_claimed(path: &str, source: &ExrSource, flight: &Arc<Flight>, index: &
         // (memory the system refused just now is not asked for again at once, see `NoMemory`;
         // planes held to let go first are let go by the store, not read beside in a copy)
         Err(e @ (Refused::NoMemory(_) | Refused::LetGo)) => Err(e),
-        _ => copy(path, source, index, want),
+        _ => copy(path, source, index, want, live),
     }
 }
 
@@ -961,6 +992,8 @@ fn run(path: &str, source: &ExrSource, flight: &Arc<Flight>, base: Option<Arc<Ba
     if let Some(threads) = crate::pool::decode_threads()
         && threads.current_thread_index().is_none()
     {
+        #[cfg(test)]
+        let asker = path.to_string();
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         let (path, source, queued) = (path.to_string(), source.clone(), flight.clone());
         // The request's cancel flag and decoding hints go with it.
@@ -985,7 +1018,12 @@ fn run(path: &str, source: &ExrSource, flight: &Arc<Flight>, base: Option<Arc<Ba
         // A plain block: this thread runs nothing else meanwhile.
         return match rx.recv() {
             Ok(outcome) => outcome,
-            Err(_) if flight.claimed() => flight.take_handed(),
+            Err(_) if flight.claimed() => {
+                let handed = flight.take_handed();
+                #[cfg(test)]
+                run_hook(&HANDED, &asker);
+                handed
+            }
             // (a decode that panicked sent nothing)
             Err(_) => Err(Refused::Stopped),
         };
@@ -1116,15 +1154,30 @@ fn decode(path: &str, source: &ExrSource, flight: &Arc<Flight>, base: Option<Arc
     // The planes held are only kept for later requests: when they don't fit with the missing
     // ones, they are let go and the request is read on its own. The store lets them go first
     // (`LetGo`), so they are not in memory while the request is read.
+    // Planes let go before but still in memory (a caller holds them, or the decode that let them
+    // go hasn't ended) count too (#3750 review): when they are what keeps the request over the
+    // limit, it is refused for now (not remembered), not read beside them.
     if !missing.is_empty() {
+        let cap = cap_of(path);
+        let fits = |planes: usize| crate::exr_read::check_total(w, h, planes, cap);
+        let live = flight.live;
+        let still_held = || {
+            log::warn!("media: {path}: {live} OpenEXR channels let go are still in use");
+            Refused::NoMemory(format!("its {w}×{h} OpenEXR channels don't fit the memory one file may use beside {live} of its channels still in use"))
+        };
         let held = base.as_ref().map_or(0, |b| b.ids.len());
-        let together = crate::exr_read::check_total(w, h, held.saturating_add(missing.len()), cap_of(path));
-        if together.is_err() && base.is_some() {
-            crate::exr_read::check_total(w, h, wanted.len(), cap_of(path)).map_err(|e| refused(path, e))?;
+        if base.is_some() && fits(held.saturating_add(missing.len()).saturating_add(live)).is_err() {
+            fits(wanted.len()).map_err(|e| refused(path, e))?;
+            if fits(wanted.len().saturating_add(live)).is_err() {
+                return Err(still_held());
+            }
             return Err(Refused::LetGo);
         }
         if base.is_none() {
-            crate::exr_read::check_total(w, h, missing.len(), cap_of(path)).map_err(|e| refused(path, e))?;
+            fits(missing.len()).map_err(|e| refused(path, e))?;
+            if fits(missing.len().saturating_add(live)).is_err() {
+                return Err(still_held());
+            }
         }
     }
     let names: Vec<String> = missing.iter().filter_map(|i| index.channels.get(*i)).map(|c| c.name.clone()).collect();
