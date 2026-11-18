@@ -935,6 +935,39 @@ fn convert_to_bezier_with_explicit_items_leaves_a_selected_mask_alone() {
     assert!(matches!(mask_kind(&s, l), GroupKind::Mask { roto_bezier: true, .. }), "the selected mask is unchanged");
 }
 
+/// #3057 review: explicit `items` with nothing parametric in them (a Fill, a path that is already
+/// Bezier) are an error and change nothing: neither a selected RotoBezier mask nor, with no mask
+/// selected, the layer's own RotoBezier masks are converted in their place.
+#[test]
+fn convert_to_bezier_with_explicit_non_parametric_items_converts_no_mask() {
+    for item in ["fill", "path"] {
+        for mask_selected in [true, false] {
+            let mut s = comp();
+            let l = s.execute("layer.newShape", json!({"kind": "rect", "size": [120, 80], "fill": "#ff0000"})).unwrap()["layer"].as_u64().unwrap();
+            s.execute("mask.new", json!({"layer": l, "vertices": [[0, 0], [50, 0], [50, 50], [0, 50]], "closed": true})).unwrap();
+            let m = layer(&s, l).masks().unwrap().groups().next().unwrap().uid;
+            s.execute("path.rotoBezier", json!({"layer": l, "mask": m, "value": true})).unwrap();
+            let (rect, _) = first_shape(&s, l);
+            s.state.selected_vertices.clear();
+            s.state.selected_props.clear();
+            // An already-Bezier path: the rectangle converted first, the mask left as it is.
+            if item == "path" {
+                s.execute("path.convertToBezier", json!({"layer": l, "items": [rect]})).unwrap();
+                assert!(matches!(mask_kind(&s, l), GroupKind::Mask { roto_bezier: true, .. }));
+            }
+            let uid = shape_item(&s, l, item);
+            s.state.selected_vertices.clear();
+            s.state.selected_props = if mask_selected { vec![(LayerId(l), m)] } else { Vec::new() };
+            let before = layer(&s, l).props;
+
+            let err = s.execute("path.convertToBezier", json!({"layer": l, "items": [uid]})).unwrap_err().to_string();
+            assert!(err.contains("Rectangle, Ellipse or Polystar"), "{item}, mask selected {mask_selected}: {err}");
+            assert!(matches!(mask_kind(&s, l), GroupKind::Mask { roto_bezier: true, .. }), "{item}, mask selected {mask_selected}: the mask is unchanged");
+            assert!(layer(&s, l).props == before, "{item}, mask selected {mask_selected}: no shape or mask changed");
+        }
+    }
+}
+
 /// #3057 review: an explicit `layer` scopes the mask conversion too: a RotoBezier mask selected
 /// on another layer is left alone, and the given layer's masks convert.
 #[test]

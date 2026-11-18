@@ -258,6 +258,16 @@ fn convert_to_bezier(s: &mut Session, p: &Value) -> Result<Value> {
         sel_masks.dedup();
     }
     if shapes.is_empty() {
+        // Explicit `items` with nothing parametric in them (a Fill, a path that is already Bezier)
+        // convert nothing: they don't hand the conversion to a selected mask or the layer's masks.
+        if p.get("items").is_some() && p.get("mask").is_none() {
+            let why = if skipped_animated > 0 {
+                "the parametric paths are animated: name the path itself in `items` to convert it at the current time (its animation is lost)"
+            } else {
+                "nothing to convert: the given items have no Rectangle, Ellipse or Polystar path"
+            };
+            return Err(bad(LABEL, why));
+        }
         let (_, mut masks) = masks_for(s, p)?;
         let mask_of = |l: LayerId, u: Uid| comp.layer(l).and_then(|l| l.masks()).and_then(|m| m.groups().find(|g| g.uid == u));
         masks.retain(|(l, u)| mask_of(*l, *u).is_some());
