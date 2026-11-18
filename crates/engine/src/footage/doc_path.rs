@@ -9,6 +9,10 @@
 //! ([`StoredPaths`]); the footage check, the changed-on-disk scan, Reload Footage, Relink, Edit
 //! Original and Reveal in Finder follow a path only through it. Paths the user imports or relinks
 //! in this session are followed as given.
+//!
+//! The network shares the user names in Settings ▸ Import ▸ Trusted Network Folders
+//! ([`trusted_shares`]) are followed from any document, as the document's own share is: a project
+//! saved on the local disk keeps finding its footage on a NAS after it is opened again.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -57,6 +61,30 @@ pub fn resolve(stored: &str, project: Option<&str>) -> Result<PathBuf, NotFollow
     })
 }
 
+/// [`resolve`], also following a network path on one of the `trusted` shares (`\\server\share`
+/// roots, [`trusted_shares`]). A trusted share is treated as the document's own share would be,
+/// with the same checks (`craft_docpath`), so `..` cannot step out of it.
+pub fn resolve_trusting(stored: &str, project: Option<&str>, trusted: &[String]) -> Result<PathBuf, NotFollowed> {
+    match resolve(stored, project) {
+        Err(NotFollowed::Refused(Refused::Network)) => trusted
+            .iter()
+            .find_map(|root| {
+                // A document at the share's root: paths on the same share are followed.
+                let doc = format!("{}/_", root.trim_end_matches(['\\', '/']));
+                craft_docpath::resolve_absolute(stored, Some(Path::new(&doc))).ok()
+            })
+            .ok_or(NotFollowed::Refused(Refused::Network)),
+        other => other,
+    }
+}
+
+/// The trusted network shares of the setting `text` (Settings ▸ Import ▸ Trusted Network Folders):
+/// `\\server\share` roots separated by `;` or line breaks; entries that are not a share are
+/// ignored.
+pub fn trusted_shares(text: &str) -> Vec<String> {
+    text.split([';', '\n', '\r']).map(str::trim).filter(|t| craft_docpath::classify(t) == craft_docpath::PathKind::Network).map(str::to_string).collect()
+}
+
 /// Whether `p` is a Windows drive or share path, which a project cannot make absolute outside Windows.
 fn is_windows_rooted(p: &Path) -> bool {
     let s = p.to_string_lossy();
@@ -66,12 +94,12 @@ fn is_windows_rooted(p: &Path) -> bool {
 
 /// The paths of `f` (its file and every frame of an image sequence) resolved against the document
 /// saved at `document`, or why one of them is not followed.
-fn footage_paths(f: &Footage, document: Option<&str>) -> Result<(String, Vec<String>), (String, NotFollowed)> {
+fn footage_paths(f: &Footage, document: Option<&str>, trusted: &[String]) -> Result<(String, Vec<String>), (String, NotFollowed)> {
     let one = |q: &String| -> Result<String, (String, NotFollowed)> {
         if q.is_empty() {
             return Ok(String::new());
         }
-        resolve(q, document).map(|p| p.to_string_lossy().into_owned()).map_err(|why| (q.clone(), why))
+        resolve_trusting(q, document, trusted).map(|p| p.to_string_lossy().into_owned()).map_err(|why| (q.clone(), why))
     };
     Ok((one(&f.path)?, f.sequence.iter().map(one).collect::<Result<_, _>>()?))
 }
@@ -83,7 +111,7 @@ fn paths_of(f: &Footage) -> impl Iterator<Item = &String> {
 /// Footage paths that came from a document, with the path of that document (`None`: one without
 /// a file). Any other path was chosen in this session and is followed as given.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct StoredPaths(Arc<HashMap<String, Option<String>>>);
+pub struct StoredPaths(Arc<HashMap<String, Option<String>>>, Arc<Vec<String>>);
 
 impl StoredPaths {
     /// Record the footage paths of `p`, loaded from the document at `document`. A path already
@@ -120,10 +148,22 @@ impl StoredPaths {
         }
     }
 
+    /// The network shares followed from any document ([`trusted_shares`]).
+    pub fn trusted(&self) -> Arc<Vec<String>> {
+        self.1.clone()
+    }
+
+    /// Settings ▸ Import ▸ Trusted Network Folders changed.
+    pub(crate) fn set_trusted(&mut self, shares: Vec<String>) {
+        if *self.1 != shares {
+            self.1 = Arc::new(shares);
+        }
+    }
+
     /// The file to open for footage path `path`.
     pub fn follow(&self, path: &str) -> Result<PathBuf, NotFollowed> {
         match self.0.get(path) {
-            Some(document) => resolve(path, document.as_deref()),
+            Some(document) => resolve_trusting(path, document.as_deref(), &self.1),
             None => Ok(PathBuf::from(path)),
         }
     }
@@ -142,13 +182,19 @@ impl StoredPaths {
 
 /// Resolve the footage paths stored in `p`, the project saved at `project`: followed paths are
 /// replaced by the file they resolve to, and an item with a path that is not followed is marked
-/// missing. Returns those items with the refused path and why.
-pub(crate) fn resolve_footage(p: &mut Project, project: Option<&str>) -> Vec<(ItemId, String, NotFollowed)> {
-    resolve_footage_of(p, |_| true, project)
+/// missing. Returns those items with the refused path and why. Paths on the `trusted` shares are
+/// followed ([`resolve_trusting`]).
+pub(crate) fn resolve_footage(p: &mut Project, project: Option<&str>, trusted: &[String]) -> Vec<(ItemId, String, NotFollowed)> {
+    resolve_footage_of(p, |_| true, project, trusted)
 }
 
 /// [`resolve_footage`] for the items of `p` that `pick` selects (the ones an import added).
-pub(crate) fn resolve_footage_of(p: &mut Project, pick: impl Fn(ItemId) -> bool, project: Option<&str>) -> Vec<(ItemId, String, NotFollowed)> {
+pub(crate) fn resolve_footage_of(
+    p: &mut Project,
+    pick: impl Fn(ItemId) -> bool,
+    project: Option<&str>,
+    trusted: &[String],
+) -> Vec<(ItemId, String, NotFollowed)> {
     let mut refused = vec![];
     for item in p.items.values_mut().filter(|i| pick(i.id)) {
         let original = match &mut item.kind {
@@ -156,7 +202,7 @@ pub(crate) fn resolve_footage_of(p: &mut Project, pick: impl Fn(ItemId) -> bool,
             _ => None,
         };
         for f in original.into_iter().chain(item.proxy.as_mut().map(|p| &mut p.footage)) {
-            match footage_paths(f, project) {
+            match footage_paths(f, project, trusted) {
                 Ok((path, sequence)) => {
                     f.path = path;
                     f.sequence = sequence;

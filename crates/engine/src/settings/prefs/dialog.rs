@@ -261,6 +261,7 @@ pub fn pages() -> Vec<Page> {
                     Kind::Choice(&[("Footage", "footage"), ("Composition", "comp"), ("Composition - Retain Layer Sizes", "compLayerSizes")]),
                     true,
                 ),
+                s("import.trustedShares", "Trusted Network Folders", Kind::Text, true),
             ],
         },
         Page {

@@ -33,7 +33,7 @@ fn read_project(s: &Session, path: &str) -> Result<(Project, Option<String>)> {
 fn resolve_footage(s: &Session, project: &mut Project, path: &str) -> Vec<String> {
     let stored: std::collections::HashMap<ItemId, String> =
         project.items.values().filter_map(|i| if let ItemKind::Footage(f) = &i.kind { Some((i.id, f.path.clone())) } else { None }).collect();
-    let refused = crate::doc_path::resolve_footage(project, Some(path));
+    let refused = crate::doc_path::resolve_footage(project, Some(path), &s.stored_paths.trusted());
     let services = s.services.clone();
     let exists = |p: &String| p.is_empty() || services.exists(p);
     let mut missing: Vec<String> = refused.iter().map(|(_, p, _)| p.clone()).collect();

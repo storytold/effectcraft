@@ -165,6 +165,10 @@ Commands (CLI, MCP, control channel):
 - `import.unlabeledAlpha`: alpha of TGA / TIFF / movie footage (Ask opens Interpret Footage;
   Guess takes premultiplied for movies, straight for stills)
 - `import.dragImportAs`: layered files dropped on the window import as footage or a comp
+- `import.trustedShares`: Trusted Network Folders, `\\server\share` roots separated by `;` or line
+  breaks. Footage a project stores on another computer is opened only from a project on the same
+  share; footage on a listed share is opened from a project saved anywhere (a project on the local
+  disk with footage on a NAS). `effectcraft-cli --trust-share` sets it for one run
 - `export.defaultOutputFolder`: where relative Render Queue outputs go
 - `export.segmentSequences`, `export.segmentSequenceFiles`: sequences split into numbered
   folders of N files; `export.segmentMovies`, `export.segmentMovieMb`: movies split into
