@@ -119,14 +119,15 @@ are checked too. No render parameter overrides this protection.
 Checks compare paths by name once resolved: made absolute, `.` and `..` resolved, either
 separator, a Windows verbatim prefix (`\\?\`) as the plain path, and without case on Windows and
 macOS. No source file is opened, so a check costs the same for a sequence of thousands of frames
-on a network share. When an output's name matches no source, its folder is resolved on disk, once
-per folder, so an output in a folder that is a symbolic link or junction to a source's folder is
-refused. On Windows a mapped network drive and its UNC path (`P:\` and `\\server\share\`)
-are one place, and so are a `subst` drive and its folder. A drive letter's root is looked up only
-when the output and the sources are not all on one letter, or not all UNC paths, and what it
-resolves to is kept for a minute. A file-level symbolic link or hard link to a source under
-another name is not recognised, nor a source imported through a linked folder and written through
-its real folder, nor another Unicode normalization of its name on macOS.
+on a network share. When an output's path matches no source but a source has the same file name,
+the output's folder and that source's folder are resolved on disk (each folder once per check) and
+compared again, so a folder reached through a symbolic link or junction, on either side, does not
+get around the check. On Windows a mapped network drive and its UNC path (`P:\` and
+`\\server\share\`) are one place, and so are a `subst` drive and its folder. A drive letter's root
+is looked up only when the output and the sources are not all on one letter, or not all UNC
+paths, and what it resolves to is kept for a minute. A file-level symbolic link or hard link to a
+source under another name is not recognised, nor another Unicode normalization of its name on
+macOS. The check runs before the render starts; a link changed after it is not seen.
 
 Default output names move aside when they would replace a protected file. This also applies to
 Create Proxy: recreating a proxy chooses a new default name and attaches the new proxy, leaving
