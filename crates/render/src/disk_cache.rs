@@ -1106,13 +1106,13 @@ impl DiskCache {
             self.write_failed(&e);
             return;
         }
+        // An entry that cannot fit would be evicted straight away (asked before it is sealed).
+        if payload.len().saturating_add(16) as u64 > self.limit_bytes() {
+            return;
+        }
         // (no memory for the sealed entry just now: it isn't written; a plane is decoded from its
         // file next time)
         let Some(data) = try_seal_format(kind, format, payload) else { return };
-        // An entry that cannot fit would be evicted straight away.
-        if data.len() as u64 > self.limit_bytes() {
-            return;
-        }
         // Make room first, so the cache never exceeds its limit (or the free-space reserve).
         self.evict_to(self.limit_bytes().saturating_sub(data.len() as u64));
         let n = self.tmp_counter.fetch_add(1, Ordering::Relaxed);
