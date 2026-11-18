@@ -2293,9 +2293,17 @@ mod tests {
         // Held by the caller: the whole still is not offered (only the reduced frame is).
         assert_eq!(holder.drop_oldest(), 8 * 4 * std::mem::size_of::<Px>() + 64, "the reduced frame");
         assert!(holder.oldest().is_none(), "the picture the caller holds stays");
+        let gone = Arc::downgrade(&whole);
         drop(whole);
-        let still = 16 * 8 * std::mem::size_of::<Px>();
-        assert_eq!(holder.drop_oldest(), still, "nobody else holds it: the whole still goes");
+        // (another still becomes the newest frame, which always stays)
+        let other = plate(&pool, "/other.exr");
+        drop(Inner::frame_at(&pool.inner, &other, Tick::ZERO, true, None, FloatCurve::Srgb).unwrap());
+        for _ in 0..8 {
+            if holder.drop_oldest() == 0 {
+                break;
+            }
+        }
+        assert!(gone.upgrade().is_none(), "nobody else holds it: both of the cache's references went, and its memory with them");
         assert!(lock(&pool.inner.cache).recent.is_empty());
     }
 
