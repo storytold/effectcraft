@@ -629,9 +629,10 @@ fn build_layers(project: &mut Project, cx: &mut Ctx<'_>, defs: &EffectDefinition
         l.label = Label::ALL.get(usize::from(h.label)).copied().unwrap_or(Label::None);
         apply_timing(&mut l, &h, &tm, &name, &mut cx.col);
         apply_switches(&mut l, &h);
-        // Preserve Underlying Transparency: `ldta` byte 103 is 1 when it is on, 0 when it is off
-        // (aep-format.md 3.1; solid, shape, text, precomp and 3D layers sampled).
-        l.preserve_transparency = layer.chunk().child(b"ldta").and_then(|c| c.bytes()).and_then(|b| b.get(103)) == Some(&1);
+        // Preserve Underlying Transparency: bit 0 of the `ldta` flag byte 103 (aep-format.md 3.1;
+        // solid, shape, text, precomp and 3D layers sampled). Bit 1 marks Dancing Dissolve, so a
+        // Dancing Dissolve layer with the switch on stores 3.
+        l.preserve_transparency = layer.chunk().child(b"ldta").and_then(|c| c.bytes()).and_then(|b| b.get(103)).is_some_and(|b| b & 0x01 != 0);
         match blend(h.blend_mode) {
             Some(b) => l.blend_mode = b,
             // Cameras and lights have no blend mode (their byte is 0, 251).

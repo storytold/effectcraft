@@ -1048,4 +1048,16 @@ fn preserve_transparency_is_imported_from_the_layer_header() {
     // The same layers, every one with the switch on.
     assert_eq!(on.len(), off.len(), "{on:?}");
     assert!(on.iter().all(|on| *on), "{on:?}");
+    // The byte holds flags: a Dancing Dissolve layer (bit 1) with the switch on stores 3
+    // (After Effects 2026 lab sample `pt_dissolve`), and the switch is still on.
+    let file = mutate(&mut |c| {
+        if c.id == *b"ldta" {
+            set_data(c, 103, &[3]);
+        }
+    });
+    let (p, r) = run(&file, true);
+    r.unwrap();
+    let flagged = pt(&p);
+    assert_eq!(flagged.len(), off.len(), "{flagged:?}");
+    assert!(flagged.iter().all(|on| *on), "{flagged:?}");
 }
