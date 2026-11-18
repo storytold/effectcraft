@@ -1449,7 +1449,7 @@ dependencies = [
 [[package]]
 name = "craft-psd"
 version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=e9ec4813311264ee1857079c2edd10a70e2389a6#e9ec4813311264ee1857079c2edd10a70e2389a6"
+source = "git+https://github.com/storytold/craft-libs?rev=c9862964df7f73ad37706539a06e346fc4865ca3#c9862964df7f73ad37706539a06e346fc4865ca3"
 dependencies = [
  "encoding_rs",
  "flate2",

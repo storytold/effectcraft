@@ -68,7 +68,7 @@ impl Psd {
         }
         if let Some(info) = &file.layer_info {
             psd.merged_alpha = info.merged_alpha;
-            psd.layers = info.layers.iter().enumerate().map(|(i, rec)| psd.layer(rec, i, splice)).collect();
+            psd.layers = info.layers.iter().enumerate().map(|(i, rec)| psd.layer(rec, i, splice)).collect::<Result<Vec<_>>>()?;
         }
         for b in &file.global_blocks {
             if let Some(stored) = b.stored.as_ref().filter(|_| linked(&b.key, 0)) {
@@ -81,7 +81,7 @@ impl Psd {
 
     /// One layer record of the model, its additional information read into [`Layer`].
     /// `splice` maps craft-psd's offsets back into `self.data` (see [`read_file`]).
-    fn layer(&self, rec: &craft_psd::LayerRecord, index: usize, splice: Splice) -> Layer {
+    fn layer(&self, rec: &craft_psd::LayerRecord, index: usize, splice: Splice) -> Result<Layer> {
         let channels = rec
             .channels
             .iter()
@@ -111,10 +111,15 @@ impl Psd {
         }
         for b in &rec.blocks {
             l.keys.push(b.key);
-            // A malformed block only loses that block's information.
-            let _ = self.layer_block(&mut l, &b.key, &b.data);
+            // A malformed optional block only loses that block's information.
+            // Unsupported modern placement geometry must not silently become an
+            // unwarped layer or fall back to a less expressive PlLd in either order.
+            match self.layer_block(&mut l, &b.key, &b.data) {
+                Err(e @ Error::Unsupported(_)) if matches!(&b.key, b"SoLd" | b"SoLE") => return Err(e),
+                _ => {}
+            }
         }
-        l
+        Ok(l)
     }
 
     /// The embedded bytes of linked file `uuid`.
