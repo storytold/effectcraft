@@ -64,6 +64,7 @@ the GPU is performance, not parity.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-18 | minor | Exposure in a linearized working space scales the linear values as they are (Bypass Linear Light Conversion makes no difference there), measured against After Effects 2026 (32 bpc, Linearize Working Space: Exposure +2 on a linear (1, 0.6, 0.2) gives (4, 2.4, 0.8)); it used to apply its own 2.2 conversion on top (CPU and GPU) |
 | 2026-11-17 | minor | Drop Shadow: Softness takes After Effects' recorded valid range, 0..30000 (default and 0..250 slider unchanged). Where the padding budget cuts the margin, the shadow keeps its full blur (σ = Softness / 2) up to the buffer's edge, where it is cut; that case renders on the CPU |
 | 2026-11-17 | minor | Radial Blur: Amount takes After Effects' valid range 0..1000 (slider and default unchanged); Zoom past 200 spreads its samples from the centre outwards instead of sampling the layer mirrored through the centre (CPU and GPU; not yet measured against After Effects past Amount 200) |
 | 2026-11-17 | minor | Gaussian Blur: Blurriness takes After Effects' recorded valid range 0..30000 (was 0..3000; default and 0..50 slider unchanged). Padding stays within the effect pixel budget at the top of the range (CPU and GPU), and Roto Brush analyses 0.24 saved below a Gaussian Blur still match (#3460) |

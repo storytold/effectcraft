@@ -506,3 +506,20 @@ fn colorama_palettes_modify_selection_masking_and_add_phase() {
     assert_eq!(p.eval(0.75, true), [0.5, 0.0, 0.5, 1.0], "wraps around");
     assert_eq!(p.eval(0.25, false), [1.0, 0.0, 0.0, 1.0]);
 }
+
+/// In a linearized working space the pixels are already linear: Exposure scales them as they
+/// are, with Bypass Linear Light Conversion on or off. After Effects 2026, 32 bpc, Linearize
+/// Working Space, a linear (1, 0.6, 0.2) solid: Exposure +2 gives (4, 2.4, 0.8) with Bypass off
+/// and on, and Exposure +1 with Offset 0.05 gives (2.05, 1.25, 0.45). The effect's own 2.2
+/// conversion on top gave (4, 1.31, 0.12) for the first.
+#[test]
+fn exposure_in_a_linear_working_space_scales_the_linear_values() {
+    let linear = || EffectEnv { working_linear: true, ..EffectEnv::default() };
+    let run = |vals: &[(&str, Value)]| run_fx("ec.color.exposure", vals, Image::filled(2, 2, [1.0, 0.6, 0.2, 1.0]), 0.0, linear()).img.get(0, 0);
+    for bypass in [false, true] {
+        let o = run(&[("master/exposure", num(2.0)), ("bypassLinearLight", Value::Bool(bypass))]);
+        assert!(close(o, [4.0, 2.4, 0.8, 1.0], 1e-4), "bypass {bypass}: {o:?}");
+    }
+    let o = run(&[("master/exposure", num(1.0)), ("master/offset", num(0.05))]);
+    assert!(close(o, [2.05, 1.25, 0.45, 1.0], 1e-4), "{o:?}");
+}
