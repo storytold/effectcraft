@@ -785,13 +785,14 @@ fn obj_repeated_material_libraries_and_textures_load_once() {
 
 #[test]
 fn gltf_textures_naming_one_image_share_it() {
-    let doc = String::from_utf8(fixture("quad.gltf")).unwrap();
+    let doc = String::from_utf8(fixture("quad.gltf")).unwrap().replace("\r\n", "\n");
     // Three textures of one image: the fixture's sampler, the same sampler again, no sampler.
-    let doc = doc.replace(
+    let modified = doc.replace(
         "\"textures\": [\n  {\n   \"source\": 0,\n   \"sampler\": 0\n  }\n ]",
         "\"textures\": [{\"source\": 0, \"sampler\": 0}, {\"source\": 0, \"sampler\": 0}, {\"source\": 0}]",
     );
-    let m = gltf::parse(doc.as_bytes(), &|_| None).unwrap();
+    assert_ne!(modified, doc, "the fixture must contain all three texture references");
+    let m = gltf::parse(modified.as_bytes(), &|_| None).unwrap();
     assert_eq!(m.textures.len(), 2);
     assert_eq!(m.textures[0].wrap, [Wrap::Clamp, Wrap::Repeat]);
     assert_eq!(m.textures[1].wrap, [Wrap::Repeat, Wrap::Repeat]);
