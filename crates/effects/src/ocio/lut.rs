@@ -77,12 +77,8 @@ pub(super) fn parse_3dl_limited(text: &str, max_side: usize) -> Option<Lut> {
             return None;
         }
     }
-    let is_cube = |k: usize| {
-        let n = (k as f64).cbrt().round() as usize;
-        n * n * n == k
-    };
-    // A 3-entry input mesh (3³ lattice) looks like a data row: tell them apart by the count.
-    if mesh.is_none() && !is_cube(rows.len()) && rows.len() == 28 {
+    // A 3-entry input mesh (3³ lattice) looks like a data row: 28 rows are a mesh and 27.
+    if mesh.is_none() && rows.len() == 28 {
         mesh = Some(rows.remove(0).to_vec());
     }
     let n = match &mesh {
