@@ -172,10 +172,9 @@ fn cc_lens(e: &mut Enc, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
 }
 
 fn turbulent(e: &mut Enc, ctx: &EffectCtx, mut b: GBuf) -> Option<GBuf> {
-    let amount = ctx.params.f("amount") * b.scale;
-    if amount.abs() < 1e-9 {
+    let Some(amount) = effectcraft_effects::turbulent_amount_px(ctx, b.scale) else {
         return Some(b);
-    }
+    };
     let kind = ctx.params.e("displacement");
     let size = (ctx.params.f("size") * b.scale).max(1.0);
     if ctx.params.b("resizeLayer") && !ctx.adjustment {
