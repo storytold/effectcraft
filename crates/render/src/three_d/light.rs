@@ -109,7 +109,8 @@ impl LightState {
             } else if cos_a <= outer {
                 0.0
             } else {
-                let t = (inner - cos_a) / (inner - outer).max(1e-9);
+                // Here outer < cos_a < inner, so the interval is not empty however narrow the cone.
+                let t = (inner - cos_a) / (inner - outer);
                 1.0 - t * t * (3.0 - 2.0 * t)
             };
         }

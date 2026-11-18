@@ -324,6 +324,20 @@ fn spot_feather_falls_off_over_the_cosine_of_the_angle() {
 }
 
 #[test]
+fn a_very_narrow_spot_still_feathers_over_its_own_cone() {
+    // Cone 0.004 degrees, feather 100 %: at 99 % of the half-angle the smoothstep leaves about
+    // 0.12 % of the light. A floor on the interval wider than the cone used to leave far more.
+    let ls = light_state(LightKind::Spot, |l| {
+        set(l, "transform/poi", Value::Vec3([0.0, 0.0, 0.0]));
+        set(l, "lightOptions/coneAngle", Value::Scalar(0.004));
+        set(l, "lightOptions/coneFeather", Value::Scalar(100.0));
+    });
+    let k = ls.attenuation(vec3(500.0 * (0.002f64 * 0.99).to_radians().tan(), 0.0, 0.0));
+    assert!(k < 0.01, "{k}");
+    assert!((ls.attenuation(vec3(0.0, 0.0, 0.0)) - 1.0).abs() < 1e-9);
+}
+
+#[test]
 fn specular_shininess_is_the_exponent() {
     // Lab c3d l10 / l11 (After Effects 26.5): a parallel light 60 degrees off the normal, the
     // viewer on the normal (half vector 30 degrees off), Specular 100 %, Metal 0 %, Diffuse 0 %:
@@ -339,7 +353,9 @@ fn specular_shininess_is_the_exponent() {
         super::light::shade([0.5; 3], vec3(0.0, 0.0, 0.0), n, n, &mat, std::slice::from_ref(&ls), &|_, _| [1.0; 3]).0[0]
     };
     assert!((spec(0.05) - 124.0 / 255.0).abs() < 1.0 / 255.0, "{}", spec(0.05));
-    assert!(spec(0.40) < 2.0 / 255.0, "{}", spec(0.40));
+    // 0.866^40 = 0.00317: present, not zero.
+    let want = (3f32.sqrt() / 2.0).powi(40);
+    assert!((spec(0.40) - want).abs() < 0.001, "{} != {want}", spec(0.40));
 }
 
 // ---------------------------------------------------------------- shadows

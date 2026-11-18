@@ -193,7 +193,7 @@ fn attenuation(l: u32, p: vec3<f32>) -> f32 {
         } else if (cos_a <= outer) {
             k = 0.0;
         } else {
-            k *= smoothstep01((inner - cos_a) / max(inner - outer, 1e-9));
+            k *= smoothstep01((inner - cos_a) / (inner - outer)); // outer < cos_a < inner here
         }
     }
     return k;
