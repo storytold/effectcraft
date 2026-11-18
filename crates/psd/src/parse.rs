@@ -168,29 +168,26 @@ impl Psd {
                 }
             }
             b"lsct" | b"lsdk" => {
-                l.section = match r.u32()? {
-                    1 => Section::OpenFolder,
-                    2 => Section::ClosedFolder,
-                    3 => Section::Divider,
+                use craft_psd::tagged::{SectionDivider, SectionType};
+                let divider = SectionDivider::from_bytes_recovering_blend(b).map_err(|e| error(&e))?;
+                l.section = match divider.kind {
+                    SectionType::OpenFolder => Section::OpenFolder,
+                    SectionType::ClosedFolder => Section::ClosedFolder,
+                    SectionType::BoundingDivider => Section::Divider,
                     _ => Section::Layer,
                 };
-                if b.len() >= 12 && &b[4..8] == b"8BIM" {
-                    l.blend.copy_from_slice(&b[8..12]);
+                if let Some(blend) = divider.blend_mode {
+                    l.blend = blend.key();
                 }
             }
             b"TySh" => {
-                let _ver = r.u16()?;
-                let mut t = [0.0; 6];
-                for v in &mut t {
-                    *v = r.f64()?;
-                }
+                let prefix = craft_psd::text::TypeLayerPrefix::from_bytes_with_limits(b, descriptor::PARSE_LIMITS).map_err(descriptor::desc_err)?;
+                let mut t = prefix.transform;
                 // A transform with NaN/inf is unusable: fall back to the identity.
                 if t.iter().any(|v| !v.is_finite()) {
                     t = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
                 }
-                let _text_ver = r.u16()?;
-                let _desc_ver = r.u32()?;
-                let d = descriptor::read_descriptor(&mut r)?;
+                let d = descriptor::from_craft_descriptor(prefix.descriptor);
                 let text = d.text("Txt ").unwrap_or_default().replace("\r\n", "\n").replace('\r', "\n");
                 let text = text.strip_suffix('\n').map(str::to_string).unwrap_or(text);
                 let style = d.raw("EngineData").map(|e| engine_data::text_style(&engine_data::parse_lossy(e))).unwrap_or_default();

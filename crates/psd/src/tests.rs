@@ -6,7 +6,9 @@ mod fixed_adjustments;
 mod integration;
 mod opt;
 mod scalar_blocks;
+mod section_divider;
 mod shared_corpus;
+mod tysh_prefix;
 mod unicode_name;
 mod vector_records;
 
