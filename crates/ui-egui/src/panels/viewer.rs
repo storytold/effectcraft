@@ -1231,7 +1231,7 @@ fn phase_dragstart(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, 
         let press = ui.input(|i| i.pointer.press_origin()).unwrap_or(pos);
         let tool = if space_pan { Tool::Hand } else { app.ui.tool };
         let g = match tool {
-            Tool::Hand => Some(Gesture::Pan { start_pan: app.ui.viewer.pan }),
+            Tool::Hand => Some(Gesture::Pan { start_pan: app.ui.viewer.pan, press }),
             // Region of Interest armed: the drag draws it.
             _ if app.ui.viewer.roi_draw => Some(Gesture::Overlay(ov::Drag::Roi { start: map.to_comp(press), keep: [None, None] })),
             // A region of interest handle: resize it from the opposite corner / edge.
@@ -1517,17 +1517,17 @@ fn phase_drag(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, resp:
         let cpt = map.to_comp(pos);
         let merge = drag_merge_key(ui);
         match g {
-            Gesture::Pan { start_pan } => {
-                // No total drag on the release frame: keep the pan reached so far (it used to
-                // snap back to where the drag began).
-                if let Some(d) = resp.total_drag_delta() {
+            Gesture::Pan { start_pan, press } => {
+                // egui has no total drag on the release frame, so use the pointer's final position:
+                // the last movement still applies, and a frame with no movement keeps the pan.
+                if let Some(d) = resp.total_drag_delta().or_else(|| resp.drag_stopped().then(|| pos - press)) {
                     app.ui.viewer.pan = [start_pan[0] + d.x, start_pan[1] + d.y];
                 }
             }
             Gesture::Zoom { start_zoom, press, cpt } => {
                 // Dragging right zooms in, left zooms out, keeping the press point fixed.
-                // No total drag on the release frame: keep the zoom reached so far.
-                if let Some(d) = resp.total_drag_delta() {
+                // Release frame: egui has no total drag, so use the pointer's final position.
+                if let Some(d) = resp.total_drag_delta().or_else(|| resp.drag_stopped().then(|| pos - press)) {
                     let nz = (start_zoom * 2f32.powf(d.x / 150.0)).clamp(0.01, 32.0);
                     set_zoom_about(app, v.area, v.cw, v.ch, press, cpt, nz);
                 }
