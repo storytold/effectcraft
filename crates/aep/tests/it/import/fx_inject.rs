@@ -35,6 +35,11 @@ pub enum Default {
     Point(f64, f64),
     /// ARGB 0..255.
     Color([u8; 4]),
+    /// A float slider whose two default slots differ (byte 56, byte 120), as in a pseudo effect
+    /// saved from a preset.
+    TwoNumbers(f64, f64),
+    /// A colour whose two default slots differ (byte 56, byte 60).
+    TwoColors([u8; 4], [u8; 4]),
 }
 
 /// The parameter type code `pard` byte 15 holds for `k`.
@@ -69,7 +74,12 @@ pub fn pard(d: &Def) -> Chunk<'static> {
     b[15] = kind_code(d.kind);
     b[16..16 + d.name.len()].copy_from_slice(d.name.as_bytes());
     match (d.kind, d.default) {
-        (ParamKind::FloatSlider, Default::Number(v)) => b[56..64].copy_from_slice(&v.to_be_bytes()),
+        // The definition holds the default twice, as After Effects writes it: a double at 56 and
+        // a float at 120 (a colour at 56 and 60).
+        (ParamKind::FloatSlider, Default::Number(v)) => {
+            b[56..64].copy_from_slice(&v.to_be_bytes());
+            b[120..124].copy_from_slice(&(v as f32).to_be_bytes());
+        }
         (ParamKind::FixedSlider | ParamKind::Angle, Default::Number(v)) => b[56..60].copy_from_slice(&fixed(v)),
         (ParamKind::IntSlider | ParamKind::Checkbox, Default::Number(v)) => b[56..60].copy_from_slice(&(v as i32).to_be_bytes()),
         (ParamKind::Popup, Default::Index(i)) => b[56..60].copy_from_slice(&i.to_be_bytes()),
@@ -77,7 +87,18 @@ pub fn pard(d: &Def) -> Chunk<'static> {
             b[56..60].copy_from_slice(&fixed(x));
             b[60..64].copy_from_slice(&fixed(y));
         }
-        (ParamKind::Color, Default::Color(c)) => b[56..60].copy_from_slice(&c),
+        (ParamKind::Color, Default::Color(c)) => {
+            b[56..60].copy_from_slice(&c);
+            b[60..64].copy_from_slice(&c);
+        }
+        (ParamKind::FloatSlider, Default::TwoNumbers(first, second)) => {
+            b[56..64].copy_from_slice(&first.to_be_bytes());
+            b[120..124].copy_from_slice(&(second as f32).to_be_bytes());
+        }
+        (ParamKind::Color, Default::TwoColors(first, second)) => {
+            b[56..60].copy_from_slice(&first);
+            b[60..64].copy_from_slice(&second);
+        }
         _ => {}
     }
     match d.kind {

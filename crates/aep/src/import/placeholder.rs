@@ -198,7 +198,7 @@ fn fill(p: &EffectParam<'_, '_>, prop: &mut Property, kind: Kind, cx: &LayerCtx<
             return;
         }
         // A popup's default slot can hold 0, no item (After Effects' save of a project it opened).
-        (None, _) => match p.pard_default() {
+        (None, _) => match definition_default(p).or_else(|| p.pard_default()) {
             Some(ParamValue::Index(0)) => {
                 col.lose(LossCategory::Effects, format!("{here}: parameter {label}: the default item is not stored, the first item used"));
                 return;
@@ -214,5 +214,25 @@ fn fill(p: &EffectParam<'_, '_>, prop: &mut Property, kind: Kind, cx: &LayerCtx<
             col.lose(LossCategory::Effects, format!("{here}: parameter {label}: item {i} is past the items kept, the first item used"));
         }
         (None, _) => col.lose(LossCategory::DamagedData, format!("{here}: parameter {label} holds a value that is not valid ({value:?})")),
+    }
+}
+
+/// The default a float slider or a colour falls back to without a value record. Their `pard`
+/// holds two values: byte 56 (what [`EffectParam::pard_default`] reads) and a second one, a float
+/// at byte 120 for a float slider and an ARGB colour at byte 60. In a pseudo effect saved from a
+/// preset the two can differ, and After Effects 26.5 shows the second for an instance without
+/// records. In a fresh effect's definitions (Slider Control, Color Control) the two are equal.
+fn definition_default(p: &EffectParam<'_, '_>) -> Option<ParamValue> {
+    let b = p.pard();
+    match p.kind {
+        ParamKind::FloatSlider => {
+            let v = f32::from_be_bytes(b.get(120..124)?.try_into().ok()?);
+            v.is_finite().then(|| ParamValue::Number(f64::from(v)))
+        }
+        ParamKind::Color => {
+            let c: [u8; 4] = b.get(60..64)?.try_into().ok()?;
+            Some(ParamValue::Argb(c.map(|x| f64::from(x) / 255.0)))
+        }
+        _ => None,
     }
 }
