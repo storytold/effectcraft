@@ -285,6 +285,20 @@ pub fn upgrade_instance(spec: &EffectSpec, g: &mut PropGroup, ids: &mut Ids, lay
         pr.keys.clear();
         pr.ui = ParamUi::Layer;
     }
+    // Polar Coordinates version 1 (saved without a Version) ran the other item's conversion
+    // (#3708). Its choice moves to the item that names what it did, so it renders as saved.
+    if spec.id == "ec.distort.polar"
+        && g.get("version").is_none()
+        && let Some(pr) = g.get_mut("conversion")
+    {
+        let other = |v: &mut Value| {
+            if let Value::Enum(i @ 0..=1) = v {
+                *i = 1 - *i;
+            }
+        };
+        other(&mut pr.value);
+        pr.keys.iter_mut().for_each(|k| other(&mut k.value));
+    }
     for ps in &spec.params {
         // Locate the stored property: at its spec path, under an old id, or at top level
         // before it moved into a twirl-down group.
@@ -863,6 +877,31 @@ not a stroke",
         let before = twirl.clone();
         to_effect_space(spec, &mut twirl, SIZE, [0.0; 2], &|_| [0.0; 2]);
         assert_eq!(twirl, before);
+    }
+
+    /// #3708: Polar Coordinates' two conversions were swapped. An instance saved before the fix
+    /// (it has no Version) keeps its picture: its choice, and each keyframe's, moves to the other
+    /// item. An instance that has a Version is left alone, so opening twice changes nothing more.
+    #[test]
+    fn polar_coordinates_saved_before_its_version_keeps_its_conversion() {
+        for saved in [0u32, 1] {
+            let mut next = 1;
+            let (spec, mut g) = instance("ec.distort.polar", &mut next);
+            assert_eq!(g.get("conversion").unwrap().value, Value::Enum(0));
+            assert!(!upgrade_instance(spec, &mut g, &mut Ids(&mut next), SIZE), "a fresh instance is current");
+            take_prop(&mut g, "version");
+            let pr = g.get_mut("conversion").unwrap();
+            pr.value = Value::Enum(saved);
+            pr.keys = [saved, 1 - saved].map(|v| effectcraft_keyframe::Keyframe::new(Default::default(), Value::Enum(v))).to_vec();
+            assert!(upgrade_instance(spec, &mut g, &mut Ids(&mut next), SIZE));
+            let pr = g.get("conversion").unwrap();
+            assert_eq!(pr.value, Value::Enum(1 - saved));
+            assert_eq!(pr.keys.iter().map(|k| k.value.clone()).collect::<Vec<_>>(), [Value::Enum(1 - saved), Value::Enum(saved)]);
+            let version = g.get("version").expect("added on upgrade");
+            assert_eq!((&version.value, &version.ui), (&Value::Scalar(2.0), &ParamUi::Hidden));
+            assert!(!upgrade_instance(spec, &mut g, &mut Ids(&mut next), SIZE), "the second open changes nothing");
+            assert_eq!(g.get("conversion").unwrap().value, Value::Enum(1 - saved));
+        }
     }
 
     #[test]

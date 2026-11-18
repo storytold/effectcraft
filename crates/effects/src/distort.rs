@@ -237,9 +237,12 @@ fn offset(ctx: &EffectCtx, mut b: Buf) -> Buf {
     b
 }
 
+/// Polar Coordinates' Type of Conversion value for Rect to Polar, the popup's first item (#3708).
+const POLAR_RECT_TO_POLAR: u32 = 0;
+
 fn polar(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let amt = ctx.params.f("interpolation") / 100.0;
-    let to_polar = ctx.params.e("conversion") == 1;
+    let to_polar = ctx.params.e("conversion") == POLAR_RECT_TO_POLAR;
     let (w, h) = (b.img.width as f64, b.img.height as f64);
     let (cx, cy) = (w / 2.0, h / 2.0);
     let rmax = cx.min(cy);
@@ -495,7 +498,10 @@ pub fn specs() -> Vec<EffectSpec> {
             "Polar Coordinates",
             vec![
                 p("interpolation", "Interpolation", num(0.0), slider(0.0, 100.0, 0.0, 100.0, 1)),
-                p("conversion", "Type of Conversion", Value::Enum(0), popup(&["Rect to Polar", "Polar to Rect"])),
+                p("conversion", "Type of Conversion", Value::Enum(POLAR_RECT_TO_POLAR), popup(&["Rect to Polar", "Polar to Rect"])),
+                // Version 1 ran the other item's conversion; `migrate::upgrade_instance` switches
+                // the choice of an instance saved without a Version, so it keeps its picture (#3708).
+                p("version", "Version", num(2.0), ParamUi::Hidden),
             ],
             polar,
         ),
@@ -635,6 +641,38 @@ mod tests {
         let o = run("ec.distort.twirl", &[("angle", num(90.0)), ("radius", num(50.0))], im.clone());
         assert!(differs(o.img.get(50, 10), im.get(50, 10)));
         assert_eq!(o.img.get(0, 0), im.get(0, 0));
+    }
+
+    /// #3708: Rect to Polar (the first item and the default) bends a horizontal line into a
+    /// circle around the centre; Polar to Rect straightens that circle back into a line.
+    #[test]
+    fn polar_rect_to_polar_bends_a_horizontal_line_into_a_circle() {
+        let lit = |o: &Buf| -> Vec<(f64, f64)> {
+            let (w, h) = (o.img.width as i64, o.img.height as i64);
+            (0..h).flat_map(|y| (0..w).map(move |x| (x, y))).filter(|&(x, y)| o.img.get(x, y)[0] > 0.5).map(|(x, y)| (x as f64 + 0.5, y as f64 + 0.5)).collect()
+        };
+        // A white line 4 px thick, a quarter of the way down a 64 × 64 layer.
+        let line = crate::util::gen_image(64, 64, |_, y| if (14..18).contains(&y) { [1.0; 4] } else { [0.0, 0.0, 0.0, 1.0] });
+        let full = ("interpolation", num(100.0));
+        for set in [vec![full.clone()], vec![full.clone(), ("conversion", Value::Enum(0))]] {
+            let o = run("ec.distort.polar", &set, line.clone());
+            let px = lit(&o);
+            assert!(px.len() > 200, "{} lit pixels", px.len());
+            // Rows 14 to 18 of 64 lie 0.72 to 0.78 of the way out, of a radius of 32 px.
+            for (x, y) in &px {
+                let r = (x - 32.0).hypot(y - 32.0);
+                assert!((21.5..26.5).contains(&r), "({x}, {y}) is {r} px from the centre");
+            }
+            // The circle is whole: lit pixels left, right, above and below the centre.
+            for (dx, dy) in [(-24.0, 0.0), (24.0, 0.0), (0.0, -24.0), (0.0, 24.0)] {
+                assert!(px.iter().any(|(x, y)| (x - 32.0 - dx).abs() < 2.0 && (y - 32.0 - dy).abs() < 2.0), "no pixel near ({dx}, {dy})");
+            }
+            // Polar to Rect undoes it: the lit pixels are back in the line's rows.
+            let back = run("ec.distort.polar", &[full.clone(), ("conversion", Value::Enum(1))], o.img);
+            let px = lit(&back);
+            assert!(px.len() > 150, "{} lit pixels", px.len());
+            assert!(px.iter().all(|(_, y)| (12.0..20.0).contains(y)), "rows {:?}", px.iter().map(|p| p.1 as i64).collect::<std::collections::BTreeSet<_>>());
+        }
     }
 
     #[test]
