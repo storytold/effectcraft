@@ -627,11 +627,11 @@ fn fxs_motiontile(@builtin(global_invocation_id) gid: vec3<u32>) {
     var j = iyr;
     var fy = fyr;
     if (P.u[0].y != 0u) {
-        let t = fxc + phase * iyr;
+        let t = fxc - phase * f32(fxs_rem2(i32(iyr)));
         i = ixc + floor(t);
         fx = t - floor(t);
     } else {
-        let t = fyr + phase * ixc;
+        let t = fyr - phase * f32(fxs_rem2(i32(ixc)));
         j = iyr + floor(t);
         fy = t - floor(t);
     }
