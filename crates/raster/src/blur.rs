@@ -153,8 +153,11 @@ fn box_passes(img: &Image, rx: &[usize], ry: &[usize], repeat: bool) -> Image {
     a
 }
 
-/// Above this sigma (pixels) [`box_radii`] gives this sigma's radii: boxes far wider than any
-/// buffer ([`crate::MAX_PADDED_SIDE`]), and the `i64` arithmetic below overflows near 9e8.
+/// Above this sigma (pixels) [`box_radii`] gives this sigma's radii: a numerical cap, since the
+/// `i64` arithmetic below overflows near 9e8. It isn't pixel-exact: with transparent edges each
+/// pass still divides by `2r + 1`, so a larger sigma would come out fainter. But boxes this wide
+/// dwarf any buffer ([`crate::MAX_PADDED_SIDE`]): each pass keeps at most 30 001 / (2e8 + 1) of
+/// a line, so three passes leave under 4e-12 of it either way.
 const MAX_BOX_SIGMA: f64 = 1e8;
 
 /// Box radii for `n` passes approximating a Gaussian of `sigma` (Kovesi / "boxes for Gauss").
