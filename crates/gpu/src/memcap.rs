@@ -12,8 +12,9 @@
 //! wgpu has no safe query for the adapter's memory size (`max_buffer_size` is capped at `i32::MAX`
 //! on Direct3D 12 and Linux/Mesa Vulkan), so the default cap is conservative per device type,
 //! and lower on a discrete card whose memory the OS reports without `unsafe` (Linux's amdgpu
-//! driver, in sysfs, and the display class key of the registry on Windows: a 2–4 GB card ran
-//! out of memory and took the system down, #1487);
+//! driver, in sysfs, the display class key of the registry on Windows, and for NVIDIA cards
+//! neither reports the driver's `nvidia-smi`: a 2–4 GB card ran out of memory and took the
+//! system down, #1487);
 //! `EFFECTCRAFT_GPU_MEMCAP_MB` overrides it (0 = off). Backends without an allocator report
 //! (Metal, WebGPU, GL) are never gated.
 //!
@@ -261,8 +262,13 @@ fn default_cap(t: wgpu::DeviceType, vram: Option<u64>) -> u64 {
     }
 }
 
+/// The PCI vendor id of NVIDIA.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+const NVIDIA: u32 = 0x10de;
+
 /// The adapter's dedicated memory in bytes, where the OS reports it without `unsafe`: Linux's
-/// amdgpu driver in sysfs, the display class key of the registry on Windows.
+/// amdgpu driver in sysfs, the display class key of the registry on Windows, and for an NVIDIA
+/// card neither reports (the proprietary Linux driver has no sysfs file) the driver's `nvidia-smi`.
 fn vram(info: &wgpu::AdapterInfo) -> Option<u64> {
     if info.device_type != wgpu::DeviceType::DiscreteGpu {
         return None;
@@ -273,6 +279,12 @@ fn vram(info: &wgpu::AdapterInfo) -> Option<u64> {
     let (bytes, source) = (vram_in_registry(info.vendor, info.device), "registry");
     #[cfg(not(any(target_os = "linux", windows)))]
     let (bytes, source) = (None::<u64>, "");
+    #[cfg(not(target_arch = "wasm32"))]
+    let (bytes, source) = if bytes.is_none() && info.vendor == NVIDIA {
+        (nvidia_smi_output().and_then(|out| vram_from_nvidia_smi(out, info.device, &info.device_pci_bus_id)), "nvidia-smi")
+    } else {
+        (bytes, source)
+    };
     if let Some(b) = bytes {
         log::info!(target: "effectcraft_gpu", "gpu {}: {} MiB of video memory ({source})", info.name, b >> 20);
     }
@@ -335,6 +347,89 @@ fn vram_in_sysfs(drm: &Path, vendor: u32, device: u32, bus: &str) -> Option<u64>
         .collect();
     let bus = bus.trim().to_ascii_lowercase();
     found.iter().find(|(s, _)| !bus.is_empty() && s.as_deref() == Some(bus.as_str())).map(|&(_, b)| b).or_else(|| found.iter().map(|&(_, b)| b).min())
+}
+
+/// What `nvidia-smi` is asked for: one line per GPU, `bus id, device id, memory in MiB`.
+#[cfg(not(target_arch = "wasm32"))]
+const NVIDIA_SMI_ARGS: [&str; 2] = ["--query-gpu=pci.bus_id,pci.device_id,memory.total", "--format=csv,noheader,nounits"];
+
+/// How long `nvidia-smi` may take. It answers in well under a second, but it can stall on a
+/// driver that is busy or broken, and the context must not wait for that.
+#[cfg(not(target_arch = "wasm32"))]
+const NVIDIA_SMI_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// The output of `nvidia-smi` (see [`NVIDIA_SMI_ARGS`]), run once per process and kept: `None` when
+/// it is missing, fails, or takes too long.
+#[cfg(not(target_arch = "wasm32"))]
+fn nvidia_smi_output() -> Option<&'static str> {
+    static OUTPUT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    OUTPUT.get_or_init(|| run_with_timeout(std::ffi::OsStr::new("nvidia-smi"), &NVIDIA_SMI_ARGS, NVIDIA_SMI_TIMEOUT)).as_deref()
+}
+
+/// Runs `program` with `args` and returns its standard output when it exits successfully within
+/// `timeout`, without a console window on Windows. A program still running at the timeout is
+/// killed and not waited for (a process stuck in the driver may not die at once).
+#[cfg(not(target_arch = "wasm32"))]
+fn run_with_timeout(program: &std::ffi::OsStr, args: &[&str], timeout: Duration) -> Option<String> {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    let mut cmd = Command::new(program);
+    cmd.args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let mut child = cmd.spawn().ok()?;
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => break,
+            Ok(None) if start.elapsed() < timeout => std::thread::sleep(Duration::from_millis(10)),
+            Ok(Some(_)) => return None,
+            _ => {
+                let _ = child.kill();
+                return None;
+            }
+        }
+    }
+    // The output is a few short lines, so the pipe never fills before the program exits.
+    let mut out = String::new();
+    child.stdout.take()?.read_to_string(&mut out).ok()?;
+    Some(out)
+}
+
+/// The memory in bytes of the NVIDIA GPU in `nvidia-smi` output (lines of `bus id, device id,
+/// memory in MiB`, like `00000000:01:00.0, 0x250310DE, 12288`) that is the adapter: the line at
+/// PCI address `bus` (wgpu's `device_pci_bus_id`, `0000:01:00.0`), otherwise the smallest among
+/// the lines of PCI device `device`, otherwise the smallest of all. Smaller is the safe guess, as
+/// the budget and the cap are fractions of it. Lines that do not parse (`[N/A]`, a zero, a size
+/// that overflows) are skipped.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+fn vram_from_nvidia_smi(output: &str, device: u32, bus: &str) -> Option<u64> {
+    // A PCI address as (domain, rest): nvidia-smi writes eight digits of domain, wgpu four.
+    let address = |s: &str| {
+        let s = s.trim().to_ascii_lowercase();
+        let (domain, rest) = s.split_once(':')?;
+        Some((u32::from_str_radix(domain, 16).ok()?, rest.to_string())).filter(|(_, rest)| !rest.is_empty())
+    };
+    let gpus: Vec<(Option<(u32, String)>, Option<u32>, u64)> = output
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split(',');
+            let (addr, id, mib) = (fields.next()?, fields.next()?, fields.next()?);
+            let bytes = mib.trim().parse::<u64>().ok()?.checked_mul(MIB).filter(|&b| b > 0)?;
+            let id = id.trim().to_ascii_lowercase();
+            let pci_device = u32::from_str_radix(id.strip_prefix("0x").unwrap_or(&id), 16).ok().map(|id| id >> 16);
+            Some((address(addr), pci_device, bytes))
+        })
+        .collect();
+    let want = address(bus);
+    if let Some(&(_, _, bytes)) = gpus.iter().find(|(a, _, _)| want.is_some() && *a == want) {
+        return Some(bytes);
+    }
+    gpus.iter().filter(|(_, d, _)| *d == Some(device)).map(|&(_, _, b)| b).min().or_else(|| gpus.iter().map(|&(_, _, b)| b).min())
 }
 
 /// Minimum reclaimable bytes before a wait is worth draining an encoder (1/8 of the cap,
@@ -500,5 +595,68 @@ mod tests {
         assert_eq!(vram_in_sysfs(&dir, 0x1002, 0x699f, ""), Some(2 * GIB), "unknown address: the smaller card");
         assert_eq!(vram_in_sysfs(&dir, 0x1002, 0x699f, "0000:09:00.0"), Some(2 * GIB), "no such address: the smaller card");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #3731: NVIDIA's Linux driver has no sysfs file, so the memory comes from `nvidia-smi`.
+    #[test]
+    fn video_memory_is_read_from_nvidia_smi_output() {
+        let one = "00000000:01:00.0, 0x250310DE, 12288\n";
+        assert_eq!(vram_from_nvidia_smi(one, 0x2503, "0000:01:00.0"), Some(12 * GIB));
+        assert_eq!(vram_from_nvidia_smi(one, 0x2503, ""), Some(12 * GIB), "no address: the device id");
+        assert_eq!(vram_from_nvidia_smi("00000000:01:00.0, 0x250310de, 12288", 0x2503, ""), Some(12 * GIB), "lower case, no newline");
+        // Two cards: the adapter's address wins, then its device id, then the smallest card.
+        let two = "00000000:01:00.0, 0x2B8510DE, 32607\r\n00000000:02:00.0, 0x250310DE, 12288\r\n";
+        assert_eq!(vram_from_nvidia_smi(two, 0x2b85, "0000:01:00.0"), Some(32607 * MIB));
+        assert_eq!(vram_from_nvidia_smi(two, 0x2b85, "0000:02:00.0"), Some(12 * GIB), "the address over the device id");
+        assert_eq!(vram_from_nvidia_smi(two, 0x2b85, ""), Some(32607 * MIB));
+        assert_eq!(vram_from_nvidia_smi(two, 0x2b85, "0000:09:00.0"), Some(32607 * MIB), "no such address: the device id");
+        assert_eq!(vram_from_nvidia_smi(two, 0x1234, ""), Some(12 * GIB), "no such device: the smallest card");
+        let twins = "00000000:01:00.0, 0x250310DE, 12288\n00000000:02:00.0, 0x250310DE, 8192\n";
+        assert_eq!(vram_from_nvidia_smi(twins, 0x2503, ""), Some(8 * GIB), "same device, no address: the smaller one");
+        // Nothing usable: no output, an error text, missing or unknown sizes, overflow.
+        for bad in [
+            "",
+            "\n",
+            "NVIDIA-SMI has failed because it couldn't communicate with the NVIDIA driver.",
+            "00000000:01:00.0, 0x250310DE",
+            "00000000:01:00.0, 0x250310DE, [N/A]",
+            "00000000:01:00.0, 0x250310DE, 0",
+            "00000000:01:00.0, 0x250310DE, -1",
+            "00000000:01:00.0, 0x250310DE, 12288 MiB",
+            "00000000:01:00.0, 0x250310DE, 99999999999999999999",
+            "00000000:01:00.0, 0x250310DE, 18446744073709551615",
+        ] {
+            assert_eq!(vram_from_nvidia_smi(bad, 0x2503, "0000:01:00.0"), None, "{bad:?}");
+        }
+        // A bad line next to a good one leaves the good one.
+        let mixed = "00000000:01:00.0, 0x250310DE, [N/A]\n00000000:02:00.0, garbage, 6144\n";
+        assert_eq!(vram_from_nvidia_smi(mixed, 0x2503, "0000:01:00.0"), Some(6 * GIB));
+    }
+
+    /// Stands in for an `nvidia-smi` that hangs: only run (through `--ignored`) as a child of
+    /// `a_program_that_fails_or_hangs_gives_no_output`.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    #[ignore = "the child process of a_program_that_fails_or_hangs_gives_no_output"]
+    fn stand_in_for_a_hanging_program() {
+        std::thread::sleep(Duration::from_secs(20));
+    }
+
+    /// `nvidia-smi` missing, failing or hanging gives no memory, and never holds the caller long.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_program_that_fails_or_hangs_gives_no_output() {
+        let missing = std::ffi::OsStr::new("effectcraft-no-such-program-3731");
+        assert_eq!(run_with_timeout(missing, &NVIDIA_SMI_ARGS, Duration::from_secs(5)), None);
+        let me = std::env::current_exe().unwrap();
+        // This test binary stands in for the program: listing tests succeeds and prints them,
+        // an unknown flag exits with an error, and the sleeping test outlasts the timeout.
+        let listed = run_with_timeout(me.as_os_str(), &["--list", "--exact", "memcap::tests::stand_in_for_a_hanging_program"], Duration::from_secs(20));
+        assert!(listed.is_some_and(|out| out.contains("stand_in_for_a_hanging_program")));
+        assert_eq!(run_with_timeout(me.as_os_str(), &["--no-such-flag-3731"], Duration::from_secs(20)), None);
+        let start = std::time::Instant::now();
+        let hung = run_with_timeout(me.as_os_str(), &["--exact", "--ignored", "memcap::tests::stand_in_for_a_hanging_program"], Duration::from_millis(500));
+        assert_eq!(hung, None);
+        assert!(start.elapsed() < Duration::from_secs(10), "waited {:?}", start.elapsed());
     }
 }

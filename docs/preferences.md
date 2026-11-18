@@ -98,8 +98,9 @@ Commands (CLI, MCP, control channel):
   job's first GPU frame and fits up to 3 frames into the GPU memory cap (by default a
   conservative 3 GiB on a discrete card, less when its memory is known, 2 GiB on an integrated
   one; `EFFECTCRAFT_GPU_MEMCAP_MB` sets it), keeping room for the upload cache to fill (the
-  textures of uploaded layers: 1.5 GiB, or three eighths of the card's memory where the OS
-  reports it, on Linux with amdgpu and on Windows; the default cap grows with it, never above
+  textures of uploaded layers: 1.5 GiB, or three eighths of the card's memory where it is
+  known: on Linux with amdgpu, on Windows, and on NVIDIA cards through `nvidia-smi`; the
+  default cap grows with it, never above
   three quarters of the card; `EFFECTCRAFT_GPU_UPLOAD_MB` sets it in whole MiB, 0 = default). It
   renders one frame at a time where the memory can't be measured (Metal, WebGPU, GL, or the
   cap turned off) and once frames have had to wait for memory. The render log names the count.
