@@ -572,36 +572,45 @@ pub fn frontend(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, p: Valu
             json!({"revealed": true})
         }
         "timeline.revealProps" => {
-            let props = p.get("props").and_then(Value::as_array).cloned().unwrap_or_default();
-            let uids = |k: &str| -> Vec<u64> { props.iter().filter_map(|x| x.get(k).and_then(Value::as_u64)).collect() };
-            let (found, with_props) = (uids("prop"), uids("layer"));
-            // The layers it looked at (`layers`), else those it found something on. Layers that
-            // have nothing to show close; the others' reveals stay.
-            let targets: Vec<u64> = match p.get("layers").and_then(Value::as_array) {
-                Some(l) => l.iter().filter_map(Value::as_u64).collect(),
-                None => with_props.clone(),
+            use std::collections::{BTreeMap, BTreeSet};
+
+            let modified = p.get("kind").and_then(Value::as_str) == Some("modified");
+            let mut by_layer = BTreeMap::<u64, BTreeSet<u64>>::new();
+            let mut found = vec![];
+            for entry in p.get("props").and_then(Value::as_array).into_iter().flatten() {
+                let prop = entry.get("prop").and_then(Value::as_u64);
+                found.extend(prop);
+                if let Some(layer) = entry.get("layer").and_then(Value::as_u64) {
+                    by_layer.entry(layer).or_default().extend(prop);
+                }
+            }
+            // Layers with no matches close. Layers outside the command's targets keep their picks.
+            let targets: BTreeSet<u64> = match p.get("layers").and_then(Value::as_array) {
+                Some(layers) => layers.iter().filter_map(Value::as_u64).collect(),
+                None => by_layer.keys().copied().collect(),
             };
-            // The targets' earlier picks go (U after UU shows the keyframed ones only).
+            let (shown, hidden): (Vec<u64>, Vec<u64>) = targets.iter().copied().partition(|id| by_layer.contains_key(id));
+            for id in &hidden {
+                by_layer.entry(*id).or_default();
+            }
             let comp = app.session.active_comp_arc();
-            let theirs = |u: u64| {
-                comp.as_ref().is_some_and(|c| {
-                    targets
-                        .iter()
-                        .filter_map(|l| c.layer(effectcraft_engine::project::LayerId(*l)))
-                        .any(|l| l.props.find(u).is_some() || l.props.find_group(u).is_some())
-                })
-            };
             let tl = &mut app.ui.timeline;
-            tl.reveal_props.retain(|u| !theirs(*u));
+            let mut shape_contents = false;
+            for (id, picked) in by_layer {
+                let Some(layer) = comp.as_ref().and_then(|c| c.layer(effectcraft_engine::project::LayerId(id))) else { continue };
+                let previous = targets.contains(&id).then_some(&mut tl.reveal_props);
+                let groups = crate::panels::timeline::reveal_group_paths(layer, modified, previous, |node| picked.contains(&node.uid()));
+                shape_contents |= layer.props.sub("contents").is_some_and(|g| groups.contains(&g.uid));
+                tl.open_groups.extend(groups);
+            }
             tl.reveal_props.extend(found.iter().copied());
-            let (shown, hidden): (Vec<u64>, Vec<u64>) = targets.into_iter().partition(|l| with_props.contains(l));
             tl.apply_reveal(&hidden, vec![]);
             if !shown.is_empty() {
-                tl.apply_reveal(&shown, vec!["props".into()]);
-            }
-            // Properties inside effects (puppet pins…) show under their effect, twirled open.
-            for (layer, prop) in props.iter().filter_map(|x| Some((x.get("layer")?.as_u64()?, x.get("prop")?.as_u64()?))) {
-                crate::panels::timeline::open_effect_paths(app, layer, &[prop]);
+                let mut kinds = vec!["props".into()];
+                if shape_contents {
+                    kinds.push("shapeContents".into());
+                }
+                tl.apply_reveal(&shown, kinds);
             }
             json!({"revealed": found.len()})
         }

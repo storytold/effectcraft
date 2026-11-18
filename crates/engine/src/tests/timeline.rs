@@ -1207,6 +1207,58 @@ fn modified_reveal_shows_changed_effect_parameters_only() {
     assert_eq!(modified(&mut s), ["/effects/ec.blur.gaussian/blurriness"]);
 }
 
+#[test]
+fn modified_shape_contents_reveal_changed_leaves_alongside_layer_position() {
+    let (mut s, _) = setup();
+    let layer = s.execute("layer.newShape", json!({"kind": "rect", "size": [200, 200], "fill": "#ff0000"})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.addShapeItem", json!({"layer": layer, "group": "contents/group", "kind": "rect"})).unwrap();
+    let size = "contents/group/contents/rect#2/size";
+    let color = "contents/group/contents/fill/color";
+    let position = "transform/position";
+    let revealed = |s: &mut Session, kind: &str| -> Vec<String> {
+        let result = s.execute("anim.reveal", json!({"kind": kind})).unwrap();
+        let props = &s.active_comp().unwrap().layer(effectcraft_project::LayerId(layer)).unwrap().props;
+        let mut paths: Vec<_> = result["props"].as_array().unwrap().iter().map(|p| props.match_path_of(p["prop"].as_u64().unwrap()).unwrap()).collect();
+        paths.sort();
+        paths
+    };
+
+    assert!(revealed(&mut s, "modified").is_empty());
+    for (path, value) in [(size, json!([500, 800])), (color, json!("#00ff00")), (position, json!([40, 60]))] {
+        s.execute("prop.set", json!({"layer": layer, "path": path, "value": value})).unwrap();
+    }
+    assert_eq!(revealed(&mut s, "modified"), [color, size, position]);
+    assert!(revealed(&mut s, "keyframes").is_empty());
+
+    s.execute("prop.set", json!({"layer": layer, "path": size, "value": [200, 200]})).unwrap();
+    assert_eq!(revealed(&mut s, "modified"), [color, position]);
+    s.execute("prop.toggleAnimation", json!({"layer": layer, "path": size})).unwrap();
+    assert_eq!(revealed(&mut s, "modified"), [color, size, position]);
+    assert_eq!(revealed(&mut s, "keyframes"), [size]);
+}
+
+#[test]
+fn modified_shape_contents_reveal_user_added_dash_pairs() {
+    let (mut s, _) = setup();
+    let layer = s.execute("layer.newShape", json!({})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.addShapeItem", json!({"layer": layer, "kind": "stroke"})).unwrap();
+    let modified = |s: &mut Session| {
+        let result = s.execute("anim.reveal", json!({"kind": "modified"})).unwrap();
+        let props = &s.active_comp().unwrap().layer(effectcraft_project::LayerId(layer)).unwrap().props;
+        let mut names: Vec<_> = result["props"].as_array().unwrap().iter().map(|p| props.find(p["prop"].as_u64().unwrap()).unwrap().match_id.clone()).collect();
+        names.sort();
+        names
+    };
+    assert!(modified(&mut s).is_empty());
+    for _ in 0..3 {
+        s.execute("shape.dashes.add", json!({"layer": layer})).unwrap();
+    }
+    assert_eq!(modified(&mut s), ["dash", "dash2", "dash3", "gap2", "gap3"]);
+    s.execute("shape.dashes.remove", json!({"layer": layer})).unwrap();
+    s.execute("prop.toggleAnimation", json!({"layer": layer, "path": "contents/stroke/dashes/gap2"})).unwrap();
+    assert_eq!(modified(&mut s), ["dash", "dash2", "gap2"]);
+}
+
 /// Enable Time Remapping on a layer extended past its source's end (its last frame frozen) puts
 /// the end key at the source's end, not at the extended out point (#290).
 #[test]
