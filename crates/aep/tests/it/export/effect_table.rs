@@ -15,6 +15,25 @@ use effectcraft_project::{Node, ParamUi, Project, PropGroup, build};
 const IMPORT_TABLE_EFFECTS: &[&str] =
     &["ec.utility.hdrcompression", "ec.time.echo", "ec.transition.linearwipe", "ec.distort.offset", "ec.color.colorstabilizer"];
 
+/// Effects mapped in both directions from After Effects 26.5 projects (defaults and every parameter
+/// changed).
+const MAPPED_FROM_SAMPLES: &[&str] = &[
+    "ec.distort.bulge",
+    "ec.distort.twirl",
+    "ec.distort.spherize",
+    "ec.stylize.mosaic",
+    "ec.stylize.posterize",
+    "ec.stylize.threshold",
+    "ec.stylize.findedges",
+    "ec.distort.mirror",
+    "ec.color.vibrance",
+];
+
+/// Every effect these tests cover.
+fn covered() -> impl Iterator<Item = &'static &'static str> {
+    IMPORT_TABLE_EFFECTS.iter().chain(MAPPED_FROM_SAMPLES)
+}
+
 /// A value other than `v` for a parameter of `ui` mapped as `conv` / `kind`, inside both
 /// programs' ranges.
 fn changed(v: &Value, ui: &ParamUi, conv: Conv, kind: ParamKind) -> Option<Value> {
@@ -84,7 +103,7 @@ fn close(a: &Value, b: &Value) -> bool {
 
 #[test]
 fn import_table_effects_are_written_and_read_back() {
-    for id in IMPORT_TABLE_EFFECTS {
+    for id in covered() {
         let (p, set) = changed_instance(id);
         let r = export_all(&p);
         assert_eq!(r.report.exported.effects, 1, "{id}: {:?}", r.report.losses);
@@ -107,7 +126,7 @@ fn import_table_effects_are_written_and_read_back() {
 /// starts at Brightness with its own sample points) comes back with the same values.
 #[test]
 fn import_table_effects_at_their_defaults_read_back() {
-    for id in IMPORT_TABLE_EFFECTS {
+    for id in covered() {
         let (mut p, c, _) = simple();
         let spec = effectcraft_effects::find(id).expect("effect");
         let mut next = p.next_id;

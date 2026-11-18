@@ -8,7 +8,8 @@
 //! reader; `effect_map` names the parameters the importer and exporter convert. HDR Highlight
 //! Compression, Echo, Linear Wipe, Offset and Color Stabilizer were listed from a project made by
 //! After Effects 26.5 with each effect at its defaults; they agree with the importer block of
-//! 2026-11-05 (`1100-quickwins.aep`, aep-format.md 3.7).
+//! 2026-11-05 (`1100-quickwins.aep`, aep-format.md 3.7). The rows after them were listed the same
+//! way, and their mapping checked against projects with every parameter changed.
 
 /// The id of the `ADBE Effect Built In Params` entry, the last of every effect.
 pub(crate) const BUILT_IN: u16 = u16::MAX;
@@ -755,6 +756,65 @@ pub(crate) static FX_DEFS: &[FxDef] = &[
         p(3, 6, &[0.5, 0.5], None, None, None, 0x00000000),
         p(4, 6, &[0.8000030517578125, 0.5], None, None, None, 0x00000000),
         p(5, 2, &[3.0], Some((1.0, 5.0)), Some(50.0), Some(1.0), 0x00010000),
+        p(BUILT_IN, 9, &[], None, None, None, 0x00000000),
+    ]),
+    fx("ADBE Bulge", "Bulge", &[
+        p(0, 0, &[], None, None, None, 0x00000000),
+        p(1, 2, &[50.0], Some((0.0, 250.0)), Some(8000.0), Some(0.0), 0x00010000),
+        p(2, 2, &[50.0], Some((0.0, 250.0)), Some(8000.0), Some(0.0), 0x00010000),
+        p(3, 6, &[0.5, 0.5], None, None, None, 0x00000000),
+        p(4, 2, &[1.0], Some((-1.0, 1.0)), Some(4.0), Some(-4.0), 0x00010000),
+        p(5, 2, &[0.0], Some((0.0, 250.0)), Some(8000.0), Some(0.0), 0x00010000),
+        p(6, 7, &[1.0], None, None, None, 0x00000002),
+        p(7, 4, &[0.0], None, None, None, 0x00000000),
+        p(BUILT_IN, 9, &[], None, None, None, 0x00000000),
+    ]),
+    fx("ADBE Twirl", "Twirl (Legacy)", &[
+        p(0, 0, &[], None, None, None, 0x00000000),
+        p(1, 3, &[0.0], None, None, None, 0x00000000),
+        p(2, 2, &[30.0], Some((0.0, 100.0)), Some(100.0), Some(0.0), 0x00010000),
+        p(3, 6, &[0.5, 0.5], None, None, None, 0x00000000),
+        p(BUILT_IN, 9, &[], None, None, None, 0x00000000),
+    ]),
+    fx("ADBE Spherize", "Spherize", &[
+        p(0, 0, &[], None, None, None, 0x00000000),
+        p(1, 2, &[0.0], Some((0.0, 250.0)), Some(2500.0), Some(0.0), 0x00010000),
+        p(2, 6, &[0.5, 0.5], None, None, None, 0x00000000),
+        p(BUILT_IN, 9, &[], None, None, None, 0x00000000),
+    ]),
+    fx("ADBE Mosaic", "Mosaic", &[
+        p(0, 0, &[], None, None, None, 0x00000000),
+        p(1, 1, &[10.0], Some((1.0, 200.0)), Some(4000.0), Some(1.0), 0x00000000),
+        p(2, 1, &[10.0], Some((1.0, 200.0)), Some(4000.0), Some(1.0), 0x00000000),
+        p(3, 4, &[0.0], None, None, None, 0x00000000),
+        p(BUILT_IN, 9, &[], None, None, None, 0x00000000),
+    ]),
+    fx("ADBE Posterize", "Posterize", &[
+        p(0, 0, &[], None, None, None, 0x00000000),
+        p(1, 10, &[7.0], Some((2.0, 32.0)), Some(255.0), Some(2.0), 0x00000000),
+        p(BUILT_IN, 9, &[], None, None, None, 0x00000000),
+    ]),
+    fx("ADBE Threshold2", "Threshold", &[
+        p(0, 0, &[], None, None, None, 0x00000000),
+        p(1, 10, &[0.5], Some((0.0, 1.0)), Some(30000.0), Some(-30000.0), 0x00000002),
+        p(BUILT_IN, 9, &[], None, None, None, 0x00000000),
+    ]),
+    fx("ADBE Find Edges", "Find Edges", &[
+        p(0, 0, &[], None, None, None, 0x00000000),
+        p(1, 4, &[0.0], None, None, None, 0x00000000),
+        p(2, 2, &[0.0], Some((0.0, 1.0)), Some(1.0), Some(0.0), 0x00000001),
+        p(BUILT_IN, 9, &[], None, None, None, 0x00000000),
+    ]),
+    fx("ADBE Mirror", "Mirror", &[
+        p(0, 0, &[], None, None, None, 0x00000000),
+        p(1, 6, &[1.0, 0.5], None, None, None, 0x00000000),
+        p(2, 3, &[0.0], None, None, None, 0x00000000),
+        p(BUILT_IN, 9, &[], None, None, None, 0x00000000),
+    ]),
+    fx("ADBE Vibrance", "Vibrance", &[
+        p(0, 0, &[], None, None, None, 0x00000000),
+        p(1, 10, &[0.0], Some((-100.0, 100.0)), Some(100.0), Some(-100.0), 0x00010000),
+        p(2, 10, &[0.0], Some((-100.0, 100.0)), Some(100.0), Some(-100.0), 0x00010000),
         p(BUILT_IN, 9, &[], None, None, None, 0x00000000),
     ]),
 ];
