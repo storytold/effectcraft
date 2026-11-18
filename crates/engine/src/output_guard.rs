@@ -5,9 +5,12 @@
 //! exporter. Paths are compared by name once resolved ([`key`]): made absolute, `.` and `..`
 //! resolved, one separator, a volume's verbatim prefix dropped, and without case where volumes
 //! ignore it. On Windows a drive letter whose root resolves elsewhere (a mapped network drive, a
-//! `subst` drive) stands for that place where that can matter ([`Drives`]). No file is looked at
-//! (#3328): a link to a source under another name is not recognised, which comparing file
-//! identities did at the cost of opening every footage frame for every check. Checks happen
+//! `subst` drive) stands for that place where that can matter ([`Drives`]). No protected file is
+//! looked at (#3328). An output whose name matches nothing has its folder resolved on disk, once
+//! per folder per guard, so a folder reached through a symbolic link or junction to the footage's
+//! folder is refused ([`Protected::through_link`]). A file-level link to a source, or a source
+//! imported through a link and written through its real folder, is not recognised, which
+//! comparing file identities did at the cost of opening every footage frame for every check. Checks happen
 //! before dispatch; filesystem changes between the check and the write require exporter-side
 //! revalidation.
 //!
@@ -113,6 +116,10 @@ pub(crate) struct Protected {
     /// one place ([`Drives`]).
     #[cfg(windows)]
     drives: Drives,
+    /// The real place of each output folder checked, `None` when it can't be resolved: asked
+    /// once per folder per guard ([`Protected::through_link`]), never for a protected file.
+    #[cfg(not(target_arch = "wasm32"))]
+    real_folders: std::sync::Mutex<HashMap<PathBuf, Option<PathBuf>>>,
 }
 
 /// The files the project reads, checked before a command writes to a path it was given
@@ -168,15 +175,49 @@ impl Protected {
         self.files.is_empty()
     }
 
-    /// The source at this path, compared by name once resolved ([`key`]): no file is looked at.
-    /// On Windows a drive letter is compared as the place its root resolves to where a path on
-    /// another letter or a UNC path could name the same file ([`Drives`]).
+    /// The source at this path, compared by name once resolved ([`key`]); no protected file is
+    /// looked at. On Windows a drive letter is compared as the place its root resolves to where a
+    /// path on another letter or a UNC path could name the same file ([`Drives`]). When the name
+    /// matches nothing, the path's folder is compared as the real place it leads to, for a folder
+    /// reached through a symbolic link or junction ([`Protected::through_link`]).
     pub(crate) fn find(&self, path: &Path) -> Option<&Source> {
-        let key = key(path);
-        let at = self.by_path.get(&key).copied();
-        #[cfg(windows)]
-        let at = at.or_else(|| self.drives.find(&self.by_path, &key));
+        let spelled = key(path);
+        let at = self.at(&spelled);
+        #[cfg(not(target_arch = "wasm32"))]
+        let at = at.or_else(|| self.through_link(path, &spelled));
         at.and_then(|i| self.files.get(i)).map(|(_, source)| source)
+    }
+
+    /// The file with this [`key`], by name (and on Windows by drive root).
+    #[cfg(windows)]
+    fn at(&self, key: &str) -> Option<usize> {
+        self.by_path.get(key).copied().or_else(|| self.drives.find(&self.by_path, key))
+    }
+
+    #[cfg(not(windows))]
+    fn at(&self, key: &str) -> Option<usize> {
+        self.by_path.get(key).copied()
+    }
+
+    /// The file `path` names once its folder is resolved on disk: an output in `render-alias`, a
+    /// symbolic link or junction to the footage's `plates`, replaces the footage when written
+    /// (#3330 review). Only the output's folder is resolved, once per folder per guard (a
+    /// sequence's frames and the numbered default names share it), and compared with the
+    /// protected files by name: no protected file is looked at. A source imported through a
+    /// link and written to through its real folder is not recognised, nor a file-level link.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn through_link(&self, path: &Path, spelled: &str) -> Option<usize> {
+        if self.files.is_empty() {
+            return None;
+        }
+        let lexical = lexical(path);
+        let (folder, name) = (lexical.parent()?, lexical.file_name()?);
+        let real = {
+            let mut known = self.real_folders.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            known.entry(folder.to_path_buf()).or_insert_with(|| std::fs::canonicalize(folder).ok()).clone()
+        }?;
+        let real = key(&real.join(name));
+        if real == spelled { None } else { self.at(&real) }
     }
 }
 
@@ -1319,6 +1360,64 @@ mod tests {
         assert!(error.contains("plates") && error.contains("footage"), "{error}");
     }
 
+    /// Make `alias` a symbolic link to the folder `target`; `false` when it can't be made here.
+    #[cfg(unix)]
+    fn link_folder(target: &Path, alias: &Path) -> bool {
+        std::os::unix::fs::symlink(target, alias).is_ok()
+    }
+
+    /// Make `alias` a symbolic link to the folder `target`, or a directory junction where
+    /// symbolic links need rights the user lacks (junctions need none); `false` when neither can
+    /// be made here.
+    #[cfg(windows)]
+    fn link_folder(target: &Path, alias: &Path) -> bool {
+        std::os::windows::fs::symlink_dir(target, alias).is_ok()
+            || std::process::Command::new("cmd").arg("/C").arg("mklink").arg("/J").arg(alias).arg(target).output().is_ok_and(|o| o.status.success())
+    }
+
+    /// #3330 review: an output in a folder that is a symbolic link or junction to the footage's
+    /// folder names the footage, and the atomic writer would replace the source there. It is
+    /// refused and the source stays as it was; another name there, or a folder that doesn't
+    /// exist, is not refused. A guard resolves the folder once for all its frames.
+    #[test]
+    #[cfg(any(unix, windows))]
+    fn an_output_through_a_linked_folder_is_its_footage() {
+        let root = std::env::temp_dir().join(format!("effectcraft-guard-alias-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let plates = root.join("plates");
+        std::fs::create_dir_all(&plates).unwrap();
+        let alias = root.join("render-alias");
+        if !link_folder(&plates, &alias) {
+            let _ = std::fs::remove_dir_all(&root);
+            eprintln!("skipped: neither a symbolic link nor a junction can be made here");
+            return;
+        }
+        let source = plates.join("source.exr");
+        std::fs::write(&source, b"the footage").unwrap();
+        let mut s = Session::default();
+        let footage = Footage { path: source.to_string_lossy().into_owned(), has_video: true, ..Default::default() };
+        Arc::make_mut(&mut s.project).add_item("plates", crate::color::Label::Aqua, None, ItemKind::Footage(footage));
+        let through = alias.join("source.exr").to_string_lossy().into_owned();
+        let written = s.write_output(&through, b"a render");
+        let refused = s.refuse_export(&through);
+        let blocked = s.output_status(&through);
+        let other = s.refuse_export(&alias.join("other.exr").to_string_lossy());
+        let missing = s.refuse_export(&root.join("none").join("source.exr").to_string_lossy());
+        let guard = s.output_guard();
+        let frames: Vec<bool> = (0..100).map(|i| guard.refuse(&alias.join(format!("f_{i:03}.exr")).to_string_lossy()).is_ok()).collect();
+        let folders = guard.0.real_folders.lock().unwrap().len();
+        let kept = std::fs::read(&source).unwrap();
+        // (the link goes, not what it leads to)
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(written.is_err(), "a write through the linked folder");
+        assert!(refused.is_err(), "a check through the linked folder");
+        assert_eq!(blocked["blocked"], true, "{blocked}");
+        assert_eq!(kept, b"the footage");
+        assert!(other.is_ok() && missing.is_ok());
+        assert!(frames.iter().all(|ok| *ok));
+        assert_eq!(folders, 1, "one folder resolved for all the frames");
+    }
+
     /// The verbatim and plain forms of a network path name one file.
     #[test]
     #[cfg(windows)]
@@ -1329,9 +1428,10 @@ mod tests {
     }
 
     /// #3328: checking an existing output against 13,000 protected frames looks at no frame.
-    /// The guard's only question to the file system is a drive's root ([`drive_root`], Windows):
-    /// counted here, it is asked once, for the output's drive (the frames are on a UNC share),
-    /// over both checks of one guard. Comparing identities opened every frame for every check.
+    /// The guard asks the file system only for the output's folder ([`Protected::through_link`])
+    /// and a drive's root ([`drive_root`], Windows): counted here, the root is asked once, for
+    /// the output's drive (the frames are on a UNC share), over both checks of one guard.
+    /// Comparing identities opened every frame for every check.
     #[test]
     #[cfg(not(target_arch = "wasm32"))]
     fn thirteen_thousand_protected_frames_are_checked_without_looking_at_a_file() {
@@ -1350,8 +1450,8 @@ mod tests {
         let first = guard.refuse(&output_text);
         let second = guard.refuse(&output_text);
         let _ = std::fs::remove_file(&output);
-        // Outside Windows `Protected::find` touches no file system at all (no drive roots to
-        // resolve), so only the Windows run can count lookups; elsewhere the checks must just pass.
+        // Outside Windows there are no drive roots to count (only the output's folder is
+        // resolved), so only the Windows run counts lookups; elsewhere the checks must just pass.
         assert!(first.is_ok() && second.is_ok());
         assert!(guard.refuse(&share.join("f_06500.exr").to_string_lossy()).is_err());
         #[cfg(windows)]
