@@ -56,6 +56,8 @@ fn all_kinds() -> Project {
     add_footage(&mut p, c, "clip.mp4", clip);
     let wav = Footage { kind: FootageKind::Audio, duration: secs(1.5), has_video: false, has_audio: true, ..still(r"C:\media\tone.wav", 0, 0) };
     add_footage(&mut p, c, "tone.wav", wav);
+    let mp3 = Footage { kind: FootageKind::Audio, duration: secs(1.5), has_video: false, has_audio: true, ..still(r"C:\media\sweep.mp3", 0, 0) };
+    add_footage(&mut p, c, "sweep.mp3", mp3);
     add_footage(&mut p, c, "still.tif", still(r"C:\media\still.tif", 64, 48));
     add_footage(&mut p, c, "j_[000-002].jpg", seq(r"C:\media\jpgseq", "j_", 0, 3, 3, ".jpg", FrameRate::new(25, 1)));
     let mov = Footage { kind: FootageKind::Video, frame_rate: FrameRate::new(25, 1), duration: secs(1.0), ..still(r"C:\media\clip.mov", 64, 48) };
@@ -83,14 +85,14 @@ fn every_kind_is_written_with_its_fields() {
     let p = all_kinds();
     let r = export_all(&p);
     assert!(r.report.is_lossless(), "{:?}", r.report.losses);
-    assert_eq!((r.report.exported.footage, r.report.exported.footage_layers), (15, 15));
+    assert_eq!((r.report.exported.footage, r.report.exported.footage_layers), (16, 16));
     let file = parse(&r.bytes).expect("parse");
     assert_eq!(effectcraft_aep::write(&file).expect("write"), r.bytes);
     let view = effectcraft_aep::Project::new(&file).expect("project");
     let items = view.all_items();
     let by_path = |end: &str| items.iter().find(|i| i.footage().and_then(|f| f.path).is_some_and(|p| p.ends_with(end))).copied().expect(end);
     // (path end, tag, w, h, duration num / den, fps, sequence)
-    let want: [(&str, &str, u32, u32, i64, i64, u32, bool); 15] = [
+    let want: [(&str, &str, u32, u32, i64, i64, u32, bool); 16] = [
         (r"\still.png", "png!", 64, 48, 0, 1, 0, false),
         (r"\still.jpg", "ZPEG", 64, 48, 0, 600, 0, false),
         (r"\still.exr", "oEXR", 64, 48, 0, 100, 0, false),
@@ -98,6 +100,7 @@ fn every_kind_is_written_with_its_fields() {
         (r"\test-seq", "png!", 64, 48, 3, 24, 24, true),
         (r"\clip.mp4", "XCEX", 64, 48, 50, 25, 25, false),
         (r"\tone.wav", "WAVE", 0, 0, 72_000, 48_000, 0, false),
+        (r"\sweep.mp3", "MP3A", 0, 0, 72_000, 48_000, 0, false),
         (r"\still.tif", "TIF ", 64, 48, 0, 600, 0, false),
         (r"\jpgseq", "ZPEG", 64, 48, 3, 25, 25, true),
         (r"\clip.mov", "MOoV", 64, 48, 25, 25, 25, false),
@@ -291,7 +294,7 @@ fn what_cannot_be_written_is_reported() {
     gaps.sequence.remove(1);
     add_footage(&mut p, c, "gaps", gaps);
     add_footage(&mut p, c, "nopath", still("", 8, 8));
-    add_footage(&mut p, c, "mp3", Footage { kind: FootageKind::Audio, ..still(r"C:\m\a.mp3", 0, 0) });
+    add_footage(&mut p, c, "ogg", Footage { kind: FootageKind::Audio, ..still(r"C:\m\a.ogg", 0, 0) });
     let r = export_all(&p);
     assert_eq!(r.report.count(LossCategory::FootageItems), 6, "{:?}", r.report.losses);
     assert_eq!(r.report.count(LossCategory::UnsupportedLayers), 6, "{:?}", r.report.losses);
@@ -336,3 +339,4 @@ fn hostile_footage_never_panics() {
     assert_eq!(effectcraft_aep::write(&file).expect("write"), r.bytes);
     let _ = reimport(&r.bytes);
 }
+
