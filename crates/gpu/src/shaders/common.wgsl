@@ -242,6 +242,23 @@ fn powz(x: f32, y: f32) -> f32 {
     return pow(x, y);
 }
 
+// color_fx::levels_curve: unclipped values below 0 mirror the curve, bounded by
+// color_fx::LEVELS_CURVE_LIMIT. WGSL leaves an overflowing pow indeterminate, so a curve past the
+// bound saturates before pow: |t|^(1/g) > 1e30 once log2|t| / g > 99.66; between 1e30 and
+// 2^99.7 the clamp gives the same 1e30.
+// A branch, not select: select evaluates both sides, so pow would still run.
+const LEVELS_CURVE_LIMIT: f32 = 1e30;
+
+fn levels_curve(t: f32, g: f32) -> f32 {
+    if (abs(t) > 1.0 && log2(abs(t)) / g > 99.7) {
+        return sign(t) * LEVELS_CURVE_LIMIT;
+    }
+    if (t >= 0.0) {
+        return min(powz(t, 1.0 / g), LEVELS_CURVE_LIMIT);
+    }
+    return -min(powz(-t, 1.0 / g), LEVELS_CURVE_LIMIT);
+}
+
 // Rust's f32::round (half away from zero; WGSL's round() is half to even). Decided by comparing
 // `x` with `t ± 0.5` (exact for integer `t`) rather than subtracting: drivers may fuse a product
 // that feeds `x - t` into one fma (AMD does), skipping the product's rounding, so `5/6 · 3`,

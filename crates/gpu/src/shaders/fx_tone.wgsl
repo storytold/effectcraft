@@ -20,14 +20,6 @@ fn fxt_rem360(x: f32) -> f32 {
 }
 
 // Levels (Individual Controls) channel `i` (data: 5 × (ib, iw, g, ob, ow, identity)).
-// color_fx::levels_gamma: unclipped values below 0 mirror the curve.
-fn fxt_gamma(t: f32, g: f32) -> f32 {
-    if (t >= 0.0) {
-        return powz(t, 1.0 / g);
-    }
-    return -powz(-t, 1.0 / g);
-}
-
 fn fxt_lv(i: u32, v: f32, clip_b: bool, clip_w: bool) -> f32 {
     let o = i * 6u;
     if (data[o + 5u] != 0.0) {
@@ -40,16 +32,7 @@ fn fxt_lv(i: u32, v: f32, clip_b: bool, clip_w: bool) -> f32 {
     if (clip_w) {
         t = min(t, 1.0);
     }
-    // color2::LEVELS_IC_CURVE_LIMIT keeps the curve finite. WGSL leaves an overflowing pow
-    // indeterminate, so a curve past the bound saturates before pow: |t|^(1/g) > 1e30 once
-    // log2|t| / g > 99.66; between 1e30 and 2^99.7 the clamp gives the same 1e30.
-    // A branch, not select: select evaluates both sides, so pow would still run.
-    let g = max(data[o + 2u], 0.01);
-    var curve = sign(t) * 1e30;
-    if (!(abs(t) > 1.0 && log2(abs(t)) / g > 99.7)) {
-        curve = clamp(fxt_gamma(t, g), -1e30, 1e30);
-    }
-    return data[o + 3u] + (data[o + 4u] - data[o + 3u]) * curve;
+    return data[o + 3u] + (data[o + 4u] - data[o + 3u]) * levels_curve(t, max(data[o + 2u], 0.01));
 }
 
 // color_fx::level (data offset o: ib, iw, g, ob, ow, clip black, clip white).
@@ -61,7 +44,7 @@ fn fxt_level(o: u32, v: f32) -> f32 {
     if (data[o + 6u] != 0.0) {
         t = min(t, 1.0);
     }
-    return data[o + 3u] + (data[o + 4u] - data[o + 3u]) * fxt_gamma(t, data[o + 2u]);
+    return data[o + 3u] + (data[o + 4u] - data[o + 3u]) * levels_curve(t, data[o + 2u]);
 }
 
 fn fxt_level_ident(o: u32) -> bool {

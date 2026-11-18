@@ -756,13 +756,7 @@ fn pointwise(@builtin(global_invocation_id) gid: vec3<u32>) {
                     if (P.u[0].z != 0u) {
                         t = min(t, 1.0);
                     }
-                    // color_fx::levels_gamma: unclipped values below 0 mirror the curve.
-                    if (t >= 0.0) {
-                        t = powz(t, 1.0 / g);
-                    } else {
-                        t = -powz(-t, 1.0 / g);
-                    }
-                    o[i] = ob + (ow - ob) * t;
+                    o[i] = ob + (ow - ob) * levels_curve(t, g);
                 }
                 px = vec4<f32>(o * a, a);
             }

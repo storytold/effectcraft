@@ -252,17 +252,9 @@ impl Lv {
         if clip_w {
             t = t.min(1.0);
         }
-        let curve = crate::color_fx::levels_gamma(t, self.g.max(0.01)).clamp(-LEVELS_IC_CURVE_LIMIT, LEVELS_IC_CURVE_LIMIT);
-        self.ob + (self.ow - self.ob) * curve
+        self.ob + (self.ow - self.ob) * crate::color_fx::levels_curve(t, self.g.max(0.01))
     }
 }
-
-/// How far Levels (Individual Controls)' curve may reach: with gamma down to 0 (rendered as 0.01,
-/// an exponent of 100) an HDR value a few times Input White overflows `f32`, and an infinite curve
-/// times an empty output range is NaN. 1e30 times the widest output range (2e4) is still finite
-/// (`f32::MAX` is 3.4e38), and every curve that was finite before stays as it was below it. The
-/// GPU (`fxt_lv`) uses the same.
-const LEVELS_IC_CURVE_LIMIT: f32 = 1e30;
 
 fn levels_ic(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let lv = LV_IDS.map(|ids| Lv {
