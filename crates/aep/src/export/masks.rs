@@ -613,9 +613,11 @@ pub(crate) fn build_shap(proto: &Chunk<'static>, s: &ShapePlan) -> R<Chunk<'stat
     let vertices = u32::try_from(records / 3).map_err(|_| tpl("too many vertices"))?;
     {
         // Point lists: word 2 the record count, words 3 and 7 the vertex count and four times it
-        // (090: 12 records, 4 and 16; 233: 9 records, 3 and 12), word 4 the record size 8.
+        // (090: 12 records, 4 and 16; 233: 9 records, 3 and 12), word 4 the record size 8, word 5
+        // always 4 (After Effects 2026 writes 4 for 1 to 40 vertices, and refuses a project with a
+        // 2-point path whose word 5 is 2 as damaged: "Invalid read length").
         let lhd3 = child_data(list, b"lhd3")?;
-        crate::export::synth::put_counts(lhd3, u32::try_from(records).map_err(|_| tpl("too many points"))?, vertices, 8, vertices, vertices.saturating_mul(4))?;
+        crate::export::synth::put_counts(lhd3, u32::try_from(records).map_err(|_| tpl("too many points"))?, vertices, 8, 4, vertices.saturating_mul(4))?;
     }
     let mut ldat = vec![0u8; records.saturating_mul(8)];
     for (i, [u, v]) in s.points.iter().enumerate() {

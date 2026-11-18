@@ -394,6 +394,101 @@ fn shape_layers_are_written_with_their_items() {
     });
 }
 
+/// The `lhd3` of every path point list (`LIST shap` / `LIST list`) below `c`.
+fn path_list_headers(c: effectcraft_aep::container::Node<'_, '_>, out: &mut Vec<Vec<u8>>) {
+    if c.is_list(b"shap")
+        && let Some(h) = c.child_list(b"list").and_then(|l| l.child(b"lhd3")).and_then(|h| h.bytes())
+    {
+        out.push(h.to_vec());
+    }
+    for k in c.children() {
+        path_list_headers(k, out);
+    }
+}
+
+#[test]
+fn a_path_list_header_has_word_5_as_after_effects_writes_it() {
+    // After Effects 2026 writes word 5 of a path's point list header as 4 whatever the vertex
+    // count (open and closed paths of 1, 2, 3, 5, 8, 13 and 40 vertices, masks of 2, 5 and 13).
+    // With the vertex count there, a 2-point line made After Effects 2026 refuse the whole
+    // project as damaged ("Invalid read length").
+    use effectcraft_keyframe::ShapePath;
+    use effectcraft_project::build;
+    for n in [1usize, 2, 3, 5, 13] {
+        let mut p = Project::default();
+        let c = add_comp(&mut p, "C", 640, 360, FrameRate::new(25, 1), 1.0, None);
+        add_layer(&mut p, c, "S", LayerSource::Shape, (640, 360));
+        let mut next = p.next_id;
+        {
+            let mut ids = build::Ids(&mut next);
+            let path = build::shape_path(
+                &mut ids,
+                ShapePath {
+                    vertices: (0..n).map(|i| [i as f64 * 100.0, (i % 2) as f64 * 50.0]).collect(),
+                    in_tangents: vec![[0.0, 0.0]; n],
+                    out_tangents: vec![[0.0, 0.0]; n],
+                    closed: false,
+                    feather: Vec::new(),
+                },
+            );
+            let stroke = build::shape_stroke(&mut ids, [1.0, 0.0, 0.0, 1.0], 4.0);
+            let g = build::shape_group(&mut ids, "Group 1", vec![path, stroke]);
+            with_layer(&mut p, c, 0, |l| {
+                l.props.sub_mut("contents").expect("contents").children = vec![g.into()];
+            });
+        }
+        p.next_id = next;
+        let r = export_all(&p);
+        let mut headers = Vec::new();
+        first_comp_layers(&r.bytes, |l| path_list_headers(l.chunk(), &mut headers));
+        assert_eq!(headers.len(), 1, "{n} vertices");
+        let h = &headers[0];
+        assert_eq!(u32_at(h, 8), 3 * n as u32, "{n} vertices: record count");
+        assert_eq!(u32_at(h, 20), 4, "{n} vertices: word 5");
+    }
+}
+
+/// The `lhd3` of the keyframe list of the first property record named `name`.
+fn key_list_header(bytes: &[u8], name: &str) -> Option<Vec<u8>> {
+    use effectcraft_aep::{Body, Chunk};
+    fn walk(cs: &[Chunk<'_>], name: &str) -> Option<Vec<u8>> {
+        for (i, c) in cs.iter().enumerate() {
+            if c.is(b"tdmn")
+                && matches!(&c.body, Body::Data(d) if d.split(|x| *x == 0).next() == Some(name.as_bytes()))
+                && let Some(h) = cs.get(i + 1).and_then(|t| t.child_list(b"list")).and_then(|l| l.child(b"lhd3")).and_then(|h| h.bytes())
+            {
+                return Some(h.to_vec());
+            }
+            if let Some(r) = walk(c.children(), name) {
+                return Some(r);
+            }
+        }
+        None
+    }
+    walk(&parse(bytes).expect("parse").chunks, name)
+}
+
+#[test]
+fn a_key_list_header_has_word_5_as_after_effects_writes_it() {
+    // After Effects 2026 writes word 5 of a keyframe list header as 4 for 1 to 17 keys (Position
+    // keys: 5 keys 5/2/128/4/1/8, 9 keys 9/3/128/4/1/12, 17 keys 17/5/128/4/1/20), not the
+    // capacity.
+    use effectcraft_keyframe::Value;
+    for n in [1usize, 4, 5, 9, 17] {
+        let (mut p, c, _) = simple();
+        with_layer(&mut p, c, 0, |l| {
+            l.transform_mut().expect("tr").get_mut("opacity").expect("o").keys =
+                (0..n).map(|i| key(i as f64 * 0.2, Value::Scalar(if i % 2 == 0 { 0.0 } else { 100.0 }))).collect();
+        });
+        let r = export_all(&p);
+        let h = key_list_header(&r.bytes, "ADBE Opacity").expect("key list");
+        assert_eq!(u32_at(&h, 8), n as u32, "{n} keys: count");
+        assert_eq!(u32_at(&h, 12), n.div_ceil(4) as u32, "{n} keys: word 3");
+        assert_eq!(u32_at(&h, 20), 4, "{n} keys: word 5");
+        assert_eq!(u32_at(&h, 28), (n.div_ceil(4) * 4) as u32, "{n} keys: word 7");
+    }
+}
+
 #[test]
 fn hostile_objects_never_panic() {
     use effectcraft_keyframe::Value;
