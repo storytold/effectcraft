@@ -453,17 +453,21 @@ fn classic3d(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     for (var k = 0u; k < nf; k++) {
         let pl = planes[fi[k]];
-        var op = pl.mat1.z;
-        if ((pl.ints.z & 2u) != 0u) {
-            op *= d.w;
-        }
-        let s = fp[k] * op;
+        let s = fp[k] * pl.mat1.z;
         let mode = pl.ints.w;
         var n = 0.5;
         if (mode == 1u || mode == 2u) {
             n = hash_noise(u32(x), u32(y), pl.ints3.y);
         }
-        d = blend_pixel(mode, d, s, n);
+        if ((pl.ints.z & 2u) != 0u) {
+            // Preserve Transparency: blend onto the opaque colour below, keep the alpha below
+            // (`effectcraft_color::blend_pixel_preserve`).
+            if (d.w > 0.0) {
+                d = blend_pixel(mode, vec4<f32>(d.xyz / d.w, 1.0), s, n) * d.w;
+            }
+        } else {
+            d = blend_pixel(mode, d, s, n);
+        }
     }
     textureStore(out, pix, d);
 }

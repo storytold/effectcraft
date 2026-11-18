@@ -492,9 +492,12 @@ fn composite_iso_with(
 ) -> Option<()> {
     iso = track_matte(e, r, ctx, layer, iso, matte_img)?;
     if layer.preserve_transparency {
-        iso = ops::preserve(e, &iso, canvas);
+        let base = ops::opaque(e, canvas);
+        let blended = ops::blend_full(e, &base, &iso, layer.blend_mode, opacity, layer.id.0 as u32, levels);
+        *canvas = ops::preserve(e, &blended, canvas);
+    } else {
+        *canvas = ops::blend_full(e, canvas, &iso, layer.blend_mode, opacity, layer.id.0 as u32, levels);
     }
-    *canvas = ops::blend_full(e, canvas, &iso, layer.blend_mode, opacity, layer.id.0 as u32, levels);
     Some(())
 }
 

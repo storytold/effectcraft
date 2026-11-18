@@ -11,6 +11,7 @@ const ENTRIES: &[&str] = &[
     "warp_blend",
     "blend_full",
     "matte",
+    "opaque",
     "preserve",
     "knockout",
     "channel_mix",

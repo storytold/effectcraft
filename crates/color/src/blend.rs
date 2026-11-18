@@ -368,6 +368,21 @@ fn non_separable(mode: BlendMode, cb: [f32; 3], cs: [f32; 3]) -> [f32; 3] {
     }
 }
 
+/// Composite `src` onto `dst` with Preserve Underlying Transparency: the layer is blended
+/// onto the colour below as if that were opaque, and the result keeps the alpha below (After
+/// Effects 2026: an opaque layer over a 30 % background comes out in the layer's colour at
+/// 30 %). Where nothing lies below, `dst` stays as it is. `src` must already include layer
+/// opacity, as for [`blend_pixel`].
+#[inline]
+pub fn blend_pixel_preserve(mode: BlendMode, dst: [f32; 4], src: [f32; 4], noise: f32) -> [f32; 4] {
+    let a = dst[3];
+    if a.is_nan() || a <= 0.0 {
+        return dst;
+    }
+    let r = blend_pixel(mode, [dst[0] / a, dst[1] / a, dst[2] / a, 1.0], src, noise);
+    [r[0] * a, r[1] * a, r[2] * a, r[3] * a]
+}
+
 /// Composite one premultiplied source pixel over a premultiplied destination pixel.
 ///
 /// `src` must already include layer opacity. `noise` (0..1) is a per-pixel random value used by
@@ -534,5 +549,22 @@ mod tests {
             assert_eq!(BlendMode::from_name(m.label()), Some(m));
         }
         assert_eq!(BlendMode::from_name("soft-light"), Some(BlendMode::SoftLight));
+    }
+}
+
+#[cfg(test)]
+mod preserve_tests {
+    use super::*;
+
+    #[test]
+    fn preserve_keeps_the_alpha_below() {
+        // Opaque red over blue at 30 %: red at 30 %.
+        let r = blend_pixel_preserve(BlendMode::Normal, [0.0, 0.0, 0.3, 0.3], [1.0, 0.0, 0.0, 1.0], 0.5);
+        assert!(r.iter().zip([0.3, 0.0, 0.0, 0.3]).all(|(a, b)| (a - b).abs() < 1e-6), "{r:?}");
+        // Nothing below: unchanged.
+        assert_eq!(blend_pixel_preserve(BlendMode::Normal, [0.0; 4], [1.0, 0.0, 0.0, 1.0], 0.5), [0.0; 4]);
+        // Multiply onto white at 50 %: the layer's colour at 50 %.
+        let r = blend_pixel_preserve(BlendMode::Multiply, [0.5, 0.5, 0.5, 0.5], [0.2, 0.4, 0.6, 1.0], 0.5);
+        assert!(r.iter().zip([0.1, 0.2, 0.3, 0.5]).all(|(a, b)| (a - b).abs() < 1e-6), "{r:?}");
     }
 }

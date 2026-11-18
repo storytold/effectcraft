@@ -123,7 +123,26 @@ fn matte(@builtin(global_invocation_id) gid: vec3<u32>) {
     textureStore(out, p, textureLoad(src, p, 0) * k);
 }
 
-// Preserve Transparency: `src` × alpha of `aux`.
+// Preserve Transparency, step 1: `src` made opaque (straight colour, alpha 1); a transparent
+// pixel becomes opaque black (step 2 leaves it alone).
+@compute @workgroup_size(16, 16)
+fn opaque(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let dims = out_dims();
+    let p = vec2<i32>(gid.xy);
+    if (p.x >= dims.x || p.y >= dims.y) {
+        return;
+    }
+    let s = textureLoad(src, p, 0);
+    var o = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    if (s.w > 0.0) {
+        o = vec4<f32>(s.xyz / s.w, 1.0);
+    }
+    textureStore(out, p, o);
+}
+
+// Preserve Transparency, step 2: the layer blended onto the opaque colour below (`src`) × the
+// alpha below (`aux`); where `aux` is transparent it stays as it is
+// (`effectcraft_color::blend_pixel_preserve`).
 @compute @workgroup_size(16, 16)
 fn preserve(@builtin(global_invocation_id) gid: vec3<u32>) {
     let dims = out_dims();
@@ -131,7 +150,12 @@ fn preserve(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (p.x >= dims.x || p.y >= dims.y) {
         return;
     }
-    textureStore(out, p, textureLoad(src, p, 0) * textureLoad(aux, p, 0).w);
+    let below = textureLoad(aux, p, 0);
+    var o = below;
+    if (below.w > 0.0) {
+        o = textureLoad(src, p, 0) * below.w;
+    }
+    textureStore(out, p, o);
 }
 
 // Knockout: `src` × (1 − alpha of `aux`).

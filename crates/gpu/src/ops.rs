@@ -117,10 +117,19 @@ pub fn matte(e: &mut Enc, iso: &GpuImage, matte: &GpuImage, kind: MatteKind) -> 
     out
 }
 
-/// Preserve Transparency: multiply by the alpha below.
-pub fn preserve(e: &mut Enc, iso: &GpuImage, canvas: &GpuImage) -> GpuImage {
-    let out = e.scratch(iso.width, iso.height);
-    e.pixels("preserve", &Params::default(), iso, Some(canvas), &out, None);
+/// Preserve Transparency, step 1: the canvas made opaque (straight colour, alpha 1), to blend
+/// the layer onto.
+pub fn opaque(e: &mut Enc, canvas: &GpuImage) -> GpuImage {
+    let out = e.scratch(canvas.width, canvas.height);
+    e.pixels("opaque", &Params::default(), canvas, None, &out, None);
+    out
+}
+
+/// Preserve Transparency, step 2: `blended` (the layer blended onto [`opaque`]) times the alpha
+/// of `canvas`; where `canvas` is transparent it stays as it is.
+pub fn preserve(e: &mut Enc, blended: &GpuImage, canvas: &GpuImage) -> GpuImage {
+    let out = e.scratch(blended.width, blended.height);
+    e.pixels("preserve", &Params::default(), blended, Some(canvas), &out, None);
     out
 }
 
