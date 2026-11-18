@@ -447,7 +447,8 @@ fn a_plugin_importing_source_at_fails_with_a_named_import() {
     let dir = std::env::temp_dir().join(format!("ec_sa_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let manifest = r#"{"api":2,"id":"org.test.host.source_at","name":"Needs source_at","category":"Test Plug-ins","version":"1","params":[],"imports":["source_at"]}"#;
+    let manifest =
+        r#"{"api":2,"id":"org.test.host.source_at","name":"Needs source_at","category":"Test Plug-ins","version":"1","params":[],"imports":["source_at"]}"#;
     let len = manifest.len();
     let escaped = manifest.replace('"', "\\\"");
     let wat = format!(
