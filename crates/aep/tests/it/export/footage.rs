@@ -339,4 +339,3 @@ fn hostile_footage_never_panics() {
     assert_eq!(effectcraft_aep::write(&file).expect("write"), r.bytes);
     let _ = reimport(&r.bytes);
 }
-
