@@ -402,9 +402,13 @@ fn accepts_shadows_only_scales_by_the_sample_alpha_and_the_shadow() {
     set(&mut l, "transform/poi", Value::Vec3([100.0, 50.0, 0.0]));
     set(&mut l, "lightOptions/castsShadows", Value::Bool(true));
     set(&mut l, "lightOptions/shadowDarkness", Value::Scalar(50.0));
-    push(&mut p, cid, l);
-    push(&mut p, cid, caster);
+    // Without lights the matte is white with the sample's alpha.
     push(&mut p, cid, recv);
+    let unlit = render(&p, cid).get(170, 50);
+    assert!(unlit.iter().all(|v| close(*v, 0.5, 1e-3)), "no lights: {unlit:?}");
+    let layers = &mut p.comp_mut(cid).unwrap().layers;
+    layers.insert(0, caster);
+    layers.insert(0, l);
     let img = render(&p, cid);
     let dark = img.get(40, 50);
     let want = [0.25, 0.25, 0.25, 0.5];
