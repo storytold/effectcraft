@@ -353,6 +353,10 @@ const DOF_PAD_BUDGET: f64 = 16.0e6;
 /// pixels grows without bound as it shrinks: blurring it would cost the most for the least.
 const DOF_MIN_SCREEN_SCALE: f64 = 1e-3;
 
+/// After Effects' Classic 3D blurs a point by its circle of confusion scaled to the image plane
+/// (`zoom / focus`) divided by this (labs dof2 and dof3, After Effects 26.5).
+const CLASSIC_DOF_DIVISOR: f64 = 9.0;
+
 /// The largest blur radius (buffer pixels) of a `w`×`h` buffer: the one whose padded copy just
 /// fits [`DOF_PAD_BUDGET`]. The circle of confusion has no bound of its own (a focus distance far
 /// beyond the scene, a near-zero layer scale), so memory sets the limit; ordinary bokeh stays far
@@ -387,9 +391,14 @@ pub(super) fn dof_radii_at(
             if z <= super::camera::NEAR {
                 continue;
             }
-            // coc · ½ / (zoom / z · sx) · scale. Infinity clamps to the cap like any large radius,
-            // so the blur keeps growing with defocus; only NaN, which has no defocus, stays sharp.
-            let r = dof.coc(z) * 0.5 * z / (cam.zoom * sx) * s;
+            // The blur on the image plane is coc · zoom / focus / 9 wide (After Effects 26.5, labs
+            // dof2 and dof3: a box this wide for comp widths 600-1920, heights 300-1080, zoom
+            // 1000-2000 and aperture 200-400; with the focus away from the zoom (1000 / 1500,
+            // 1500 / 1000) within 6 %). Half of it is the radius, in layer pixels:
+            // coc · zoom / (9 · focus) · ½ / (zoom / z · sx) · scale. Infinity clamps to the cap like
+            // any large radius, so the blur keeps growing with defocus; only NaN, which has no
+            // defocus, stays sharp.
+            let r = dof.coc(z) * 0.5 * z / (CLASSIC_DOF_DIVISOR * dof.focus * sx) * s;
             *o = if r.is_nan() || cam.zoom * sx / (z * s) < DOF_MIN_SCREEN_SCALE { 0.0 } else { r.min(cap) as f32 };
         }
     });
