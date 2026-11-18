@@ -720,15 +720,6 @@ fn plan_param(pin: ParamIn<'_>, index: u16, cp: &CompPlan, here: &str, col: &mut
         }
         return Some(ParamPlan { index, kind, value: ParamValue::Static(s), expr });
     }
-    if !matches!(kind, PKind::Fixed | PKind::Float | PKind::Color | PKind::Point) {
-        col.lose(
-            LossCategory::Effects,
-            format!("{what}: keys on a popup, checkbox, angle or integer slider are not written (not sampled), the first key's value was written"),
-        );
-        let first = prop.keys.first().map(|k| &k.value).unwrap_or(&prop.value);
-        let s = stored_reported(conv, kind, first, (size, &prop.ui), &what, col)?;
-        return (!is_default(kind, &s, def) || expr.is_some()).then_some(ParamPlan { index, kind, value: ParamValue::Static(s), expr });
-    }
     let keys = plan_keys(pin, cp, &what, col);
     if keys.is_empty() {
         return None;
@@ -742,7 +733,10 @@ fn plan_keys(pin: ParamIn<'_>, cp: &CompPlan, what: &str, col: &mut Collector) -
     let timed = timed_keys(&prop.keys, &cp.tb, what, "key", col);
     // The ease of colour keys is sampled only as speed 0 / influence 0, which After Effects
     // interpolates linearly (598): a colour key is written linear.
-    let ease_ok = matches!(kind, PKind::Fixed | PKind::Float | PKind::Point);
+    let ease_ok = matches!(kind, PKind::Fixed | PKind::Float | PKind::Angle | PKind::Int | PKind::Point);
+    // After Effects holds every key of a checkbox or popup, whatever was asked (lab
+    // keyed-param-kinds: both sides of every key are Hold).
+    let held = matches!(kind, PKind::Popup | PKind::Checkbox);
     // Ease speeds are in stored units per second; a point's in pixels per second over the layer
     // height (597, 598, 730).
     let factor = match conv {
@@ -776,7 +770,7 @@ fn plan_keys(pin: ParamIn<'_>, cp: &CompPlan, what: &str, col: &mut Collector) -
                 }
             }
         };
-        let (in_i, out_i) = (side(k.in_interp), side(k.out_interp));
+        let (in_i, out_i) = if held { (3, 3) } else { (side(k.in_interp), side(k.out_interp)) };
         let ease = |eases: &[effectcraft_keyframe::Ease], on: bool| -> Vec<EaseSlot> {
             if !on {
                 return vec![EaseSlot::default()];
@@ -848,7 +842,11 @@ fn keyed_kind(k: PKind) -> Option<KeyedKind> {
         PKind::Color => Some(KeyedKind::Color),
         PKind::Point => Some(KeyedKind::Point),
         PKind::Float => Some(KeyedKind::Float),
-        _ => None,
+        // One-component plain records like a fixed slider's: the keyed record differs from the
+        // static one in the same `tdb4` bytes (lab keyed-param-kinds: Evolution, Direction,
+        // Horizontal Blocks, Invert and Fractal Type, 48-byte keys with the value as shown, a
+        // popup 1-based).
+        PKind::Angle | PKind::Int | PKind::Popup | PKind::Checkbox => Some(KeyedKind::Fixed),
     }
 }
 
