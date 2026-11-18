@@ -11,6 +11,7 @@ rust-version = "1.95"
 repository = "https://github.com/storytold/effectcraft"
 
 [workspace.dependencies]
+craft-timeline = { git = "https://github.com/storytold/craft-libs", rev = "0d6dd8bed815b8366869a800d2bf22588ca62dcb", default-features = false }
 craft-mime = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "5a7a63a21dd03dd1a2bc6c308a3a6ce818caae87" }
 craft-pdf = { git = "https://github.com/storytold/craft-libs", rev = "808730f49b9637b7909fe2ae56f9d63fdb100cae", version = "=0.1.0", default-features = false, features = ["read"] }
 craft-docpath = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "5a7a63a21dd03dd1a2bc6c308a3a6ce818caae87" }
@@ -20,8 +21,8 @@ craft-dpx = { version = "0.1.0", git = "https://github.com/storytold/craft-libs"
 craft-ps = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "808730f49b9637b7909fe2ae56f9d63fdb100cae", default-features = false, features = ["read"] }
 craft-exr = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "5a7a63a21dd03dd1a2bc6c308a3a6ce818caae87" }
 craft-gif = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "5a7a63a21dd03dd1a2bc6c308a3a6ce818caae87" }
-craft-psd = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "ce2ec507c2e6a6a078a5f450f641487f8931816d" }
-craft-svg = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "5a7a63a21dd03dd1a2bc6c308a3a6ce818caae87" }
+craft-psd = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "e1fc4b1376148197c2cfd2381eeb400e2731269a" }
+craft-svg = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "77686f24fe8665c21369f1b593f4d65a973e2a45" }
 craft-webp = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "5a7a63a21dd03dd1a2bc6c308a3a6ce818caae87" }
 craft-lottie = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "5a7a63a21dd03dd1a2bc6c308a3a6ce818caae87" }
 craft-mesh = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "5a7a63a21dd03dd1a2bc6c308a3a6ce818caae87", default-features = false, features = ["stl", "obj", "gltf", "fbx"] }

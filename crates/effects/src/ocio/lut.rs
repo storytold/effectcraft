@@ -38,6 +38,11 @@ pub fn parse_spi3d(text: &str) -> Option<Lut> {
 
 /// Parse an Autodesk `.3dl` lattice (integers, blue fastest; an optional input-mesh line).
 pub fn parse_3dl(text: &str) -> Option<Lut> {
+    parse_3dl_limited(text, MAX_LATTICE)
+}
+
+/// [`parse_3dl`] with the largest accepted lattice side as a parameter, so tests can reach it.
+pub(super) fn parse_3dl_limited(text: &str, max_side: usize) -> Option<Lut> {
     let mut mesh: Option<Vec<f64>> = None;
     let mut rows: Vec<[f64; 3]> = vec![];
     let mut out_bits: Option<u32> = None;
@@ -48,34 +53,39 @@ pub fn parse_3dl(text: &str) -> Option<Lut> {
         }
         if l.starts_with(|c: char| c.is_ascii_alphabetic()) {
             // "Mesh <in bits> <out bits>" (Lustre header); other keywords are ignored.
-            let t: Vec<&str> = l.split_whitespace().collect();
+            let t: Vec<&str> = l.split_whitespace().take(3).collect();
             if t[0].eq_ignore_ascii_case("mesh") && t.len() >= 3 {
                 out_bits = t[2].parse().ok();
             }
             continue;
         }
-        let v: Vec<f64> = l.split_whitespace().filter_map(|t| t.parse().ok()).collect();
+        let v: Vec<f64> = l.split_whitespace().filter_map(|t| t.parse().ok()).take(max_side.max(3).saturating_add(1)).collect();
         if v.len() > 3 && mesh.is_none() && rows.is_empty() {
+            // The mesh length is the lattice side: refuse one no lattice reader accepts (#3830).
+            if v.len() > max_side {
+                return None;
+            }
             mesh = Some(v);
         } else if v.len() == 3 {
+            // One spare row while no mesh is known: a 3-entry mesh reads as a data row until the
+            // count tells them apart below.
+            if rows.len() >= max_side.saturating_pow(3).saturating_add(usize::from(mesh.is_none())) {
+                return None;
+            }
             rows.push([v[0], v[1], v[2]]);
         } else {
             return None;
         }
     }
-    let is_cube = |k: usize| {
-        let n = (k as f64).cbrt().round() as usize;
-        n * n * n == k
-    };
-    // A 3-entry input mesh (3³ lattice) looks like a data row: tell them apart by the count.
-    if mesh.is_none() && !is_cube(rows.len()) && rows.len() == 28 {
+    // A 3-entry input mesh (3³ lattice) looks like a data row: 28 rows are a mesh and 27.
+    if mesh.is_none() && rows.len() == 28 {
         mesh = Some(rows.remove(0).to_vec());
     }
     let n = match &mesh {
         Some(m) => m.len(),
         None => (rows.len() as f64).cbrt().round() as usize,
     };
-    if n < 2 || rows.len() != n * n * n {
+    if !(2..=max_side).contains(&n) || n.checked_pow(3) != Some(rows.len()) {
         return None;
     }
     let maxv = rows.iter().flat_map(|r| r.iter()).fold(0.0f64, |m, &v| m.max(v));
@@ -92,7 +102,7 @@ pub fn parse_3dl(text: &str) -> Option<Lut> {
     Some(Lut { n1: 0, d1: vec![], n3: n, d3, dmin: [0.0; 3], dmax: [1.0; 3] })
 }
 
-/// Largest lattice side the lattice readers accept (`.spi3d`, `.csp`).
+/// Largest lattice side the lattice readers accept (`.spi3d`, `.csp`, `.3dl`).
 const MAX_LATTICE: usize = 129;
 /// Most entries of a 1D table (interpolated by index, so capped like the lattices: 2²⁴).
 const MAX_1D: usize = 1 << 24;

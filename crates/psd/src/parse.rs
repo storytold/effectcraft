@@ -1,7 +1,5 @@
 use super::limits::{Error, Result};
-use super::model::{
-    Adjustment, ChannelInfo, ColorMode, Layer, LayerMask, LinkedFile, MAX_GROUP_DEPTH, Node, Rect, Section, SmartObject, SubPath, TextInfo, VectorMask,
-};
+use super::model::{Adjustment, ChannelInfo, ColorMode, Layer, LayerMask, LinkedFile, MAX_GROUP_DEPTH, Node, Rect, Section, SubPath, TextInfo, VectorMask};
 use super::{Psd, Reader, descriptor, engine_data, placed};
 use std::sync::Arc;
 
@@ -70,7 +68,7 @@ impl Psd {
         }
         if let Some(info) = &file.layer_info {
             psd.merged_alpha = info.merged_alpha;
-            psd.layers = info.layers.iter().enumerate().map(|(i, rec)| psd.layer(rec, i, splice)).collect();
+            psd.layers = info.layers.iter().enumerate().map(|(i, rec)| psd.layer(rec, i, splice)).collect::<Result<Vec<_>>>()?;
         }
         for b in &file.global_blocks {
             if let Some(stored) = b.stored.as_ref().filter(|_| linked(&b.key, 0)) {
@@ -83,7 +81,7 @@ impl Psd {
 
     /// One layer record of the model, its additional information read into [`Layer`].
     /// `splice` maps craft-psd's offsets back into `self.data` (see [`read_file`]).
-    fn layer(&self, rec: &craft_psd::LayerRecord, index: usize, splice: Splice) -> Layer {
+    fn layer(&self, rec: &craft_psd::LayerRecord, index: usize, splice: Splice) -> Result<Layer> {
         let channels = rec
             .channels
             .iter()
@@ -113,10 +111,15 @@ impl Psd {
         }
         for b in &rec.blocks {
             l.keys.push(b.key);
-            // A malformed block only loses that block's information.
-            let _ = self.layer_block(&mut l, &b.key, &b.data);
+            // A malformed optional block only loses that block's information.
+            // Unsupported modern placement geometry must not silently become an
+            // unwarped layer or fall back to a less expressive PlLd in either order.
+            match self.layer_block(&mut l, &b.key, &b.data) {
+                Err(e @ Error::Unsupported(_)) if matches!(&b.key, b"SoLd" | b"SoLE") => return Err(e),
+                _ => {}
+            }
         }
-        l
+        Ok(l)
     }
 
     /// The embedded bytes of linked file `uuid`.
@@ -236,32 +239,12 @@ impl Psd {
                 l.adjustment = Some(Adjustment::Other(String::from_utf8_lossy(key).into_owned()));
             }
             b"SoLd" | b"SoLE" => {
-                let _id = r.tag()?;
-                let _ver = r.u32()?;
-                let _dver = r.u32()?;
-                let d = descriptor::read_descriptor(&mut r)?;
-                let uuid = d.text("Idnt").unwrap_or_default().to_string();
-                let t = placed::eight(&d, "Trnf").unwrap_or([0.0; 8]);
-                // The non-affine transform when present (perspective), else the transform.
-                let t = placed::eight(&d, "nonAffineTransform").unwrap_or(t);
-                let size = d.obj("Sz  ").and_then(|s| Some([s.num("Wdth")?, s.num("Hght")?]));
-                let warp = d.obj("warp").and_then(placed::Warp::read);
-                l.smart_object = Some(SmartObject { uuid, quad: placed::quad_from(t), size, warp });
+                l.smart_object = Some(placed::from_craft_smart(
+                    craft_psd::smart::SmartObject::from_placed_layer_data_with_limits(b, crate::descriptor::PARSE_LIMITS).map_err(|e| error(&e))?,
+                ));
             }
             b"PlLd" if l.smart_object.is_none() => {
-                let _id = r.tag()?;
-                let _ver = r.u32()?;
-                let n = r.u8()? as usize;
-                let uuid = String::from_utf8_lossy(r.bytes(n)?).into_owned();
-                let _page = r.u32()?;
-                let _pages = r.u32()?;
-                let _aa = r.u32()?;
-                let _ty = r.u32()?;
-                let mut t = [0.0; 8];
-                for v in &mut t {
-                    *v = r.f64_finite()?;
-                }
-                l.smart_object = Some(SmartObject { uuid, quad: placed::quad_from(t), size: None, warp: None });
+                l.smart_object = Some(placed::from_craft_smart(craft_psd::smart::SmartObject::from_placed_layer(b).map_err(|e| error(&e))?));
             }
             b"vmsk" | b"vsms" => {
                 let _ver = r.u32()?;

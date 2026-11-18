@@ -148,21 +148,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "alloc-no-stdlib"
-version = "3.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c2fb6cfd47bf496ff64095c20eaba0c201404ee38714d4142fcfa1dc334fcc7a"
-
-[[package]]
-name = "alloc-stdlib"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0b5c1865780388bfa186411ab5f247819487fc4864c6e9c3106611fa347586e1"
-dependencies = [
- "alloc-no-stdlib",
-]
-
-[[package]]
 name = "allocator-api2"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -810,16 +795,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "brotli-decompressor"
-version = "6.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cc031cd87c6529082b0b65c604e86af0ed7744841b17ccfe60b1e31fa606179e"
-dependencies = [
- "alloc-no-stdlib",
- "alloc-stdlib",
-]
-
-[[package]]
 name = "built"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1398,39 +1373,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "craft-image-codecs"
-version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=5a7a63a21dd03dd1a2bc6c308a3a6ce818caae87#5a7a63a21dd03dd1a2bc6c308a3a6ce818caae87"
-dependencies = [
- "craft-jpeg 0.1.0 (git+https://github.com/storytold/craft-libs?rev=5a7a63a21dd03dd1a2bc6c308a3a6ce818caae87)",
- "craft-metadata",
- "crc32fast",
- "exr",
- "flate2",
- "half",
- "hayro-jpeg2000",
- "image",
- "image-webp",
- "jpeg-encoder",
- "png",
- "rayon",
- "serde_json",
- "thiserror 2.0.21",
- "tiff",
- "zune-core",
- "zune-jpeg",
- "zune-jpegxl",
-]
-
-[[package]]
-name = "craft-jpeg"
-version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=5a7a63a21dd03dd1a2bc6c308a3a6ce818caae87#5a7a63a21dd03dd1a2bc6c308a3a6ce818caae87"
-dependencies = [
- "thiserror 2.0.21",
-]
-
-[[package]]
 name = "craft-jpeg"
 version = "0.1.0"
 source = "git+https://github.com/storytold/craft-libs?rev=937ac93c5cf3cd4b6a81e195b078fe161eb081b9#937ac93c5cf3cd4b6a81e195b078fe161eb081b9"
@@ -1483,18 +1425,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "craft-metadata"
-version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=5a7a63a21dd03dd1a2bc6c308a3a6ce818caae87#5a7a63a21dd03dd1a2bc6c308a3a6ce818caae87"
-dependencies = [
- "brotli-decompressor",
- "chrono",
- "craft-tiff 0.1.0 (git+https://github.com/storytold/craft-libs?rev=5a7a63a21dd03dd1a2bc6c308a3a6ce818caae87)",
- "quick-xml 0.41.0",
- "serde",
-]
-
-[[package]]
 name = "craft-mime"
 version = "0.1.0"
 source = "git+https://github.com/storytold/craft-libs?rev=5a7a63a21dd03dd1a2bc6c308a3a6ce818caae87#5a7a63a21dd03dd1a2bc6c308a3a6ce818caae87"
@@ -1540,7 +1470,7 @@ dependencies = [
 [[package]]
 name = "craft-psd"
 version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=ce2ec507c2e6a6a078a5f450f641487f8931816d#ce2ec507c2e6a6a078a5f450f641487f8931816d"
+source = "git+https://github.com/storytold/craft-libs?rev=e1fc4b1376148197c2cfd2381eeb400e2731269a#e1fc4b1376148197c2cfd2381eeb400e2731269a"
 dependencies = [
  "encoding_rs",
  "flate2",
@@ -1564,7 +1494,7 @@ name = "craft-raw"
 version = "0.1.0"
 source = "git+https://github.com/storytold/craft-libs?rev=bea91b1861eea3889bec9d26338076f2ff31c4ac#bea91b1861eea3889bec9d26338076f2ff31c4ac"
 dependencies = [
- "craft-tiff 0.1.0 (git+https://github.com/storytold/craft-libs?rev=bea91b1861eea3889bec9d26338076f2ff31c4ac)",
+ "craft-tiff",
  "miniz_oxide 0.9.1",
  "rayon",
  "serde",
@@ -1576,10 +1506,9 @@ dependencies = [
 [[package]]
 name = "craft-svg"
 version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=5a7a63a21dd03dd1a2bc6c308a3a6ce818caae87#5a7a63a21dd03dd1a2bc6c308a3a6ce818caae87"
+source = "git+https://github.com/storytold/craft-libs?rev=77686f24fe8665c21369f1b593f4d65a973e2a45#77686f24fe8665c21369f1b593f4d65a973e2a45"
 dependencies = [
- "craft-image-codecs",
- "craft-xml 0.1.0 (git+https://github.com/storytold/craft-libs?rev=5a7a63a21dd03dd1a2bc6c308a3a6ce818caae87)",
+ "craft-xml 0.1.0 (git+https://github.com/storytold/craft-libs?rev=77686f24fe8665c21369f1b593f4d65a973e2a45)",
  "flate2",
  "kurbo",
  "quick-xml 0.41.0",
@@ -1600,16 +1529,16 @@ dependencies = [
 [[package]]
 name = "craft-tiff"
 version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=5a7a63a21dd03dd1a2bc6c308a3a6ce818caae87#5a7a63a21dd03dd1a2bc6c308a3a6ce818caae87"
+source = "git+https://github.com/storytold/craft-libs?rev=bea91b1861eea3889bec9d26338076f2ff31c4ac#bea91b1861eea3889bec9d26338076f2ff31c4ac"
 dependencies = [
  "serde",
  "thiserror 2.0.21",
 ]
 
 [[package]]
-name = "craft-tiff"
+name = "craft-time"
 version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=bea91b1861eea3889bec9d26338076f2ff31c4ac#bea91b1861eea3889bec9d26338076f2ff31c4ac"
+source = "git+https://github.com/storytold/craft-libs?rev=0d6dd8bed815b8366869a800d2bf22588ca62dcb#0d6dd8bed815b8366869a800d2bf22588ca62dcb"
 dependencies = [
  "serde",
  "thiserror 2.0.21",
@@ -1631,6 +1560,14 @@ source = "git+https://github.com/storytold/craft-libs?rev=b3643af6477326e840f86b
 dependencies = [
  "serde",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "craft-timeline"
+version = "0.1.0"
+source = "git+https://github.com/storytold/craft-libs?rev=0d6dd8bed815b8366869a800d2bf22588ca62dcb#0d6dd8bed815b8366869a800d2bf22588ca62dcb"
+dependencies = [
+ "craft-time 0.1.0 (git+https://github.com/storytold/craft-libs?rev=0d6dd8bed815b8366869a800d2bf22588ca62dcb)",
 ]
 
 [[package]]
@@ -1754,7 +1691,7 @@ dependencies = [
 [[package]]
 name = "craft-xml"
 version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=5a7a63a21dd03dd1a2bc6c308a3a6ce818caae87#5a7a63a21dd03dd1a2bc6c308a3a6ce818caae87"
+source = "git+https://github.com/storytold/craft-libs?rev=77686f24fe8665c21369f1b593f4d65a973e2a45#77686f24fe8665c21369f1b593f4d65a973e2a45"
 dependencies = [
  "quick-xml 0.41.0",
  "serde",
@@ -2275,6 +2212,7 @@ dependencies = [
 name = "effectcraft-interchange"
 version = "0.24.1"
 dependencies = [
+ "craft-timeline 0.1.0 (git+https://github.com/storytold/craft-libs?rev=0d6dd8bed815b8366869a800d2bf22588ca62dcb)",
  "effectcraft-color",
  "effectcraft-keyframe",
  "effectcraft-project",
@@ -2379,6 +2317,7 @@ dependencies = [
  "effectcraft-raster",
  "kurbo",
  "linesweeper",
+ "log",
  "tiny-skia 0.12.0",
 ]
 
@@ -3045,7 +2984,7 @@ version = "0.20.1"
 source = "git+https://github.com/storytold/filmcraft?rev=3f137a7ed420cac79b32145f5243b7f98b31f71c#3f137a7ed420cac79b32145f5243b7f98b31f71c"
 dependencies = [
  "craft-audio 0.1.0 (git+https://github.com/storytold/craft-libs?rev=82062077bba679ba5236e2d1a391f02d1533cbab)",
- "craft-jpeg 0.1.0 (git+https://github.com/storytold/craft-libs?rev=937ac93c5cf3cd4b6a81e195b078fe161eb081b9)",
+ "craft-jpeg",
  "craft-media 0.1.0 (git+https://github.com/storytold/craft-libs?rev=82062077bba679ba5236e2d1a391f02d1533cbab)",
  "craft-video 0.1.0 (git+https://github.com/storytold/craft-libs?rev=82062077bba679ba5236e2d1a391f02d1533cbab)",
  "craft-y4m",
@@ -3077,7 +3016,7 @@ version = "0.20.1"
 source = "git+https://github.com/storytold/filmcraft?rev=3f137a7ed420cac79b32145f5243b7f98b31f71c#3f137a7ed420cac79b32145f5243b7f98b31f71c"
 dependencies = [
  "craft-raw",
- "craft-tiff 0.1.0 (git+https://github.com/storytold/craft-libs?rev=bea91b1861eea3889bec9d26338076f2ff31c4ac)",
+ "craft-tiff",
  "image",
  "rayon",
  "thiserror 2.0.21",
@@ -3766,9 +3705,6 @@ name = "hayro-jpeg2000"
 version = "0.3.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c75ab947623ef4ccaa7acf0579edf7cbb5a73838e3839a7be73335e522f433a1"
-dependencies = [
- "fearless_simd",
-]
 
 [[package]]
 name = "hayro-syntax"
@@ -4030,7 +3966,6 @@ dependencies = [
  "moxcms",
  "num-traits",
  "png",
- "qoi",
  "tiff",
  "zune-core",
  "zune-jpeg",
@@ -4180,12 +4115,6 @@ dependencies = [
  "getrandom 0.4.3",
  "libc",
 ]
-
-[[package]]
-name = "jpeg-encoder"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b454d911ac55068f53495488d8ccd0646eaa540c033a28ee15b07838afafb01f"
 
 [[package]]
 name = "js-sys"
@@ -5578,15 +5507,6 @@ name = "pxfm"
 version = "0.1.30"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d55d956fa96f5ec02be2e13af0e20391a5aa83d6a074e3ad368959d0fab299ea"
-
-[[package]]
-name = "qoi"
-version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f6d64c71eb498fe9eae14ce4ec935c555749aef511cca85b5568910d6e48001"
-dependencies = [
- "bytemuck",
-]
 
 [[package]]
 name = "quick-error"
@@ -9009,15 +8929,6 @@ name = "zune-jpeg"
 version = "0.5.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "27bc9d5b815bc103f142aa054f561d9187d191692ec7c2d1e2b4737f8dbd7296"
-dependencies = [
- "zune-core",
-]
-
-[[package]]
-name = "zune-jpegxl"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cba11ecd07cc23351500e840ae03841b7e4997923ec8e4832ee3ae199ea0b6b4"
 dependencies = [
  "zune-core",
 ]
