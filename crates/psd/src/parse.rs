@@ -144,7 +144,13 @@ impl Psd {
         let mut r = Reader::new(b);
         match key {
             b"luni" => {
-                let name = descriptor::read_unicode(&mut r)?;
+                // Shared framing rejects truncated counts/payloads before allocation. Only
+                // the first record belongs to this block; UTF-16 repair and naming stay local.
+                let units = craft_psd::unicode_names::records(b).next().ok_or(Error::Truncated)?;
+                let mut name: String = char::decode_utf16(units.as_chunks::<2>().0.iter().map(|v| u16::from_be_bytes(*v)))
+                    .map(|v| v.unwrap_or(char::REPLACEMENT_CHARACTER))
+                    .collect();
+                name.truncate(name.trim_end_matches('\0').len());
                 if !name.is_empty() {
                     l.name = name;
                 }
