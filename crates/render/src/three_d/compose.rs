@@ -395,10 +395,14 @@ pub(super) fn dof_radii_at(
             // dof2 and dof3: a box this wide for comp widths 600-1920, heights 300-1080, zoom
             // 1000-2000 and aperture 200-400; with the focus away from the zoom (1000 / 1500,
             // 1500 / 1000) within 6 %). Half of it is the radius, in layer pixels:
-            // coc · zoom / (9 · focus) · ½ / (zoom / z · sx) · scale. Infinity clamps to the cap like
-            // any large radius, so the blur keeps growing with defocus; only NaN, which has no
-            // defocus, stays sharp.
-            let r = dof.coc(z) * 0.5 * z / (CLASSIC_DOF_DIVISOR * dof.focus * sx) * s;
+            // coc · zoom / (9 · focus) · ½ / (zoom / z · sx) · scale, where coc · z / focus is
+            // aperture · |z − focus| / focus · blur level, divided first so a huge focus distance
+            // cannot overflow. `coc` keeps its guards: no defocus (0) or none measurable (NaN)
+            // stays sharp. Infinity clamps to the cap like any large radius, so the blur keeps
+            // growing with defocus.
+            let coc = dof.coc(z);
+            let defocus = if coc == 0.0 || coc.is_nan() { coc } else { dof.aperture * ((z - dof.focus).abs() / dof.focus) * dof.blur_level };
+            let r = defocus * 0.5 / (CLASSIC_DOF_DIVISOR * sx) * s;
             *o = if r.is_nan() || cam.zoom * sx / (z * s) < DOF_MIN_SCREEN_SCALE { 0.0 } else { r.min(cap) as f32 };
         }
     });

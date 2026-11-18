@@ -440,7 +440,7 @@ fn depth_of_field_blurs_out_of_focus_layers() {
     let (mut p, cid, comp) = setup();
     let mut cam = camera(&mut p, &comp);
     set(&mut cam, "cameraOptions/dof", Value::Bool(true));
-    // Radius = aperture · |z − f| / z · zoom / f / 18: 270 gives 3 px at f = zoom / 2.
+    // Radius = aperture · |z − f| / z · zoom / f / 18: 270 gives 15 px at z = zoom, f = zoom / 2.
     set(&mut cam, "cameraOptions/aperture", Value::Scalar(270.0));
     let s = solid3(&mut p, &comp, [1.0, 1.0, 1.0], 60, 60, [100.0, 50.0, 0.0]);
     push(&mut p, cid, cam);
@@ -533,8 +533,12 @@ fn dof_blur_radius_is_bounded_for_degenerate_inputs() {
     // A 0%-scaled layer 10 px off the focal plane: an ordinary defocus times 1/sx (sx = 1e-9).
     assert!(finite(&scene(zoom() + 10.0, 0.0, 60.0)), "zero-scaled: non-finite pixels");
     // Huge but finite Focus Distances (typed in, or a large expression result) stay finite.
-    for focus in [1.0e12, 1.0e307] {
-        assert!(finite(&scene(focus, 100.0, 60.0)), "focus {focus:e}: non-finite pixels");
+    // They still blur: |z − focus| / focus is about 1, a radius of 60 · ½ / 9 = 3.3 px here
+    // (9 · 3e307 overflowed to infinity and left the layer sharp).
+    for focus in [1.0e12, 1.0e307, 3.0e307] {
+        let img = scene(focus, 100.0, 60.0);
+        assert!(finite(&img), "focus {focus:e}: non-finite pixels");
+        assert!(img.get(71, 50)[3] < 0.9, "focus {focus:e}: the edge should be soft ({})", img.get(71, 50)[3]);
     }
     // Huge Apertures: the blur is as large as the buffer budget allows, never refused (which
     // would render the layer sharp). 1e308 overflows the circle of confusion to infinity: still
