@@ -238,17 +238,9 @@ pub fn levels_clip_on(ctx: &EffectCtx, id: &str) -> bool {
 
 /// Levels' gamma on the normalised input `t`: unclipped values below Input Black extrapolate
 /// (the curve mirrored through 0) instead of stopping at Output Black.
-pub fn levels_curve(t: f32, g: f32) -> f32 {
-    let curve = if t >= 0.0 { t.powf(1.0 / g) } else { -(-t).powf(1.0 / g) };
-    curve.clamp(-LEVELS_CURVE_LIMIT, LEVELS_CURVE_LIMIT)
+pub fn levels_gamma(t: f32, g: f32) -> f32 {
+    if t >= 0.0 { t.powf(1.0 / g) } else { -(-t).powf(1.0 / g) }
 }
-
-/// How far the Levels curve may reach: with a small gamma (rendered from 0.01, an exponent of 100)
-/// an HDR value or an empty input range overflows `f32`, and an infinite curve times an empty
-/// output range is NaN. 1e30 times the widest output range (2e4) is still finite (`f32::MAX` is
-/// 3.4e38), and every curve that was finite before stays as it was below it. The GPU
-/// (`levels_curve` in common.wgsl) uses the same.
-pub const LEVELS_CURVE_LIMIT: f32 = 1e30;
 
 /// Levels' Channel popup.
 pub const LEVELS_CHANNELS: [&str; 5] = ["RGB", "Red", "Green", "Blue", "Alpha"];
@@ -275,7 +267,19 @@ fn level(v: f32, [ib, iw, g, ob, ow]: [f32; 5], (clip_b, clip_w): (bool, bool)) 
     if clip_w {
         t = t.min(1.0);
     }
-    ob + (ow - ob) * levels_curve(t, g)
+    levels_output(levels_gamma(t, g), ob, ow)
+}
+
+fn levels_output(curve: f32, ob: f32, ow: f32) -> f32 {
+    let span = ow - ob;
+    let mapped = ob + span * curve;
+    if mapped.is_finite() || curve.is_nan() {
+        mapped
+    } else if span == 0.0 {
+        ob
+    } else {
+        f32::MAX.copysign(span) * curve.signum()
+    }
 }
 
 const LEVELS_IDENTITY: [f32; 5] = [0.0, 1.0, 1.0, 0.0, 1.0];

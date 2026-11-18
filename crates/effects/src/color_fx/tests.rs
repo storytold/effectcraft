@@ -530,40 +530,65 @@ fn levels_stays_finite_with_an_empty_input_range_and_clipping_off() {
     }
 }
 
+fn levels_unbounded(v: f32, [ib, iw, g, ob, ow]: [f32; 5], (clip_b, clip_w): (bool, bool)) -> f32 {
+    let mut t = (v - ib) / (iw - ib).max(1e-6);
+    if clip_b {
+        t = t.max(0.0);
+    }
+    if clip_w {
+        t = t.min(1.0);
+    }
+    let curve = if t >= 0.0 { t.powf(1.0 / g) } else { -(-t).powf(1.0 / g) };
+    ob + (ow - ob) * curve
+}
+
 #[test]
-fn levels_overflowing_curve_saturates_with_its_sign() {
-    let (ib, iw, g) = (0.5, 0.5, 0.1);
-    let above = level(0.6, [ib, iw, g, 0.0, 1.0], (false, false));
-    let below = level(0.4, [ib, iw, g, 0.0, 1.0], (false, false));
-    assert!(above.is_finite() && above > 1e29, "{above}");
-    assert!(below.is_finite() && below < -1e29, "{below}");
-    assert_eq!(above, -below);
-    let finite_beyond_the_bound = level(0.004096, [0.0, 0.0, g, 0.0, 1.0], (false, false));
-    assert_eq!(finite_beyond_the_bound, LEVELS_CURVE_LIMIT);
+fn levels_saturates_only_where_the_output_would_overflow() {
+    let unclipped = (false, false);
+    assert_eq!(level(0.6, [0.5, 0.5, 0.1, 0.0, 1.0], unclipped), f32::MAX);
+    assert_eq!(level(0.4, [0.5, 0.5, 0.1, 0.0, 1.0], unclipped), -f32::MAX);
+    assert_eq!(level(0.6, [0.5, 0.5, 0.1, 1.0, 0.0], unclipped), -f32::MAX);
+    assert_eq!(level(0.6, [0.5, 0.5, 0.1, 0.3, 0.3], unclipped), 0.3);
+    assert_eq!(level(f32::MAX, [0.0, 0.5, 1.0, 0.0, 1.0], unclipped), f32::MAX);
+    assert_eq!(level(f32::MAX, [0.0, 0.5, 1.0, 0.0, 1.0], (false, true)), 1.0);
+    let finite_beyond_1e30 = [0.0, 0.0, 0.1, 0.0, 1.0];
+    let want = levels_unbounded(0.004096, finite_beyond_1e30, unclipped);
+    assert!(want.is_finite() && want > 1e35, "{want}");
+    assert_eq!(level(0.004096, finite_beyond_1e30, unclipped).to_bits(), want.to_bits());
+}
+
+#[test]
+fn levels_keeps_a_finite_rgb_stage_for_the_channel_stage() {
+    let vals = [
+        ("inBlack", num(0.0)),
+        ("inWhite", num(0.0)),
+        ("gamma", num(0.1)),
+        ("clipToOutputBlack", Value::Enum(0)),
+        ("clipToOutputWhite", Value::Enum(0)),
+        ("redGamma", num(10.0)),
+        ("redOutBlack", num(-1.0)),
+        ("redOutWhite", num(-0.999)),
+        ("redClipToOutputBlack", Value::Enum(0)),
+        ("redClipToOutputWhite", Value::Enum(0)),
+    ];
+    let red = px("ec.color.levels", &vals, [0.0015, 0.0, 0.0, 1.0])[0];
+    let rgb_stage = levels_unbounded(0.0015, [0.0, 0.0, 0.1, 0.0, 1.0], (false, false));
+    let want = levels_unbounded(rgb_stage, [0.0, 1.0, 10.0, -1.0, -0.999], (false, false));
+    assert!((want - 0.49998).abs() < 1e-4, "{want}");
+    assert!((red - want).abs() < 1e-6, "{red} vs {want}");
 }
 
 #[test]
 fn levels_curves_that_were_finite_render_unchanged() {
-    let unbounded = |v: f32, [ib, iw, g, ob, ow]: [f32; 5], (clip_b, clip_w): (bool, bool)| {
-        let mut t = (v - ib) / (iw - ib).max(1e-6);
-        if clip_b {
-            t = t.max(0.0);
-        }
-        if clip_w {
-            t = t.min(1.0);
-        }
-        let curve = if t >= 0.0 { t.powf(1.0 / g) } else { -(-t).powf(1.0 / g) };
-        ob + (ow - ob) * curve
-    };
     let mut compared = 0;
     for ib in [-1.0, 0.0, 0.2, 0.5] {
-        for iw in [-0.5, 0.5, 0.9, 1.0, 2.0] {
+        for iw in [-0.5, 0.0, 0.5, 0.9, 1.0, 2.0] {
             for g in [0.1, 0.5, 1.0, 2.2, 10.0] {
                 for (ob, ow) in [(0.0, 1.0), (-1.0, 2.0), (0.1, 0.9), (1.0, 0.0), (0.5, 0.5)] {
                     for clip in [(false, false), (true, false), (false, true), (true, true)] {
-                        for v in [-2.0, -0.5, 0.0, 0.25, 0.5, 0.75, 1.0, 1.5, 4.0, 16.0] {
-                            let want = unbounded(v, [ib, iw, g, ob, ow], clip);
-                            if want.is_finite() && want.abs() < 1e29 {
+                        for v in [-2.0, -0.5, 0.0, 0.0015, 0.004096, 0.25, 0.5, 0.75, 1.0, 1.5, 4.0, 16.0] {
+                            let want = levels_unbounded(v, [ib, iw, g, ob, ow], clip);
+                            if want.is_finite() {
                                 assert_eq!(level(v, [ib, iw, g, ob, ow], clip).to_bits(), want.to_bits(), "{v} {:?} {clip:?}", [ib, iw, g, ob, ow]);
                                 compared += 1;
                             }

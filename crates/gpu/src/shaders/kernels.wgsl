@@ -749,14 +749,7 @@ fn pointwise(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let ow = P.f[1].x;
                 var o = vec3<f32>(0.0);
                 for (var i = 0; i < 3; i++) {
-                    var t = (c[i] - ib) / max(iw - ib, 1e-6);
-                    if (P.u[0].y != 0u) {
-                        t = max(t, 0.0);
-                    }
-                    if (P.u[0].z != 0u) {
-                        t = min(t, 1.0);
-                    }
-                    o[i] = ob + (ow - ob) * levels_curve(t, g);
+                    o[i] = levels_level(c[i], ib, iw, g, ob, ow, P.u[0].y != 0u, P.u[0].z != 0u);
                 }
                 px = vec4<f32>(o * a, a);
             }

@@ -46,30 +46,31 @@ fn levels_and_gamma() {
     effect_case("ec.color.gammapedestalgain", &[("blackStretch", n(2.0)), ("redGain", n(1.2))]);
 }
 
+fn levels_controls(prefix: &str, values: [f64; 5]) -> Vec<(String, Value)> {
+    let ids = if prefix.is_empty() {
+        ["inBlack", "inWhite", "gamma", "outBlack", "outWhite", "clipToOutputBlack", "clipToOutputWhite"].map(String::from)
+    } else {
+        ["InBlack", "InWhite", "Gamma", "OutBlack", "OutWhite", "ClipToOutputBlack", "ClipToOutputWhite"].map(|s| format!("{prefix}{s}"))
+    };
+    ids.into_iter().zip(values.map(n).into_iter().chain([e(0), e(0)])).collect()
+}
+
 #[test]
-fn levels_stays_finite_with_an_empty_input_range_and_clipping_off() {
-    let rgb = [
-        ("inBlack", n(0.5)),
-        ("inWhite", n(0.5)),
-        ("gamma", n(0.1)),
-        ("outBlack", n(0.5)),
-        ("outWhite", n(0.5)),
-        ("clipToOutputBlack", e(0)),
-        ("clipToOutputWhite", e(0)),
+fn levels_stays_finite_and_matches_the_cpu_with_clipping_off() {
+    let empty_input = [0.5, 0.5, 0.1, 0.0, 1.0];
+    let empty_input_and_output = [0.5, 0.5, 0.1, 0.5, 0.5];
+    let cases = [
+        levels_controls("", empty_input_and_output),
+        levels_controls("", empty_input),
+        levels_controls("red", empty_input),
+        levels_controls("alpha", empty_input),
+        [levels_controls("", empty_input), levels_controls("red", empty_input)].concat(),
+        [levels_controls("", [0.0, 0.0, 0.1, 0.0, 1.0]), levels_controls("red", [0.0, 1.0, 10.0, -1.0, -0.999])].concat(),
     ];
-    let red = [
-        ("redInBlack", n(0.5)),
-        ("redInWhite", n(0.5)),
-        ("redGamma", n(0.1)),
-        ("redOutBlack", n(0.5)),
-        ("redOutWhite", n(0.5)),
-        ("redClipToOutputBlack", e(0)),
-        ("redClipToOutputWhite", e(0)),
-    ];
-    let rgb_and_red: Vec<_> = rgb.iter().chain(&red).cloned().collect();
-    for vals in [&rgb[..], &red[..], &rgb_and_red[..]] {
+    for owned in &cases {
+        let vals: Vec<(&str, Value)> = owned.iter().map(|(id, v)| (id.as_str(), v.clone())).collect();
         for adjustment in [false, true] {
-            for out in effect_direct("ec.color.levels", vals, adjustment) {
+            for out in effect_direct("ec.color.levels", &vals, adjustment) {
                 assert!(out.data.iter().flatten().all(|v| v.is_finite()), "{vals:?} adj {adjustment}");
             }
         }

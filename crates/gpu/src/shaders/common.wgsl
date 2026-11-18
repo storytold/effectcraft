@@ -242,21 +242,49 @@ fn powz(x: f32, y: f32) -> f32 {
     return pow(x, y);
 }
 
-// color_fx::levels_curve: unclipped values below 0 mirror the curve, bounded by
-// color_fx::LEVELS_CURVE_LIMIT. WGSL leaves an overflowing pow indeterminate, so a curve past the
-// bound saturates before pow: |t|^(1/g) > 1e30 once log2|t| / g > 99.66; between 1e30 and
-// 2^99.7 the clamp gives the same 1e30.
-// A branch, not select: select evaluates both sides, so pow would still run.
-const LEVELS_CURVE_LIMIT: f32 = 1e30;
+const F32_MAX: f32 = 0x1.fffffep+127f;
+const LEVELS_OVERFLOW_LOG2: f32 = 127.999;
 
-fn levels_curve(t: f32, g: f32) -> f32 {
-    if (abs(t) > 1.0 && log2(abs(t)) / g > 99.7) {
-        return sign(t) * LEVELS_CURVE_LIMIT;
-    }
+fn levels_gamma(t: f32, g: f32) -> f32 {
     if (t >= 0.0) {
-        return min(powz(t, 1.0 / g), LEVELS_CURVE_LIMIT);
+        return powz(t, 1.0 / g);
     }
-    return -min(powz(-t, 1.0 / g), LEVELS_CURVE_LIMIT);
+    return -powz(-t, 1.0 / g);
+}
+
+fn levels_input_overflows(x: f32, d: f32) -> bool {
+    return d < 1.0 && abs(x) > F32_MAX * d;
+}
+
+fn levels_output_overflows(t: f32, g: f32, span: f32) -> bool {
+    if (abs(t) <= 1.0) {
+        return false;
+    }
+    let curve_log2 = log2(abs(t)) / g;
+    return max(curve_log2, curve_log2 + log2(abs(span))) > LEVELS_OVERFLOW_LOG2;
+}
+
+fn levels_level(v: f32, ib: f32, iw: f32, g: f32, ob: f32, ow: f32, clip_b: bool, clip_w: bool) -> f32 {
+    if (ow == ob) {
+        return ob;
+    }
+    let x = v - ib;
+    let d = max(iw - ib, 1e-6);
+    let input_overflows = levels_input_overflows(x, d);
+    var t = sign(x) * F32_MAX;
+    if (!input_overflows) {
+        t = x / d;
+    }
+    if (clip_b) {
+        t = max(t, 0.0);
+    }
+    if (clip_w) {
+        t = min(t, 1.0);
+    }
+    if ((input_overflows && abs(t) == F32_MAX) || levels_output_overflows(t, g, ow - ob)) {
+        return sign(t) * sign(ow - ob) * F32_MAX;
+    }
+    return ob + (ow - ob) * levels_gamma(t, g);
 }
 
 // Rust's f32::round (half away from zero; WGSL's round() is half to even). Decided by comparing

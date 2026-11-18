@@ -1350,8 +1350,7 @@ fn gpu_tint_defaults_match_after_effects_greys() {
 /// op 1), Tritone and Luma Key / Extract, Black & White's tint weights and Exposure's 2.2 power.
 #[test]
 fn shader_constants_match_the_cpu() {
-    use effectcraft_effects::{BW_TINT_LUMA, EXPOSURE_LINEAR_GAMMA, LEVELS_CURVE_LIMIT, LUMA_601};
-    let common = include_str!("shaders/common.wgsl");
+    use effectcraft_effects::{BW_TINT_LUMA, EXPOSURE_LINEAR_GAMMA, LUMA_601};
     let kernels = include_str!("shaders/kernels.wgsl");
     let color = include_str!("shaders/fx_color.wgsl");
     let key = include_str!("shaders/fx_key.wgsl");
@@ -1366,10 +1365,6 @@ fn shader_constants_match_the_cpu() {
     assert!(
         kernels.contains(&format!("powz(abs(c[i]), {gamma})")) && kernels.contains(&format!("1.0 / {gamma})")),
         "Exposure's power in kernels.wgsl is not {gamma}"
-    );
-    assert!(
-        common.contains(&format!("const LEVELS_CURVE_LIMIT: f32 = {LEVELS_CURVE_LIMIT:e};")),
-        "LEVELS_CURVE_LIMIT in common.wgsl is not {LEVELS_CURVE_LIMIT:e}"
     );
 }
 
