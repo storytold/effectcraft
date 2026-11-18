@@ -2,6 +2,7 @@ use super::write::*;
 use super::*;
 use crate::pixels::srgb_encode;
 
+mod fixed_adjustments;
 mod integration;
 mod opt;
 mod shared_corpus;
