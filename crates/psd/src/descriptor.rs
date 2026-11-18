@@ -114,18 +114,6 @@ impl Descriptor {
     }
 }
 
-pub(crate) fn read_unicode(r: &mut Reader) -> Result<String> {
-    let n = r.u32()? as usize;
-    let mut v = Vec::with_capacity(n.min(r.remaining() / 2));
-    for _ in 0..n {
-        v.push(r.u16()?);
-    }
-    while v.last() == Some(&0) {
-        v.pop();
-    }
-    Ok(String::from_utf16_lossy(&v))
-}
-
 /// Preserve the application parser's per-container limits in the shared parser.
 pub(crate) const PARSE_LIMITS: craft_psd::descriptor::ParseLimits =
     craft_psd::descriptor::ParseLimits { max_descriptor_items: 100_000, max_list_items: 1_000_000 };
