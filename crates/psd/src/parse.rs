@@ -1,6 +1,6 @@
 use super::limits::{Error, Result};
 use super::model::{Adjustment, ChannelInfo, ColorMode, Layer, LayerMask, LinkedFile, MAX_GROUP_DEPTH, Node, Rect, Section, SubPath, TextInfo, VectorMask};
-use super::{Psd, Reader, descriptor, engine_data, placed};
+use super::{Psd, descriptor, engine_data, placed};
 use std::sync::Arc;
 
 /// Whether `bytes` start like a Photoshop document.
@@ -143,7 +143,6 @@ impl Psd {
     fn layer_block(&self, l: &mut Layer, block: &craft_psd::tagged::TaggedBlock) -> Result<()> {
         let key = &block.key;
         let b = block.data.as_slice();
-        let mut r = Reader::new(b);
         match key {
             b"luni" => {
                 // Shared framing rejects truncated counts/payloads before allocation. Only
