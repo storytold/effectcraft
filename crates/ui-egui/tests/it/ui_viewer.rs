@@ -3176,6 +3176,17 @@ fn fit_up_to_100_follows_the_maximized_panel() {
 /// 1.5 turns clockwise gives 540° (1x +180.0°), going back 2 turns gives −180°, with no jump a
 /// revolution back where the pointer crosses the left of the anchor. One drag is one undo step.
 #[test]
+fn rotate_tool_shows_rotation_cursor() {
+    let mut h = harness();
+    h.state_mut().ui.tool = Tool::Rotate;
+    h.run_steps(2);
+    let p = screen(&h, [320.0, 180.0]);
+    h.input_mut().events.push(Event::PointerMoved(p));
+    h.step();
+    assert_eq!(h.output().platform_output.cursor_icon, egui::CursorIcon::Alias, "W shows a rotation cursor over the viewer (#3864)");
+}
+
+#[test]
 fn rotate_tool_counts_revolutions_both_ways() {
     let mut h = harness();
     let box_id = h.state().session.active_comp().unwrap().layers[0].id;

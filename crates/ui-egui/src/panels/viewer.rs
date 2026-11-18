@@ -1008,7 +1008,8 @@ fn phase_hover(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, resp
             Tool::Hand => egui::CursorIcon::Grab,
             Tool::Zoom => egui::CursorIcon::ZoomIn,
             Tool::Type | Tool::TypeVertical => egui::CursorIcon::Text,
-            Tool::Orbit => egui::CursorIcon::Alias,
+            // egui has no curved-arrow cursor; Alias is what the puppet pin rotate ring uses too (#3864).
+            Tool::Orbit | Tool::Rotate => egui::CursorIcon::Alias,
             Tool::PanCamera => egui::CursorIcon::Move,
             Tool::Dolly => egui::CursorIcon::ResizeVertical,
             t if t.is_pen() => {
