@@ -13,7 +13,7 @@ const MAX_PIXELS: u64 = 16 << 20;
 // (16 B), two blur images (32 B) and output (16 B), even where lifetimes do not
 // overlap. Twelve Mi pixels fit within a 1 GiB working-buffer budget (84 B/pixel).
 const MAX_LAYER_PIXELS: u64 = 12 << 20;
-pub(crate) const MAX_INPUT_BYTES: u64 = 512 << 20;
+pub(crate) const MAX_INPUT_BYTES: u64 = effectcraft_project::PCRAFT_MAX_INPUT;
 
 pub(crate) fn sniff(path: &str, bytes: &[u8]) -> bool {
     path.to_ascii_lowercase().ends_with(".pcraft") || craft_doc::sniff(bytes) == Some(craft_doc::Kind::PhotoCraft)

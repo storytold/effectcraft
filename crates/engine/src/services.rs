@@ -1,7 +1,7 @@
 use super::config;
 
 /// The largest PhotoCraft bundle [`Services::read_pcraft`] reads.
-pub const PCRAFT_MAX_INPUT: u64 = 512 << 20;
+pub use effectcraft_project::PCRAFT_MAX_INPUT;
 
 /// The error for a PhotoCraft bundle over [`PCRAFT_MAX_INPUT`].
 pub fn pcraft_too_large() -> std::io::Error {
@@ -130,7 +130,7 @@ fn read_regular_file(path: &str, limit: Option<u64>) -> std::io::Result<Vec<u8>>
     let mut bytes = Vec::new();
     // A sparse file can claim far more than memory: an error, not an abort.
     bytes.try_reserve_exact(usize::try_from(meta.len()).unwrap_or(usize::MAX)).map_err(|e| std::io::Error::new(std::io::ErrorKind::OutOfMemory, e))?;
-    file.take(limit.map_or(u64::MAX, |max| max + 1)).read_to_end(&mut bytes)?;
+    file.take(limit.map_or(u64::MAX, |max| max.saturating_add(1))).read_to_end(&mut bytes)?;
     if limit.is_some_and(|max| bytes.len() as u64 > max) {
         return Err(pcraft_too_large());
     }

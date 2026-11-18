@@ -112,7 +112,7 @@ pub(crate) fn read_regular_file_stamped(path: &std::path::Path) -> std::io::Resu
     // A sparse file can claim far more than memory: an error, not an abort.
     bytes.try_reserve_exact(usize::try_from(meta.len()).unwrap_or(usize::MAX)).map_err(|e| std::io::Error::new(std::io::ErrorKind::OutOfMemory, e))?;
     if pcraft {
-        file.take(pcraft::MAX_INPUT_BYTES + 1).read_to_end(&mut bytes)?;
+        file.take(pcraft::MAX_INPUT_BYTES.saturating_add(1)).read_to_end(&mut bytes)?;
         if bytes.len() as u64 > pcraft::MAX_INPUT_BYTES {
             return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "PhotoCraft bundle grew beyond the 512 MiB input limit"));
         }
