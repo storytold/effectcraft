@@ -110,6 +110,19 @@ pub(crate) struct FootagePlan {
     /// A sequence's folder modification time as stored (`sspc@118`, seconds since 1904, UTC; 860),
     /// when the caller supplied it ([`crate::export::export_with`]).
     pub folder_time: Option<u32>,
+    /// The Photoshop layer the item shows instead of the merged image.
+    pub psd_layer: Option<PsdLayerPlan>,
+}
+
+/// One layer of a `.psd` (lab psd-layers: After Effects reads the layer from the file by its index;
+/// the bounds, layer id and byte count it also stores may be zero, read-back psd_layers_zeroed).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct PsdLayerPlan {
+    /// The layer record's index in the file (bottom of the stack = 0).
+    pub index: i32,
+    pub name: String,
+    /// The item is the layer's own bounds (a cropped layer), not the document's size.
+    pub layer_size: bool,
 }
 
 /// Seconds between 1904-01-01 (the stored time's epoch) and 1970-01-01.
@@ -173,10 +186,22 @@ fn integer_rate(f: &Footage) -> Option<u32> {
 /// Plans one footage item, or reports why it cannot be written.
 pub(crate) fn plan_footage(name: &str, f: &Footage, col: &mut Collector) -> Option<FootagePlan> {
     let what = |why: &str| format!("footage '{name}': {why}");
-    if f.layer.is_some() {
-        col.lose(LossCategory::FootageItems, what("one layer of a layered file is not exported"));
-        return None;
-    }
+    // One layer of a Photoshop file is written; a smart object's embedded file or a placed
+    // (warped) layer is not.
+    let psd_layer = match &f.layer {
+        None => None,
+        Some(l) if l.embedded.is_none() && !l.placed && f.kind == FootageKind::Still && ext(&f.path) == "psd" => match i32::try_from(l.index) {
+            Ok(index) => Some(PsdLayerPlan { index, name: l.name.clone(), layer_size: l.layer_size }),
+            Err(_) => {
+                col.lose(LossCategory::FootageItems, what("a Photoshop layer index out of range, not exported"));
+                return None;
+            }
+        },
+        Some(_) => {
+            col.lose(LossCategory::FootageItems, what("one layer of a layered file is not exported (only a plain Photoshop layer is)"));
+            return None;
+        }
+    };
     // Interpret Footage settings other than the defaults are not written (After Effects
     // interprets the file itself).
     let d = Footage::default();
@@ -241,6 +266,7 @@ pub(crate) fn plan_footage(name: &str, f: &Footage, col: &mut Collector) -> Opti
         numbering: None,
         seconds: 0.0,
         folder_time: None,
+        psd_layer,
     };
     match kind {
         FtKind::PngSeq | FtKind::ExrSeq | FtKind::JpegSeq => {
@@ -623,6 +649,18 @@ pub(crate) fn build_footage(protos: &FtProtos, id: u32, label: u8, name: &str, p
         put_u16(opti, 20, u16::try_from(p.width).unwrap_or(u16::MAX))?;
         put_u16(opti, 24, u16::try_from(p.height).unwrap_or(u16::MAX))?;
         put_cstr(opti, 58, 256, &p.file_name)?;
+    }
+    if let Some(l) = &p.psd_layer {
+        // The layer's index at `sspc` 192 (the merged image's -1), the layer id before it (zero
+        // is read), byte 199 set for an item of the document's size (0 for a cropped layer); in
+        // `opti` the index at 14 and the name at 344 (lab psd-layers).
+        let sspc = child_data(pin, b"sspc")?;
+        put(sspc, 188, &[0; 4])?;
+        put(sspc, 192, &l.index.to_be_bytes())?;
+        put_u8(sspc, 199, u8::from(!l.layer_size))?;
+        let opti = child_data(pin, b"opti")?;
+        put(opti, 14, &l.index.to_be_bytes())?;
+        put_cstr(opti, 344, 258, &l.name)?;
     }
     put(child_data(pin, b"pgui")?, 0, &guid)?;
     Ok(chunks)
