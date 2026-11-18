@@ -609,3 +609,10 @@ fn shared_packbits_keeps_padded_rows_and_truncated_packet_errors() {
     unpack_bits(&[0, 9, 255], 1, &mut row).unwrap();
     assert_eq!(row, [9]);
 }
+
+#[test]
+fn shared_packbits_reports_row_limits_as_invalid_not_truncated() {
+    // The shared recovery decoder refuses a row beyond its decoded-size limit. That refusal
+    // is a limit, not truncated PackBits data, so the wrapper must not report it as one.
+    assert!(matches!(unpack_bits(&[], usize::MAX, &mut Vec::new()), Err(Error::Invalid(_))));
+}
