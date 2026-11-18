@@ -731,6 +731,20 @@ fn small_blurs_fall_back_to_the_cpu() {
     }
 }
 
+/// Fill with All Masks on a layer without masks fills nothing (After Effects 2026): it renders on
+/// the CPU, and a GPU frame matches it.
+#[test]
+fn fill_all_masks_without_masks_matches_cpu() {
+    let mut s = Scene::new(BitDepth::Bpc32);
+    let bg = s.solid([0.15, 0.1, 0.2], 97, 61);
+    s.push(bg);
+    let mut l = s.footage(70, 44);
+    let vals = [("allMasks", Value::Bool(true)), ("color", c(0.2, 0.6, 1.0))];
+    s.effect(&mut l, "ec.generate.fill", &vals);
+    s.push(l);
+    check(&format!("ec.generate.fill {vals:?}"), compare_at(&s, opts(), Tick::ZERO), 0.0);
+}
+
 /// Horizontal GPU box passes used to restart the running sum every 256 px; the CPU keeps one sum
 /// per row, so images wider than 256 disagreed in f32 rounding. Width 320 forces that path.
 /// Exact on llvmpipe (CI lavapipe), which fails without the fix; other adapters use the usual

@@ -457,7 +457,7 @@ pub(crate) fn polys_coverage(w: usize, h: usize, polys: &[(Vec<[f64; 2]>, bool)]
 /// Fill: paints the layer's pixels with Color. With Fill Mask (or All Masks) only the pixels
 /// inside that mask (or any mask) are painted, with the mask edge feathered horizontally /
 /// vertically; Invert paints outside instead. Without a mask, Invert fills the transparent
-/// areas.
+/// areas, and All Masks fills nothing.
 fn fill(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let c = ctx.params.color("color");
     let invert = ctx.params.b("invert");
@@ -487,6 +487,11 @@ fn fill(ctx: &EffectCtx, mut b: Buf) -> Buf {
                 px[i] += (c[i] * a - px[i]) * m;
             }
         });
+        return b;
+    }
+    // All Masks on a layer without masks fills nothing: After Effects 2026 leaves the layer as it
+    // was, also with Invert (test-corpus fx-fill-out 6 and 7).
+    if ctx.params.b("allMasks") {
         return b;
     }
     // Without masks the layer becomes the fill colour, and Opacity is the layer's opacity: After

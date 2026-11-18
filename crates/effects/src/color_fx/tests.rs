@@ -443,6 +443,17 @@ fn fill_mask_all_masks_feather_and_invert() {
     assert_eq!(plain.get(10, 5), [1.0, 0.0, 0.0, 1.0]);
 }
 
+/// After Effects 2026 (test-corpus fx-fill-out 6 and 7): All Masks on a layer without masks
+/// leaves the layer as it was, with or without Invert and at any Opacity.
+#[test]
+fn fill_all_masks_without_masks_leaves_the_layer() {
+    let grey = Image::filled(4, 4, [0.5, 0.5, 0.5, 1.0]);
+    for vals in [vec![("allMasks", Value::Bool(true))], vec![("allMasks", Value::Bool(true)), ("invert", Value::Bool(true)), ("opacity", num(0.0))]] {
+        let out = run_fx("ec.generate.fill", &vals, grey.clone(), 0.0, EffectEnv::default()).img;
+        assert_eq!(out.get(1, 1), [0.5, 0.5, 0.5, 1.0], "{vals:?}");
+    }
+}
+
 /// After Effects 2026: Fill (0, 0.5, 1) at Opacity 50 % on an opaque layer (a Gradient Ramp
 /// on a red solid) renders premultiplied (0, 0.251, 0.502) at alpha 0.502 everywhere: the
 /// fill colour at half the layer's alpha, nothing of the ramp left.
