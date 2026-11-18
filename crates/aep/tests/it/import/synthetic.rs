@@ -1060,4 +1060,15 @@ fn preserve_transparency_is_imported_from_the_layer_header() {
     let flagged = pt(&p);
     assert_eq!(flagged.len(), off.len(), "{flagged:?}");
     assert!(flagged.iter().all(|on| *on), "{flagged:?}");
+    // Dancing Dissolve alone (2) leaves the switch off.
+    let file = mutate(&mut |c| {
+        if c.id == *b"ldta" {
+            set_data(c, 103, &[2]);
+        }
+    });
+    let (p, r) = run(&file, true);
+    r.unwrap();
+    let dancing = pt(&p);
+    assert_eq!(dancing.len(), off.len(), "{dancing:?}");
+    assert!(dancing.iter().all(|on| !on), "{dancing:?}");
 }
