@@ -1106,7 +1106,9 @@ impl DiskCache {
             self.write_failed(&e);
             return;
         }
-        let data = seal_format(kind, format, payload);
+        // (no memory for the sealed entry just now: it isn't written; a plane is decoded from its
+        // file next time)
+        let Some(data) = try_seal_format(kind, format, payload) else { return };
         // An entry that cannot fit would be evicted straight away.
         if data.len() as u64 > self.limit_bytes() {
             return;
@@ -1578,13 +1580,32 @@ fn writer(dc: std::sync::Weak<DiskCache>, q: Arc<(Mutex<Queue>, Condvar)>) {
 /// [`FORMAT_LAYER_FILES`] for layer buffers), payload, checksum.
 fn seal_format(kind: Kind, format: u8, payload: &[u8]) -> Vec<u8> {
     let mut data = Vec::with_capacity(payload.len() + 16);
+    seal_into(&mut data, kind, format, payload);
+    data
+}
+
+/// [`seal_format`] with its memory taken fallibly: `None` when the system can't give it (a
+/// poorly compressible 16K plane's entry is about 1 GiB), and the entry is then not written.
+fn try_seal_format(kind: Kind, format: u8, payload: &[u8]) -> Option<Vec<u8>> {
+    let len = payload.len().checked_add(16)?;
+    #[cfg(test)]
+    if len > NO_SEAL_OVER.with(std::cell::Cell::get) {
+        return None;
+    }
+    let mut data = Vec::new();
+    data.try_reserve_exact(len).ok()?;
+    seal_into(&mut data, kind, format, payload);
+    Some(data)
+}
+
+/// The header, `payload` and checksum of an entry appended to `data` (room for them reserved).
+fn seal_into(data: &mut Vec<u8>, kind: Kind, format: u8, payload: &[u8]) {
     data.extend_from_slice(MAGIC);
     data.push(kind.tag());
     data.extend_from_slice(&[format, 0, 0]);
     data.extend_from_slice(payload);
-    let sum = checksum(&data);
+    let sum = checksum(data.as_slice());
     data.extend_from_slice(&sum.to_le_bytes());
-    data
 }
 
 /// A sealed 8-bit frame entry with the source files it was made of: what the browser's frame
@@ -1827,11 +1848,12 @@ fn encode_plane(w: u32, h: u32, name: &str, plane: &[f32]) -> Vec<u8> {
 /// channel: half the bytes); type 2: `f32` (bit-exact: Cryptomatte IDs are float bit patterns).
 /// The scratch memory and the result are taken fallibly: `None` when the system can't give them.
 fn encode_plane_after(mut out: Vec<u8>, w: u32, h: u32, name: &str, plane: &[f32]) -> Option<Vec<u8>> {
-    out.try_reserve(64).ok()?;
-    out.extend_from_slice(&w.to_le_bytes());
-    out.extend_from_slice(&h.to_le_bytes());
     let name = name.as_bytes();
     let len = name.len().min(u16::MAX as usize);
+    // (the size, the name and the sample type)
+    out.try_reserve(len.checked_add(64)?).ok()?;
+    out.extend_from_slice(&w.to_le_bytes());
+    out.extend_from_slice(&h.to_le_bytes());
     out.extend_from_slice(&(len as u16).to_le_bytes());
     out.extend_from_slice(name.get(..len).unwrap_or_default());
     let n = plane.len();
@@ -1876,6 +1898,9 @@ thread_local! {
     /// Allocations [`zeroed`] refuses on this thread: those over this many bytes (tests: memory
     /// the system can't give).
     static NO_MEMORY_OVER: std::cell::Cell<usize> = const { std::cell::Cell::new(usize::MAX) };
+    /// Sealed entries [`try_seal_format`] can't get memory for on this thread: those over this
+    /// many bytes (tests).
+    static NO_SEAL_OVER: std::cell::Cell<usize> = const { std::cell::Cell::new(usize::MAX) };
 }
 
 /// The name and plane of a plane entry's pixels ([`encode_plane_after`]) of `expect` (width, height);
@@ -2417,6 +2442,31 @@ mod tests {
         assert!(!dc.contains(Kind::Plane, 1), "no entry without the encoder's memory");
         job(2).write(&dc, Kind::Plane, 2, FORMAT_PLANES_FILES);
         assert!(dc.get_plane(2, 16, 8).is_some(), "written with it");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #3750 review: a plane entry that can't get the memory to be sealed (a poorly compressible
+    /// 16K plane's is about 1 GiB) is not written, and the planes after it are; a sealed entry
+    /// is the same bytes either way.
+    #[test]
+    fn a_plane_entry_without_memory_to_seal_is_skipped_and_the_rest_written() {
+        let dir = tmpdir("planes-no-seal");
+        let dc = DiskCache::open(&dir, 1 << 30).unwrap();
+        let (files, _) = plane_source(&dir.join("src"));
+        // (noise compresses poorly: its entry is over 2 KiB; the flat plane's is far under)
+        let noise: Vec<f32> = (0..1024u32).map(|i| f32::from_bits(0x3f00_0000 | i.wrapping_mul(2_654_435_761) >> 9)).collect();
+        let flat = vec![0.5f32; 1024];
+        let job = Payload::Planes(32, 32, vec![(1, "A.id".to_string(), noise.clone()), (2, "A.R".to_string(), flat)], files.clone());
+        NO_SEAL_OVER.with(|c| c.set(2048));
+        job.write(&dc, Kind::Plane, 0, FORMAT_PLANES_FILES);
+        NO_SEAL_OVER.with(|c| c.set(usize::MAX));
+        assert!(!dc.contains(Kind::Plane, 1), "no memory to seal it: not written");
+        assert!(dc.get_plane(2, 32, 32).is_some(), "the next plane is written");
+        let mut entry = Vec::new();
+        files.encode(&mut entry);
+        let entry = encode_plane_after(entry, 32, 32, "A.id", &noise).unwrap();
+        assert!(entry.len() > 2048);
+        assert_eq!(try_seal_format(Kind::Plane, FORMAT_PLANES_FILES, &entry), Some(seal_format(Kind::Plane, FORMAT_PLANES_FILES, &entry)), "the same bytes");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
