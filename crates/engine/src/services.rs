@@ -173,19 +173,22 @@ mod tests {
     }
 
     /// Templates and dotLottie files are ZIP archives too: only PhotoCraft reads have the
-    /// 512 MiB input limit. The length is set without writing the data.
+    /// 512 MiB input limit. A file over it is refused from its length, which is set without
+    /// writing the data, so nothing is read; the same read with a smaller limit, and with none,
+    /// shows where the limit applies.
     #[test]
     fn only_photocraft_reads_have_the_input_limit() {
         let f = std::env::temp_dir().join(format!("ec-services-large-{}.zip", std::process::id()));
         std::fs::write(&f, b"PK\x03\x04").unwrap();
         std::fs::OpenOptions::new().write(true).open(&f).unwrap().set_len(super::PCRAFT_MAX_INPUT + 1).unwrap();
-        let path = f.to_string_lossy();
+        let path = f.to_string_lossy().to_string();
         let error = FsServices.read_pcraft(&path).unwrap_err();
         assert!(error.to_string().contains("512 MiB input limit"), "{error}");
-        let bytes = FsServices.read_file(&path).unwrap();
-        assert_eq!(bytes.len() as u64, super::PCRAFT_MAX_INPUT + 1);
-        assert!(bytes.starts_with(b"PK\x03\x04"));
-        drop(bytes);
+        std::fs::OpenOptions::new().write(true).open(&f).unwrap().set_len(4).unwrap();
+        assert_eq!(FsServices.read_file(&path).unwrap(), b"PK\x03\x04");
+        assert_eq!(FsServices.read_pcraft(&path).unwrap(), b"PK\x03\x04");
+        assert!(super::read_regular_file(&path, Some(3)).is_err(), "one byte over a limit");
+        assert_eq!(super::read_regular_file(&path, None).unwrap(), b"PK\x03\x04");
         let _ = std::fs::remove_file(f);
     }
 
