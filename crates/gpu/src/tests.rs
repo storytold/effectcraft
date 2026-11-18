@@ -742,7 +742,11 @@ fn fill_all_masks_without_masks_matches_cpu() {
     let vals = [("allMasks", Value::Bool(true)), ("color", c(0.2, 0.6, 1.0))];
     s.effect(&mut l, "ec.generate.fill", &vals);
     s.push(l);
-    check(&format!("ec.generate.fill {vals:?}"), compare_at(&s, opts(), Tick::ZERO), 0.0);
+    // Every pixel within the 32 bpc tolerance: `check` lets a share of pixels through on GL,
+    // which would hide a fill of a few pixels.
+    if let Some(d) = compare_at(&s, opts(), Tick::ZERO) {
+        assert_eq!(d.over, 0, "ec.generate.fill {vals:?}: {} of {} pixels over tolerance (max {:.6}); worst {:?}", d.over, d.total, d.max, d.worst);
+    }
 }
 
 /// Horizontal GPU box passes used to restart the running sum every 256 px; the CPU keeps one sum
