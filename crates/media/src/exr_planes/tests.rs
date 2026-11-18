@@ -1887,8 +1887,8 @@ fn planes_let_go_but_still_held_count_toward_the_limit() {
 }
 
 /// #3750 review: a decode thread that took over a decode whose held planes are let go asks
-/// again while the request that queued the decode still holds them (its flight): it is refused
-/// for now rather than read beside them; that request reads once they are gone.
+/// again while the request that queued the decode still holds that decode's flight: the flight
+/// no longer keeps the planes, so they are gone, not read beside, when the request is read.
 #[test]
 fn a_claimed_decode_is_not_read_beside_the_planes_it_let_go() {
     let path = "/3750-claimed-let-go.exr";
@@ -1922,8 +1922,8 @@ fn a_claimed_decode_is_not_read_beside_the_planes_it_let_go() {
         let _ = CLAIM_SIGNAL.wait_timeout_while(claims, std::time::Duration::from_secs(10), |c| !c.iter().any(|c| c == p));
     });
     STARTING.lock().unwrap().push((path.to_string(), hold));
-    // ...and the asker, handed the let-go, holds its flight (and the planes) until the decode
-    // thread has asked again.
+    // ...and the asker, handed the let-go, holds its flight until the decode thread has asked
+    // again.
     {
         let done = done.clone();
         let wait: Hook = Arc::new(move |_: &str| {
@@ -1941,8 +1941,8 @@ fn a_claimed_decode_is_not_read_beside_the_planes_it_let_go() {
     HANDED.lock().unwrap().retain(|(p, _)| p != path);
     set_read_error(path, None);
     assert!(CLAIMS.lock().unwrap().iter().any(|p| p == path), "claimed");
-    assert!(matches!(&claimed, Err(Refused::NoMemory(why)) if why.contains("still in use")), "{claimed:?}");
-    assert_eq!(asked.ok(), Some(1), "the asker reads the depth plane once the picture's planes are gone");
+    assert_eq!(claimed.ok(), Some(1), "the decode thread reads the depth plane alone");
+    assert_eq!(asked.ok(), Some(1), "so does the asker");
     assert!(old.upgrade().is_none());
     let alive = alive.lock().unwrap().clone();
     assert!(!alive.is_empty() && !alive.contains(&true), "no read beside the planes let go: {alive:?}");

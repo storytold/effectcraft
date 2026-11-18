@@ -80,7 +80,7 @@ fn asks_at_least(index: &ExrIndex, want: &Want, failed: &Want) -> bool {
 /// Decode `want` for this request alone (kept nowhere), noting the file it read. `live`: planes
 /// of the file let go but still in memory ([`PlaneStore::live`]).
 fn copy(path: &str, source: &ExrSource, index: &Arc<ExrIndex>, want: &Want, live: usize) -> Result<Arc<Batch>, Refused> {
-    let b = run(path, source, &Flight::new(index.clone(), want.clone(), live), None, None);
+    let b = run(path, source, &Flight::new(index.clone(), want.clone(), live), None);
     if let Ok(b) = &b {
         crate::reads::note(b.file.clone());
     }
@@ -179,8 +179,10 @@ struct Flight {
     phase: std::sync::atomic::AtomicU8,
     handed: Mutex<Option<Result<Arc<Batch>, Refused>>>,
     handed_ready: Condvar,
-    /// What the store held when the decode was asked for (the decode adds to it).
-    base: Option<Arc<Batch>>,
+    /// What the store held when the decode was asked for (the decode adds to it). Taken when the
+    /// store lets it go ([`PlaneStore::let_go`]): the requests still holding the flight (its
+    /// waiters, until they wake) don't keep those planes in memory.
+    base: Mutex<Option<Arc<Batch>>>,
     /// Planes of the file the store let go ([`Refused::LetGo`]) that are still in memory when the
     /// decode was asked for: a caller holds them, or a decode that let them go hasn't ended yet
     /// ([`PlaneStore::live`]). They count toward the limit with the planes read.
@@ -231,7 +233,7 @@ impl Flight {
             phase: std::sync::atomic::AtomicU8::new(QUEUED),
             handed: Mutex::new(None),
             handed_ready: Condvar::new(),
-            base,
+            base: Mutex::new(base),
             live,
             since,
             hints: filmcraft_media::cancel::Context::current(),
@@ -284,6 +286,11 @@ impl Flight {
         }
     }
 
+    /// [`Flight::base`] (`None` once let go).
+    fn base(&self) -> Option<Arc<Batch>> {
+        self.base.lock().unwrap_or_else(PoisonError::into_inner).clone()
+    }
+
     fn state(&self) -> MutexGuard<'_, FlightState> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -320,9 +327,12 @@ impl Entry {
         self.let_go.iter().map(|(_, n)| *n).fold(0, usize::saturating_add)
     }
 
-    /// Dropping it would free nothing or lose work in progress: a decode runs, or planes are held.
+    /// Dropping it would free nothing or lose work in progress: a decode runs, or planes are held
+    /// (also planes it let go: dropping the entry would forget that they are still in memory).
     fn in_use(&self) -> bool {
-        self.flight.is_some() || self.batch.as_ref().is_some_and(|b| Arc::strong_count(b) > 1 || Arc::strong_count(&b.aux) > 1)
+        self.flight.is_some()
+            || self.batch.as_ref().is_some_and(|b| Arc::strong_count(b) > 1 || Arc::strong_count(&b.aux) > 1)
+            || self.let_go.iter().any(|(w, _)| w.strong_count() > 0)
     }
 }
 
@@ -608,20 +618,19 @@ impl PlaneStore {
                 Waited::Got(Err(Refused::TooLarge(_))) if flight.asks_beyond(index, want) => Step::Again { retry: true },
                 Waited::Got(Err(e)) => Step::Done(Err(e)),
                 Waited::Cancelled => Step::Done(Err(Refused::Cancelled)),
-                // A copy, kept nowhere (with the planes let go still in memory now: a decode
-                // that let them go may not have ended yet).
+                // A copy, kept nowhere (with the planes let go that something still holds now).
                 Waited::No => Step::Done(copy(path, source, index, want, self.live(path))),
             };
         }
         // This request decodes: what it asks for, minus what the store holds.
         let base = e.batch.clone().filter(|b| Arc::ptr_eq(&b.index, index));
-        let flight = Flight::with_base(index.clone(), want.clone(), base.clone(), live, since);
+        let flight = Flight::with_base(index.clone(), want.clone(), base, live, since);
         e.flight = Some(flight.clone());
         drop(st);
         #[cfg(test)]
         crate::exr_channels::count_decode(true);
         let mut owning = Owning { store: self, path, flight: &flight, ended: false };
-        let outcome = run(path, source, &flight, base, opened.take());
+        let outcome = run(path, source, &flight, opened.take());
         match owning.end(outcome) {
             Ok(b) if b.covers(index, want) => {
                 let mut st = self.lock();
@@ -741,7 +750,7 @@ impl PlaneStore {
                 let took = clock.saturating_sub(flight.asked).max(1);
                 // A decode adding channels to what was held: both decodes made the planes; one
                 // that read them all anew replaces what was held, and its cost.
-                e.cost_us = if flight.base.is_some() { e.cost_us.saturating_add(took) } else { took };
+                e.cost_us = if flight.base().is_some() { e.cost_us.saturating_add(took) } else { took };
             }
             Err(why @ (Refused::Unreadable | Refused::TooLarge(_))) => {
                 let (index, want) = {
@@ -776,9 +785,11 @@ impl PlaneStore {
     }
 
     /// Let the planes `flight` was asked to add to go ([`Refused::LetGo`]): the entry of `path`
-    /// and the pictures' held planes no longer keep them (unless the entry holds others by now).
+    /// and the pictures' held planes no longer keep them (unless the entry holds others by now),
+    /// nor the flight (whose waiters may hold it a while yet).
     fn let_go(st: &mut State, path: &str, flight: &Flight) {
-        let Some(base) = &flight.base else { return };
+        let Some(base) = flight.base.lock().unwrap_or_else(PoisonError::into_inner).take() else { return };
+        let base = &base;
         if let Some(e) = st.entries.iter_mut().find(|e| e.path == path && e.batch.as_ref().is_some_and(|b| Arc::ptr_eq(b, base))) {
             e.batch = None;
             e.bytes = 0;
@@ -970,7 +981,7 @@ fn decode_claimed(path: &str, source: &ExrSource, flight: &Arc<Flight>, index: &
         CLAIM_SIGNAL.notify_all();
     }
     let mut handing = Handing { flight, outcome: None };
-    let outcome = flight.hints.clone().run(|| decode(path, source, flight, flight.base.clone(), None));
+    let outcome = flight.hints.clone().run(|| decode(path, source, flight, flight.base(), None));
     handing.outcome = Some(outcome.clone());
     drop(handing);
     match outcome {
@@ -987,7 +998,7 @@ fn decode_claimed(path: &str, source: &ExrSource, flight: &Arc<Flight>, index: &
 
 /// Run `flight`'s decode on the footage decode threads (here when this is one of them, or
 /// there are none) and block until it is done.
-fn run(path: &str, source: &ExrSource, flight: &Arc<Flight>, base: Option<Arc<Batch>>, opened: Option<Opened>) -> Result<Arc<Batch>, Refused> {
+fn run(path: &str, source: &ExrSource, flight: &Arc<Flight>, opened: Option<Opened>) -> Result<Arc<Batch>, Refused> {
     #[cfg(not(target_arch = "wasm32"))]
     if let Some(threads) = crate::pool::decode_threads()
         && threads.current_thread_index().is_none()
@@ -1005,7 +1016,7 @@ fn run(path: &str, source: &ExrSource, flight: &Arc<Flight>, base: Option<Arc<Ba
             run_hook(&STARTING, &path);
             // (claimed meanwhile by a decode thread: it decodes, and hands the outcome over)
             if queued.take(RUNNING) {
-                let outcome = hints.run(|| decode(&path, &source, &queued, base, opened));
+                let outcome = hints.run(|| decode(&path, &source, &queued, queued.base(), opened));
                 // (let go of the flight before the asker goes on: the flight keeps the outcome
                 // for its waiters, and a flight still held here would keep the planes looking in
                 // use, so the store would drop another file's instead)
@@ -1032,7 +1043,7 @@ fn run(path: &str, source: &ExrSource, flight: &Arc<Flight>, base: Option<Arc<Ba
     if !flight.take(RUNNING) {
         return flight.take_handed();
     }
-    decode(path, source, flight, base, opened)
+    decode(path, source, flight, flight.base(), opened)
 }
 
 /// What a failed read of `path` means for the request.
@@ -1162,7 +1173,7 @@ fn decode(path: &str, source: &ExrSource, flight: &Arc<Flight>, base: Option<Arc
         let fits = |planes: usize| crate::exr_read::check_total(w, h, planes, cap);
         let live = flight.live;
         let still_held = || {
-            log::warn!("media: {path}: {live} OpenEXR channels let go are still in use");
+            log::debug!("media: {path}: {live} OpenEXR channels let go are still in use");
             Refused::NoMemory(format!("its {w}×{h} OpenEXR channels don't fit the memory one file may use beside {live} of its channels still in use"))
         };
         let held = base.as_ref().map_or(0, |b| b.ids.len());
