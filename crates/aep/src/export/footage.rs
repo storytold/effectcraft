@@ -114,8 +114,9 @@ pub(crate) struct FootagePlan {
     pub psd_layer: Option<PsdLayerPlan>,
 }
 
-/// One layer of a `.psd` (lab psd-layers: After Effects reads the layer from the file by its index;
-/// the bounds, layer id and byte count it also stores may be zero, read-back psd_layers_zeroed).
+/// One layer of a `.psd` (lab psd-layers: After Effects finds the layer in the file by the name in
+/// `Pin`; the bounds, layer id and byte count it also stores may be zero, read-backs
+/// psd_layers_zeroed and psd-layer v4).
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct PsdLayerPlan {
     /// The layer record's index in the file (bottom of the stack = 0).
@@ -661,6 +662,13 @@ pub(crate) fn build_footage(protos: &FtProtos, id: u32, label: u8, name: &str, p
         let opti = child_data(pin, b"opti")?;
         put(opti, 14, &l.index.to_be_bytes())?;
         put_cstr(opti, 344, 258, &l.name)?;
+        // The layer's name is also the `Utf8` after `sspc`: After Effects finds the layer by it
+        // and reports the item missing without it (read-back psd-layer v4).
+        let kids = kids_mut(pin)?;
+        let at = kids.iter().position(|c| c.is(b"Utf8")).ok_or_else(|| tpl("footage prototype without its name"))?;
+        if let Some(c) = kids.get_mut(at) {
+            *c = Chunk::data(*b"Utf8", l.name.as_bytes().to_vec());
+        }
     }
     put(child_data(pin, b"pgui")?, 0, &guid)?;
     Ok(chunks)

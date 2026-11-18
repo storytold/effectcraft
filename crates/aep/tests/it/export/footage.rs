@@ -338,10 +338,10 @@ fn hostile_footage_never_panics() {
 }
 
 /// One layer of a Photoshop file is written as After Effects stores it (lab psd-layers): the index
-/// in `opti` (14) and `sspc` (192), the name in `opti` (344), `sspc` 199 set for an item of the
-/// document's size. After Effects reads the layer from the file by its index and renders it as
-/// it does its own items (read-back psd_layers_zeroed: the bounds, the layer id and the byte count
-/// it also stores may be zero).
+/// in `opti` (14) and `sspc` (192), the name in `Pin` (the `Utf8` after `sspc`, which After Effects
+/// finds the layer by: read-back psd-layer v4) and in `opti` (344), `sspc` 199 set for an item of
+/// the document's size (the bounds, the layer id and the byte count it also stores may be zero:
+/// read-back psd_layers_zeroed).
 #[test]
 fn one_layer_of_a_photoshop_file_is_written() {
     let mut p = Project::default();
@@ -365,6 +365,9 @@ fn one_layer_of_a_photoshop_file_is_written() {
         let pin = item.chunk().child_list(b"Pin ").expect("Pin");
         let sspc = pin.child(b"sspc").and_then(|c| c.bytes()).expect("sspc");
         let index = i32::from_be_bytes(sspc[192..196].try_into().unwrap());
+        // The name After Effects finds the layer by: the `Utf8` after `sspc`.
+        let pin_name = pin.child(b"Utf8").and_then(|c| c.bytes()).map(|b| String::from_utf8_lossy(b).into_owned());
+        assert_eq!(pin_name.as_deref(), Some(l.name.as_str()));
         seen.push((l.index, l.name, (f.width, f.height), index, sspc[199]));
     }
     seen.sort();
