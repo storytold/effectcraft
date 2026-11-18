@@ -460,9 +460,9 @@ fn depth_of_field_blurs_out_of_focus_layers() {
 fn dof_blur_width_matches_after_effects() {
     // Labs dof2 / dof3 (After Effects 26.5, Fast Rectangle iris): a 1200 × 300 comp, the camera
     // at (600, 150, -zoom) with Aperture 400. With zoom = focus = 1000, a square at depth 2000
-    // has edges that ramp linearly over 22.2 px (half of 400 · ½ / 9); with focus 1500 they ramp
-    // over 7.2 px, with zoom 1500 and focus 1000 (depth 3000) over 47.1 px. The blur used to be
-    // nine times wider and to ignore zoom / focus.
+    // has edges that ramp linearly over 22.2 px (Aperture · |depth − focus| / depth / 9 =
+    // 400 · ½ / 9); with focus 1500 they ramp over 7.2 px, with zoom 1500 and focus 1000 (depth
+    // 3000) over 47.1 px. The blur used to be nine times wider and to ignore zoom / focus.
     let ramp = |zoom: f64, focus: f64| {
         let (mut p, cid, comp) = setup_sized(1200, 300);
         let mut cam = camera(&mut p, &comp);
