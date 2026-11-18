@@ -302,7 +302,7 @@ fn lightning(e: &mut Enc, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
     let (w, h) = (b.img.width, b.img.height);
     let core = Variant { mul: plan.core, min: 0.3, ..Variant::plain(0.6) };
     let cov = raster_segs(e, w, h, plan.segs.iter().map(|s| (s.a, s.b, s.r, s.v)), &[Variant::plain(0.0), core])?;
-    let glow = gauss_plane(e, &cov, plan.width * 0.5, plan.width * 0.5);
+    let glow = gauss_plane(e, &cov, plan.width * 0.5, plan.width * 0.5)?;
     let m = e.scratch(w, h);
     e.pixels("fg2_pair", &Params::default(), &cov, Some(&glow), &m, None);
     let mut p = Params::default();
@@ -322,7 +322,7 @@ fn advanced_lightning(e: &mut Enc, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
     let linear = Variant { linear: true, ..Variant::plain(0.0) };
     let core = raster_segs(e, w, h, segs.iter().map(|(a, z, i)| ([a.0, a.1], [z.0, z.1], core_r, *i)), &[linear])?;
     let glow = glow_r > 0.5;
-    let blurred = if glow { gauss_plane(e, &core, glow_r / 3.0, glow_r / 3.0) } else { core.clone() };
+    let blurred = if glow { gauss_plane(e, &core, glow_r / 3.0, glow_r / 3.0)? } else { core.clone() };
     let m = e.scratch(w, h);
     e.pixels("fg2_pair", &Params::default(), &core, Some(&blurred), &m, None);
     let mut p = Params::default();
@@ -528,7 +528,7 @@ fn paint_bucket(e: &mut Enc, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
     let cov = match pr.e("stroke") {
         1 => {
             let s = pr.f("featherSoftness") * sc * 0.5;
-            if s > 0.05 { gauss_plane(e, &region, s, s) } else { region }
+            if s > 0.05 { gauss_plane(e, &region, s, s)? } else { region }
         }
         2 => morph_frac(e, &region, pr.f("spreadRadius") * sc, DILATE_X),
         3 => morph_frac(e, &region, pr.f("spreadRadius") * sc, ERODE_X),
@@ -539,7 +539,7 @@ fn paint_bucket(e: &mut Enc, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
             cov_kernel(e, 2, &out, &inn)
         }
         _ => {
-            let blurred = gauss_plane(e, &region, 0.5, 0.5);
+            let blurred = gauss_plane(e, &region, 0.5, 0.5)?;
             cov_kernel(e, 0, &region, &blurred)
         }
     };
