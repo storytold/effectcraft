@@ -784,6 +784,17 @@ fn keys_on_angles_checkboxes_popups_and_integer_sliders_are_written() {
     // The third EffectCraft item is After Effects' fourth: its list has a separator after Basic.
     assert_eq!(keys(1), [(0, vec![1.0], (3, 3)), (51_200, vec![4.0], (3, 3))]);
     assert_eq!(keys(27), [(0, vec![1.0], (1, 1)), (25_600, vec![40.0], (1, 1))]);
+    // The Evolution key's incoming ease is written as set (degrees per second).
+    {
+        let view = effectcraft_aep::Project::new(&file).expect("project");
+        let comp = view.all_items().into_iter().find_map(|i| i.comp()).expect("comp");
+        let layer = comp.layers().next().expect("layer");
+        let fx = layer.effects().into_iter().next().expect("effect");
+        let evo = view.effect_params(&fx).into_iter().find(|p| p.index == 24).expect("evolution");
+        let written: Vec<_> = evo.keys().expect("keys").keyframes().collect();
+        let e = written[2].ease_components().expect("ease");
+        assert_eq!((e[0].in_speed, e[0].in_influence), (-100.0, 0.5));
+    }
     // And back: the same keys, the popup ones held (the importer does not read checkbox keys).
     let q = import_bytes(&r.bytes);
     let back = q
@@ -793,6 +804,8 @@ fn keys_on_angles_checkboxes_popups_and_integer_sliders_are_written() {
         .expect("effect");
     let values = |id: &str| back.prop(id).expect(id).keys.iter().map(|k| (k.value.clone(), k.out_interp)).collect::<Vec<_>>();
     assert_eq!(values("evolution").iter().map(|v| v.0.clone()).collect::<Vec<_>>(), [Value::Scalar(0.0), Value::Scalar(720.0), Value::Scalar(90.0)]);
+    let evo_in = &back.prop("evolution").expect("evolution").keys[2];
+    assert_eq!((evo_in.in_interp, evo_in.in_ease.clone()), (Interp::Bezier, vec![effectcraft_keyframe::Ease { speed: -100.0, influence: 0.5 }]));
     assert_eq!(values("fractalType"), [(Value::Enum(0), Interp::Hold), (Value::Enum(2), Interp::Hold)]);
     assert_eq!(values("evolutionOptions/cycle").iter().map(|v| v.0.clone()).collect::<Vec<_>>(), [Value::Scalar(1.0), Value::Scalar(40.0)]);
 }
