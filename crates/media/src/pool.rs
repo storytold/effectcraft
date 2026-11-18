@@ -71,11 +71,23 @@ enum Pixels {
 }
 
 impl Pixels {
-    /// Nobody but the cache holds the pixels: dropping them frees their memory.
-    fn unshared(&self) -> bool {
+    /// Nobody but the cache holds the pixels: dropping the cache's references frees their memory.
+    /// `own` counts the cache's own references to them ([`CacheState::own_refs`]): one picture can
+    /// be cached under two keys, or both as a frame and as a whole still (#3750 review: a still
+    /// asked for reduced and then whole is one picture in both), and those are not other holders.
+    fn unshared(&self, own: impl FnOnce(*const ()) -> usize) -> bool {
+        let holders = match self {
+            Pixels::F32(img) => Arc::strong_count(img),
+            Pixels::Q8(f) => Arc::strong_count(f),
+        };
+        holders <= 1 || holders <= own(self.addr())
+    }
+
+    /// Where the pixels are (the same for every reference to them).
+    fn addr(&self) -> *const () {
         match self {
-            Pixels::F32(img) => Arc::strong_count(img) == 1,
-            Pixels::Q8(f) => Arc::strong_count(f) == 1,
+            Pixels::F32(img) => Arc::as_ptr(img).cast(),
+            Pixels::Q8(f) => Arc::as_ptr(f).cast(),
         }
     }
 
@@ -208,23 +220,21 @@ impl Lru {
         }
     }
     /// The least recently used frame it may drop and its last use: not the newest (it always
-    /// stays) and not one whose pixels someone else holds (dropping it would free nothing yet).
-    fn oldest(&self) -> Option<(&Key, u64)> {
+    /// stays) and not one whose pixels someone outside the cache holds (dropping it would free
+    /// nothing yet). `own`: the cache's own references to pixels ([`CacheState::own_refs`]).
+    fn oldest(&self, own: impl Fn(*const ()) -> usize) -> Option<(&Key, u64)> {
         if self.map.len() <= 1 {
             return None;
         }
         let newest = self.order.last_key_value().map(|(s, _)| *s);
         self.order.iter().filter(|(s, _)| Some(**s) != newest).find_map(|(_, k)| {
             let e = self.map.get(k)?;
-            e.img.unshared().then_some((k, e.used))
+            e.img.unshared(&own).then_some((k, e.used))
         })
     }
-    /// Drop the least recently used frame it may drop; the bytes freed.
-    fn drop_oldest(&mut self) -> usize {
-        let Some(k) = self.oldest().map(|(k, _)| k.clone()) else { return 0 };
-        let had = self.bytes;
-        self.remove(&k);
-        had.saturating_sub(self.bytes)
+    /// The frames holding the pixels at `addr`.
+    fn refs(&self, addr: *const ()) -> usize {
+        self.map.values().filter(|e| e.img.addr() == addr).count()
     }
     /// The bytes of the recycled buffers ([`Lru::spare`]).
     fn spare_bytes(&self) -> usize {
@@ -398,10 +408,33 @@ impl CacheState {
         self.lru.bytes.saturating_add(self.lru.spare_bytes()).saturating_add(self.recent_bytes())
     }
 
-    /// The oldest whole still in [`CacheState::recent`] that nobody else holds (dropping one in
-    /// use would free nothing yet).
+    /// The oldest whole still in [`CacheState::recent`] that nobody outside the cache holds
+    /// (dropping one in use would free nothing yet; one also cached as a frame is the cache's).
     fn oldest_recent(&self) -> Option<usize> {
-        self.recent.iter().position(|r| Arc::strong_count(&r.img) == 1)
+        self.recent.iter().position(|r| {
+            let holders = Arc::strong_count(&r.img);
+            holders <= 1 || holders <= self.own_refs(Arc::as_ptr(&r.img).cast())
+        })
+    }
+
+    /// The references the cache itself holds to the pixels at `addr`: its frames and whole
+    /// stills holding them (#3750 review: a whole still kept for a reduced size and then asked
+    /// for whole is in both).
+    fn own_refs(&self, addr: *const ()) -> usize {
+        self.lru.refs(addr).saturating_add(self.recent.iter().filter(|r| Arc::as_ptr(&r.img).cast::<()>() == addr).count())
+    }
+
+    /// The least recently used frame it may drop ([`Lru::oldest`]) and its last use.
+    fn oldest_frame(&self) -> Option<(&Key, u64)> {
+        self.lru.oldest(|addr| self.own_refs(addr))
+    }
+
+    /// Drop the least recently used frame it may drop; the bytes freed.
+    fn drop_oldest_frame(&mut self) -> usize {
+        let Some(k) = self.oldest_frame().map(|(k, _)| k.clone()) else { return 0 };
+        let had = self.lru.bytes;
+        self.lru.remove(&k);
+        had.saturating_sub(self.lru.bytes)
     }
 
     /// The bytes of the whole stills [`CacheState::recent`] holds.
@@ -1776,7 +1809,7 @@ impl effectcraft_render::memory::MemoryHolder for Inner {
             return Some(Candidate { used: 0, bytes: b.len().saturating_mul(std::mem::size_of::<Px>()).max(1), cost_us: 0, protected: false });
         }
         let frame =
-            c.lru.oldest().and_then(|(k, _)| c.lru.map.get(k)).map(|e| Candidate { used: e.used, bytes: e.bytes, cost_us: e.cost_us, protected: false });
+            c.oldest_frame().and_then(|(k, _)| c.lru.map.get(k)).map(|e| Candidate { used: e.used, bytes: e.bytes, cost_us: e.cost_us, protected: false });
         let still = c.oldest_recent().and_then(|i| c.recent.get(i)).map(|r| Candidate { used: r.used, bytes: r.bytes.max(1), cost_us: 0, protected: false });
         match (frame, still) {
             (Some(f), Some(s)) => Some(if s.used < f.used { s } else { f }),
@@ -1788,13 +1821,13 @@ impl effectcraft_render::memory::MemoryHolder for Inner {
         if !c.lru.spare.is_empty() {
             return c.lru.drop_spare();
         }
-        let frame = c.lru.oldest().map(|(_, t)| t);
+        let frame = c.oldest_frame().map(|(_, t)| t);
         let at = c.oldest_recent();
         let still = at.and_then(|i| c.recent.get(i)).map(|r| r.used);
         match (frame, still, at) {
             (Some(f), Some(s), Some(i)) if s < f => c.recent.remove(i).map_or(0, |r| r.bytes.max(1)),
             (None, Some(_), Some(i)) => c.recent.remove(i).map_or(0, |r| r.bytes.max(1)),
-            _ => c.lru.drop_oldest(),
+            _ => c.drop_oldest_frame(),
         }
     }
 }
@@ -2239,6 +2272,31 @@ mod tests {
         assert!(c.lru.map.contains_key(&k(0)) && c.recent.iter().any(|r| Arc::ptr_eq(&r.img, &held_still)));
         drop(c);
         drop((held, held_still));
+    }
+
+    /// #3750 review: a still asked for reduced and then whole is one picture both kept as a whole
+    /// still and cached as a frame; once nobody else holds it, those two references are the
+    /// cache's own, and the accountant can let it go.
+    #[test]
+    fn a_still_cached_both_as_frame_and_whole_still_is_offered() {
+        let pool = MediaPool::unregistered(usize::MAX);
+        let holder = pool.memory_holder();
+        let f = plate(&pool, "/both.exr");
+        Inner::frame_at(&pool.inner, &f, Tick::ZERO, true, Some((8, 4)), FloatCurve::Srgb).unwrap();
+        let whole = Inner::frame_at(&pool.inner, &f, Tick::ZERO, true, None, FloatCurve::Srgb).unwrap();
+        {
+            let c = lock(&pool.inner.cache);
+            assert!(c.recent.iter().any(|r| Arc::ptr_eq(&r.img, &whole)), "kept as a whole still");
+            assert!(c.lru.map.values().any(|e| matches!(&e.img, Pixels::F32(i) if Arc::ptr_eq(i, &whole))), "and cached as a frame");
+        }
+        assert!(holder.oldest().is_some());
+        // Held by the caller: the whole still is not offered (only the reduced frame is).
+        assert_eq!(holder.drop_oldest(), 8 * 4 * std::mem::size_of::<Px>() + 64, "the reduced frame");
+        assert!(holder.oldest().is_none(), "the picture the caller holds stays");
+        drop(whole);
+        let still = 16 * 8 * std::mem::size_of::<Px>();
+        assert_eq!(holder.drop_oldest(), still, "nobody else holds it: the whole still goes");
+        assert!(lock(&pool.inner.cache).recent.is_empty());
     }
 
     /// A frame kept as 8-bit levels is its own entry beside the float one, counted at 4 bytes
