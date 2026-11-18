@@ -760,6 +760,68 @@ fn box_blur_horizontal_rows_match_cpu_beyond_256() {
     }
 }
 
+/// #3464: Drop Shadow's Softness reaches 30000. While the padded buffer holds the blur the GPU
+/// runs it and matches the CPU (1000, the old maximum, on a 70 × 44 layer). Once the pixel
+/// budget cuts the padding only the CPU blurs past the buffer's edge, so the GPU declines the
+/// effect; the render then takes it on the CPU at 8 and 32 bpc, with and without Shadow Only.
+#[test]
+fn drop_shadow_large_softness_matches_cpu() {
+    effect_case("ec.perspective.dropshadow", &[("distance", n(6.0)), ("softness", n(1000.0)), ("opacity", n(100.0))]);
+    let Some(g) = gpu() else { return };
+    for only in [false, true] {
+        let vals = [("distance", n(6.0)), ("softness", n(30000.0)), ("opacity", n(100.0)), ("shadowOnly", Value::Bool(only))];
+        let spec = effectcraft_effects::find("ec.perspective.dropshadow").unwrap();
+        let mut params = effectcraft_effects::Params {
+            values: spec.params.iter().map(|ps| (ps.id.to_string(), effectcraft_effects::default_value(ps, [70.0, 44.0]))).collect(),
+        };
+        for (k, v) in &vals {
+            params.values.insert(k.to_string(), v.clone());
+        }
+        let ctx = effectcraft_effects::EffectCtx { params: &params, time: 0.0, layer_size: [70.0, 44.0], seed: 11, adjustment: false, env: Default::default() };
+        let buf = effectcraft_effects::Buf { img: pattern(7, 70, 44), offset: [0.0, 0.0], scale: 1.0 };
+        let step = effectcraft_render::FxStep { spec, ctx };
+        assert!(effectcraft_render::Accelerator::effects(g, &[step], &buf, None).is_none(), "the GPU hands a cut margin to the CPU");
+        for depth in [BitDepth::Bpc8, BitDepth::Bpc32] {
+            let mut s = Scene::new(depth);
+            let bg = s.solid([0.15, 0.1, 0.2], 97, 61);
+            s.push(bg);
+            let mut l = s.footage(70, 44);
+            s.effect(&mut l, "ec.perspective.dropshadow", &vals);
+            s.push(l);
+            check(&format!("drop shadow 30000 only {only} {depth:?}"), compare_at(&s, opts(), Tick::ZERO), 0.0);
+        }
+    }
+}
+
+/// #3460: a box radius far past the image (Gaussian Blur's at Blurriness 30000 is about 15000 px)
+/// starts each running sum as the CPU does, the pixels inside once and the repeated edges
+/// counted, so the GPU matches it along rows and columns, with and without repeated edges.
+#[test]
+fn box_passes_with_a_radius_far_past_the_image_match_cpu() {
+    let Some(g) = gpu() else { return };
+    let img = pattern(5, 96, 40);
+    let up = g.ctx.upload_image(&img).expect("upload");
+    let tol = tolerance(BitDepth::Bpc32);
+    for repeat in [true, false] {
+        let mut e = crate::context::Enc::new(&g.ctx);
+        let r = [15_000usize; 3];
+        let out = crate::effects::box_passes(&mut e, &up, &r, &r, repeat);
+        let got = e.download(&out).expect("download");
+        let want = effectcraft_raster::box_blur(&img, 15_000, 15_000, 3, repeat);
+        assert_eq!((got.width, got.height), (want.width, want.height));
+        let d = diff(&want, &got, tol);
+        assert_eq!(d.over, 0, "repeat {repeat}: max {} at {:?} on {}", d.max, d.worst, g.ctx.name);
+    }
+}
+
+/// #3460: Gaussian Blur's highest Blurriness, 30000, renders the same on the GPU as on the CPU,
+/// with the padding cut to the effect pixel budget and with Repeat Edge Pixels.
+#[test]
+fn gaussian_blur_at_the_highest_blurriness_matches_cpu() {
+    effect_case("ec.blur.gaussian", &[("blurriness", n(30000.0))]);
+    effect_case("ec.blur.gaussian", &[("blurriness", n(30000.0)), ("repeatEdge", Value::Bool(true))]);
+}
+
 #[test]
 fn gpu_effects_match_cpu() {
     // Sigma 3 px and up and even radii, so the half-scale pass stays on the GPU too (#1939).
