@@ -583,4 +583,9 @@ fn a_3dl_lattice_is_capped_at_the_largest_side() {
         assert!(lut::parse_3dl_limited(&table_3dl(5, mesh), 4).is_none(), "mesh {mesh}");
         assert!(lut::parse_3dl_limited(&table_3dl(5, mesh), 5).is_some(), "mesh {mesh}");
     }
+    // A 3-entry mesh reads as a 28th row until the count separates it, and a four-value row is
+    // still refused at the smallest limit.
+    assert!(lut::parse_3dl_limited(&table_3dl(3, true), 3).is_some_and(|l| l.n3 == 3));
+    let four = table_3dl(2, false).replacen("7 7 7", "7 7 7 7", 1);
+    assert!(lut::parse_3dl_limited(&four, 2).is_none());
 }

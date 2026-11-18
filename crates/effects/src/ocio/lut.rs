@@ -59,7 +59,7 @@ pub(super) fn parse_3dl_limited(text: &str, max_side: usize) -> Option<Lut> {
             }
             continue;
         }
-        let v: Vec<f64> = l.split_whitespace().filter_map(|t| t.parse().ok()).take(max_side.saturating_add(1)).collect();
+        let v: Vec<f64> = l.split_whitespace().filter_map(|t| t.parse().ok()).take(max_side.max(3).saturating_add(1)).collect();
         if v.len() > 3 && mesh.is_none() && rows.is_empty() {
             // The mesh length is the lattice side: refuse one no lattice reader accepts (#3830).
             if v.len() > max_side {
@@ -67,7 +67,9 @@ pub(super) fn parse_3dl_limited(text: &str, max_side: usize) -> Option<Lut> {
             }
             mesh = Some(v);
         } else if v.len() == 3 {
-            if rows.len() >= max_side.saturating_pow(3) {
+            // One spare row while no mesh is known: a 3-entry mesh reads as a data row until the
+            // count tells them apart below.
+            if rows.len() >= max_side.saturating_pow(3).saturating_add(usize::from(mesh.is_none())) {
                 return None;
             }
             rows.push([v[0], v[1], v[2]]);
