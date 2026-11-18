@@ -42,8 +42,14 @@ pub enum RefItem {
     Class(String),
     Enum(String, String, String),
     Offset(String, i32),
+    /// Identifier with the legacy unnamed `null` class.
     Identifier(i32),
+    /// Index with the legacy unnamed `null` class.
     Index(i32),
+    /// Identifier retaining the original class and its encoding.
+    IdentifierWithClass(craft_psd::descriptor::Class, i32),
+    /// Index retaining the original class and its encoding.
+    IndexWithClass(craft_psd::descriptor::Class, i32),
     Name(String, String),
 }
 
@@ -108,14 +114,6 @@ impl Descriptor {
     }
 }
 
-/// A key or class id: length-prefixed string, or a 4-character code when the length is 0.
-pub(crate) fn read_id(r: &mut Reader) -> Result<String> {
-    let n = r.u32()? as usize;
-    let n = if n == 0 { 4 } else { n };
-    let b = r.bytes(n)?;
-    Ok(String::from_utf8_lossy(b).into_owned())
-}
-
 pub(crate) fn read_unicode(r: &mut Reader) -> Result<String> {
     let n = r.u32()? as usize;
     let mut v = Vec::with_capacity(n.min(r.remaining() / 2));
@@ -128,122 +126,90 @@ pub(crate) fn read_unicode(r: &mut Reader) -> Result<String> {
     Ok(String::from_utf16_lossy(&v))
 }
 
-/// Read a descriptor (after its version field).
+/// Preserve the application parser's per-container limits in the shared parser.
+pub(crate) const PARSE_LIMITS: craft_psd::descriptor::ParseLimits =
+    craft_psd::descriptor::ParseLimits { max_descriptor_items: 100_000, max_list_items: 1_000_000 };
+
+/// Read a descriptor (after its version field) with [`craft_psd::descriptor::Descriptor::parse_prefix`].
+/// The public [`Descriptor`] / [`DValue`] types stay this crate's (engine interchange uses them).
 pub fn read_descriptor(r: &mut Reader) -> Result<Descriptor> {
-    read_descriptor_at(r, 0)
+    let rest = r.data.get(r.pos..).unwrap_or(&[]);
+    let (d, used) = craft_psd::descriptor::Descriptor::parse_prefix_with_limits(rest, PARSE_LIMITS).map_err(desc_err)?;
+    r.skip(used)?;
+    Ok(from_craft_descriptor(d))
 }
 
-/// [`read_descriptor`] nested `depth` values deep: the limit in [`read_value`] counts nested
-/// descriptors too, so a file can't recurse until the stack overflows.
-fn read_descriptor_at(r: &mut Reader, depth: usize) -> Result<Descriptor> {
-    let class_name = read_unicode(r)?;
-    let class_id = read_id(r)?;
-    let n = r.u32()? as usize;
-    if n > 100_000 {
-        return Err(Error::Invalid("descriptor item count".into()));
+fn desc_err(e: craft_psd::PsdError) -> Error {
+    match e {
+        craft_psd::PsdError::UnexpectedEof { .. } => Error::Truncated,
+        craft_psd::PsdError::Unsupported(s) => Error::Unsupported(s),
+        other => Error::Invalid(other.to_string()),
     }
-    let mut items = Vec::with_capacity(n.min(64));
-    for _ in 0..n {
-        let key = read_id(r)?;
-        let ty = r.tag()?;
-        let v = read_value(r, &ty, depth)?;
-        items.push((key, v));
-    }
-    Ok(Descriptor { class_name, class_id, items })
 }
 
-fn read_value(r: &mut Reader, ty: &[u8; 4], depth: usize) -> Result<DValue> {
-    if depth > 64 {
-        return Err(Error::Invalid("descriptor nesting".into()));
+fn id_str(id: &craft_psd::descriptor::Id) -> String {
+    String::from_utf8_lossy(id.as_bytes()).into_owned()
+}
+
+fn unit_str(u: &[u8; 4]) -> String {
+    String::from_utf8_lossy(u).into_owned()
+}
+
+fn from_craft_descriptor(d: craft_psd::descriptor::Descriptor) -> Descriptor {
+    Descriptor {
+        class_name: d.name.to_string_lossy(),
+        class_id: id_str(&d.class_id),
+        items: d.items.into_iter().map(|(k, v)| (id_str(&k), from_craft_value(v))).collect(),
     }
-    Ok(match ty {
-        b"Objc" | b"GlbO" => DValue::Descriptor(read_descriptor_at(r, depth + 1)?),
-        b"VlLs" => {
-            let n = r.u32()? as usize;
-            if n > 1_000_000 {
-                return Err(Error::Invalid("descriptor list length".into()));
+}
+
+fn from_craft_value(v: craft_psd::descriptor::Value) -> DValue {
+    use craft_psd::descriptor::Value;
+    match v {
+        Value::Descriptor(d) | Value::GlobalObject(d) => DValue::Descriptor(from_craft_descriptor(d)),
+        Value::List(l) => DValue::List(l.into_iter().map(from_craft_value).collect()),
+        Value::Double(x) => DValue::Double(if x.is_finite() { x } else { 0.0 }),
+        Value::UnitFloat { unit, value } => DValue::UnitFloat(unit_str(&unit), if value.is_finite() { value } else { 0.0 }),
+        Value::UnitFloats { unit, values } => DValue::UnitFloats(unit_str(&unit), values.into_iter().map(|x| if x.is_finite() { x } else { 0.0 }).collect()),
+        Value::Text(s) => DValue::Text(s.to_string_lossy()),
+        Value::Enumerated { type_id, value } => DValue::Enum(id_str(&type_id), id_str(&value)),
+        Value::Integer(i) => DValue::Integer(i),
+        Value::LargeInteger(i) => DValue::LargeInteger(i),
+        Value::Boolean(b) => DValue::Bool(b),
+        Value::Class(c) | Value::GlobalClass(c) => DValue::Class(c.name.to_string_lossy(), id_str(&c.class_id)),
+        Value::Alias(b) | Value::Path(b) | Value::RawData(b) => DValue::Raw(b),
+        Value::ObjectArray(o) => DValue::ObjectArray(o.prefix, from_craft_descriptor(o.body)),
+        Value::Reference(items) => DValue::Reference(items.into_iter().map(from_craft_ref).collect()),
+    }
+}
+
+fn legacy_reference_class(class: &craft_psd::descriptor::Class) -> bool {
+    class.name.0 == [0] && class.class_id == craft_psd::descriptor::Id::Code(*b"null")
+}
+
+fn from_craft_ref(it: craft_psd::descriptor::ReferenceItem) -> RefItem {
+    use craft_psd::descriptor::ReferenceItem;
+    match it {
+        ReferenceItem::Property { class, key } => RefItem::Property(id_str(&class.class_id), id_str(&key)),
+        ReferenceItem::Class(c) => RefItem::Class(id_str(&c.class_id)),
+        ReferenceItem::Enumerated { class, type_id, value } => RefItem::Enum(id_str(&class.class_id), id_str(&type_id), id_str(&value)),
+        ReferenceItem::Offset { class, offset } => RefItem::Offset(id_str(&class.class_id), offset),
+        ReferenceItem::Identifier { class, id } => {
+            if legacy_reference_class(&class) {
+                RefItem::Identifier(id as i32)
+            } else {
+                RefItem::IdentifierWithClass(class, id as i32)
             }
-            let mut v = Vec::with_capacity(n.min(256));
-            for _ in 0..n {
-                let t = r.tag()?;
-                v.push(read_value(r, &t, depth + 1)?);
+        }
+        ReferenceItem::Index { class, index } => {
+            if legacy_reference_class(&class) {
+                RefItem::Index(index as i32)
+            } else {
+                RefItem::IndexWithClass(class, index as i32)
             }
-            DValue::List(v)
         }
-        b"ObAr" => {
-            let n = r.u32()?;
-            DValue::ObjectArray(n, read_descriptor_at(r, depth + 1)?)
-        }
-        b"doub" => DValue::Double(r.f64_finite()?),
-        b"UntF" => {
-            let unit = String::from_utf8_lossy(&r.tag()?).into_owned();
-            DValue::UnitFloat(unit, r.f64_finite()?)
-        }
-        b"UnFl" => {
-            let unit = String::from_utf8_lossy(&r.tag()?).into_owned();
-            let n = r.u32()? as usize;
-            let mut v = Vec::with_capacity(n.min(1024));
-            for _ in 0..n {
-                v.push(r.f64_finite()?);
-            }
-            DValue::UnitFloats(unit, v)
-        }
-        b"TEXT" => DValue::Text(read_unicode(r)?),
-        b"enum" => {
-            let t = read_id(r)?;
-            DValue::Enum(t, read_id(r)?)
-        }
-        b"long" => DValue::Integer(r.u32()? as i32),
-        b"comp" => DValue::LargeInteger(r.u64()? as i64),
-        b"bool" => DValue::Bool(r.u8()? != 0),
-        b"type" | b"GlbC" => {
-            let name = read_unicode(r)?;
-            DValue::Class(name, read_id(r)?)
-        }
-        b"alis" | b"tdta" | b"Pth " => {
-            let n = r.u32()? as usize;
-            DValue::Raw(r.bytes(n)?.to_vec())
-        }
-        b"obj " => {
-            let n = r.u32()? as usize;
-            let mut items = Vec::with_capacity(n.min(16));
-            for _ in 0..n {
-                let t = r.tag()?;
-                items.push(match &t {
-                    b"prop" => {
-                        let _name = read_unicode(r)?;
-                        let class = read_id(r)?;
-                        RefItem::Property(class, read_id(r)?)
-                    }
-                    b"Clss" => {
-                        let _name = read_unicode(r)?;
-                        RefItem::Class(read_id(r)?)
-                    }
-                    b"Enmr" => {
-                        let _name = read_unicode(r)?;
-                        let class = read_id(r)?;
-                        let ty = read_id(r)?;
-                        RefItem::Enum(class, ty, read_id(r)?)
-                    }
-                    b"rele" => {
-                        let _name = read_unicode(r)?;
-                        let class = read_id(r)?;
-                        RefItem::Offset(class, r.u32()? as i32)
-                    }
-                    b"Idnt" => RefItem::Identifier(r.u32()? as i32),
-                    b"indx" => RefItem::Index(r.u32()? as i32),
-                    b"name" => {
-                        let _name = read_unicode(r)?;
-                        let class = read_id(r)?;
-                        RefItem::Name(class, read_unicode(r)?)
-                    }
-                    other => return Err(Error::Invalid(format!("reference item `{}`", String::from_utf8_lossy(other)))),
-                });
-            }
-            DValue::Reference(items)
-        }
-        other => return Err(Error::Invalid(format!("descriptor type `{}`", String::from_utf8_lossy(other)))),
-    })
+        ReferenceItem::Name { class, name } => RefItem::Name(id_str(&class.class_id), name.to_string_lossy()),
+    }
 }
 
 // ---------------------------------------------------------------- writing
@@ -387,12 +353,27 @@ fn write_value(out: &mut Vec<u8>, v: &DValue) {
                         out.extend_from_slice(&o.to_be_bytes());
                     }
                     RefItem::Identifier(i) => {
+                        // Photoshop stores a class before the id; craft-psd reads it that way.
                         out.extend_from_slice(b"Idnt");
+                        put_unicode(out, "");
+                        put_id(out, "null");
                         out.extend_from_slice(&i.to_be_bytes());
                     }
                     RefItem::Index(i) => {
                         out.extend_from_slice(b"indx");
+                        put_unicode(out, "");
+                        put_id(out, "null");
                         out.extend_from_slice(&i.to_be_bytes());
+                    }
+                    RefItem::IdentifierWithClass(class, id) => {
+                        out.extend_from_slice(b"Idnt");
+                        put_reference_class(out, class);
+                        out.extend_from_slice(&id.to_be_bytes());
+                    }
+                    RefItem::IndexWithClass(class, index) => {
+                        out.extend_from_slice(b"indx");
+                        put_reference_class(out, class);
+                        out.extend_from_slice(&index.to_be_bytes());
                     }
                     RefItem::Name(c, n) => {
                         out.extend_from_slice(b"name");
@@ -404,6 +385,19 @@ fn write_value(out: &mut Vec<u8>, v: &DValue) {
             }
         }
     }
+}
+
+fn put_reference_class(out: &mut Vec<u8>, class: &craft_psd::descriptor::Class) {
+    out.extend_from_slice(&(class.name.0.len() as u32).to_be_bytes());
+    for unit in &class.name.0 {
+        out.extend_from_slice(&unit.to_be_bytes());
+    }
+    let length = match &class.class_id {
+        craft_psd::descriptor::Id::Code(_) => 0,
+        craft_psd::descriptor::Id::Str(bytes) => bytes.len() as u32,
+    };
+    out.extend_from_slice(&length.to_be_bytes());
+    out.extend_from_slice(class.class_id.as_bytes());
 }
 
 fn tag4(s: &str) -> [u8; 4] {

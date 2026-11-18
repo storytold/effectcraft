@@ -156,3 +156,9 @@ under [`docs/brand/LICENSE-brand.txt`](docs/brand/LICENSE-brand.txt). Forks and 
 | `docs/brand/artcraft-mark.svg` | ArtCraft Team | Original work: first-party ArtCraft brand mark (ArtCraft symbol ("A" mark), blue) | ArtCraft brand terms, not open source (`docs/brand/LICENSE-brand.txt`) |
 
 - Appearance theme previews, drawn procedurally from original shapes: `crates/ui-egui/src/panels/settings.rs` (original work, MIT OR Apache-2.0).
+
+## Synthetic test audio
+
+| Asset | Author | Source | Licence |
+|---|---|---|---|
+| `crates/media/tests/fixtures/pce61-ffmpeg.aac-fixture` | Dylan M. Taylor | Original sine waves; reproducible recipe in `crates/media/tests/fixtures/README.md` | MIT OR Apache-2.0 |

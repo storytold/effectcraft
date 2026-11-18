@@ -224,19 +224,7 @@ pub(crate) fn profile_json(icc: &[u8], name: &str) -> String {
 
 /// Standard base64 with padding.
 pub(crate) fn base64(data: &[u8]) -> String {
-    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
-    for c in data.chunks(3) {
-        let n = (u32::from(c[0]) << 16) | (u32::from(c.get(1).copied().unwrap_or(0)) << 8) | u32::from(c.get(2).copied().unwrap_or(0));
-        for (i, shift) in [18u32, 12, 6, 0].iter().enumerate() {
-            if i <= c.len() {
-                out.push(char::from(T[((n >> shift) & 63) as usize]));
-            } else {
-                out.push('=');
-            }
-        }
-    }
-    out
+    craft_mime::base64::STANDARD.encode(data)
 }
 
 #[cfg(test)]
