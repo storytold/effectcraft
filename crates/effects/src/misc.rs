@@ -508,24 +508,31 @@ fn blend_with(orig: [f32; 4], fx: [f32; 4], k: f32) -> [f32; 4] {
     [0, 1, 2, 3].map(|c| fx[c] + (orig[c] - fx[c]) * k)
 }
 
+/// Emboss: each channel's difference across the edge, `relief` pixels along Direction (0 is
+/// up, clockwise, as every After Effects angle), on mid grey, times Contrast. After Effects 26.5
+/// embosses red, green and blue apart (a red square on blue gets orange and blue edges) and
+/// keeps the alpha.
 fn emboss(ctx: &EffectCtx, mut b: Buf) -> Buf {
-    let ang = ctx.params.f("direction").to_radians();
-    let relief = ctx.params.f("relief") * b.scale;
+    let (dx, dy) = emboss_offset(ctx.params.f("direction"), ctx.params.f("relief") * b.scale);
     let contrast = ctx.params.f("contrast") as f32 / 100.0;
     let blend = ctx.params.f("blend") as f32 / 100.0;
-    let (dx, dy) = (ang.cos() * relief, -ang.sin() * relief);
     let src = b.img.clone();
     b.img.rows_mut().for_each(|(y, row)| {
         for (x, px) in row.iter_mut().enumerate() {
             let a = src.sample_bilinear_clamped(x as f64 + 0.5 + dx, y as f64 + 0.5 + dy);
             let c = src.sample_bilinear_clamped(x as f64 + 0.5 - dx, y as f64 + 0.5 - dy);
-            let d = luminance(a[0], a[1], a[2]) - luminance(c[0], c[1], c[2]);
-            let v = (0.5 + d * contrast).clamp(0.0, 1.0);
             let al = px[3];
-            *px = blend_with(*px, [v * al, v * al, v * al, al], blend);
+            let v = [0, 1, 2].map(|i| (0.5 + (a[i] - c[i]) * contrast).clamp(0.0, 1.0) * al);
+            *px = blend_with(*px, [v[0], v[1], v[2], al], blend);
         }
     });
     b
+}
+
+/// The sampling offset of Emboss for Direction `degrees` (0 up, clockwise) and `relief` pixels.
+pub fn emboss_offset(degrees: f64, relief: f64) -> (f64, f64) {
+    let ang = degrees.to_radians();
+    (ang.sin() * relief, -ang.cos() * relief)
 }
 
 fn noise(ctx: &EffectCtx, mut b: Buf) -> Buf {
