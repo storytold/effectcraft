@@ -3,6 +3,7 @@ use super::editors::{curves_editor, editor_height, histogram_only, levels_editor
 use super::rows::{FxScope, group_rows, toggle_closed};
 use super::{Align2, Color32, EffectcraftApp, EvalCtx, GroupKind, Icon, Layer, PropGroup, Rect, Sense, Stroke, Tokens, json, pos2, vec2, widgets};
 use crate::dock::{PanelKind, WorkspaceExt as _};
+use crate::panels::dialogs::{Field, form};
 
 /// Plain arrows in Effect Controls, as in After Effects, before their layer nudge runs: Right /
 /// Left expand / collapse the selected effects, and Down / Up select the next / previous effect
@@ -84,6 +85,16 @@ struct EffectHdr<'a> {
     reset: Rect,
     rename_id: egui::Id,
     layer_id: u64,
+}
+
+fn paint_header_name(app: &mut EffectcraftApp, ui: &mut egui::Ui, bp: &egui::Painter, h: &EffectHdr, effect: &str, name_area: Rect) {
+    let painter = bp.with_clip_rect(name_area);
+    let name = painter.text(pos2(h.tw.max.x + 6.0, h.r.center().y), Align2::LEFT_CENTER, h.shown, Tokens::semibold(12.0), app.tokens.text);
+    let visible = name.intersect(name_area);
+    if visible.is_positive() {
+        app.auto.add(&format!("effectControls.effect.{}.name", h.g.uid), visible, &h.g.name);
+    }
+    render_error_mark(app, ui, bp, effect, h.g, pos2(name.max.x + 8.0, h.r.center().y));
 }
 
 /// The effect header's name field while renaming: Enter or blur commits, Escape cancels.
@@ -206,6 +217,46 @@ fn render_error_mark(app: &mut EffectcraftApp, ui: &mut egui::Ui, bp: &egui::Pai
     ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
 }
 
+/// Reserve the Edit button in a Dropdown Menu Control header and open a draft for its own
+/// Menu property. Other effects keep the usual space for Reset and the effect name.
+fn dropdown_edit_button(app: &mut EffectcraftApp, ui: &mut egui::Ui, cx: &EditorCx, g: &PropGroup, r: Rect, tw: Rect, y: &mut f32) -> (Rect, Rect) {
+    let mut reset = Rect::from_min_size(pos2(r.max.x - 96.0, r.center().y - 9.0), vec2(40.0, 18.0));
+    let mut name_area = Rect::EVERYTHING;
+    if matches!(&g.kind, GroupKind::Effect { effect } if effect == "ec.control.dropdown")
+        && let Some(menu) = g.get("menu")
+        && let super::ParamUi::Popup { options } = &menu.ui
+    {
+        // A narrow dock has room for the usual Reset/About pair only.
+        let edit = if r.width() < 220.0 {
+            let edit = Rect::from_min_size(pos2(tw.max.x, *y), reset.size());
+            *y += ROW;
+            edit
+        } else {
+            let edit = reset;
+            reset = reset.translate(vec2(-46.0, 0.0));
+            edit
+        };
+        name_area = Rect::from_min_max(r.min, pos2(reset.min.x - 4.0, r.max.y));
+        let response = ui.interact(edit, egui::Id::unique(("ec-edit-dropdown", g.uid)), Sense::click());
+        let label = crate::i18n::tr("Edit…");
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), label));
+        let t = &app.tokens;
+        cx.bp.text(edit.center(), Align2::CENTER_CENTER, label, Tokens::ui(11.5), if response.hovered() { t.hot_text } else { t.text_dim });
+        widgets::focus_outline(ui, &response, t);
+        app.auto.add_response(&format!("effectControls.effect.{}.edit", g.uid), &response, "Edit Dropdown Menu");
+        if response.clicked() {
+            form(
+                app,
+                "Edit Dropdown Menu",
+                "effect.editDropdown",
+                json!({"comp": cx.ectx.comp_id.0, "layer": cx.layer.id.0, "prop": menu.uid}),
+                vec![Field::string_list("items", "Items", options.clone())],
+            );
+        }
+    }
+    (reset, name_area)
+}
+
 fn about_button(app: &mut EffectcraftApp, ui: &mut egui::Ui, bp: &egui::Painter, t: &Tokens, effect: &str, g: &PropGroup, r: Rect) {
     // About…: the effect's name and category (AE's About dialog).
     let about = Rect::from_min_size(pos2(r.max.x - 50.0, r.center().y - 9.0), vec2(44.0, 18.0));
@@ -268,6 +319,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let mut y = body.min.y + 4.0 - scroll.offset;
     let mut actions: Actions = vec![];
     let bp = p.with_clip_rect(body);
+    let editor_cx = EditorCx { bp: &bp, layer: &layer, ectx: &ectx };
     let fx: Vec<PropGroup> = layer.effects().map(|f| f.groups().cloned().collect()).unwrap_or_default();
     if fx.is_empty() {
         bp.text(
@@ -322,14 +374,12 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         app.auto.add(&format!("effectControls.effect.{}.twirl", g.uid), tw, &g.name);
         let rename_id = egui::Id::unique(("ec-rename", g.uid));
         let editing: Option<String> = ctx.data(|d| d.get_temp(rename_id));
-        let reset = Rect::from_min_size(pos2(r.max.x - 96.0, r.center().y - 9.0), vec2(40.0, 18.0));
+        let (reset, name_area) = dropdown_edit_button(app, ui, &editor_cx, g, r, tw, &mut y);
         let hdr_cx = EffectHdr { g, shown: &shown, r, tw, reset, rename_id, layer_id: layer.id.0 };
         if let Some(value) = editing.as_ref().cloned() {
             rename_field(app, ui, &hdr_cx, value, &mut actions);
         } else {
-            let name = bp.text(pos2(tw.max.x + 6.0, r.center().y), Align2::LEFT_CENTER, &shown, Tokens::semibold(12.0), t.text);
-            app.auto.add(&format!("effectControls.effect.{}.name", g.uid), name, &g.name);
-            render_error_mark(app, ui, &bp, effect, g, pos2(name.max.x + 8.0, r.center().y));
+            paint_header_name(app, ui, &bp, &hdr_cx, effect, name_area);
         }
         let rresp = ui.interact(reset, egui::Id::unique(("ec-reset", g.uid)), Sense::click());
         bp.text(reset.center(), Align2::CENTER_CENTER, crate::i18n::tr("Reset"), Tokens::ui(11.5), if rresp.hovered() { t.hot_text } else { t.text_dim });
@@ -428,7 +478,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                     if ui.input(|i| i.pointer.primary_pressed()) && ui.rect_contains_pointer(er) {
                         actions.push(("prop.select".into(), json!({"layer":layer.id.0,"prop":g.uid})));
                     }
-                    effect_editor(app, ui, &EditorCx { bp: &bp, layer: &layer, ectx: &ectx }, g, er, &mut actions);
+                    effect_editor(app, ui, &editor_cx, g, er, &mut actions);
                 }
             }
             let scope = FxScope { effect: effect.as_str(), root: g, path: String::new() };

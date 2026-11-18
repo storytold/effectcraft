@@ -506,6 +506,72 @@ fn effect_controls_widgets_register_automation_ids() {
 }
 
 #[test]
+fn dropdown_edit_targets_its_instance_and_applies_one_undoable_change() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"width": 160, "height": 90})).unwrap();
+    let lid = s.execute("layer.newSolid", json!({})).unwrap()["layer"].as_u64().unwrap();
+    let mut apply = |effect: &str| s.execute("effect.apply", json!({"effect": effect})).unwrap()["effects"][0].as_u64().unwrap();
+    let first = apply("Dropdown Menu Control");
+    let second = apply("Dropdown Menu Control");
+    let slider = apply("Slider Control");
+    let original = ["Cool, blue", "Warm", "Discard"];
+    s.execute("effect.editDropdown", json!({"layer": lid, "path": "effects/#2/menu", "items": original})).unwrap();
+    let mut app = EffectcraftApp::new(s);
+    app.show_panel(PanelKind::EffectControls);
+    app.toggle_maximize(PanelKind::EffectControls);
+    let mut h = Harness::builder().with_size(egui::vec2(1200.0, 800.0)).build_eframe(|_| app);
+    h.run_steps(4);
+
+    let click_id = |h: &mut Harness<'_, EffectcraftApp>, id: &str| {
+        let at = rect_of(h, id).center();
+        click(h, at);
+        h.run_steps(2);
+    };
+    let rename_row = |h: &mut Harness<'_, EffectcraftApp>, index: usize, text: &str| {
+        click_id(h, &format!("form.field.items.{index}"));
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+        h.event(egui::Event::Text(text.into()));
+        h.run_steps(2);
+    };
+    let options = |h: &Harness<'_, EffectcraftApp>, effect| {
+        let l = layer(&h.state().session, lid);
+        let menu = l.props.find_group(effect).unwrap().get("menu").unwrap();
+        let effectcraft_engine::project::ParamUi::Popup { options } = &menu.ui else { panic!("expected a dropdown") };
+        options.clone()
+    };
+    let edit = |effect| format!("effectControls.effect.{effect}.edit");
+    assert!(h.state().auto.find(&edit(first)).is_some(), "each Dropdown Menu Control has an Edit action");
+    assert!(h.state().auto.find(&edit(slider)).is_none());
+    let undo = h.state().session.history.undo.len();
+    click_id(&mut h, &edit(second));
+    rename_row(&mut h, 0, "Canceled");
+    for index in (0..original.len()).rev() {
+        click_id(&mut h, &format!("form.field.items.remove.{index}"));
+    }
+    assert_eq!(h.state().auto.find("form.field.items.0").map(|row| row.label.as_str()), Some("Canceled"), "the last item remains");
+    click_id(&mut h, "form.cancel");
+    assert_eq!(options(&h, second), original);
+    assert_eq!(h.state().session.history.undo.len(), undo);
+
+    click_id(&mut h, &edit(second));
+    rename_row(&mut h, 1, "Amber");
+    click_id(&mut h, "form.field.items.remove.2");
+    click_id(&mut h, "form.field.items.add");
+    h.key_press(egui::Key::Enter);
+    h.run_steps(2);
+    assert_eq!(h.state().dialog, Some(effectcraft_ui_egui::Dialog::Form), "an empty item keeps the draft open");
+    assert_eq!(h.state().session.history.undo.len(), undo);
+    rename_row(&mut h, 2, "Night");
+    click_id(&mut h, "form.field.items.up.2");
+    click_id(&mut h, "form.ok");
+    assert_eq!(options(&h, second), ["Cool, blue", "Night", "Amber"]);
+    assert_eq!(options(&h, first), ["Item 1", "Item 2", "Item 3"]);
+    assert_eq!(h.state().session.history.undo.len(), undo + 1);
+    assert!(h.state_mut().session.undo());
+    assert_eq!(options(&h, second), original);
+}
+
+#[test]
 fn tint_swap_button_targets_its_instance_and_undoes_both_colors() {
     let mut s = Session::default();
     s.execute("comp.new", json!({"width": 640, "height": 360, "frameRate": 30, "duration": 5})).unwrap();
