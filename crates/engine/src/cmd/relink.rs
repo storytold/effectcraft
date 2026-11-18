@@ -64,10 +64,21 @@ fn compatible(old: &Footage, new: &Footage) -> bool {
             || (old.native_rate.unwrap_or(old.frame_rate) == new.frame_rate && old.frame_rate.frame_at(old.duration) == new.frame_rate.frame_at(new.duration)))
 }
 
-/// The file name of a stored path, split at `/` and `\\` alike: a project saved on Windows keeps
-/// `D:\…\plate.png`, which `Path::file_name` on macOS and Linux takes whole.
+/// True for a Windows path: a drive (`D:\…`, `D:/…`) or a UNC share (`\\server\…`).
+fn is_windows_path(path: &str) -> bool {
+    path.starts_with("\\\\") || matches!(path.as_bytes(), [d, b':', b'\\' | b'/', ..] if d.is_ascii_alphabetic())
+}
+
+/// The file name of a stored path. A Windows path (a project saved on Windows, or an .aep made
+/// there: `D:\…\plate.png`) is split at `\` and `/` alike, since `Path::file_name` on macOS and
+/// Linux takes it whole. Any other path is split as this system splits it: on macOS and Linux a
+/// `\` is an ordinary character of a file name (`/old/shot\plate.png` is the file
+/// `shot\plate.png`), so it is never taken for a separator there.
 fn file_name(path: &str) -> Option<&str> {
-    path.rsplit(['/', '\\']).find(|p| !p.is_empty())
+    if is_windows_path(path) {
+        return path.rsplit(['/', '\\']).find(|p| !p.is_empty());
+    }
+    Path::new(path).file_name().and_then(|n| n.to_str())
 }
 
 fn sequence_at(old: &Footage, path: &str) -> Option<Vec<String>> {
@@ -310,7 +321,48 @@ mod tests {
         assert_eq!(get(&s, id), Footage { path: new, missing: false, ..foreign });
         assert_eq!(file_name("/Volumes/Work/plate.png"), Some("plate.png"));
         assert_eq!(file_name("\\\\server\\share\\a.png"), Some("a.png"));
+        assert_eq!(file_name("c:/Work/a.png"), Some("a.png"));
         assert_eq!(file_name(""), None);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_backslash_in_a_unix_file_name_is_not_a_separator() {
+        // On macOS and Linux `shot\plate.png` is one file name: a missing `/old/shot\plate.png`
+        // must not be relinked to some other `plate.png`, only to a file of its own name.
+        assert_eq!(file_name("/old/shot\\plate.png"), Some("shot\\plate.png"));
+        let dir = Fixture::new();
+        let (mut s, id, old) = setup(&dir, "shot\\plate.png");
+        dir.file("new/plate.png", b"valid");
+        let r = search(&mut s, &dir, false);
+        assert_eq!(r["items"][0]["status"], "notFound");
+        assert_eq!(get(&s, id), old);
+        let own = dir.file("new/shot\\plate.png", b"valid");
+        assert_eq!(search(&mut s, &dir, false)["relinked"], 1);
+        assert_eq!(get(&s, id), Footage { path: own, missing: false, ..old });
+    }
+
+    #[test]
+    fn a_sequence_stored_with_windows_paths_needs_every_frame() {
+        let dir = Fixture::new();
+        let (mut s, id, old) = setup(&dir, "shot_0002.png");
+        let foreign = Footage {
+            path: "D:\\Work\\seq\\shot_0002.png".into(),
+            kind: FootageKind::Sequence,
+            sequence: vec!["D:\\Work\\seq\\shot_0002.png".into(), "D:\\Work\\seq\\shot_0004.png".into()],
+            ..old
+        };
+        Arc::make_mut(&mut s.project).item_mut(id).unwrap().kind = ItemKind::Footage(foreign.clone());
+        let first = dir.file("new/shot_0002.png", b"valid");
+        // A frame is missing: the candidate is listed, nothing is relinked.
+        let r = search(&mut s, &dir, false);
+        assert_eq!(r["relinked"], 0);
+        assert_eq!(r["items"][0]["status"], "incompatible");
+        assert_eq!(r["items"][0]["candidates"][0]["reason"], "sequence is incomplete");
+        assert_eq!(get(&s, id), foreign);
+        let second = dir.file("new/shot_0004.png", b"valid");
+        assert_eq!(search(&mut s, &dir, false)["relinked"], 1);
+        assert_eq!(get(&s, id), Footage { path: first.clone(), sequence: vec![first, second], missing: false, ..foreign });
     }
 
     #[test]
