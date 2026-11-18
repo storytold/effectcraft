@@ -429,6 +429,49 @@ fn hostile_objects_never_panic() {
     assert!(r.report.count(LossCategory::TrackMattes) == 1);
 }
 
+/// Removes every `ADBE Position` record (its `tdmn` and the record after it) under `chunks`.
+fn drop_position_records(chunks: &mut Vec<effectcraft_aep::Chunk<'_>>) {
+    use effectcraft_aep::Body;
+    let named = |c: &effectcraft_aep::Chunk<'_>| c.id == *b"tdmn" && matches!(&c.body, Body::Data(d) if d.starts_with(b"ADBE Position\0"));
+    while let Some(i) = chunks.iter().position(named) {
+        chunks.drain(i..(i + 2).min(chunks.len()));
+    }
+    for c in chunks.iter_mut() {
+        if let Body::List { children, .. } | Body::Chunks(children) = &mut c.body {
+            drop_position_records(children);
+        }
+    }
+}
+
+#[test]
+fn a_camera_without_a_position_record_stands_back_from_its_point_of_interest_by_the_zoom() {
+    // After Effects 2026 writes no Position record for a camera at its point of interest moved
+    // back by the zoom (lab file `lab_campos`: [200, 100, -1000] with the point of interest
+    // [200, 100, 0] and Zoom 1000 reads back as set). The importer used to leave such a camera at
+    // the new layer's default, on the plane of its point of interest.
+    use effectcraft_keyframe::Value;
+    let mut p = Project::default();
+    let c = add_comp(&mut p, "C", 400, 200, FrameRate::new(25, 1), 1.0, None);
+    add_layer(&mut p, c, "Cam", LayerSource::Camera, (400, 200));
+    with_props(
+        &mut p,
+        c,
+        0,
+        &[
+            ("transform/position", Value::Vec3([150.0, 80.0, -1000.0])),
+            ("transform/poi", Value::Vec3([150.0, 80.0, 0.0])),
+            ("cameraOptions/zoom", Value::Scalar(1000.0)),
+        ],
+    );
+    let r = export_all(&p);
+    let mut file = parse(&r.bytes).expect("parse");
+    drop_position_records(&mut file.chunks);
+    let bytes = effectcraft_aep::write(&file).expect("write");
+    first_comp_layers(&bytes, |l| assert!(l.camera_position().is_none(), "the record is gone"));
+    let back = reimported_layers(&bytes);
+    assert_eq!(value(&back[0], "transform/position"), Value::Vec3([150.0, 80.0, -1000.0]));
+}
+
 #[test]
 fn camera_fixtures_come_back_without_a_loss() {
     // The exporter writes every camera option, Blur Level 100 too; importing the export must not

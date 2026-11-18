@@ -18,7 +18,7 @@ use effectcraft_project::{
 use effectcraft_time::Tick;
 
 use crate::import::ImportOptions;
-use crate::import::camera::{import_camera_options, import_light_options};
+use crate::import::camera::{import_camera, import_light_options};
 use crate::import::effects::{LayerCtx, PendingLayerRef, import_effects, resolve_layer_refs};
 use crate::import::markers::{import_markers, import_time_remap, insert_time_remap};
 use crate::import::masks::{MaskLayer, import_masks};
@@ -653,8 +653,8 @@ fn build_layers(project: &mut Project, cx: &mut Ctx<'_>, defs: &EffectDefinition
             // one-node camera does not (251, 256).
             l.auto_orient = camera_light_orient(h.is_auto_oriented(), light);
         }
-        if is_camera && let Some(options) = l.props.sub_mut("cameraOptions") {
-            import_camera_options(&layer, &what, comp.width, &tm, options, &mut cx.col);
+        if is_camera {
+            import_camera(&layer, &what, comp.width, &tm, &mut l.props, &mut cx.col);
         }
         if light.is_some()
             && let Some(options) = l.props.sub_mut("lightOptions")

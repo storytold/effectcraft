@@ -61,6 +61,37 @@ pub(crate) fn import_camera_options(layer: &AepLayer<'_, '_>, what: &str, comp_w
     import_group(&group, &CAMERA, what, tm, options, col);
 }
 
+/// Imports the Camera Options of the camera `layer` into its property tree `props`, then derives
+/// a Position the file leaves out ([`derive_camera_position`]).
+pub(crate) fn import_camera(layer: &AepLayer<'_, '_>, what: &str, comp_width: u32, tm: &TimeMap, props: &mut PropGroup, col: &mut Collector) {
+    if let Some(options) = props.sub_mut("cameraOptions") {
+        import_camera_options(layer, what, comp_width, tm, options, col);
+    }
+    derive_camera_position(layer, props);
+}
+
+/// A camera without a Position record: After Effects leaves it out when the Position is the point
+/// of interest moved back by the zoom (`[x, y, z - zoom]`; lab file `lab_campos`, After Effects
+/// 2026: the cameras set to `[200, 100, -1000]` with the point of interest `[200, 100, 0]` and Zoom
+/// 1000 store no record and read back that Position, one set to `[200, 100, -1000]` with Zoom 800
+/// stores it). Runs after the transform and the Camera Options are imported; `props` is the
+/// layer's property tree.
+fn derive_camera_position(layer: &AepLayer<'_, '_>, props: &mut PropGroup) {
+    let Some(PropNode::Group(transform)) = layer.properties().and_then(|p| p.get("ADBE Transform Group")) else { return };
+    if transform.get("ADBE Position").is_some() {
+        return;
+    }
+    let (Some(Value::Vec3(poi)), Some(Value::Scalar(zoom))) =
+        (props.prop("transform/poi").map(|p| p.value.clone()), props.prop("cameraOptions/zoom").map(|p| p.value.clone()))
+    else {
+        return;
+    };
+    let position = Value::Vec3([poi[0], poi[1], poi[2] - zoom]);
+    if let (true, Some(p)) = (sane(&position), props.prop_mut("transform/position")) {
+        p.value = position;
+    }
+}
+
 /// Imports the Light Options of `layer` into `options` (the layer's `lightOptions` group).
 pub(crate) fn import_light_options(layer: &AepLayer<'_, '_>, what: &str, tm: &TimeMap, options: &mut PropGroup, col: &mut Collector) {
     let Some(PropNode::Group(group)) = layer.properties().and_then(|p| p.get("ADBE Light Options Group")) else { return };
