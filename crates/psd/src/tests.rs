@@ -6,6 +6,7 @@ mod fixed_adjustments;
 mod fixed_writers;
 mod integration;
 mod opt;
+mod scalar_blocks;
 mod section_divider;
 mod shared_corpus;
 mod tysh_prefix;
