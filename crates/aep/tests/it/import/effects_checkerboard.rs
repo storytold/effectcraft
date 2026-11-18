@@ -36,12 +36,17 @@ const BLEND: &[&str] = &[
 
 /// Checkerboard with the definitions After Effects 26.5 wrote and the stored `values`.
 fn checkerboard(values: Vec<(usize, f64)>) -> Fx {
+    checkerboard_with_size_from_slot(values, 2)
+}
+
+/// Checkerboard whose Size From definition holds `slot` in its default slot.
+fn checkerboard_with_size_from_slot(values: Vec<(usize, f64)>, slot: u32) -> Fx {
     Fx {
         match_name: "ADBE Checkerboard",
         name: "Checkerboard",
         defs: vec![
             other(K::Point, "Anchor", Default::Point(0.5, 0.5)),
-            popup("Size From", 2, SIZE_FROM),
+            popup("Size From", slot, SIZE_FROM),
             other(K::Point, "Corner", Default::Point(0.58, 0.58)),
             slider(K::FixedSlider, "Width", 16.0, (0.0, 4000.0)),
             slider(K::FixedSlider, "Height", 8.0, (0.0, 4000.0)),
@@ -82,4 +87,15 @@ fn checkerboard_defaults() {
     near(&g, "width", 16.0);
     near(&g, "height", 8.0);
     assert_eq!(v(&g, "blendingMode"), Value::Enum(0), "None");
+}
+
+/// Size From without a record and without a usable default slot (0: an instance whose
+/// definitions are another copy's, or After Effects' save of a project it opened) is After
+/// Effects' fresh default, Width Slider, not Corner Point (lab fx-tile: three Checkerboards set
+/// to Width Slider, only one with its own definitions; none has a Size From record).
+#[test]
+fn size_from_without_record_or_default_is_width_slider() {
+    let (g, r) = run(&checkerboard_with_size_from_slot(vec![(4, 40.0)], 0), "ec.generate.checkerboard");
+    assert_eq!(losses(&r, LossCategory::Effects, "ADBE Checkerboard"), Vec::<String>::new());
+    assert_eq!(v(&g.expect("imported"), "sizeFrom"), Value::Enum(1), "Width Slider");
 }

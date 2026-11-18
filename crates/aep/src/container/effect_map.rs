@@ -851,13 +851,15 @@ pub const EFFECTS: &[EffectMap] = &[
         ],
     ),
     // Checkerboard (lab fx-tile, After Effects 26.5): Grid's parameters without Border and
-    // Invert Grid; 6 and 9 are the Feather twirl-down markers.
+    // Invert Grid; 6 and 9 are the Feather twirl-down markers. A fresh Checkerboard's Size From
+    // is Width Slider (2): After Effects writes no record for it, and instances that borrow
+    // their definitions have no usable default slot.
     fx(
         "ADBE Checkerboard",
         "ec.generate.checkerboard",
         &[
             pm(1, K::Point, "anchor", Conv::Point),
-            pm(2, K::Popup, "sizeFrom", Conv::Popup { default: 1, items: GRID_SIZE_FROM }),
+            pm(2, K::Popup, "sizeFrom", Conv::Popup { default: 2, items: GRID_SIZE_FROM }),
             pm(3, K::Point, "corner", Conv::Point),
             pm(4, K::FixedSlider, "width", Conv::Plain { valid_max: 4000.0 }),
             pm(5, K::FixedSlider, "height", Conv::Plain { valid_max: 4000.0 }),
