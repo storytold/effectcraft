@@ -84,51 +84,75 @@ pub(crate) fn import_camera(
 /// `[200, 100, -1000]` with the point of interest `[200, 100, 0]` and Zoom 1000 store no record and
 /// read back that Position; one set to `[200, 100, -1000]` with Zoom 800 stores it; only sampled
 /// with the point of interest at z = 0). The importer therefore sets `[x, y, z - zoom]` from the
-/// imported point of interest and Zoom. When that cannot be done (no transform group; keys,
-/// keyframe records or an expression on either, in the file or after import; a Zoom that is not
-/// positive; a result that is not a valid number) it puts back the new layer's Position
-/// (`default_position`) and reports the loss. Runs after the transform and the Camera Options are
+/// imported point of interest and Zoom. When that cannot be done it puts back the new layer's
+/// Position (`default_position`) and reports why ([`underivable`]; a Zoom that is not positive;
+/// a result that is not a valid number). Runs after the transform and the Camera Options are
 /// imported; `props` is the layer's property tree.
 fn derive_camera_position(layer: &AepLayer<'_, '_>, what: &str, default_position: Option<Value>, props: &mut PropGroup, col: &mut Collector) {
     let root = layer.properties();
     let Some(PropNode::Group(transform)) = root.as_ref().and_then(|p| p.get("ADBE Transform Group")) else {
-        col.lose(LossCategory::TransformProperties, format!("{what}: no transform group, default Position used"));
+        col.lose(LossCategory::TransformProperties, format!("{what}: no transform group, so no Position can be derived; default Position used"));
         return;
     };
     if transform.get("ADBE Position").is_some() {
         return;
     }
-    // A record that animates in the file counts even when its keys could not be imported.
-    let animated = |node: Option<PropNode<'_, '_>>| matches!(node, Some(PropNode::Property(p)) if p.is_animated() || p.expression().is_some());
-    let zoom_node = match root.as_ref().and_then(|p| p.get("ADBE Camera Options Group")) {
+    let zoom = match root.as_ref().and_then(|p| p.get("ADBE Camera Options Group")) {
         Some(PropNode::Group(options)) => options.get("ADBE Camera Zoom"),
         _ => None,
     };
-    let in_file = !animated(transform.get("ADBE Anchor Point")) && !animated(zoom_node);
     let fixed = |path: &str| props.prop(path).filter(|p| p.keys.is_empty() && p.expr.is_none()).map(|p| p.value.clone());
-    let derived = match (in_file, fixed("transform/poi"), fixed("cameraOptions/zoom")) {
-        (true, Some(Value::Vec3(poi)), Some(Value::Scalar(zoom))) if zoom > 0.0 => Some(Value::Vec3([poi[0], poi[1], poi[2] - zoom])),
-        _ => None,
-    };
+    let derived = underivable(&transform, zoom).map_or_else(
+        || match (fixed("transform/poi"), fixed("cameraOptions/zoom")) {
+            (Some(Value::Vec3(poi)), Some(Value::Scalar(zoom))) if zoom > 0.0 => {
+                let position = Value::Vec3([poi[0], poi[1], poi[2] - zoom]);
+                if sane(&position) {
+                    Ok(position)
+                } else {
+                    Err((LossCategory::DamagedData, "the Position derived from the point of interest and Zoom is not valid"))
+                }
+            }
+            _ => Err((LossCategory::TransformProperties, "no Position record, and it cannot be derived from the point of interest and Zoom")),
+        },
+        Err,
+    );
     let Some(target) = props.prop_mut("transform/position") else { return };
     match derived {
-        Some(position) if sane(&position) => target.value = position,
-        Some(_) => {
+        Ok(position) => target.value = position,
+        Err((category, why)) => {
             if let Some(d) = default_position {
                 target.value = d;
             }
-            col.lose(LossCategory::DamagedData, format!("{what}: the Position derived from the point of interest and Zoom is not valid, default used"));
-        }
-        None => {
-            if let Some(d) = default_position {
-                target.value = d;
-            }
-            col.lose(
-                LossCategory::TransformProperties,
-                format!("{what}: no Position record, and it cannot be derived from the point of interest and Zoom; default used"),
-            );
+            col.lose(category, format!("{what}: {why}; default Position used"));
         }
     }
+}
+
+/// Why the records of a camera without a Position record give no Position, if they don't: X, Y
+/// and Z stored as separate records (they hold something, not the zero defaults After Effects
+/// writes next to the 3D record), or a point of interest or Zoom record that animates (keys,
+/// even ones that could not be imported, or an expression) or whose value cannot be read. An
+/// absent record is fine: the default it stands for is what was imported.
+fn underivable<'f, 'a>(transform: &AepGroup<'f, 'a>, zoom: Option<PropNode<'f, 'a>>) -> Option<(LossCategory, &'static str)> {
+    fn record<'f, 'a>(node: Option<PropNode<'f, 'a>>) -> Option<crate::Property<'f, 'a>> {
+        match node {
+            Some(PropNode::Property(p)) => Some(p),
+            _ => None,
+        }
+    }
+    let separated = ["ADBE Position_0", "ADBE Position_1", "ADBE Position_2"].into_iter().filter_map(|n| record(transform.get(n))).any(|p| is_stored(&p));
+    if separated {
+        return Some((LossCategory::TransformProperties, "the Position is stored as separate X, Y and Z records, which are not imported"));
+    }
+    for p in [record(transform.get("ADBE Anchor Point")), record(zoom)].into_iter().flatten() {
+        if p.is_animated() || p.expression().is_some() {
+            return Some((LossCategory::TransformProperties, "no Position record, and the point of interest or Zoom it is derived from is animated"));
+        }
+        if p.static_value().is_none() {
+            return Some((LossCategory::DamagedData, "no Position record, and the point of interest or Zoom it is derived from is unreadable"));
+        }
+    }
+    None
 }
 
 /// Imports the Light Options of `layer` into `options` (the layer's `lightOptions` group).

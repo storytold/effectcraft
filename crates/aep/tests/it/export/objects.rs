@@ -496,18 +496,9 @@ fn set_record(chunks: &mut [effectcraft_aep::Chunk<'_>], name: &[u8], v: f64) {
     }
 }
 
-/// Drops the keyframe data (`ldat`) of the record after `tdmn` `name` under `chunks`, leaving the
-/// record marked as animated.
-fn drop_key_data(chunks: &mut Vec<effectcraft_aep::Chunk<'_>>, name: &[u8]) {
+/// Applies `f` to the chunks of the record after `tdmn` `name` (its list) under `chunks`.
+fn edit_record(chunks: &mut Vec<effectcraft_aep::Chunk<'_>>, name: &[u8], f: &mut dyn FnMut(&mut Vec<effectcraft_aep::Chunk<'_>>)) {
     use effectcraft_aep::Body;
-    fn strip(chunks: &mut Vec<effectcraft_aep::Chunk<'_>>) {
-        chunks.retain(|c| c.id != *b"ldat");
-        for c in chunks.iter_mut() {
-            if let Body::List { children, .. } | Body::Chunks(children) = &mut c.body {
-                strip(children);
-            }
-        }
-    }
     let mut armed = false;
     for c in chunks.iter_mut() {
         if c.id == *b"tdmn" {
@@ -515,32 +506,68 @@ fn drop_key_data(chunks: &mut Vec<effectcraft_aep::Chunk<'_>>, name: &[u8]) {
             continue;
         }
         if let Body::List { children, .. } | Body::Chunks(children) = &mut c.body {
-            if armed { strip(children) } else { drop_key_data(children, name) }
+            if armed { f(children) } else { edit_record(children, name, f) }
         }
         armed = false;
     }
 }
 
+/// Removes every `ldat` under `chunks`.
+fn drop_key_data(chunks: &mut Vec<effectcraft_aep::Chunk<'_>>) {
+    use effectcraft_aep::Body;
+    chunks.retain(|c| c.id != *b"ldat");
+    for c in chunks.iter_mut() {
+        if let Body::List { children, .. } | Body::Chunks(children) = &mut c.body {
+            drop_key_data(children);
+        }
+    }
+}
+
+/// Removes the record after `tdmn` `name` (the name and the list) under `chunks`.
+fn drop_record(chunks: &mut Vec<effectcraft_aep::Chunk<'_>>, name: &[u8]) {
+    use effectcraft_aep::Body;
+    let named = |c: &effectcraft_aep::Chunk<'_>| c.id == *b"tdmn" && matches!(&c.body, Body::Data(d) if d.starts_with(name));
+    while let Some(i) = chunks.iter().position(named) {
+        chunks.drain(i..(i + 2).min(chunks.len()));
+    }
+    for c in chunks.iter_mut() {
+        if let Body::List { children, .. } | Body::Chunks(children) = &mut c.body {
+            drop_record(children, name);
+        }
+    }
+}
+
 #[test]
 fn a_camera_position_that_cannot_be_derived_is_reported() {
-    // No Position record, and a Zoom that is not positive, a derived Position out of range, or a
-    // point of interest whose keyframes are declared but hold no data: the layer gets back the new
-    // camera's default Position and the import reports it, so a strict import refuses.
+    // No Position record, and something that stops the Position being derived: the layer gets
+    // back the new camera's default Position and the import reports why, so a strict import
+    // refuses.
     use effectcraft_aep::import::{AepImportError, ImportOptions, LossCategory, import};
+    use effectcraft_aep::{Body, Chunk};
     use effectcraft_keyframe::Value;
     let none = |_: &str| false;
-    #[derive(Clone, Copy)]
+    #[derive(Clone, Copy, Debug)]
     enum Damage {
-        Zoom(f64),
-        None,
+        NegativeZoom,
+        OutOfRange,
         PoiKeysWithoutData,
+        SeparatedPosition,
+        UnreadableZoom,
+        UnreadablePoi,
+        NoTransformGroup,
     }
     let cases = [
-        (0.0, 1000.0, Damage::Zoom(-1000.0), LossCategory::TransformProperties, "cannot be derived"),
-        (-9.0e8, 5.0e8, Damage::None, LossCategory::DamagedData, "is not valid"),
-        (0.0, 1000.0, Damage::PoiKeysWithoutData, LossCategory::TransformProperties, "cannot be derived"),
+        (Damage::NegativeZoom, LossCategory::TransformProperties, "cannot be derived"),
+        (Damage::OutOfRange, LossCategory::DamagedData, "is not valid"),
+        (Damage::PoiKeysWithoutData, LossCategory::TransformProperties, "is animated"),
+        (Damage::SeparatedPosition, LossCategory::TransformProperties, "separate X, Y and Z"),
+        (Damage::UnreadableZoom, LossCategory::DamagedData, "is unreadable"),
+        (Damage::UnreadablePoi, LossCategory::DamagedData, "is unreadable"),
+        (Damage::NoTransformGroup, LossCategory::TransformProperties, "no transform group"),
     ];
-    for (poi_z, zoom, damage, category, detail) in cases {
+    let drop_cdat = |c: &mut Vec<Chunk<'_>>| c.retain(|k| k.id != *b"cdat");
+    for (damage, category, detail) in cases {
+        let (poi_z, zoom) = if matches!(damage, Damage::OutOfRange) { (-9.0e8, 5.0e8) } else { (0.0, 1000.0) };
         let mut p = Project::default();
         let c = add_comp(&mut p, "C", 400, 200, FrameRate::new(25, 1), 1.0, None);
         add_layer(&mut p, c, "Cam", LayerSource::Camera, (400, 200));
@@ -565,19 +592,28 @@ fn a_camera_position_that_cannot_be_derived_is_reported() {
         let mut file = parse(&r.bytes).expect("parse");
         drop_position_records(&mut file.chunks);
         match damage {
-            Damage::Zoom(z) => set_record(&mut file.chunks, b"ADBE Camera Zoom\0", z),
-            Damage::PoiKeysWithoutData => drop_key_data(&mut file.chunks, b"ADBE Anchor Point\0"),
-            Damage::None => {}
+            Damage::NegativeZoom => set_record(&mut file.chunks, b"ADBE Camera Zoom\0", -1000.0),
+            Damage::OutOfRange => {}
+            Damage::PoiKeysWithoutData => edit_record(&mut file.chunks, b"ADBE Anchor Point\0", &mut drop_key_data),
+            Damage::SeparatedPosition => {
+                // `tdsb` 1: the record holds a value the user set (the zero records are 3).
+                edit_record(&mut file.chunks, b"ADBE Position_0\0", &mut |c| {
+                    for k in c.iter_mut().filter(|k| k.id == *b"tdsb") {
+                        k.body = Body::Data(1u32.to_be_bytes().to_vec().into());
+                    }
+                });
+            }
+            Damage::UnreadableZoom => edit_record(&mut file.chunks, b"ADBE Camera Zoom\0", &mut |c| drop_cdat(c)),
+            Damage::UnreadablePoi => edit_record(&mut file.chunks, b"ADBE Anchor Point\0", &mut |c| drop_cdat(c)),
+            Damage::NoTransformGroup => drop_record(&mut file.chunks, b"ADBE Transform Group\0"),
         }
         let bytes = effectcraft_aep::write(&file).expect("write");
         let mut back = Project::default();
-        let Err(AepImportError::Refused(report)) = import(&mut back, &bytes, &ImportOptions::new(&none)) else {
-            panic!("zoom {zoom}, poi z {poi_z}: a strict import refuses")
-        };
+        let Err(AepImportError::Refused(report)) = import(&mut back, &bytes, &ImportOptions::new(&none)) else { panic!("{damage:?}: a strict import refuses") };
         let reported = report.losses.iter().any(|l| l.category == category && l.details.iter().any(|d| d.contains("Position") && d.contains(detail)));
-        assert!(reported, "zoom {zoom}, poi z {poi_z}: {:?}", report.losses);
+        assert!(reported, "{damage:?}: {:?}", report.losses);
         let layers = reimported_layers(&bytes);
-        assert_eq!(value(&layers[0], "transform/position"), default, "zoom {zoom}, poi z {poi_z}: the new camera's default Position");
+        assert_eq!(value(&layers[0], "transform/position"), default, "{damage:?}: the new camera's default Position");
     }
 }
 
