@@ -151,6 +151,56 @@ fn a_failed_export_logs_its_timing_line_too() {
     assert!(log.contains("Timing: export failed after"), "{log}");
 }
 
+/// #3724 review: a write that fails still counts in the failed job's line. The output path is a
+/// folder, so opening the output file fails; the log next to it names the writing stage.
+#[test]
+fn a_failed_write_keeps_its_time_in_the_log() {
+    use effectcraft_export::render_queue::WebmVideoCodec;
+    let (p, cid) = project();
+    let settings = RenderSettings { time_span: TimeSpan::LengthOfComp, ..Default::default() };
+    let dir = tempfile::tempdir().expect("temp dir");
+    let vp9 = OutputModule::for_format(OutputFormat::WebM);
+    let av1 = OutputModule { webm_codec: WebmVideoCodec::Av1, ..OutputModule::for_format(OutputFormat::WebM) };
+    let cases = [
+        ("h264.mp4", OutputModule::for_format(OutputFormat::H264), "writing output"),
+        ("anim.gif", OutputModule::for_format(OutputFormat::Gif), "encoding and writing output measured together"),
+        ("vp9.webm", vp9, "writing output"),
+        ("av1.webm", av1, "writing output"),
+        ("wave.wav", OutputModule::for_format(OutputFormat::Wav), "writing output"),
+        ("aiff.aiff", OutputModule::for_format(OutputFormat::Aiff), "writing output"),
+    ];
+    let mut misses = vec![];
+    for (name, om, stage) in cases {
+        let out = dir.path().join(name);
+        std::fs::create_dir(&out).expect("a folder where the output should go");
+        let path = out.to_string_lossy().into_owned();
+        let job = Job {
+            project: &p,
+            footage: &NoFootage,
+            expr: None,
+            accel: None,
+            comp: cid,
+            settings: &settings,
+            output: &om,
+            path: &path,
+            sink: None,
+            options: Default::default(),
+            nested_switches: true,
+        };
+        if export(&job, &mut |_| true).is_ok() {
+            misses.push(format!("{name}: the export did not fail"));
+            continue;
+        }
+        let stem = name.split('.').next().unwrap_or(name);
+        let log = std::fs::read_to_string(dir.path().join(format!("{stem}_RenderLog.txt"))).unwrap_or_default();
+        let line = log.lines().find(|l| l.starts_with("Timing: export failed after")).unwrap_or_default();
+        if !line.contains(stage) || line.contains("rendering, encoding and writing measured together") {
+            misses.push(format!("{name}: {stage:?} missing from {line:?}"));
+        }
+    }
+    assert!(misses.is_empty(), "{misses:#?}");
+}
+
 #[test]
 fn a_stopped_export_has_a_summary_without_a_frame_count() {
     let t = effectcraft_export::render_queue::RenderTiming {

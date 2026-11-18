@@ -170,7 +170,8 @@ pub(crate) async fn webm(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut Sta
     let duration_ms = frame_ms(total) as f64;
 
     let path = job.place(job.path, 1);
-    let mut file = job.create(&path)?;
+    // Each write is timed before its error is passed on: a failed export's line keeps the time.
+    let mut file = job.timed(Stage::Write, || job.create(&path))?;
     // EBML header.
     let mut head = vec![];
     let mut eb = vec![];
@@ -229,7 +230,7 @@ pub(crate) async fn webm(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut Sta
         el(&mut tracks, TRACK_ENTRY, &a);
     }
     el(&mut head, TRACKS, &tracks);
-    job.timed(Stage::Write, || file.write_all(&head)).map_err(io)?;
+    job.timed(Stage::Write, || file.write_all(&head).map_err(io))?;
     let mut seg_len = head.len() as u64 - seg_start;
 
     // Audio: mixed in blocks, encoded in 20 ms packets.
@@ -293,29 +294,31 @@ pub(crate) async fn webm(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut Sta
         job.add_time(Stage::Encode, t);
         let t_end = if end >= total { span_end } else { job.settings.frame_time(comp, end) };
         job.timed_if(with_audio, Stage::Audio, || audio_until(t_end, &mut frames, end >= total))?;
-        let t = Instant::now();
-        let c = cluster(&mut frames);
-        file.write_all(&c).map_err(io)?;
-        seg_len += c.len() as u64;
-        job.add_time(Stage::Write, t);
+        job.timed(Stage::Write, || -> Result<()> {
+            let c = cluster(&mut frames);
+            file.write_all(&c).map_err(io)?;
+            seg_len += c.len() as u64;
+            Ok(())
+        })?;
         st.advance(end - i)?;
         i = end;
     }
     if total == 0 {
         let mut frames = vec![];
-        audio_until(span_end, &mut frames, true)?;
+        job.timed_if(with_audio, Stage::Audio, || audio_until(span_end, &mut frames, true))?;
         if !frames.is_empty() {
-            let c = cluster(&mut frames);
-            file.write_all(&c).map_err(io)?;
-            seg_len += c.len() as u64;
+            job.timed(Stage::Write, || -> Result<()> {
+                let c = cluster(&mut frames);
+                file.write_all(&c).map_err(io)?;
+                seg_len += c.len() as u64;
+                Ok(())
+            })?;
         }
     }
     // Patch the Segment size.
     let mut size = [0u8; 8];
     size[0] = 0x01;
     size[1..].copy_from_slice(&seg_len.to_be_bytes()[1..]);
-    // (the size patch and the file's delivery are writing too: for a sink or a share the end is
-    // where the time goes, #3732 review)
     let bytes = job.timed(Stage::Write, || -> Result<u64> {
         file.seek(SeekFrom::Start(size_pos)).map_err(io)?;
         file.write_all(&size).map_err(io)?;
@@ -438,12 +441,14 @@ pub(crate) fn audio_file(job: &Cx, comp: &Comp, aiff: bool, st: &mut State) -> R
             out.push(0);
         }
     }
-    let t = Instant::now();
-    let path = job.place(job.path, out.len() as u64);
-    let mut file = job.create(&path)?;
-    file.write_all(&out).map_err(io)?;
-    let bytes = file.finish()?;
-    job.add_time(Stage::Write, t);
+    // Timed before the error is passed on: a failed export's line keeps the time.
+    let (path, bytes) = job.timed(Stage::Write, || -> Result<(String, u64)> {
+        let path = job.place(job.path, out.len() as u64);
+        let mut file = job.create(&path)?;
+        file.write_all(&out).map_err(io)?;
+        let bytes = file.finish()?;
+        Ok((path, bytes))
+    })?;
     Ok(Report { path, frames: 0, width: 0, height: 0, seconds: 0.0, bytes, audio: true, log: None, overflow: vec![], timing: Default::default() })
 }
 

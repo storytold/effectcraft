@@ -53,7 +53,8 @@ pub(crate) async fn webm_av1(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut
     let duration_ms = frame_ms(total) as f64;
 
     let path = job.place(job.path, 1);
-    let mut file = job.create(&path)?;
+    // Each write is timed before its error is passed on: a failed export's line keeps the time.
+    let mut file = job.timed(Stage::Write, || job.create(&path))?;
     let mut head = vec![];
     let mut eb = vec![];
     el_uint(&mut eb, 0x4286, 1);
@@ -105,7 +106,7 @@ pub(crate) async fn webm_av1(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut
         el(&mut tracks, TRACK_ENTRY, &a);
     }
     el(&mut head, TRACKS, &tracks);
-    job.timed(Stage::Write, || file.write_all(&head)).map_err(io)?;
+    job.timed(Stage::Write, || file.write_all(&head).map_err(io))?;
     let mut seg_len = head.len() as u64 - seg_start;
 
     let (span_start, span_end) = job.settings.span(comp);
@@ -167,14 +168,12 @@ pub(crate) async fn webm_av1(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut
         i = end;
     }
     if total == 0 {
-        audio_until(span_end, &mut blocks, true)?;
-        flush_blocks(&mut blocks, &mut file, &mut seg_len)?;
+        job.timed_if(with_audio, Stage::Audio, || audio_until(span_end, &mut blocks, true))?;
+        job.timed(Stage::Write, || flush_blocks(&mut blocks, &mut file, &mut seg_len))?;
     }
     let mut size = [0u8; 8];
     size[0] = 0x01;
     size[1..].copy_from_slice(&seg_len.to_be_bytes()[1..]);
-    // (the size patch and the file's delivery are writing too: for a sink or a share the end is
-    // where the time goes, #3732 review)
     let bytes = job.timed(Stage::Write, || -> Result<u64> {
         file.seek(SeekFrom::Start(size_pos)).map_err(io)?;
         file.write_all(&size).map_err(io)?;
