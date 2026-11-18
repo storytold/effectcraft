@@ -472,27 +472,12 @@ enum PlaneStream {
 
 /// PackBits decoding of one row (appends exactly `row` bytes, zero-padded).
 pub(crate) fn unpack_bits(src: &[u8], row: usize, out: &mut Vec<u8>) -> Result<()> {
-    let start = out.len();
-    let mut i = 0;
-    while i < src.len() && out.len() - start < row {
-        let n = src[i] as i8;
-        i += 1;
-        // A packet is written only up to the row's end, so the reserved plane never grows.
-        let room = row - (out.len() - start);
-        if n >= 0 {
-            let k = n as usize + 1;
-            let s = src.get(i..i + k).ok_or(Error::Truncated)?;
-            out.extend_from_slice(&s[..k.min(room)]);
-            i += k;
-        } else if n != -128 {
-            let k = (1 - n as isize) as usize;
-            let v = *src.get(i).ok_or(Error::Truncated)?;
-            out.extend(std::iter::repeat_n(v, k.min(room)));
-            i += 1;
-        }
-    }
-    out.resize(start + row, 0);
-    Ok(())
+    // The production caller already charges/reserves the complete plane in Budget.
+    // Keep the shared recovery API bounded to this row; never relax the app budget.
+    craft_psd::compression::packbits::decode_padded_into(src, row, row, out).map_err(|error| match error {
+        craft_psd::PsdError::Decompress(_) => Error::Truncated,
+        other => Error::Invalid(other.to_string()),
+    })
 }
 
 pub(crate) fn srgb_encode(v: f32) -> f32 {
