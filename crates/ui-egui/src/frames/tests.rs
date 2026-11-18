@@ -3611,6 +3611,35 @@ fn a_side_panes_queued_frame_someone_else_asks_for_is_theirs() {
     assert_eq!(job(ahead), Some((false, None)), "so does the prefetch frame");
 }
 
+/// #3845: a side pane's frame that is already rendering when the viewer asks for it (the pane was
+/// clicked and became the active one) lands as the viewer's: as a side pane's frame no pane waits
+/// for, a full cache evicted it the moment it landed and the viewer rendered it again.
+#[test]
+fn a_side_panes_running_frame_someone_else_asks_for_lands_as_theirs() {
+    let mut f = Frames::default();
+    f.set_remote(Some(Arc::new(Idle)));
+    f.set_budget(4 * 16);
+    let at = |frame| key(1, frame, 0);
+    f.request_urgent(&idle_source(), at(0), ItemId(1), Tick::ZERO, RenderOpts::default());
+    for frame in 0..4 {
+        insert(&f, at(frame));
+    }
+    let shared = FrameKey { view: 7, ..at(20) };
+    f.request_pane(&idle_source(), shared, ItemId(1), Tick::ZERO, RenderOpts::default(), 0);
+    {
+        let mut q = f.queue.lock().unwrap();
+        let i = q.jobs.iter().position(|j| j.key == shared).unwrap();
+        let job = q.jobs.swap_remove(i);
+        assert_eq!(job.pane, Some(0));
+        q.running.insert(job.key);
+    }
+    f.release_pane(0);
+    f.request_urgent(&idle_source(), shared, ItemId(1), Tick::ZERO, RenderOpts::default());
+    f.worker().finish_key(shared, false, true, img(), None, None, web_time::Instant::now());
+    assert!(f.is_cached(&shared), "the viewer's frame stays");
+    assert!(f.queue.lock().unwrap().claimed.is_empty(), "released with the job");
+}
+
 /// #3845: a side pane's frame no pane waits for any more goes before the viewer's frames, also at
 /// the viewer's scale (the least recently shown frame, the viewer's oldest, went).
 #[test]

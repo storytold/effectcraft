@@ -1687,6 +1687,10 @@ impl Frames {
             for j in q.jobs.iter_mut().filter(|j| j.key == key) {
                 j.pane = None;
             }
+            // The same for a frame already rendering: it lands as theirs (see `finish_key`).
+            if q.running.contains(&key) {
+                q.claimed.insert(key);
+            }
         }
         if urgent {
             // Only the newest viewer frame is urgent. The comp's earlier viewer frames that
@@ -2076,6 +2080,8 @@ impl Worker {
         if urgent && let Ok(mut l) = self.last.lock() {
             *l = t0.elapsed().as_secs_f64() * 1000.0;
         }
+        // A side pane's job someone else asked for while it rendered lands as theirs.
+        let pane = pane && !self.queue.lock().map(|q| q.claimed.contains(&key)).unwrap_or(false);
         if let Ok(mut c) = self.cache.lock()
             && (!img.is_gpu() || !self.gpu_retired.load(Ordering::Acquire))
         {
@@ -2091,6 +2097,7 @@ impl Worker {
         }
         if let Ok(mut q) = self.queue.lock() {
             q.running.remove(&key);
+            q.claimed.remove(&key);
             if urgent {
                 q.urgent_running = q.urgent_running.saturating_sub(1);
                 if let Some(i) = q.urgent_cancels.iter().position(|(k, _)| *k == key) {
@@ -2327,6 +2334,9 @@ impl Job {
 struct Queue {
     jobs: Vec<Job>,
     running: HashSet<FrameKey>,
+    /// Running frames someone other than a side pane asked for: they land as theirs, not as a
+    /// side pane's (the first frames evicted).
+    claimed: HashSet<FrameKey>,
     urgent_running: usize,
     /// The running viewer (urgent) frames and how to call them off.
     urgent_cancels: Vec<(FrameKey, Arc<AtomicBool>)>,
