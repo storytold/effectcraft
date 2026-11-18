@@ -1004,8 +1004,10 @@ fn phase_hover(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, resp
             let c = map.to_comp(hp);
             [c[0] as f32, c[1] as f32]
         });
+        let mods_alt = ui.input(|i| i.modifiers.alt);
         let cursor = match app.ui.tool {
             Tool::Hand => egui::CursorIcon::Grab,
+            Tool::Zoom if mods_alt => egui::CursorIcon::ZoomOut,
             Tool::Zoom => egui::CursorIcon::ZoomIn,
             Tool::Type | Tool::TypeVertical => egui::CursorIcon::Text,
             Tool::Orbit => egui::CursorIcon::Alias,
@@ -1230,6 +1232,7 @@ fn phase_dragstart(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, 
         let tool = if space_pan { Tool::Hand } else { app.ui.tool };
         let g = match tool {
             Tool::Hand => Some(Gesture::Pan { start_pan: app.ui.viewer.pan }),
+            Tool::Zoom => Some(Gesture::Zoom { start_zoom: zoom, press, cpt: map.to_comp(press) }),
             // Region of Interest armed: the drag draws it.
             _ if app.ui.viewer.roi_draw => Some(Gesture::Overlay(ov::Drag::Roi { start: map.to_comp(press), keep: [None, None] })),
             // A region of interest handle: resize it from the opposite corner / edge.
@@ -1492,6 +1495,14 @@ fn edge_pan_speed(area: Rect, pos: Pos2) -> egui::Vec2 {
     vec2(axis(pos.x, area.min.x, area.max.x), axis(pos.y, area.min.y, area.max.y))
 }
 
+/// Sets the zoom to `nz` and pans so comp point `cpt` stays under screen point `pos`.
+fn set_zoom_about(app: &mut EffectcraftApp, area: Rect, cw: f32, ch: f32, pos: Pos2, cpt: [f64; 2], nz: f32) {
+    let new_origin = pos - vec2(cpt[0] as f32 * nz, cpt[1] as f32 * nz);
+    let pan = new_origin + vec2(cw * nz / 2.0, ch * nz / 2.0) - area.center();
+    app.ui.viewer.zoom = Some(nz);
+    app.ui.viewer.pan = [pan.x, pan.y];
+}
+
 fn phase_drag(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, resp: &egui::Response, v: &mut Vw<'_>) {
     let t = v.t;
     let zoom = v.zoom;
@@ -1511,6 +1522,14 @@ fn phase_drag(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, resp:
                 // snap back to where the drag began).
                 if let Some(d) = resp.total_drag_delta() {
                     app.ui.viewer.pan = [start_pan[0] + d.x, start_pan[1] + d.y];
+                }
+            }
+            Gesture::Zoom { start_zoom, press, cpt } => {
+                // Dragging right zooms in, left zooms out, keeping the press point fixed.
+                // No total drag on the release frame: keep the zoom reached so far.
+                if let Some(d) = resp.total_drag_delta() {
+                    let nz = (start_zoom * 2f32.powf(d.x / 150.0)).clamp(0.01, 32.0);
+                    set_zoom_about(app, v.area, v.cw, v.ch, press, cpt, nz);
                 }
             }
             Gesture::Move { layers, start, snap_src } => {
@@ -1850,10 +1869,7 @@ fn phase_clicked(app: &mut EffectcraftApp, ectx: &EvalCtx, resp: &egui::Response
             Tool::Zoom => {
                 let k = if mods.alt { 0.5 } else { 2.0 };
                 let nz = (zoom * k).clamp(0.01, 32.0);
-                let new_origin = pos - vec2(cpt[0] as f32 * nz, cpt[1] as f32 * nz);
-                let pan = new_origin + vec2(cw * nz / 2.0, ch * nz / 2.0) - area.center();
-                app.ui.viewer.zoom = Some(nz);
-                app.ui.viewer.pan = [pan.x, pan.y];
+                set_zoom_about(app, area, cw, ch, pos, cpt, nz);
             }
             Tool::Type | Tool::TypeVertical => {}
             Tool::Pen | Tool::MaskFeather => {}

@@ -64,6 +64,12 @@ pub(super) enum Gesture {
     Pan {
         start_pan: [f32; 2],
     },
+    /// Zoom tool drag (scrubby zoom): the zoom when it began, the press point and the comp point under it.
+    Zoom {
+        start_zoom: f32,
+        press: Pos2,
+        cpt: [f64; 2],
+    },
     Create {
         tool: Tool,
         start: [f64; 2],
