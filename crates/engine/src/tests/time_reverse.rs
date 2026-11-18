@@ -308,14 +308,24 @@ fn nested_markers_on_a_reversed_precomp_stay_put_when_time_remap_is_enabled() {
         let v = s.execute("markers.nested", json!({"comp": outer.0, "layer": pre})).unwrap();
         v.as_array().unwrap().iter().map(|m| (m["nestedTime"].as_f64().unwrap(), m["time"].as_f64().unwrap())).collect()
     };
-    let close = |got: &[(f64, f64)], what: &str| {
-        let want = [(0.0, 0.9), (0.5, 0.4)];
+    let close = |got: &[(f64, f64)], want: [(f64, f64); 2], what: &str| {
         assert_eq!(got.len(), want.len(), "{what}: {got:?}");
         assert!(got.iter().zip(&want).all(|(a, b)| (a.0 - b.0).abs() < 1e-9 && (a.1 - b.1).abs() < 1e-9), "{what}: {got:?}, want {want:?}");
     };
-    close(&times(&mut s), "reversed");
+    close(&times(&mut s), [(0.0, 0.9), (0.5, 0.4)], "reversed");
     s.execute("layer.enableTimeRemap", json!({"layers": [pre]})).unwrap();
-    close(&times(&mut s), "reversed with Time Remap");
+    close(&times(&mut s), [(0.0, 0.9), (0.5, 0.4)], "reversed with Time Remap");
+    // The remap keys swapped, so the reversed layer's source runs forwards (comp t names nested
+    // t): comp frame t shows the nested frame ending at t, so frame 5 shows at 0.6 s and frame 0
+    // at 0.1 s. They used to sit one frame early, on frames showing the frame before.
+    {
+        let ly = Arc::make_mut(&mut s.project).comp_mut(outer).unwrap().layer_mut(LayerId(pre)).unwrap();
+        let keys = &mut ly.props.get_mut("timeRemap").unwrap().keys;
+        assert_eq!(keys.len(), 2, "Enable Time Remapping keys the two ends");
+        let (a, b) = (keys[0].value.clone(), keys[1].value.clone());
+        (keys[0].value, keys[1].value) = (b, a);
+    }
+    close(&times(&mut s), [(0.0, 0.1), (0.5, 0.6)], "reversed with Time Remap running forwards");
 }
 
 /// A 25 fps comp with the sequence reversed as Time-Reverse Layer made it before #3245 (one comp

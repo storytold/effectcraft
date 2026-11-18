@@ -210,13 +210,16 @@ pub fn restore(s: &mut Session) -> bool {
     let c = config();
     let (Some(json), Some(meta)) = (c.read(SNAPSHOT), c.read(SNAPSHOT_META)) else { return false };
     let meta: SnapshotMeta = serde_json::from_str(&meta).unwrap_or_default();
-    let p = match Project::from_json(&json) {
+    let mut p = match Project::from_json(&json) {
         Ok(p) => p,
         Err(e) => {
             log::warn!("restoring the last session: {e}");
             return false;
         }
     };
+    // A snapshot from before #3245 has its time-reversed layers one comp frame early, as an old
+    // project file has; it is repaired as `file.open` repairs one.
+    effectcraft_engine::repair_old_time_reverse(&mut p);
     s.replace_project(p, meta.path.clone());
     if let Some(st) = meta.state.and_then(|v| serde_json::from_value(v).ok()) {
         s.state = st;

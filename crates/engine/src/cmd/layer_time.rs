@@ -107,7 +107,7 @@ fn time_stretch(s: &mut Session, p: &Value) -> Result<Value> {
 /// they may be either layout), each as "Comp ▸ Layer"; a reversed layer whose Out point is at
 /// layer time 0 is in After Effects' layout already and is in neither list. The project is marked as checked either
 /// way, so saving it writes the marker and it is not checked again.
-pub(crate) fn repair_old_time_reverse(project: &mut effectcraft_project::Project) -> (Vec<String>, Vec<String>) {
+pub fn repair_old_time_reverse(project: &mut effectcraft_project::Project) -> (Vec<String>, Vec<String>) {
     let (mut moved, mut unsure) = (vec![], vec![]);
     if project.settings.reverse_layout >= effectcraft_project::REVERSE_LAYOUT_AE {
         return (moved, unsure);

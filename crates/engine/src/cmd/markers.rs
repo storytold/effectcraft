@@ -111,7 +111,10 @@ pub fn nested_markers<'a>(project: &'a Project, comp_id: ItemId, comp: &Comp, la
     let frames: Vec<(Tick, Tick)> = (f0..f1.min(f0.saturating_add(100_000)))
         .map(|f| {
             let t = fr.tick_of(f);
-            (t, effectcraft_render::EvalCtx::new(project, comp_id, comp, t).source_time(layer))
+            // A reversed layer shows the nested frame its source time lies in (`nested_time`
+            // floors it), whichever way the source runs.
+            let ctx = effectcraft_render::EvalCtx::new(project, comp_id, comp, t);
+            (t, if effectcraft_render::EvalCtx::plays_backwards(layer) { ctx.nested_time(layer) } else { ctx.source_time(layer) })
         })
         .collect();
     let eps = nc.frame_duration().0 / 1000;
