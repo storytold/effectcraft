@@ -101,8 +101,9 @@ Commands (CLI, MCP, control channel):
   textures of uploaded layers: 1.5 GiB, or three eighths of the card's memory where it is
   known: on Linux with amdgpu, on Windows, and on NVIDIA cards through `nvidia-smi`; the
   default cap grows with it, never above
-  three quarters of the card, and a cap set with `EFFECTCRAFT_GPU_MEMCAP_MB` lowers it to half
-  that cap, not below 1.5 GiB; `EFFECTCRAFT_GPU_UPLOAD_MB` sets it in whole MiB, 0 = default). It
+  three quarters of the card, and a cap above 0 set with `EFFECTCRAFT_GPU_MEMCAP_MB` lowers the
+  default budget to half that cap, not below 1.5 GiB; `EFFECTCRAFT_GPU_UPLOAD_MB` sets the budget
+  in whole MiB, 0 = default, and a budget set there is kept). It
   renders one frame at a time where the memory can't be measured (Metal, WebGPU, GL, or the
   cap turned off) and once frames have had to wait for memory. The render log names the count.
   `EFFECTCRAFT_GPU_INFLIGHT` overrides it. CPU renders have no such setting. A job on GPU

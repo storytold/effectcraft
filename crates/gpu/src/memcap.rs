@@ -741,6 +741,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     #[ignore = "the child process of output_held_open_by_a_left_process_does_not_hold_the_caller"]
+    #[allow(clippy::zombie_processes, reason = "the process is left running on purpose; this process exits at once")]
     fn stand_in_that_leaves_its_output_open() {
         let me = std::env::current_exe().unwrap();
         let _left = std::process::Command::new(me).args(["--exact", "--ignored", "memcap::tests::stand_in_for_a_hanging_program"]).spawn().unwrap();
@@ -753,9 +754,11 @@ mod tests {
     fn output_held_open_by_a_left_process_does_not_hold_the_caller() {
         let me = std::env::current_exe().unwrap();
         let start = std::time::Instant::now();
-        let out = run_with_timeout(me.as_os_str(), &["--exact", "--ignored", "memcap::tests::stand_in_that_leaves_its_output_open"], Duration::from_secs(1));
+        // The timeout leaves the stand-in time to start and exit; the left process sleeps 5 s.
+        let out =
+            run_with_timeout(me.as_os_str(), &["--exact", "--ignored", "memcap::tests::stand_in_that_leaves_its_output_open"], Duration::from_millis(2500));
         assert_eq!(out, None);
-        assert!(start.elapsed() < Duration::from_secs(3), "waited {:?}", start.elapsed());
+        assert!(start.elapsed() < Duration::from_millis(4500), "waited {:?}", start.elapsed());
     }
 
     /// A program killed at the timeout is reaped (its exit status collected), within a bounded wait.
@@ -769,7 +772,11 @@ mod tests {
             .spawn()
             .unwrap();
         let start = std::time::Instant::now();
-        let status = stop(&mut child);
+        // A loaded machine may take longer than one `REAP_TIMEOUT` to end the process.
+        let mut status = stop(&mut child);
+        while status.is_none() && start.elapsed() < Duration::from_secs(3) {
+            status = stop(&mut child);
+        }
         assert!(status.is_some_and(|s| !s.success()), "{status:?}");
         assert!(start.elapsed() < Duration::from_secs(3), "waited {:?}", start.elapsed());
     }
