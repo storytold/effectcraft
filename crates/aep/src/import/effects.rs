@@ -312,6 +312,8 @@ pub(crate) fn import_mapped(p: &EffectParam<'_, '_>, m: &ParamMap, cx: &LayerCtx
                 for k in &mut prop.keys {
                     k.value = whole(&k.value);
                 }
+                // `import_keys` also sets the static value to the first key's.
+                prop.value = whole(&prop.value);
             }
             if prop.keys.len() == before {
                 col.lose_with(LossCategory::DamagedData, || format!("{here}: parameter {label} has no readable keyframe, default used"));

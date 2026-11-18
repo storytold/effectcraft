@@ -190,6 +190,9 @@ fn integer_slider_fractions_arrive_as_whole_numbers() {
     fx.keys = vec![(2, vec![(0, 3.25), (1000, 7.75)])];
     let (g, _) = run(&fx, "ec.time.echo");
     let g = g.expect("imported");
-    let keys: Vec<Value> = g.prop("numberOfEchoes").expect("numberOfEchoes").keys.iter().map(|k| k.value.clone()).collect();
+    let echoes = g.prop("numberOfEchoes").expect("numberOfEchoes");
+    let keys: Vec<Value> = echoes.keys.iter().map(|k| k.value.clone()).collect();
     assert_eq!(keys, [Value::Scalar(3.0), Value::Scalar(8.0)]);
+    // The static value follows the first key, whole as well.
+    assert_eq!(echoes.value, Value::Scalar(3.0));
 }
