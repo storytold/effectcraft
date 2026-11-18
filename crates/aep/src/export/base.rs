@@ -238,6 +238,13 @@ const SOLID_SSPC: [(usize, &[u8]); 11] = [
     (212, &[1]),
 ];
 
+/// The header of a solid's `opti` as After Effects 2026 writes it: the tag `Soli`, bytes 4 and 5
+/// `00 09` and the chunk's own size (282) as a big-endian `u16` at byte 8 (every solid of the
+/// corpus, for example `01_solids_nulls_adjustment`). After Effects opens and renders a solid whose
+/// header is zero, but crashes when it saves that project (read-back save-crash, AE 26.5: the same
+/// export with these bytes saves).
+const SOLID_OPTI_HEADER: [(usize, &[u8]); 3] = [(0, b"Soli"), (4, &[0x00, 0x09]), (8, &[0x01, 0x1a])];
+
 /// A solid's footage item: `sspc` (type `Soli`, duration 0 / 1), `opti` (`Soli`; `emit` writes
 /// the colour and the name), `pgui`, the colour-management list (no profile, the defaults of
 /// every sample; required, read-back u-noclrs), `ftgi` (required, u-noftgi) and the guides. The
@@ -268,7 +275,7 @@ pub(crate) fn solid_item() -> Chunk<'static> {
         vec![
             Chunk::data(*b"sspc", bytes(222, &sspc_fields)),
             utf8(""),
-            Chunk::data(*b"opti", bytes(282, &[(0, b"Soli")])),
+            Chunk::data(*b"opti", bytes(282, &SOLID_OPTI_HEADER)),
             Chunk::data(*b"pgui", vec![0; 16]),
             clrs,
             utf8(""),
@@ -326,5 +333,16 @@ mod tests {
         let sspc = pin.child(b"sspc").and_then(|c| c.bytes()).unwrap();
         assert!(SOLID_SSPC.iter().all(|(at, v)| &sspc[*at..*at + v.len()] == *v));
         assert_eq!(solid.child(b"idta").and_then(|c| c.bytes()).unwrap()[23], 0x30);
+    }
+
+    /// A solid's `opti` carries the header After Effects writes; with zeros there After Effects
+    /// crashes saving the project.
+    #[test]
+    fn a_solid_carries_the_opti_header_after_effects_needs_to_save() {
+        let solid = solid_item();
+        let opti = solid.child_list(b"Pin ").and_then(|p| p.child(b"opti")).and_then(|c| c.bytes()).unwrap();
+        assert_eq!(opti.len(), 282);
+        assert_eq!(&opti[..10], b"Soli\x00\x09\x00\x00\x01\x1a");
+        assert_eq!(usize::from(u16::from_be_bytes([opti[8], opti[9]])), opti.len());
     }
 }
