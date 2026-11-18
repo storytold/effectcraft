@@ -425,186 +425,12 @@ enum PaintRef {
     Current,
 }
 
-/// The most selectors (each entry of a comma list counts) the `<style>` sheets of a document may
-/// hold (#2140).
-const MAX_CSS_SELECTORS: usize = 20_000;
-/// The most declarations the `<style>` sheets of a document may hold, each block counted once.
-const MAX_CSS_DECLARATIONS: usize = 50_000;
+#[cfg(test)]
+use craft_svg::simple_css::{MAX_CSS_DECLARATIONS, MAX_CSS_SELECTORS};
+use craft_svg::simple_css::{MAX_CSS_WORK, StyleSheet};
 
-/// The most matching work (candidate rules checked plus declarations applied) the elements of a
-/// document may cost, `<use>` copies included: a bound on elements x rules x declarations.
-const MAX_CSS_WORK: usize = 50_000_000;
-
-/// A CSS rule: selector (type, class, id; `*`) with its specificity and declaration block.
-#[derive(Clone, Debug)]
-struct Rule {
-    tag: Option<String>,
-    classes: Vec<String>,
-    id: Option<String>,
-    specificity: u32,
-    order: usize,
-    /// Index into [`StyleSheet::blocks`]: every selector of a comma list shares one block.
-    block: usize,
-}
-
-/// The rules of a document's `<style>` sheets, indexed by the part of the selector an element
-/// must have (id, else first class, else type) so an element only checks rules that can match.
-#[derive(Default, Debug)]
-struct StyleSheet {
-    /// Distinct selector rules in source order.
-    rules: Vec<Rule>,
-    /// Declaration blocks; comma-list selectors share one block.
-    blocks: Vec<Vec<(String, String)>>,
-    /// Declarations over all blocks.
-    decls: usize,
-    /// Rules keyed by their id selector.
-    by_id: HashMap<String, Vec<usize>>,
-    /// Rules keyed by their first class selector.
-    by_class: HashMap<String, Vec<usize>>,
-    /// Rules keyed by their type selector.
-    by_tag: HashMap<String, Vec<usize>>,
-    /// Rules with no id, class or type to index on.
-    universal: Vec<usize>,
-}
-
-impl StyleSheet {
-    /// Build the id, class, tag and universal lookup buckets from `rules`.
-    fn index(&mut self) {
-        for (i, r) in self.rules.iter().enumerate() {
-            let bucket = if let Some(id) = &r.id {
-                self.by_id.entry(id.clone()).or_default()
-            } else if let Some(c) = r.classes.first() {
-                self.by_class.entry(c.clone()).or_default()
-            } else if let Some(t) = &r.tag {
-                self.by_tag.entry(t.clone()).or_default()
-            } else {
-                &mut self.universal
-            };
-            bucket.push(i);
-        }
-    }
-}
-
-fn parse_decls(s: &str) -> Vec<(String, String)> {
-    s.split(';')
-        .filter_map(|d| {
-            let (k, v) = d.split_once(':')?;
-            let v = v.trim().trim_end_matches("!important").trim();
-            Some((k.trim().to_ascii_lowercase(), v.to_string()))
-        })
-        .filter(|(k, _)| !k.is_empty())
-        .collect()
-}
-
-fn strip_comments(s: &str) -> String {
-    let mut out = String::new();
-    let mut rest = s;
-    while let Some(i) = rest.find("/*") {
-        out.push_str(&rest[..i]);
-        match rest[i + 2..].find("*/") {
-            Some(j) => rest = &rest[i + 2 + j + 2..],
-            None => return out,
-        }
-    }
-    out.push_str(rest);
-    out
-}
-
-/// Splits one simple selector (`tag.class#id`) into its tag, classes and id.
-fn parse_compound(one: &str) -> (Option<String>, Vec<String>, Option<String>) {
-    let mut tag = None;
-    let mut classes = vec![];
-    let mut id = None;
-    let mut cur = String::new();
-    let mut kind = 't';
-    let flush = |kind: char, cur: &mut String, tag: &mut Option<String>, classes: &mut Vec<String>, id: &mut Option<String>| {
-        if !cur.is_empty() {
-            match kind {
-                '.' => classes.push(std::mem::take(cur)),
-                '#' => *id = Some(std::mem::take(cur)),
-                _ => {
-                    if cur != "*" {
-                        *tag = Some(std::mem::take(cur));
-                    }
-                    cur.clear();
-                }
-            }
-        }
-    };
-    for c in one.chars() {
-        if c == '.' || c == '#' {
-            flush(kind, &mut cur, &mut tag, &mut classes, &mut id);
-            kind = c;
-        } else {
-            cur.push(c);
-        }
-    }
-    flush(kind, &mut cur, &mut tag, &mut classes, &mut id);
-    (tag, classes, id)
-}
-
-/// Add the rules of one `<style>` sheet. Errs once the sheets exceed [`MAX_CSS_SELECTORS`] or
-/// [`MAX_CSS_DECLARATIONS`] (#2140).
-fn parse_css(css: &str, sheet: &mut StyleSheet) -> Result<(), Error> {
-    let css = strip_comments(css);
-    let mut rest = css.as_str();
-    while let Some(open) = rest.find('{') {
-        let sel = rest[..open].trim();
-        if sel.starts_with('@') {
-            // Skip the whole at-rule block, matching nested braces by depth.
-            let mut depth = 0usize;
-            let mut end = None;
-            for (i, c) in rest[open..].char_indices() {
-                match c {
-                    '{' => depth = depth.saturating_add(1),
-                    '}' => {
-                        depth = depth.saturating_sub(1);
-                        if depth == 0 {
-                            end = Some(open + i + 1);
-                            break;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            let Some(end) = end else { break };
-            rest = &rest[end..];
-            continue;
-        }
-        let Some(close) = rest[open..].find('}') else { break };
-        let body = &rest[open + 1..open + close];
-        rest = &rest[open + close + 1..];
-        let mut decls = parse_decls(body);
-        sheet.decls = sheet.decls.saturating_add(decls.len());
-        if sheet.decls > MAX_CSS_DECLARATIONS {
-            return Err(Error::Xml(format!("its <style> sheets hold more than {MAX_CSS_DECLARATIONS} declarations")));
-        }
-        // Stored with the rule's first accepted selector: a rule of unsupported selectors only
-        // (`a b{}`, repeated) adds no block.
-        let mut block = None;
-        for one in sel.split(',') {
-            let one = one.trim();
-            // Only simple selectors (no combinators / pseudo-classes / attributes).
-            if one.is_empty() || one.contains([' ', '>', '+', '~', ':', '[']) {
-                continue;
-            }
-            if sheet.rules.len() >= MAX_CSS_SELECTORS {
-                return Err(Error::Xml(format!("its <style> sheets hold more than {MAX_CSS_SELECTORS} selectors")));
-            }
-            let block = *block.get_or_insert_with(|| {
-                let i = sheet.blocks.len();
-                sheet.blocks.push(std::mem::take(&mut decls));
-                i
-            });
-            let (tag, classes, id) = parse_compound(one);
-            let specificity = (id.is_some() as u32 * 100)
-                .saturating_add(u32::try_from(classes.len()).unwrap_or(u32::MAX).saturating_mul(10))
-                .saturating_add(tag.is_some() as u32);
-            let order = sheet.rules.len();
-            sheet.rules.push(Rule { tag, classes, id, specificity, order, block });
-        }
-    }
-    Ok(())
+fn parse_css(text: &str, sheet: &mut StyleSheet) -> Result<(), Error> {
+    craft_svg::simple_css::parse(text, sheet).map_err(|error| Error::Xml(error.to_string()))
 }
 
 const PROPS: &[&str] = &[
@@ -695,7 +521,7 @@ impl<'a, 'i> Parser<'a, 'i> {
         }
         self.apply_rules(n, &mut out);
         if let Some(st) = n.attribute("style") {
-            for (k, v) in parse_decls(st) {
+            for (k, v) in craft_svg::simple_css::declarations(st) {
                 out.insert(k, v);
             }
         }
@@ -763,50 +589,9 @@ impl<'a, 'i> Parser<'a, 'i> {
         self.charge_pattern_work(bytes.saturating_add(1))
     }
 
-    /// Apply the matching `<style>` rules to `out`, by specificity then source order.
+    /// Apply the shared compatibility stylesheet rules under the document work budget.
     fn apply_rules(&self, n: roxmltree::Node, out: &mut HashMap<String, String>) {
-        let css = &self.css;
-        if css.rules.is_empty() {
-            return;
-        }
-        // Splitting and sorting the class list is work too: charge its length first.
-        let class = n.attribute("class").unwrap_or_default();
-        if !self.charge_css(class.len()) {
-            return;
-        }
-        let tag = n.tag_name().name();
-        let mut classes: Vec<&str> = class.split_whitespace().collect();
-        classes.sort_unstable();
-        classes.dedup();
-        let id = n.attribute("id");
-        // Each rule sits in exactly one bucket and the classes are distinct: no rule twice.
-        let mut buckets: Vec<&Vec<usize>> = vec![&css.universal];
-        buckets.extend(id.and_then(|i| css.by_id.get(i)));
-        buckets.extend(classes.iter().filter_map(|c| css.by_class.get(*c)));
-        buckets.extend(css.by_tag.get(tag));
-        if !self.charge_css(buckets.iter().map(|b| b.len()).fold(0, usize::saturating_add)) {
-            return;
-        }
-        let candidates = || buckets.iter().flat_map(|b| b.iter()).filter_map(|&i| css.rules.get(i));
-        // A selector like `.z.z.z…` checks each of its classes: charge them too.
-        if !self.charge_css(candidates().map(|r| r.classes.len()).fold(0, usize::saturating_add)) {
-            return;
-        }
-        let mut matching: Vec<&Rule> = candidates()
-            .filter(|r| {
-                r.tag.as_deref().is_none_or(|t| t == tag)
-                    && r.id.as_deref().is_none_or(|i| Some(i) == id)
-                    && r.classes.iter().all(|c| classes.binary_search(&c.as_str()).is_ok())
-            })
-            .collect();
-        matching.sort_by_key(|r| (r.specificity, r.order));
-        let blocks: Vec<&Vec<(String, String)>> = matching.iter().filter_map(|r| css.blocks.get(r.block)).collect();
-        if !self.charge_css(blocks.iter().map(|b| b.len()).fold(0, usize::saturating_add)) {
-            return;
-        }
-        for (k, v) in blocks.into_iter().flatten() {
-            out.insert(k.clone(), v.clone());
-        }
+        self.css.apply(n.tag_name().name(), n.attribute("id"), n.attribute("class").unwrap_or_default(), out, |work| self.charge_css(work));
     }
 
     fn length(&self, s: &str, axis: char, font: f64) -> Option<f64> {
@@ -1668,34 +1453,7 @@ fn viewbox_transform(n: roxmltree::Node, w: f64, h: f64) -> Affine {
 }
 
 /// Parse a `transform` list.
-pub fn parse_transform(s: &str) -> Affine {
-    let mut m = Affine::IDENTITY;
-    let mut rest = s;
-    while let Some(open) = rest.find('(') {
-        let name = rest[..open].trim().trim_start_matches(',').trim();
-        let Some(close) = rest[open..].find(')') else { break };
-        let (a, too_many) = pathdata::numbers_bounded(&rest[open + 1..open + close], 6);
-        rest = &rest[open + close + 1..];
-        let t = if too_many {
-            Affine::IDENTITY
-        } else {
-            match (name, a.as_slice()) {
-                ("matrix", [a0, a1, a2, a3, a4, a5]) => Affine::new([*a0, *a1, *a2, *a3, *a4, *a5]),
-                ("translate", [x]) => Affine::translate((*x, 0.0)),
-                ("translate", [x, y]) => Affine::translate((*x, *y)),
-                ("scale", [scale]) => Affine::scale(*scale),
-                ("scale", [x, y]) => Affine::scale_non_uniform(*x, *y),
-                ("rotate", [angle]) => Affine::rotate(angle.to_radians()),
-                ("rotate", [angle, x, y]) => Affine::translate((*x, *y)) * Affine::rotate(angle.to_radians()) * Affine::translate((-*x, -*y)),
-                ("skewX", [angle]) => Affine::new([1.0, 0.0, angle.to_radians().tan(), 1.0, 0.0, 0.0]),
-                ("skewY", [angle]) => Affine::new([1.0, angle.to_radians().tan(), 0.0, 1.0, 0.0, 0.0]),
-                _ => Affine::IDENTITY,
-            }
-        };
-        m *= t;
-    }
-    m
-}
+pub use craft_svg::transform_compat::parse_transform;
 
 /// The deepest element nesting accepted. The XML parser recurses per level and overflowed a
 /// 2 MiB thread's stack (aborting the app) at a few thousand levels; real documents stay far

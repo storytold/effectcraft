@@ -879,27 +879,6 @@ fn selector_lists_keep_the_css_cascade() {
 }
 
 #[test]
-fn a_comma_list_stores_its_declarations_once() {
-    let sels = vec!["rect"; 1000].join(",");
-    let decls: String = (0..50).map(|i| format!("p{i}:v;")).collect();
-    let mut sheet = StyleSheet::default();
-    parse_css(&format!("{sels}{{{decls}}}"), &mut sheet).unwrap();
-    assert_eq!(sheet.rules.len(), 1000);
-    assert_eq!(sheet.blocks.len(), 1);
-    assert_eq!(sheet.decls, 50);
-}
-
-#[test]
-fn rules_of_unsupported_selectors_store_no_blocks() {
-    let mut sheet = StyleSheet::default();
-    parse_css(&"a b{}".repeat(100_000), &mut sheet).unwrap();
-    parse_css("a b{fill:red} a>b, rect{fill:blue} c:hover, d{fill:red}", &mut sheet).unwrap();
-    assert_eq!(sheet.rules.len(), 2);
-    assert_eq!(sheet.blocks.len(), 2);
-    assert!(sheet.rules.iter().all(|r| sheet.blocks.get(r.block).is_some_and(|b| b.len() == 1)));
-}
-
-#[test]
 fn huge_class_lists_count_against_the_matching_budget() {
     // One rule, but a 1 MB class attribute re-split on each of 100 `<use>` copies (#2140).
     let class = "a ".repeat(500_000);
@@ -957,18 +936,6 @@ fn font_size_percentage_resolves_against_the_parent_font_size() {
         assert_eq!(shapes.len(), 1);
         assert!(matches!(shapes[0].2.geom, Geom::Rect { w, .. } if w == expected), "{body}: {:?}", shapes[0].2.geom);
     }
-}
-
-#[test]
-fn at_rule_blocks_are_skipped_by_brace_depth() {
-    let mut sheet = StyleSheet::default();
-    parse_css("@media print { .a{fill:#ff0000} .b{fill:#0000ff} } .c{fill:red}", &mut sheet).unwrap();
-    assert_eq!(sheet.rules.len(), 1);
-    assert_eq!(sheet.rules[0].classes, vec!["c".to_string()]);
-    let mut sheet = StyleSheet::default();
-    parse_css("@media x { @supports y { .c{} } .d{} } .e{fill:red}", &mut sheet).unwrap();
-    assert_eq!(sheet.rules.len(), 1);
-    assert_eq!(sheet.rules[0].classes, vec!["e".to_string()]);
 }
 
 /// Build a `w` x `h` document from `nodes` for sparse-content render tests.

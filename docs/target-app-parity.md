@@ -1,5 +1,6 @@
 # Parity with After Effects
 
+> **Last reviewed:** 2026-11-15 · **Last updated:** 2026-11-15 · **Change:** minor (ROADMAP sync over 5–15 November: .aep export, drag-and-drop import, hostile-input audit and loss reporting, effect placeholders and mappings, 2.6× GPU rendering, EXR output options, eighteen aligned effect ranges and a broad editor/expression fix batch; releases v0.22.0–v0.24.1. No parity numbers re-measured; the 10 October re-measure and all readiness estimates are unchanged) · **Target:** Adobe After Effects 2026 (26.5.0.89)
 > **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-12 · **Change:** minor (issue, catalog and export-format references re-audited against `upstream/main` 470ea7a3; the 10 October re-measure is otherwise unchanged) · **Target:** Adobe After Effects 2026 (26.5.0.89)
 
 The authoritative assessment of how close EffectCraft is to After Effects, and how much work is

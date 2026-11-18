@@ -86,13 +86,13 @@ pub struct Run {
     pub lf_levels: Vec<u32>,
 }
 
-/// Encodes `pics`, checks every packet decodes (filmcraft-av1) to exactly the encoder's
+/// Encodes `pics`, checks every packet decodes (craft-video's AV1 decoder) to exactly the encoder's
 /// reconstruction and returns packets, reconstructions and luma PSNRs.
 pub fn encode_and_check(cfg: EncoderConfig, pics: &[Pic]) -> Run {
     let bd = cfg.bit_depth as u32;
     let mut enc = Encoder::new(cfg).expect("config");
     // single-threaded: each packet's picture comes out of its own decode call
-    let mut dec = filmcraft_av1::Decoder::with_threads(1);
+    let mut dec = craft_video::av1::decode::Decoder::with_threads(1);
     let mut run = Run { packets: Vec::new(), recons: Vec::new(), psnr_y: Vec::new(), lf_levels: Vec::new() };
     for (i, p) in pics.iter().enumerate() {
         let pkt = enc.encode(&p.frame()).expect("encode");
