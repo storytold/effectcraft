@@ -1709,7 +1709,9 @@ fn pasted_source_text_key_keeps_its_style() {
     s.execute("time.set", json!({"time": 3.0})).unwrap();
     s.execute("edit.pasteReversedKeyframes", json!({"layers": [t]})).unwrap();
     let p = prop(&s, t, "text/sourceText");
-    assert_eq!(p.keys.last().map(|k| &k.value), Some(&copied));
+    assert_eq!(p.keys.len(), 4, "Paste Reversed adds one key");
+    assert!((p.keys[3].time.seconds() - 3.0).abs() < 1e-6, "the reversed key is at 3 s: {}", p.keys[3].time.seconds());
+    assert_eq!(p.keys[3].value, copied, "the reversed key keeps the whole document");
 }
 
 /// #3901: Edit ▸ Copy of an unanimated Source Text and Edit ▸ Paste onto another text layer
