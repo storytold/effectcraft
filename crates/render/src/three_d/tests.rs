@@ -719,3 +719,29 @@ fn rig_orbit_keeps_distance_and_pan_moves_both() {
     let off = r.eye - r.poi;
     assert!(off.y.abs() / off.length() < 0.9999);
 }
+
+/// #3845: each pane of a 2- or 4-view layout is a layout position; the active one's view is
+/// `current`, so activating another pane moves no view, and the layouts show positions 0 and 3
+/// (2 views), all four, or the active one alone.
+#[test]
+fn positions_activate_without_moving_views() {
+    let mut vs = Views3D::default();
+    assert_eq!(vs.active(), 3);
+    assert_eq!([0, 1, 2, 3].map(|p| vs.view_at(p)), [View3D::Top, View3D::Front, View3D::Right, View3D::ActiveCamera]);
+    vs.activate(0);
+    assert_eq!((vs.active(), vs.current), (0, View3D::Top));
+    assert_eq!([0, 1, 2, 3].map(|p| vs.view_at(p)), [View3D::Top, View3D::Front, View3D::Right, View3D::ActiveCamera]);
+    vs.set_view_at(0, View3D::Left);
+    assert_eq!((vs.current, vs.last), (View3D::Left, View3D::Top), "the active position's view is `current`");
+    vs.set_view_at(3, View3D::Custom2);
+    assert_eq!((vs.current, vs.view_at(3)), (View3D::Left, View3D::Custom2), "another position leaves `current` alone");
+    vs.activate(3);
+    assert_eq!((vs.current, vs.view_at(0)), (View3D::Custom2, View3D::Left));
+    vs.activate(4);
+    assert_eq!(vs.active(), 3, "no position 4");
+    assert_eq!(vs.shown(1), vec![3]);
+    assert_eq!(vs.shown(2), vec![0, 3]);
+    assert_eq!(vs.shown(4), vec![0, 1, 2, 3]);
+    vs.activate(1);
+    assert_eq!(vs.shown(1), vec![1], "one view shows the active position");
+}

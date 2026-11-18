@@ -128,8 +128,58 @@ impl EffectcraftApp {
             frame: 0,
             scale: (scale * 1000.0).round() as u32,
             view: self.view_hash(comp),
-            opts: frames::opts_hash(&self.frame_opts(comp, scale)) ^ self.roto_model_stamp() ^ self.lut_stamp() ^ self.purge_stamp(),
+            opts: frames::opts_hash(&self.frame_opts(comp, scale)) ^ self.key_stamps(),
         }
+    }
+
+    /// The parts of a viewer frame's key the project does not hold (the Roto Brush model in use,
+    /// LUT files changed on disk, purged caches): every frame key the viewers ask for carries them.
+    fn key_stamps(&self) -> u64 {
+        self.roto_model_stamp() ^ self.lut_stamp() ^ self.purge_stamp()
+    }
+
+    /// The frame the side pane at layout position `pos` of the view layout shows: frame `frame` of
+    /// `comp` at `scale` through the 3D view camera `view` (`None`: through the comp's own camera,
+    /// as an Active Camera pane or a 2D comp's panes show it), a draft of the whole frame. As a
+    /// passive viewer's: the cached frame, or while that renders (an edit, a drag) the newest
+    /// completed revision of the same frame after `drawn`, the frame the pane drew last, never
+    /// another time or view. Until the exact frame is cached it stays asked for, one queued frame
+    /// per pane (`Frames::request_pane`); a frame the pane has drawn is not asked for again. The
+    /// key of the exact frame comes back either way.
+    pub(crate) fn pane_frame(
+        &self,
+        comp: ItemId,
+        frame: i64,
+        scale: f64,
+        view: Option<effectcraft_engine::render::three_d::CameraState>,
+        pos: usize,
+        drawn: Option<FrameKey>,
+    ) -> (FrameKey, Option<(FrameKey, frames::FrameImage)>) {
+        let opts = RenderOpts { view, draft: true, roi: None, ..self.frame_opts(comp, scale) };
+        let view_key = view.map_or(0, |cam| {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            hash_camera(&cam, &mut h);
+            std::hash::Hasher::finish(&h) | 1
+        });
+        let key = FrameKey {
+            revision: self.session.revision,
+            content: self.frames.content_of(&self.session.project, self.session.revision, comp),
+            comp: comp.0,
+            frame,
+            scale: (scale * 1000.0).round() as u32,
+            view: view_key,
+            opts: frames::opts_hash(&opts) ^ self.key_stamps(),
+        };
+        if drawn == Some(key) {
+            return (key, None);
+        }
+        let got = self.frames.get_for_viewer(&key, drawn.as_ref());
+        if got.as_ref().is_none_or(|(k, _)| *k != key)
+            && let Some(c) = self.session.project.comp(comp)
+        {
+            self.frames.request_pane(&self.render_source(), key, comp, c.frame_rate.tick_of(frame), opts, pos);
+        }
+        (key, got)
     }
 
     /// Changes when the Roto Brush model in use does: a frame drawn with the classic fallback while the model loaded
@@ -183,13 +233,7 @@ impl EffectcraftApp {
             r.map(f64::to_bits).hash(&mut h);
         }
         let Some(cam) = self.session.view_camera(comp) else { return if roi.is_some() { h.finish() | 1 } else { 0 } };
-        for row in cam.view.0 {
-            for v in row {
-                v.to_bits().hash(&mut h);
-            }
-        }
-        cam.zoom.to_bits().hash(&mut h);
-        cam.ortho.hash(&mut h);
+        hash_camera(&cam, &mut h);
         h.finish() | 1
     }
 
@@ -252,6 +296,18 @@ impl EffectcraftApp {
         let opts = self.frame_opts(comp, scale);
         request(&self.frames, &self.render_source(), key, comp, t, opts);
     }
+}
+
+/// Hash a 3D view camera (its view matrix, zoom and projection) into `h`, for frame keys.
+fn hash_camera(cam: &effectcraft_engine::render::three_d::CameraState, h: &mut impl std::hash::Hasher) {
+    use std::hash::Hash;
+    for row in cam.view.0 {
+        for v in row {
+            v.to_bits().hash(h);
+        }
+    }
+    cam.zoom.to_bits().hash(h);
+    cam.ortho.hash(h);
 }
 
 #[cfg(test)]

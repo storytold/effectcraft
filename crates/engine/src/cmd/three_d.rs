@@ -331,19 +331,56 @@ fn set_3d_view(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(switch_view(s, cid, v))
 }
 
-/// The view of one pane of the View Layout: pane 0 is the main view (the same as Switch 3D View),
-/// panes 1 to 3 are the extra views of a 2- or 4-view layout. UI state, not part of the project.
+/// The view of one pane of the View Layout, named by its layout `position` (0 top-left,
+/// 1 top-right, 2 bottom-left, 3 bottom-right) or, numbered as before, by `pane`: 0 is the
+/// active pane (the same as Switch 3D View), 1 to 3 are positions 0 to 2. The answer echoes a
+/// `pane` it was given. UI state, not part of the project.
 fn set_pane_view(s: &mut Session, p: &Value) -> Result<Value> {
+    const CMD: &str = "view.setPaneView";
     let cid = comp_id(s, p)?;
-    let v = view_p(p, "view.setPaneView")?;
-    let pane = p.get("pane").and_then(Value::as_u64).filter(|n| *n <= 3).ok_or_else(|| bad("view.setPaneView", "pane: 0 (main view) to 3"))? as usize;
-    if pane == 0 {
-        switch_view(s, cid, v);
-    } else {
-        views(s, cid).set_pane(pane - 1, v);
-    }
+    let v = view_p(p, CMD)?;
+    let active = views(s, cid).active();
+    let given = |k: &str| p.get(k).filter(|v| !v.is_null());
+    let (pane, pos) = match (given("position"), given("pane")) {
+        (Some(_), Some(_)) => return Err(bad(CMD, "give `position` or `pane`, not both")),
+        (Some(x), None) => (None, x.as_u64().filter(|n| *n <= 3).ok_or_else(|| bad(CMD, "position: 0 to 3"))? as usize),
+        (None, Some(x)) => {
+            let pane = x.as_u64().filter(|n| *n <= 3).ok_or_else(|| bad(CMD, "pane: 0 (the active pane) to 3"))? as usize;
+            (Some(pane), pane.checked_sub(1).unwrap_or(active))
+        }
+        (None, None) => return Err(bad(CMD, "pane: 0 (the active pane) to 3, or position: 0 to 3")),
+    };
     let vs = views(s, cid);
-    Ok(json!({"pane": pane, "view": v.id(), "views": [vs.current.id(), vs.pane(0).id(), vs.pane(1).id(), vs.pane(2).id()]}))
+    if vs.view_at(pos) != v {
+        vs.set_view_at(pos, v);
+    }
+    let mut out = json!({
+        "position": pos,
+        "view": v.id(),
+        "views": [vs.current.id(), vs.view_at(0).id(), vs.view_at(1).id(), vs.view_at(2).id()],
+        "positions": (0..4).map(|i| vs.view_at(i).id()).collect::<Vec<_>>(),
+        "activePosition": vs.active(),
+    });
+    if let (Some(n), Some(o)) = (pane, out.as_object_mut()) {
+        o.insert("pane".into(), json!(n));
+    }
+    Ok(out)
+}
+
+/// Make a pane of the View Layout the active one (a press in it does this, as in After Effects):
+/// the commands that act on the current 3D view (View ▸ Switch 3D View, the camera tools…) then
+/// act on it. `position` must be one the layout shows.
+fn activate_pane(s: &mut Session, p: &Value) -> Result<Value> {
+    const CMD: &str = "view.activatePane";
+    let cid = comp_id(s, p)?;
+    let pos = p.get("position").and_then(Value::as_u64).filter(|n| *n <= 3).ok_or_else(|| bad(CMD, "position: 0 to 3"))? as usize;
+    let n = s.state.view_layout.max(1);
+    let vs = views(s, cid);
+    if !vs.shown(n).contains(&pos) {
+        return Err(bad(CMD, format!("position {pos} is not shown in the {n}-view layout")));
+    }
+    vs.activate(pos);
+    Ok(json!({"position": pos, "view": vs.current.id()}))
 }
 
 macro_rules! view_cmd {
@@ -450,6 +487,8 @@ fn get_3d(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({
         "view": vs.current.id(),
         "label": vs.current.label(),
+        "activePosition": vs.active(),
+        "positions": (0..4).map(|i| vs.view_at(i).id()).collect::<Vec<_>>(),
         "views": View3D::ALL.iter().map(|v| v.id()).collect::<Vec<_>>(),
         "camera": {"eye": [cam.eye.x, cam.eye.y, cam.eye.z], "forward": [f.x, f.y, f.z], "zoom": cam.zoom, "ortho": cam.ortho},
         "activeCameraLayer": active,
@@ -758,9 +797,18 @@ pub fn specs() -> Vec<CommandSpec> {
             "Set View of Pane",
             [],
             None,
-            "{pane: 0 (main) | 1 | 2 | 3, view: activeCamera|default|front|left|top|back|right|bottom|custom1|custom2|custom3, comp?}",
+            "{pane?: 0 (the active pane) | 1 | 2 | 3 (= position pane - 1), position?: 0..3 (top-left, top-right, bottom-left, bottom-right; instead of pane), view: activeCamera|default|front|left|top|back|right|bottom|custom1|custom2|custom3, comp?} → {position, view, views, positions, activePosition, pane (when given)}",
             has_comp,
             set_pane_view
+        ),
+        cmd!(
+            "view.activatePane",
+            "Activate Pane",
+            [],
+            None,
+            "{position: 0..3 (a pane the view layout shows: top-left, top-right, bottom-left, bottom-right), comp?} → {position, view}",
+            has_comp,
+            activate_pane
         ),
         cmd!("view.3d.activeCamera", "Active Camera", ["View", "Switch 3D View"], Some("F12"), "{comp?}", has_comp, view_active),
         cmd!("view.3d.default", "Default", ["View", "Switch 3D View"], None, "{comp?}", has_comp, view_default),
@@ -792,6 +840,11 @@ pub fn specs() -> Vec<CommandSpec> {
         ),
         cmd!("camera.pan", "Pan Camera", [], None, "{dx, dy (comp px), layer?, merge?}", has_comp, pan),
         cmd!("camera.dolly", "Dolly Camera", [], None, "{amount (px, + = forward), layer?, merge?}", has_comp, dolly),
-        query!("view.get3D", "3D View State", "{comp?} → current 3D view, view camera, active camera layer, lights", get_3d),
+        query!(
+            "view.get3D",
+            "3D View State",
+            "{comp?} → current 3D view (the active pane's), activePosition, view of each position, view camera, active camera layer, lights",
+            get_3d
+        ),
     ]
 }

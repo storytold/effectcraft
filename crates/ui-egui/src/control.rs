@@ -235,7 +235,11 @@ pub fn handle(app: &mut EffectcraftApp, ctx: &egui::Context, req: &ControlReques
         "engine.execute" | "ui.menu.invoke" => execute_command(app, ctx, &req.method, p),
         "engine.commands" => engine_commands(app, p),
         "ui.menu.list" => ok(serde_json::to_value(crate::menus::menu_items(app)).unwrap_or_default()),
-        "ui.inspect" => ok(inspect(app, ctx)),
+        "ui.inspect" => {
+            // (the viewer's zoom and pan it reports are the active pane's)
+            crate::panels::viewer::sync_framing(app);
+            ok(inspect(app, ctx))
+        }
         "ui.elements" => elements(app, p),
         "ui.set" => set_ui(app, ctx, p),
         "ui.panel.show" | "ui.panel.close" => panel(app, &req.method, p),
@@ -395,6 +399,8 @@ fn set_ui_layout(app: &mut EffectcraftApp, p: &Value) -> Outcome {
 /// `grid`, `rulers`, `safeMargins` and `transparencyGrid` toggles. An unknown resolution name
 /// is an error; a resolution change without an active comp is ignored.
 fn apply_viewer(app: &mut EffectcraftApp, v: &Value) -> Result<(), String> {
+    // (zoom and pan are the active pane's, also one activated since the viewer's last pass)
+    crate::panels::viewer::sync_framing(app);
     if let Some(z) = v.get("zoom") {
         app.ui.viewer.zoom = z.as_f64().map(|z| z as f32);
     }

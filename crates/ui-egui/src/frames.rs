@@ -202,6 +202,12 @@ impl FrameKey {
     pub fn same_series(&self, base: &FrameKey) -> bool {
         FrameKey { frame: base.frame, ..*self } == *base
     }
+
+    /// Whether `self` and `o` are the same frame of a comp (time, scale, view and options),
+    /// whatever the comp's content: two revisions of it during an edit.
+    fn same_frame(&self, o: &FrameKey) -> bool {
+        (self.comp, self.frame, self.scale, self.view, self.opts) == (o.comp, o.frame, o.scale, o.view, o.opts)
+    }
 }
 
 impl PartialEq for FrameKey {
@@ -255,6 +261,8 @@ impl Playhead {
 /// ([`Frames::persist_missing`]).
 struct Cached {
     img: FrameImage,
+    /// A side pane's frame (a view of a 2- or 4-view layout; see [`Frames::request_pane`]).
+    pane: bool,
     /// (the browser's frames are stored by its frame workers, not from here)
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     files: Option<Arc<ReadFiles>>,
@@ -298,6 +306,12 @@ struct Cache {
     playhead: Option<Playhead>,
     /// Scale of the frame on screen (the newest urgent request): frames of other scales go first.
     scale: Option<u32>,
+    /// The frame each side pane of the view layout asked for last (by layout position), until the
+    /// pane has drawn it.
+    panes: [Option<FrameKey>; 4],
+    /// For each position, the newest earlier revision of that frame that has landed: the pane
+    /// shows it while the frame it asked for renders (a drag in the active pane).
+    landed: [Option<FrameKey>; 4],
 }
 
 impl Cache {
@@ -307,10 +321,28 @@ impl Cache {
         self.insert_with(k, img, None, None);
     }
     /// [`Cache::insert`] with the source files the frame was made of and the disk cache's drop
-    /// generation when its render started.
+    /// generation when its render started (tests).
+    #[cfg(test)]
     fn insert_with(&mut self, k: FrameKey, img: FrameImage, files: Option<Arc<ReadFiles>>, since: Option<DiskSince>) {
+        self.insert_frame(k, img, files, since, false);
+    }
+    /// A frame with the source files it was made of and the disk cache's drop generation when its
+    /// render started; `pane`: a side pane's frame.
+    fn insert_frame(&mut self, k: FrameKey, img: FrameImage, files: Option<Arc<ReadFiles>>, since: Option<DiskSince>, pane: bool) {
+        // An earlier revision of the frame a side pane waits for (it asked for the next one
+        // meanwhile): the pane shows it until that one lands (`Frames::get_for_viewer`).
+        for (wanted, landed) in self.panes.iter().zip(self.landed.iter_mut()) {
+            if let Some(w) = wanted
+                && k != *w
+                && k.revision < w.revision
+                && k.same_frame(w)
+                && landed.is_none_or(|l| l.revision < k.revision)
+            {
+                *landed = Some(k);
+            }
+        }
         let (sz, gpu) = (img.bytes(), img.is_gpu());
-        if let Some(old) = self.map.insert(k, Cached { img, files, since }) {
+        if let Some(old) = self.map.insert(k, Cached { img, pane, files, since }) {
             self.forget(&old.img);
         } else {
             self.order.push_back(k);
@@ -322,21 +354,53 @@ impl Cache {
         self.evict_to_budget();
         self.evict_gpu();
     }
+    /// The frames the side panes wait for, until each pane has drawn its own: the frame it asked
+    /// for and the newest earlier revision of it that has landed. Never evicted, and not counted
+    /// against the budgets, so side panes never push the viewer's or the preview's frames out (at
+    /// most six frames, two for each side pane: other positions wait for none, see
+    /// [`Frames::retain_panes`]).
+    fn waited_for(&self, k: &FrameKey) -> bool {
+        self.panes.iter().chain(&self.landed).any(|p| p.as_ref() == Some(k))
+    }
+    /// The bytes of the frames the side panes wait for (GPU frames only, with `gpu`), each once.
+    fn waited_bytes(&self, gpu: bool) -> usize {
+        let mut seen: Vec<&FrameKey> = Vec::with_capacity(8);
+        let mut bytes = 0;
+        for k in self.panes.iter().chain(&self.landed).flatten() {
+            if seen.contains(&k) {
+                continue;
+            }
+            seen.push(k);
+            if let Some(c) = self.map.get(k).filter(|c| !gpu || c.img.is_gpu()) {
+                bytes += c.img.bytes();
+            }
+        }
+        bytes
+    }
+    /// A side pane's frame that no pane waits for any more.
+    fn spare_pane_frame(&self, k: &FrameKey) -> bool {
+        self.map.get(k).is_some_and(|c| c.pane) && !self.waited_for(k)
+    }
     /// The frame to evict next: the least recently shown, but while a preview plays, the least
     /// recently shown of the frames it doesn't reach, then the one it reaches last. Plain LRU
     /// evicted the frames just ahead of the playhead first (rendered a while ago, not shown yet)
     /// to keep the ones just shown, so a preview longer than the cache played into a gap that
-    /// prefetch kept refilling while it evicted the next frames (#595). Frames of another scale
-    /// than the one on screen go first (a zoom or resolution change).
+    /// prefetch kept refilling while it evicted the next frames (#595). Side panes' frames go
+    /// first, then frames of another scale than the one on screen (a zoom or resolution change).
+    /// The frames the side panes wait for never go (`None` when only they are left).
     fn victim(&self) -> Option<usize> {
+        if let Some(i) = self.order.iter().position(|k| self.spare_pane_frame(k)) {
+            return Some(i);
+        }
+        let free = |k: &FrameKey| !self.waited_for(k);
         if let Some(s) = self.scale
-            && let Some(i) = self.order.iter().position(|k| k.scale != s)
+            && let Some(i) = self.order.iter().position(|k| k.scale != s && free(k))
         {
             return Some(i);
         }
-        let Some(p) = &self.playhead else { return (!self.order.is_empty()).then_some(0) };
+        let Some(p) = &self.playhead else { return self.order.iter().position(free) };
         let mut farthest: Option<(i64, usize)> = None;
-        for (i, k) in self.order.iter().enumerate() {
+        for (i, k) in self.order.iter().enumerate().filter(|(_, k)| free(k)) {
             match p.ahead(k) {
                 None => return Some(i),
                 Some(d) if farthest.is_none_or(|(f, _)| d > f) => farthest = Some((d, i)),
@@ -345,13 +409,15 @@ impl Cache {
         }
         farthest.map(|(_, i)| i)
     }
-    /// Video memory: drop the oldest GPU frames past their own budget, frames of another scale
-    /// than the one on screen first (a zoom or resolution change).
+    /// Video memory: drop the oldest GPU frames past their own budget, side panes' frames first
+    /// (never the ones they wait for), then frames of another scale than the one on screen (a
+    /// zoom or resolution change).
     fn evict_gpu(&mut self) {
-        while self.gpu_bytes > self.gpu_budget {
-            let is_gpu = |k: &FrameKey| self.map.get(k).is_some_and(|c| c.img.is_gpu());
-            let other_scale = self.order.iter().position(|k| Some(k.scale) != self.scale && is_gpu(k));
-            let Some(i) = other_scale.or_else(|| self.order.iter().position(is_gpu)) else { break };
+        while self.gpu_bytes.saturating_sub(self.waited_bytes(true)) > self.gpu_budget {
+            let is_gpu = |k: &FrameKey| self.map.get(k).is_some_and(|c| c.img.is_gpu()) && !self.waited_for(k);
+            let pane = self.order.iter().position(|k| is_gpu(k) && self.spare_pane_frame(k));
+            let other_scale = || self.order.iter().position(|k| Some(k.scale) != self.scale && is_gpu(k));
+            let Some(i) = pane.or_else(other_scale).or_else(|| self.order.iter().position(is_gpu)) else { break };
             if let Some(old) = self.order.remove(i) {
                 self.remove(&old);
             }
@@ -421,7 +487,7 @@ impl Cache {
         }
     }
     fn evict_to_budget(&mut self) {
-        while self.bytes > self.budget {
+        while self.bytes.saturating_sub(self.waited_bytes(false)) > self.budget {
             let Some(old) = self.victim().and_then(|i| self.order.remove(i)) else { break };
             self.remove(&old);
         }
@@ -768,7 +834,20 @@ impl Frames {
         #[cfg(target_arch = "wasm32")]
         let queue = Queue::default();
         Frames {
-            cache: Arc::new(Mutex::new(Cache { map: HashMap::new(), order: VecDeque::new(), bytes: 0, gpu_bytes: 0, budget: 3 << 30, gpu_budget: GPU_BUDGET, gpu_pressure: None, gpu_adjusted: None, playhead: None, scale: None })),
+            cache: Arc::new(Mutex::new(Cache {
+                map: HashMap::new(),
+                order: VecDeque::new(),
+                bytes: 0,
+                gpu_bytes: 0,
+                budget: 3 << 30,
+                gpu_budget: GPU_BUDGET,
+                gpu_pressure: None,
+                gpu_adjusted: None,
+                playhead: None,
+                scale: None,
+                panes: [None; 4],
+                landed: [None; 4],
+            })),
             inflight: Arc::new(Mutex::new(HashSet::new())),
             queue: Arc::new(Mutex::new(queue)),
             #[cfg(not(target_arch = "wasm32"))]
@@ -1390,6 +1469,7 @@ impl Frames {
         if let Ok(mut c) = self.cache.lock() {
             c.map.clear();
             c.order.clear();
+            (c.panes, c.landed) = ([None; 4], [None; 4]);
             c.bytes = 0;
             c.gpu_bytes = 0;
             c.gpu_budget = GPU_BUDGET;
@@ -1488,6 +1568,52 @@ impl Frames {
         self.request_with(src, key, comp, t, opts, Want::Background);
     }
 
+    /// Queue the frame the side pane at layout position `pos` (0 to 3) of a 2- or 4-view layout
+    /// shows. It renders as prefetch does. It never goes to the disk cache. The RAM cache keeps
+    /// it, and the newest earlier revision of it that lands meanwhile, until the pane asks for
+    /// another frame, has drawn this one ([`Frames::release_pane`]) or is no longer drawn
+    /// ([`Frames::retain_panes`]).
+    pub fn request_pane(&self, src: &RenderSource, key: FrameKey, comp: ItemId, t: Tick, opts: RenderOpts, pos: usize) {
+        let Ok(pos) = u8::try_from(pos) else { return };
+        if usize::from(pos) >= 4 {
+            return;
+        }
+        let src = RenderSource { disk: None, ..src.clone() };
+        self.request_with(&src, key, comp, t, opts, Want::Pane(pos));
+    }
+
+    /// The side pane at layout position `pos` has drawn the frame it asked for: the cache keeps
+    /// that frame and its earlier revision for the pane no more (the pane holds its own picture);
+    /// they count against the budget again.
+    pub fn release_pane(&self, pos: usize) {
+        let Ok(mut c) = self.cache.lock() else { return };
+        let c = &mut *c;
+        if let Some((slot, landed)) = c.panes.get_mut(pos).zip(c.landed.get_mut(pos)) {
+            (*slot, *landed) = (None, None);
+        }
+        c.evict_to_budget();
+        c.evict_gpu();
+    }
+
+    /// Side panes show at layout positions `side` only (this viewer pass): the cache keeps no
+    /// frame for any other position. A position the layout hides, the active one, or one of a
+    /// viewer no longer drawn would never draw the frame it asked for, so never release it.
+    pub fn retain_panes(&self, side: &[usize]) {
+        let Ok(mut c) = self.cache.lock() else { return };
+        let c = &mut *c;
+        let mut released = false;
+        for (pos, (slot, landed)) in c.panes.iter_mut().zip(c.landed.iter_mut()).enumerate() {
+            if !side.contains(&pos) && (slot.is_some() || landed.is_some()) {
+                (*slot, *landed) = (None, None);
+                released = true;
+            }
+        }
+        if released {
+            c.evict_to_budget();
+            c.evict_gpu();
+        }
+    }
+
     /// Queue the frame the viewer is showing: it jumps ahead of every prefetch job.
     pub fn request_urgent(&self, src: &RenderSource, key: FrameKey, comp: ItemId, t: Tick, opts: RenderOpts) {
         self.request_with(src, key, comp, t, opts, Want::Viewer);
@@ -1500,14 +1626,43 @@ impl Frames {
 
     fn request_with(&self, src: &RenderSource, key: FrameKey, comp: ItemId, t: Tick, opts: RenderOpts, want: Want) {
         let urgent = want == Want::Viewer;
+        let pane = match want {
+            Want::Pane(p) => Some(p),
+            _ => None,
+        };
+        // The queue is locked first and held through the cache check, as a finishing job holds
+        // it while it stores its frame (`finish_key`): a frame rendering for a side pane that
+        // this request claims either lands claimed or is found here.
+        let Ok(mut q) = self.queue.lock() else { return };
         // The frame on screen sets the scale evictions keep: a prefetch or a passive viewer at
         // another zoom must not evict the active viewer's frames.
         let cached = self
             .cache
             .lock()
             .map(|mut c| {
+                let c = &mut *c;
                 if urgent {
                     c.scale = Some(key.scale);
+                }
+                match pane.map(usize::from).and_then(|p| c.panes.get_mut(p).zip(c.landed.get_mut(p))) {
+                    Some((slot, landed)) => {
+                        // Another frame (not a later revision of it): its earlier revision is no
+                        // use to the pane any more.
+                        if landed.is_some_and(|l| !l.same_frame(&key)) {
+                            *landed = None;
+                        }
+                        *slot = Some(key);
+                    }
+                    // A frame someone else asks for is no side pane's frame any more; one still
+                    // rendering lands as theirs (see `finish_key`).
+                    None => match c.map.get_mut(&key) {
+                        Some(e) => e.pane = false,
+                        None => {
+                            if q.running.contains(&key) {
+                                q.claimed.insert(key);
+                            }
+                        }
+                    },
                 }
                 c.map.contains_key(&key)
             })
@@ -1515,13 +1670,30 @@ impl Frames {
         if cached {
             return;
         }
-        let Ok(mut q) = self.queue.lock() else { return };
         let Ok(mut inf) = self.inflight.lock() else { return };
         // Jobs for an older project revision can never be shown: drop them.
         let before = q.jobs.len();
         q.jobs.retain(|j| j.key.revision >= key.revision);
         if q.jobs.len() < before {
             inf.retain(|k| k.revision >= key.revision || q.running.contains(k));
+        }
+        if let Some(p) = pane {
+            // A side pane waits for its newest frame only: its queued frames of other keys go
+            // (scrubbing queued one per pane and pass, and the pane's current frame waited
+            // behind them); the ones rendering finish into the cache.
+            q.jobs.retain(|j| {
+                let superseded = j.pane == Some(p) && j.key != key && !j.urgent;
+                if superseded {
+                    inf.remove(&j.key);
+                }
+                !superseded
+            });
+        } else {
+            // A queued frame someone else asks for is no side pane's frame any more: it lands as
+            // theirs, and the pane's next frame does not drop it.
+            for j in q.jobs.iter_mut().filter(|j| j.key == key) {
+                j.pane = None;
+            }
         }
         if urgent {
             // Only the newest viewer frame is urgent. The comp's earlier viewer frames that
@@ -1562,7 +1734,7 @@ impl Frames {
         }
         q.seq += 1;
         let seq = q.seq;
-        let job = Job { key, src: src.clone(), comp, t, opts, urgent, background: want == Want::Background, seq, cancel: Arc::default() };
+        let job = Job { key, src: src.clone(), comp, t, opts, urgent, background: want == Want::Background, pane, seq, cancel: Arc::default() };
         // A lane's frame: a busy lane takes the next job when it is done, an idle one starts now.
         #[cfg(not(target_arch = "wasm32"))]
         let on_lane = q.on_lane(&job);
@@ -1656,8 +1828,10 @@ impl Frames {
             };
             // The GPU compositor here keeps the frame on the GPU, but runs layer effects on the
             // CPU (this thread can't wait for readbacks): frames with effects go to workers
-            // that render them on their own GPU.
-            let gpu_here = job.src.gpu.is_some() && job.src.gpu_display && !(remote.gpu() && comp_has_effects(&job.src.project, job.comp));
+            // that render them on their own GPU. A side pane's frame always goes to the workers:
+            // here it would render on the interface thread again.
+            let gpu_here =
+                job.pane.is_none() && job.src.gpu.is_some() && job.src.gpu_display && !(remote.gpu() && comp_has_effects(&job.src.project, job.comp));
             if gpu_here {
                 let t0 = web_time::Instant::now();
                 // (A frame kept on the GPU is not written to the disk cache: its files are not
@@ -1671,11 +1845,12 @@ impl Frames {
                 *b += 1;
             }
             started += 1;
-            let (key, urgent) = (job.key, job.urgent);
+            let (key, urgent, pane) = (job.key, job.urgent, job.pane.is_some());
             let fw = self.worker();
             let busy = self.remote_busy.clone();
             let t0 = web_time::Instant::now();
-            let disk_key = remote.disk().then(|| frame_disk_key(&w.content_keys, &job.src.project, &key, opts_hash(&job.opts)));
+            // (a side pane's frames stay out of the disk cache)
+            let disk_key = (remote.disk() && !pane).then(|| frame_disk_key(&w.content_keys, &job.src.project, &key, opts_hash(&job.opts)));
             let rj = RemoteJob { project: job.src.project.clone(), revision: key.revision, comp: job.comp, t: job.t, opts: job.opts, disk_key };
             remote.start(
                 rj,
@@ -1686,7 +1861,7 @@ impl Frames {
                     match r {
                         Ok(f) => {
                             let img = egui::ColorImage::from_rgba_premultiplied([f.width as usize, f.height as usize], &f.rgba);
-                            fw.finish_key(key, urgent, FrameImage::Cpu(Arc::new(img)), None, None, t0);
+                            fw.finish_key(key, urgent, pane, FrameImage::Cpu(Arc::new(img)), None, None, t0);
                         }
                         Err(e) => {
                             // Not rendered (a stale revision, a lost worker): the viewer asks again.
@@ -1889,18 +2064,36 @@ impl Worker {
     /// Store a finished frame (with the source files it was made of, when known) and release its
     /// job.
     fn finish(&self, job: &Job, img: FrameImage, files: Option<Arc<ReadFiles>>, since: Option<DiskSince>, t0: web_time::Instant) {
-        self.finish_key(job.key, job.urgent, img, files, since, t0);
+        self.finish_key(job.key, job.urgent, job.pane.is_some(), img, files, since, t0);
     }
 
-    /// Stores a finished frame in the cache with its read files, records the render time for urgent jobs, then releases the job.
-    fn finish_key(&self, key: FrameKey, urgent: bool, img: FrameImage, files: Option<Arc<ReadFiles>>, since: Option<DiskSince>, t0: web_time::Instant) {
+    /// Stores a finished frame in the cache with its read files (`pane`: a side pane's frame),
+    /// records the render time for urgent jobs, then releases the job.
+    #[allow(clippy::too_many_arguments)]
+    fn finish_key(
+        &self,
+        key: FrameKey,
+        urgent: bool,
+        pane: bool,
+        img: FrameImage,
+        files: Option<Arc<ReadFiles>>,
+        since: Option<DiskSince>,
+        t0: web_time::Instant,
+    ) {
         if urgent && let Ok(mut l) = self.last.lock() {
             *l = t0.elapsed().as_secs_f64() * 1000.0;
         }
-        if let Ok(mut c) = self.cache.lock()
-            && (!img.is_gpu() || !self.gpu_retired.load(Ordering::Acquire))
         {
-            c.insert_with(key, img, files, since);
+            // A side pane's job someone else asked for while it rendered lands as theirs. The
+            // queue stays locked until the frame is stored: `request_with` holds it from its cache
+            // check to its claim, so a request either claims the frame first or finds it stored.
+            let q = self.queue.lock().ok();
+            let pane = pane && !q.as_ref().is_some_and(|q| q.claimed.contains(&key));
+            if let Ok(mut c) = self.cache.lock()
+                && (!img.is_gpu() || !self.gpu_retired.load(Ordering::Acquire))
+            {
+                c.insert_frame(key, img, files, since, pane);
+            }
         }
         self.release(key, urgent);
     }
@@ -1912,6 +2105,7 @@ impl Worker {
         }
         if let Ok(mut q) = self.queue.lock() {
             q.running.remove(&key);
+            q.claimed.remove(&key);
             if urgent {
                 q.urgent_running = q.urgent_running.saturating_sub(1);
                 if let Some(i) = q.urgent_cancels.iter().position(|(k, _)| *k == key) {
@@ -2117,6 +2311,8 @@ enum Want {
     Viewer,
     Prefetch,
     Background,
+    /// The side pane at this layout position (see [`Frames::request_pane`]).
+    Pane(u8),
 }
 
 struct Job {
@@ -2128,6 +2324,8 @@ struct Job {
     urgent: bool,
     /// Nobody waits for it (see [`Frames::request_background`]).
     background: bool,
+    /// The side pane that asked for it (see [`Frames::request_pane`]).
+    pane: Option<u8>,
     seq: u64,
     /// Set when the viewer no longer waits for this frame (see [`Frames::request_urgent`]).
     cancel: Arc<AtomicBool>,
@@ -2144,6 +2342,9 @@ impl Job {
 struct Queue {
     jobs: Vec<Job>,
     running: HashSet<FrameKey>,
+    /// Running frames someone other than a side pane asked for: they land as theirs, not as a
+    /// side pane's (the first frames evicted).
+    claimed: HashSet<FrameKey>,
     urgent_running: usize,
     /// The running viewer (urgent) frames and how to call them off.
     urgent_cancels: Vec<(FrameKey, Arc<AtomicBool>)>,

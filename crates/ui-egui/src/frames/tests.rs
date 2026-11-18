@@ -212,7 +212,7 @@ fn retirement_reaches_existing_workers_and_keeps_cpu_frames_and_completion_live(
     let next = key(1, 1, 0);
     frames.inflight.lock().unwrap().insert(next);
     frames.queue.lock().unwrap().running.insert(next);
-    worker.finish_key(next, false, img(), None, None, web_time::Instant::now());
+    worker.finish_key(next, false, false, img(), None, None, web_time::Instant::now());
     assert!(frames.is_cached(&next), "CPU retry can still publish");
     assert_eq!(frames.inflight(), 0);
     assert!(frames.queue.lock().unwrap().running.is_empty());
@@ -3173,6 +3173,7 @@ fn gpu_worker_routes_admit_display_readback_and_auto_effects() {
         opts: RenderOpts { backend: Backend::Gpu, ..Default::default() },
         urgent: true,
         background: false,
+        pane: None,
         seq: 0,
         cancel: Arc::default(),
     };
@@ -3247,6 +3248,7 @@ fn gpu_worker_routes_admit_display_readback_and_auto_effects() {
         opts: RenderOpts { backend: Backend::Gpu, ..job.opts },
         urgent: false,
         background: true,
+        pane: None,
         seq: 1,
         cancel: Arc::default(),
     });
@@ -3420,4 +3422,354 @@ fn an_effect_found_by_a_short_route_is_not_hidden_by_a_deep_one() {
     nest(&mut s, root, chain);
     nest(&mut s, root, fx);
     assert!(comp_has_effects(&s.project, root));
+}
+
+/// A side pane's frame, as the worker stores the frame of a `request_pane` job.
+fn insert_pane(f: &Frames, k: FrameKey) {
+    f.cache.lock().unwrap().insert_frame(k, img(), None, None, true);
+}
+
+/// #3845: the cache is full of the viewer's frames (another scale than the side panes'). The
+/// frame a side pane asked for is not evicted the moment it lands (the pane asked again on every
+/// pass and was rendered again and again), and it pushes none of the viewer's frames out.
+#[test]
+fn a_side_panes_frame_survives_a_full_cache() {
+    let mut f = Frames::default();
+    f.set_remote(Some(Arc::new(Idle)));
+    f.set_budget(4 * 16);
+    let at = |frame, scale| FrameKey { scale, ..key(1, frame, 0) };
+    f.request_urgent(&idle_source(), at(0, 1000), ItemId(1), Tick::ZERO, RenderOpts::default());
+    for frame in 0..4 {
+        insert(&f, at(frame, 1000));
+    }
+    let pane = FrameKey { view: 7, ..at(9, 790) };
+    f.request_pane(&idle_source(), pane, ItemId(1), Tick::ZERO, RenderOpts::default(), 0);
+    insert_pane(&f, pane);
+    assert!(f.is_cached(&pane), "the frame the pane waits for stays");
+    assert_eq!(f.cached_frames(&at(0, 1000)), [0, 1, 2, 3], "and so do the viewer's");
+    // The viewer's fifth frame: the pane's older frame goes first, then the viewer's oldest, as
+    // it would without side panes; the frame the pane waits for now stays.
+    let newer = FrameKey { frame: 10, ..pane };
+    f.request_pane(&idle_source(), newer, ItemId(1), Tick::ZERO, RenderOpts::default(), 0);
+    insert_pane(&f, newer);
+    insert(&f, at(4, 1000));
+    assert!(!f.is_cached(&pane) && f.is_cached(&newer), "the pane's older frame went, not its newest");
+    assert_eq!(f.cached_frames(&at(0, 1000)), [1, 2, 3, 4]);
+}
+
+/// #3845: side-pane frames never push the viewer's or the RAM preview's frames out, also when
+/// they share the viewer's scale (the least recently shown frame went).
+#[test]
+fn side_pane_frames_never_evict_the_viewers_or_the_previews_frames() {
+    let mut f = Frames::default();
+    f.set_remote(Some(Arc::new(Idle)));
+    f.set_budget(4 * 16);
+    let at = |frame| key(1, frame, 0);
+    f.request_urgent(&idle_source(), at(0), ItemId(1), Tick::ZERO, RenderOpts::default());
+    for frame in 0..4 {
+        insert(&f, at(frame));
+    }
+    for (pos, frame) in [(0, 20), (1, 21), (2, 22)] {
+        let k = FrameKey { view: 7 + pos as u64, ..at(frame) };
+        f.request_pane(&idle_source(), k, ItemId(1), Tick::ZERO, RenderOpts::default(), pos);
+        insert_pane(&f, k);
+    }
+    assert_eq!(f.cached_frames(&at(0)), [0, 1, 2, 3], "the viewer's frames at the same scale");
+    // A playing preview's frames, those it has played too.
+    let mut f = Frames::default();
+    f.set_remote(Some(Arc::new(Idle)));
+    f.set_budget(4 * 16);
+    f.set_playhead(Some(Playhead { series: at(0), cur: 2, start: 0, end: 99, step: 1, looping: false }));
+    for frame in 0..4 {
+        insert(&f, at(frame));
+    }
+    let k = FrameKey { view: 7, ..at(50) };
+    f.request_pane(&idle_source(), k, ItemId(1), Tick::ZERO, RenderOpts::default(), 0);
+    insert_pane(&f, k);
+    assert_eq!(f.cached_frames(&at(0)), [0, 1, 2, 3], "the preview's frames");
+}
+
+/// #3845: a side pane waits for its newest frame only. Its queued frames of other keys go when it
+/// asks for another (scrubbing queued three frames per pass, none ever dropped); the other panes'
+/// frames stay queued.
+#[test]
+fn a_side_pane_waits_for_its_newest_frame_only() {
+    let mut f = Frames::default();
+    f.set_remote(Some(Arc::new(Idle)));
+    let other = FrameKey { view: 9, ..key(1, 0, 0) };
+    f.request_pane(&idle_source(), other, ItemId(1), Tick::ZERO, RenderOpts::default(), 1);
+    for frame in 0..60 {
+        f.request_pane(&idle_source(), FrameKey { view: 7, ..key(1, frame, 0) }, ItemId(1), Tick::ZERO, RenderOpts::default(), 0);
+    }
+    let q = f.queue.lock().unwrap();
+    let mine: Vec<i64> = q.jobs.iter().filter(|j| j.pane == Some(0)).map(|j| j.key.frame).collect();
+    assert_eq!(mine, [59], "pane 0 waits for frame 59 only");
+    assert_eq!(q.jobs.iter().filter(|j| j.pane == Some(1)).map(|j| j.key).collect::<Vec<_>>(), [other], "pane 1's frame stays");
+    drop(q);
+    assert_eq!(f.inflight(), 2);
+}
+
+/// #3845: side-pane frames do not go to the disk cache (drafts through Top, Front and Right would
+/// take its room from the viewer's frames).
+#[test]
+fn side_pane_frames_skip_the_disk_cache() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut f = Frames::default();
+    f.set_remote(Some(Arc::new(Idle)));
+    let src = RenderSource { disk: Some(DiskCache::open(dir.path(), 1 << 30).unwrap()), ..idle_source() };
+    f.request_pane(&src, FrameKey { view: 7, ..key(1, 0, 0) }, ItemId(1), Tick::ZERO, RenderOpts::default(), 0);
+    f.request(&src, key(1, 1, 0), ItemId(1), Tick::ZERO, RenderOpts::default());
+    let q = f.queue.lock().unwrap();
+    let disk = |frame| q.jobs.iter().find(|j| j.key.frame == frame).map(|j| j.src.disk.is_some());
+    assert_eq!((disk(0), disk(1)), (Some(false), Some(true)), "the pane's job has no disk cache, prefetch keeps it");
+}
+
+/// #3845: while a drag in the active pane renders, a side pane shows the newest earlier revision
+/// of its frame that has landed (`get_for_viewer`). That frame lands after the pane has asked for
+/// the next revision; in a full cache it went at once (no pane waited for it), and the pane kept
+/// the picture from before the press until the pointer rested. It is kept now, the newest one
+/// only, until the pane asks for another frame.
+#[test]
+fn a_side_pane_keeps_the_earlier_revision_it_shows_during_a_drag() {
+    let mut f = Frames::default();
+    f.set_remote(Some(Arc::new(Idle)));
+    f.set_budget(4 * 16);
+    let at = |frame| key(1, frame, 0);
+    f.request_urgent(&idle_source(), at(0), ItemId(1), Tick::ZERO, RenderOpts::default());
+    for frame in 0..4 {
+        insert(&f, at(frame));
+    }
+    // Pane 0's frame 9 at revisions 1 (drawn), 2 (rendering) and 3 (asked for now).
+    let rev = |r: u64| FrameKey { view: 7, ..key(r, 9, 0) };
+    let ask = |k: FrameKey| f.request_pane(&idle_source(), k, ItemId(1), Tick::ZERO, RenderOpts::default(), 0);
+    ask(rev(3));
+    insert_pane(&f, rev(2));
+    insert(&f, at(4));
+    assert!(f.is_cached(&rev(2)), "the earlier revision the pane shows meanwhile stays");
+    assert_eq!(f.get_for_viewer(&rev(3), Some(&rev(1))).map(|(k, _)| k.revision), Some(2));
+    assert_eq!(f.cached_frames(&at(0)), [1, 2, 3, 4], "the viewer's frames go as without side panes");
+    // The drag goes on: revision 3 lands while the pane waits for 4; 2 is no help any more.
+    ask(rev(4));
+    insert_pane(&f, rev(3));
+    assert!(f.is_cached(&rev(3)) && !f.is_cached(&rev(2)), "the newest earlier revision only");
+    // The pane asks for another frame (another time): its frame 9 is no help any more.
+    ask(FrameKey { frame: 10, ..rev(4) });
+    insert(&f, at(5));
+    assert!(!f.is_cached(&rev(3)), "it goes first");
+    assert_eq!(f.cached_frames(&at(0)), [2, 3, 4, 5]);
+}
+
+/// #3845: once a side pane has drawn the frame it asked for, the cache keeps that frame and its
+/// earlier revision for it no more (the pane holds its own picture): they count against the
+/// budget and go first. A purge forgets what the panes waited for.
+#[test]
+fn a_frame_a_side_pane_drew_is_kept_for_it_no_more() {
+    let mut f = Frames::default();
+    f.set_remote(Some(Arc::new(Idle)));
+    f.set_budget(4 * 16);
+    let at = |frame| key(1, frame, 0);
+    f.request_urgent(&idle_source(), at(0), ItemId(1), Tick::ZERO, RenderOpts::default());
+    for frame in 0..4 {
+        insert(&f, at(frame));
+    }
+    let rev = |r: u64| FrameKey { view: 7, ..key(r, 9, 0) };
+    f.request_pane(&idle_source(), rev(3), ItemId(1), Tick::ZERO, RenderOpts::default(), 0);
+    insert_pane(&f, rev(2));
+    insert_pane(&f, rev(3));
+    assert!(f.is_cached(&rev(2)) && f.is_cached(&rev(3)));
+    f.release_pane(0);
+    assert!(!f.is_cached(&rev(2)) && !f.is_cached(&rev(3)), "drawn: both went, over the budget");
+    assert_eq!(f.cached_frames(&at(0)), [0, 1, 2, 3], "not the viewer's");
+    // After a purge.
+    f.request_pane(&idle_source(), rev(3), ItemId(1), Tick::ZERO, RenderOpts::default(), 0);
+    f.clear();
+    for frame in 0..4 {
+        insert(&f, at(frame));
+    }
+    insert_pane(&f, rev(3));
+    assert!(!f.is_cached(&rev(3)), "no pane waits for a frame asked for before the purge");
+}
+
+/// #3845: a frame a side pane's queued job renders that the viewer (or prefetch) then asks for is
+/// no side pane's frame any more: it would land as one (the first to be evicted), and the pane
+/// asking for another frame dropped the viewer's frame from the queue.
+#[test]
+fn a_side_panes_queued_frame_someone_else_asks_for_is_theirs() {
+    let mut f = Frames::default();
+    f.set_remote(Some(Arc::new(Idle)));
+    let (shared, ahead) = (key(1, 0, 0), key(1, 1, 0));
+    let pane = |f: &Frames, k: FrameKey, pos| f.request_pane(&idle_source(), k, ItemId(1), Tick::ZERO, RenderOpts::default(), pos);
+    pane(&f, shared, 0);
+    pane(&f, ahead, 1);
+    f.request_urgent(&idle_source(), shared, ItemId(1), Tick::ZERO, RenderOpts::default());
+    f.request(&idle_source(), ahead, ItemId(1), Tick::ZERO, RenderOpts::default());
+    pane(&f, key(1, 5, 0), 0);
+    pane(&f, key(1, 6, 0), 1);
+    let q = f.queue.lock().unwrap();
+    let job = |k: FrameKey| q.jobs.iter().find(|j| j.key == k).map(|j| (j.urgent, j.pane));
+    assert_eq!(job(shared), Some((true, None)), "the viewer's frame stays queued, no pane's");
+    assert_eq!(job(ahead), Some((false, None)), "so does the prefetch frame");
+}
+
+/// #3845: a side pane's frame that is already rendering when the viewer asks for it (the pane was
+/// clicked and became the active one) lands as the viewer's: as a side pane's frame no pane waits
+/// for, a full cache evicted it the moment it landed and the viewer rendered it again.
+#[test]
+fn a_side_panes_running_frame_someone_else_asks_for_lands_as_theirs() {
+    let mut f = Frames::default();
+    f.set_remote(Some(Arc::new(Idle)));
+    f.set_budget(4 * 16);
+    let at = |frame| key(1, frame, 0);
+    f.request_urgent(&idle_source(), at(0), ItemId(1), Tick::ZERO, RenderOpts::default());
+    for frame in 0..4 {
+        insert(&f, at(frame));
+    }
+    let shared = FrameKey { view: 7, ..at(20) };
+    f.request_pane(&idle_source(), shared, ItemId(1), Tick::ZERO, RenderOpts::default(), 0);
+    {
+        let mut q = f.queue.lock().unwrap();
+        let i = q.jobs.iter().position(|j| j.key == shared).unwrap();
+        let job = q.jobs.swap_remove(i);
+        assert_eq!(job.pane, Some(0));
+        q.running.insert(job.key);
+    }
+    f.release_pane(0);
+    f.request_urgent(&idle_source(), shared, ItemId(1), Tick::ZERO, RenderOpts::default());
+    f.worker().finish_key(shared, false, true, img(), None, None, web_time::Instant::now());
+    assert!(f.is_cached(&shared), "the viewer's frame stays");
+    assert!(f.queue.lock().unwrap().claimed.is_empty(), "released with the job");
+}
+
+/// #3845: a finishing side-pane job holds the queue until its frame is stored, as `request_with`
+/// holds it from its cache check to its claim. Otherwise a request could miss the cache before the
+/// frame was stored and claim it only after the job had read that nobody had: the frame landed as
+/// a spare side-pane frame and a full cache evicted it at once.
+#[test]
+fn a_finishing_side_pane_job_holds_the_queue_until_its_frame_is_stored() {
+    let f = Frames::default();
+    let shared = FrameKey { view: 7, ..key(1, 20, 0) };
+    f.inflight.lock().unwrap().insert(shared);
+    f.queue.lock().unwrap().running.insert(shared);
+    let worker = f.worker();
+    let cache = f.cache.lock().unwrap();
+    let job = std::thread::spawn(move || worker.finish_key(shared, false, true, img(), None, None, web_time::Instant::now()));
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while f.queue.try_lock().is_ok() {
+        assert!(std::time::Instant::now() < until, "the job stored its frame without the queue");
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    drop(cache);
+    job.join().unwrap();
+    assert!(f.is_cached(&shared));
+    assert!(f.queue.lock().unwrap().running.is_empty());
+}
+
+/// #3845: a side pane's frame no pane waits for any more goes before the viewer's frames, also at
+/// the viewer's scale (the least recently shown frame, the viewer's oldest, went).
+#[test]
+fn a_frame_no_side_pane_waits_for_goes_before_the_viewers() {
+    let mut f = Frames::default();
+    f.set_remote(Some(Arc::new(Idle)));
+    f.set_budget(4 * 16);
+    let at = |frame| key(1, frame, 0);
+    f.request_urgent(&idle_source(), at(0), ItemId(1), Tick::ZERO, RenderOpts::default());
+    for frame in 0..4 {
+        insert(&f, at(frame));
+    }
+    let (first, next) = (FrameKey { view: 7, ..at(20) }, FrameKey { view: 7, ..at(21) });
+    for k in [first, next] {
+        f.request_pane(&idle_source(), k, ItemId(1), Tick::ZERO, RenderOpts::default(), 0);
+        insert_pane(&f, k);
+    }
+    assert!(!f.is_cached(&first) && f.is_cached(&next), "the pane's first frame went");
+    assert_eq!(f.cached_frames(&at(0)), [0, 1, 2, 3], "not the viewer's oldest");
+}
+
+/// #3845: a side pane's frame rendered by a remote renderer that keeps a disk cache (the browser's
+/// frame workers) gets no disk key, so it stays out of that cache; prefetch frames keep theirs.
+#[test]
+fn a_side_panes_remote_frame_skips_the_remote_disk_cache() {
+    struct Keys(Mutex<Vec<Option<u128>>>);
+    impl RemoteFrames for Keys {
+        fn slots(&self) -> usize {
+            2
+        }
+        fn disk(&self) -> bool {
+            true
+        }
+        fn start(&self, job: RemoteJob, _: RemoteDone) {
+            self.0.lock().unwrap().push(job.disk_key);
+        }
+    }
+    let keys = Arc::new(Keys(Mutex::default()));
+    let mut f = Frames::default();
+    f.set_remote(Some(keys.clone()));
+    f.request_pane(&idle_source(), FrameKey { view: 7, ..key(1, 0, 0) }, ItemId(1), Tick::ZERO, RenderOpts::default(), 0);
+    assert_eq!(f.dispatch_remote(), 1);
+    f.request(&idle_source(), key(1, 1, 0), ItemId(1), Tick::ZERO, RenderOpts::default());
+    assert_eq!(f.dispatch_remote(), 1);
+    let sent: Vec<bool> = keys.0.lock().unwrap().iter().map(Option::is_some).collect();
+    assert_eq!(sent, [false, true], "the pane's frame has no disk key, prefetch has one");
+}
+
+/// #3845: only the layout positions that show a side pane in this viewer pass wait for frames.
+/// A position the layout hides, the active one or a closed viewer's never draws the frame it
+/// asked for, so it never released it.
+#[test]
+fn only_positions_that_show_a_side_pane_wait_for_frames() {
+    let mut f = Frames::default();
+    f.set_remote(Some(Arc::new(Idle)));
+    f.set_budget(4 * 16);
+    let at = |frame| key(1, frame, 0);
+    f.request_urgent(&idle_source(), at(0), ItemId(1), Tick::ZERO, RenderOpts::default());
+    for frame in 0..4 {
+        insert(&f, at(frame));
+    }
+    let (p0, p1) = (FrameKey { view: 7, ..at(20) }, FrameKey { view: 8, ..at(20) });
+    for (pos, k) in [(0, p0), (1, p1)] {
+        f.request_pane(&idle_source(), k, ItemId(1), Tick::ZERO, RenderOpts::default(), pos);
+        insert_pane(&f, k);
+    }
+    f.retain_panes(&[1, 2]);
+    assert!(!f.is_cached(&p0), "position 0 shows no side pane: its frame went");
+    assert!(f.is_cached(&p1), "position 1's stays");
+    assert_eq!(f.cached_frames(&at(0)), [0, 1, 2, 3], "not the viewer's");
+    f.retain_panes(&[]);
+    assert!(!f.is_cached(&p1), "no side pane at all");
+}
+
+/// #3845, browser build: with frame workers (a remote renderer), a side pane's frame goes to them
+/// even when the GPU compositor here could keep it on the GPU. That path renders on the interface
+/// thread (`pump`), which the viewer's frames may take but the side panes must not.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn a_side_panes_frame_goes_to_the_frame_workers_not_the_local_gpu() {
+    use effectcraft_engine::render::Backend;
+    let Some(gpu) = Gpu::headless() else {
+        eprintln!("side-pane remote route test skipped: no adapter");
+        return;
+    };
+    struct Started(Mutex<usize>);
+    impl RemoteFrames for Started {
+        fn slots(&self) -> usize {
+            2
+        }
+        fn start(&self, _: RemoteJob, _: RemoteDone) {
+            *self.0.lock().unwrap() += 1;
+        }
+    }
+    let mut session = effectcraft_engine::Session::default();
+    session.execute("comp.new", serde_json::json!({"width": 16, "height": 16, "duration": 1})).unwrap();
+    let comp = session.active_comp_id().unwrap();
+    session.execute("layer.newSolid", serde_json::json!({"color": "#ff0000"})).unwrap();
+    let started = Arc::new(Started(Mutex::default()));
+    let mut f = Frames::default();
+    f.set_remote(Some(started.clone()));
+    let src = RenderSource { project: session.project.clone(), gpu: Some(gpu), gpu_display: true, ..idle_source() };
+    let pane = FrameKey { comp: comp.0, view: 7, ..key(1, 0, 0) };
+    let opts = RenderOpts { backend: Backend::Gpu, ..Default::default() };
+    f.request_pane(&src, pane, comp, Tick::ZERO, opts, 0);
+    f.dispatch_remote();
+    assert!(!f.is_cached(&pane), "the side pane's frame was not rendered here");
+    assert_eq!(*started.0.lock().unwrap(), 1, "it went to the frame workers");
 }

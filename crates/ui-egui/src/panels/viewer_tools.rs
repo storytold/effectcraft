@@ -481,6 +481,14 @@ pub(crate) fn draw_frame(app: &mut EffectcraftApp, ctx: &egui::Context, painter:
     let dc = vw::DisplayColor::of(&app.session);
     let region = shown_region(ctx, [ectx.comp.width as f32, ectx.comp.height as f32]);
     let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+    // A pane that just became active: until its own frame is shown, its side-pane picture stands
+    // in for the frame on screen, which is the previously active pane's (another view).
+    if !snap && let Some(stand_in) = super::viewer::stand_in(app, ctx, cid) {
+        if let Some(tex) = stand_in {
+            painter.image(tex, comp_rect, uv, Color32::WHITE);
+        }
+        return;
+    }
     if snap {
         let Some(s) = app.session.snapshot.clone() else { return };
         let pass = display_pass(app, s.encoding, dc.as_ref());
