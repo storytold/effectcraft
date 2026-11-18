@@ -2,9 +2,11 @@ use super::write::*;
 use super::*;
 use crate::pixels::srgb_encode;
 
+mod fixed_adjustments;
 mod integration;
 mod opt;
 mod shared_corpus;
+mod unicode_name;
 mod vector_records;
 
 fn gradient(w: u32, h: u32) -> Vec<[f32; 4]> {
@@ -595,4 +597,25 @@ fn written_32_bit_color_samples_keep_their_range() {
     let p8 = Psd::parse(write(&d8)).expect("parse 8-bit");
     let q = |x: f32| (x.clamp(0.0, 1.0) * 255.0).round() / 255.0;
     assert_eq!(p8.composite().expect("composite").data[0], [q(2.0), q(-0.5), q(0.25), q(1.5)]);
+}
+
+#[test]
+fn shared_packbits_keeps_padded_rows_and_truncated_packet_errors() {
+    let mut out = vec![42];
+    unpack_bits(&[0, 7], 3, &mut out).unwrap();
+    assert_eq!(out, [42, 7, 0, 0]);
+    unpack_bits(&[128], 2, &mut out).unwrap();
+    assert_eq!(out, [42, 7, 0, 0, 0, 0]);
+    assert_eq!(unpack_bits(&[3, 1], 1, &mut vec![]), Err(Error::Truncated));
+    assert_eq!(unpack_bits(&[255], 1, &mut vec![]), Err(Error::Truncated));
+    let mut row = vec![];
+    unpack_bits(&[0, 9, 255], 1, &mut row).unwrap();
+    assert_eq!(row, [9]);
+}
+
+#[test]
+fn shared_packbits_reports_row_limits_as_invalid_not_truncated() {
+    // The shared recovery decoder refuses a row beyond its decoded-size limit. That refusal
+    // is a limit, not truncated PackBits data, so the wrapper must not report it as one.
+    assert!(matches!(unpack_bits(&[], usize::MAX, &mut Vec::new()), Err(Error::Invalid(_))));
 }
