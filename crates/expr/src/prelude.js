@@ -11,14 +11,18 @@
 if (typeof String.prototype.substr !== "function") {
   Object.defineProperty(String.prototype, "substr", {
     value: function (start, length) {
+      // Strict, so `this` stays null or undefined in substr.call(null) instead of becoming the
+      // global object.
+      "use strict";
       if (this === null || this === undefined) throw new TypeError("String.substr called on null or undefined");
       var text = String(this), n = text.length;
-      var from = Number(start);
-      if (Number.isNaN(from)) from = 0;
-      from = from < 0 ? Math.max(n + Math.ceil(from), 0) : Math.min(Math.floor(from), n);
-      var count = length === undefined ? n - from : Number(length);
-      if (Number.isNaN(count) || count <= 0) return "";
-      return text.slice(from, from + count);
+      // Annex B: start and length are truncated to integers before their sign is looked at.
+      var whole = function (v) { var x = Number(v); return Number.isNaN(x) ? 0 : Math.trunc(x); };
+      var from = whole(start);
+      from = from < 0 ? Math.max(n + from, 0) : Math.min(from, n);
+      var count = length === undefined ? n - from : whole(length);
+      if (count <= 0) return "";
+      return text.slice(from, from + Math.min(count, n - from));
     },
     writable: true, configurable: true
   });
