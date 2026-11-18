@@ -35,7 +35,7 @@ mod placeholder;
 mod props;
 mod puppet;
 mod report;
-mod settings;
+pub(crate) mod settings;
 mod shapes;
 mod styles;
 mod text;

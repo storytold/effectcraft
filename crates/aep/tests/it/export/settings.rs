@@ -184,3 +184,38 @@ fn an_output_space_equal_to_the_working_space_is_the_normal_case() {
     });
     assert_eq!(export_all(&other).report.count(LossCategory::ProjectSettings), 1);
 }
+
+/// The renderer's id in `LIST gpuG` of an exported file.
+fn renderer(bytes: &[u8]) -> Option<String> {
+    let file = parse(bytes).expect("parse");
+    let top = file.chunks.iter().find(|c| c.is_list(b"gpuG"))?;
+    let id = top.children().iter().find(|c| c.is(b"Utf8"))?;
+    match &id.body {
+        effectcraft_aep::Body::Data(d) => Some(String::from_utf8_lossy(d).into_owned()),
+        _ => None,
+    }
+}
+
+/// Video Rendering and Effects ▸ Use is written: without `gpuG` After Effects opens a project as
+/// Mercury Software Only, which decodes H.264 footage with softer chroma than the GPU renderer
+/// (up to 128 of 255 at colour-bar edges in After Effects 2026), whatever EffectCraft's setting.
+#[test]
+fn the_renderer_is_written_and_read_back() {
+    const CUDA: &str = "7ee0ab59-822d-44cc-ac10-16279d041016";
+    const SOFTWARE: &str = "f33089e2-1ede-47c1-8a9e-b232bb1cc1a4";
+    for (gpu, id) in [(true, CUDA), (false, SOFTWARE)] {
+        let p = with(|s| s.gpu_acceleration = gpu);
+        let r = export_all(&p);
+        assert_eq!(renderer(&r.bytes).as_deref(), Some(id), "gpu {gpu}");
+        // After `qtlg`, where After Effects writes it.
+        let file = parse(&r.bytes).expect("parse");
+        let at = file.chunks.iter().position(|c| c.is(b"qtlg")).expect("qtlg");
+        assert!(file.chunks.get(at + 1).is_some_and(|c| c.is_list(b"gpuG")));
+        let mut back = Project::default();
+        back.settings.gpu_acceleration = !gpu;
+        let none = |_: &str| false;
+        let opts = effectcraft_aep::import::ImportOptions { allow_losses: true, ..effectcraft_aep::import::ImportOptions::new(&none) };
+        let settings = effectcraft_aep::import::import(&mut back, &r.bytes, &opts).expect("import").settings;
+        assert_eq!(settings.gpu_acceleration, gpu);
+    }
+}

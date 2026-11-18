@@ -8,6 +8,7 @@ use effectcraft_project::{BitDepth, ColorEngine, HdrMode, ProjectSettings, TimeD
 
 use crate::export::report::{Collector, LossCategory};
 use crate::export::tree::{R, data_mut, put_u8, tpl};
+use crate::import::settings::{CUDA_RENDERER, SOFTWARE_RENDERER};
 
 /// The settings in the file's terms.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -27,6 +28,8 @@ pub(crate) struct SettingsPlan {
     pub feet: Option<u8>,
     /// `nhed` byte 14: 2 for a count from 0, 1 for a count from 1.
     pub frame_start: u8,
+    /// The renderer's id in `LIST gpuG` (`import::settings::CUDA_RENDERER` and its neighbours).
+    pub renderer: &'static str,
 }
 
 pub(crate) fn plan(s: &ProjectSettings, col: &mut Collector) -> SettingsPlan {
@@ -83,6 +86,10 @@ pub(crate) fn plan(s: &ProjectSettings, col: &mut Collector) -> SettingsPlan {
         frames,
         feet,
         frame_start,
+        // Mercury GPU Acceleration is written as CUDA, After Effects' default for a new project on
+        // the machine that was sampled; without `gpuG` After Effects would open the project as
+        // Software Only.
+        renderer: if s.gpu_acceleration { CUDA_RENDERER } else { SOFTWARE_RENDERER },
     }
 }
 
@@ -101,6 +108,10 @@ pub(crate) fn emit(file: &mut AepFile<'static>, p: &SettingsPlan) -> R<()> {
         put_u8(d, at_fpf, p.feet.unwrap_or(16))?;
         put_u8(d, at_start, p.frame_start)?;
     }
+    // The renderer: `LIST gpuG` right after `qtlg`, where After Effects writes it.
+    top.retain(|c| !c.is_list(b"gpuG"));
+    let qtlg = header(top, b"qtlg")?;
+    top.insert(qtlg.saturating_add(1), Chunk::list(*b"gpuG", vec![Chunk::data(*b"Utf8", p.renderer.as_bytes().to_vec())]));
     {
         let i = header(top, b"dwga")?;
         put_u8(data_mut(top.get_mut(i).ok_or_else(|| tpl("dwga"))?)?, 0, u8::from(p.gamma_24))?;

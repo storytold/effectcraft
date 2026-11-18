@@ -1,5 +1,6 @@
 //! Project settings (colour depth, working space, working gamma, linear-light switches, time
-//! display, frame count start) from [`crate::ProjectSettings`] (cases 620-634).
+//! display, frame count start) from [`crate::ProjectSettings`] (cases 620-634), and the renderer
+//! (Video Rendering and Effects ▸ Use) from `LIST gpuG`.
 
 use crate::container::index::{Node, Root};
 use crate::{TimeDisplay, WorkingSpace};
@@ -17,6 +18,22 @@ pub(crate) fn color_space(name: &str) -> Option<ColorSpace> {
         "Rec.709 Gamma 2.4" | "Rec.709 Gamma 2.4 (EffectCraft)" => Some(ColorSpace::Rec709),
         _ => None,
     }
+}
+
+/// Video Rendering and Effects ▸ Use: `LIST gpuG` holds one `Utf8`, the id of the renderer. After
+/// Effects 2026 on Windows (read-backs of projects saved with each `app.project.gpuAccelType`):
+/// Mercury GPU Acceleration (CUDA) writes [`CUDA_RENDERER`] (also its default for a new project
+/// there), OpenCL `be93941a-7488-4117-8a46-7e3596950307`, Mercury Software Only [`SOFTWARE_RENDERER`]; a project
+/// without `gpuG` opens as Software Only. The renderer changes pixels: H.264 footage decodes with
+/// softer chroma edges under Software Only (up to 128 of 255 at colour-bar edges).
+pub(crate) const CUDA_RENDERER: &str = "7ee0ab59-822d-44cc-ac10-16279d041016";
+pub(crate) const SOFTWARE_RENDERER: &str = "f33089e2-1ede-47c1-8a9e-b232bb1cc1a4";
+
+/// Whether the file's renderer is a GPU one (EffectCraft's Mercury GPU Acceleration): any id but
+/// Software Only's; no `gpuG` is Software Only.
+fn gpu_renderer(file: Root<'_, '_>) -> bool {
+    let id = file.list(b"gpuG").and_then(|g| g.child(b"Utf8")).and_then(Node::bytes);
+    id.is_some_and(|id| id.trim_ascii() != SOFTWARE_RENDERER.as_bytes())
 }
 
 /// `current` with every setting the file stores replaced; a setting the file does not hold (or
@@ -76,6 +93,7 @@ pub(crate) fn map(file: Root<'_, '_>, current: &ProjectSettings, col: &mut Colle
             }
         }
     }
+    out.gpu_acceleration = gpu_renderer(file);
     match s.frame_start {
         Some(start) => out.frame_start = i64::from(start),
         None => {
