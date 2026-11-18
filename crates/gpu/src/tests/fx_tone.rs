@@ -113,7 +113,7 @@ fn levels_keeps_finite_results_near_f32_max_distinct() {
     let vals: Vec<(&str, Value)> = owned.iter().map(|(id, v)| (id.as_str(), v.clone())).collect();
     for out in effect_direct_on("ec.color.levels", &vals, false, filled([3.4006e38, 3.4022e38, f32::MAX, 1.0])) {
         let [r, g, b, _] = out.data[0];
-        assert!(r < g && g < f32::MAX && b.is_finite() && g <= b, "{:?}", out.data[0]);
+        assert!([r, g, b].iter().all(|v| v.is_finite()) && 3.4e38 < r && r < g && g < f32::MAX && g <= b, "{:?}", out.data[0]);
     }
 }
 
