@@ -388,3 +388,23 @@ fn ntsc_clips_are_written_as_after_effects_stores_them() {
         assert!((r - rate).abs() < 0.001 && (d - seconds).abs() < 0.001, "{name}: {r} fps, {d} s");
     }
 }
+
+/// A 23.976 fps clip whose duration in 2997ths does not fit the 32-bit field (40 000 000 frames,
+/// 125 units each) is reported and not written, rather than written shorter.
+#[test]
+fn an_ntsc_clip_too_long_to_store_is_reported() {
+    let mut p = Project::default();
+    let c = add_comp(&mut p, "C", 320, 180, FrameRate::FPS_23_976, 3.0, None);
+    let long = Footage {
+        kind: FootageKind::Video,
+        frame_rate: FrameRate::FPS_23_976,
+        duration: FrameRate::FPS_23_976.tick_of(40_000_000),
+        ..still(r"C:\m\long.mp4", 320, 180)
+    };
+    add_footage(&mut p, c, "long.mp4", long);
+    let r = export_all(&p);
+    let found: Vec<String> = r.report.losses.iter().filter(|l| l.category == LossCategory::FootageItems).flat_map(|l| l.details.clone()).collect();
+    assert!(found.iter().any(|d| d.contains("long.mp4") && d.contains("too long")), "{found:?}");
+    assert_eq!(r.report.exported.footage, 0);
+    parse(&r.bytes).expect("still a valid file");
+}

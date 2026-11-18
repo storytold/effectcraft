@@ -346,7 +346,13 @@ pub(crate) fn plan_footage(name: &str, f: &Footage, col: &mut Collector) -> Opti
             plan.fps = stored.timescale;
             plan.rate = stored.fixed;
             plan.conform = if native.is_some() { play.fixed } else { 0 };
-            plan.duration = (frames.saturating_mul(stored.units), stored.timescale);
+            // The duration in the stored rate's units must fit the 32-bit field: a clip that long
+            // would come back shorter, so it is not written.
+            let Some(units) = frames.checked_mul(stored.units) else {
+                col.lose(LossCategory::FootageItems, what("a clip too long to store at its rate is not exported"));
+                return None;
+            };
+            plan.duration = (units, stored.timescale);
         }
         FtKind::Wav => {
             // The sample rate is the denominator (351: 48 000 / 48 000 for 1 s).
