@@ -6,6 +6,7 @@ mod helpers;
 mod bounds;
 mod built;
 mod ease;
+mod effect_opacity;
 mod effects;
 mod footage;
 mod masks;

@@ -128,6 +128,8 @@ pub(crate) struct EffectPlan {
     pub layers: Vec<(u16, LayerPick)>,
     /// The fx switch (the value group's `tdsb`: 1 on, 0 off).
     pub enabled: bool,
+    /// Effect Opacity (Compositing Options' `ADBE Effect Mask Opacity`, percent); absent = 100.
+    pub opacity: Option<ParamPlan>,
 }
 
 /// What a layer parameter names (`docs/aep-format.md` 3.7: its record always exists, its `tdpi`
@@ -371,6 +373,10 @@ pub(crate) fn plan_effects(layer: &Layer, size: (u32, u32), cp: &CompPlan, comp_
             Extra::MeshWarp => plan_mesh(g, pdefs, size, &here, col),
             _ => plan_extra(spec, g, pdefs, &here, col),
         };
+        let opacity = g.prop(effectcraft_effects::EFFECT_OPACITY).and_then(|prop| {
+            let pin = ParamIn { conv: Conv::Plain { valid_max: 100.0 }, kind: PKind::Fixed, def: &opacity_def(), prop, size };
+            plan_param(pin, OPACITY_INDEX, cp, &here, col)
+        });
         report_unmapped(g, (effect, spec), size, &here, col);
         col.exported.effects = col.exported.effects.saturating_add(1);
         out.push(EffectPlan {
@@ -380,9 +386,22 @@ pub(crate) fn plan_effects(layer: &Layer, size: (u32, u32), cp: &CompPlan, comp_
             data,
             layers,
             enabled: g.enabled,
+            opacity,
         });
     }
     out
+}
+
+/// The plan index of Effect Opacity, which has no parameter definition of the effect's own.
+const OPACITY_INDEX: u16 = u16::MAX;
+/// The record After Effects keeps Effect Opacity in, inside the value group's
+/// `ADBE Effect Built In Params` group (Compositing Options).
+const OPACITY_RECORD: &str = "ADBE Effect Mask Opacity";
+
+/// Effect Opacity's definition: a fixed slider 0..100 % with the default 100, as After Effects
+/// writes its record (`tdum` 0, `tduM` 100, the percent in `cdat`).
+fn opacity_def() -> ParDef {
+    ParDef { record: OPACITY_RECORD.to_string(), code: 2, default: vec![100.0], range: Some((0.0, 100.0)), valid_max: Some(100.0), data: None }
 }
 
 /// A layer parameter (the importer's inverse, `Conv::LayerRef`): an unset layer is None where the
@@ -647,7 +666,9 @@ fn report_unmapped(g: &PropGroup, (effect, spec): (&str, &EffectMap), size: (f64
                     let path = format!("{prefix}{}", p.match_id);
                     // A layer parameter's source companion is checked with the parameter (`plan_layer_param`).
                     let companion = spec.params.iter().any(|s| matches!(s.conv, Conv::LayerRef { .. }) && path == format!("{}Source", s.target));
-                    if spec.params.iter().any(|s| s.target == path) || extra.contains(&path.as_str()) || companion {
+                    // Effect Opacity is written into Compositing Options (`plan_effects`).
+                    let opacity = path == effectcraft_effects::EFFECT_OPACITY;
+                    if spec.params.iter().any(|s| s.target == path) || extra.contains(&path.as_str()) || companion || opacity {
                         continue;
                     }
                     if !p.keys.is_empty() || p.has_expression() {
@@ -1042,6 +1063,15 @@ fn instance(
                 .map(|(i, _)| i)
                 .unwrap_or(kids.len());
             kids.splice(at..at, [m, r]);
+        }
+        if let Some(p) = &fx.opacity {
+            // Into the nested `ADBE Effect Built In Params` group, before its end.
+            let (m, r) = value_record(protos, p, &opacity_def(), source_size)?;
+            let i = kids.iter().position(|c| is_tdmn(c, "ADBE Effect Built In Params")).ok_or_else(|| tpl("compositing options missing"))?;
+            let group = kids.get_mut(i + 1).filter(|c| c.is_list(b"tdgp")).ok_or_else(|| tpl("compositing options group missing"))?;
+            let inner = kids_mut(group)?;
+            let at = inner.iter().position(|c| is_tdmn(c, "ADBE Group End")).unwrap_or(inner.len());
+            inner.splice(at..at, [m, r]);
         }
     }
     // A popup selection is also written into its `pard` default slot (@56, u32; 377, 390, 324).

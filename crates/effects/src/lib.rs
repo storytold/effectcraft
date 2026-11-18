@@ -935,8 +935,59 @@ pub fn instantiate(spec: &EffectSpec, ids: &mut Ids, instance_name: &str, layer_
             }
         }
     }
+    // After Effects' Compositing Options ▸ Effect Opacity: every effect blends its result with its
+    // input by this percent (the renderer turns it into a fraction with `effect_opacity`; a
+    // project saved before it existed has none and renders the effect fully).
+    if !spec.params.iter().any(|ps| ps.id == EFFECT_OPACITY) {
+        let ui = ParamUi::Slider { min: 0.0, max: 100.0, slider_min: 0.0, slider_max: 100.0, decimals: 0 };
+        g.children.push(Property::new(ids.alloc(), EFFECT_OPACITY, "Effect Opacity", Value::Scalar(100.0)).with_ui(ui).into());
+    }
     g
 }
+
+/// The parameter id of an effect's Effect Opacity (percent, 100 = the effect's full result).
+pub const EFFECT_OPACITY: &str = "effectOpacity";
+
+/// Effect Opacity `percent` as a 0..1 fraction (1 for a value that is not a number).
+pub fn effect_opacity(percent: f64) -> f64 {
+    if percent.is_finite() { (percent / 100.0).clamp(0.0, 1.0) } else { 1.0 }
+}
+
+/// Blends an effect's result `out` with its `input` by Effect Opacity `k` (0..1, premultiplied:
+/// `input + (out - input) * k`). The result covers both buffers, so the input stays visible where
+/// the effect moved or cropped its pixels. Buffers of different scales return `out` unchanged.
+pub fn blend_with_input(input: &Buf, out: Buf, k: f64) -> Buf {
+    use rayon::prelude::*;
+    if k >= 1.0 || (input.scale - out.scale).abs() > 1e-9 {
+        return out;
+    }
+    let k = k.max(0.0) as f32;
+    // A pixel x of a buffer is the scaled layer coordinate x - offset.
+    let (ai, bi) = ([input.offset[0].round() as i64, input.offset[1].round() as i64], [out.offset[0].round() as i64, out.offset[1].round() as i64]);
+    let (aw, ah) = (i64::from(input.img.width), i64::from(input.img.height));
+    let (bw, bh) = (i64::from(out.img.width), i64::from(out.img.height));
+    let (x0, y0) = ((-ai[0]).min(-bi[0]), (-ai[1]).min(-bi[1]));
+    let (x1, y1) = ((aw - ai[0]).max(bw - bi[0]), (ah - ai[1]).max(bh - bi[1]));
+    let (w, h) = (u32::try_from(x1 - x0).unwrap_or(0), u32::try_from(y1 - y0).unwrap_or(0));
+    if w == 0 || h == 0 || u64::from(w) * u64::from(h) > MAX_BLEND_PIXELS {
+        return out;
+    }
+    let mut img = Image::new(w, h);
+    img.rows_mut().for_each(|(y, row)| {
+        let u = y as i64 + y0;
+        for (x, px) in row.iter_mut().enumerate() {
+            let t = x as i64 + x0;
+            let a = input.img.get(t + ai[0], u + ai[1]);
+            let b = out.img.get(t + bi[0], u + bi[1]);
+            *px = [0, 1, 2, 3].map(|c| a[c] + (b[c] - a[c]) * k);
+        }
+    });
+    Buf { img, offset: [-x0 as f64, -y0 as f64], scale: out.scale }
+}
+
+/// The largest buffer `blend_with_input` makes (a quarter gigapixel); beyond, the effect's result
+/// is kept as it is.
+const MAX_BLEND_PIXELS: u64 = 1 << 28;
 
 /// Display names of twirl-down parameter groups (`group/param` spec ids) by match id, for
 /// effects without their own table.

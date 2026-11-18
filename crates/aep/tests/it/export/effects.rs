@@ -261,7 +261,8 @@ fn edited_parameters_and_keys_no_fixture_has() {
     assert_eq!(amount.iter().map(|k| (k.0, k.1[0], k.2)).collect::<Vec<_>>(), vec![(0, 10.0, (1, 3)), (51_200, 90.0, (1, 1))]);
     // And back.
     let q = import_bytes(&r.bytes);
-    assert_eq!(effect_values(&p).into_iter().filter(|v| v.2 == "My Tint").count(), 3);
+    // Tint's three parameters and Effect Opacity.
+    assert_eq!(effect_values(&p).into_iter().filter(|v| v.2 == "My Tint").count(), 4);
     assert_eq!(
         effect_values(&p)
             .into_iter()
