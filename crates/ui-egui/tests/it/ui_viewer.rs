@@ -3172,9 +3172,8 @@ fn fit_up_to_100_follows_the_maximized_panel() {
     assert!((rect(&h, "viewer.comp").width() - 640.0 / ppp).abs() < 0.01);
 }
 
-/// The Rotation tool keeps counting past a full turn, as in After Effects: going round the anchor
-/// 1.5 turns clockwise gives 540° (1x +180.0°), going back 2 turns gives −180°, with no jump a
-/// revolution back where the pointer crosses the left of the anchor. One drag is one undo step.
+/// The Rotation tool shows a rotation cursor over the viewer (#3864): the Alias pointer, or on
+/// Windows (where that is the plain arrow) its glyph painted at the pointer with the OS cursor hidden.
 #[test]
 fn rotate_tool_shows_rotation_cursor() {
     let mut h = harness();
@@ -3186,8 +3185,23 @@ fn rotate_tool_shows_rotation_cursor() {
     // Windows draws Alias as the plain arrow, so there the viewer paints the glyph and hides the OS cursor.
     let want = if cfg!(windows) { egui::CursorIcon::None } else { egui::CursorIcon::Alias };
     assert_eq!(h.output().platform_output.cursor_icon, want, "W shows a rotation cursor over the viewer (#3864)");
+    // The glyph is white strokes/fills inside the 16 x 16 box around the pointer; nothing else there is pure white.
+    fn white_near(s: &egui::Shape, box_: egui::Rect) -> bool {
+        let white = |c: egui::Color32| c == egui::Color32::WHITE;
+        match s {
+            egui::Shape::Vec(v) => v.iter().any(|s| white_near(s, box_)),
+            egui::Shape::Path(p) => ((p.stroke.color == egui::epaint::ColorMode::Solid(egui::Color32::WHITE)) || white(p.fill)) && box_.contains_rect(p.visual_bounding_rect()),
+            _ => false,
+        }
+    }
+    let box_ = egui::Rect::from_center_size(p, egui::vec2(16.0, 16.0)).expand(2.0);
+    let glyph = h.output().shapes.iter().any(|c| white_near(&c.shape, box_));
+    assert_eq!(glyph, cfg!(windows), "the rotation glyph is painted at the pointer on Windows only");
 }
 
+/// The Rotation tool keeps counting past a full turn, as in After Effects: going round the anchor
+/// 1.5 turns clockwise gives 540° (1x +180.0°), going back 2 turns gives −180°, with no jump a
+/// revolution back where the pointer crosses the left of the anchor. One drag is one undo step.
 #[test]
 fn rotate_tool_counts_revolutions_both_ways() {
     let mut h = harness();
