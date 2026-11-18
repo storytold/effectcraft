@@ -158,14 +158,16 @@ impl Psd {
             b"lyid" => l.id = Some(r.u32()?),
             b"iOpa" => l.fill_opacity = r.u8()?,
             b"lsct" | b"lsdk" => {
-                l.section = match r.u32()? {
-                    1 => Section::OpenFolder,
-                    2 => Section::ClosedFolder,
-                    3 => Section::Divider,
+                use craft_psd::tagged::{SectionDivider, SectionType};
+                let divider = SectionDivider::from_bytes_recovering_blend(b).map_err(|e| error(&e))?;
+                l.section = match divider.kind {
+                    SectionType::OpenFolder => Section::OpenFolder,
+                    SectionType::ClosedFolder => Section::ClosedFolder,
+                    SectionType::BoundingDivider => Section::Divider,
                     _ => Section::Layer,
                 };
-                if b.len() >= 12 && &b[4..8] == b"8BIM" {
-                    l.blend.copy_from_slice(&b[8..12]);
+                if let Some(blend) = divider.blend_mode {
+                    l.blend = blend.key();
                 }
             }
             b"TySh" => {
