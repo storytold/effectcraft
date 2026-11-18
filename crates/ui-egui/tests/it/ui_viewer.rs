@@ -3183,7 +3183,9 @@ fn rotate_tool_shows_rotation_cursor() {
     let p = screen(&h, [320.0, 180.0]);
     h.input_mut().events.push(Event::PointerMoved(p));
     h.step();
-    assert_eq!(h.output().platform_output.cursor_icon, egui::CursorIcon::Alias, "W shows a rotation cursor over the viewer (#3864)");
+    // Windows draws Alias as the plain arrow, so there the viewer paints the glyph and hides the OS cursor.
+    let want = if cfg!(windows) { egui::CursorIcon::None } else { egui::CursorIcon::Alias };
+    assert_eq!(h.output().platform_output.cursor_icon, want, "W shows a rotation cursor over the viewer (#3864)");
 }
 
 #[test]
