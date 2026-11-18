@@ -230,45 +230,37 @@ impl Psd {
                 l.smart_object = Some(placed::from_craft_smart(craft_psd::smart::SmartObject::from_placed_layer(b).map_err(|e| error(&e))?));
             }
             b"vmsk" | b"vsms" => {
-                let _ver = r.u32()?;
-                let flags = r.u32()?;
-                l.vector_mask = Some(self.vector_paths(&mut r, flags)?);
+                let block = craft_psd::path::VectorMaskBlock::from_bytes(b).map_err(|e| error(&e))?;
+                l.vector_mask = Some(self.vector_paths(&block));
             }
             _ => {}
         }
         Ok(())
     }
 
-    fn vector_paths(&self, r: &mut Reader, flags: u32) -> Result<VectorMask> {
+    fn vector_paths(&self, block: &craft_psd::path::VectorMaskBlock) -> VectorMask {
+        use craft_psd::path::{VectorMaskBlock, selector};
         let (w, h) = (self.width as f64, self.height as f64);
-        let mut vm = VectorMask { inverted: flags & 1 != 0, disabled: flags & 4 != 0, subpaths: vec![] };
-        let fixed = |r: &mut Reader| -> Result<f64> { Ok(r.i32()? as f64 / (1 << 24) as f64) };
-        while r.remaining() >= 26 {
-            let sel = r.u16()?;
-            match sel {
-                0 | 3 => {
-                    let _n = r.u16()?;
-                    r.skip(22)?;
-                    vm.subpaths.push(SubPath { closed: sel == 0, knots: vec![] });
-                }
-                1 | 2 | 4 | 5 => {
-                    let mut pts = [[0.0; 2]; 3];
-                    for p in &mut pts {
-                        let y = fixed(r)?;
-                        let x = fixed(r)?;
-                        *p = [x * w, y * h];
-                    }
-                    if let Some(sp) = vm.subpaths.last_mut() {
-                        sp.knots.push(pts);
-                    }
-                }
-                _ => r.skip(24)?,
+        let mut vm = VectorMask {
+            inverted: block.flags & VectorMaskBlock::FLAG_INVERT != 0,
+            disabled: block.flags & VectorMaskBlock::FLAG_DISABLED != 0,
+            subpaths: vec![],
+        };
+        // Keep Effect's recovery policy: ignore declared counts and orphan knots, and
+        // keep mixed open/closed knot selectors in the last declared subpath.
+        // PathData::subpaths deliberately has a different, more permissive policy.
+        for record in &block.path.records {
+            if record.is_length() {
+                vm.subpaths.push(SubPath { closed: record.selector == selector::CLOSED_LENGTH, knots: vec![] });
+            } else if let Some(knot) = record.knot()
+                && let Some(sp) = vm.subpaths.last_mut()
+            {
+                sp.knots.push([knot.pre, knot.anchor, knot.post].map(|(x, y)| [x * w, y * h]));
             }
         }
         vm.subpaths.retain(|s| !s.knots.is_empty());
-        Ok(vm)
+        vm
     }
-
     /// The layer tree, top of the stack first. Groups nest at most [`MAX_GROUP_DEPTH`] deep (see
     /// [`Psd::tree_report`]).
     pub fn tree(&self) -> Vec<Node> {
