@@ -189,9 +189,12 @@ fn convert_to_bezier(s: &mut Session, p: &Value) -> Result<Value> {
         let (items_cid, items) = selected_shape_items(s, p, "path.convertToBezier")?;
         if items_cid == cid { items } else { Vec::new() }
     };
+    // `items` count as given only as a list, as `selected_shape_items` reads them; a null or other
+    // value leaves the selection in charge.
+    let explicit_items = matches!(p.get("items"), Some(Value::Array(_)));
     // An explicit `layer` / `layers` limits the selected shape items to those layers.
     let explicit_layers = p.get("layer").is_some_and(|v| !v.is_null()) || p.get("layers").is_some();
-    if explicit_layers && p.get("items").is_none() {
+    if explicit_layers && !explicit_items {
         let (_, layers) = layers_p(s, p)?;
         items.retain(|(l, _)| layers.contains(l));
     }
@@ -239,7 +242,7 @@ fn convert_to_bezier(s: &mut Session, p: &Value) -> Result<Value> {
     // selecting a mask and a Rectangle path must not convert only the rectangle.
     // Explicit `items` name exactly what converts: the selection adds no masks to them.
     let mut sel_masks: Vec<(LayerId, Uid)> = Vec::new();
-    if !shapes.is_empty() && p.get("items").is_none() {
+    if !shapes.is_empty() && !explicit_items {
         let masks_of = |l: LayerId| comp.layer(l).filter(|ly| !ly.switches.locked).and_then(|ly| ly.masks());
         for (l, u) in &s.state.selected_props {
             let Some(m) = masks_of(*l) else { continue };
@@ -260,7 +263,7 @@ fn convert_to_bezier(s: &mut Session, p: &Value) -> Result<Value> {
     if shapes.is_empty() {
         // Explicit `items` with nothing parametric in them (a Fill, a path that is already Bezier)
         // convert nothing: they don't hand the conversion to a selected mask or the layer's masks.
-        if p.get("items").is_some() && p.get("mask").is_none() {
+        if explicit_items && p.get("mask").is_none() {
             let why = if skipped_animated > 0 {
                 "the parametric paths are animated: name the path itself in `items` to convert it at the current time (its animation is lost)"
             } else {
