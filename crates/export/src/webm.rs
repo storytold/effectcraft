@@ -8,12 +8,13 @@
 //! with `AlphaMode` 1 on the track, as WebM defines. VP9 comes from `craft_video::vp9` (key
 //! frames every two seconds, inter frames between them: SimpleBlocks carry the key flag, inter
 //! BlockGroups a ReferenceBlock; the alpha stream's key frames line up with the colour stream's),
-//! Opus from `effectcraft-opusenc` (CELT, 48 kHz stereo, 20 ms packets,
+//! Opus from `craft_audio::opus::Encoder` (SILK / hybrid / CELT, 48 kHz, 20 ms packets,
 //! `CodecDelay` = pre-skip). WAV (RIFF, PCM or IEEE float) and AIFF (big-endian PCM, 80-bit
 //! extended sample rate; AIFF-C `fl32` for float) follow their published file layouts.
 
 use std::io::{Seek, SeekFrom, Write};
 
+use craft_audio::opus::encoder as opus;
 use effectcraft_project::Comp;
 use effectcraft_project::render_queue::{AudioFormat, Channels};
 use effectcraft_time::{TICKS_PER_SECOND, Tick};
@@ -21,7 +22,7 @@ use web_time::Instant;
 
 use crate::encode::{mix, pcm_bytes};
 use crate::pipeline::Stage;
-use crate::{Cx, Report, Result, State, batch_size, io, wants_audio};
+use crate::{Cx, ExportError, Report, Result, State, batch_size, io, wants_audio};
 
 pub(crate) const OPUS_RATE: u32 = 48_000;
 
@@ -126,13 +127,18 @@ fn cluster(frames: &mut [Frame]) -> Vec<u8> {
 }
 
 /// The Opus encoder of a WebM output: the module's channel count, bitrate and application.
-pub(crate) fn opus_encoder(job: &Cx) -> effectcraft_opusenc::OpusEncoder {
+pub(crate) fn opus_encoder(job: &Cx) -> Result<opus::Encoder> {
     let channels = if job.output.audio_channels == 1 { 1 } else { 2 };
     let app = match job.output.opus_application {
-        effectcraft_project::render_queue::OpusApplication::Audio => effectcraft_opusenc::Application::Audio,
-        effectcraft_project::render_queue::OpusApplication::Voip => effectcraft_opusenc::Application::Voip,
+        effectcraft_project::render_queue::OpusApplication::Audio => opus::Application::Audio,
+        effectcraft_project::render_queue::OpusApplication::Voip => opus::Application::Voip,
     };
-    effectcraft_opusenc::OpusEncoder::with_application(channels, job.output.opus_bitrate_kbps.clamp(6, 510) * 1000, app)
+    opus::Encoder::with_application(channels, job.output.opus_bitrate_kbps.clamp(6, 510) * 1000, app).map_err(opus_error)
+}
+
+/// An Opus encoder error as an export error.
+pub(crate) fn opus_error(e: opus::Error) -> ExportError {
+    ExportError::Encode(format!("Opus: {e}"))
 }
 
 pub(crate) async fn webm(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut State<'_>) -> Result<Report> {
@@ -158,7 +164,7 @@ pub(crate) async fn webm(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut Sta
     let mut alpha_enc = alpha.then(|| craft_video::vp9::Vp9Encoder::new(cfg.clone()));
     let with_audio = wants_audio(job);
     let opus_channels = if job.output.audio_channels == 1 { 1usize } else { 2 };
-    let mut opus = with_audio.then(|| opus_encoder(job));
+    let mut opus = with_audio.then(|| opus_encoder(job)).transpose()?;
     let total = st.total;
     let frame_ms = |k: u64| -> i64 { ((k as i128 * 1000 * rate.den as i128 + rate.num as i128 / 2) / rate.num as i128) as i64 };
     let duration_ms = frame_ms(total) as f64;
@@ -231,8 +237,8 @@ pub(crate) async fn webm(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut Sta
     let mut cursor = span_start.to_units_floor(OPUS_RATE as i64);
     let mut pcm_left: Vec<f32> = vec![];
     let mut packets = 0u64;
-    let mut audio_until = |until: Tick, frames: &mut Vec<Frame>, finish: bool| {
-        let Some(enc) = opus.as_mut() else { return };
+    let mut audio_until = |until: Tick, frames: &mut Vec<Frame>, finish: bool| -> Result<()> {
+        let Some(enc) = opus.as_mut() else { return Ok(()) };
         let end = until.to_units_floor(OPUS_RATE as i64);
         if end > cursor {
             let n = (end - cursor) as usize;
@@ -240,7 +246,7 @@ pub(crate) async fn webm(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut Sta
             pcm_left.extend(mix(job, start, n, OPUS_RATE));
             cursor = end;
         }
-        let fs = effectcraft_opusenc::OpusEncoder::FRAME_SIZE * opus_channels;
+        let fs = craft_audio::opus::Encoder::FRAME_SIZE * opus_channels;
         if finish && !pcm_left.is_empty() {
             // Pad the last packet (pre-skip + padding cover the encoder delay).
             let pad = (fs - pcm_left.len() % fs) % fs + fs;
@@ -249,11 +255,12 @@ pub(crate) async fn webm(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut Sta
         // Packets are read in place and the encoded samples dropped once: draining each packet
         // from the front would shift the rest of the batch's audio every 20 ms.
         for packet in pcm_left.chunks_exact(fs) {
-            let pkt = enc.encode_float(packet);
+            let pkt = enc.encode_float(packet).map_err(crate::webm::opus_error)?;
             frames.push(Frame { ms: packets as i64 * 20, track: 2, key: true, prev_ms: None, data: pkt, alpha: None });
             packets += 1;
         }
         pcm_left.drain(..pcm_left.len() / fs * fs);
+        Ok(())
     };
 
     let batch = batch_size();
@@ -285,7 +292,7 @@ pub(crate) async fn webm(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut Sta
         drop(pixels);
         job.add_time(Stage::Encode, t);
         let t_end = if end >= total { span_end } else { job.settings.frame_time(comp, end) };
-        job.timed_if(with_audio, Stage::Audio, || audio_until(t_end, &mut frames, end >= total));
+        job.timed_if(with_audio, Stage::Audio, || audio_until(t_end, &mut frames, end >= total))?;
         let t = Instant::now();
         let c = cluster(&mut frames);
         file.write_all(&c).map_err(io)?;
@@ -296,7 +303,7 @@ pub(crate) async fn webm(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut Sta
     }
     if total == 0 {
         let mut frames = vec![];
-        audio_until(span_end, &mut frames, true);
+        audio_until(span_end, &mut frames, true)?;
         if !frames.is_empty() {
             let c = cluster(&mut frames);
             file.write_all(&c).map_err(io)?;
