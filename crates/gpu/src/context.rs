@@ -1679,7 +1679,9 @@ impl GpuContext {
     }
 
     /// Bytes of uploaded layer textures the context keeps (by default 3/8 of the card's memory
-    /// when known, 1536 MB otherwise; `EFFECTCRAFT_GPU_UPLOAD_MB`, see `memcap`). An application
+    /// when known, 1536 MiB otherwise; a positive `EFFECTCRAFT_GPU_MEMCAP_MB` lowers that default to
+    /// half the cap, not below 1536 MiB; a positive `EFFECTCRAFT_GPU_UPLOAD_MB` sets it and is not
+    /// lowered by the cap; see `memcap`). An application
     /// can raise it (static layers of a big frame upload once) or lower it (a small GPU); the
     /// least recently used textures go first.
     pub fn set_upload_budget(&self, bytes: usize) {

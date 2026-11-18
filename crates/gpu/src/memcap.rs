@@ -78,15 +78,21 @@ impl MemCap {
         let mut upload = upload_budget(upload_var, vram);
         // An explicit cap is the user's: it does not grow with the cache, so a default budget
         // is lowered to half of it (never below the former fixed 1.5 GiB); an explicit one stays.
-        let cap = match cap_var {
-            Some(_) => {
-                let cap = cap_from_env(cap_var, device_type, vram);
+        // A value that is not a number is treated as unset (with a warning), not as a cap.
+        let cap = match explicit_cap(cap_var) {
+            Some(cap) => {
                 if cap > 0 && explicit_upload(upload_var).is_none() {
                     upload = upload.min((cap / 2).max(UPLOAD_DEFAULT));
                 }
                 cap
             }
-            None => default_cap_for(device_type, vram, upload),
+            None => {
+                let cap = default_cap_for(device_type, vram, upload);
+                if let Some(v) = cap_var {
+                    log::warn!(target: "effectcraft_gpu", "{MEMCAP_ENV}={v:?} is not a whole number of MiB that fits in 64 bits: using {} MiB", cap / MIB);
+                }
+                cap
+            }
         };
         MemCap {
             cap,
@@ -206,18 +212,10 @@ impl MemCap {
     }
 }
 
-/// The cap from the `EFFECTCRAFT_GPU_MEMCAP_MB` value: whole MiB (0 turns the gate off), or the
-/// default for `device_type` when unset, or (with a warning) when not a number or too large.
-fn cap_from_env(var: Option<&str>, device_type: wgpu::DeviceType, vram: Option<u64>) -> u64 {
-    let Some(v) = var else { return default_cap(device_type, vram) };
-    match v.trim().parse::<u64>().ok().and_then(|mb| mb.checked_mul(MIB)) {
-        Some(cap) => cap,
-        None => {
-            let cap = default_cap(device_type, vram);
-            log::warn!(target: "effectcraft_gpu", "{MEMCAP_ENV}={v:?} is not a whole number of MiB that fits in 64 bits: using {} MiB", cap / MIB);
-            cap
-        }
-    }
+/// The cap the user set in `EFFECTCRAFT_GPU_MEMCAP_MB`: whole MiB (0 turns the gate off); `None`
+/// when unset, not a number or too large.
+fn explicit_cap(var: Option<&str>) -> Option<u64> {
+    var?.trim().parse::<u64>().ok()?.checked_mul(MIB)
 }
 
 /// The upload cache budget from the `EFFECTCRAFT_GPU_UPLOAD_MB` value: whole MiB, or (0, unset, or
@@ -374,9 +372,14 @@ fn nvidia_smi_output() -> Option<&'static str> {
         .as_deref()
 }
 
-/// Runs `program` with `args` and returns its standard output when it exits successfully within
-/// `timeout`, without a console window on Windows. A program still running at the timeout is
-/// killed and not waited for (a process stuck in the driver may not die at once).
+/// How long a killed program may take to exit before it is left behind unreaped.
+#[cfg(not(target_arch = "wasm32"))]
+const REAP_TIMEOUT: Duration = Duration::from_millis(200);
+
+/// Runs `program` with `args` and returns its standard output when it exits successfully and its
+/// output ends within `timeout`, without a console window on Windows. The output is read on a
+/// thread of its own, so a process the program left behind holding the pipe open cannot hold the
+/// caller past the timeout. A program still running at the timeout is killed (see [`stop`]).
 #[cfg(not(target_arch = "wasm32"))]
 fn run_with_timeout(program: &std::ffi::OsStr, args: &[&str], timeout: Duration) -> Option<String> {
     use std::io::Read;
@@ -389,31 +392,60 @@ fn run_with_timeout(program: &std::ffi::OsStr, args: &[&str], timeout: Duration)
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
-    let mut child = cmd.spawn().ok()?;
     let start = std::time::Instant::now();
+    let mut child = cmd.spawn().ok()?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    let reader = child.stdout.take().and_then(|mut stdout| {
+        std::thread::Builder::new()
+            .name("nvidia-smi output".into())
+            .spawn(move || {
+                let mut out = String::new();
+                let _ = tx.send(stdout.read_to_string(&mut out).ok().map(|_| out));
+            })
+            .ok()
+    });
+    if reader.is_none() {
+        stop(&mut child);
+        return None;
+    }
     loop {
         match child.try_wait() {
             Ok(Some(status)) if status.success() => break,
             Ok(None) if start.elapsed() < timeout => std::thread::sleep(Duration::from_millis(10)),
             Ok(Some(_)) => return None,
             _ => {
-                let _ = child.kill();
+                stop(&mut child);
                 return None;
             }
         }
     }
-    // The output is a few short lines, so the pipe never fills before the program exits.
-    let mut out = String::new();
-    child.stdout.take()?.read_to_string(&mut out).ok()?;
-    Some(out)
+    rx.recv_timeout(timeout.saturating_sub(start.elapsed())).ok().flatten()
+}
+
+/// Kills `child` and collects its exit status, waiting at most [`REAP_TIMEOUT`] for it to exit
+/// (a process stuck in the driver may not die at once, and the caller must not wait for that).
+/// The exit status, or `None` when the program has not exited by then.
+#[cfg(not(target_arch = "wasm32"))]
+fn stop(child: &mut std::process::Child) -> Option<std::process::ExitStatus> {
+    let _ = child.kill();
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status),
+            Ok(None) if start.elapsed() < REAP_TIMEOUT => std::thread::sleep(Duration::from_millis(5)),
+            _ => return None,
+        }
+    }
 }
 
 /// The memory in bytes of the NVIDIA GPU in `nvidia-smi` output (lines of `bus id, device id,
 /// memory in MiB`, like `00000000:01:00.0, 0x250310DE, 12288`) that is the adapter: the line at
 /// PCI address `bus` (wgpu's `device_pci_bus_id`, `0000:01:00.0`), otherwise the smallest among
 /// the lines of PCI device `device`, otherwise the smallest of all. Smaller is the safe guess, as
-/// the budget and the cap are fractions of it. Lines that do not parse (`[N/A]`, a zero, a size
-/// that overflows) are skipped.
+/// the budget and the cap are fractions of it. A size that does not parse (`[N/A]`, a zero, a
+/// size that overflows) is unknown: on the adapter's own line, or on any line of its device id
+/// when no line has its address, the memory is unknown, never another card's. Lines without three
+/// fields are skipped.
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 fn vram_from_nvidia_smi(output: &str, device: u32, bus: &str) -> Option<u64> {
     // A PCI address as (domain, rest): nvidia-smi writes eight digits of domain, wgpu four.
@@ -422,12 +454,13 @@ fn vram_from_nvidia_smi(output: &str, device: u32, bus: &str) -> Option<u64> {
         let (domain, rest) = s.split_once(':')?;
         Some((u32::from_str_radix(domain, 16).ok()?, rest.to_string())).filter(|(_, rest)| !rest.is_empty())
     };
-    let gpus: Vec<(Option<(u32, String)>, Option<u32>, u64)> = output
+    type Gpu = (Option<(u32, String)>, Option<u32>, Option<u64>);
+    let gpus: Vec<Gpu> = output
         .lines()
         .filter_map(|line| {
             let mut fields = line.split(',');
             let (addr, id, mib) = (fields.next()?, fields.next()?, fields.next()?);
-            let bytes = mib.trim().parse::<u64>().ok()?.checked_mul(MIB).filter(|&b| b > 0)?;
+            let bytes = mib.trim().parse::<u64>().ok().and_then(|mib| mib.checked_mul(MIB)).filter(|&b| b > 0);
             let id = id.trim().to_ascii_lowercase();
             let pci_device = u32::from_str_radix(id.strip_prefix("0x").unwrap_or(&id), 16).ok().map(|id| id >> 16);
             Some((address(addr), pci_device, bytes))
@@ -435,9 +468,14 @@ fn vram_from_nvidia_smi(output: &str, device: u32, bus: &str) -> Option<u64> {
         .collect();
     let want = address(bus);
     if let Some(&(_, _, bytes)) = gpus.iter().find(|(a, _, _)| want.is_some() && *a == want) {
-        return Some(bytes);
+        return bytes;
     }
-    gpus.iter().filter(|(_, d, _)| *d == Some(device)).map(|&(_, _, b)| b).min().or_else(|| gpus.iter().map(|&(_, _, b)| b).min())
+    let same: Vec<Option<u64>> = gpus.iter().filter(|(_, d, _)| *d == Some(device)).map(|&(_, _, b)| b).collect();
+    if !same.is_empty() {
+        // Any of them may be the adapter: one of unknown size makes the adapter's size unknown.
+        return same.iter().copied().collect::<Option<Vec<u64>>>()?.into_iter().min();
+    }
+    gpus.iter().filter_map(|&(_, _, b)| b).min()
 }
 
 /// Minimum reclaimable bytes before a wait is worth draining an encoder (1/8 of the cap,
@@ -515,9 +553,23 @@ mod tests {
         assert_eq!(default_cap(d, Some(4 * GIB)), 3 * GIB);
         assert_eq!(default_cap(d, Some(16 * GIB)), 3 * GIB, "never above the default");
         assert_eq!(default_cap(wgpu::DeviceType::IntegratedGpu, Some(GIB / 2)), 2 * GIB);
-        assert_eq!(cap_from_env(None, d, Some(2 * GIB)), 3 * GIB / 2);
-        assert_eq!(cap_from_env(Some("lots"), d, Some(2 * GIB)), 3 * GIB / 2, "a bad override falls back to it");
-        assert_eq!(cap_from_env(Some("4096"), d, Some(2 * GIB)), 4 * GIB, "the override still wins");
+        let cap = |v| MemCap::from_env(v, d, Some(2 * GIB)).cap();
+        assert_eq!(cap(None), 3 * GIB / 2);
+        assert_eq!(cap(Some("lots")), 3 * GIB / 2, "a bad override falls back to it");
+        assert_eq!(cap(Some("4096")), 4 * GIB, "the override still wins");
+    }
+
+    /// A cap override that is not a number is ignored as a whole: the cap and the upload budget
+    /// are those of no override, not the 3 GiB base cap and a budget lowered to half of it.
+    #[test]
+    fn a_bad_cap_override_keeps_the_default_cap_and_budget() {
+        let d = wgpu::DeviceType::DiscreteGpu;
+        let unset = MemCap::from_envs(None, None, d, Some(32 * GIB));
+        assert_eq!((unset.cap(), unset.upload_budget()), (3 * GIB + 21 * GIB / 2, 12 * GIB as usize));
+        for bad in ["", "lots", "-1", "1.5", "17592186044416"] {
+            let m = MemCap::from_envs(Some(bad), None, d, Some(32 * GIB));
+            assert_eq!((m.cap(), m.upload_budget()), (unset.cap(), unset.upload_budget()), "{bad:?}");
+        }
     }
 
     #[test]
@@ -636,9 +688,23 @@ mod tests {
         ] {
             assert_eq!(vram_from_nvidia_smi(bad, 0x2503, "0000:01:00.0"), None, "{bad:?}");
         }
-        // A bad line next to a good one leaves the good one.
+        // A line that is not a card next to a good one leaves the good one.
+        let noise = "NVIDIA-SMI warning\n00000000:02:00.0, garbage, 6144\n";
+        assert_eq!(vram_from_nvidia_smi(noise, 0x2503, "0000:01:00.0"), Some(6 * GIB));
+    }
+
+    /// The adapter's own line without a size gives unknown memory (the 1.5 GiB fallback), never
+    /// the size of another card: a 4 GB card next to a 24 GB one must not get the larger budget.
+    #[test]
+    fn an_unknown_size_on_the_adapters_line_is_not_taken_from_another_card() {
         let mixed = "00000000:01:00.0, 0x250310DE, [N/A]\n00000000:02:00.0, garbage, 6144\n";
-        assert_eq!(vram_from_nvidia_smi(mixed, 0x2503, "0000:01:00.0"), Some(6 * GIB));
+        assert_eq!(vram_from_nvidia_smi(mixed, 0x2503, "0000:01:00.0"), None, "the adapter's address");
+        assert_eq!(vram_from_nvidia_smi(mixed, 0x2503, ""), None, "the adapter's device id");
+        let twins = "00000000:01:00.0, 0x250310DE, [N/A]\n00000000:02:00.0, 0x250310DE, 8192\n00000000:03:00.0, 0x2B8510DE, 24576\n";
+        assert_eq!(vram_from_nvidia_smi(twins, 0x2503, ""), None, "either twin may be the adapter");
+        assert_eq!(vram_from_nvidia_smi(twins, 0x2503, "0000:09:00.0"), None, "no such address: either twin");
+        assert_eq!(vram_from_nvidia_smi(twins, 0x2503, "0000:02:00.0"), Some(8 * GIB), "the known twin by its address");
+        assert_eq!(vram_from_nvidia_smi(twins, 0x1234, ""), Some(8 * GIB), "no such device: the smallest known card");
     }
 
     /// Stands in for an `nvidia-smi` that hangs: only run (through `--ignored`) as a child of
@@ -665,6 +731,46 @@ mod tests {
         let start = std::time::Instant::now();
         let hung = run_with_timeout(me.as_os_str(), &["--exact", "--ignored", "memcap::tests::stand_in_for_a_hanging_program"], Duration::from_millis(500));
         assert_eq!(hung, None);
-        assert!(start.elapsed() < Duration::from_secs(10), "waited {:?}", start.elapsed());
+        // Well under the stand-in's 5 s: the caller did not wait for it to finish.
+        assert!(start.elapsed() < Duration::from_secs(3), "waited {:?}", start.elapsed());
+    }
+
+    /// Stands in for an `nvidia-smi` that exits at once but leaves a process behind that holds its
+    /// output open (the hanging stand-in, which inherits it): only run (through `--ignored`) as a
+    /// child of `output_held_open_by_a_left_process_does_not_hold_the_caller`.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    #[ignore = "the child process of output_held_open_by_a_left_process_does_not_hold_the_caller"]
+    fn stand_in_that_leaves_its_output_open() {
+        let me = std::env::current_exe().unwrap();
+        let _left = std::process::Command::new(me).args(["--exact", "--ignored", "memcap::tests::stand_in_for_a_hanging_program"]).spawn().unwrap();
+    }
+
+    /// The output is read within the same timeout: a program that exits but leaves a process
+    /// holding its output open gives no output, and the caller does not wait for that process.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn output_held_open_by_a_left_process_does_not_hold_the_caller() {
+        let me = std::env::current_exe().unwrap();
+        let start = std::time::Instant::now();
+        let out = run_with_timeout(me.as_os_str(), &["--exact", "--ignored", "memcap::tests::stand_in_that_leaves_its_output_open"], Duration::from_secs(1));
+        assert_eq!(out, None);
+        assert!(start.elapsed() < Duration::from_secs(3), "waited {:?}", start.elapsed());
+    }
+
+    /// A program killed at the timeout is reaped (its exit status collected), within a bounded wait.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_killed_program_is_reaped() {
+        let me = std::env::current_exe().unwrap();
+        let mut child = std::process::Command::new(me)
+            .args(["--exact", "--ignored", "memcap::tests::stand_in_for_a_hanging_program"])
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let start = std::time::Instant::now();
+        let status = stop(&mut child);
+        assert!(status.is_some_and(|s| !s.success()), "{status:?}");
+        assert!(start.elapsed() < Duration::from_secs(3), "waited {:?}", start.elapsed());
     }
 }

@@ -1533,17 +1533,19 @@ fn upload_budget_bounds_the_layer_textures_kept() {
         let img = g.render(&r, s.cid, Tick::from_seconds_f64(k as f64 / 30.0)).expect("the GPU renders the frame");
         (img.data, g.ctx.transfer_stats().upload_bytes - before)
     };
+    // A budget that holds both 640 KB footprints, whatever EFFECTCRAFT_GPU_UPLOAD_MB says.
+    let inherited = g.ctx.upload_budget();
+    g.ctx.set_upload_budget(64 << 20);
     let fits = effectcraft_render::cache::LayerCache::new(64 << 20);
     let (a, _) = frame(&fits, 0);
-    let (b, up) = frame(&fits, 1);
-    assert_eq!(up, 0, "static layers re-uploaded within the default budget");
+    let (b, up_fits) = frame(&fits, 1);
     // A budget smaller than the two 640 KB footprints: each upload evicts the other.
-    let default = g.ctx.upload_budget();
     g.ctx.set_upload_budget(1 << 20);
     let tight = effectcraft_render::cache::LayerCache::new(64 << 20);
     let _ = frame(&tight, 0);
     let (c, up) = frame(&tight, 1);
-    g.ctx.set_upload_budget(default);
+    g.ctx.set_upload_budget(inherited);
+    assert_eq!(up_fits, 0, "static layers re-uploaded within a budget that fits them");
     assert!(up > 0, "over budget, the footprints must upload again");
     assert!(a == b && b == c, "the upload budget changed the frame");
 }
