@@ -656,7 +656,7 @@ fn build_layers(project: &mut Project, cx: &mut Ctx<'_>, defs: &EffectDefinition
             l.auto_orient = camera_light_orient(h.is_auto_oriented(), light);
         }
         if is_camera {
-            import_camera(&layer, &what, comp.width, &tm, camera_default, &mut l.props, &mut cx.col);
+            import_camera(&layer, &what, (comp.width, comp.height), &tm, camera_default, &mut l.props, &mut cx.col);
         }
         if light.is_some()
             && let Some(options) = l.props.sub_mut("lightOptions")

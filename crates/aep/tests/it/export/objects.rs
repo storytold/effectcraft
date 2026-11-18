@@ -512,6 +512,24 @@ fn edit_record(chunks: &mut Vec<effectcraft_aep::Chunk<'_>>, name: &[u8], f: &mu
     }
 }
 
+/// Applies `f` to the list chunk after `tdmn` `name` under `chunks`.
+fn edit_record_chunk(chunks: &mut Vec<effectcraft_aep::Chunk<'_>>, name: &[u8], f: &mut dyn FnMut(&mut effectcraft_aep::Chunk<'_>)) {
+    use effectcraft_aep::Body;
+    let mut armed = false;
+    for c in chunks.iter_mut() {
+        if c.id == *b"tdmn" {
+            armed = matches!(&c.body, Body::Data(d) if d.starts_with(name));
+            continue;
+        }
+        if armed {
+            f(c);
+        } else if let Body::List { children, .. } | Body::Chunks(children) = &mut c.body {
+            edit_record_chunk(children, name, f);
+        }
+        armed = false;
+    }
+}
+
 /// Removes every `ldat` under `chunks`.
 fn drop_key_data(chunks: &mut Vec<effectcraft_aep::Chunk<'_>>) {
     use effectcraft_aep::Body;
@@ -551,19 +569,27 @@ fn a_camera_position_that_cannot_be_derived_is_reported() {
         NegativeZoom,
         OutOfRange,
         PoiKeysWithoutData,
+        PoiExpression,
         SeparatedPosition,
         UnreadableZoom,
         UnreadablePoi,
         NoTransformGroup,
+        OpaqueCameraOptions,
+        ZoomIsAGroup,
+        PoiWithTwoComponents,
     }
     let cases = [
         (Damage::NegativeZoom, LossCategory::TransformProperties, "cannot be derived"),
         (Damage::OutOfRange, LossCategory::DamagedData, "is not valid"),
-        (Damage::PoiKeysWithoutData, LossCategory::TransformProperties, "is animated"),
+        (Damage::PoiKeysWithoutData, LossCategory::DamagedData, "is unreadable"),
+        (Damage::PoiExpression, LossCategory::TransformProperties, "is animated"),
         (Damage::SeparatedPosition, LossCategory::TransformProperties, "separate X, Y and Z"),
         (Damage::UnreadableZoom, LossCategory::DamagedData, "is unreadable"),
         (Damage::UnreadablePoi, LossCategory::DamagedData, "is unreadable"),
         (Damage::NoTransformGroup, LossCategory::TransformProperties, "no transform group"),
+        (Damage::OpaqueCameraOptions, LossCategory::DamagedData, "is unreadable"),
+        (Damage::ZoomIsAGroup, LossCategory::DamagedData, "is unreadable"),
+        (Damage::PoiWithTwoComponents, LossCategory::DamagedData, "is unreadable"),
     ];
     let drop_cdat = |c: &mut Vec<Chunk<'_>>| c.retain(|k| k.id != *b"cdat");
     for (damage, category, detail) in cases {
@@ -582,6 +608,11 @@ fn a_camera_position_that_cannot_be_derived_is_reported() {
                 ("cameraOptions/zoom", Value::Scalar(zoom)),
             ],
         );
+        if matches!(damage, Damage::PoiExpression) {
+            with_layer(&mut p, c, 0, |l| {
+                l.props.prop_mut("transform/poi").expect("poi").expr = Some(effectcraft_project::Expression { text: "value".into(), enabled: true });
+            });
+        }
         if matches!(damage, Damage::PoiKeysWithoutData) {
             with_layer(&mut p, c, 0, |l| {
                 let poi = l.props.prop_mut("transform/poi").expect("poi");
@@ -593,7 +624,7 @@ fn a_camera_position_that_cannot_be_derived_is_reported() {
         drop_position_records(&mut file.chunks);
         match damage {
             Damage::NegativeZoom => set_record(&mut file.chunks, b"ADBE Camera Zoom\0", -1000.0),
-            Damage::OutOfRange => {}
+            Damage::OutOfRange | Damage::PoiExpression => {}
             Damage::PoiKeysWithoutData => edit_record(&mut file.chunks, b"ADBE Anchor Point\0", &mut drop_key_data),
             Damage::SeparatedPosition => {
                 // `tdsb` 1: the record holds a value the user set (the zero records are 3).
@@ -606,6 +637,21 @@ fn a_camera_position_that_cannot_be_derived_is_reported() {
             Damage::UnreadableZoom => edit_record(&mut file.chunks, b"ADBE Camera Zoom\0", &mut |c| drop_cdat(c)),
             Damage::UnreadablePoi => edit_record(&mut file.chunks, b"ADBE Anchor Point\0", &mut |c| drop_cdat(c)),
             Damage::NoTransformGroup => drop_record(&mut file.chunks, b"ADBE Transform Group\0"),
+            // A group whose content is not a chunk sequence: none of its records can be seen.
+            Damage::OpaqueCameraOptions => edit_record_chunk(&mut file.chunks, b"ADBE Camera Options Group\0", &mut |c| {
+                c.body = Body::OpaqueList { list_type: *b"tdgp", data: vec![0xff, 0xff].into() };
+            }),
+            Damage::ZoomIsAGroup => edit_record_chunk(&mut file.chunks, b"ADBE Camera Zoom\0", &mut |c| {
+                c.body = Body::List { list_type: *b"tdgp", children: Vec::new() };
+            }),
+            // `tdb4` byte 3: the number of components.
+            Damage::PoiWithTwoComponents => edit_record(&mut file.chunks, b"ADBE Anchor Point\0", &mut |c| {
+                for k in c.iter_mut().filter(|k| k.id == *b"tdb4") {
+                    if let Body::Data(d) = &mut k.body {
+                        d.to_mut()[3] = 2;
+                    }
+                }
+            }),
         }
         let bytes = effectcraft_aep::write(&file).expect("write");
         let mut back = Project::default();
