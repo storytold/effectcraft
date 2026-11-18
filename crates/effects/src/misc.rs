@@ -431,12 +431,14 @@ fn mosaic(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let ch = (h as f64 / vb as f64).max(1.0);
     let src = b.img.clone();
     if ctx.params.b("sharpColors") {
-        // Each tile takes the colour of the pixel at its centre.
+        // Each tile takes the colour of its last pixel (bottom right), as After Effects' Sharp
+        // Colors does: on a 1920 x 1080 gradient with 6 x 6 tiles every tile of After Effects 26.5's
+        // render held the colour of its bottom-right source pixel (within 1/255), not its centre.
         b.img.rows_mut().for_each(|(y, row)| {
-            let cy = ((y as f64 / ch).floor() + 0.5) * ch;
+            let cy = ((y as f64 / ch).floor() + 1.0) * ch - 1.0;
             for (x, px) in row.iter_mut().enumerate() {
-                let cx = ((x as f64 / cw).floor() + 0.5) * cw;
-                *px = src.get_clamped(cx as i64, cy as i64);
+                let cx = ((x as f64 / cw).floor() + 1.0) * cw - 1.0;
+                *px = src.get_clamped(cx.ceil() as i64, cy.ceil() as i64);
             }
         });
         return b;

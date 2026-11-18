@@ -979,8 +979,10 @@ mod tests {
         let avg = run_at("ec.stylize.mosaic", &[("horizontal", num(2.0)), ("vertical", num(1.0))], img.clone(), 0.0);
         // Left tile: the mean of x / 20 over x = 0..9 is 0.225.
         assert!((avg.img.get(3, 4)[0] - 0.225).abs() < 1e-4, "{:?}", avg.img.get(3, 4));
+        // Sharp Colors: each tile takes the colour of its bottom-right pixel, as in After Effects.
         let sharp = run_at("ec.stylize.mosaic", &[("horizontal", num(2.0)), ("vertical", num(1.0)), ("sharpColors", Value::Bool(true))], img.clone(), 0.0);
-        assert_eq!(sharp.img.get(3, 4), img.get(5, 5));
+        assert_eq!(sharp.img.get(3, 4), img.get(9, 9));
+        assert_eq!(sharp.img.get(12, 0), img.get(19, 9));
     }
 
     #[test]
