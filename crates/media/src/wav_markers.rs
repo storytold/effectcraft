@@ -5,7 +5,7 @@ use effectcraft_project::Marker;
 use effectcraft_time::Tick;
 use std::collections::HashSet;
 
-pub use shared::{MAX_MARKERS, is_wav};
+pub use shared::MAX_MARKERS;
 #[cfg(test)]
 const MAX_ADTL_RECORDS: usize = 4 * MAX_MARKERS;
 
