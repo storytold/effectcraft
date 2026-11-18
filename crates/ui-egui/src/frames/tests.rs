@@ -3640,6 +3640,30 @@ fn a_side_panes_running_frame_someone_else_asks_for_lands_as_theirs() {
     assert!(f.queue.lock().unwrap().claimed.is_empty(), "released with the job");
 }
 
+/// #3845: a finishing side-pane job holds the queue until its frame is stored, as `request_with`
+/// holds it from its cache check to its claim. Otherwise a request could miss the cache before the
+/// frame was stored and claim it only after the job had read that nobody had: the frame landed as
+/// a spare side-pane frame and a full cache evicted it at once.
+#[test]
+fn a_finishing_side_pane_job_holds_the_queue_until_its_frame_is_stored() {
+    let f = Frames::default();
+    let shared = FrameKey { view: 7, ..key(1, 20, 0) };
+    f.inflight.lock().unwrap().insert(shared);
+    f.queue.lock().unwrap().running.insert(shared);
+    let worker = f.worker();
+    let cache = f.cache.lock().unwrap();
+    let job = std::thread::spawn(move || worker.finish_key(shared, false, true, img(), None, None, web_time::Instant::now()));
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while f.queue.try_lock().is_ok() {
+        assert!(std::time::Instant::now() < until, "the job stored its frame without the queue");
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    drop(cache);
+    job.join().unwrap();
+    assert!(f.is_cached(&shared));
+    assert!(f.queue.lock().unwrap().running.is_empty());
+}
+
 /// #3845: a side pane's frame no pane waits for any more goes before the viewer's frames, also at
 /// the viewer's scale (the least recently shown frame, the viewer's oldest, went).
 #[test]

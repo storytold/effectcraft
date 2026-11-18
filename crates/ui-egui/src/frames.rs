@@ -1630,6 +1630,10 @@ impl Frames {
             Want::Pane(p) => Some(p),
             _ => None,
         };
+        // The queue is locked first and held through the cache check, as a finishing job holds
+        // it while it stores its frame (`finish_key`): a frame rendering for a side pane that
+        // this request claims either lands claimed or is found here.
+        let Ok(mut q) = self.queue.lock() else { return };
         // The frame on screen sets the scale evictions keep: a prefetch or a passive viewer at
         // another zoom must not evict the active viewer's frames.
         let cached = self
@@ -1649,12 +1653,16 @@ impl Frames {
                         }
                         *slot = Some(key);
                     }
-                    // A frame someone else asks for is no side pane's frame any more.
-                    None => {
-                        if let Some(e) = c.map.get_mut(&key) {
-                            e.pane = false;
+                    // A frame someone else asks for is no side pane's frame any more; one still
+                    // rendering lands as theirs (see `finish_key`).
+                    None => match c.map.get_mut(&key) {
+                        Some(e) => e.pane = false,
+                        None => {
+                            if q.running.contains(&key) {
+                                q.claimed.insert(key);
+                            }
                         }
-                    }
+                    },
                 }
                 c.map.contains_key(&key)
             })
@@ -1662,7 +1670,6 @@ impl Frames {
         if cached {
             return;
         }
-        let Ok(mut q) = self.queue.lock() else { return };
         let Ok(mut inf) = self.inflight.lock() else { return };
         // Jobs for an older project revision can never be shown: drop them.
         let before = q.jobs.len();
@@ -1686,10 +1693,6 @@ impl Frames {
             // theirs, and the pane's next frame does not drop it.
             for j in q.jobs.iter_mut().filter(|j| j.key == key) {
                 j.pane = None;
-            }
-            // The same for a frame already rendering: it lands as theirs (see `finish_key`).
-            if q.running.contains(&key) {
-                q.claimed.insert(key);
             }
         }
         if urgent {
@@ -2080,12 +2083,17 @@ impl Worker {
         if urgent && let Ok(mut l) = self.last.lock() {
             *l = t0.elapsed().as_secs_f64() * 1000.0;
         }
-        // A side pane's job someone else asked for while it rendered lands as theirs.
-        let pane = pane && !self.queue.lock().map(|q| q.claimed.contains(&key)).unwrap_or(false);
-        if let Ok(mut c) = self.cache.lock()
-            && (!img.is_gpu() || !self.gpu_retired.load(Ordering::Acquire))
         {
-            c.insert_frame(key, img, files, since, pane);
+            // A side pane's job someone else asked for while it rendered lands as theirs. The
+            // queue stays locked until the frame is stored: `request_with` holds it from its cache
+            // check to its claim, so a request either claims the frame first or finds it stored.
+            let q = self.queue.lock().ok();
+            let pane = pane && !q.as_ref().is_some_and(|q| q.claimed.contains(&key));
+            if let Ok(mut c) = self.cache.lock()
+                && (!img.is_gpu() || !self.gpu_retired.load(Ordering::Acquire))
+            {
+                c.insert_frame(key, img, files, since, pane);
+            }
         }
         self.release(key, urgent);
     }
