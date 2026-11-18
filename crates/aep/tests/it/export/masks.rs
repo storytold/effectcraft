@@ -153,17 +153,19 @@ fn same_masks(a: &[PropGroup], b: &[PropGroup]) {
                     assert!(vx.components().iter().zip(vy.components()).all(|(p, q)| (p - q).abs() < 1e-9), "{w} {id} {vx:?} {vy:?}");
                 }
             }
-            for (kx, ky) in px.keys.iter().zip(&py.keys) {
+            let last = px.keys.len().saturating_sub(1);
+            for (i, (kx, ky)) in px.keys.iter().zip(&py.keys).enumerate() {
                 assert_eq!((kx.time, kx.in_interp, kx.out_interp, kx.label), (ky.time, ky.in_interp, ky.out_interp, ky.label), "{w} {id}");
                 if id != "path" {
                     let near = |e: &[Ease], f: &[Ease]| {
                         e.len() == f.len() && e.iter().zip(f).all(|(a, b)| (a.speed - b.speed).abs() < 1e-9 && (a.influence - b.influence).abs() < 1e-9)
                     };
-                    // The first key's in ease and the last key's out ease are not carried.
-                    if kx.in_interp == Interp::Bezier && !kx.in_ease.is_empty() && !ky.in_ease.is_empty() {
+                    // The first key's in ease and the last key's out ease are not carried; every
+                    // other bezier side that has an ease must come back with the same one.
+                    if i > 0 && kx.in_interp == Interp::Bezier && !kx.in_ease.is_empty() {
                         assert!(near(&kx.in_ease, &ky.in_ease), "{w} in ease {:?} {:?}", kx.in_ease, ky.in_ease);
                     }
-                    if kx.out_interp == Interp::Bezier && !kx.out_ease.is_empty() && !ky.out_ease.is_empty() {
+                    if i < last && kx.out_interp == Interp::Bezier && !kx.out_ease.is_empty() {
                         assert!(near(&kx.out_ease, &ky.out_ease), "{w} out ease {:?} {:?}", kx.out_ease, ky.out_ease);
                     }
                 }
