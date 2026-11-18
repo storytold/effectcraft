@@ -187,6 +187,8 @@ fn plane_blurs_too_wide_for_the_gpu_fall_back_to_the_cpu() {
     assert!(plane_blur_on_gpu(3840, 2160, 1000.0 / 3.0, 1000.0 / 3.0));
     assert!(plane_blur_on_gpu(3840, 2160, f64::NAN, f64::NAN));
     assert!(plane_blur_on_gpu(70, 44, 1e20, 1e20));
+    // Rows read in full plus both edges: 4096 × 1365 × 3 × 4098 reads, past 2^36 only with the edges.
+    assert!(!plane_blur_on_gpu(4096, 1365, 1e20, 0.0));
 }
 
 #[test]

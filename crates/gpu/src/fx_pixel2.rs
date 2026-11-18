@@ -113,13 +113,17 @@ fn plane(e: &mut Enc, img: &GpuImage, kind: u32, prop: u32, soft: f64) -> Option
 /// Glow Radius 1000 (sigma 333), reads about 3.3e10 there and stays on the GPU.
 const PLANE_BLUR_MAX_READS: f64 = (1u64 << 36) as f64;
 
-/// Texture reads of [`gauss_plane`]'s box passes over a `width` × `height` plane.
+/// Texture reads of [`gauss_plane`]'s box passes over a `width` × `height` plane: per pixel of a
+/// pass (zero radii aren't dispatched), the window's part inside the line plus the two edge
+/// pixels `fp2_box` reads to count the rest.
 fn plane_blur_reads(width: u32, height: u32, sx: f64, sy: f64) -> f64 {
     let pixels = f64::from(width) * f64::from(height);
     [(sx, width), (sy, height)]
         .into_iter()
         .filter(|&(sigma, _)| sigma > 0.05)
-        .flat_map(|(sigma, line)| crate::effects::box_radii(sigma, 3).into_iter().map(move |r| (2.0 * r as f64 + 1.0).min(f64::from(line))))
+        .flat_map(|(sigma, line)| {
+            crate::effects::box_radii(sigma, 3).into_iter().filter(|&r| r > 0).map(move |r| (2.0 * r as f64 + 1.0).min(f64::from(line) + 2.0))
+        })
         .map(|window| pixels * window)
         .sum()
 }
