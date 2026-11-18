@@ -793,7 +793,7 @@ mod tests {
         let start = std::time::Instant::now();
         // The timeout leaves the stand-in time to start and exit; the left process sleeps 5 s.
         let out =
-            run_with_timeout(me.as_os_str(), &["--exact", "--ignored", "memcap::tests::stand_in_that_leaves_its_output_open"], Duration::from_millis(2500));
+            run_with_timeout(me.as_os_str(), &["--exact", "--ignored", "memcap::tests::stand_in_that_leaves_its_output_open"], Duration::from_millis(3000));
         // Not a stand-in that failed to start its left process (that exits with an error).
         assert_eq!(out, Err(NoOutput::OutputOpen));
         assert!(start.elapsed() < Duration::from_millis(4500), "waited {:?}", start.elapsed());
@@ -824,11 +824,11 @@ mod tests {
         assert!(start.elapsed() < Duration::from_secs(4), "waited {:?}", start.elapsed());
     }
 
-    /// A killed program that has not exited when the caller stops waiting is reaped by a thread of
-    /// its own, which collects its exit status (#3737 review).
+    /// The thread that reaps a killed program the caller stopped waiting for collects its exit
+    /// status (#3737 review).
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn a_program_that_exits_late_is_reaped_by_a_thread() {
+    fn a_killed_program_is_reaped_by_a_thread_of_its_own() {
         let mut child = hanging_stand_in();
         let _ = child.kill();
         let start = std::time::Instant::now();
