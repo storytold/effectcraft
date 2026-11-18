@@ -18,12 +18,15 @@ use crate::import::time::TimeMap;
 /// other widths).
 const APERTURE_1920: f64 = 25.309_336_332_958_4;
 
-/// Camera Options: match name, project property id, kind (341, 342).
-const CAMERA: [(&str, &str, Kind); 4] = [
+/// Camera Options: match name, project property id, kind (341, 342). Blur Level is stored in
+/// percent like EffectCraft's (lab file `lab_dof2`: 50 is stored as 50, and After Effects blurs
+/// half as much as at 100).
+const CAMERA: [(&str, &str, Kind); 5] = [
     ("ADBE Camera Zoom", "zoom", Kind::Number),
     ("ADBE Camera Depth of Field", "dof", Kind::EffectBool),
     ("ADBE Camera Focus Distance", "focusDistance", Kind::Number),
     ("ADBE Camera Aperture", "aperture", Kind::Number),
+    ("ADBE Camera Blur Level", "blurLevel", Kind::Number),
 ];
 
 /// Light Options of a spot or point light (254, 343-345). Every light stores Casts Shadows as a
@@ -81,15 +84,6 @@ fn import_group(group: &AepGroup<'_, '_>, table: &[(&str, &str, Kind)], what: &s
         }
         let PropNode::Property(node) = entry.node else { continue };
         if !is_stored(&node) {
-            continue;
-        }
-        // Blur Level at 100 (the default) is neutral: the exporter writes it explicitly and After
-        // Effects reads it back as 100 % (export read-back o1); other values are not sampled.
-        if name == "ADBE Camera Blur Level"
-            && !node.is_animated()
-            && node.expression().is_none()
-            && node.static_value().and_then(|raw| Kind::Number.value(&raw)) == Some(Value::Scalar(100.0))
-        {
             continue;
         }
         let mapped = table.iter().find(|(m, _, _)| *m == name).and_then(|(_, id, kind)| options.prop_mut(id).map(|p| (p, *kind)));

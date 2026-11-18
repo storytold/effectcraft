@@ -430,6 +430,26 @@ fn hostile_objects_never_panic() {
 }
 
 #[test]
+fn a_camera_blur_level_is_read_back() {
+    // After Effects 2026 stores Blur Level in percent (lab file `lab_dof2`: 50 is stored as 50 and
+    // blurs half as much). The importer used to report it as "not imported" and keep 100 %.
+    use effectcraft_aep::import::{ImportOptions, import};
+    use effectcraft_keyframe::Value;
+    let mut p = Project::default();
+    let c = add_comp(&mut p, "C", 640, 360, FrameRate::new(25, 1), 1.0, None);
+    add_layer(&mut p, c, "Cam", LayerSource::Camera, (640, 360));
+    with_props(&mut p, c, 0, &[("cameraOptions/dof", Value::Bool(true)), ("cameraOptions/blurLevel", Value::Scalar(50.0))]);
+    let r = export_all(&p);
+    assert!(r.report.is_lossless(), "{:?}", r.report.losses);
+    let none = |_: &str| false;
+    let mut back = Project::default();
+    let ri = import(&mut back, &r.bytes, &ImportOptions::new(&none)).expect("import");
+    assert!(ri.report.losses.is_empty(), "{:?}", ri.report.losses);
+    let layers = &back.comp(ri.comps[0]).expect("comp").layers;
+    assert_eq!(value(&layers[0], "cameraOptions/blurLevel"), Value::Scalar(50.0));
+}
+
+#[test]
 fn camera_fixtures_come_back_without_a_loss() {
     // The exporter writes every camera option, Blur Level 100 too; importing the export must not
     // report it (it was reported as "not imported" before the importer and exporter lines met).
