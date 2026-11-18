@@ -92,3 +92,51 @@ fn a_tiny_file_claiming_a_huge_image_is_refused_within_the_budget() {
         }
     }
 }
+
+#[test]
+fn unsupported_modern_placement_does_not_fall_back_to_legacy_in_either_order() {
+    use craft_psd::descriptor::{Descriptor, Id, ObjectArray, UnicodeString, Value, VersionedDescriptor};
+    let quad = [[0.0, 0.0], [20.0, 0.0], [20.0, 10.0], [0.0, 10.0]];
+    let legacy = craft_psd::smart::SmartObject { uuid: "legacy".into(), quad, size: Some([20.0, 10.0]), warp: None }.to_placed_layer();
+    let modern = |middle| {
+        let floats = |values| Value::UnitFloats { unit: *b"#Pxl", values };
+        let points = Descriptor::new("rationalPoint")
+            .with("Hrzn", floats((0..4).flat_map(|_| (0..7).map(|i| i as f64 * 20.0 / 6.0)).collect()))
+            .with("Vrtc", floats((0..4).flat_map(|j| [j as f64 * 10.0 / 3.0; 7]).collect()));
+        let envelope = Descriptor::new("customEnvelopeWarp")
+            .with("quiltSliceX", floats(vec![0.0, middle, 20.0]))
+            .with("quiltSliceY", floats(vec![0.0, 10.0]))
+            .with("meshPoints", Value::ObjectArray(ObjectArray { prefix: 28, body: points }));
+        let warp = Descriptor::new("quiltWarp")
+            .with("warpStyle", Value::Enumerated { type_id: Id::new("warpStyle"), value: Id::new("warpCustom") })
+            .with("customEnvelopeWarp", Value::Descriptor(envelope));
+        let descriptor = Descriptor::new("null")
+            .with("Idnt", Value::Text(UnicodeString::new("modern")))
+            .with("Trnf", Value::List(quad.iter().flatten().map(|v| Value::Double(*v)).collect()))
+            .with("quiltWarp", Value::Descriptor(warp));
+        let mut bytes = b"soLD".to_vec();
+        bytes.extend_from_slice(&4u32.to_be_bytes());
+        bytes.extend_from_slice(&VersionedDescriptor::new(descriptor).to_bytes());
+        bytes
+    };
+    for key in [*b"SoLd", *b"SoLE"] {
+        for legacy_first in [false, true] {
+            for (bytes, expected) in [(modern(5.0), None), (modern(10.0), Some("modern")), (b"soLD".to_vec(), Some("legacy"))] {
+                let mut blocks = vec![(key, bytes), (*b"PlLd", legacy.clone()), (*b"luni", vec![0])];
+                if legacy_first {
+                    blocks.swap(0, 1);
+                }
+                let mut doc = WDoc::new(2, 2);
+                doc.layers = vec![WLayer::empty("placement", blocks)];
+                let result = Psd::parse(write(&doc));
+                if let Some(uuid) = expected {
+                    let parsed = result.unwrap();
+                    assert_eq!(parsed.layers[0].smart_object.as_ref().unwrap().uuid, uuid);
+                    assert_eq!(parsed.layers[0].name, "placement", "malformed optional metadata still recovers");
+                } else {
+                    assert!(matches!(result, Err(Error::Unsupported(_))), "unsupported modern placement must be reported");
+                }
+            }
+        }
+    }
+}

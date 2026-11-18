@@ -1198,6 +1198,15 @@ source = "git+https://github.com/storytold/craft-libs?rev=453b0da782ccef39be9a6d
 [[package]]
 name = "craft-audio"
 version = "0.1.0"
+source = "git+https://github.com/storytold/craft-libs?rev=30596f73c5ef851ba3dad9cf145669f391e2eb0d#30596f73c5ef851ba3dad9cf145669f391e2eb0d"
+dependencies = [
+ "craft-media 0.1.0 (git+https://github.com/storytold/craft-libs?rev=30596f73c5ef851ba3dad9cf145669f391e2eb0d)",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "craft-audio"
+version = "0.1.0"
 source = "git+https://github.com/storytold/craft-libs?rev=453b0da782ccef39be9a6dac8d27c80b553ef1cc#453b0da782ccef39be9a6dac8d27c80b553ef1cc"
 dependencies = [
  "craft-media 0.1.0 (git+https://github.com/storytold/craft-libs?rev=453b0da782ccef39be9a6dac8d27c80b553ef1cc)",
@@ -1372,6 +1381,11 @@ dependencies = [
 [[package]]
 name = "craft-media"
 version = "0.1.0"
+source = "git+https://github.com/storytold/craft-libs?rev=30596f73c5ef851ba3dad9cf145669f391e2eb0d#30596f73c5ef851ba3dad9cf145669f391e2eb0d"
+
+[[package]]
+name = "craft-media"
+version = "0.1.0"
 source = "git+https://github.com/storytold/craft-libs?rev=453b0da782ccef39be9a6dac8d27c80b553ef1cc#453b0da782ccef39be9a6dac8d27c80b553ef1cc"
 dependencies = [
  "thiserror 2.0.21",
@@ -1450,7 +1464,7 @@ dependencies = [
 [[package]]
 name = "craft-psd"
 version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=453b0da782ccef39be9a6dac8d27c80b553ef1cc#453b0da782ccef39be9a6dac8d27c80b553ef1cc"
+source = "git+https://github.com/storytold/craft-libs?rev=e1fc4b1376148197c2cfd2381eeb400e2731269a#e1fc4b1376148197c2cfd2381eeb400e2731269a"
 dependencies = [
  "encoding_rs",
  "flate2",
@@ -2242,6 +2256,7 @@ dependencies = [
 name = "effectcraft-media"
 version = "0.24.1"
 dependencies = [
+ "craft-audio 0.1.0 (git+https://github.com/storytold/craft-libs?rev=30596f73c5ef851ba3dad9cf145669f391e2eb0d)",
  "craft-audio 0.1.0 (git+https://github.com/storytold/craft-libs?rev=453b0da782ccef39be9a6dac8d27c80b553ef1cc)",
  "craft-docpath",
  "craft-dpx 0.1.0 (git+https://github.com/storytold/craft-libs?rev=453b0da782ccef39be9a6dac8d27c80b553ef1cc)",
