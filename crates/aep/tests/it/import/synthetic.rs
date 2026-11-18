@@ -466,10 +466,10 @@ fn a_stretched_layer_with_large_time_denominators_keeps_its_in_and_out_points() 
 }
 
 #[test]
-fn a_layer_time_that_reduces_past_i64_is_rounded_to_ticks() {
+fn a_layer_time_with_the_template_values_is_kept() {
     // A real resize template: a clip layer at 16050557/524288 s with in and out points over
-    // 110729625 and a stretch of 14059307/2^24 (83.8 %). Reduced, `start + in * stretch` still has
-    // a denominator past `i64`: it is rounded to ticks instead of being set to 0.
+    // 110729625 and a stretch of 14059307/2^24 (83.8 %). Unreduced, `start + in * stretch` has a
+    // denominator past `i64`; reduced, it fits.
     let (start, in_num, out_num, den, s_num, s_den) = (16_050_557i32, 37_789_696i32, 666_935_296i32, 110_729_625u32, 14_059_307i32, 16_777_216u32);
     let bytes = mutate(&mut |c| {
         if c.id == *b"ldta" {
@@ -496,6 +496,42 @@ fn a_layer_time_that_reduces_past_i64_is_rounded_to_ticks() {
         .find(|l| l.name == "Solid")
         .unwrap();
     // Within a tick of the exact times, and so on the same frame (30.90 s and 35.66 s).
+    assert!((solid.in_point.0 as f64 - at(in_num)).abs() <= 1.0, "{:?} vs {}", solid.in_point, at(in_num));
+    assert!((solid.out_point.0 as f64 - at(out_num)).abs() <= 1.0, "{:?} vs {}", solid.out_point, at(out_num));
+}
+
+#[test]
+fn a_layer_time_that_reduces_past_i64_is_rounded_to_ticks() {
+    // Start, in / out and stretch over three different primes near 2^32: even reduced, the
+    // denominator of `start + in * stretch` is their product (about 2^96), so the time is rounded
+    // to the nearest tick instead of being set to 0.
+    let (start, s_den0) = (2_000_000_000i32, 4_294_967_291u32);
+    let (in_num, out_num, den) = (1_000_000_000i32, 2_100_000_000i32, 4_294_967_279u32);
+    let (s_num, s_den) = (2_000_000_000i32, 4_294_967_231u32);
+    let bytes = mutate(&mut |c| {
+        if c.id == *b"ldta" {
+            set_data(c, 8, &s_num.to_be_bytes());
+            set_data(c, 108, &s_den.to_be_bytes());
+            set_data(c, 12, &start.to_be_bytes());
+            set_data(c, 16, &s_den0.to_be_bytes());
+            for (at, num) in [(20, in_num), (28, out_num)] {
+                set_data(c, at, &num.to_be_bytes());
+                set_data(c, at + 4, &den.to_be_bytes());
+            }
+        }
+    });
+    let (p, r) = run(&bytes, true);
+    let r = r.unwrap();
+    assert_eq!(losses(&r, LossCategory::DamagedData), Vec::<String>::new());
+    let tps = effectcraft_time::TICKS_PER_SECOND as f64;
+    let at = |n: i32| (f64::from(start) / f64::from(s_den0) + f64::from(n) / f64::from(den) * f64::from(s_num) / f64::from(s_den)) * tps;
+    let solid = p
+        .items
+        .values()
+        .filter_map(|i| if let ItemKind::Comp(c) = &i.kind { Some(c) } else { None })
+        .flat_map(|c| c.layers.iter())
+        .find(|l| l.name == "Solid")
+        .unwrap();
     assert!((solid.in_point.0 as f64 - at(in_num)).abs() <= 1.0, "{:?} vs {}", solid.in_point, at(in_num));
     assert!((solid.out_point.0 as f64 - at(out_num)).abs() <= 1.0, "{:?} vs {}", solid.out_point, at(out_num));
 }
