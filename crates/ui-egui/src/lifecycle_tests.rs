@@ -264,6 +264,11 @@ fn restart_to_update_with_nothing_unsaved_leaves_the_close_to_the_updater() {
 fn restart_to_update_with_the_startup_prompt_open_leaves_the_window_open() {
     let ctx = egui::Context::default();
     let mut app = app_with_comp();
+    // Version choices come from a file that does not exist, so the launcher settings of the
+    // machine running the test do not hold the app off the offer.
+    let pins = tempfile::tempdir().unwrap();
+    app.updates_rt.updater =
+        craft_update::updater::Updater::new(&crate::UPDATE_APP, env!("CARGO_PKG_VERSION")).with_pins_path(pins.path().join("versions.json"));
     // The updater reads the installed files for an offer on a thread of its own, which asks the
     // context the updater keeps for a repaint after it answers; the next tick opens the prompt.
     let offer_ctx = egui::Context::default();
@@ -283,7 +288,7 @@ fn restart_to_update_with_the_startup_prompt_open_leaves_the_window_open() {
         html_url: "https://github.com/storytold/effectcraft/releases/tag/v99.0.0".into(),
         ..Default::default()
     });
-    assert!(updater.managed().is_none(), "the launcher manages this copy, so it ignored the offer");
+    assert!(updater.managed().is_none(), "no launcher choice holds the app off stable releases");
     // The offer's thread asks for one repaint after it answers, so one wait and one tick suffice.
     if !updater.prompt_open() {
         wait.recv().unwrap();
