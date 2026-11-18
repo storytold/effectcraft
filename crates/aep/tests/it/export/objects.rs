@@ -472,6 +472,67 @@ fn a_camera_without_a_position_record_stands_back_from_its_point_of_interest_by_
     assert_eq!(value(&back[0], "transform/position"), Value::Vec3([150.0, 80.0, -1000.0]));
 }
 
+/// Sets the first value of the record after `tdmn` `name` (its `cdat`) under `chunks`.
+fn set_record(chunks: &mut [effectcraft_aep::Chunk<'_>], name: &[u8], v: f64) {
+    use effectcraft_aep::Body;
+    let mut armed = false;
+    for c in chunks.iter_mut() {
+        if c.id == *b"tdmn" {
+            armed = matches!(&c.body, Body::Data(d) if d.starts_with(name));
+            continue;
+        }
+        if let Body::List { children, .. } | Body::Chunks(children) = &mut c.body {
+            if armed {
+                for k in children.iter_mut().filter(|k| k.id == *b"cdat") {
+                    if let Body::Data(d) = &mut k.body {
+                        d.to_mut()[..8].copy_from_slice(&v.to_be_bytes());
+                    }
+                }
+            } else {
+                set_record(children, name, v);
+            }
+        }
+        armed = false;
+    }
+}
+
+#[test]
+fn a_camera_position_that_cannot_be_derived_is_reported() {
+    // No Position record and a Zoom that is not positive, or a derived Position out of range: the
+    // layer keeps its default Position and the import reports it, so a strict import refuses.
+    use effectcraft_aep::import::{ImportOptions, import};
+    use effectcraft_keyframe::Value;
+    let none = |_: &str| false;
+    for (poi_z, zoom, set_zoom) in [(0.0, 1000.0, Some(-1000.0)), (-9.0e8, 5.0e8, None)] {
+        let mut p = Project::default();
+        let c = add_comp(&mut p, "C", 400, 200, FrameRate::new(25, 1), 1.0, None);
+        add_layer(&mut p, c, "Cam", LayerSource::Camera, (400, 200));
+        with_props(
+            &mut p,
+            c,
+            0,
+            &[
+                ("transform/position", Value::Vec3([150.0, 80.0, poi_z - zoom])),
+                ("transform/poi", Value::Vec3([150.0, 80.0, poi_z])),
+                ("cameraOptions/zoom", Value::Scalar(zoom)),
+            ],
+        );
+        let r = export_all(&p);
+        let mut file = parse(&r.bytes).expect("parse");
+        drop_position_records(&mut file.chunks);
+        if let Some(z) = set_zoom {
+            set_record(&mut file.chunks, b"ADBE Camera Zoom\0", z);
+        }
+        let bytes = effectcraft_aep::write(&file).expect("write");
+        let mut back = Project::default();
+        let strict = import(&mut back, &bytes, &ImportOptions::new(&none));
+        assert!(strict.is_err(), "zoom {zoom}, poi z {poi_z}: a strict import refuses");
+        let layers = reimported_layers(&bytes);
+        let Value::Vec3(pos) = value(&layers[0], "transform/position") else { panic!("vec3") };
+        assert!(pos[2] > -1.0e9 && pos[2] != poi_z - zoom, "zoom {zoom}, poi z {poi_z}: default kept, {pos:?}");
+    }
+}
+
 #[test]
 fn camera_fixtures_come_back_without_a_loss() {
     // The exporter writes every camera option, Blur Level 100 too; importing the export must not

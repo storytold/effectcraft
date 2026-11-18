@@ -67,28 +67,34 @@ pub(crate) fn import_camera(layer: &AepLayer<'_, '_>, what: &str, comp_width: u3
     if let Some(options) = props.sub_mut("cameraOptions") {
         import_camera_options(layer, what, comp_width, tm, options, col);
     }
-    derive_camera_position(layer, props);
+    derive_camera_position(layer, what, props, col);
 }
 
-/// A camera without a Position record: After Effects leaves it out when the Position is the point
-/// of interest moved back by the zoom (`[x, y, z - zoom]`; lab file `lab_campos`, After Effects
-/// 2026: the cameras set to `[200, 100, -1000]` with the point of interest `[200, 100, 0]` and Zoom
-/// 1000 store no record and read back that Position, one set to `[200, 100, -1000]` with Zoom 800
-/// stores it). Runs after the transform and the Camera Options are imported; `props` is the
-/// layer's property tree.
-fn derive_camera_position(layer: &AepLayer<'_, '_>, props: &mut PropGroup) {
+/// A camera without a Position record. After Effects 2026 leaves the record out when the
+/// Position is the point of interest moved back by the zoom (lab file `lab_campos`: cameras set to
+/// `[200, 100, -1000]` with the point of interest `[200, 100, 0]` and Zoom 1000 store no record and
+/// read back that Position; one set to `[200, 100, -1000]` with Zoom 800 stores it; only sampled
+/// with the point of interest at z = 0). The importer therefore sets `[x, y, z - zoom]` from the
+/// imported point of interest and Zoom. It keeps the new layer's Position and reports a
+/// transform loss when that cannot be done: keys or an expression on either, a Zoom that is not
+/// positive, or a result that is not a valid number. Runs after the transform and the Camera
+/// Options are imported; `props` is the layer's property tree.
+fn derive_camera_position(layer: &AepLayer<'_, '_>, what: &str, props: &mut PropGroup, col: &mut Collector) {
     let Some(PropNode::Group(transform)) = layer.properties().and_then(|p| p.get("ADBE Transform Group")) else { return };
     if transform.get("ADBE Position").is_some() {
         return;
     }
-    let (Some(Value::Vec3(poi)), Some(Value::Scalar(zoom))) =
-        (props.prop("transform/poi").map(|p| p.value.clone()), props.prop("cameraOptions/zoom").map(|p| p.value.clone()))
-    else {
-        return;
+    let fixed = |path: &str| props.prop(path).filter(|p| p.keys.is_empty() && p.expr.is_none()).map(|p| p.value.clone());
+    let position = match (fixed("transform/poi"), fixed("cameraOptions/zoom")) {
+        (Some(Value::Vec3(poi)), Some(Value::Scalar(zoom))) if zoom > 0.0 => Value::Vec3([poi[0], poi[1], poi[2] - zoom]),
+        _ => {
+            col.lose(LossCategory::TransformProperties, format!("{what}: no Position record, and it cannot be derived from the point of interest and Zoom"));
+            return;
+        }
     };
-    let position = Value::Vec3([poi[0], poi[1], poi[2] - zoom]);
-    if let (true, Some(p)) = (sane(&position), props.prop_mut("transform/position")) {
-        p.value = position;
+    match (sane(&position), props.prop_mut("transform/position")) {
+        (true, Some(p)) => p.value = position,
+        _ => col.lose(LossCategory::DamagedData, format!("{what}: the Position derived from the point of interest and Zoom is not valid, default used")),
     }
 }
 
