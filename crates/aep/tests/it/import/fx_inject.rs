@@ -172,7 +172,7 @@ fn param_name(fx: &Fx, i: usize) -> String {
 
 /// The effect's `sspc`: its name, the parameter definitions (`parT`) and the stored values
 /// (`tdgp`), each value record copied from `template`.
-fn sspc(fx: &Fx, template: &Chunk<'_>) -> Chunk<'static> {
+pub fn sspc(fx: &Fx, template: &Chunk<'_>) -> Chunk<'static> {
     let n = fx.defs.len() + 2;
     let mut part = vec![
         Chunk::data(*b"parn", (n as u32).to_be_bytes().to_vec()),
@@ -256,6 +256,19 @@ pub fn bytes_with_effect(match_name: &str, make: impl Fn(&Chunk<'_>) -> Chunk<'s
     let mut file = parse(SYNTHETIC).unwrap();
     assert_eq!(replace_glow(&mut file.chunks, match_name, &sspc), 2, "the Glow effect and its shared definitions");
     write(&file).unwrap()
+}
+
+/// `sspc` with Compositing Options holding `opacity` as its Effect Opacity record (the value
+/// group's `ADBE Effect Built In Params` group with `ADBE Effect Mask Opacity`, as After Effects
+/// 26.5 stores an Effect Opacity other than 100 %).
+pub fn with_effect_opacity(mut sspc: Chunk<'static>, opacity: Chunk<'static>) -> Chunk<'static> {
+    let options =
+        Chunk::list(*b"tdgp", vec![Chunk::data(*b"tdsb", 1u32.to_be_bytes().to_vec()), tdmn("ADBE Effect Mask Opacity"), opacity, tdmn("ADBE Group End")]);
+    let values = sspc.children_mut().iter_mut().find(|c| c.is_list(b"tdgp")).expect("the value group");
+    let mut kids = values.children().to_vec();
+    kids.extend([tdmn("ADBE Effect Built In Params"), options]);
+    *values = Chunk::list(*b"tdgp", kids);
+    sspc
 }
 
 /// `synthetic.aep` with `fx` in place of the Glow effect.
