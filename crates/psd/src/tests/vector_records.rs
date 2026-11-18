@@ -16,7 +16,7 @@ fn length(selector: u16, count: u16) -> Vec<u8> {
 fn knot(selector: u16) -> Vec<u8> {
     let mut data = [0; 24];
     // Stored y then x, including negative and outside-document coordinates.
-    for (chunk, value) in data.chunks_exact_mut(4).zip([-(1i32 << 23), 1 << 22, 1 << 24, -(1 << 24), 1 << 23, 1 << 25]) {
+    for (chunk, value) in data.as_chunks_mut::<4>().0.iter_mut().zip([-(1i32 << 23), 1 << 22, 1 << 24, -(1 << 24), 1 << 23, 1 << 25]) {
         chunk.copy_from_slice(&value.to_be_bytes());
     }
     record(selector, data)
