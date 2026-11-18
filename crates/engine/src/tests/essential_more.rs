@@ -156,3 +156,52 @@ fn a_control_on_a_nested_instances_essential_property_renders_its_value() {
     // The nested instance renders only what it overrides: the value counts as overridden.
     assert_eq!(essential::overridden(nested), vec![child.uid]);
 }
+
+#[test]
+fn a_control_on_a_nested_instances_grouped_essential_property_renders_its_value() {
+    // As above, with Title's control inside a panel group: the nested instance's property sits
+    // in a group of its Essential Properties, and still counts as overridden.
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Title", "width": 64, "height": 64, "frameRate": 30, "duration": 1})).unwrap();
+    let title = s.active_comp_id().unwrap();
+    let solid = s.execute("layer.newSolid", json!({"width": 64, "height": 64})).unwrap()["layer"].as_u64().unwrap();
+    let t = s.execute("essential.addProperty", json!({"layer": solid, "path": "transform/opacity"})).unwrap()["controls"][0].as_u64().unwrap();
+    let g = s.execute("essential.addGroup", json!({"name": "Look"})).unwrap()["control"].as_u64().unwrap();
+    s.execute("essential.move", json!({"control": t, "group": g})).unwrap();
+    s.execute("comp.new", json!({"name": "Mid", "width": 64, "height": 64, "frameRate": 30, "duration": 1})).unwrap();
+    let mid = s.active_comp_id().unwrap();
+    let inst = s.execute("layer.addItem", json!({"item": title.0})).unwrap()["layer"].as_u64().unwrap();
+    let path = format!("{}/{}/{}", essential::GROUP, essential::match_id(g), essential::match_id(t));
+    let m = s.execute("essential.addProperty", json!({"layer": inst, "path": path})).unwrap()["controls"][0].as_u64().unwrap();
+    let p = essential::with_overrides(&s.project, mid, &[essential::Override { control: m, value: KV::Scalar(25.0) }]).unwrap();
+    let nested = p.comp(mid).unwrap().layer(effectcraft_project::LayerId(inst)).unwrap();
+    let look = essential::group(nested).unwrap().groups().next().expect("the panel group");
+    let child = look.children.iter().filter_map(|n| n.as_prop()).find(|p| p.match_id == essential::match_id(t)).unwrap();
+    assert_eq!(child.value, KV::Scalar(25.0));
+    assert_eq!(essential::overridden(nested), vec![child.uid]);
+}
+
+#[test]
+fn a_font_control_on_a_nested_instances_essential_property_counts_as_overridden() {
+    // Title's Source Text is a control; Mid's Font control is the Title instance's Essential
+    // Property. The font an instance of Mid sets must reach Title, so it counts as overridden.
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Title", "width": 64, "height": 64, "frameRate": 30, "duration": 1})).unwrap();
+    let title = s.active_comp_id().unwrap();
+    let text = s.execute("layer.newText", json!({"text": "Hello"})).unwrap()["layer"].as_u64().unwrap();
+    let body = s.execute("essential.addProperty", json!({"layer": text, "path": "text/sourceText"})).unwrap()["controls"][0].as_u64().unwrap();
+    s.execute("comp.new", json!({"name": "Mid", "width": 64, "height": 64, "frameRate": 30, "duration": 1})).unwrap();
+    let mid = s.active_comp_id().unwrap();
+    let inst = s.execute("layer.addItem", json!({"item": title.0})).unwrap()["layer"].as_u64().unwrap();
+    let path = format!("{}/{}", essential::GROUP, essential::match_id(body));
+    let f = s.execute("essential.addProperty", json!({"layer": inst, "path": path, "as": "font"})).unwrap()["controls"][0].as_u64().unwrap();
+    let font = KV::Text(Box::new(effectcraft_keyframe::TextDoc { font: "Serif Test".into(), size: 40.0, ..Default::default() }));
+    let p = essential::with_overrides(&s.project, mid, &[essential::Override { control: f, value: font }]).unwrap();
+    let nested = p.comp(mid).unwrap().layer(effectcraft_project::LayerId(inst)).unwrap();
+    let child = essential::group(nested).unwrap().children.iter().filter_map(|n| n.as_prop()).find(|p| p.match_id == essential::match_id(body)).unwrap();
+    match &child.value {
+        KV::Text(d) => assert_eq!((d.text.as_str(), d.font.as_str()), ("Hello", "Serif Test")),
+        o => panic!("{o:?}"),
+    }
+    assert_eq!(essential::overridden(nested), vec![child.uid]);
+}
