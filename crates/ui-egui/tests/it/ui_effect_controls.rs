@@ -505,6 +505,19 @@ fn effect_controls_widgets_register_automation_ids() {
     assert!(ids(&h).contains(&pt_id), "effect point control shown for the selected effect");
 }
 
+fn click_id(h: &mut Harness<'_, EffectcraftApp>, id: &str) {
+    let at = rect_of(h, id).center();
+    click(h, at);
+    h.run_steps(2);
+}
+
+fn rename_dropdown_row(h: &mut Harness<'_, EffectcraftApp>, index: usize, text: &str) {
+    click_id(h, &format!("form.field.items.{index}"));
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.event(egui::Event::Text(text.into()));
+    h.run_steps(2);
+}
+
 #[test]
 fn dropdown_edit_targets_its_instance_and_applies_one_undoable_change() {
     let mut s = Session::default();
@@ -522,17 +535,6 @@ fn dropdown_edit_targets_its_instance_and_applies_one_undoable_change() {
     let mut h = Harness::builder().with_size(egui::vec2(1200.0, 800.0)).build_eframe(|_| app);
     h.run_steps(4);
 
-    let click_id = |h: &mut Harness<'_, EffectcraftApp>, id: &str| {
-        let at = rect_of(h, id).center();
-        click(h, at);
-        h.run_steps(2);
-    };
-    let rename_row = |h: &mut Harness<'_, EffectcraftApp>, index: usize, text: &str| {
-        click_id(h, &format!("form.field.items.{index}"));
-        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
-        h.event(egui::Event::Text(text.into()));
-        h.run_steps(2);
-    };
     let options = |h: &Harness<'_, EffectcraftApp>, effect| {
         let l = layer(&h.state().session, lid);
         let menu = l.props.find_group(effect).unwrap().get("menu").unwrap();
@@ -544,7 +546,7 @@ fn dropdown_edit_targets_its_instance_and_applies_one_undoable_change() {
     assert!(h.state().auto.find(&edit(slider)).is_none());
     let undo = h.state().session.history.undo.len();
     click_id(&mut h, &edit(second));
-    rename_row(&mut h, 0, "Canceled");
+    rename_dropdown_row(&mut h, 0, "Canceled");
     for index in (0..original.len()).rev() {
         click_id(&mut h, &format!("form.field.items.remove.{index}"));
     }
@@ -554,14 +556,14 @@ fn dropdown_edit_targets_its_instance_and_applies_one_undoable_change() {
     assert_eq!(h.state().session.history.undo.len(), undo);
 
     click_id(&mut h, &edit(second));
-    rename_row(&mut h, 1, "Amber");
+    rename_dropdown_row(&mut h, 1, "Amber");
     click_id(&mut h, "form.field.items.remove.2");
     click_id(&mut h, "form.field.items.add");
     h.key_press(egui::Key::Enter);
     h.run_steps(2);
     assert_eq!(h.state().dialog, Some(effectcraft_ui_egui::Dialog::Form), "an empty item keeps the draft open");
     assert_eq!(h.state().session.history.undo.len(), undo);
-    rename_row(&mut h, 2, "Night");
+    rename_dropdown_row(&mut h, 2, "Night");
     click_id(&mut h, "form.field.items.up.2");
     click_id(&mut h, "form.ok");
     assert_eq!(options(&h, second), ["Cool, blue", "Night", "Amber"]);
@@ -569,6 +571,42 @@ fn dropdown_edit_targets_its_instance_and_applies_one_undoable_change() {
     assert_eq!(h.state().session.history.undo.len(), undo + 1);
     assert!(h.state_mut().session.undo());
     assert_eq!(options(&h, second), original);
+}
+
+#[test]
+fn dropdown_text_undo_follows_the_item_and_starts_fresh_on_reopen() {
+    let mut session = Session::default();
+    session.execute("comp.new", json!({"width": 160, "height": 90})).unwrap();
+    session.execute("layer.newSolid", json!({})).unwrap();
+    let effect = session.execute("effect.apply", json!({"effect": "Dropdown Menu Control"})).unwrap()["effects"][0].as_u64().unwrap();
+    let mut app = EffectcraftApp::new(session);
+    app.show_panel(PanelKind::EffectControls);
+    app.toggle_maximize(PanelKind::EffectControls);
+    let mut h = Harness::builder().with_size(egui::vec2(1200.0, 800.0)).with_step_dt(1.0 / 60.0).build_eframe(|_| app);
+    h.run_steps(4);
+
+    let edit = format!("effectControls.effect.{effect}.edit");
+    let undo_in = |h: &mut Harness<'_, EffectcraftApp>, index| {
+        click_id(h, &format!("form.field.items.{index}"));
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+        h.run_steps(2);
+    };
+    let label = |h: &Harness<'_, EffectcraftApp>, index| h.state().auto.find(&format!("form.field.items.{index}")).unwrap().label.clone();
+
+    click_id(&mut h, &edit);
+    rename_dropdown_row(&mut h, 0, "Edited");
+    click_id(&mut h, "form.field.items.down.0");
+    assert_eq!(label(&h, 1), "Edited");
+    undo_in(&mut h, 0);
+    assert_eq!(label(&h, 0), "Item 2", "Undo in the old slot preserves its current item");
+    undo_in(&mut h, 1);
+    assert_eq!(label(&h, 1), "Item 1", "the moved item's own rename can still be undone");
+
+    rename_dropdown_row(&mut h, 1, "Saved");
+    click_id(&mut h, "form.ok");
+    click_id(&mut h, &edit);
+    undo_in(&mut h, 1);
+    assert_eq!(label(&h, 1), "Saved", "the reopened editor starts with the committed label");
 }
 
 #[test]
