@@ -333,7 +333,7 @@ fn a_very_narrow_spot_still_feathers_over_its_own_cone() {
         set(l, "lightOptions/coneFeather", Value::Scalar(100.0));
     });
     let k = ls.attenuation(vec3(500.0 * (0.002f64 * 0.99).to_radians().tan(), 0.0, 0.0));
-    assert!(k < 0.01, "{k}");
+    assert!((k - 0.00117).abs() < 0.0002, "{k}");
     assert!((ls.attenuation(vec3(0.0, 0.0, 0.0)) - 1.0).abs() < 1e-9);
 }
 

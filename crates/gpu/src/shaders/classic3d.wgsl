@@ -185,15 +185,20 @@ fn attenuation(l: u32, p: vec3<f32>) -> f32 {
         }
     }
     if (li.ints.x == 3u) {
-        // Smoothstep over the cosine of the angle (LightState::attenuation).
-        let cos_a = clamp(dot(-tl.xyz, li.dir.xyz), -1.0, 1.0);
-        let outer = cos(li.cone.x);
-        let inner = cos(li.cone.x * (1.0 - li.cone.y));
-        if (cos_a >= inner) {
-        } else if (cos_a <= outer) {
+        // Smoothstep over the cosine of the angle (LightState::attenuation), written with
+        // 1 - cos: half the squared distance between the unit vectors, and 2 sin²(angle / 2) for
+        // the cone. A cosine near 1 rounds to 1 in f32, which made narrow cones all or nothing.
+        let dv = -tl.xyz - li.dir.xyz;
+        let omc_a = 0.5 * dot(dv, dv);
+        let so = sin(0.5 * li.cone.x);
+        let si = sin(0.5 * li.cone.x * (1.0 - li.cone.y));
+        let outer = 2.0 * so * so;
+        let inner = 2.0 * si * si;
+        if (omc_a <= inner) {
+        } else if (omc_a >= outer) {
             k = 0.0;
         } else {
-            k *= smoothstep01((inner - cos_a) / (inner - outer)); // outer < cos_a < inner here
+            k *= smoothstep01((omc_a - inner) / (outer - inner)); // inner < omc_a < outer here
         }
     }
     return k;
