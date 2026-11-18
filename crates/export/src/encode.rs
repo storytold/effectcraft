@@ -393,10 +393,13 @@ pub(crate) async fn movie(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut St
     st.advance(first_end)?;
 
     let path = job.place(job.path, 1);
-    let mut file = job.create(&path)?;
+    let mut file = job.timed(Stage::Write, || job.create(&path))?;
     let opts = WriterOptions::new(brand);
     let movie_ts = opts.movie_timescale.max(1) as i128;
-    let mut mux: Writer = Mp4Writer::new(&mut file, opts).map_err(mux_err)?;
+    let t = Instant::now();
+    let mux = Mp4Writer::new(&mut file, opts).map_err(mux_err);
+    job.add_time(Stage::Write, t);
+    let mut mux: Writer = mux?;
     let mut vcfg = TrackConfig::new(venc.sample_entry(), rate.num as u32);
     if let Some(start) = venc.media_start() {
         // An explicit edit: the convenience `media_start` edit would subtract the B-frame delay
@@ -491,18 +494,20 @@ pub(crate) async fn movie(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut St
     let tail = job.timed(Stage::Encode, || venc.flush())?;
     job.timed(Stage::Write, || write_video(&mut mux, tail))?;
     job.timed_if(with_audio, Stage::Audio, || write_audio_until(&mut mux, span_end, &mut cursor))?;
+    // Each write is timed before its error is passed on: a failed export's line keeps the time.
     if let Some((Audio::Aac(e), at)) = audio.as_mut() {
-        let t = Instant::now();
-        for au in e.flush() {
-            mux.write_sample(*at, WriteSample { data: &au, duration: 1024, composition_offset: 0, is_sync: true }).map_err(mux_err)?;
-        }
-        job.add_time(Stage::Audio, t);
+        job.timed(Stage::Audio, || -> Result<()> {
+            for au in e.flush() {
+                mux.write_sample(*at, WriteSample { data: &au, duration: 1024, composition_offset: 0, is_sync: true }).map_err(mux_err)?;
+            }
+            Ok(())
+        })?;
     }
     let t = Instant::now();
-    let out = mux.finish().map_err(mux_err)?;
-    out.flush().map_err(mux_err)?;
-    let bytes = file.finish()?;
+    let finished = mux.finish().map_err(mux_err).and_then(|out| out.flush().map_err(mux_err));
     job.add_time(Stage::Write, t);
+    finished?;
+    let bytes = job.timed(Stage::Write, || file.finish())?;
     Ok(Report { path, frames: 0, width: w, height: h, seconds: 0.0, bytes, audio: with_audio, log: None, overflow: vec![], timing: Default::default() })
 }
 

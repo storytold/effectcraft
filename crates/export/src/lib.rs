@@ -455,8 +455,10 @@ async fn gif_export(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut State<'_
 
     validate_gif_dimensions(w, h)?;
     let path = job.place(job.path, 1);
-    let mut file = job.create(&path)?;
-    let mut enc = AnimationWriter::new(
+    // Each write is timed before its error is passed on: a failed export's line keeps the time.
+    let mut file = job.timed(pipeline::Stage::EncodeWrite, || job.create(&path))?;
+    let t = Instant::now();
+    let enc = AnimationWriter::new(
         &mut file,
         w,
         h,
@@ -466,7 +468,9 @@ async fn gif_export(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut State<'_
             speed: 10,
         },
     )
-    .map_err(|e| ExportError::Encode(e.to_string()))?;
+    .map_err(|e| ExportError::Encode(e.to_string()));
+    job.add_time(pipeline::Stage::EncodeWrite, t);
+    let mut enc = enc?;
     let rate = job.settings.rate(comp);
     // GIF delays are in 1/100 s: carry the rounding error so long animations keep their timing.
     let cs_per_frame = 100.0 * rate.den as f64 / rate.num as f64;
@@ -480,22 +484,24 @@ async fn gif_export(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut State<'_
             .frames(comp, (i..end).collect(), |_, img| craft_gif::write::prepare_frame(w, h, job.pixels_with(&img, comp, job.output.channels, w, h, false), 10))
             .await;
         let t = Instant::now();
-        for frame in frames {
+        let wrote = frames.into_iter().try_for_each(|frame| {
             clock += cs_per_frame;
             let d = (clock.round() as u64).saturating_sub(emitted).max(1);
             emitted += d;
             let frame = frame.map_err(|e| ExportError::Encode(e.to_string()))?;
-            enc.write_prepared_frame(frame, d.min(u16::MAX as u64) as u16).map_err(|e| ExportError::Encode(e.to_string()))?;
-        }
+            enc.write_prepared_frame(frame, d.min(u16::MAX as u64) as u16).map_err(|e| ExportError::Encode(e.to_string()))
+        });
         // The GIF writer compresses as it writes: the two are not measured apart.
         job.add_time(pipeline::Stage::EncodeWrite, t);
+        wrote?;
         st.advance(end - i)?;
         i = end;
     }
     let t = Instant::now();
-    let _ = enc.finish().map_err(|e| ExportError::Encode(e.to_string()))?;
-    let bytes = file.finish()?;
+    let finished = enc.finish().map(drop).map_err(|e| ExportError::Encode(e.to_string()));
     job.add_time(pipeline::Stage::EncodeWrite, t);
+    finished?;
+    let bytes = job.timed(pipeline::Stage::EncodeWrite, || file.finish())?;
     Ok(Report { path, frames: 0, width: w, height: h, seconds: 0.0, bytes, audio: false, log: None, overflow: vec![], timing: Default::default() })
 }
 
