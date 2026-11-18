@@ -130,7 +130,13 @@ impl Warp {
 
     /// The warp of a content point (content pixels → content pixels).
     pub fn apply(&self, p: [f64; 2], w: f64, h: f64) -> [f64; 2] {
-        let [l, t, r, b] = if self.bounds[2] > self.bounds[0] && self.bounds[3] > self.bounds[1] { self.bounds } else { [0.0, 0.0, w, h] };
+        // Keep the local mapping facade aligned with the shared bake evaluator.
+        let valid_bounds = self.bounds.iter().all(|x| x.is_finite())
+            && (self.bounds[2] - self.bounds[0]).is_finite()
+            && self.bounds[2] > self.bounds[0]
+            && (self.bounds[3] - self.bounds[1]).is_finite()
+            && self.bounds[3] > self.bounds[1];
+        let [l, t, r, b] = if valid_bounds { self.bounds } else { [0.0, 0.0, w, h] };
         let (bw, bh) = (r - l, b - t);
         let (u, v) = ((p[0] - l) / bw, (p[1] - t) / bh);
         if self.style == "warpCustom" {

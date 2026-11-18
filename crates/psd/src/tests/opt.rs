@@ -751,3 +751,24 @@ fn shared_placed_layer_adapter_normalizes_before_warp_classification() {
     assert!(!object.needs_bake());
     assert_eq!(object.map([10.0, 5.0], 20.0, 10.0), [10.0, 5.0]);
 }
+
+#[test]
+fn local_and_shared_warp_mapping_agree_on_overflowing_bounds() {
+    let mesh: Vec<_> = (0..4).flat_map(|j| (0..4).map(move |i| [i as f64 * 20.0 / 3.0, j as f64 * 10.0 / 3.0])).collect();
+    for bounds in [[-f64::MAX, 0.0, f64::MAX, 10.0], [0.0, -f64::MAX, 20.0, f64::MAX]] {
+        let shared = craft_psd::smart::SmartObject {
+            uuid: String::new(),
+            quad: [[0.0, 0.0], [20.0, 0.0], [20.0, 10.0], [0.0, 10.0]],
+            size: Some([20.0, 10.0]),
+            warp: Some(craft_psd::smart::Warp { style: "warpCustom".into(), bounds, cols: 1, rows: 1, mesh: mesh.clone(), ..Default::default() }),
+        };
+        let local = crate::placed::from_craft_smart(shared.clone());
+        for point in [[5.0, 2.5], [10.0, 5.0], [15.0, 7.5]] {
+            let actual = local.map(point, 20.0, 10.0);
+            assert_eq!(actual, shared.map(point, 20.0, 10.0));
+            for axis in 0..2 {
+                assert!((actual[axis] - point[axis]).abs() < 1e-9, "{bounds:?} {point:?}: {actual:?}");
+            }
+        }
+    }
+}
