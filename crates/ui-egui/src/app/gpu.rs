@@ -44,6 +44,9 @@ impl EffectcraftApp {
     pub fn set_gpu_failure_bridge(&mut self, bridge: gpu_failure::GpuFailureBridge) {
         if let Some(gpu) = &self.gpu {
             bridge.forward_to(gpu.context().device_failure_notifier());
+            if let Some(observer) = bridge.scoped_error_observer() {
+                gpu.set_scoped_error_observer(observer);
+            }
         }
         self.gpu_failures = Some(bridge);
     }
@@ -73,14 +76,30 @@ impl EffectcraftApp {
                 renderer.free_texture(id);
             }
             for (_, texture) in self.passive_tex.values() {
-                if let panels::viewers::PassiveTexture::Gpu(id, _) = texture {
-                    renderer.free_texture(id);
+                match texture {
+                    panels::viewers::PassiveTexture::Gpu(id, _) => renderer.free_texture(id),
+                    panels::viewers::PassiveTexture::Baked(b) => {
+                        if let Some(id) = b.id() {
+                            renderer.free_texture(&id);
+                        }
+                    }
+                    panels::viewers::PassiveTexture::Cpu(_) => {}
                 }
             }
+            drop(renderer);
         }
+        // The display pass's textures: half-float frames go through the CPU from now on.
+        self.viewer_bake.free(self.window_wgpu.as_ref());
+        self.snapshot_bake.free(self.window_wgpu.as_ref());
+        self.display_gpu = None;
+        self.window_wgpu = None;
         self.viewer_native = None;
         self.passive_tex.retain(|_, (_, texture)| matches!(texture, panels::viewers::PassiveTexture::Cpu(_)));
-        self.viewer_shown = self.viewer_tex.as_ref().map(|(texture, key, _)| (texture.id(), *key));
+        self.viewer_shown = match &self.viewer_f16 {
+            // A half-float frame stays on screen through the CPU pass.
+            Some(_) => self.viewer_shown.map(|(_, key)| (None, key)),
+            None => self.viewer_tex.as_ref().map(|(texture, key, _)| (Some(texture.id()), *key)),
+        };
         self.viewer_image = None;
         // Old completion closures retain only their detached slot, not the replacement.
         self.viewer_readback = Default::default();
@@ -152,6 +171,9 @@ impl EffectcraftApp {
             return;
         }
         let Some(rs) = frame.wgpu_render_state() else { return };
+        // The display pass needs only this device, not the compositor (which may take tens of
+        // seconds to build, or fail).
+        self.window_wgpu = Some(rs.clone());
         // Help ▸ System Compatibility Report names the adapter and backend the window got.
         let info = rs.adapter.get_info();
         self.session.window_adapter = Some(format!(
@@ -238,6 +260,9 @@ impl EffectcraftApp {
             Ok(Ok(g)) => {
                 if let Some(bridge) = &self.gpu_failures {
                     bridge.forward_to(g.context().device_failure_notifier());
+                    if let Some(observer) = bridge.scoped_error_observer() {
+                        g.set_scoped_error_observer(observer);
+                    }
                     if bridge.failure().is_some() {
                         return;
                     }

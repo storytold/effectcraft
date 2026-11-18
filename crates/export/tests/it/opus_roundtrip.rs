@@ -1,9 +1,9 @@
-//! Round trip of `effectcraft-opusenc` through FilmCraft's spec-derived Opus decoder, plus an
+//! Round trip of WebM export's Opus encoder (`craft_audio::opus::Encoder`) through FilmCraft's spec-derived Opus decoder, plus an
 //! ffmpeg oracle (skipped when ffmpeg is not installed) reading an Ogg Opus file written here.
 
 use std::process::Command;
 
-use effectcraft_opusenc::OpusEncoder;
+use craft_audio::opus::Encoder as OpusEncoder;
 
 const SR: f32 = 48_000.0;
 const FRAME: usize = OpusEncoder::FRAME_SIZE;
@@ -11,18 +11,18 @@ const FRAME: usize = OpusEncoder::FRAME_SIZE;
 /// Encodes interleaved `pcm`, padding the tail so the encoder's look-ahead is flushed.
 fn encode(pcm: &[f32], channels: u8, bitrate: u32) -> (OpusEncoder, Vec<Vec<u8>>) {
     let c = channels as usize;
-    let mut enc = OpusEncoder::new(channels, bitrate);
+    let mut enc = OpusEncoder::new(channels, bitrate).expect("1 or 2 channels");
     let total = pcm.len() / c + enc.pre_skip() as usize;
     let frames = total.div_ceil(FRAME);
     let mut padded = pcm.to_vec();
     padded.resize(frames * FRAME * c, 0.0);
-    let packets = padded.chunks(FRAME * c).map(|f| enc.encode_float(f)).collect();
+    let packets = padded.chunks(FRAME * c).map(|f| enc.encode_float(f).expect("one whole frame")).collect();
     (enc, packets)
 }
 
-/// Decodes with filmcraft-opus, drops the pre-skip and returns planar channels of `len` samples.
+/// Decodes with craft-audio, drops the pre-skip and returns planar channels of `len` samples.
 fn decode(head: &[u8], packets: &[Vec<u8>], len: usize) -> Vec<Vec<f32>> {
-    let mut dec = filmcraft_opus::Decoder::new(head).expect("OpusHead");
+    let mut dec = craft_audio::opus::Decoder::new(head).expect("OpusHead");
     dec.set_trim_pre_skip(true);
     let mut out: Vec<Vec<f32>> = vec![Vec::new(); dec.channels()];
     for p in packets {
@@ -303,7 +303,7 @@ fn ogg_page(out: &mut Vec<u8>, packet: &[u8], header_type: u8, granule: u64, seq
 fn ogg_opus(enc: &OpusEncoder, packets: &[Vec<u8>], len: usize) -> Vec<u8> {
     let mut out = Vec::new();
     ogg_page(&mut out, &enc.opus_head(), 0x02, 0, 0);
-    let vendor = b"effectcraft-opusenc";
+    let vendor = b"craft-audio";
     let mut tags = b"OpusTags".to_vec();
     tags.extend_from_slice(&(vendor.len() as u32).to_le_bytes());
     tags.extend_from_slice(vendor);
@@ -342,7 +342,8 @@ fn ffmpeg_oracle_decodes_ogg_opus() {
             }
         }
         let (enc, packets) = encode(&pcm, channels, rate);
-        let path = std::env::temp_dir().join(format!("effectcraft-opusenc-{}-{channels}.opus", std::process::id()));
+        let guard = tempfile::tempdir().unwrap();
+        let path = guard.path().join("out.opus");
         std::fs::write(&path, ogg_opus(&enc, &packets, len)).unwrap();
         let out = Command::new("ffmpeg")
             .args(["-v", "error", "-i"])

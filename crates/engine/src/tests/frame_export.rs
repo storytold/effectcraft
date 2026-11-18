@@ -358,3 +358,28 @@ fn proexr_layers_are_not_tone_mapped() {
         assert!((at(n) - want).abs() <= 1e-4 * want, "{n}: {} vs {want}", at(n));
     }
 }
+
+/// The `chromaticities` attribute of the ProEXR file `path`: red, green, blue, white (CIE xy).
+fn proexr_chromaticities(s: &mut Session, name: &str) -> Option<[[f32; 2]; 4]> {
+    let path = out_dir(name).join("frame.exr").to_string_lossy().to_string();
+    s.execute("comp.saveFrameAsExr", json!({"path": path})).unwrap();
+    let meta = exr::meta::MetaData::read_from_buffered(std::io::BufReader::new(std::fs::File::open(&path).unwrap()), false).unwrap();
+    meta.headers[0].shared_attributes.chromaticities.map(|c| [c.red, c.green, c.blue, c.white].map(|v| [v.0, v.1]))
+}
+
+/// ProEXR names the primaries and white of the output space (default: Rec. 709 / sRGB).
+#[test]
+fn proexr_writes_the_output_spaces_chromaticities() {
+    let d65 = [0.3127, 0.3290];
+    let mut s = frame();
+    assert_eq!(proexr_chromaticities(&mut s, "frame-exr-chroma-default"), Some([[0.64, 0.33], [0.30, 0.60], [0.15, 0.06], d65]));
+    s.execute("file.projectSettings", json!({"workingSpace": "srgb", "outputSpace": "p3"})).unwrap();
+    assert_eq!(proexr_chromaticities(&mut s, "frame-exr-chroma-p3"), Some([[0.680, 0.320], [0.265, 0.690], [0.150, 0.060], d65]));
+    s.execute("file.projectSettings", json!({"outputSpace": "rec2020"})).unwrap();
+    assert_eq!(proexr_chromaticities(&mut s, "frame-exr-chroma-2020"), Some([[0.708, 0.292], [0.170, 0.797], [0.131, 0.046], d65]));
+    s.execute("file.projectSettings", json!({"outputSpace": "rec2100pq"})).unwrap();
+    assert_eq!(proexr_chromaticities(&mut s, "frame-exr-chroma-pq"), Some([[0.708, 0.292], [0.170, 0.797], [0.131, 0.046], d65]));
+    // Unmanaged: the output space is ignored, the Working Gamma's curve (Rec. 709 primaries) decodes.
+    s.execute("file.projectSettings", json!({"workingSpace": "none", "outputSpace": "p3"})).unwrap();
+    assert_eq!(proexr_chromaticities(&mut s, "frame-exr-chroma-unmanaged"), Some([[0.64, 0.33], [0.30, 0.60], [0.15, 0.06], d65]));
+}

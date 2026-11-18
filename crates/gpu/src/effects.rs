@@ -274,7 +274,9 @@ pub(crate) fn box_passes(e: &mut Enc, img: &GpuImage, rx: &[usize], ry: &[usize]
     let mut cur = img.clone();
     let passes = rx.iter().map(|&r| (false, r)).chain(ry.iter().map(|&r| (true, r))).filter(|p| p.1 > 0);
     for (vertical, r) in passes {
-        let block = if vertical { (4 * r).clamp(32, 256) } else { 256 } as u32;
+        // Vertical sums restart every `block` rows as the CPU's do; a row is one running sum, as
+        // on the CPU (restarting it rounds differently).
+        let block = if vertical { (4 * r).clamp(32, 256) as u32 } else { cur.width.max(1) };
         let (lines, n) = if vertical { (cur.width, cur.height) } else { (cur.height, cur.width) };
         let mut p = Params::default();
         p.u[0] = [r as u32, repeat as u32, block, 0];
@@ -409,8 +411,12 @@ fn drop_shadow(e: &mut Enc, ctx: &EffectCtx, mut b: GBuf) -> Option<GBuf> {
     let dist = ctx.params.f("distance") * b.scale;
     let soft = ctx.params.f("softness") * b.scale;
     let only = ctx.params.b("shadowOnly");
-    let pad = (dist + soft * 1.5).ceil() as u32 + 2;
+    let pad = effectcraft_effects::drop_shadow_pad(dist, soft);
     if !ctx.adjustment {
+        // A margin cut to the pixel budget: the CPU blurs on past the buffer's edge (#3464).
+        if soft > 0.0 && effectcraft_effects::pad_within_budget(b.img.width, b.img.height, pad) < pad {
+            return None;
+        }
         b.pad(e, pad)?;
     }
     let (dx, dy) = (dir.sin() * dist, -dir.cos() * dist);
@@ -590,7 +596,7 @@ fn pointwise(e: &mut Enc, id: &str, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
             let (ox, oy) = b.to_px(pr.v2("transform/offset"));
             let s = f("transform/scale");
             let (sw, sh) = if pr.b("transform/uniformScaling") { (s, s) } else { (f("transform/scaleWidth"), f("transform/scaleHeight")) };
-            let sub = (f("subSettings/subScaling") / 100.0).clamp(0.1, 1.0);
+            let sub = effectcraft_effects::sub_scaling_ratio(f("subSettings/subScaling"));
             p.u[0] = [10, kind, octaves.ceil() as u32, f("evolutionOptions/seed") as u32 ^ 0x51ed];
             p.u[1] = [pr.b("invert") as u32, pr.e("overflow"), mode, 0];
             p.f[0] = [
@@ -606,7 +612,7 @@ fn pointwise(e: &mut Enc, id: &str, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
                 (f("opacity") as f32 / 100.0).clamp(0.0, 1.0),
                 (sh * effectcraft_effects::NOISE_CELL * b.scale).max(1.0) as f32,
             ];
-            p.f[3] = [(f("subSettings/subInfluence") as f32 / 100.0).clamp(0.0, 1.0), 1.0 / sub as f32, 0.0, 0.0];
+            p.f[3] = [(f("subSettings/subInfluence") as f32 / 100.0).clamp(0.0, 1.0), 1.0 / sub as f32, effectcraft_effects::OCTAVE_SCALE_MAX, 0.0];
         }
         _ => return None,
     }

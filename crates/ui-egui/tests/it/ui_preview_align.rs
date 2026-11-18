@@ -238,8 +238,9 @@ fn cache_frames_when_idle_fills_the_work_area() {
     let mut h = harness();
     let cid = h.state().session.active_comp_id().unwrap();
     let cached = |h: &Harness<'_, EffectcraftApp>| h.state().frames.cached_frames(&h.state().shown_series(cid)).len();
-    // Off: only a few frames ahead of the current time are prefetched (the work area is the
-    // whole 240 frames).
+    // Off (it is on by default): only a few frames ahead of the current time are prefetched (the
+    // work area is the whole 240 frames).
+    invoke(&mut h, "playback.cacheWhenIdle", json!({"value": false}));
     for _ in 0..120 {
         h.step();
         std::thread::sleep(std::time::Duration::from_millis(2));
@@ -284,6 +285,9 @@ fn playback_prefetches_past_the_cached_frames_ahead() {
     h.state_mut().use_manual_clock();
     h.state_mut().session.set_time(Tick::ZERO);
     invoke(&mut h, "playback.toggle", json!({}));
+    // The first pass sees the frames ahead cached and starts the clock (a silent preview holds
+    // its first frame until a few are, as one with sound does).
+    h.step();
     h.state_mut().clock_mut().advance(0.25);
     h.run_steps(2);
     assert!(h.state().playback.playing);
@@ -314,4 +318,121 @@ fn cache_frames_when_idle_survives_an_inverted_work_area() {
         std::thread::sleep(std::time::Duration::from_millis(2));
     }
     assert!(!h.state().playback.playing);
+}
+
+/// A preview that played at full rate and then stalls on frames that aren't cached still steps
+/// down: the rate from before the stall doesn't count once nothing was shown for a second. (The
+/// last second shown kept reading as full rate through the stall, and it never stepped down.)
+#[test]
+fn playback_that_stalls_after_keeping_up_steps_down() {
+    let mut h = harness();
+    h.state_mut().session.prefs.previews.adaptive_playback = true;
+    h.state().frames.set_budget(0);
+    h.state_mut().use_manual_clock();
+    invoke(&mut h, "playback.toggle", json!({}));
+    h.step();
+    assert!(h.state().playback.playing);
+    // A second shown at the comp's rate, just before the stall.
+    let t0 = h.state().now();
+    for i in 0..30 {
+        h.state_mut().playback.frame_shown(t0 - 1.0 + f64::from(i) / 30.0);
+    }
+    for _ in 0..25 {
+        h.state_mut().clock_mut().advance(0.1);
+        h.step();
+    }
+    assert_eq!(h.state().viewer_scale(1.0, 1.0), 0.5);
+}
+
+/// Settings ▸ Previews ▸ Lower Resolution When Playback Can't Keep Up: a preview at Auto that
+/// stalls for two seconds steps down to half its scale, two more to a quarter; an explicit Resolution and
+/// the pref turned off (its default) keep the scale, and stopping goes back to the viewer's.
+#[test]
+fn playback_that_cannot_keep_up_steps_down_a_resolution() {
+    let stall = |h: &mut Harness<'_, EffectcraftApp>, secs: f64| {
+        for _ in 0..(secs / 0.1).round() as usize {
+            h.state_mut().clock_mut().advance(0.1);
+            h.step();
+        }
+    };
+    let play = |h: &mut Harness<'_, EffectcraftApp>| {
+        h.state_mut().use_manual_clock();
+        invoke(h, "playback.toggle", json!({}));
+        h.step();
+        assert!(h.state().playback.playing);
+    };
+    let mut h = harness();
+    assert!(!h.state().session.prefs.previews.adaptive_playback, "off by default");
+    h.state_mut().session.prefs.previews.adaptive_playback = true;
+    // No room in the RAM preview: frames never stay cached and every pass stalls, as with a comp
+    // too heavy to render in real time.
+    h.state().frames.set_budget(0);
+    play(&mut h);
+    stall(&mut h, 1.5);
+    assert_eq!(h.state().viewer_scale(1.0, 1.0), 1.0, "it waits two seconds before it steps down");
+    stall(&mut h, 0.7);
+    assert_eq!(h.state().viewer_scale(1.0, 1.0), 0.5);
+    stall(&mut h, 1.5);
+    assert_eq!(h.state().viewer_scale(1.0, 1.0), 0.5, "and two more before the next step");
+    stall(&mut h, 0.7);
+    assert_eq!(h.state().viewer_scale(1.0, 1.0), 0.25);
+    invoke(&mut h, "playback.toggle", json!({}));
+    assert!(!h.state().playback.playing);
+    assert_eq!(h.state().viewer_scale(1.0, 1.0), 1.0, "stopped: the viewer's resolution again");
+
+    // An explicit Resolution is kept.
+    let cid = h.state().session.active_comp_id().unwrap();
+    std::sync::Arc::make_mut(&mut h.state_mut().session.project).comp_mut(cid).unwrap().resolution = effectcraft_engine::project::Resolution::Full;
+    play(&mut h);
+    stall(&mut h, 2.5);
+    assert_eq!(h.state().viewer_scale(1.0, 1.0), 1.0);
+    invoke(&mut h, "playback.toggle", json!({}));
+
+    // So is Auto with the pref off.
+    std::sync::Arc::make_mut(&mut h.state_mut().session.project).comp_mut(cid).unwrap().resolution = effectcraft_engine::project::Resolution::Auto;
+    h.state_mut().session.prefs.previews.adaptive_playback = false;
+    play(&mut h);
+    stall(&mut h, 2.5);
+    assert_eq!(h.state().viewer_scale(1.0, 1.0), 1.0);
+}
+
+/// A preview that renders every frame at once plays in real time even when the RAM preview holds
+/// only a few frames. (The pace measured its lead over twice the prefetch depth, more frames than
+/// a small RAM preview keeps ahead, so such a preview was slowed to a fraction of its frame rate.)
+#[test]
+fn a_preview_that_keeps_up_plays_in_real_time_with_a_small_ram_preview() {
+    let mut h = harness();
+    let cid = h.state().session.active_comp_id().unwrap();
+    let series = h.state().shown_series(cid);
+    let s = series.scale as f64 / 1000.0;
+    let frame = (320.0 * s).ceil() * (180.0 * s).ceil() * 4.0;
+    // Room for 4 frames (90 % of 5): the prefetch keeps the current frame and 2 after it.
+    h.state().frames.set_budget((frame * 5.0) as usize);
+    h.state_mut().use_manual_clock();
+    h.state_mut().session.set_time(Tick::ZERO);
+    invoke(&mut h, "playback.toggle", json!({}));
+    let fr = h.state().session.active_comp().unwrap().frame_rate;
+    // Rendering keeps up: the frames ahead are rendered before the clock moves on.
+    let settle = |h: &mut Harness<'_, EffectcraftApp>| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while std::time::Instant::now() < deadline {
+            h.step();
+            let cur = fr.frame_at(h.state().session.time());
+            let cached = h.state().frames.cached_frames(&series);
+            if (1..=2).all(|k| cached.contains(&((cur + k) % 240))) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        panic!("frames ahead never cached");
+    };
+    for _ in 0..48 {
+        settle(&mut h);
+        h.state_mut().clock_mut().advance(1.0 / 24.0);
+        h.step();
+    }
+    let pb = &h.state().playback;
+    assert!(pb.playing);
+    assert!(pb.pace >= 24.0 * 0.98, "plays at {} fps of 24", pb.pace);
+    assert!(fr.frame_at(h.state().session.time()) >= 40, "the clock kept real time: {:?}", h.state().session.time());
 }

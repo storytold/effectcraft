@@ -1,6 +1,6 @@
 //! Distort effects, batch 2: Turbulent Displace, Displacement Map (self as map), Optics
-//! Compensation, Magnify, Mesh Warp, Bezier Warp, CC Bend It, CC Lens, CC Page Turn, CC Tiler,
-//! CC Griddler.
+//! Compensation, Magnify, Mesh Warp, Bezier Warp, Two-Point Bend, Lens Distortion, Page Curl, Scaled Tiles,
+//! Tile Grid.
 //!
 //! Mesh Warp and Bezier Warp share a grid rasteriser: a (nx+1)×(ny+1) grid of destination points
 //! and matching source points is split into triangles, bucketed per output row and filled
@@ -85,11 +85,24 @@ const TURBULENT_PINNING: [&str; 15] = [
     "Pin Bottom Locked",
 ];
 
+/// The largest Amount, in buffer pixels, Turbulent Displace displaces by: 2^24, exact in f32.
+/// Only an expression gets past the -10000..10000 hard range. At this bound nearly every sample
+/// already lands far outside any buffer, and the padding and the CPU and GPU samplers' integer
+/// pixel positions (the gradient kinds move up to 2.5 × Amount) stay in range.
+const TURBULENT_MAX_AMOUNT_PX: f64 = 16_777_216.0;
+
+/// Turbulent Displace's Amount at `scale`, in buffer pixels, bounded to
+/// ±[`TURBULENT_MAX_AMOUNT_PX`]; `None` when nothing moves (zero, or not a number). Shared with
+/// the GPU path.
+pub fn turbulent_amount_px(ctx: &EffectCtx, scale: f64) -> Option<f64> {
+    let amount = ctx.params.f("amount") * scale;
+    (amount.abs() >= 1e-9).then(|| amount.clamp(-TURBULENT_MAX_AMOUNT_PX, TURBULENT_MAX_AMOUNT_PX))
+}
+
 fn turbulent_displace(ctx: &EffectCtx, mut b: Buf) -> Buf {
-    let amount = ctx.params.f("amount") * b.scale;
-    if amount.abs() < 1e-9 {
+    let Some(amount) = turbulent_amount_px(ctx, b.scale) else {
         return b;
-    }
+    };
     // TURBULENT_KINDS order: the "Smoother" variants (3, 4, 5) use a gentler octave falloff.
     let kind = ctx.params.e("displacement");
     let size = (ctx.params.f("size") * b.scale).max(1.0);
@@ -110,6 +123,11 @@ fn turbulent_displace(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let falloff = if (3..=5).contains(&kind) { 0.3 } else { 0.5 };
     let (lx, ly, lw, lh) = layer_rect(ctx, &b);
     let edge = (lw.min(lh) * if locked { 0.25 } else { 0.1 }).max(1.0);
+    // Locked: samples stay between the outermost pixel centres, or at the centre of a layer under
+    // a pixel across (a reduced resolution). Its bounds may still differ by rounding, so the
+    // clamp is max/min, which `f64::clamp` would panic on.
+    let (ix, iy) = (0.5f64.min(lw * 0.5), 0.5f64.min(lh * 0.5));
+    let lock = (lx + ix, lx + lw - ix, ly + iy, ly + lh - iy);
     let seed = (ctx.seed ^ 0x7d15).wrapping_add((ctx.params.f("evolutionOptions/randomSeed") as i64 as u32).wrapping_mul(0x9e37_79b9));
     let n = |u: f64, v: f64, s: u32| {
         let s = seed.wrapping_add(s);
@@ -156,7 +174,7 @@ fn turbulent_displace(ctx: &EffectCtx, mut b: Buf) -> Buf {
         };
         let (sx, sy) = (x + dx * k, y + dy * k);
         if locked {
-            return Some((sx.clamp(lx + 0.5, lx + lw - 0.5), sy.clamp(ly + 0.5, ly + lh - 0.5)));
+            return Some((sx.max(lock.0).min(lock.1), sy.max(lock.2).min(lock.3)));
         }
         Some((sx, sy))
     });
@@ -550,7 +568,7 @@ pub fn bezier_grid(ctx: &EffectCtx, offset: [f64; 2], scale: f64) -> (usize, Vec
     (n, dest, srcp)
 }
 
-// ---------------------------------------------------------------- CC Bend It
+// ---------------------------------------------------------------- Two-Point Bend
 
 fn bend_it(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let mut beta = ctx.params.f("bend").to_radians();
@@ -606,7 +624,7 @@ fn bend_it(ctx: &EffectCtx, mut b: Buf) -> Buf {
     b
 }
 
-// ---------------------------------------------------------------- CC Lens
+// ---------------------------------------------------------------- Lens Distortion
 
 fn cc_lens(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let c = b.to_px(ctx.params.v2("center"));
@@ -629,7 +647,7 @@ fn cc_lens(ctx: &EffectCtx, mut b: Buf) -> Buf {
     b
 }
 
-// ---------------------------------------------------------------- CC Page Turn
+// ---------------------------------------------------------------- Page Curl
 
 fn page_turn(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let f = b.to_px(ctx.params.v2("foldPosition"));
@@ -679,7 +697,7 @@ fn page_turn(ctx: &EffectCtx, mut b: Buf) -> Buf {
     b
 }
 
-// ---------------------------------------------------------------- CC Tiler / CC Griddler
+// ---------------------------------------------------------------- Scaled Tiles / Tile Grid
 
 fn cc_tiler(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let s = (ctx.params.f("scale") / 100.0).max(0.001);
@@ -736,14 +754,14 @@ pub fn specs() -> Vec<EffectSpec> {
             "Turbulent Displace",
             vec![
                 p("displacement", "Displacement", Value::Enum(0), popup(&TURBULENT_KINDS)),
-                p("amount", "Amount", num(50.0), slider(-1000.0, 1000.0, -200.0, 200.0, 1)),
+                p("amount", "Amount", num(50.0), slider(-10000.0, 10000.0, -200.0, 200.0, 1)),
                 p("size", "Size", num(100.0), slider(2.0, 4000.0, 2.0, 400.0, 1)),
                 p("offset", "Offset (Turbulence)", pt(0.5, 0.5), ParamUi::Point),
                 p("complexity", "Complexity", num(1.0), slider(1.0, 10.0, 1.0, 10.0, 1)),
                 p("evolution", "Evolution", num(0.0), ParamUi::Angle),
                 p("evolutionOptions/cycleEvolution", "Cycle Evolution", Value::Bool(false), ParamUi::Checkbox),
                 p("evolutionOptions/cycle", "Cycle (in Revolutions)", num(1.0), slider(1.0, 1000.0, 1.0, 20.0, 0)),
-                p("evolutionOptions/randomSeed", "Random Seed", num(0.0), slider(0.0, 10000.0, 0.0, 1000.0, 0)),
+                p("evolutionOptions/randomSeed", "Random Seed", num(0.0), slider(0.0, 100000.0, 0.0, 1000.0, 0)),
                 p("pinning", "Pinning", Value::Enum(1), popup(&TURBULENT_PINNING)),
                 p("resizeLayer", "Resize Layer", Value::Bool(false), ParamUi::Checkbox),
             ],
@@ -829,7 +847,7 @@ pub fn specs() -> Vec<EffectSpec> {
         ),
         spec(
             "ec.distort.ccbendit",
-            "CC Bend It",
+            "Two-Point Bend",
             vec![
                 p("bend", "Bend", num(0.0), ParamUi::Angle),
                 p("start", "Start", pt(0.5, 0.2), ParamUi::Point),
@@ -840,7 +858,7 @@ pub fn specs() -> Vec<EffectSpec> {
         ),
         spec(
             "ec.distort.cclens",
-            "CC Lens",
+            "Lens Distortion",
             vec![
                 p("center", "Center", pt(0.5, 0.5), ParamUi::Point),
                 p("size", "Size", num(50.0), slider(0.0, 400.0, 0.0, 200.0, 1)),
@@ -850,7 +868,7 @@ pub fn specs() -> Vec<EffectSpec> {
         ),
         spec(
             "ec.distort.ccpageturn",
-            "CC Page Turn",
+            "Page Curl",
             vec![
                 p("foldPosition", "Fold Position", pt(0.7, 0.7), ParamUi::Point),
                 p("foldDirection", "Fold Direction", num(315.0), ParamUi::Angle),
@@ -864,7 +882,7 @@ pub fn specs() -> Vec<EffectSpec> {
         ),
         spec(
             "ec.distort.cctiler",
-            "CC Tiler",
+            "Scaled Tiles",
             vec![
                 p("scale", "Scale", num(50.0), slider(1.0, 10000.0, 1.0, 200.0, 1)),
                 p("center", "Center", pt(0.5, 0.5), ParamUi::Point),
@@ -874,7 +892,7 @@ pub fn specs() -> Vec<EffectSpec> {
         ),
         spec(
             "ec.distort.ccgriddler",
-            "CC Griddler",
+            "Tile Grid",
             vec![
                 p("horizontalScale", "Horizontal Scale", num(100.0), slider(1.0, 1000.0, 1.0, 400.0, 1)),
                 p("verticalScale", "Vertical Scale", num(100.0), slider(1.0, 1000.0, 1.0, 400.0, 1)),
@@ -1008,6 +1026,75 @@ mod tests {
         let img = test_img(32, 24);
         assert_eq!(run("ec.distort.turbulentdisplace", &[("amount", num(0.0))], img.clone()).img, img);
         assert!(max_diff(&run("ec.distort.turbulentdisplace", &[], img.clone()).img, &img) > 1e-3);
+    }
+
+    /// #3469: Amount's hard range is After Effects' recorded valid range, -10000..10000; the
+    /// slider keeps its -200..200 scrub range.
+    #[test]
+    fn turbulent_displace_amount_takes_the_after_effects_range() {
+        let spec = crate::find("ec.distort.turbulentdisplace").unwrap();
+        let amount = spec.params.iter().find(|p| p.id == "amount").unwrap();
+        let ParamUi::Slider { min, max, slider_min, slider_max, .. } = amount.ui else { panic!("{:?}", amount.ui) };
+        assert_eq!((min, max, slider_min, slider_max), (-10000.0, 10000.0, -200.0, 200.0));
+    }
+
+    /// #3469: at either end of Amount's range, with every displacement kind, resized or not and
+    /// pinned or not, the output stays finite, in its alpha range and within the padding budget.
+    #[test]
+    fn turbulent_displace_extreme_amounts_stay_finite_and_bounded() {
+        let img = test_img(32, 24);
+        // Resize Layer grows the buffer to the padding budget (16 Mpx here), so it runs with two
+        // kinds; the rest stay layer-sized.
+        let cases = (0..9).flat_map(|kind| [(kind, 0, 0.0), (kind, 1, 0.0), (kind, 8, 0.0)]).chain([(0, 3, 1.0), (4, 14, 1.0)]);
+        for amount in [-10000.0, 10000.0] {
+            for (kind, pin, resize) in cases.clone() {
+                let set = [("amount", num(amount)), ("displacement", Value::Enum(kind)), ("pinning", Value::Enum(pin)), ("resizeLayer", num(resize))];
+                let o = run("ec.distort.turbulentdisplace", &set, img.clone());
+                let what = format!("amount {amount} kind {kind} pinning {pin} resize {resize}");
+                assert!(o.img.data.iter().all(|p| p.iter().all(|v| v.is_finite()) && (0.0..=1.0 + 1e-5).contains(&p[3])), "{what}");
+                let area = u64::from(o.img.width) * u64::from(o.img.height);
+                assert!(area <= 16_777_216, "{what}: {}x{}", o.img.width, o.img.height);
+            }
+        }
+    }
+
+    /// #3469: an Amount past the hard range, which only an expression produces, renders without
+    /// overflowing the padding or the sampler's pixel positions and stays finite (a plain, a
+    /// gradient and the cross kind; unpinned, pinned and locked); one that is not a number leaves
+    /// the layer as it is.
+    #[test]
+    fn turbulent_displace_unbounded_amounts_do_not_crash() {
+        let img = test_img(32, 24);
+        let cases = [0, 1, 8].into_iter().flat_map(|kind| [(kind, 0, 0.0), (kind, 1, 0.0), (kind, 11, 0.0)]).chain([(0, 1, 1.0)]);
+        for amount in [1e12, -1e300, f64::MAX, f64::INFINITY, f64::NEG_INFINITY] {
+            for (kind, pin, resize) in cases.clone() {
+                let set = [("amount", num(amount)), ("displacement", Value::Enum(kind)), ("pinning", Value::Enum(pin)), ("resizeLayer", num(resize))];
+                let o = run("ec.distort.turbulentdisplace", &set, img.clone());
+                assert!(o.img.data.iter().all(|p| p.iter().all(|v| v.is_finite())), "{amount} kind {kind} pinning {pin} resize {resize}");
+            }
+        }
+        for resize in [0.0, 1.0] {
+            assert_eq!(run("ec.distort.turbulentdisplace", &[("amount", num(f64::NAN)), ("resizeLayer", num(resize))], img.clone()).img, img);
+        }
+    }
+
+    /// #3469: a locked pinning on a layer under a buffer pixel across (a 1-pixel layer at half or
+    /// third resolution, anywhere in the buffer) keeps samples inside it without its rounded
+    /// bounds crossing, at any Amount.
+    #[test]
+    fn turbulent_displace_locked_pinning_on_a_subpixel_layer_does_not_crash() {
+        let spec = crate::find("ec.distort.turbulentdisplace").unwrap();
+        for amount in [-10000.0, 50.0, 10000.0] {
+            let mut params = Params { values: spec.params.iter().map(|p| (p.id.to_string(), p.default.clone())).collect() };
+            params.values.insert("amount".into(), num(amount));
+            params.values.insert("pinning".into(), Value::Enum(8));
+            for (size, scale, offset) in [(1.0, 0.5, 0.0), (1.0, 1.0 / 3.0, -8.0), (1.0, 1.0 / 3.0, 7.0), (0.9, 1.0, -8.0), (f64::NAN, 1.0, 0.0)] {
+                let ctx = EffectCtx { params: &params, time: 0.5, layer_size: [size, size], seed: 3, adjustment: false, env: Default::default() };
+                let o = crate::apply(spec, &ctx, Buf { img: test_img(2, 2), offset: [offset, offset], scale });
+                // A layer size that is not a number only has to render without panicking.
+                assert!(size.is_nan() || o.img.data.iter().all(|p| p.iter().all(|v| v.is_finite())), "{amount} {size} {scale} {offset}");
+            }
+        }
     }
 
     #[test]

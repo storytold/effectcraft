@@ -409,7 +409,67 @@ pub fn selection_hashes(sel: &str, manifest: Option<&[(String, u32)]>) -> Vec<u3
     out
 }
 
+/// The Cryptomatte layers every renderer names, and the Layer popup's options when the footage
+/// has no Cryptomatte metadata. The stored Layer value is an index: 0-2 are these (an exact
+/// match or a suffix such as `ViewLayer.CryptoObject`), 3 and up are the file's other Cryptomatte
+/// layers in name order, so a project saved before the popup followed the footage loads unchanged.
 pub const CRYPTO_LAYERS: [&str; 3] = ["CryptoObject", "CryptoMaterial", "CryptoAsset"];
+
+/// The Layer popup's entries for Cryptomatte `layers` (sorted, as [`AuxChannels::crypto_layers`]
+/// returns them): the stored value and the layer's name, in value order. Of several layers
+/// that fit one standard slot (`A.CryptoObject`, `B.CryptoObject`) the first one keeps the standard
+/// slot, so existing projects load unchanged, and the others get the next custom slots.
+fn crypto_layer_slots(layers: &[String]) -> Vec<(usize, &str)> {
+    let mut out: Vec<(usize, &str)> = vec![];
+    let mut custom = CRYPTO_LAYERS.len();
+    for l in layers {
+        match CRYPTO_LAYERS.iter().position(|w| l == w || l.ends_with(w)) {
+            Some(i) if !out.iter().any(|(j, _)| *j == i) => out.push((i, l)),
+            _ => {
+                out.push((custom, l));
+                custom += 1;
+            }
+        }
+    }
+    out.sort_by_key(|(i, _)| *i);
+    out
+}
+
+/// What the Layer popup lists for the footage `aux`: the Cryptomatte layers the file has, as
+/// (stored value, name), or the three standard ones when there is none (no footage, not an
+/// OpenEXR, no Cryptomatte channels).
+pub fn crypto_layer_choices(aux: Option<&AuxChannels>) -> Vec<(usize, String)> {
+    crypto_layer_menu(aux, 0).0
+}
+
+/// The Layer popup for the stored value `index`: [`crypto_layer_choices`], and the name of the
+/// entry the effect reads (the first when `index` names none, as the effect does).
+pub fn crypto_layer_menu(aux: Option<&AuxChannels>, index: usize) -> (Vec<(usize, String)>, Option<String>) {
+    let layers = aux.map(AuxChannels::crypto_layers).unwrap_or_default();
+    if layers.is_empty() {
+        let all: Vec<(usize, String)> = CRYPTO_LAYERS.iter().enumerate().map(|(i, n)| (i, n.to_string())).collect();
+        let shown = all.iter().find(|c| c.0 == index).or(all.first()).map(|c| c.1.clone());
+        return (all, shown);
+    }
+    let slots = crypto_layer_slots(&layers);
+    let shown = slots.iter().find(|(i, _)| *i == index).map(|(_, n)| n.to_string()).or_else(|| layers.first().cloned());
+    (slots.into_iter().map(|(i, n)| (i, n.to_string())).collect(), shown)
+}
+
+/// The Cryptomatte layer the effect reads: the one called `name` when the footage has it (Layer
+/// Name, the layer an imported After Effects project names), else [`crypto_layer_name`]'s.
+pub fn crypto_layer_named(aux: &AuxChannels, name: &str, index: usize) -> Option<String> {
+    aux.resolve_crypto_layer_named(name, &crypto_layer_name(aux, index)?)
+}
+
+/// The Cryptomatte layer of `aux` that the stored Layer value `index` reads: its slot's layer, else
+/// the first layer (what a file without that layer has always shown). `None` without any.
+pub fn crypto_layer_name(aux: &AuxChannels, index: usize) -> Option<String> {
+    if aux.crypto_layers().is_empty() {
+        return None;
+    }
+    crypto_layer_menu(Some(aux), index).1
+}
 
 /// Rank planes as [`AuxChannels::crypto_rank_planes`] returns them.
 type RankPlanes<'a> = [(&'a [f32], &'a [f32])];
@@ -524,12 +584,7 @@ pub fn matte_only_px(m: f32, in_alpha: bool) -> Px {
 
 fn cryptomatte(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let Some(a) = aux(ctx) else { return b };
-    let layers = a.crypto_layers();
-    if layers.is_empty() {
-        return b;
-    }
-    let want = CRYPTO_LAYERS[(ctx.params.e("layer") as usize).min(2)];
-    let layer = layers.iter().find(|l| l.as_str() == want || l.ends_with(want)).unwrap_or(&layers[0]).clone();
+    let Some(layer) = crypto_layer_named(&a, ctx.params.s("layerName"), ctx.params.e("layer") as usize) else { return b };
     let manifest = a.manifests.iter().find(|(l, _)| *l == layer).map(|(_, m)| m.as_slice());
     let sel = selection_hashes(ctx.params.s("selection"), manifest);
     let idx = index_map(&b, &a);
@@ -564,6 +619,39 @@ fn cryptomatte(ctx: &EffectCtx, mut b: Buf) -> Buf {
 
 // ---------------------------------------------------------------- EXtractoR
 
+/// EXtractoR's channel name for After Effects' `(copy)`: the effect input's own channel of the
+/// same position (red's red ... alpha's alpha), as the earlier effects left it, never a footage
+/// channel of some name (an OpenEXR's `A` is the file's alpha, not the input's).
+pub const EXTRACTOR_COPY: &str = "(copy)";
+
+/// Whether an EXtractoR channel name is [`EXTRACTOR_COPY`].
+pub fn is_extractor_copy(name: &str) -> bool {
+    name.trim().eq_ignore_ascii_case(EXTRACTOR_COPY)
+}
+
+/// The layer's own channel an EXtractoR output channel at position `k` reads when no footage
+/// channel of that name exists: `R`/`G`/`B`/`A` (or the long names) by name, [`EXTRACTOR_COPY`]
+/// its own position.
+pub fn extractor_own_channel(k: usize, name: &str) -> Option<usize> {
+    if is_extractor_copy(name) {
+        return (k < 4).then_some(k);
+    }
+    match name.trim().to_ascii_uppercase().as_str() {
+        "R" | "RED" => Some(0),
+        "G" | "GREEN" => Some(1),
+        "B" | "BLUE" => Some(2),
+        "A" | "ALPHA" => Some(3),
+        _ => None,
+    }
+}
+
+/// The footage channel an EXtractoR output channel reads by name: none for an empty name or
+/// [`EXTRACTOR_COPY`] (the input's own channel).
+pub fn extractor_aux_channel<'a>(a: &'a AuxChannels, name: &str) -> Option<&'a [f32]> {
+    let n = name.trim();
+    if n.is_empty() || is_extractor_copy(n) { None } else { a.get(n) }
+}
+
 fn extractor(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let a = aux(ctx);
     let names = [ctx.params.s("red"), ctx.params.s("green"), ctx.params.s("blue"), ctx.params.s("alpha")];
@@ -571,17 +659,11 @@ fn extractor(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let unmult = ctx.params.b("unMult");
     let clip = ctx.params.b("clip");
     let idx = a.as_ref().map(|a| index_map(&b, a));
-    // Each output channel: an aux channel by name, or the layer's own R/G/B/A.
-    let own = |n: &str| match n.trim().to_ascii_uppercase().as_str() {
-        "R" | "RED" => Some(0),
-        "G" | "GREEN" => Some(1),
-        "B" | "BLUE" => Some(2),
-        "A" | "ALPHA" => Some(3),
-        "" => None,
-        _ => None,
-    };
-    let src_ch: Vec<Option<&[f32]>> = names.iter().map(|n| a.as_ref().and_then(|a| if n.trim().is_empty() { None } else { a.get(n.trim()) })).collect();
-    if src_ch.iter().all(Option::is_none) && bp == 0.0 && wp == 1.0 && !unmult && names.iter().enumerate().all(|(k, n)| own(n) == Some(k)) {
+    // Each output channel: an aux channel by name, or the layer's own R/G/B/A (`(copy)`: its
+    // own position, never an aux channel).
+    let own = |k: usize, n: &str| extractor_own_channel(k, n);
+    let src_ch: Vec<Option<&[f32]>> = names.iter().map(|n| a.as_ref().and_then(|a| extractor_aux_channel(a, n))).collect();
+    if src_ch.iter().all(Option::is_none) && bp == 0.0 && wp == 1.0 && !unmult && names.iter().enumerate().all(|(k, n)| own(k, n) == Some(k)) {
         return b;
     }
     let src = b.img.clone();
@@ -597,7 +679,7 @@ fn extractor(ctx: &EffectCtx, mut b: Buf) -> Buf {
             o[k] = match (src_ch[k], idx.as_ref().and_then(|m| m[i])) {
                 (Some(ch), Some(j)) => ch[j],
                 (Some(_), None) => 0.0,
-                (None, _) => match own(names[k]) {
+                (None, _) => match own(k, names[k]) {
                     Some(c) => straight[c],
                     None => {
                         if k == 3 {
@@ -657,6 +739,10 @@ pub fn specs() -> Vec<EffectSpec> {
                 p("display", "Display", Value::Enum(2), popup(&["Colors", "Matte", "Preview"])),
                 p("matteOnly", "Matte Only", Value::Bool(false), ParamUi::Checkbox),
                 p(MATTE_ONLY_IN_ALPHA, "Matte Only In Alpha", Value::Bool(false), ParamUi::Hidden),
+                // A layer named in full (`CryptoMaterial`); empty uses Layer. Last, so the
+                // earlier parameters keep their indexes and saved instances, which get it
+                // appended, have the same order as new ones.
+                text("layerName", "Layer Name", ""),
             ],
             cryptomatte,
         ),

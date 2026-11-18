@@ -4,6 +4,7 @@
 use std::collections::BTreeMap;
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::Condvar;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
@@ -90,6 +91,48 @@ fn run_deadlines(inner: &Inner) {
 pub(crate) struct Ticket {
     owner: Weak<Readbacks>,
     id: u64,
+}
+
+/// Tracks one GPU buffer mapping shared by the callback and its waiter. A timeout can race a
+/// late callback, so the buffer must be unmapped exactly once. A failed map is never unmapped.
+pub(crate) struct Mapping(AtomicU8);
+
+impl Mapping {
+    const PENDING: u8 = 0;
+    const MAPPED: u8 = 1;
+    const FAILED: u8 = 2;
+    const FINISHED: u8 = 3;
+
+    pub(crate) fn new() -> Self {
+        Self(AtomicU8::new(Self::PENDING))
+    }
+
+    /// Claim a successful map callback. False means a timeout already cancelled the map.
+    pub(crate) fn mapped(&self) -> bool {
+        self.0.compare_exchange(Self::PENDING, Self::MAPPED, Ordering::AcqRel, Ordering::Acquire).is_ok()
+    }
+
+    /// Record a failed map so the waiter will not unmap a buffer that was never mapped.
+    pub(crate) fn failed(&self) {
+        let _ = self.0.compare_exchange(Self::PENDING, Self::FAILED, Ordering::AcqRel, Ordering::Acquire);
+    }
+
+    /// Unmap once if mapping is pending (cancel it) or mapped (release it).
+    pub(crate) fn unmap(&self, unmap: impl FnOnce()) {
+        let mut unmap = Some(unmap);
+        loop {
+            let state = self.0.load(Ordering::Acquire);
+            if state != Self::PENDING && state != Self::MAPPED {
+                return;
+            }
+            if self.0.compare_exchange(state, Self::FINISHED, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+                if let Some(unmap) = unmap.take() {
+                    unmap();
+                }
+                return;
+            }
+        }
+    }
 }
 
 /// User callbacks run outside locks and are isolated one at a time. On panic=abort
@@ -367,20 +410,32 @@ thread_local! {
 
 /// Validate every row before publishing tightly packed bytes.
 pub(crate) fn packed(view: &[u8], row: usize, stride: usize, height: usize) -> Result<Vec<u8>, Error> {
-    if row == 0 || height == 0 || stride < row {
+    rows(view, row, stride, height)
+}
+
+/// The `height` rows of `row` bytes each, `stride` bytes apart in the mapped `view`, as tightly
+/// packed `T`s: one copy, straight from the mapped rows into a vector reserved once (no
+/// zero-filled buffer first, no intermediate byte vector). Every row is validated before any
+/// is copied. A row that is not aligned for `T` is decoded value by value (same bytes).
+pub(crate) fn rows<T: bytemuck::Pod>(view: &[u8], row: usize, stride: usize, height: usize) -> Result<Vec<T>, Error> {
+    let unit = std::mem::size_of::<T>().max(1);
+    if row == 0 || height == 0 || stride < row || !row.is_multiple_of(unit) {
         return Err("invalid GPU readback layout".into());
     }
-    let size = row.checked_mul(height).ok_or("GPU readback output size overflow")?;
+    let size = row.checked_mul(height).ok_or("GPU readback output size overflow")? / unit;
     let end = (height - 1).checked_mul(stride).and_then(|s| s.checked_add(row)).ok_or("GPU readback mapped size overflow")?;
     if view.len() < end {
         return Err(format!("short GPU readback: {} bytes, needs {end}", view.len()));
     }
-    let mut out = Vec::new();
+    let mut out: Vec<T> = Vec::new();
     out.try_reserve_exact(size).map_err(|e| format!("allocating GPU readback output: {e}"))?;
     for y in 0..height {
         let start = y.checked_mul(stride).ok_or("GPU readback row overflow")?;
-        let bytes = view.get(start..start + row).ok_or("short GPU readback row")?;
-        out.extend_from_slice(bytes);
+        let bytes = start.checked_add(row).and_then(|e| view.get(start..e)).ok_or("short GPU readback row")?;
+        match bytemuck::try_cast_slice::<u8, T>(bytes) {
+            Ok(values) => out.extend_from_slice(values),
+            Err(_) => out.extend(bytes.chunks_exact(unit).map(bytemuck::pod_read_unaligned::<T>)),
+        }
     }
     Ok(out)
 }
@@ -389,6 +444,83 @@ pub(crate) fn packed(view: &[u8], row: usize, stride: usize, height: usize) -> R
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn timeout_racing_late_map_callback_unmaps_once() {
+        let mapping = Arc::new(Mapping::new());
+        let unmap_calls = Arc::new(AtomicUsize::new(0));
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+
+        let timeout_mapping = Arc::clone(&mapping);
+        let timeout_calls = Arc::clone(&unmap_calls);
+        let timeout_barrier = Arc::clone(&barrier);
+        let timeout = std::thread::spawn(move || {
+            timeout_barrier.wait();
+            timeout_mapping.unmap(|| {
+                timeout_calls.fetch_add(1, Ordering::SeqCst);
+            });
+        });
+
+        let callback_mapping = Arc::clone(&mapping);
+        let callback_calls = Arc::clone(&unmap_calls);
+        let callback_barrier = Arc::clone(&barrier);
+        let callback = std::thread::spawn(move || {
+            callback_barrier.wait();
+            if callback_mapping.mapped() {
+                callback_mapping.unmap(|| {
+                    callback_calls.fetch_add(1, Ordering::SeqCst);
+                });
+            }
+        });
+
+        barrier.wait();
+        timeout.join().unwrap();
+        callback.join().unwrap();
+        assert_eq!(unmap_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn timeout_before_map_callback_cancels_late_map() {
+        let mapping = Mapping::new();
+        let unmap_calls = AtomicUsize::new(0);
+
+        mapping.unmap(|| {
+            unmap_calls.fetch_add(1, Ordering::SeqCst);
+        });
+        assert!(!mapping.mapped());
+        mapping.unmap(|| {
+            unmap_calls.fetch_add(1, Ordering::SeqCst);
+        });
+
+        assert_eq!(unmap_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn mapped_callback_and_timeout_release_once() {
+        let mapping = Mapping::new();
+        let unmap_calls = AtomicUsize::new(0);
+        assert!(mapping.mapped());
+
+        mapping.unmap(|| {
+            unmap_calls.fetch_add(1, Ordering::SeqCst);
+        });
+        mapping.unmap(|| {
+            unmap_calls.fetch_add(1, Ordering::SeqCst);
+        });
+
+        assert_eq!(unmap_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn failed_map_is_not_unmapped() {
+        let mapping = Mapping::new();
+        let unmap_calls = AtomicUsize::new(0);
+        mapping.failed();
+        mapping.unmap(|| {
+            unmap_calls.fetch_add(1, Ordering::SeqCst);
+        });
+        assert_eq!(unmap_calls.load(Ordering::SeqCst), 0);
+    }
 
     #[test]
     fn early_rejection_reports_no_pixels_exactly_once() {
@@ -657,5 +789,29 @@ mod tests {
     fn no_partial_rows() {
         assert!(packed(&[0; 7], 4, 4, 2).is_err());
         assert_eq!(packed(&[1, 2, 0, 0, 3, 4], 2, 4, 2).unwrap(), vec![1, 2, 3, 4]);
+    }
+
+    /// #3335: rows go from the mapped buffer straight into the destination type, skipping the
+    /// row padding, whether or not the mapped bytes are aligned for it.
+    #[test]
+    fn rows_copy_once_into_the_destination_type() {
+        // Two rows of two RGBA f32 pixels, padded to a 48-byte stride.
+        let px = |i: f32| [i, i + 0.25, i + 0.5, 1.0];
+        let want = vec![px(1.0), px(2.0), px(3.0), px(4.0)];
+        let mut view = Vec::new();
+        for r in want.chunks(2) {
+            view.extend_from_slice(bytemuck::cast_slice(r));
+            view.extend_from_slice(&[0xAB; 16]);
+        }
+        assert_eq!(rows::<[f32; 4]>(&view, 32, 48, 2).unwrap(), want);
+        // The same bytes one byte off any f32 alignment decode the same.
+        let mut shifted = vec![0u8];
+        shifted.extend_from_slice(&view);
+        assert_eq!(rows::<[f32; 4]>(&shifted[1..], 32, 48, 2).unwrap(), want);
+        // A row that isn't whole pixels, a short last row and a stride under the row fail.
+        assert!(rows::<[f32; 4]>(&view, 30, 48, 2).is_err());
+        assert!(rows::<[f32; 4]>(&view[..view.len() - 17], 32, 48, 2).is_err());
+        assert!(rows::<[f32; 4]>(&view, 32, 16, 2).is_err());
+        assert_eq!(rows::<u8>(&[1, 2, 9, 3, 4], 2, 3, 2).unwrap(), vec![1, 2, 3, 4]);
     }
 }
