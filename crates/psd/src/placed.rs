@@ -334,8 +334,7 @@ impl SmartObject {
     /// the baked image would exceed [`MAX_BAKE_PIXELS`] or the mesh needs more rasterising work than
     /// the budget allows.
     pub fn render_placed(&self, content: &Pixels, k: f64, size: Option<(u32, u32)>) -> Option<(Pixels, [f64; 2])> {
-        let img = craft_psd::FloatImage { width: content.width, height: content.height, data: content.data.clone() };
-        let (out, origin) = to_craft_smart(self).render_placed(&img, k, size)?;
+        let (out, origin) = to_craft_smart(self).render_placed_pixels(content.width, content.height, &content.data, k, size)?;
         Some((Pixels { width: out.width, height: out.height, data: out.data }, origin))
     }
 }

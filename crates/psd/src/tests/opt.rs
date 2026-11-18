@@ -650,3 +650,69 @@ fn placed_bake_solves_the_quad_once() {
     so.map([1.0, 1.0], 20.0, 10.0);
     assert_eq!(counters::take(&QUAD), 1);
 }
+
+#[test]
+fn shared_unpredict_keeps_tail_bytes_and_refuses_unbudgeted_scratch() {
+    for depth in [8u16, 16, 32] {
+        let p = Psd { depth, ..base() };
+        let (w, h) = (3, 2);
+        let row = w * usize::from(depth / 8);
+        let mut actual: Vec<u8> = (0..row * 3 + 1).map(|i| (i * 31 % 251) as u8).collect();
+        let mut expected = actual.clone();
+        ref_unpredict(depth, &mut expected, w, h);
+        p.unpredict(&mut actual, w, h, &mut Budget::new(u64::MAX)).unwrap();
+        assert_eq!(actual, expected, "complete extra rows and partial tails stay untouched");
+    }
+    let p = Psd { depth: 32, ..base() };
+    let mut bytes = vec![0x31; 24];
+    assert!(p.unpredict(&mut bytes, 3, 2, &mut Budget::new(11)).is_err());
+    assert_eq!(bytes, vec![0x31; 24], "budget refusal precedes mutation");
+}
+
+#[test]
+fn shared_descriptor_parser_preserves_application_count_limits() {
+    use craft_psd::descriptor::{Descriptor as Shared, Value};
+    let mut bytes = Shared::new("test").to_bytes();
+    let end = bytes.len();
+    bytes[end - 4..].copy_from_slice(&100_001u32.to_be_bytes());
+    let error = crate::descriptor::read_descriptor(&mut Reader::new(&bytes)).unwrap_err();
+    assert!(matches!(error, Error::Invalid(ref message) if message.contains("too many descriptor items")));
+    let mut bytes = Shared::new("test").with("list", Value::List(vec![])).to_bytes();
+    let end = bytes.len();
+    bytes[end - 4..].copy_from_slice(&1_000_001u32.to_be_bytes());
+    let error = crate::descriptor::read_descriptor(&mut Reader::new(&bytes)).unwrap_err();
+    assert!(matches!(error, Error::Invalid(ref message) if message.contains("too many descriptor list items")));
+}
+
+#[test]
+fn placed_bake_keeps_the_borrowed_source_available_on_rejection() {
+    let object = SmartObject { uuid: String::new(), quad: [[0.0, 0.0], [2.0, 0.0], [2.0, 2.0], [0.0, 2.0]], size: None, warp: None };
+    let source = Pixels { width: 2, height: 2, data: vec![[1.0, 0.5, 0.25, 0.5]; 4] };
+    let original = source.data.clone();
+    let ptr = source.data.as_ptr();
+    assert!(object.render_placed(&source, 1.0, Some((u32::MAX, u32::MAX))).is_none());
+    assert_eq!(source.data, original);
+    assert_eq!(source.data.as_ptr(), ptr);
+    assert!(object.render_placed(&source, 1.0, Some((2, 2))).is_some());
+}
+
+#[test]
+fn identifier_and_index_references_preserve_non_null_classes_exactly() {
+    use craft_psd::descriptor::{Class, Descriptor as Shared, Id, ReferenceItem, UnicodeString, Value};
+    for class in [
+        Class { name: UnicodeString(vec![0xD800, 0]), class_id: Id::Code(*b"Lyr ") },
+        Class { name: UnicodeString::default(), class_id: Id::Code(*b"null") },
+        Class { name: UnicodeString::default(), class_id: Id::Str(b"null".to_vec()) },
+        Class { name: UnicodeString(vec![0]), class_id: Id::Code(*b"null") },
+    ] {
+        let mut original = Shared::new("test")
+            .with("refs", Value::Reference(vec![ReferenceItem::Identifier { class: class.clone(), id: u32::MAX }, ReferenceItem::Index { class, index: 7 }]));
+        original.name = UnicodeString(vec![0]);
+        let bytes = original.to_bytes();
+        let local = crate::descriptor::read_descriptor(&mut Reader::new(&bytes)).unwrap();
+        let mut out = Vec::new();
+        crate::descriptor::write_descriptor(&mut out, &local);
+        assert_eq!(Shared::from_bytes(&out).unwrap(), original);
+        assert_eq!(out, bytes);
+    }
+}

@@ -234,7 +234,9 @@ impl Psd {
                 l.adjustment = Some(Adjustment::Other(String::from_utf8_lossy(key).into_owned()));
             }
             b"SoLd" | b"SoLE" => {
-                l.smart_object = Some(placed::from_craft_smart(craft_psd::smart::SmartObject::from_placed_layer_data(b).map_err(|e| error(&e))?));
+                l.smart_object = Some(placed::from_craft_smart(
+                    craft_psd::smart::SmartObject::from_placed_layer_data_with_limits(b, crate::descriptor::PARSE_LIMITS).map_err(|e| error(&e))?,
+                ));
             }
             b"PlLd" if l.smart_object.is_none() => {
                 l.smart_object = Some(placed::from_craft_smart(craft_psd::smart::SmartObject::from_placed_layer(b).map_err(|e| error(&e))?));
