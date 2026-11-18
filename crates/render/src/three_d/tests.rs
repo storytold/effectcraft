@@ -325,16 +325,20 @@ fn spot_feather_falls_off_over_the_cosine_of_the_angle() {
 
 #[test]
 fn a_very_narrow_spot_still_feathers_over_its_own_cone() {
-    // Cone 0.004 degrees, feather 100 %: at 99 % of the half-angle the smoothstep leaves about
-    // 0.12 % of the light. A floor on the interval wider than the cone used to leave far more.
-    let ls = light_state(LightKind::Spot, |l| {
-        set(l, "transform/poi", Value::Vec3([0.0, 0.0, 0.0]));
-        set(l, "lightOptions/coneAngle", Value::Scalar(0.004));
-        set(l, "lightOptions/coneFeather", Value::Scalar(100.0));
-    });
-    let k = ls.attenuation(vec3(500.0 * (0.002f64 * 0.99).to_radians().tan(), 0.0, 0.0));
-    assert!((k - 0.00117).abs() < 0.0002, "{k}");
-    assert!((ls.attenuation(vec3(0.0, 0.0, 0.0)) - 1.0).abs() < 1e-9);
+    // Feather 100 %: at 99 % of the half-angle the smoothstep leaves about 0.12 % of the light.
+    // A floor on the interval wider than the cone used to leave far more (cone 0.004 degrees);
+    // below about 1e-6 degrees every f64 cosine in the cone is 1, so it went all or nothing
+    // (cone 1e-7 degrees).
+    for cone in [0.004, 1e-7] {
+        let ls = light_state(LightKind::Spot, |l| {
+            set(l, "transform/poi", Value::Vec3([0.0, 0.0, 0.0]));
+            set(l, "lightOptions/coneAngle", Value::Scalar(cone));
+            set(l, "lightOptions/coneFeather", Value::Scalar(100.0));
+        });
+        let k = ls.attenuation(vec3(500.0 * (cone / 2.0 * 0.99).to_radians().tan(), 0.0, 0.0));
+        assert!((k - 0.00117).abs() < 0.0002, "cone {cone}: {k}");
+        assert!((ls.attenuation(vec3(0.0, 0.0, 0.0)) - 1.0).abs() < 1e-9);
+    }
 }
 
 #[test]

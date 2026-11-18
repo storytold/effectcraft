@@ -135,9 +135,10 @@ fn lights_specular_transmission_and_shadows() {
 
 #[test]
 fn narrow_spot_feather() {
-    // A 0.2 degree spot 30 000 px away lights a disc about 105 px wide on the plane; its feather
-    // runs over cosines within 2e-6 of 1, below f32's step there, so the shader works with
-    // 1 - cos (half the squared distance between the unit vectors) like the CPU's f64 cosine.
+    // A 0.2 degree spot 30 000 px away lights a disc about 105 px wide on the plane. Its feather
+    // spans cosines from 1 down to 1 - 1.52e-6, only about 25 f32 steps, so neighbouring pixels
+    // round to the same cosine and the falloff comes out in steps. The shader works with 1 - cos
+    // (half the squared distance between the unit vectors), which keeps its precision there.
     for depth in [BitDepth::Bpc8, BitDepth::Bpc32] {
         let mut s = scene(depth);
         let bg = s.solid([0.1, 0.12, 0.2], W, H);

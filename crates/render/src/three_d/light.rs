@@ -100,17 +100,21 @@ impl LightState {
         if self.kind == LightKind::Spot {
             // Full inside the inner angle (the cone half-angle less the feather share), none
             // outside the half-angle, and a smoothstep between them over the cosine of the angle
-            // (lab `c3d` l16-l18, After Effects 26.5: within 1/255 at feather 50 and 100).
-            let cos_a = (-l).dot(self.dir).clamp(-1.0, 1.0);
-            let outer = self.cone_half.cos();
-            let inner = (self.cone_half * (1.0 - self.feather)).cos();
-            k *= if cos_a >= inner {
+            // (lab `c3d` l16-l18, After Effects 26.5: within 1/255 at feather 50 and 100). Written
+            // with 1 - cos, as the GPU does: half the squared distance between the unit vectors,
+            // and 2 sin²(angle / 2) for the cone, so a cone too narrow for distinct cosines still
+            // feathers.
+            let d = -l - self.dir;
+            let omc_a = 0.5 * d.dot(d);
+            let (so, si) = ((0.5 * self.cone_half).sin(), (0.5 * self.cone_half * (1.0 - self.feather)).sin());
+            let (outer, inner) = (2.0 * so * so, 2.0 * si * si);
+            k *= if omc_a <= inner {
                 1.0
-            } else if cos_a <= outer {
+            } else if omc_a >= outer {
                 0.0
             } else {
-                // Here outer < cos_a < inner, so the interval is not empty however narrow the cone.
-                let t = (inner - cos_a) / (inner - outer);
+                // Here inner < omc_a < outer, so the interval is not empty however narrow the cone.
+                let t = (omc_a - inner) / (outer - inner);
                 1.0 - t * t * (3.0 - 2.0 * t)
             };
         }
