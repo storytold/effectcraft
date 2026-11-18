@@ -22,6 +22,7 @@ mod base;
 mod camlight;
 mod effects;
 mod emit;
+mod essential;
 mod footage;
 mod fx_defs;
 mod fxsynth;
