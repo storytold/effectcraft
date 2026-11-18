@@ -2401,20 +2401,7 @@ fn map_for_read(
     let b = buffer.clone();
     let callback_mapping = Arc::clone(&mapping);
     buffer.map_async(wgpu::MapMode::Read, .., move |r| {
-        if let Err(e) = r {
-            callback_mapping.failed();
-            ticket.complete(Err(format!("GPU buffer mapping: {e}")));
-            return;
-        }
-        if !callback_mapping.mapped() {
-            return;
-        }
-        // Timed out or cancelled: nobody reads the mapping.
-        if !ticket.active() {
-            callback_mapping.unmap(|| b.unmap());
-            return;
-        }
-        ticket.complete(on_mapped(&b, &callback_mapping));
+        crate::readback::finish_map(r, &callback_mapping, ticket, || b.unmap(), || on_mapped(&b, &callback_mapping));
     });
     mapping
 }
