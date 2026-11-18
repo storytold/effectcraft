@@ -55,16 +55,29 @@ const fn fx(match_name: &'static str, name: &'static str, params: &'static [PDef
     FxDef { match_name, name, params }
 }
 
-/// The sequence data (`sdat`) an effect's instance must carry: After Effects crashes rendering a
-/// Color Stabilizer without it (read-back of an exported instance: aerender failed 3 of 3, the same
-/// instance with these 16 bytes rendered as the original; they are what After Effects 26.5 writes
-/// for a new instance and for one with every parameter changed). Every other effect of the table
-/// is written without one (e2-nosdat).
-pub(crate) const SEQUENCE_DATA: &[(&str, &[u8])] = &[("ADBE Deflicker", &[0xde, 0xf1, 0x1c, 0xe4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1])];
+/// The sequence data (`sdat`) an effect's instance must carry, as its length and its leading bytes
+/// (the rest is zero). After Effects 26.5 crashes rendering these effects without it:
+///
+/// - Color Stabilizer: aerender failed 3 of 3 on an exported instance; the same instance with these
+///   16 bytes rendered as the original. They are what After Effects 26.5 writes for a new instance
+///   and for one with every parameter changed.
+/// - Invert: aerender stopped with error 512 on an exported instance; with this block (`ff ff ff ff`
+///   and 9244 zero bytes, what After Effects 26.5 saved for an instance with its channel and blend
+///   changed) it rendered as the original. Instances saved at their defaults hold the same length
+///   with other non-zero bytes after the first four.
+///
+/// Every other effect of the table is written without one: Curves, Levels, Levels (Individual
+/// Controls) and Glow carry one in After Effects' files too, but their exported instances render
+/// without it.
+pub(crate) const SEQUENCE_DATA: &[(&str, usize, &[u8])] =
+    &[("ADBE Deflicker", 16, &[0xde, 0xf1, 0x1c, 0xe4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]), ("ADBE Invert", 9248, &[0xff, 0xff, 0xff, 0xff])];
 
 /// The sequence data the instances of `match_name` carry, when they need one.
-pub(crate) fn sequence_data(match_name: &str) -> Option<&'static [u8]> {
-    SEQUENCE_DATA.iter().find(|(m, _)| *m == match_name).map(|(_, d)| *d)
+pub(crate) fn sequence_data(match_name: &str) -> Option<Vec<u8>> {
+    let (_, len, head) = SEQUENCE_DATA.iter().find(|(m, _, _)| *m == match_name)?;
+    let mut data = vec![0u8; (*len).max(head.len())];
+    data.get_mut(..head.len())?.copy_from_slice(head);
+    Some(data)
 }
 
 #[rustfmt::skip]

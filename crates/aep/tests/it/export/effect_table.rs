@@ -130,12 +130,18 @@ fn import_table_effects_at_their_defaults_read_back() {
     }
 }
 
-/// Color Stabilizer's instance carries the sequence data After Effects needs to render it (without
-/// it After Effects 26.5 crashed rendering the exported layer); other effects carry none.
+/// Color Stabilizer's and Invert's instances carry the sequence data After Effects needs to render
+/// them (without it After Effects 26.5 crashed rendering the exported layer); other effects carry
+/// none.
 #[test]
-fn color_stabilizer_carries_its_sequence_data() {
-    for (id, want) in [("ec.color.colorstabilizer", Some(vec![0xde, 0xf1, 0x1c, 0xe4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1])), ("ec.transition.linearwipe", None)]
-    {
+fn effects_carry_the_sequence_data_after_effects_needs() {
+    let mut invert = vec![0u8; 9248];
+    invert[..4].copy_from_slice(&[0xff; 4]);
+    for (id, want) in [
+        ("ec.color.colorstabilizer", Some(vec![0xde, 0xf1, 0x1c, 0xe4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1])),
+        ("ec.channel.invert", Some(invert)),
+        ("ec.transition.linearwipe", None),
+    ] {
         let (p, _) = changed_instance(id);
         let r = export_all(&p);
         let file = parse(&r.bytes).expect("parse");

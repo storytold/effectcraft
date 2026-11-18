@@ -280,7 +280,7 @@ pub(crate) fn default_sspc(fx: &FxDef) -> Chunk<'static> {
     let mut sspc = vec![fnam, Chunk::list(*b"parT", part), Chunk::list(*b"tdgp", values)];
     // After Effects writes `sdat` between the value group and `pgui`.
     if let Some(data) = crate::export::fx_defs::sequence_data(fx.match_name) {
-        sspc.push(Chunk::data(*b"sdat", data.to_vec()));
+        sspc.push(Chunk::data(*b"sdat", data));
     }
     sspc.push(Chunk::data(*b"pgui", vec![0u8; 16]));
     Chunk::list(*b"sspc", sspc)
