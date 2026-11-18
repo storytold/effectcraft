@@ -295,10 +295,15 @@ fn shade_texel(it: u32, g: u32, u: f32, v: f32, t: vec4<f32>) -> vec4<f32> {
     let pl = planes[it];
     let n_lights = P.u[0].y;
     let accepts_shadows = pl.ints2.y;
-    if (n_lights == 0u || (pl.ints.z & 4u) == 0u) {
-        if (accepts_shadows == 2u) {
-            return vec4<f32>(0.0);
+    // Accepts Shadows: Only is a shadow matte: white, black in shadow, the layer's alpha.
+    let only = accepts_shadows == 2u;
+    if (n_lights == 0u) {
+        if (only) {
+            return vec4<f32>(t.w);
         }
+        return t;
+    }
+    if ((pl.ints.z & 4u) == 0u && !only) {
         return t;
     }
     let gm = geos[g];
@@ -357,8 +362,8 @@ fn shade_texel(it: u32, g: u32, u: f32, v: f32, t: vec4<f32>) -> vec4<f32> {
         }
     }
     let lit = rgb * (pl.mat0.x * amb + pl.mat0.y * diff) + specular * spec;
-    if (accepts_shadows == 2u) {
-        return vec4<f32>(0.0, 0.0, 0.0, a * shadow_amt);
+    if (only) {
+        return vec4<f32>(vec3<f32>((1.0 - shadow_amt) * a), a);
     }
     return vec4<f32>(lit * a, a);
 }

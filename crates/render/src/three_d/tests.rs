@@ -350,6 +350,37 @@ fn shadow_darkness_and_accepts_off() {
 }
 
 #[test]
+fn accepts_shadows_only_is_a_white_matte_with_black_shadows() {
+    // Lab accept_only (After Effects 26.5): a coloured solid with Accepts Shadows: Only renders
+    // white where no shadow falls and black in the full shadow of a parallel light, with its own
+    // alpha; its colour, the light's colour and intensity and Accepts Lights do not change it.
+    // It used to render transparent outside the shadow and a black shadow.
+    let (mut p, cid, comp) = setup();
+    let mut recv = solid3(&mut p, &comp, [0.2, 0.6, 0.4], 400, 200, [100.0, 50.0, 100.0]);
+    set(&mut recv, "materialOptions/acceptsShadows", Value::Enum(2));
+    set(&mut recv, "materialOptions/acceptsLights", Value::Bool(false));
+    let mut caster = solid3(&mut p, &comp, [1.0, 1.0, 1.0], 100, 200, [40.0, 50.0, 0.0]);
+    set(&mut caster, "materialOptions/castsShadows", Value::Enum(2)); // Only: invisible caster
+    let mut l = light(&mut p, &comp, LightKind::Parallel, [100.0, 50.0, -500.0]);
+    set(&mut l, "transform/poi", Value::Vec3([100.0, 50.0, 0.0]));
+    set(&mut l, "lightOptions/castsShadows", Value::Bool(true));
+    set(&mut l, "lightOptions/intensity", Value::Scalar(50.0));
+    set(&mut l, "lightOptions/color", Value::Color([1.0, 0.5, 0.25, 1.0]));
+    push(&mut p, cid, l);
+    push(&mut p, cid, caster);
+    push(&mut p, cid, recv);
+    let img = render(&p, cid);
+    let lit = img.get(170, 50);
+    assert!(lit.iter().all(|v| close(*v, 1.0, 1e-3)), "white matte: {lit:?}");
+    let dark = img.get(40, 50);
+    assert!(dark[..3].iter().all(|v| *v < 1e-3) && close(dark[3], 1.0, 1e-3), "black shadow: {dark:?}");
+    let c = p.comp_mut(cid).unwrap();
+    set(&mut c.layers[2], "transform/opacity", Value::Scalar(50.0));
+    let half = render(&p, cid).get(170, 50);
+    assert!(close(half[3], 0.5, 1e-3), "the layer's alpha: {half:?}");
+}
+
+#[test]
 fn shadow_diffusion_is_a_soft_ramp_not_copies() {
     // #2444: a wide Shadow Diffusion stamped 3 × 3 copies of the caster, so the penumbra stepped
     // through three flat levels instead of ramping smoothly from lit to shadowed.
