@@ -302,6 +302,78 @@ fn a_moved_key_keeps_its_own_fill_through_master_restyles() {
     assert_eq!((moved.text.as_str(), moved.fill), ("Mine", red), "the moved key stays red");
 }
 
+/// Two keys on an override at 0 s and 0.5 s: (session, bubble, text layer, control, main,
+/// instance, property uid). `first` is the value of the first key, `second` of the second.
+fn two_keys(first: impl FnOnce(TextDoc) -> TextDoc, second: impl FnOnce(TextDoc) -> TextDoc) -> (Session, ItemId, u64, u64, ItemId, u64, u64) {
+    let (mut s, bubble, text, body, main, inst) = bubble(json!({"text": "Placeholder", "size": 54, "fill": "#0000ff"}));
+    let (doc, _) = instance_value(&s, main, inst, body);
+    let uid = child_uid(essential::group(s.project.comp(main).unwrap().layer(LayerId(inst)).unwrap()).unwrap(), body);
+    let (a, b) = (first(doc.clone()), second(doc));
+    s.edit("Keys", None, |p, _| {
+        let pr = p.comp_mut(main).unwrap().layer_mut(LayerId(inst)).unwrap().props.find_mut(uid).unwrap();
+        pr.keys = vec![
+            effectcraft_keyframe::Keyframe::new(effectcraft_time::Tick::ZERO, KV::Text(Box::new(a))),
+            effectcraft_keyframe::Keyframe::new(effectcraft_time::Tick::from_seconds_f64(0.5), KV::Text(Box::new(b))),
+        ];
+        Ok(())
+    })
+    .unwrap();
+    s.state.selected_keys = [effectcraft_time::Tick::ZERO, effectcraft_time::Tick::from_seconds_f64(0.5)]
+        .into_iter()
+        .map(|time| crate::KeyRef { layer: LayerId(inst), prop: uid, time })
+        .collect();
+    (s, bubble, text, body, main, inst, uid)
+}
+
+/// The keys of property `uid` of instance `inst`: (seconds, document).
+fn key_docs(s: &Session, main: ItemId, inst: u64, uid: u64) -> Vec<(f64, TextDoc)> {
+    let pr = s.project.comp(main).unwrap().layer(LayerId(inst)).unwrap().props.find(uid).unwrap();
+    pr.keys
+        .iter()
+        .map(|k| match &k.value {
+            KV::Text(d) => (k.time.seconds(), (**d).clone()),
+            o => panic!("{o:?}"),
+        })
+        .collect()
+}
+
+/// Two keys of equal value, one owning its red and one following a red master, dragged together
+/// in two merged steps (the first key lands where the second was): each keeps its own base, so the
+/// next restyle turns only the follower green.
+#[test]
+fn keys_dragged_together_keep_their_own_bases() {
+    let red = [1.0, 0.0, 0.0, 1.0];
+    let (mut s, bubble, text, _, main, inst, uid) =
+        two_keys(|d| TextDoc { text: "Mine".into(), fill: [1.0, 0.0, 0.0, 1.0], ..d }, |d| TextDoc { text: "Mine".into(), ..d });
+    s.execute("layer.setText", json!({"comp": bubble.0, "layer": text, "fill": "#ff0000"})).unwrap();
+    let k = key_docs(&s, main, inst, uid);
+    assert_eq!(k[0].1, k[1].1, "both keys are red now");
+
+    for _ in 0..2 {
+        s.execute("keys.move", json!({"delta": 0.25, "merge": "drag"})).unwrap();
+    }
+    s.execute("layer.setText", json!({"comp": bubble.0, "layer": text, "fill": "#00ff00"})).unwrap();
+    let k = key_docs(&s, main, inst, uid);
+    assert_eq!(k.iter().map(|k| k.0).collect::<Vec<_>>(), vec![0.5, 1.0]);
+    assert_eq!(k[0].1.fill, red, "the key that owns its red stays red");
+    assert_eq!(k[1].1.fill, [0.0, 1.0, 0.0, 1.0], "the following key turns green");
+}
+
+/// Time-Reverse Keyframes swaps the times of a key that owns its red and one that follows the
+/// master: each takes its own base along.
+#[test]
+fn time_reversed_keys_keep_their_own_bases() {
+    let red = [1.0, 0.0, 0.0, 1.0];
+    let (mut s, bubble, text, _, main, inst, uid) =
+        two_keys(|d| TextDoc { text: "First".into(), fill: [1.0, 0.0, 0.0, 1.0], ..d }, |d| TextDoc { text: "Second".into(), ..d });
+    s.execute("layer.setText", json!({"comp": bubble.0, "layer": text, "fill": "#ff0000"})).unwrap();
+    s.execute("keys.timeReverse", json!({})).unwrap();
+    s.execute("layer.setText", json!({"comp": bubble.0, "layer": text, "fill": "#00ff00"})).unwrap();
+    let k = key_docs(&s, main, inst, uid);
+    assert_eq!((k[0].1.text.as_str(), k[0].1.fill), ("Second", [0.0, 1.0, 0.0, 1.0]), "the follower turns green");
+    assert_eq!((k[1].1.text.as_str(), k[1].1.fill), ("First", red), "the key that owns its red stays red");
+}
+
 /// Precomps three deep, the outer comp created first (so visited first): the outer instance's
 /// override of the middle comp's control (which shows the inner text) follows a restyle of the
 /// inner text layer in the same edit.
