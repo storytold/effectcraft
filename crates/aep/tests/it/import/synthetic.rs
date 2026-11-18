@@ -1035,13 +1035,17 @@ fn preserve_transparency_is_imported_from_the_layer_header() {
     let pt = |p: &Project| -> Vec<bool> { p.comps().flat_map(|(_, c)| c.layers.iter().map(|l| l.preserve_transparency)).collect() };
     let (p, r) = run(SYNTHETIC, true);
     r.unwrap();
-    assert!(!pt(&p).is_empty() && pt(&p).iter().all(|on| !on), "{:?}", pt(&p));
-    let on = mutate(&mut |c| {
+    let off = pt(&p);
+    assert!(!off.is_empty() && off.iter().all(|on| !on), "{off:?}");
+    let file = mutate(&mut |c| {
         if c.id == *b"ldta" {
             set_data(c, 103, &[1]);
         }
     });
-    let (p, r) = run(&on, true);
+    let (p, r) = run(&file, true);
     r.unwrap();
-    assert!(pt(&p).iter().all(|on| *on), "{:?}", pt(&p));
+    let on = pt(&p);
+    // The same layers, every one with the switch on.
+    assert_eq!(on.len(), off.len(), "{on:?}");
+    assert!(on.iter().all(|on| *on), "{on:?}");
 }
