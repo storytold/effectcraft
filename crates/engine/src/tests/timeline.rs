@@ -1664,3 +1664,84 @@ fn convert_expression_to_keyframes_refuses_a_zero_frame_duration() {
     assert!(e.contains("frame duration"), "{e}");
     assert!(prop(&s, l, "transform/rotation").keys.is_empty());
 }
+
+/// Source Text of text layer `t`, its static value set to `doc` (no keyframes touched).
+fn set_static_text(s: &mut Session, t: u64, doc: &effectcraft_keyframe::TextDoc) {
+    let cid = s.active_comp_id().unwrap();
+    let comp = std::sync::Arc::make_mut(&mut s.project).comp_mut(cid).unwrap();
+    comp.layer_mut(effectcraft_project::LayerId(t)).unwrap().props.prop_mut("text/sourceText").unwrap().value = KV::Text(Box::new(doc.clone()));
+}
+
+/// A text layer's current Source Text document, restyled: `text` in fill `fill`, size `size`.
+fn styled_text(s: &Session, t: u64, text: &str, fill: [f32; 4], size: f64) -> effectcraft_keyframe::TextDoc {
+    let mut doc = prop(s, t, "text/sourceText").value.as_text().unwrap().clone();
+    doc.text = text.into();
+    doc.fill = fill;
+    doc.size = size;
+    doc
+}
+
+/// #3901: a pasted Source Text keyframe is the copied one, characters and style, not the copied
+/// characters in the property's current style.
+#[test]
+fn pasted_source_text_key_keeps_its_style() {
+    let (mut s, _) = setup();
+    let t = s.execute("layer.newText", json!({"text": "Start", "size": 40})).unwrap()["layer"].as_u64().unwrap();
+    let red = styled_text(&s, t, "Red", [1.0, 0.0, 0.0, 1.0], 72.0);
+    let blue = styled_text(&s, t, "Blue", [0.0, 0.0, 1.0, 1.0], 30.0);
+    animate(&mut s, t, "text/sourceText", &[(0.0, serde_json::to_value(&red).unwrap()), (1.0, serde_json::to_value(&blue).unwrap())]);
+    set_static_text(&mut s, t, &blue);
+    let copied = prop(&s, t, "text/sourceText").keys[0].value.clone();
+    assert_eq!(copied.as_text().map(|d| d.fill), Some(red.fill), "key A is red");
+    assert_ne!(prop(&s, t, "text/sourceText").value.as_text().map(|d| d.fill), Some(red.fill), "the property's own value is not red");
+    let uid = prop(&s, t, "text/sourceText").uid;
+    s.execute("keys.select", json!({"keys": [{"layer": t, "prop": uid, "time": 0.0}]})).unwrap();
+    assert_eq!(s.execute("keys.copy", json!({})).unwrap(), json!(1));
+    assert_eq!(s.execute("keys.paste", json!({"layers": [t], "time": 2.0})).unwrap(), json!(1));
+    let p = prop(&s, t, "text/sourceText");
+    assert_eq!(p.keys.len(), 3);
+    let pasted = p.keys[2].value.as_text().unwrap();
+    assert_eq!((pasted.text.as_str(), pasted.fill, pasted.size), ("Red", red.fill, 72.0), "text, fill and size travel with the key");
+    assert_eq!(p.keys[2].value, copied, "the whole document travels with the key");
+    // Edit ▸ Paste Reversed goes the same way.
+    s.execute("keys.select", json!({"keys": [{"layer": t, "prop": uid, "time": 0.0}]})).unwrap();
+    s.execute("keys.copy", json!({})).unwrap();
+    s.execute("time.set", json!({"time": 3.0})).unwrap();
+    s.execute("edit.pasteReversedKeyframes", json!({"layers": [t]})).unwrap();
+    let p = prop(&s, t, "text/sourceText");
+    assert_eq!(p.keys.last().map(|k| &k.value), Some(&copied));
+}
+
+/// #3901: Edit ▸ Copy of an unanimated Source Text and Edit ▸ Paste onto another text layer
+/// gives that layer the copied document, style included.
+#[test]
+fn pasted_source_text_value_keeps_its_style() {
+    let (mut s, _) = setup();
+    let a = s.execute("layer.newText", json!({"text": "Red", "size": 40})).unwrap()["layer"].as_u64().unwrap();
+    let b = s.execute("layer.newText", json!({"text": "Blue", "size": 40})).unwrap()["layer"].as_u64().unwrap();
+    let red = styled_text(&s, a, "Red", [1.0, 0.0, 0.0, 1.0], 72.0);
+    let blue = styled_text(&s, b, "Blue", [0.0, 0.0, 1.0, 1.0], 30.0);
+    set_static_text(&mut s, a, &red);
+    set_static_text(&mut s, b, &blue);
+    s.execute("layer.select", json!({"layers": [a]})).unwrap();
+    s.execute("prop.select", json!({"layer": a, "path": "text/sourceText", "selectKeys": false})).unwrap();
+    s.execute("edit.copy", json!({})).unwrap();
+    assert_eq!(s.state.value_clipboard.len(), 1);
+    s.execute("layer.select", json!({"layers": [b]})).unwrap();
+    s.execute("edit.paste", json!({})).unwrap();
+    assert_eq!(prop(&s, b, "text/sourceText").value, KV::Text(Box::new(red)), "layer B gets the copied text and style");
+}
+
+/// Typing plain characters into Source Text (control channel / scripts) still keeps the
+/// property's style: the JSON form of a text value stays its characters (not changed by #3901).
+#[test]
+fn plain_string_source_text_keeps_the_current_style() {
+    let (mut s, _) = setup();
+    let t = s.execute("layer.newText", json!({"text": "Start", "size": 40})).unwrap()["layer"].as_u64().unwrap();
+    let blue = styled_text(&s, t, "Start", [0.0, 0.0, 1.0, 1.0], 30.0);
+    set_static_text(&mut s, t, &blue);
+    s.execute("prop.addKey", json!({"layer": t, "path": "text/sourceText", "time": 0.0, "value": "Hello"})).unwrap();
+    let k = prop(&s, t, "text/sourceText").keys[0].value.as_text().unwrap().clone();
+    assert_eq!((k.text.as_str(), k.fill, k.size), ("Hello", blue.fill, 30.0));
+    assert_eq!(s.execute("prop.get", json!({"layer": t, "path": "text/sourceText"})).unwrap()["value"], json!("Hello"));
+}
