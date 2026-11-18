@@ -174,11 +174,6 @@ fn fill(p: &EffectParam<'_, '_>, prop: &mut Property, kind: Kind, cx: &LayerCtx<
     }
     if p.is_animated() {
         let Some(stored) = p.stored() else { return };
-        if kind == Kind::EffectBool {
-            // Keys on a checkbox are not sampled by the corpus.
-            col.lose(LossCategory::Effects, format!("{here}: the keyframes of parameter {label} are not kept (not decoded)"));
-            return;
-        }
         let before = prop.keys.len();
         import_keys(&stored, kind, cx.layer, &p.match_name, cx.tm, prop, col);
         if prop.keys.len() == before {

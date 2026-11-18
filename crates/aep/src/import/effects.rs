@@ -300,11 +300,6 @@ pub(crate) fn import_mapped(p: &EffectParam<'_, '_>, m: &ParamMap, cx: &LayerCtx
         }
     }
     if p.is_animated() {
-        if kind == Kind::EffectBool {
-            // Keys on a checkbox are not sampled by the corpus.
-            col.lose_with(LossCategory::Effects, || format!("{here}: the keyframes of parameter {label} are not imported (not decoded), default used"));
-            return;
-        }
         if let Some(stored) = p.stored() {
             let before = prop.keys.len();
             import_keys(&stored, kind, cx.layer, &p.match_name, cx.tm, prop, col);
