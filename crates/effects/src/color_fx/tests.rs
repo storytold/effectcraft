@@ -506,3 +506,70 @@ fn colorama_palettes_modify_selection_masking_and_add_phase() {
     assert_eq!(p.eval(0.75, true), [0.5, 0.0, 0.5, 1.0], "wraps around");
     assert_eq!(p.eval(0.25, false), [1.0, 0.0, 0.0, 1.0]);
 }
+
+fn levels_overflow_settings(prefix: &str) -> Vec<(String, Value)> {
+    let ids = levels_channel_ids(LEVELS_CHANNEL_PREFIX.iter().position(|p| *p == prefix).map_or(0, |i| i + 1));
+    let values = [0.5, 0.5, 0.1, 0.5, 0.5];
+    let clip = if prefix.is_empty() {
+        ["clipToOutputBlack", "clipToOutputWhite"].map(String::from)
+    } else {
+        ["ClipToOutputBlack", "ClipToOutputWhite"].map(|s| format!("{prefix}{s}"))
+    };
+    ids.into_iter().zip(values).map(|(id, v)| (id, num(v))).chain(clip.map(|id| (id, Value::Enum(0)))).collect()
+}
+
+#[test]
+fn levels_stays_finite_with_an_empty_input_range_and_clipping_off() {
+    for prefix in ["", "red", "green", "blue", "alpha"] {
+        let owned = levels_overflow_settings(prefix);
+        let vals: Vec<(&str, Value)> = owned.iter().map(|(id, v)| (id.as_str(), v.clone())).collect();
+        for v in [0.6, 0.4, 1.0, 0.0, 2.0, -1.0] {
+            let o = px("ec.color.levels", &vals, [v, v, v, 1.0]);
+            assert!(o.iter().all(|c| c.is_finite()), "{prefix:?} at {v}: {o:?}");
+        }
+    }
+}
+
+#[test]
+fn levels_overflowing_curve_saturates_with_its_sign() {
+    let (ib, iw, g) = (0.5, 0.5, 0.1);
+    let above = level(0.6, [ib, iw, g, 0.0, 1.0], (false, false));
+    let below = level(0.4, [ib, iw, g, 0.0, 1.0], (false, false));
+    assert!(above.is_finite() && above > 1e29, "{above}");
+    assert!(below.is_finite() && below < -1e29, "{below}");
+    assert_eq!(above, -below);
+}
+
+#[test]
+fn levels_curves_that_were_finite_render_unchanged() {
+    let unbounded = |v: f32, [ib, iw, g, ob, ow]: [f32; 5], (clip_b, clip_w): (bool, bool)| {
+        let mut t = (v - ib) / (iw - ib).max(1e-6);
+        if clip_b {
+            t = t.max(0.0);
+        }
+        if clip_w {
+            t = t.min(1.0);
+        }
+        let curve = if t >= 0.0 { t.powf(1.0 / g) } else { -(-t).powf(1.0 / g) };
+        ob + (ow - ob) * curve
+    };
+    let mut compared = 0;
+    for ib in [-1.0, 0.0, 0.2, 0.5] {
+        for iw in [-0.5, 0.5, 0.9, 1.0, 2.0] {
+            for g in [0.1, 0.5, 1.0, 2.2, 10.0] {
+                for (ob, ow) in [(0.0, 1.0), (-1.0, 2.0), (0.1, 0.9), (1.0, 0.0), (0.5, 0.5)] {
+                    for clip in [(false, false), (true, false), (false, true), (true, true)] {
+                        for v in [-2.0, -0.5, 0.0, 0.25, 0.5, 0.75, 1.0, 1.5, 4.0, 16.0] {
+                            let want = unbounded(v, [ib, iw, g, ob, ow], clip);
+                            if want.is_finite() && want.abs() < 1e29 {
+                                assert_eq!(level(v, [ib, iw, g, ob, ow], clip).to_bits(), want.to_bits(), "{v} {:?} {clip:?}", [ib, iw, g, ob, ow]);
+                                compared += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(compared > 10_000, "{compared}");
+}

@@ -650,8 +650,8 @@ fn layer_styles_collapsed_precomps_and_cpu_fallbacks() {
 
 /// The effect alone on a buffer: GPU kernels vs the CPU effect (32-bit float), including the
 /// buffer geometry (padding, offset).
-pub(crate) fn effect_direct(id: &str, vals: &[(&str, Value)], adjustment: bool) {
-    let Some(g) = gpu() else { return };
+pub(crate) fn effect_direct(id: &str, vals: &[(&str, Value)], adjustment: bool) -> Vec<Image> {
+    let Some(g) = gpu() else { return vec![] };
     let spec = effectcraft_effects::find(id).unwrap();
     let size = [70.0, 44.0];
     let mut params =
@@ -660,6 +660,7 @@ pub(crate) fn effect_direct(id: &str, vals: &[(&str, Value)], adjustment: bool) 
         params.values.insert(k.to_string(), v.clone());
     }
     let expect_empty = id == "ec.distort.ccblobbylize" && vals.iter().any(|(k, v)| *k == "cutAway" && matches!(v, Value::Scalar(x) if *x == 100.0));
+    let mut outputs = vec![];
     for scale in [1.0, 0.5] {
         let img = pattern(7, (size[0] * scale) as u32, (size[1] * scale) as u32);
         let buf = effectcraft_effects::Buf { img, offset: [0.0, 0.0], scale };
@@ -689,7 +690,9 @@ pub(crate) fn effect_direct(id: &str, vals: &[(&str, Value)], adjustment: bool) 
             d.max,
             d.worst
         );
+        outputs.push(out.img);
     }
+    outputs
 }
 
 /// One footage layer with `fx` applied, composited over a background, at 8 and 32 bpc.

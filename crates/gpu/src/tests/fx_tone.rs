@@ -7,7 +7,7 @@ use effectcraft_project::{BitDepth, Comp, ItemKind, LayerSource, build};
 use effectcraft_render::RenderOpts;
 use effectcraft_time::{FrameRate, Tick};
 
-use crate::tests::{Scene, c, check, compare_at, effect_case, n, opts, set};
+use crate::tests::{Scene, c, check, compare_at, effect_case, effect_direct, n, opts, set};
 
 fn e(v: u32) -> Value {
     Value::Enum(v)
@@ -44,6 +44,36 @@ fn levels_and_gamma() {
     effect_case("ec.color.levels", &[("alphaInWhite", n(0.6)), ("redInWhite", n(0.5)), ("redClipToOutputWhite", e(0))]);
     effect_case("ec.color.gammapedestalgain", &[("redGamma", n(1.4)), ("greenPedestal", n(0.1)), ("blueGain", n(0.8))]);
     effect_case("ec.color.gammapedestalgain", &[("blackStretch", n(2.0)), ("redGain", n(1.2))]);
+}
+
+#[test]
+fn levels_stays_finite_with_an_empty_input_range_and_clipping_off() {
+    let rgb = [
+        ("inBlack", n(0.5)),
+        ("inWhite", n(0.5)),
+        ("gamma", n(0.1)),
+        ("outBlack", n(0.5)),
+        ("outWhite", n(0.5)),
+        ("clipToOutputBlack", e(0)),
+        ("clipToOutputWhite", e(0)),
+    ];
+    let red = [
+        ("redInBlack", n(0.5)),
+        ("redInWhite", n(0.5)),
+        ("redGamma", n(0.1)),
+        ("redOutBlack", n(0.5)),
+        ("redOutWhite", n(0.5)),
+        ("redClipToOutputBlack", e(0)),
+        ("redClipToOutputWhite", e(0)),
+    ];
+    let rgb_and_red: Vec<_> = rgb.iter().chain(&red).cloned().collect();
+    for vals in [&rgb[..], &red[..], &rgb_and_red[..]] {
+        for adjustment in [false, true] {
+            for out in effect_direct("ec.color.levels", vals, adjustment) {
+                assert!(out.data.iter().flatten().all(|v| v.is_finite()), "{vals:?} adj {adjustment}");
+            }
+        }
+    }
 }
 
 #[test]
