@@ -115,10 +115,22 @@ pub fn nested_markers<'a>(project: &'a Project, comp_id: ItemId, comp: &Comp, la
         })
         .collect();
     let eps = nc.frame_duration().0 / 1000;
+    // Source time running backwards (a reversed layer, or Time Remap keys that fall): a frame
+    // shows the nested frame its source time lies in, and a marker sits at the first frame whose
+    // nested frame starts at or before it.
+    let backwards = matches!((frames.first(), frames.last()), (Some((_, a)), Some((_, b))) if b < a);
+    let nfr = nc.frame_rate;
+    let reaches = |src: Tick, m: Tick| {
+        if backwards {
+            nfr.tick_of(effectcraft_render::frame_position(src, nfr).0).0 <= m.0.saturating_add(eps)
+        } else {
+            src.0.saturating_add(eps) >= m.0
+        }
+    };
     nc.markers
         .iter()
         .enumerate()
-        .filter_map(|(i, m)| frames.iter().find(|(_, src)| src.0.saturating_add(eps) >= m.time.0).map(|(t, _)| (*t, i, m)))
+        .filter_map(|(i, m)| frames.iter().find(|(_, src)| reaches(*src, m.time)).map(|(t, _)| (*t, i, m)))
         .filter(|(t, _, _)| shown(*t))
         .collect()
 }

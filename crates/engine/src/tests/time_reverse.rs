@@ -287,6 +287,37 @@ fn projects_saved_with_the_old_time_reverse_layout_open_in_after_effects_layout(
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Checks that a reversed precomp's nested markers sit on the frames that show them, with and without Time Remap.
+#[test]
+fn nested_markers_on_a_reversed_precomp_stay_put_when_time_remap_is_enabled() {
+    // A 10 fps precomp with markers at its frames 0 and 5, reversed in a 10 fps comp: frame 5
+    // shows at comp 0.4 s and frame 0 at the last comp frame, 0.9 s. With Time Remap on (keys at
+    // the identity) they used to all sit at the In point, the first frame reaching them forwards.
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Inner", "width": N, "height": 2, "frameRate": 10, "duration": 1})).unwrap();
+    let inner = s.active_comp_id().unwrap();
+    for t in [0.0, 0.5] {
+        let m = effectcraft_project::Marker { time: Tick::from_seconds_f64(t), ..Default::default() };
+        Arc::make_mut(&mut s.project).comp_mut(inner).unwrap().markers.push(m);
+    }
+    s.execute("comp.new", json!({"name": "Outer", "width": N, "height": 2, "frameRate": 10, "duration": 1})).unwrap();
+    let outer = s.active_comp_id().unwrap();
+    let pre = s.execute("layer.addItem", json!({"item": inner.0})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.timeReverse", json!({"layers": [pre]})).unwrap();
+    let times = |s: &mut Session| -> Vec<(f64, f64)> {
+        let v = s.execute("markers.nested", json!({"comp": outer.0, "layer": pre})).unwrap();
+        v.as_array().unwrap().iter().map(|m| (m["nestedTime"].as_f64().unwrap(), m["time"].as_f64().unwrap())).collect()
+    };
+    let close = |got: &[(f64, f64)], what: &str| {
+        let want = [(0.0, 0.9), (0.5, 0.4)];
+        assert_eq!(got.len(), want.len(), "{what}: {got:?}");
+        assert!(got.iter().zip(&want).all(|(a, b)| (a.0 - b.0).abs() < 1e-9 && (a.1 - b.1).abs() < 1e-9), "{what}: {got:?}, want {want:?}");
+    };
+    close(&times(&mut s), "reversed");
+    s.execute("layer.enableTimeRemap", json!({"layers": [pre]})).unwrap();
+    close(&times(&mut s), "reversed with Time Remap");
+}
+
 /// A 25 fps comp with the sequence reversed as Time-Reverse Layer made it before #3245 (one comp
 /// frame early) and no layout marker, as an older EffectCraft saved it: (session, comp, layer,
 /// the start time After Effects' layout gives the layer).

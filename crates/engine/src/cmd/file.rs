@@ -44,7 +44,8 @@ fn demo(s: &mut Session, _: &Value) -> Result<Value> {
 }
 
 /// Opens a project file in place of the current one: reads and upgrades it, repairs old time-reverse layouts, re-resolves footage paths and toasts what changed.
-/// Returns the path, the saving version and the repaired layers.
+/// Returns the path, the saving version, the values repaired to their limits (`repaired`) and the
+/// reversed layers moved to After Effects' layout or left unchanged (`reversedLayers`).
 pub(crate) fn open(s: &mut Session, p: &Value) -> Result<Value> {
     let path = str_p(p, "path").ok_or_else(|| bad("file.open", "missing `path`"))?;
     let bytes = s.services.read_file(path).map_err(|e| EngineError::Other(format!("cannot read {path}: {e}")))?;

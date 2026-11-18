@@ -1247,7 +1247,7 @@ impl<'a> Renderer<'a> {
     }
 
     /// The footage frame at source time `t` after frame blending: the average of the source frames one comp frame spans, else a blend of the two neighbouring frames, else the plain frame.
-    /// Log scans are converted first, and blended frames are cached. A reversed layer blends from the frame ending at `t` toward the one before.
+    /// Log scans are converted first, and blended frames are cached. A reversed layer blends from the frame ending at the time it names (`t` is one tick before it, see [`EvalCtx::source_time`]) toward the one before.
     fn footage_frame_raw(&self, ctx: &EvalCtx, layer: &Layer, item: ItemId, f: &Footage, t: Tick, size: Option<(u32, u32)>) -> Option<Arc<Image>> {
         let mode = frame_blend_mode(ctx, layer);
         let float = self.pipe.float_curve(f);

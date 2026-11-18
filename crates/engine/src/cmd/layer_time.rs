@@ -104,7 +104,8 @@ fn time_stretch(s: &mut Session, p: &Value) -> Result<Value> {
 /// Time Remap, footage or a precomp, the Out point exactly one comp frame below layer time 0,
 /// which is what the old command made of a layer starting at its source's start) start one comp
 /// frame later. Returns (the layers moved, the other reversed layers left as they are because
-/// they may be either layout), each as "Comp ▸ Layer". The project is marked as checked either
+/// they may be either layout), each as "Comp ▸ Layer"; a reversed layer whose Out point is at
+/// layer time 0 is in After Effects' layout already and is in neither list. The project is marked as checked either
 /// way, so saving it writes the marker and it is not checked again.
 pub(crate) fn repair_old_time_reverse(project: &mut effectcraft_project::Project) -> (Vec<String>, Vec<String>) {
     let (mut moved, mut unsure) = (vec![], vec![]);
