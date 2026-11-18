@@ -496,17 +496,55 @@ fn set_record(chunks: &mut [effectcraft_aep::Chunk<'_>], name: &[u8], v: f64) {
     }
 }
 
+/// Drops the keyframe data (`ldat`) of the record after `tdmn` `name` under `chunks`, leaving the
+/// record marked as animated.
+fn drop_key_data(chunks: &mut Vec<effectcraft_aep::Chunk<'_>>, name: &[u8]) {
+    use effectcraft_aep::Body;
+    fn strip(chunks: &mut Vec<effectcraft_aep::Chunk<'_>>) {
+        chunks.retain(|c| c.id != *b"ldat");
+        for c in chunks.iter_mut() {
+            if let Body::List { children, .. } | Body::Chunks(children) = &mut c.body {
+                strip(children);
+            }
+        }
+    }
+    let mut armed = false;
+    for c in chunks.iter_mut() {
+        if c.id == *b"tdmn" {
+            armed = matches!(&c.body, Body::Data(d) if d.starts_with(name));
+            continue;
+        }
+        if let Body::List { children, .. } | Body::Chunks(children) = &mut c.body {
+            if armed { strip(children) } else { drop_key_data(children, name) }
+        }
+        armed = false;
+    }
+}
+
 #[test]
 fn a_camera_position_that_cannot_be_derived_is_reported() {
-    // No Position record and a Zoom that is not positive, or a derived Position out of range: the
-    // layer keeps its default Position and the import reports it, so a strict import refuses.
-    use effectcraft_aep::import::{ImportOptions, import};
+    // No Position record, and a Zoom that is not positive, a derived Position out of range, or a
+    // point of interest whose keyframes are declared but hold no data: the layer gets back the new
+    // camera's default Position and the import reports it, so a strict import refuses.
+    use effectcraft_aep::import::{AepImportError, ImportOptions, LossCategory, import};
     use effectcraft_keyframe::Value;
     let none = |_: &str| false;
-    for (poi_z, zoom, set_zoom) in [(0.0, 1000.0, Some(-1000.0)), (-9.0e8, 5.0e8, None)] {
+    #[derive(Clone, Copy)]
+    enum Damage {
+        Zoom(f64),
+        None,
+        PoiKeysWithoutData,
+    }
+    let cases = [
+        (0.0, 1000.0, Damage::Zoom(-1000.0), LossCategory::TransformProperties, "cannot be derived"),
+        (-9.0e8, 5.0e8, Damage::None, LossCategory::DamagedData, "is not valid"),
+        (0.0, 1000.0, Damage::PoiKeysWithoutData, LossCategory::TransformProperties, "cannot be derived"),
+    ];
+    for (poi_z, zoom, damage, category, detail) in cases {
         let mut p = Project::default();
         let c = add_comp(&mut p, "C", 400, 200, FrameRate::new(25, 1), 1.0, None);
         add_layer(&mut p, c, "Cam", LayerSource::Camera, (400, 200));
+        let default = value(&p.comp(c).expect("comp").layers[0], "transform/position");
         with_props(
             &mut p,
             c,
@@ -517,19 +555,29 @@ fn a_camera_position_that_cannot_be_derived_is_reported() {
                 ("cameraOptions/zoom", Value::Scalar(zoom)),
             ],
         );
+        if matches!(damage, Damage::PoiKeysWithoutData) {
+            with_layer(&mut p, c, 0, |l| {
+                let poi = l.props.prop_mut("transform/poi").expect("poi");
+                poi.keys = vec![key(0.0, Value::Vec3([150.0, 80.0, poi_z])), key(0.5, Value::Vec3([250.0, 80.0, poi_z]))];
+            });
+        }
         let r = export_all(&p);
         let mut file = parse(&r.bytes).expect("parse");
         drop_position_records(&mut file.chunks);
-        if let Some(z) = set_zoom {
-            set_record(&mut file.chunks, b"ADBE Camera Zoom\0", z);
+        match damage {
+            Damage::Zoom(z) => set_record(&mut file.chunks, b"ADBE Camera Zoom\0", z),
+            Damage::PoiKeysWithoutData => drop_key_data(&mut file.chunks, b"ADBE Anchor Point\0"),
+            Damage::None => {}
         }
         let bytes = effectcraft_aep::write(&file).expect("write");
         let mut back = Project::default();
-        let strict = import(&mut back, &bytes, &ImportOptions::new(&none));
-        assert!(strict.is_err(), "zoom {zoom}, poi z {poi_z}: a strict import refuses");
+        let Err(AepImportError::Refused(report)) = import(&mut back, &bytes, &ImportOptions::new(&none)) else {
+            panic!("zoom {zoom}, poi z {poi_z}: a strict import refuses")
+        };
+        let reported = report.losses.iter().any(|l| l.category == category && l.details.iter().any(|d| d.contains("Position") && d.contains(detail)));
+        assert!(reported, "zoom {zoom}, poi z {poi_z}: {:?}", report.losses);
         let layers = reimported_layers(&bytes);
-        let Value::Vec3(pos) = value(&layers[0], "transform/position") else { panic!("vec3") };
-        assert!(pos[2] > -1.0e9 && pos[2] != poi_z - zoom, "zoom {zoom}, poi z {poi_z}: default kept, {pos:?}");
+        assert_eq!(value(&layers[0], "transform/position"), default, "zoom {zoom}, poi z {poi_z}: the new camera's default Position");
     }
 }
 
