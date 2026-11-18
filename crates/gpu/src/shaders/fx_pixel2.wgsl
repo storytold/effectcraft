@@ -127,15 +127,39 @@ fn fp2_box(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
     let r = i32(P.u[0].x);
+    let vertical = P.u[0].y != 0u;
+    let d = vec2<i32>(textureDimensions(src));
+    var at = p.x;
+    var n = d.x;
+    if (vertical) {
+        at = p.y;
+        n = d.y;
+    }
+    // The window at-r..=at+r. The edge pixels it repeats are counted, not visited, so the work
+    // is bounded by the line and not by the radius (util::box_row does the same; #3816).
+    let lo = at - r;
+    let hi = at + r;
     var acc = vec4<f32>(0.0);
-    for (var i = -r; i <= r; i++) {
-        if (P.u[0].y != 0u) {
-            acc += tex_get_clamped(src, p.x, p.y + i);
-        } else {
-            acc += tex_get_clamped(src, p.x + i, p.y);
-        }
+    let before = max(-lo, 0);
+    if (before > 0) {
+        acc += fp2_line_get(vertical, p, 0) * f32(before);
+    }
+    for (var i = max(lo, 0); i <= min(hi, n - 1); i++) {
+        acc += fp2_line_get(vertical, p, i);
+    }
+    let after = max(hi - (n - 1), 0);
+    if (after > 0) {
+        acc += fp2_line_get(vertical, p, n - 1) * f32(after);
     }
     textureStore(out, p, acc * (1.0 / f32(2 * r + 1)));
+}
+
+// Pixel `i` of `p`'s column (vertical) or row.
+fn fp2_line_get(vertical: bool, p: vec2<i32>, i: i32) -> vec4<f32> {
+    if (vertical) {
+        return tex_get_clamped(src, p.x, i);
+    }
+    return tex_get_clamped(src, i, p.y);
 }
 
 // ---------------------------------------------------------------- planes

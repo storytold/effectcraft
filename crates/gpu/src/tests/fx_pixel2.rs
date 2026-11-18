@@ -165,6 +165,14 @@ fn blurs() {
     effect_case("ec.blur.reduceflicker", &[("softness", n(0.5))]);
 }
 
+/// #3816: a huge Map Softness (from an expression or a file value) softens CC Vector Blur's map
+/// with box radii near the cap, 1e8; `fp2_box` counts the repeated edge pixels instead of
+/// reading each one, so the pass costs the image's extent and still matches the CPU.
+#[test]
+fn vector_blur_with_a_huge_map_softness_matches_cpu() {
+    effect_case("ec.blur.ccvector", &[("type", e(4)), ("amount", n(12.0)), ("mapSoftness", n(2e20))]);
+}
+
 #[test]
 fn composites_and_colour() {
     for m in [0, 1, 2, 3, 5, 8, 11, 14, 15] {
