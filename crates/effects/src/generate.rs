@@ -671,6 +671,15 @@ mod generator_tests {
     }
 
     #[test]
+    fn value_noise_past_the_i32_range_is_finite() {
+        for (x, y, z) in [(3e9, -3e9, 2.5e9), (f32::MAX, f32::MIN, 1e30), (f32::INFINITY, f32::NEG_INFINITY, f32::INFINITY)] {
+            for n in [value_noise(x, y, z, 7), value_noise_linear_z(x, y, z, 7)] {
+                assert!(n.is_finite(), "({x}, {y}, {z}): {n}");
+            }
+        }
+    }
+
+    #[test]
     fn four_color_blending_mode_and_opacity() {
         let pts: Vec<(&str, Value)> = (1..=4)
             .map(|i| match i {

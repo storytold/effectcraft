@@ -516,9 +516,9 @@ mod tests {
     #[test]
     fn noise_past_the_i32_range_is_finite() {
         for noise_type in [0, 1, 2, 3] {
-            for (x, y) in [(1e30, -1e30), (f32::MAX, f32::MIN), (3e9, 2.5e9)] {
-                let n = typed_noise(x, y, 1e12, 7, noise_type);
-                assert!(n.is_finite(), "type {noise_type} at ({x}, {y}): {n}");
+            for (x, y, z) in [(1e30, -1e30, 1e12), (f32::MAX, f32::MIN, 1e12), (3e9, 2.5e9, 1e12), (f32::INFINITY, f32::NEG_INFINITY, f32::INFINITY)] {
+                let n = typed_noise(x, y, z, 7, noise_type);
+                assert!(n.is_finite(), "type {noise_type} at ({x}, {y}, {z}): {n}");
             }
         }
     }
@@ -756,6 +756,93 @@ mod tests {
                     }
                     let img = run(id, &vals);
                     assert!(img.data.iter().flatten().all(|c| c.is_finite()), "{id} sub {sub} perspective {perspective} offset {offset:?}: non-finite output");
+                }
+            }
+        }
+    }
+
+    fn bits_hash(values: impl IntoIterator<Item = f32>) -> u64 {
+        values.into_iter().fold(0xcbf2_9ce4_8422_2325u64, |h, v| (h ^ u64::from(v.to_bits())).wrapping_mul(0x0100_0000_01b3))
+    }
+
+    fn ordinary_coordinates() -> impl Iterator<Item = (f32, f32, f32)> {
+        let grid = (0..400).map(|i| {
+            let i = i as f32;
+            (i * 0.37 - 70.0, i * 0.53 - 40.0, i * 0.011 - 1.5)
+        });
+        let large = [(1e6 + 0.25, -2e6 - 0.75, 3.5), (2.1e9, -2.1e9, 1e7 + 0.5), (-8_388_607.5, 8_388_607.25, -0.125), (1e10, -1e10, 0.75)];
+        grid.chain(large)
+    }
+
+    #[test]
+    fn lattice_noise_at_ordinary_coordinates_is_unchanged() {
+        let all = ordinary_coordinates().flat_map(|(x, y, z)| {
+            let typed = [0, 1, 2, 3].map(|t| typed_noise(x, y, z, 11, t));
+            let value =
+                if x.abs() < 2e9 { [crate::generate::value_noise(x, y, z, 11), crate::generate::value_noise_linear_z(x, y, z, 11)] } else { [0.0, 0.0] };
+            typed.into_iter().chain(value)
+        });
+        assert_eq!(bits_hash(all), 16_565_229_818_293_526_361);
+    }
+
+    #[test]
+    fn fractal_renders_at_ordinary_settings_are_unchanged() {
+        let cases: Vec<(&str, Vec<(&str, Value)>)> = vec![
+            ("ec.noise.fractal", vec![]),
+            ("ec.noise.fractal", vec![("fractalType", Value::Enum(2)), ("noiseType", Value::Enum(3)), ("transform/offset", Value::Vec2([-300.0, 125.5]))]),
+            ("ec.noise.fractal", vec![("fractalType", Value::Enum(6)), ("noiseType", Value::Enum(0)), ("subSettings/subOffset", Value::Vec2([40.0, -12.0]))]),
+            (
+                "ec.noise.fractal",
+                vec![("fractalType", Value::Enum(4)), ("noiseType", Value::Enum(1)), ("subSettings/subScaling", num(10.0)), ("complexity", num(20.0))],
+            ),
+            ("ec.noise.fractal", vec![("transform/perspectiveOffset", Value::Bool(true)), ("fractalType", Value::Enum(8)), ("evolution", num(275.0))]),
+            (
+                "ec.noise.turbulent",
+                vec![("fractalType", Value::Enum(3)), ("evolutionOptions/turbulenceFactor", num(2.0)), ("subSettings/subScaling", num(250.0))],
+            ),
+        ];
+        let hashes: Vec<u64> = cases
+            .iter()
+            .map(|(id, vals)| {
+                let mut vals = vals.clone();
+                vals.push(("blendingMode", Value::Enum(BLEND_NONE)));
+                bits_hash(run(id, &vals).data.into_iter().flatten())
+            })
+            .collect();
+        assert_eq!(
+            hashes,
+            [
+                14_820_215_278_946_423_483,
+                15_667_682_713_800_055_601,
+                18_081_240_588_472_799_263,
+                1_806_134_991_285_303_243,
+                13_725_828_349_026_147_724,
+                4_670_050_784_813_517_094
+            ]
+        );
+    }
+
+    #[test]
+    fn huge_offsets_render_finite_noise() {
+        let offsets = [([1e25, 0.0], [0.0, 0.0]), ([1e39, -1e39], [0.0, 0.0]), ([0.5, 0.5], [1e39, -1e37])];
+        for id in ["ec.noise.fractal", "ec.noise.turbulent"] {
+            for kind in 0..FRACTAL_TYPES.len() as u32 {
+                for (offset, sub_offset) in offsets {
+                    let mut vals = vec![
+                        ("fractalType", Value::Enum(kind)),
+                        ("subSettings/subScaling", num(10.0)),
+                        ("complexity", num(20.0)),
+                        ("transform/offset", Value::Vec2(offset)),
+                        ("blendingMode", Value::Enum(BLEND_NONE)),
+                    ];
+                    if id == "ec.noise.fractal" {
+                        vals.push(("subSettings/subOffset", Value::Vec2(sub_offset)));
+                    }
+                    let img = run(id, &vals);
+                    assert!(
+                        img.data.iter().flatten().all(|c| c.is_finite()),
+                        "{id} type {kind} offset {offset:?} sub offset {sub_offset:?}: non-finite output"
+                    );
                 }
             }
         }

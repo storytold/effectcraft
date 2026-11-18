@@ -157,6 +157,14 @@ fn fractal_noise_sub_scaling_above_100() {
 }
 
 #[test]
+fn fractal_noise_huge_offset() {
+    let huge = [("subSettings/subScaling", n(10.0)), ("complexity", n(20.0)), ("transform/offset", pt(1e25, 0.0))];
+    effect_case("ec.noise.fractal", &huge);
+    effect_case("ec.noise.fractal", &[huge.as_slice(), &[("transform/perspectiveOffset", on()), ("fractalType", e(4))]].concat());
+    effect_case("ec.noise.turbulent", &[huge.as_slice(), &[("evolutionOptions/turbulenceFactor", n(10.0))]].concat());
+}
+
+#[test]
 fn fractal_noise_other_modes() {
     effect_case("ec.noise.fractal", &[("noiseType", e(3)), ("fractalType", e(4)), ("blendingMode", e(3))]);
     effect_case(
