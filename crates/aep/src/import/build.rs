@@ -435,14 +435,26 @@ fn blend(mode: AepBlend) -> Option<BlendMode> {
     })
 }
 
+/// A layer's blend mode. Dissolve and Dancing Dissolve share code 3; `ldta` byte 103 bit 1 marks
+/// Dancing Dissolve (`dissolve_pair`, After Effects 26.5: 0 on the Dissolve layer, 2 on the
+/// Dancing one).
+fn layer_blend(layer: &AepLayer<'_, '_>, mode: AepBlend) -> Option<BlendMode> {
+    let dancing = || layer.chunk().child(b"ldta").and_then(|c| c.bytes()).and_then(|b| b.get(103)).is_some_and(|b| b & 0x02 != 0);
+    match mode {
+        AepBlend::Other(3) if dancing() => Some(BlendMode::DancingDissolve),
+        AepBlend::Other(3) => Some(BlendMode::Dissolve),
+        m => blend(m),
+    }
+}
+
 /// The blend mode codes beyond the reader's six (`ldta` byte 99): 906 (set by name: Soft Light 8,
 /// Hard Light 9, Darken 10, Lighten 11, Exclusion 25, Color Dodge 27, Color Burn 28) and 907
 /// (each code rendered by After Effects over a test image and matched against every EffectCraft
 /// mode: the named mode was the only one within 1/255 on average inside the patch). Codes 23 / 24
 /// render like 27 / 28 on that image; they are taken as the classic variants, which After Effects
 /// keeps beside the newer ones (E). Not imported: 1, 21 and 22 (Alpha Add and Luminescent
-/// Premul render alike on opaque layers), 3 (Dissolve and Dancing Dissolve share it, 906 sweep)
-/// and codes above 34 (not sampled).
+/// Premul render alike on opaque layers) and codes above 34 (not sampled). Code 3 (Dissolve or
+/// Dancing Dissolve, told apart by `ldta` byte 103) is mapped where the layer is read.
 fn blend_code(code: u8) -> Option<BlendMode> {
     Some(match code {
         8 => BlendMode::SoftLight,
@@ -629,7 +641,7 @@ fn build_layers(project: &mut Project, cx: &mut Ctx<'_>, defs: &EffectDefinition
         l.label = Label::ALL.get(usize::from(h.label)).copied().unwrap_or(Label::None);
         apply_timing(&mut l, &h, &tm, &name, &mut cx.col);
         apply_switches(&mut l, &h);
-        match blend(h.blend_mode) {
+        match layer_blend(&layer, h.blend_mode) {
             Some(b) => l.blend_mode = b,
             // Cameras and lights have no blend mode (their byte is 0, 251).
             None if is_camera || light.is_some() => {}
