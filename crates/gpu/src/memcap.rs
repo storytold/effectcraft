@@ -363,7 +363,15 @@ const NVIDIA_SMI_TIMEOUT: Duration = Duration::from_secs(3);
 #[cfg(not(target_arch = "wasm32"))]
 fn nvidia_smi_output() -> Option<&'static str> {
     static OUTPUT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    OUTPUT.get_or_init(|| run_with_timeout(std::ffi::OsStr::new("nvidia-smi"), &NVIDIA_SMI_ARGS, NVIDIA_SMI_TIMEOUT)).as_deref()
+    OUTPUT
+        .get_or_init(|| {
+            let out = run_with_timeout(std::ffi::OsStr::new("nvidia-smi"), &NVIDIA_SMI_ARGS, NVIDIA_SMI_TIMEOUT);
+            if out.is_none() {
+                log::debug!(target: "effectcraft_gpu", "nvidia-smi is missing, failed or took longer than {NVIDIA_SMI_TIMEOUT:?}: video memory unknown");
+            }
+            out
+        })
+        .as_deref()
 }
 
 /// Runs `program` with `args` and returns its standard output when it exits successfully within
@@ -639,7 +647,7 @@ mod tests {
     #[test]
     #[ignore = "the child process of a_program_that_fails_or_hangs_gives_no_output"]
     fn stand_in_for_a_hanging_program() {
-        std::thread::sleep(Duration::from_secs(20));
+        std::thread::sleep(Duration::from_secs(5));
     }
 
     /// `nvidia-smi` missing, failing or hanging gives no memory, and never holds the caller long.
