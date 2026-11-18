@@ -538,6 +538,8 @@ fn levels_overflowing_curve_saturates_with_its_sign() {
     assert!(above.is_finite() && above > 1e29, "{above}");
     assert!(below.is_finite() && below < -1e29, "{below}");
     assert_eq!(above, -below);
+    let finite_beyond_the_bound = level(0.004096, [0.0, 0.0, g, 0.0, 1.0], (false, false));
+    assert_eq!(finite_beyond_the_bound, LEVELS_CURVE_LIMIT);
 }
 
 #[test]
