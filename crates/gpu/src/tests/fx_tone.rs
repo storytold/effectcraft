@@ -103,6 +103,31 @@ fn levels_matches_the_cpu_at_the_edge_of_f32() {
     }
 }
 
+fn filled(px: [f32; 4]) -> impl Fn(u32, u32) -> effectcraft_raster::Image + Copy {
+    move |w, h| effectcraft_raster::Image::filled(w, h, px)
+}
+
+#[test]
+fn levels_keeps_finite_results_near_f32_max_distinct() {
+    let owned = levels_controls("", [0.0, 1.0, 1.0, 1.0, 2.0]);
+    let vals: Vec<(&str, Value)> = owned.iter().map(|(id, v)| (id.as_str(), v.clone())).collect();
+    for out in effect_direct_on("ec.color.levels", &vals, false, filled([3.4006e38, 3.4022e38, f32::MAX, 1.0])) {
+        let [r, g, b, _] = out.data[0];
+        assert!(r < g && g < f32::MAX && b.is_finite() && g <= b, "{:?}", out.data[0]);
+    }
+}
+
+#[test]
+fn levels_channel_stage_reads_a_saturated_master_back_finite() {
+    let owned = [levels_controls("", [0.5, 0.5, 0.1, 0.0, 1.0]), levels_controls("red", [0.0, 1.0, 10.0, 0.0, 1.0])].concat();
+    let vals: Vec<(&str, Value)> = owned.iter().map(|(id, v)| (id.as_str(), v.clone())).collect();
+    for alpha in [0.75, 0.3, 1.0] {
+        for out in effect_direct_on("ec.color.levels", &vals, false, filled([0.45 * alpha, 0.55 * alpha, 0.0, alpha])) {
+            assert!(out.data.iter().flatten().all(|v| v.is_finite()), "alpha {alpha}: {:?}", out.data[0]);
+        }
+    }
+}
+
 #[test]
 fn hue_saturation_ranges() {
     effect_case("ec.color.huesaturation", &[("redsHue", n(40.0)), ("bluesSaturation", n(-60.0)), ("greensLightness", n(30.0))]);

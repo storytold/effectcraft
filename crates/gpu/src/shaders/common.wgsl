@@ -244,7 +244,7 @@ fn powz(x: f32, y: f32) -> f32 {
 
 const F32_MAX: f32 = 0x1.fffffep+127f;
 const LEVELS_DIRECT_LOG2: f32 = 126.0;
-const LEVELS_SATURATION_LOG2: f32 = 127.999;
+const LEVELS_OVERFLOW_LOG2: f32 = 129.0;
 
 fn levels_gamma(t: f32, g: f32) -> f32 {
     if (t >= 0.0) {
@@ -282,10 +282,14 @@ fn levels_level(v: f32, ib: f32, iw: f32, g: f32, ob: f32, ow: f32, clip_b: bool
         return levels_direct(select(0.0, 1.0, x > 0.0), g, ob, ow);
     }
     let direction = sign(x) * sign(ow - ob);
-    if (out_log2 >= LEVELS_SATURATION_LOG2) {
+    if (out_log2 >= LEVELS_OVERFLOW_LOG2) {
         return direction * F32_MAX;
     }
-    return ob + direction * exp2(out_log2);
+    let quarter = exp2(out_log2 - 2.0);
+    if (quarter > F32_MAX * 0.25) {
+        return direction * F32_MAX;
+    }
+    return ob + direction * (quarter * 4.0);
 }
 
 // Rust's f32::round (half away from zero; WGSL's round() is half to even). Decided by comparing
