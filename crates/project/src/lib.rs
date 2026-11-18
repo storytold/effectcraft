@@ -32,6 +32,7 @@ pub use effectcraft_keyframe::{Keyframe, Value};
 
 mod comp;
 mod dirty;
+mod dolby_vision;
 mod footage;
 mod item;
 mod layer;
@@ -40,6 +41,7 @@ mod reach;
 mod settings;
 
 pub use comp::{Comp, Guide, Renderer, Resolution};
+pub use dolby_vision::{DolbyVisionInfo, UNREAD_CODEC};
 pub use footage::{AlphaMode, CineonSettings, CineonUnits, FieldOrder, Footage, FootageKind, Proxy, Solid, SourceLayer, VIDEO_EXTENSIONS, cineon_log_to_lin};
 pub use item::NO_LAYER;
 pub use item::{Heard, Item, ItemId, ItemKind, LayerId};

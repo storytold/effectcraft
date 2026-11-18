@@ -1,5 +1,5 @@
 use super::settings::{Marker, yes};
-use super::{ColorSpace, Deserialize, FrameRate, Serialize, Tick};
+use super::{ColorSpace, Deserialize, DolbyVisionInfo, FrameRate, Serialize, Tick};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FootageKind {
@@ -265,6 +265,10 @@ pub struct Footage {
     /// timecodes into footage time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file_timecode: Option<i64>,
+    /// The Dolby Vision configuration the movie's video carries, read when probing. It describes
+    /// the file and never changes its pixels: the base layer is what's decoded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dolby_vision: Option<DolbyVisionInfo>,
     /// Markers the file carries (a WAV's cue points and XMP markers), at footage time. A layer
     /// made from the footage starts with them, and Update Markers From Source copies new ones.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -313,6 +317,7 @@ impl Default for Footage {
             alphabetical: false,
             start_timecode: None,
             file_timecode: None,
+            dolby_vision: None,
             markers: vec![],
             placed_page: false,
         }

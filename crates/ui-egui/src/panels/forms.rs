@@ -311,6 +311,22 @@ fn interpret_footage_form(s: &effectcraft_engine::Session, proxy: bool, base: &m
             m.insert("pointUnits".into(), json!(c.units.id()));
         }
     }
+    // Color: what the file's Dolby Vision configuration says, and what is shown of it (read-only).
+    // Video the importer read no codec in had no picture when it was imported or last reloaded;
+    // the import warning goes by the same answer (`Footage::codec_unread`). The stored codec isn't
+    // read again until Reload Footage, so in a later build that decodes the video the picture can
+    // come back before this note changes.
+    if let Some(dv) = f.dolby_vision {
+        let base = "the base layer is shown; the Dolby Vision metadata is not applied.";
+        let shown = if f.codec_unread() {
+            format!(
+                "when this footage was imported or last reloaded, EffectCraft couldn't decode the video, so it showed no picture; File ▸ Reload Footage checks again. When it can, {base}"
+            )
+        } else {
+            base.to_string()
+        };
+        fields.push(Field::note("dolbyVision", &format!("{}: {shown}", dv.label())));
+    }
     // After Frame Rate: an image sequence's frames (a missing one holds the previous frame),
     // then Start Timecode.
     let mut timing = Vec::new();
@@ -1271,6 +1287,47 @@ mod tests {
         let Some(FieldKind::Note(text)) = note else { panic!("no sequence note: {note:?}") };
         assert!(text.contains("2 missing frames (3–4)") && text.contains("the previous frame is held"), "{text}");
         assert!(!text.contains("color bars"), "{text}");
+    }
+
+    /// Interpret Footage says what a movie's Dolby Vision configuration is, read-only (it is no
+    /// parameter of the command), and that only its base layer is shown, or, when the importer
+    /// read no codec in its video, that the video couldn't be decoded when it was imported or last
+    /// reloaded and that Reload Footage checks again; other footage has no such line.
+    #[test]
+    fn interpret_footage_shows_the_dolby_vision_configuration() {
+        use effectcraft_engine::project::{DolbyVisionInfo, Footage, FootageKind, ItemKind, UNREAD_CODEC};
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        let movie = |codec: &str, dolby_vision| {
+            ItemKind::Footage(Footage {
+                path: "/m/clip.mov".into(),
+                kind: FootageKind::Video,
+                width: 4,
+                height: 4,
+                has_video: true,
+                codec: codec.into(),
+                dolby_vision,
+                ..Default::default()
+            })
+        };
+        let iphone = Some(DolbyVisionInfo { profile: 8, level: 4, compatibility: 4 });
+        let project = std::sync::Arc::make_mut(&mut app.session.project);
+        let hvc1 = project.add_item("iphone.mov", Default::default(), None, movie("HEVC", iphone));
+        let dvh1 = project.add_item("dvh1.mov", Default::default(), None, movie(UNREAD_CODEC, iphone));
+        let plain = project.add_item("plain.mov", Default::default(), None, movie("HEVC", None));
+        let note = |app: &mut EffectcraftApp, item| {
+            app.session.state.project_selection = vec![item];
+            assert!(open_form(app, "file.interpretFootage", &json!({})));
+            assert!(app.dialog_state.form.params().get("dolbyVision").is_none(), "{}", app.dialog_state.form.params());
+            app.dialog_state.form.fields.iter().find(|f| f.key == "dolbyVision").map(|f| f.kind.clone())
+        };
+        let Some(FieldKind::Note(text)) = note(&mut app, hvc1) else { panic!("no Dolby Vision note") };
+        assert_eq!(text, "Dolby Vision 8.4 (HLG base layer): the base layer is shown; the Dolby Vision metadata is not applied.");
+        let Some(FieldKind::Note(text)) = note(&mut app, dvh1) else { panic!("no Dolby Vision note") };
+        assert_eq!(
+            text,
+            "Dolby Vision 8.4 (HLG base layer): when this footage was imported or last reloaded, EffectCraft couldn't decode the video, so it showed no picture; File ▸ Reload Footage checks again. When it can, the base layer is shown; the Dolby Vision metadata is not applied."
+        );
+        assert!(note(&mut app, plain).is_none());
     }
 
     /// Interpret Footage shows Cineon Settings for DPX footage only. The converted points show in

@@ -304,6 +304,9 @@ impl Text {
             alphabetical,
             start_timecode,
             file_timecode,
+            // The Dolby Vision configuration describes the file; the frames shown are its base
+            // layer's either way.
+            dolby_vision: _,
             // Markers annotate the footage; they never change its frames.
             markers: _,
             placed_page,

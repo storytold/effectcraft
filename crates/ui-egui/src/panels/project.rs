@@ -501,8 +501,13 @@ fn details_header(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter
             let fps = it.frame_rate().map(|r| r.as_f64()).unwrap_or(30.0);
             lines.push(format!("Δ {}, {:.2} fps", fmt_dur(d.seconds(), fps), fps));
         }
+        // The codec, and the Dolby Vision configuration a movie carries (on the codec's line: the
+        // header has room for three).
         if let ItemKind::Footage(f) = &it.kind {
-            lines.push(f.codec.clone());
+            lines.push(match f.dolby_vision {
+                Some(dv) => format!("{}, {}", f.codec, dv.label()),
+                None => f.codec.clone(),
+            });
         }
         for (i, l) in lines.iter().enumerate() {
             let r = widgets::text_fit(p, pos2(tx, thumb.min.y + 22.0 + 13.0 * i as f32), Align2::LEFT_CENTER, l, Tokens::ui(11.0), max_w, t.text_dim);

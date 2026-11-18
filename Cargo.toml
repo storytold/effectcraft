@@ -93,9 +93,9 @@ same-file = "1.0"
 tempfile = "3.27"
 
 # codecs + containers shared by the Craft apps (crates/media, crates/export); keep all three on one rev.
-craft-media = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "5a7a63a21dd03dd1a2bc6c308a3a6ce818caae87", default-features = false, features = ["isobmff", "matroska"] }
-craft-audio = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "5a7a63a21dd03dd1a2bc6c308a3a6ce818caae87", default-features = false, features = ["aac-decode", "aac-encode", "opus-decode", "opus-encode"] }
-craft-video = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "5a7a63a21dd03dd1a2bc6c308a3a6ce818caae87", features = ["h264-encode", "prores", "hevc-encode", "vp9-encode", "av1", "threads"] }
+craft-media = { version = "0.1.0", git = "https://github.com/ChristopherLinnett/craft-libs", rev = "b6a0761943a911a0c4fd68f84f74f0e7735c7b66", default-features = false, features = ["isobmff", "matroska"] }
+craft-audio = { version = "0.1.0", git = "https://github.com/ChristopherLinnett/craft-libs", rev = "b6a0761943a911a0c4fd68f84f74f0e7735c7b66", default-features = false, features = ["aac-decode", "aac-encode", "opus-decode", "opus-encode"] }
+craft-video = { version = "0.1.0", git = "https://github.com/ChristopherLinnett/craft-libs", rev = "b6a0761943a911a0c4fd68f84f74f0e7735c7b66", features = ["h264-encode", "prores", "hevc-encode", "vp9-encode", "av1", "threads"] }
 
 # footage decoding: FilmCraft's pure-Rust crates, pinned to a revision (plan/adr/0001).
 # Only `crates/media`, `crates/export` and `crates/interchange` may depend on these.

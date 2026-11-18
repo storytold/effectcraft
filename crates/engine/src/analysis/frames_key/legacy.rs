@@ -120,6 +120,7 @@ impl std::fmt::Debug for FootageText<'_> {
             alphabetical,
             start_timecode,
             file_timecode,
+            dolby_vision: _,
             markers,
             placed_page,
         } = self.f;

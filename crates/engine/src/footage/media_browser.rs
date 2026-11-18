@@ -334,6 +334,7 @@ pub fn footage_metadata(f: &Footage) -> Value {
         "hasAudio": f.has_audio,
         "alpha": format!("{:?}", f.alpha),
         "colorProfile": f.color_profile.map(|c| format!("{c:?}")).unwrap_or_else(|| "sRGB (default)".into()),
+        "dolbyVision": f.dolby_vision.map(|d| d.label()),
         "linearLight": f.linear_light,
         "preserveRgb": f.preserve_rgb,
         "fields": format!("{:?}", f.fields),
