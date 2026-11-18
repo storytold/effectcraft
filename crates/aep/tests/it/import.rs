@@ -23,6 +23,7 @@ mod issue_3087;
 mod lumetri;
 mod markers;
 mod masks;
+mod material_options;
 mod mattes;
 mod placeholders;
 mod puppet;
