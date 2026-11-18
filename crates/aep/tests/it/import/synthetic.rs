@@ -1026,3 +1026,22 @@ fn french_levels_channel_aliases_cover_every_item() {
     // "Alpha" needs no alias: the same word in both languages.
     assert_eq!(popup_alias("alpha"), None);
 }
+
+/// A parent id that names no layer is a link After Effects left behind (the high bit set, or the
+/// id of a layer since deleted); After Effects 26.5 shows such a layer with no parent, so the
+/// import does too, without reporting a lost link.
+#[test]
+fn a_parent_id_that_names_no_layer_is_no_parent() {
+    for stale in [0x8000_0000u32, 999] {
+        let bytes = mutate(&mut |c| {
+            if c.id == *b"ldta" {
+                set_data(c, 132, &stale.to_be_bytes());
+            }
+        });
+        let (p, r) = run(&bytes, true);
+        let r = r.unwrap_or_else(|e| panic!("parent id {stale:#x}: {e}"));
+        assert_eq!(losses(&r, LossCategory::ParentLinks), Vec::<String>::new(), "parent id {stale:#x}");
+        let comp = p.comp(r.comps[0]).unwrap();
+        assert!(comp.layers.iter().all(|l| l.parent.is_none()), "parent id {stale:#x}");
+    }
+}

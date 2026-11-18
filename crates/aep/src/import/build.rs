@@ -1178,9 +1178,13 @@ fn resolve_parents(
             Some(target) => {
                 links.insert(*layer, *target);
             }
+            // An id that names no layer (the high bit set, or a layer since deleted) is a link
+            // After Effects left behind: After Effects 26.5 shows the layer with no parent, and
+            // nothing is lost. A layer that was not imported loses its children's links.
             None => {
-                let why = skipped.get(parent).map_or("a layer that does not exist", |s| s.as_str());
-                col.lose_with(LossCategory::ParentLinks, || format!("{comp_name}: '{name}' has {why} as its parent"));
+                if let Some(why) = skipped.get(parent) {
+                    col.lose_with(LossCategory::ParentLinks, || format!("{comp_name}: '{name}' has {why} as its parent"));
+                }
             }
         }
     }
