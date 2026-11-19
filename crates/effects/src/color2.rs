@@ -252,9 +252,17 @@ impl Lv {
         if clip_w {
             t = t.min(1.0);
         }
-        self.ob + (self.ow - self.ob) * crate::color_fx::levels_gamma(t, self.g.max(0.01))
+        let curve = crate::color_fx::levels_gamma(t, self.g.max(0.01)).clamp(-LEVELS_IC_CURVE_LIMIT, LEVELS_IC_CURVE_LIMIT);
+        self.ob + (self.ow - self.ob) * curve
     }
 }
+
+/// How far Levels (Individual Controls)' curve may reach: with gamma down to 0 (rendered as 0.01,
+/// an exponent of 100) an HDR value a few times Input White overflows `f32`, and an infinite curve
+/// times an empty output range is NaN. 1e30 times the widest output range (2e4) is still finite
+/// (`f32::MAX` is 3.4e38), and every curve that was finite before stays as it was below it. The
+/// GPU (`fxt_lv`) uses the same.
+const LEVELS_IC_CURVE_LIMIT: f32 = 1e30;
 
 fn levels_ic(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let lv = LV_IDS.map(|ids| Lv {
@@ -978,11 +986,14 @@ fn cc_kernel(ctx: &EffectCtx, mut b: Buf) -> Buf {
 pub fn specs() -> Vec<EffectSpec> {
     let mut lv_params = Vec::new();
     for (ids, names) in LV_IDS.iter().zip(LV_NAMES.iter()) {
-        lv_params.push(p(ids[0], names[0], num(0.0), slider(-1.0, 2.0, 0.0, 1.0, 3)));
-        lv_params.push(p(ids[1], names[1], num(1.0), slider(-1.0, 2.0, 0.0, 1.0, 3)));
-        lv_params.push(p(ids[2], names[2], num(1.0), slider(0.1, 10.0, 0.1, 3.0, 2)));
-        lv_params.push(p(ids[3], names[3], num(0.0), slider(-1.0, 2.0, 0.0, 1.0, 3)));
-        lv_params.push(p(ids[4], names[4], num(1.0), slider(-1.0, 2.0, 0.0, 1.0, 3)));
+        // After Effects' valid ranges (#3487-#3491): levels -10000..10000 and gamma from 0 (the
+        // renderer floors it at 0.01); gamma keeps its wider maximum. The sliders stay 0..1.
+        let level = || slider(-10000.0, 10000.0, 0.0, 1.0, 3);
+        lv_params.push(p(ids[0], names[0], num(0.0), level()));
+        lv_params.push(p(ids[1], names[1], num(1.0), level()));
+        lv_params.push(p(ids[2], names[2], num(1.0), slider(0.0, 10.0, 0.1, 3.0, 2)));
+        lv_params.push(p(ids[3], names[3], num(0.0), level()));
+        lv_params.push(p(ids[4], names[4], num(1.0), level()));
     }
     lv_params.push(p("clipToOutputBlack", "Clip To Output Black", Value::Enum(2), popup(&crate::color_fx::LEVELS_CLIP)));
     lv_params.push(p("clipToOutputWhite", "Clip To Output White", Value::Enum(2), popup(&crate::color_fx::LEVELS_CLIP)));

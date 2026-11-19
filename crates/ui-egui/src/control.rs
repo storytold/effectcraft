@@ -344,6 +344,21 @@ fn set_ui(app: &mut EffectcraftApp, ctx: &egui::Context, p: &Value) -> Outcome {
     {
         return err(e);
     }
+    // Effect Controls' tab lock: on locks it to the layer it shows. With no layer shown (the
+    // lock kept for a layer of another comp, nothing selected here) a lock request is an error
+    // and the kept lock stays.
+    if let Some(on) = p.get("effectControlsLocked").and_then(Value::as_bool) {
+        crate::panels::effect_controls::scope_lock(app);
+        let shown = crate::panels::effect_controls::shown_layer_id(app).is_some();
+        if (on && !shown) || crate::panels::effect_controls::set_lock(app, on) != on {
+            return err("effectControlsLocked: Effect Controls shows no layer to lock");
+        }
+        // Locked to a layer of another comp, the panel shows this comp's selection: the tab's
+        // lock reads locked and a click unlocks, so a lock request does not lock what is shown.
+        if on && app.ui.effect_controls_lock.is_some_and(|k| app.session.active_comp_id().is_none_or(|c| c.0 != k.comp)) {
+            return err("effectControlsLocked: Effect Controls is locked to a layer of another composition; unlock it first");
+        }
+    }
     set_ui_layout(app, p)
 }
 
@@ -788,19 +803,7 @@ fn render_frame(app: &EffectcraftApp, p: &Value) -> Outcome {
 
 /// Standard base64 (RFC 4648, padded).
 pub fn base64(data: &[u8]) -> String {
-    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut s = String::with_capacity(data.len().div_ceil(3) * 4);
-    for c in data.chunks(3) {
-        let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
-        for i in 0..4 {
-            if i <= c.len() {
-                s.push(A[(n >> (18 - 6 * i) & 63) as usize] as char);
-            } else {
-                s.push('=');
-            }
-        }
-    }
-    s
+    craft_mime::base64::STANDARD.encode(data)
 }
 
 /// Builds the `ui.inspect` reply: window size and pixels per point, fps, UI state with the

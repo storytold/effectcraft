@@ -766,10 +766,12 @@ pub fn specs() -> Vec<EffectSpec> {
     let hls_common = || {
         vec![
             p("noise", "Noise", Value::Enum(0), popup(&["Uniform", "Squared", "Grain"])),
-            p("hue", "Hue", num(0.0), pct()),
-            p("lightness", "Lightness", num(0.0), pct()),
-            p("saturation", "Saturation", num(0.0), pct()),
-            p("grainSize", "Grain Size", num(1.0), slider(0.1, 100.0, 0.5, 10.0, 2)),
+            // After Effects' valid ranges (#3483, #3484): the amounts go to 1000 %, Grain Size
+            // down to 0 (the renderer floors it at 0.1 px) and keeps its wider maximum.
+            p("hue", "Hue", num(0.0), slider(0.0, 1000.0, 0.0, 100.0, 1)),
+            p("lightness", "Lightness", num(0.0), slider(0.0, 1000.0, 0.0, 100.0, 1)),
+            p("saturation", "Saturation", num(0.0), slider(0.0, 1000.0, 0.0, 100.0, 1)),
+            p("grainSize", "Grain Size", num(1.0), slider(0.0, 100.0, 0.5, 10.0, 2)),
         ]
     };
     let mut hls = hls_common();
@@ -965,6 +967,32 @@ mod tests {
         assert_ne!(a.img, b.img);
         let still = run("ec.noise.noisehls", &[], img.clone(), 0.0);
         assert_eq!(still.img, img);
+    }
+
+    /// #3483, #3484: amounts above 100 % keep adding noise, and Grain Size 0 renders (floored at
+    /// 0.1 px) with finite output, for both effects.
+    #[test]
+    fn noise_hls_takes_after_effects_ranges() {
+        let mut img = Image::new(16, 16);
+        for (i, p) in img.data.iter_mut().enumerate() {
+            *p = premul([0.6, 0.3, (i % 7) as f32 / 7.0], 1.0);
+        }
+        for id in ["ec.noise.noisehls", "ec.noise.noisehlsauto"] {
+            for (param, lo, hi) in [("hue", 0.0, 1000.0), ("lightness", 0.0, 1000.0), ("saturation", 0.0, 1000.0), ("grainSize", 0.0, 100.0)] {
+                let ui = &crate::find(id).unwrap().params.iter().find(|p| p.id == param).unwrap().ui;
+                assert!(matches!(ui, ParamUi::Slider { min, max, .. } if *min == lo && *max == hi), "{id} {param}: {ui:?}");
+            }
+            let at = |amount: f64, grain: f64| {
+                let vals =
+                    [("noise", Value::Enum(2)), ("hue", num(amount)), ("lightness", num(amount)), ("saturation", num(amount)), ("grainSize", num(grain))];
+                run(id, &vals, img.clone(), 0.0).img
+            };
+            let (low, high) = (at(100.0, 1.0), at(1000.0, 1.0));
+            assert_ne!(low, high, "{id}");
+            for out in [high, at(1000.0, 0.0)] {
+                assert!(out.data.iter().flatten().all(|v| v.is_finite() && (0.0..=1.0).contains(v)), "{id}");
+            }
+        }
     }
 
     #[test]

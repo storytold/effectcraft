@@ -114,6 +114,10 @@ ffmpeg elsewhere) to check the code tables against an independent implementation
   stitching and PostScript calculator (type 4) functions.
 - **Pages:** any page ([`parse_page`], [`page_count`]); File ▸ Import takes `page` (from 1) and
   the Import dialog asks for it; footage remembers its page (`Footage::page`).
+- **VectorCraft documents** (`.vectorcraft`, plain or compressed): the PDF the document carries
+  when VectorCraft saved it with Create PDF-Compatible File, one page per artboard, read through
+  `craft-doc` from craft-libs. The footage codec is `VectorCraft`. A document saved without that
+  option has no PDF, and importing it reports an error that names the option.
 
 ## Limitations
 
@@ -144,7 +148,7 @@ ffmpeg elsewhere) to check the code tables against an independent implementation
 ## Shared parser setup and bounds
 
 The workspace pins `craft-pdf` to `craft-libs` Git revision
-`e7c3dda7f3e339dd2c8d40fc4eb405472be1a1e4`, with `default-features = false` and only the explicit `read`
+`091863e4a615f38743bfd5d6dc62a2e8f37cd5d5`, with `default-features = false` and only the explicit `read`
 feature. This excludes the backend's bundled fonts and Adobe CMaps and preserves EffectCraft's
 font and asset policies. The shared parser does not change the supported drawing operators,
 image codecs, continuously rasterized SVG tree, editable shapes, or EPS interpreter.

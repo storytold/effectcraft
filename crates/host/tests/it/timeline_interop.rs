@@ -54,6 +54,7 @@ fn still(p: &mut fp::Project, path: &str) -> fp::ItemId {
             codec: "png".into(),
             pixel_format: String::new(),
             color: Default::default(),
+            color_assumed: None,
             has_alpha: false,
             bitrate: None,
             hdr: None,

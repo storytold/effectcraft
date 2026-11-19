@@ -1,17 +1,16 @@
 //! Utility effects: bounds growth, HDR inspection/compression, Cineon log conversion and colour
 //! lookup tables (.cube).
 
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::sync::Arc;
 
+use crate::file_cache::{self, Registered};
 use effectcraft_color::luminance;
 use effectcraft_keyframe::Value;
 use effectcraft_project::ParamUi;
 use rayon::prelude::*;
 
 use crate::util::{premul, unpremul};
-use crate::{Buf, EffectCtx, EffectSpec, col, num, p, popup, slider};
+use crate::{Buf, EffectCtx, EffectSpec, Params, col, num, p, popup, slider};
 
 fn spec(id: &'static str, name: &'static str, params: Vec<crate::ParamSpec>, render: crate::RenderFn) -> EffectSpec {
     EffectSpec { id, name, category: "Utility", params, render, gpu: false, float: true }
@@ -103,8 +102,10 @@ pub(crate) struct Cineon {
     pub white: f32,
     pub ib: f32,
     pub iw: f32,
+    /// Version 2: [`cineon_gamma`]. Version 1: the saved Gamma, where 1.7 gives linear output.
     pub gamma: f32,
     pub rolloff: f32,
+    pub version_2: bool,
 }
 
 impl Cineon {
@@ -114,14 +115,25 @@ impl Cineon {
     fn knee(&self) -> f32 {
         1.0 - (self.rolloff / 100.0).clamp(0.0, 0.99)
     }
-    /// Normalized code value (code / 1023) → linear, raised to `1.7 / gamma`
-    /// ([`effectcraft_project::cineon_log_to_lin`], which Interpret Footage ▸ Cineon Settings
-    /// also uses with `1 / gamma`).
+    /// Normalized code value (code / 1023) to linear output.
     pub fn log_to_lin(&self, v: f32) -> f32 {
-        let lin = effectcraft_project::cineon_log_to_lin(v, self.black, self.white, 1.7, self.gamma, self.rolloff);
+        let lin = if self.version_2 {
+            let offset = self.offset().powf(1.0 / self.gamma.max(0.001));
+            let exposure = 10f32.powf((v * 1023.0 - self.white) * 0.002 / 0.6).powf(1.0 / self.gamma.max(0.001));
+            let mut lin = ((exposure - offset) / (1.0 - offset).max(1e-6)).max(0.0);
+            let k = self.knee();
+            if k < 1.0 && lin > k {
+                let w = 1.0 - k;
+                lin = k + w * (1.0 - (-(lin - k) / w).exp());
+            }
+            lin
+        } else {
+            // Version 1 keeps its earlier arithmetic, so saved instances render the same bits.
+            effectcraft_project::cineon_log_to_lin(v, self.black, self.white, 1.7, self.gamma, self.rolloff)
+        };
         self.ib + (self.iw - self.ib) * lin
     }
-    /// Linear → normalised code value.
+    /// Linear to normalized code value.
     pub fn lin_to_log(&self, v: f32) -> f32 {
         let off = self.offset();
         let d = self.iw - self.ib;
@@ -131,27 +143,61 @@ impl Cineon {
             let w = 1.0 - k;
             lin = k - w * (1.0 - (lin - k) / w).max(1e-6).ln();
         }
-        lin = lin.max(0.0).powf(self.gamma.max(0.01) / 1.7);
-        let code = self.white + (lin * (1.0 - off) + off).max(1e-9).log10() * 0.6 / 0.002;
+        let exposure = if self.version_2 {
+            let root_offset = off.powf(1.0 / self.gamma.max(0.001));
+            (lin.max(0.0) * (1.0 - root_offset) + root_offset).max(0.0).powf(self.gamma.max(0.001))
+        } else {
+            lin.max(0.0).powf(self.gamma.max(0.01) / 1.7) * (1.0 - off) + off
+        };
+        let code = self.white + exposure.max(1e-9).log10() * 0.6 / 0.002;
         code / 1023.0
     }
 }
 
+/// The Gamma that gives linear output in Cineon Converter version 1.
+pub const CINEON_V1_LINEAR_GAMMA: f64 = 1.7;
+
+/// The Gamma scale used by Cineon Converter version `version`: `1 / 1.7` for version 1, 1 for
+/// version 2. Preset conversion aligns the linear points but not other Gamma values. Version 1
+/// instances (saved before the hidden Version parameter existed; see
+/// [`crate::migrate::legacy_default`]) raised the linear value to `1.7 / gamma`.
+pub fn cineon_gamma_scale(version: f64) -> f64 {
+    if version < 2.0 { 1.0 / CINEON_V1_LINEAR_GAMMA } else { 1.0 }
+}
+
+/// Cineon Converter's Gamma on the version 2 scale ([`cineon_gamma_scale`]), limited to `0.01 /
+/// 1.7` or more: version 1 limited its saved Gamma to 0.01.
+pub fn cineon_gamma(params: &Params) -> f64 {
+    (params.f("gamma") * cineon_gamma_scale(params.f("version"))).max(0.01 * cineon_gamma_scale(1.0))
+}
+
 fn cineon(ctx: &EffectCtx, mut b: Buf) -> Buf {
+    let version_2 = ctx.params.f("version") >= 2.0;
     let c = Cineon {
         black: ctx.params.f("tenBitBlackPoint") as f32,
         white: ctx.params.f("tenBitWhitePoint") as f32,
         ib: ctx.params.f("internalBlackPoint") as f32,
         iw: ctx.params.f("internalWhitePoint") as f32,
-        gamma: ctx.params.f("gamma") as f32,
+        gamma: if version_2 { cineon_gamma(ctx.params) } else { ctx.params.f("gamma") } as f32,
         rolloff: ctx.params.f("highlightRolloff") as f32,
+        version_2,
     };
-    let std = Cineon { black: 95.0, white: 685.0, ib: 0.0, iw: 1.0, gamma: 1.7, rolloff: c.rolloff };
+    let std = Cineon { black: 95.0, white: 685.0, ib: 0.0, iw: 1.0, gamma: 1.7, rolloff: c.rolloff, version_2: false };
     let kind = ctx.params.e("conversionType");
     b.img.map_straight(|v| {
         v.map(|x| match kind {
             0 => c.lin_to_log(x),
             1 => c.log_to_lin(x),
+            _ if c.version_2 => {
+                // Custom points use the Gamma 1 code conversion before the code-value power.
+                let code = if (c.black, c.white, c.ib, c.iw) == (95.0, 685.0, 0.0, 1.0) {
+                    x
+                } else {
+                    let unit = Cineon { gamma: 1.0, ..c };
+                    std.lin_to_log(unit.log_to_lin(x))
+                };
+                code.max(0.0).powf(1.0 / c.gamma.max(0.001))
+            }
             _ => std.lin_to_log(c.log_to_lin(x)),
         })
     });
@@ -170,8 +216,16 @@ pub struct Lut {
     pub dmax: [f32; 3],
 }
 
+// Cube LUT Specification 1.0 §§6–7 permits at most 65,536 1D rows and a 256³
+// lattice. Allow their sum for combined shaper + 3D files, regardless of header order.
+const MAX_CUBE_ROWS: usize = 65_536 + 256 * 256 * 256;
+
 /// Parse `.cube` text (TITLE, LUT_1D_SIZE, LUT_3D_SIZE, DOMAIN_MIN/MAX, data red-fastest).
 pub fn parse_cube(text: &str) -> Option<Lut> {
+    parse_cube_limited(text, MAX_CUBE_ROWS)
+}
+
+fn parse_cube_limited(text: &str, max_rows: usize) -> Option<Lut> {
     let mut lut = Lut { n1: 0, d1: vec![], n3: 0, d3: vec![], dmin: [0.0; 3], dmax: [1.0; 3] };
     let mut rows: Vec<[f32; 3]> = Vec::new();
     let three = |it: &mut std::str::SplitWhitespace| -> Option<[f32; 3]> {
@@ -213,16 +267,27 @@ pub fn parse_cube(text: &str) -> Option<Lut> {
                 lut.dmax = [hi; 3];
             }
             k if k.starts_with(|c: char| c.is_ascii_alphabetic()) => continue,
-            _ => rows.push(three(&mut it)?),
+            _ => {
+                if rows.len() == max_rows {
+                    return None;
+                }
+                let row = three(&mut it)?;
+                // Make buffer growth fallible before push can allocate.
+                rows.try_reserve(1).ok()?;
+                rows.push(row);
+            }
         }
+    }
+    if lut.n3 > 256 {
+        return None;
     }
     let need1 = lut.n1;
     let need3 = lut.n3 * lut.n3 * lut.n3;
-    if (lut.n1 == 0 && lut.n3 == 0) || lut.n1 == 1 || lut.n3 == 1 || rows.len() != need1 + need3 || lut.n3 > 256 {
+    if (lut.n1 == 0 && lut.n3 == 0) || lut.n1 == 1 || lut.n3 == 1 || Some(rows.len()) != need1.checked_add(need3) {
         return None;
     }
-    lut.d1 = rows[..need1].to_vec();
-    lut.d3 = rows[need1..].to_vec();
+    lut.d1 = rows.get(..need1)?.to_vec();
+    lut.d3 = rows.get(need1..)?.to_vec();
     Some(lut)
 }
 
@@ -331,84 +396,22 @@ impl Lut {
     }
 }
 
-/// A LUT file's size and modification time when it was read (`None`: inline text, or a file
-/// that could not be described). A file whose stamp moved is read again (#3493).
-type FileStamp = Option<(u64, Option<std::time::SystemTime>)>;
-
 /// At most this many parsed LUTs (files and inline texts) are kept, and at most
 /// [`MAX_CACHED_BYTES`] of them; the least recently used go first.
 const MAX_CACHED_LUTS: usize = 64;
 const MAX_CACHED_BYTES: usize = 512 << 20;
 
-/// At most this many LUT files are followed by [`check_lut_files`] beyond the ones whose LUT is
-/// kept: the frames made with a LUT that left the cache are still dropped when its file changes.
-const MAX_FOLLOWED_FILES: usize = 1024;
+/// [`load_lut`]'s cache, by parameter text.
+static LUTS: Registered<Option<Arc<Lut>>> = Registered::new(MAX_CACHED_LUTS, MAX_CACHED_BYTES);
 
-/// A parsed LUT (or the failure to parse one) and what it was read from.
-struct CachedLut {
-    stamp: FileStamp,
-    lut: Option<Arc<Lut>>,
-    used: u64,
-    /// The parsed tables and the parameter text, counted against [`MAX_CACHED_BYTES`].
-    bytes: usize,
-}
-
-/// [`load_lut`]'s cache, by parameter text, and the stamp each LUT file was last read with.
-#[derive(Default)]
-struct LutCache {
-    map: HashMap<String, CachedLut>,
-    files: HashMap<String, FileStamp>,
-    clock: u64,
-    bytes: usize,
-}
-
-impl LutCache {
-    /// Forget the LUT kept for `src`.
-    fn remove(&mut self, src: &str) {
-        if let Some(e) = self.map.remove(src) {
-            self.bytes = self.bytes.saturating_sub(e.bytes);
-        }
-    }
-
-    /// Note that the file at `path` was read with `stamp`: a different stamp than the last read's
-    /// means it changed on disk, and frames made before may show the old LUT.
-    fn read_file(&mut self, path: &str, stamp: FileStamp) {
-        if self.files.insert(path.to_string(), stamp).is_some_and(|old| old != stamp) {
-            GENERATION.fetch_add(1, Ordering::AcqRel);
-        }
-        if self.files.len() > MAX_FOLLOWED_FILES {
-            let map = &self.map;
-            self.files.retain(|p, _| p.as_str() == path || map.keys().any(|src| lut_file(src) == Some(p.as_str())));
-        }
-    }
-
-    /// Keep at most [`MAX_CACHED_LUTS`] LUTs and [`MAX_CACHED_BYTES`], always the one for `keep`.
-    fn evict(&mut self, keep: &str) {
-        while self.map.len() > MAX_CACHED_LUTS || (self.bytes > MAX_CACHED_BYTES && self.map.len() > 1) {
-            let Some(oldest) = self.map.iter().filter(|(k, _)| k.as_str() != keep).min_by_key(|(_, e)| e.used).map(|(k, _)| k.clone()) else { break };
-            self.remove(&oldest);
-        }
-    }
-}
-
-/// How often a LUT file was found changed on disk ([`lut_generation`]).
-static GENERATION: AtomicU64 = AtomicU64::new(0);
-
-fn lut_cache() -> std::sync::MutexGuard<'static, LutCache> {
-    static CACHE: OnceLock<Mutex<LutCache>> = OnceLock::new();
-    CACHE.get_or_init(Mutex::default).lock().unwrap_or_else(PoisonError::into_inner)
-}
-
-/// The stamp of the file at `path` now: one `metadata` call.
-fn file_stamp(path: &str) -> FileStamp {
-    std::fs::metadata(path).ok().map(|md| (md.len(), md.modified().ok()))
-}
-
-/// The parameters (paths in the effect's group) of `effect` that [`load_lut`] reads.
+/// The parameters (paths in the effect's group) of `effect` that name a file an effect reads
+/// through a cache that follows it ([`load_lut`], the OCIO file transforms and configs).
 pub fn lut_params(effect: &str) -> &'static [&'static str] {
     match effect {
         "ec.utility.applylut" => &["lut"],
         "ec.color.lumetri" => &["basicCorrection/inputLutFile", "creative/lookFile"],
+        "ec.color.ociofile" => &["file"],
+        "ec.color.ociocolorspace" | "ec.color.ociodisplay" => &["configFile"],
         _ => &[],
     }
 }
@@ -421,75 +424,43 @@ pub fn lut_file(src: &str) -> Option<&str> {
     (!path.is_empty() && !path.contains('\n')).then_some(path)
 }
 
-/// Changes each time a LUT file [`load_lut`] read is found changed on disk (by [`load_lut`]
-/// itself or [`check_lut_files`]): frames made before then may show the old LUT.
-pub fn lut_generation() -> u64 {
-    GENERATION.load(Ordering::Acquire)
-}
-
-/// Look at every LUT file read (one `metadata` call each) and forget the LUTs of the ones that
-/// changed on disk since, so the next [`load_lut`] reads them again. Returns [`lut_generation`].
-pub fn check_lut_files() -> u64 {
-    let files: Vec<(String, FileStamp)> = lut_cache().files.iter().map(|(p, s)| (p.clone(), *s)).collect();
-    // (stamped without the lock: a file on a slow share must not hold up renders)
-    let changed: Vec<(String, FileStamp, FileStamp)> =
-        files.into_iter().filter_map(|(path, old)| Some(file_stamp(&path)).filter(|now| *now != old).map(|now| (path, old, now))).collect();
-    if !changed.is_empty() {
-        let mut c = lut_cache();
-        for (path, old, now) in changed {
-            // (a render that read the file meanwhile has noted its new stamp already)
-            if c.files.get(&path) == Some(&old) {
-                let stale: Vec<String> = c.map.keys().filter(|src| lut_file(src) == Some(path.as_str())).cloned().collect();
-                for src in stale {
-                    c.remove(&src);
-                }
-                c.read_file(&path, now);
-            }
-        }
+/// The files a [`lut_params`] parameter set to `src` reads: the ones its cached result was read
+/// from (an OCIO config's also the LUTs it names, and the places it looked for missing ones; an
+/// `.ocio` config not read yet is read), else the file it names.
+pub fn lut_files(src: &str) -> Vec<String> {
+    // A config not read yet is read now: the LUTs it names are its files from the first render.
+    if crate::ocio_config::cached_files(src).is_none()
+        && lut_file(src).is_some_and(|p| std::path::Path::new(p).extension().is_some_and(|e| e.eq_ignore_ascii_case("ocio")))
+    {
+        let _ = crate::ocio_config::load_config(src);
     }
-    lut_generation()
+    crate::ocio_config::cached_files(src)
+        .or_else(|| crate::ocio::cached_files(src))
+        .or_else(|| file_cache::lock(LUTS.get()).files(src))
+        .unwrap_or_else(|| lut_file(src).map(str::to_string).into_iter().collect())
 }
 
 /// Load (and cache) a LUT from inline `.cube` text or a file path. A file is stamped (one
-/// `metadata` call) on every load and read again once its size or modification time moved, so a
-/// file edited, created, deleted or repaired on disk is followed; inline text is its own content.
-/// An edit that keeps both the size and the modification time can't be told apart.
+/// `metadata` call) on every load and read again once its size or modification time moved (see
+/// [`crate::file_cache`]); inline text is its own content.
 pub fn load_lut(src: &str) -> Option<Arc<Lut>> {
     if src.trim().is_empty() {
         return None;
     }
-    let file = lut_file(src);
-    let stamp = file.and_then(file_stamp);
-    {
-        let mut c = lut_cache();
-        c.clock += 1;
-        let now = c.clock;
-        if let Some(e) = c.map.get_mut(src)
-            && e.stamp == stamp
-        {
-            e.used = now;
-            return e.lut.clone();
+    file_cache::cached(LUTS.get(), src, || {
+        let lut = match lut_file(src) {
+            Some(path) => file_cache::read(path).ok().and_then(|t| parse_cube(&t)),
+            None => parse_cube(src),
         }
-    }
-    // (read and parsed without the lock; a file written after it was stamped has a newer stamp,
-    // and is read again next time)
-    let lut = match file {
-        Some(path) => std::fs::read_to_string(path).ok().and_then(|t| parse_cube(&t)),
-        None => parse_cube(src),
-    }
-    .map(Arc::new);
-    let tables = lut.as_ref().map_or(0, |l| l.d1.len().saturating_add(l.d3.len()).saturating_mul(std::mem::size_of::<[f32; 3]>()));
-    let bytes = tables.saturating_add(src.len());
-    let mut c = lut_cache();
-    if let Some(path) = file {
-        c.read_file(path, stamp);
-    }
-    c.remove(src);
-    let used = c.clock;
-    c.map.insert(src.to_string(), CachedLut { stamp, lut: lut.clone(), used, bytes });
-    c.bytes = c.bytes.saturating_add(bytes);
-    c.evict(src);
-    lut
+        .map(Arc::new);
+        let bytes = lut.as_ref().map_or(0, |l| lut_bytes(l));
+        (lut, bytes)
+    })
+}
+
+/// The size of a LUT's tables.
+pub(crate) fn lut_bytes(l: &Lut) -> usize {
+    l.d1.len().saturating_add(l.d3.len()).saturating_mul(std::mem::size_of::<[f32; 3]>())
 }
 
 fn apply_lut(ctx: &EffectCtx, mut b: Buf) -> Buf {
@@ -527,8 +498,10 @@ pub fn specs() -> Vec<EffectSpec> {
                 p("internalBlackPoint", "Internal Black Point", num(0.0), slider(-1.0, 2.0, 0.0, 1.0, 3)),
                 p("tenBitWhitePoint", "10 Bit White Point", num(685.0), slider(0.0, 1023.0, 0.0, 1023.0, 0)),
                 p("internalWhitePoint", "Internal White Point", num(1.0), slider(-1.0, 2.0, 0.0, 1.0, 3)),
-                p("gamma", "Gamma", num(1.7), slider(0.1, 5.0, 0.1, 5.0, 2)),
+                p("gamma", "Gamma", num(1.7), slider(0.05, 5.0, 0.1, 5.0, 2)),
                 p("highlightRolloff", "Highlight Rolloff", num(20.0), slider(0.0, 100.0, 0.0, 100.0, 0)),
+                // 2: Gamma 1 gives linear output (`cineon_gamma`).
+                p("version", "Version", num(2.0), ParamUi::Hidden),
             ],
             cineon,
         ),
@@ -617,6 +590,10 @@ mod tests {
     fn bad_cube_is_passthrough() {
         assert!(parse_cube("LUT_3D_SIZE 2\n0 0 0\n1 1 1\n").is_none());
         assert!(parse_cube("LUT_3D_SIZE 2\n0 0 zz\n").is_none());
+        // A hostile size must be rejected, not overflow `n3^3` or `n1 + n3^3`.
+        assert!(parse_cube("LUT_3D_SIZE 4294967296\n0 0 0\n").is_none());
+        assert!(parse_cube(&format!("LUT_3D_SIZE {}\n0 0 0\n", usize::MAX)).is_none());
+        assert!(parse_cube(&format!("LUT_1D_SIZE {}\nLUT_3D_SIZE 2\n{}", usize::MAX, "0 0 0\n".repeat(7))).is_none());
         let img = test_img();
         let out = run("ec.utility.applylut", &[("lut", Value::Str("LUT_3D_SIZE 3\n0 0 0\n".into()))], img.clone());
         assert_eq!(out.img, img);
@@ -685,11 +662,11 @@ mod tests {
         std::fs::write(&path, identity_cube(2)).unwrap();
         let src = path.to_string_lossy().into_owned();
         assert!(load_lut(&src).is_some());
-        let before = check_lut_files();
-        assert!(lut_cache().map.contains_key(&src), "an unchanged file stays");
+        let before = crate::check_lut_files();
+        assert!(file_cache::lock(LUTS.get()).contains(&src), "an unchanged file stays");
         std::fs::write(&path, identity_cube(3)).unwrap();
-        assert!(check_lut_files() > before);
-        assert!(!lut_cache().map.contains_key(&src), "a changed file is read again");
+        assert!(crate::check_lut_files() > before);
+        assert!(!file_cache::lock(LUTS.get()).contains(&src), "a changed file is read again");
         assert_eq!(load_lut(&src).map(|l| l.n3), Some(3));
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -703,12 +680,12 @@ mod tests {
         for i in 0..MAX_CACHED_LUTS + 8 {
             let text = format!("TITLE \"bounded {i}\"\n{}", identity_cube(2));
             assert!(load_lut(&text).is_some());
-            assert!(lut_cache().map.len() <= MAX_CACHED_LUTS);
+            assert!(file_cache::lock(LUTS.get()).len() <= MAX_CACHED_LUTS);
         }
         assert!(!Arc::ptr_eq(&first, &load_lut(&oldest).unwrap()), "the oldest was let go");
-        let c = lut_cache();
-        assert_eq!(c.bytes, c.map.values().map(|e| e.bytes).sum::<usize>(), "the bytes kept add up");
-        assert!(c.bytes <= MAX_CACHED_BYTES);
+        let (bytes, sum, max) = file_cache::lock(LUTS.get()).bytes();
+        assert_eq!(bytes, sum, "the bytes kept add up");
+        assert!(bytes <= max);
     }
 
     /// A LUT file whose LUT left the cache is still followed: its frames are dropped when it
@@ -725,24 +702,33 @@ mod tests {
         for i in 0..MAX_CACHED_LUTS + 8 {
             assert!(load_lut(&format!("TITLE \"evict {i}\"\n{}", identity_cube(2))).is_some());
         }
-        assert!(!lut_cache().map.contains_key(&src), "its LUT left the cache");
+        assert!(!file_cache::lock(LUTS.get()).contains(&src), "its LUT left the cache");
         std::fs::write(&path, identity_cube(3)).unwrap();
-        check_lut_files();
-        assert_eq!(lut_cache().files.get(&src), Some(&file_stamp(&src)), "the change was noticed");
+        crate::check_lut_files();
+        assert_eq!(file_cache::followed_stamp(&src), Some(file_cache::file_stamp(&src)), "the change was noticed");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// Past [`MAX_FOLLOWED_FILES`], the file just read is still followed (a cache of its own:
-    /// the shared one's followed files belong to the other tests too).
     #[test]
-    fn the_file_just_read_stays_followed_past_the_limit() {
-        let mut c = LutCache::default();
-        for i in 0..MAX_FOLLOWED_FILES + 8 {
-            let path = format!("/followed/{i}.cube");
-            c.read_file(&path, Some((1, None)));
-            assert!(c.files.contains_key(&path), "{i}: the file just read");
-        }
-        assert!(c.files.len() <= MAX_FOLLOWED_FILES, "the others no longer cached are let go");
+    fn cube_accepts_maximum_1d_shaper_with_3d_table() {
+        let text = format!("LUT_1D_SIZE 65536\nLUT_3D_SIZE 2\n{}", "0 0 0\n".repeat(65_536 + 8));
+        let lut = parse_cube(&text).unwrap();
+        assert_eq!(lut.d1.len(), 65_536);
+        assert_eq!(lut.d3.len(), 8);
+        // Keep the parser's existing tolerance for headers following data.
+        let text = format!("{}LUT_1D_SIZE 2\nLUT_3D_SIZE 2\n", "0 0 0\n".repeat(10));
+        let lut = parse_cube(&text).unwrap();
+        assert_eq!(lut.d1, vec![[0.0; 3]; 2]);
+        assert_eq!(lut.d3, vec![[0.0; 3]; 8]);
+    }
+
+    #[test]
+    fn cube_row_collection_is_bounded() {
+        assert_eq!(MAX_CUBE_ROWS, 65_536 + 256 * 256 * 256);
+        let text = "LUT_1D_SIZE 2\n0 0 0\n1 1 1\n";
+        let lut = parse_cube_limited(text, 2).unwrap();
+        assert_eq!(lut.d1, vec![[0.0; 3], [1.0; 3]]);
+        assert!(parse_cube_limited("LUT_1D_SIZE 3\n0 0 0\n0.5 0.5 0.5\n1 1 1\n", 2).is_none());
     }
 
     #[test]
@@ -754,29 +740,133 @@ mod tests {
 
     #[test]
     fn cineon_round_trip() {
-        let c = Cineon { black: 95.0, white: 685.0, ib: 0.0, iw: 1.0, gamma: 1.7, rolloff: 20.0 };
-        for code in [100.0f32, 200.0, 350.0, 500.0, 600.0] {
-            let v = code / 1023.0;
-            let back = c.lin_to_log(c.log_to_lin(v));
-            assert!((back - v).abs() < 1e-3, "{code}: {back}");
+        for gamma in [1.0, 1.7, 0.6] {
+            let c = Cineon { black: 95.0, white: 685.0, ib: 0.0, iw: 1.0, gamma, rolloff: 20.0, version_2: true };
+            for code in [100.0f32, 200.0, 350.0, 500.0, 600.0] {
+                let v = code / 1023.0;
+                let back = c.lin_to_log(c.log_to_lin(v));
+                assert!((back - v).abs() < 1e-3, "gamma {gamma}, {code}: {back}");
+            }
+            assert!(c.log_to_lin(95.0 / 1023.0).abs() < 1e-4);
         }
-        assert!(c.log_to_lin(95.0 / 1023.0).abs() < 1e-4);
+        let custom = Cineon { black: 120.0, white: 700.0, ib: 0.1, iw: 0.9, gamma: 2.2, rolloff: 35.0, version_2: true };
+        for code in [120.0f32, 250.0, 400.0, 560.0, 700.0] {
+            let value = code / 1023.0;
+            let back = custom.lin_to_log(custom.log_to_lin(value));
+            assert!((back - value).abs() < 1e-5, "code {code}: {back}");
+        }
     }
 
-    /// Interpret Footage ▸ Cineon Settings and the Cineon Converter's Log to Linear give the same
-    /// values for the same points and Highlight Rolloff when the converter's Gamma is 1.7 times
-    /// Cineon Settings' Gamma: the converter's default 1.7 and Cineon Settings' Gamma 1 both give
-    /// linear light (code 400 is 0.10251).
+    /// Gamma 1 gives linear light: Kodak's printing-density curve with nothing
+    /// raised, so code 400 is (10^(-0.95) - 10^(-1.9667)) / (1 - 10^(-1.9667)) = 0.10251. A larger
+    /// Gamma lightens the midtones, and Linear to Log undoes it.
+    #[test]
+    fn cineon_gamma_1_is_linear_and_larger_lightens() {
+        let c = |gamma| Cineon { black: 95.0, white: 685.0, ib: 0.0, iw: 1.0, gamma, rolloff: 0.0, version_2: true };
+        let lin = c(1.0).log_to_lin(400.0 / 1023.0);
+        assert!((lin - 0.10251).abs() < 1e-4, "{lin}");
+        let lighter = c(2.0).log_to_lin(400.0 / 1023.0);
+        let offset = c(2.0).offset().sqrt();
+        let exposure = 10f32.powf((400.0 - 685.0) * 0.002 / 0.6).sqrt();
+        assert!((lighter - (exposure - offset) / (1.0 - offset)).abs() < 1e-4, "{lighter}");
+        assert!((c(2.0).lin_to_log(lighter) - 400.0 / 1023.0).abs() < 1e-4);
+        let out = run("ec.utility.cineon", &[("gamma", num(1.0))], {
+            let mut img = Image::new(1, 1);
+            img.set(0, 0, [400.0 / 1023.0, 400.0 / 1023.0, 400.0 / 1023.0, 1.0]);
+            img
+        });
+        assert!((out.img.data[0][0] - 0.10251).abs() < 1e-4, "Gamma 1 is linear: {:?}", out.img.data[0]);
+    }
+
+    #[test]
+    fn cineon_log_to_log_gamma_1_keeps_code_values() {
+        let codes = [95.0f32, 250.0, 400.0, 560.0, 685.0, 800.0];
+        let mut img = Image::new(codes.len() as u32, 1);
+        for (x, code) in codes.iter().enumerate() {
+            let value = code / 1023.0;
+            img.set(x as u32, 0, [value, value, value, 1.0]);
+        }
+        for rolloff in [0.0, 20.0] {
+            let out = run("ec.utility.cineon", &[("conversionType", Value::Enum(2)), ("gamma", num(1.0)), ("highlightRolloff", num(rolloff))], img.clone());
+            for (x, code) in codes.iter().enumerate() {
+                assert!((out.img.data[x][0] - code / 1023.0).abs() < 1e-6, "code {code}: {}", out.img.data[x][0]);
+            }
+        }
+    }
+
+    #[test]
+    fn cineon_version_2_log_to_linear_matches_observed_codes() {
+        for (gamma, codes, expected) in [
+            (1.7, &[95.0, 180.0, 250.0, 320.0, 400.0, 480.0, 560.0, 620.0, 685.0][..], &[0, 9, 19, 34, 57, 89, 136, 185, 255][..]),
+            (2.2, &[180.0, 250.0, 320.0, 400.0, 480.0, 560.0, 620.0][..], &[13, 27, 44, 71, 106, 152, 196][..]),
+        ] {
+            let c = Cineon { black: 95.0, white: 685.0, ib: 0.0, iw: 1.0, gamma, rolloff: 0.0, version_2: true };
+            for (&code, &want) in codes.iter().zip(expected) {
+                let got = (c.log_to_lin(code / 1023.0).clamp(0.0, 1.0) * 255.0).round() as i32;
+                assert!((got - want).abs() <= 1, "Gamma {gamma}, code {code}: {got} vs {want}");
+            }
+        }
+    }
+
+    #[test]
+    fn cineon_version_2_log_to_log_matches_observed_codes() {
+        let codes = [95.0f32, 180.0, 250.0, 320.0, 400.0, 480.0, 560.0, 620.0, 685.0, 800.0];
+        let expected = [63, 92, 111, 129, 146, 164, 179, 190, 202, 221];
+        let mut img = Image::new(codes.len() as u32, 1);
+        for (x, code) in codes.iter().enumerate() {
+            let v = code / 1023.0;
+            img.set(x as u32, 0, [v, v, v, 1.0]);
+        }
+        let out = run("ec.utility.cineon", &[("conversionType", Value::Enum(2)), ("gamma", num(1.7))], img);
+        for (x, (&code, &want)) in codes.iter().zip(&expected).enumerate() {
+            let got = (out.img.data[x][0].clamp(0.0, 1.0) * 255.0).round() as i32;
+            assert!((got - want).abs() <= 2, "code {code}: {got} vs {want}");
+        }
+    }
+
+    /// A version 1 instance renders as version 1 did: Gamma 1.7 gives linear light, and a
+    /// version 1 Gamma of 3.4 has the old post-normalization power.
+    #[test]
+    fn cineon_version_1_gamma_17_is_linear() {
+        let px = |vals: &[(&str, Value)]| {
+            let mut img = Image::new(1, 1);
+            img.set(0, 0, [400.0 / 1023.0, 400.0 / 1023.0, 400.0 / 1023.0, 1.0]);
+            run("ec.utility.cineon", vals, img).img.data[0][0]
+        };
+        let v1 = |gamma: f64| px(&[("version", num(1.0)), ("gamma", num(gamma)), ("highlightRolloff", num(0.0))]);
+        assert!((v1(1.7) - 0.10251).abs() < 1e-4, "{}", v1(1.7));
+        let v2 = px(&[("gamma", num(2.0)), ("highlightRolloff", num(0.0))]);
+        assert!((v1(3.4) - v2).abs() > 1e-3, "{} vs {v2}", v1(3.4));
+        // Version 1 limited the saved Gamma to 0.01: Gamma 0 raised the linear value to 170.
+        let code = 684.0 / 1023.0;
+        let base = Cineon { black: 95.0, white: 685.0, ib: 0.0, iw: 1.0, gamma: 1.7, rolloff: 0.0, version_2: false }.log_to_lin(code);
+        let mut img = Image::new(1, 1);
+        img.set(0, 0, [code, code, code, 1.0]);
+        let zero = run("ec.utility.cineon", &[("version", num(1.0)), ("gamma", num(0.0)), ("highlightRolloff", num(0.0))], img).img.data[0][0];
+        assert!((zero - base.powf(170.0)).abs() < 1e-4, "{zero} != {}", base.powf(170.0));
+        // The version 2 formula differs even when Gamma uses the version 1 scale.
+        let mut img = Image::new(1, 1);
+        img.set(0, 0, [code, code, code, 1.0]);
+        let v2_floor = run("ec.utility.cineon", &[("gamma", num(0.01 / 1.7)), ("highlightRolloff", num(0.0))], img).img.data[0][0];
+        assert!((v2_floor - zero).abs() > 1e-4, "{v2_floor} vs {zero}");
+        // An instance without the parameter reads as version 1.
+        let s = crate::find("ec.utility.cineon").unwrap();
+        let mut params = Params { values: s.params.iter().filter(|p| p.id != "version").map(|p| (p.id.to_string(), p.default.clone())).collect() };
+        params.values.insert("gamma".into(), num(1.7));
+        assert!((cineon_gamma(&params) - 1.0).abs() < 1e-12);
+    }
+
+    /// Interpret Footage and version 2 Converter agree at Gamma 1.
     #[test]
     fn cineon_converter_matches_interpret_footage() {
         let codes = [0.0f32, 95.0, 250.0, 400.0, 560.0, 685.0, 800.0, 1023.0];
-        for (gamma, rolloff) in [(1.0, 20.0), (1.0, 0.0), (1.7, 50.0), (2.4, 50.0)] {
+        for (gamma, rolloff) in [(1.0, 20.0), (1.0, 0.0)] {
             let mut img = Image::new(codes.len() as u32, 1);
             for (x, code) in codes.iter().enumerate() {
                 let v = code / 1023.0;
                 img.set(x as u32, 0, [v, v, v, 1.0]);
             }
-            let vals = [("conversionType", Value::Enum(1)), ("gamma", num(gamma * 1.7)), ("highlightRolloff", num(rolloff))];
+            let vals = [("conversionType", Value::Enum(1)), ("gamma", num(gamma)), ("highlightRolloff", num(rolloff))];
             let out = run("ec.utility.cineon", &vals, img);
             let settings = effectcraft_project::CineonSettings { log_conversion: true, gamma: gamma as f32, rolloff: rolloff as f32, ..Default::default() };
             for (x, code) in codes.iter().enumerate() {
@@ -789,9 +879,9 @@ mod tests {
         assert!((linear.convert(400.0 / 1023.0) - 0.10251).abs() < 1e-4);
     }
 
-    /// The Cineon Converter gives the same values as before Cineon Settings shared its
-    /// log-to-linear function, at the default Gamma (1.7) and at Gamma 2.4, for all three
-    /// conversion types.
+    /// Saved version 1 Cineon Converter effects give the same bits as the converter before the
+    /// Version parameter (`log_to_lin` and `lin_to_log` below), at the default and custom black
+    /// and white points, for several Gammas and all three conversion types.
     #[test]
     fn cineon_converter_output_is_unchanged() {
         fn log_to_lin(v: f32, gamma: f32, rolloff: f32, black: f32, white: f32) -> f32 {
@@ -816,29 +906,35 @@ mod tests {
             lin = lin.max(0.0).powf(gamma.max(0.01) / 1.7);
             (white + (lin * (1.0 - off) + off).max(1e-9).log10() * 0.6 / 0.002) / 1023.0
         }
-        let codes = [0.0f32, 95.0, 250.0, 400.0, 560.0, 685.0, 800.0, 1023.0];
-        for gamma in [None, Some(2.4)] {
-            for kind in 0..3 {
-                let mut img = Image::new(codes.len() as u32, 1);
-                for (x, code) in codes.iter().enumerate() {
-                    let v = code / 1023.0;
-                    img.set(x as u32, 0, [v, v, v, 1.0]);
-                }
-                let mut vals = vec![("conversionType", Value::Enum(kind))];
-                if let Some(g) = gamma {
-                    vals.push(("gamma", num(g)));
-                }
-                let out = run("ec.utility.cineon", &vals, img);
-                let g = gamma.unwrap_or(1.7) as f32;
-                for (x, code) in codes.iter().enumerate() {
-                    let v = code / 1023.0;
-                    let want = match kind {
-                        0 => lin_to_log(v, g, 20.0, 95.0, 685.0),
-                        1 => log_to_lin(v, g, 20.0, 95.0, 685.0),
-                        _ => lin_to_log(log_to_lin(v, g, 20.0, 95.0, 685.0), 1.7, 20.0, 95.0, 685.0),
-                    };
-                    let got = out.img.data[x][0];
-                    assert!((want - got).abs() < 1e-6, "gamma {g}, type {kind}, code {code}: {want} vs {got}");
+        let codes = [0.0f32, 95.0, 120.0, 250.0, 400.0, 560.0, 685.0, 700.0, 800.0, 1023.0];
+        for (black, white) in [(95.0f32, 685.0f32), (120.0, 700.0)] {
+            for g in [1.7, 1.0, 2.4, 0.6, 3.4, 0.0] {
+                for kind in 0..3 {
+                    let mut img = Image::new(codes.len() as u32, 1);
+                    for (x, code) in codes.iter().enumerate() {
+                        let v = code / 1023.0;
+                        img.set(x as u32, 0, [v, v, v, 1.0]);
+                    }
+                    let vals = [
+                        ("version", num(1.0)),
+                        ("conversionType", Value::Enum(kind)),
+                        ("gamma", num(g)),
+                        ("tenBitBlackPoint", num(f64::from(black))),
+                        ("tenBitWhitePoint", num(f64::from(white))),
+                    ];
+                    let out = run("ec.utility.cineon", &vals, img);
+                    let g = g as f32;
+                    for (x, code) in codes.iter().enumerate() {
+                        let v = code / 1023.0;
+                        let want = match kind {
+                            0 => lin_to_log(v, g, 20.0, black, white),
+                            1 => log_to_lin(v, g, 20.0, black, white),
+                            _ => lin_to_log(log_to_lin(v, g, 20.0, black, white), 1.7, 20.0, 95.0, 685.0),
+                        };
+                        let got = out.img.data[x][0];
+                        // Bit for bit: a saved version 1 instance renders exactly as before.
+                        assert_eq!(want.to_bits(), got.to_bits(), "points {black}-{white}, gamma {g}, type {kind}, code {code}: {want} vs {got}");
+                    }
                 }
             }
         }

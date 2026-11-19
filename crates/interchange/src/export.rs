@@ -540,6 +540,9 @@ impl Exporter<'_> {
                 comment: if m.chapter.is_empty() { String::new() } else { m.comment.clone() },
                 kind: if m.chapter.is_empty() { fp::MarkerKind::Comment } else { fp::MarkerKind::Chapter },
                 color: fp::Label::Green,
+                custom_color: None,
+                author: String::new(),
+                url: m.url.clone(),
             })
             .collect();
         if let Some(seq) = self.fp.sequence_mut(sid) {
@@ -733,6 +736,7 @@ fn media_info(name: &str, kind: MediaKind, duration: Tick, video: Option<VideoSp
             codec,
             pixel_format: String::new(),
             color: Default::default(),
+            color_assumed: None,
             has_alpha,
             bitrate: None,
             hdr: None,
@@ -754,6 +758,15 @@ fn media_clip(media: fp::MediaRef, info: MediaInfo) -> fp::MediaClip {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn synthesized_video_metadata_does_not_claim_an_inferred_color_profile() {
+        let info = media_info("clip", MediaKind::Movie, Tick::ZERO, Some((1920, 1080, FrameRate::new(24, 1), 1.0, "raw".into(), true)), false);
+        let video = info.video.unwrap();
+        assert_eq!((video.width, video.height), (1920, 1080));
+        assert!(video.color_assumed.is_none());
+        assert!(video.has_alpha);
+    }
 
     /// A folder's bin is the same one each time it is asked for (a cached folder once answered
     /// `None`, so a folder's second item went to the project root); a non-item has no bin.
