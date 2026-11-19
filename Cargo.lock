@@ -2077,6 +2077,7 @@ dependencies = [
  "image",
  "kurbo",
  "log",
+ "memory-stats",
  "rayon",
  "same-file",
  "serde",
@@ -2280,6 +2281,7 @@ dependencies = [
  "filmcraft-media",
  "filmcraft-time",
  "gif",
+ "half",
  "image",
  "log",
  "rayon",
@@ -2393,6 +2395,7 @@ dependencies = [
  "effectcraft-raster",
  "effectcraft-text",
  "effectcraft-time",
+ "half",
  "kurbo",
  "log",
  "lz4_flex",
@@ -4363,6 +4366,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "memory-stats"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c73f5c649995a115e1a0220b35e4df0a1294500477f97a91d0660fb5abeb574a"
+dependencies = [
+ "libc",
+ "windows-sys 0.52.0",
+]
+
+[[package]]
 name = "minicov"
 version = "0.3.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5112,7 +5125,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
 dependencies = [
  "libc",
- "windows-sys 0.45.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
