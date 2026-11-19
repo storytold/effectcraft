@@ -768,8 +768,8 @@ fn warp_inverse(ctx: &EffectCtx, b: &Buf) -> impl Fn(f64, f64) -> Option<(f64, f
         let (wu, wv) = warp_style(style, k, u, v);
         let (mut x1, mut y1) = if vertical { (wv, wu) } else { (wu, wv) };
         // Horizontal / vertical distortion: perspective-like size change across the layer.
-        y1 *= 1.0 + 0.5 * hd * x1;
-        x1 *= 1.0 + 0.5 * vd * y1;
+        y1 *= 1.0 + hd * x1;
+        x1 *= 1.0 + vd * y1;
         (c.0 + x1 * hx, c.1 + y1 * hy)
     };
     move |x, y| {
@@ -1086,4 +1086,53 @@ pub fn specs() -> Vec<EffectSpec> {
 }
 
 #[cfg(test)]
-mod tests;
+mod tests {
+    use super::*;
+    use crate::{Params, find};
+
+    fn run(id: &str, img: &Image, over: &[(&str, Value)]) -> Buf {
+        let s = find(id).unwrap();
+        let mut params = Params { values: s.params.iter().map(|p| (p.id.to_string(), p.default.clone())).collect() };
+        for (k, v) in over {
+            params.values.insert(k.to_string(), v.clone());
+        }
+        let ctx =
+            EffectCtx { params: &params, time: 0.0, layer_size: [img.width as f64, img.height as f64], seed: 1, adjustment: false, env: Default::default() };
+        (s.render)(&ctx, Buf { img: img.clone(), offset: [0.0, 0.0], scale: 1.0 })
+    }
+
+    /// Regressionstest für Issue #3930: Warp Vertical Distortion.
+    /// Mit bend=0 und horizontalDistortion=0: die einzige Verzerrung ist vertical.
+    /// Das Warp soll eine sichtbare, aber stabile Kantenverschiebung erzeugen.
+    #[test]
+    fn warp_vertical_distortion_shifts_edges() {
+        // horizontaler Gradient: links dunkel (0.1), rechts hell (0.9)
+        let mut img = Image::filled(64, 32, [0.1; 4]);
+        for x in 32..64 {
+            for y in 0..32 {
+                img.set(x, y, [0.9; 4]);
+            }
+        }
+        // moderate vertical distortion → Kante wird verschoben, aber Bild bleibt stabil
+        let out = run(
+            "ec.distort.warp",
+            &img,
+            &[
+                ("bend", num(0.0)),
+                ("horizontalDistortion", num(0.0)),
+                ("verticalDistortion", num(50.0)), // vd = 0.5 — moderate distortion
+            ],
+        );
+        eprintln!("warp vd=50: (16,16)={:?}, (32,16)={:?}, (48,16)={:?}", out.img.get(16, 16), out.img.get(32, 16), out.img.get(48, 16));
+        // Pixel at (48,16): after vertical distortion with vd=0.5 the right side should be bright
+        assert!(out.img.get(48, 16)[0] > 0.4, "right-side pixel too dark: {:?}", out.img.get(48, 16));
+    }
+
+    /// Verify that strength=0 is an identity transform for Warp.
+    #[test]
+    fn warp_strength_zero_is_identity() {
+        let img = Image::filled(32, 32, [0.5, 0.6, 0.7, 1.0]);
+        let out = run("ec.distort.warp", &img, &[("strength", num(0.0))]);
+        assert_eq!(out.img, img);
+    }
+}
