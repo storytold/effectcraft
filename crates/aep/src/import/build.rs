@@ -538,6 +538,9 @@ fn build_layers(project: &mut Project, cx: &mut Ctx<'_>, defs: &EffectDefinition
     for layer in comp_view.layers() {
         let Some(h) = layer.header() else {
             cx.col.lose_with(LossCategory::DamagedData, || format!("{comp_name}: a layer header is unreadable, layer not imported"));
+            // Its id (the first four bytes) may still be readable: its children then report the
+            // lost link instead of silently losing their parent.
+            skipped.extend(layer.id().map(|id| (id, "a layer whose header is unreadable".to_string())));
             above = None;
             continue;
         };
