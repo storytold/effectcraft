@@ -836,6 +836,11 @@ mod tests {
         }
         // A side that does not grow keeps its size; the other stops at 16 384 pixels.
         assert_eq!(frame([320.0, 180.0], 30000.0, 100.0), (16384, 180, [(16384.0 - 320.0) / 2.0, 0.0]));
+        // One side growing by a hair next to a wide one: the budget, not cancellation, sets the
+        // growth (the textbook root rounded to 0 here and kept the layer's size).
+        let (w, h, _) = frame([4000.0, 4000.0], 30000.0, 100.0 + 1e-13);
+        assert!(f64::from(w) * f64::from(h) <= 4.0 * 4000.0 * 4000.0, "{w}x{h}");
+        assert!(w > 15_000 && h == 4000, "{w}x{h}");
         // Below the caps nothing changes.
         assert_eq!(frame([320.0, 180.0], 200.0, 200.0), (640, 360, [160.0, 90.0]));
     }

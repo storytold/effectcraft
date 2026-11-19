@@ -431,13 +431,10 @@ fn capped_tile_frame(layer: [f64; 2], out: [f64; 2], rounded: (f64, f64), grow: 
     if (base[0] + d[0] * f) * (base[1] + d[1] * f) > budget {
         // (bw + dx·f)(bh + dy·f) = budget, solved for f.
         let (a, b, c) = (d[0] * d[1], base[0] * d[1] + base[1] * d[0], base[0] * base[1] - budget);
-        let q = if a > 0.0 {
-            (-b + (b * b - 4.0 * a * c).max(0.0).sqrt()) / (2.0 * a)
-        } else if b > 0.0 {
-            -c / b
-        } else {
-            0.0
-        };
+        // The positive root as -2c / (b + √disc): the usual (-b + √disc) / 2a cancels to 0 when
+        // 4ac is tiny next to b² (one side barely grows), which would keep the layer's size.
+        let den = b + (b * b - 4.0 * a * c).max(0.0).sqrt();
+        let q = if den > 0.0 { -2.0 * c / den } else { 0.0 };
         f = f.min(q);
     }
     let f = if f.is_finite() { f.clamp(0.0, 1.0) } else { 0.0 };
