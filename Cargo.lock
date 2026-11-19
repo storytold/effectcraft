@@ -1369,6 +1369,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "craft-jsonrpc"
+version = "0.1.0"
+source = "git+https://github.com/storytold/craft-libs?rev=bc186ca719958fcce3b6ee24794277eabed14609#bc186ca719958fcce3b6ee24794277eabed14609"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "craft-lottie"
 version = "0.1.0"
 source = "git+https://github.com/storytold/craft-libs?rev=5a7a63a21dd03dd1a2bc6c308a3a6ce818caae87#5a7a63a21dd03dd1a2bc6c308a3a6ce818caae87"
@@ -1990,6 +1998,7 @@ dependencies = [
 name = "effectcraft-automation"
 version = "0.24.1"
 dependencies = [
+ "craft-jsonrpc",
  "craft-mime",
  "effectcraft-engine",
  "effectcraft-host",
