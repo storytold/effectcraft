@@ -130,7 +130,30 @@ fn a_remapped_time_just_short_of_a_cut_reaches_it() {
         pre.props.children.push(Node::Prop(tr));
         p.comp_mut(cid).unwrap().layers.push(pre);
         let px = render_frame(&p, cid, frame, 1.0).get(5, 5);
-        let green = px[1] > 0.5 && px[0] < 0.5;
-        assert_eq!(green, after, "{rate:?} cut {cut} remapped to {v}: {px:?}");
+        let (green, red) = (px[1] > 0.5 && px[0] < 0.5, px[0] > 0.5 && px[1] < 0.5);
+        assert!(px[3] > 0.99 && green == after && red != after, "{rate:?} cut {cut} remapped to {v}: {px:?}");
     }
+}
+
+/// The nudge above stops at the nested comp's end: a remapped time in its last 1/1500 frame
+/// still draws the nested comp's last frame instead of nothing.
+#[test]
+fn a_remapped_time_just_short_of_the_nested_end_still_draws() {
+    let mut p = Project::default();
+    let outer = Comp::new(10, 10, FrameRate::FPS_30, s(2.0));
+    let mut inner = Comp::new(10, 10, FrameRate::FPS_30, s(1.0));
+    let sid = p.add_item("S", Label::Red, None, ItemKind::Solid(Solid { color: [1.0, 0.0, 0.0], width: 10, height: 10, pixel_aspect: 1.0 }));
+    inner.layers.push(build::layer(&mut p, &inner, "S", LayerSource::Solid { item: sid }, (10, 10), None));
+    let iid = p.add_item("Inner", Label::Sandstone, None, ItemKind::Comp(inner.into()));
+    let cid = p.add_item("Outer", Label::Sandstone, None, ItemKind::Comp(outer.clone().into()));
+    let mut pre = build::layer(&mut p, &outer, "Inner", LayerSource::Comp { item: iid }, (10, 10), None);
+    let mut next = p.next_id;
+    let mut tr = Ids(&mut next).prop("timeRemap", "Time Remap", Value::Scalar(0.0));
+    p.next_id = next;
+    // 1 s minus 1e-5 s: inside the nested comp, and closer to its end than the nudge (1/45 000 s).
+    tr.keys = vec![Keyframe::new(Tick::ZERO, Value::Scalar(1.0 - 1e-5)).hold()];
+    pre.props.children.push(Node::Prop(tr));
+    p.comp_mut(cid).unwrap().layers.push(pre);
+    let px = render_frame(&p, cid, Tick::ZERO, 1.0).get(5, 5);
+    assert!(px[3] > 0.99 && px[0] > 0.5, "the nested comp's last frame: {px:?}");
 }

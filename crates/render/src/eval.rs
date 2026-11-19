@@ -137,10 +137,14 @@ impl<'a> EvalCtx<'a> {
             // layer's in point by under about 1/1500 of the nested comp's frame as reaching it: a
             // remap keyed onto a cut shows the layer after the cut, not the one before. Measured
             // window: 1/1666 to 1/1258 of a frame at 24, 30 and 60 fps (stretch has no such slack).
+            // The nudge never carries a time inside the nested comp past its end, where the
+            // precomp would draw nothing.
             if let LayerSource::Comp { item } = layer.source
                 && let Some(nc) = self.project.comp(item)
+                && nc.covers(t)
             {
-                return Tick(t.0.saturating_add(nc.frame_duration().0 / REMAP_SLACK_PER_FRAME));
+                let last = Tick(nc.duration.0.saturating_sub(1));
+                return Tick(t.0.saturating_add(nc.frame_duration().0 / REMAP_SLACK_PER_FRAME)).min(last);
             }
             return t;
         }
