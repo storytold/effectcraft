@@ -59,6 +59,39 @@ fn watch_folder_renders_queued_projects_and_writes_status() {
 }
 
 #[test]
+fn a_watch_folder_render_takes_the_hosts_memory_budget() {
+    // #3941: the Watch Folder renders each project in a session of its own, which had no memory
+    // reading: its Render Queue caches took the budget for unknown RAM, not the host's.
+    use crate::{ExportJob, ExportResult, Exporter};
+    use effectcraft_project::render_queue::OutputFormat;
+    struct Budgets(std::sync::Mutex<Vec<Option<usize>>>);
+    impl Exporter for Budgets {
+        fn formats(&self) -> Vec<OutputFormat> {
+            OutputFormat::ALL.to_vec()
+        }
+        fn export(&self, job: &ExportJob, _: &mut dyn FnMut(u64, u64) -> bool) -> Result<ExportResult, String> {
+            self.0.lock().unwrap().push(job.caches.map(|c| c.gpu.budget()));
+            Ok(ExportResult { path: job.path.to_string(), ..Default::default() })
+        }
+    }
+    let dir = out_dir("watch-folder-budget");
+    let ex = Arc::new(Budgets(Default::default()));
+    let mut a = Session { exporter: Some(ex.clone()), ..Default::default() };
+    a.execute("comp.new", json!({"name": "Shot", "width": 32, "height": 32, "frameRate": 10, "duration": 0.5})).unwrap();
+    a.execute("renderQueue.add", json!({})).unwrap();
+    a.execute("file.saveAs", json!({"path": dir.join("a.ecproj").to_string_lossy()})).unwrap();
+
+    let mut host = Session { exporter: Some(ex.clone()), ..Default::default() };
+    // A 64 GB machine: 46.4 GB with the default reserve.
+    host.take_memory_reading(Some(crate::sysinfo::SysMemory { total: 64 << 30, available: 48 << 30 }));
+    let budget = host.export_cache_budget();
+    assert_ne!(budget as u64, crate::prefs::FALLBACK_MEMORY_BUDGET);
+    host.execute("file.watchFolder", json!({"folder": dir.to_string_lossy()})).unwrap();
+    host.execute("file.watchFolder", json!({"stop": true})).unwrap();
+    assert_eq!(*ex.0.lock().unwrap(), vec![Some(budget)]);
+}
+
+#[test]
 fn vanishing_point_import_is_disabled_with_a_reason() {
     let mut s = Session::default();
     assert!(!s.is_enabled("file.importVanishingPoint"));
