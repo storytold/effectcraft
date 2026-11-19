@@ -418,17 +418,14 @@ pub fn text_block(text: &str, origin: [f64; 2], font: &str, size: f64, color: [f
 /// `lfx2`: layer effects from an effects descriptor (`null` class with `DrSh`, `FrFX`…).
 pub fn effects_block(desc: &Descriptor) -> ([u8; 4], Vec<u8>) {
     let mut d = vec![];
-    put_u32(&mut d, 0);
-    put_u32(&mut d, 16);
-    descriptor::write_descriptor(&mut d, desc);
+    craft_psd::tagged::append_layer_effects_data(&mut d, desc);
     (*b"lfx2", d)
 }
 
 /// `SoCo`: solid colour fill.
 pub fn solid_color_block(rgb: [f64; 3]) -> ([u8; 4], Vec<u8>) {
     let mut d = vec![];
-    put_u32(&mut d, 16);
-    descriptor::write_descriptor(&mut d, &Descriptor::new("null").with("Clr ", DValue::Descriptor(Descriptor::rgb(rgb))));
+    craft_psd::tagged::append_solid_color_data(&mut d, &Descriptor::new("null").with("Clr ", DValue::Descriptor(Descriptor::rgb(rgb))));
     (*b"SoCo", d)
 }
 
