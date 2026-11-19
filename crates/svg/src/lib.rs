@@ -1455,10 +1455,6 @@ fn viewbox_transform(n: roxmltree::Node, w: f64, h: f64) -> Affine {
 /// Parse a `transform` list.
 pub use craft_svg::transform_compat::parse_transform;
 
-/// The deepest element nesting accepted. The XML parser recurses per level and overflowed a
-/// 2 MiB thread's stack (aborting the app) at a few thousand levels; real documents stay far
-/// below this.
-const MAX_XML_DEPTH: usize = 256;
 /// The most elements an import converts, `<use>` copies included, unless the file itself has
 /// more than half as many (#1236).
 const MAX_EXPANDED_ELEMENTS: usize = 500_000;
@@ -1482,20 +1478,12 @@ const MIN_PATTERN_WORK_BYTES: usize = 8 * 1024 * 1024;
 /// Bound viewport-specific pattern results; uncached resolutions remain covered by the work budget.
 const MAX_PATTERN_CACHE_ENTRIES: usize = 256;
 
-/// Nodes a document may expand to: a few kilobytes of nested internal entities
-/// (`<!ENTITY b "&a;&a;…">`) otherwise expand to millions and exhaust memory.
-const MAX_XML_NODES: u32 = 4_000_000;
-
 /// Parse an SVG document.
 pub fn parse(bytes: &[u8]) -> Result<Doc, Error> {
     let text = String::from_utf8_lossy(bytes);
     let text = text.trim_start_matches('\u{feff}');
-    if craft_svg::guard::deeper_than(text, MAX_XML_DEPTH) {
-        return Err(Error::Xml(format!("elements nested more than {MAX_XML_DEPTH} levels deep")));
-    }
-    // DTDs stay allowed (Illustrator's SVGs declare entities), but expansion is bounded (#2129).
-    let opts = roxmltree::ParsingOptions { allow_dtd: true, nodes_limit: MAX_XML_NODES, ..Default::default() };
-    let xml = roxmltree::Document::parse_with_options(text, opts).map_err(|e| Error::Xml(e.to_string()))?;
+    // Shared preflight: entity expansion, attribute work, nesting depth, and bounded DTD/node parsing (#2129).
+    let xml = craft_svg::preflight::parse_text(text, &craft_svg::preflight::Limits::default()).map_err(|e| Error::Xml(e.to_string()))?;
     let root = xml.root_element();
     if root.tag_name().name() != "svg" {
         return Err(Error::NotSvg);
