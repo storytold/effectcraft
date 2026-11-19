@@ -999,7 +999,7 @@ mod tests {
     /// After Effects 26.5 (lab renders of an 80 px square, Relief 3, Contrast 100): Direction 0
     /// darkens the square's top edge and lightens its bottom edge, leaving its sides mid grey;
     /// a red square on blue gets orange-red top edges and blue bottom ones, each channel embossed
-    /// apart.
+    /// apart. Direction 90 lightens the left edge and darkens the right one.
     #[test]
     fn emboss_direction_is_clockwise_from_up_and_channels_are_apart() {
         let square = |inside: [f32; 4], outside: [f32; 4]| {
@@ -1012,11 +1012,18 @@ mod tests {
             img
         };
         let grey = square([1.0, 1.0, 1.0, 1.0], [0.5, 0.5, 0.5, 1.0]);
-        let up = run_at("ec.stylize.emboss", &[("direction", num(0.0)), ("relief", num(3.0)), ("contrast", num(100.0))], grey, 0.0);
+        let up = run_at("ec.stylize.emboss", &[("direction", num(0.0)), ("relief", num(3.0)), ("contrast", num(100.0))], grey.clone(), 0.0);
         let near = |a: f32, b: f32| (a - b).abs() < 1e-4;
         assert!(near(up.img.get(20, 10)[0], 0.0), "top edge {:?}", up.img.get(20, 10));
         assert!(near(up.img.get(20, 29)[0], 1.0), "bottom edge {:?}", up.img.get(20, 29));
         assert!(near(up.img.get(10, 20)[0], 0.5) && near(up.img.get(29, 20)[0], 0.5), "sides");
+        // Direction 90 (After Effects' E2 render): the light comes from the right, so the left
+        // edge is light, the right edge dark and the top and bottom mid grey. A counter-clockwise
+        // angle would swap the sides.
+        let right = run_at("ec.stylize.emboss", &[("direction", num(90.0)), ("relief", num(3.0)), ("contrast", num(100.0))], grey, 0.0);
+        assert!(near(right.img.get(10, 20)[0], 1.0), "left edge {:?}", right.img.get(10, 20));
+        assert!(near(right.img.get(29, 20)[0], 0.0), "right edge {:?}", right.img.get(29, 20));
+        assert!(near(right.img.get(20, 10)[0], 0.5) && near(right.img.get(20, 29)[0], 0.5), "top and bottom");
         let red_on_blue = square([1.0, 0.0, 0.0, 1.0], [0.0, 0.0, 1.0, 1.0]);
         let out = run_at("ec.stylize.emboss", &[("direction", num(0.0)), ("relief", num(3.0)), ("contrast", num(100.0))], red_on_blue, 0.0);
         let top = out.img.get(20, 10);
