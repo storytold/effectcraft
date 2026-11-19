@@ -181,6 +181,7 @@ pub(crate) fn tr_args(text: &str, args: &[&dyn Display]) -> String {
 
 /// Japanese: the same rows, in the same order, as the Chinese catalogs below.
 const JAPANESE: &[(&str, &str)] = &[
+    ("Views:", "画面:"),
     ("Click to sample color", "クリックして色をサンプル"),
     ("Appearance Settings…", "外観設定…"),
     ("Add to favorites", "お気に入りに追加"),
@@ -1334,6 +1335,7 @@ const JAPANESE: &[(&str, &str)] = &[
 ];
 
 const SIMPLIFIED_CHINESE: &[(&str, &str)] = &[
+    ("Views:", "视图:"),
     ("Click to sample color", "单击以取样颜色"),
     ("Appearance Settings…", "外观设置…"),
     ("Add to favorites", "添加到收藏"),
@@ -2463,6 +2465,7 @@ const SIMPLIFIED_CHINESE: &[(&str, &str)] = &[
 
 /// Swedish (`sv`), written from the English source.
 const SWEDISH: &[(&str, &str)] = &[
+    ("Views:", "Vyer:"),
     ("Appearance Settings…", "Utseendeinställningar…"),
     ("Add to favorites", "Lägg till i favoriter"),
     ("Remove from favorites", "Ta bort från favoriter"),
@@ -3748,6 +3751,7 @@ const SWEDISH: &[(&str, &str)] = &[
 ];
 
 const TRADITIONAL_CHINESE: &[(&str, &str)] = &[
+    ("Views:", "檢視:"),
     ("Click to sample color", "按一下以取樣顏色"),
     ("Appearance Settings…", "外觀設定…"),
     ("Add to favorites", "加入最愛"),
@@ -4826,6 +4830,7 @@ const TRADITIONAL_CHINESE: &[(&str, &str)] = &[
 /// Ukrainian (uk): original translations of the same interface rows as the Chinese catalogs.
 /// Technical names, key names and substituted project content keep their original spelling.
 const UKRAINIAN: &[(&str, &str)] = &[
+    ("Views:", "Вигляди:"),
     ("Click to sample color", "Клацніть, щоб узяти зразок кольору"),
     ("Appearance Settings…", "Налаштування вигляду…"),
     ("Add to favorites", "Додати до вибраного"),
@@ -5416,6 +5421,7 @@ const UKRAINIAN: &[(&str, &str)] = &[
 
 // Brazilian Portuguese.
 const PORTUGUESE: &[(&str, &str)] = &[
+    ("Views:", "Visualizações:"),
     ("Click to sample color", "Clique para obter uma amostra de cor"),
     ("Export Scene to Blender...", "Exportar cena para o Blender..."),
     ("   OK   ", "   OK   "),
@@ -6193,6 +6199,7 @@ const PORTUGUESE: &[(&str, &str)] = &[
 
 /// Polish (pl): original translations covering every row in the Chinese panel catalogs.
 const POLISH: &[(&str, &str)] = &[
+    ("Views:", "Widoki:"),
     ("Click to sample color", "Kliknij, aby pobrać próbkę koloru"),
     ("Appearance Settings…", "Ustawienia wyglądu…"),
     ("Add to favorites", "Dodaj do ulubionych"),
@@ -6963,6 +6970,7 @@ const POLISH: &[(&str, &str)] = &[
 
 /// Czech (cs): original translations covering every row in the Chinese panel catalogs.
 const CZECH: &[(&str, &str)] = &[
+    ("Views:", "Zobrazení:"),
     ("Click to sample color", "Kliknutím naberete barvu"),
     ("   OK   ", "   OK   "),
     ("  Delete  ", "  Odstranit  "),
@@ -7533,6 +7541,7 @@ const CZECH: &[(&str, &str)] = &[
 /// order. Terms follow the Spanish menu catalog (composición, material de archivo, cola de procesamiento,
 /// ajuste preestablecido, método abreviado). Written from the English source.
 const SPANISH: &[(&str, &str)] = &[
+    ("Views:", "Vistas:"),
     ("Click to sample color", "Haz clic para tomar una muestra de color"),
     ("Copy Source Path", "Copiar ruta de origen"),
     ("Appearance Settings…", "Ajustes de apariencia…"),
@@ -8105,6 +8114,7 @@ const SPANISH: &[(&str, &str)] = &[
 
 /// Georgian (ka): every row of the Chinese catalogs, in the same order (the tests keep them in step).
 const GEORGIAN: &[(&str, &str)] = &[
+    ("Views:", "ხედები:"),
     ("Click to sample color", "დააწკაპუნეთ ფერის ნიმუშის ასაღებად"),
     ("Appearance Settings…", "იერსახის პარამეტრები…"),
     ("Add to favorites", "რჩეულებში დამატება"),
@@ -9086,6 +9096,7 @@ const GEORGIAN_PANELS: &[(&str, &str)] = &[
 /// clé, métrage, file d'attente de rendu, chronologie, repère, estampe). A no-break space precedes
 /// `:`, `;`, `?` and `!`, and the apostrophe is the typographic one. Written from the English source.
 const FRENCH: &[(&str, &str)] = &[
+    ("Views:", "Vues\u{a0}:"),
     ("Appearance Settings…", "Paramètres d’apparence…"),
     ("Add to favorites", "Ajouter aux favoris"),
     ("Remove from favorites", "Retirer des favoris"),
