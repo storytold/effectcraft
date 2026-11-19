@@ -8,9 +8,11 @@ use super::{Buf, EffectCtx, Image, IntoParallelRefMutIterator, ParallelIterator,
 /// Steps per second of the stepped particle simulations.
 pub(crate) const SPS: f64 = 60.0;
 
-/// Number of whole steps reached at layer time `t`.
+/// Number of whole steps reached at layer time `t` (at most [`crate::util::MAX_SIM_STEPS`]: the
+/// per-step histories built from it, such as [`rate_history`], stay bounded however late a
+/// project places the layer's time).
 pub(crate) fn steps_at(t: f64) -> u64 {
-    if t <= 0.0 { 0 } else { (t * SPS + 1e-6).floor() as u64 }
+    if t <= 0.0 { 0 } else { ((t * SPS + 1e-6).floor() as u64).min(crate::util::MAX_SIM_STEPS) }
 }
 
 #[derive(Clone, Debug)]

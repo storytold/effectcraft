@@ -151,3 +151,40 @@ fn vertical_metrics_w2_and_dw2() {
     let dw2 = doc("/DW2 [780 -1000]");
     assert!(((base.1 - dw2.1) - 2).abs() <= 1, "vy 780 → 2 pt higher: {base:?} {dw2:?}");
 }
+
+#[test]
+fn actual_text_does_not_combine_knockout_children() {
+    let plain = "1 0 0 rg 0 0 100 100 re f /H gs 0 0 1 rg 50 0 100 100 re f";
+    let marked = format!("/Span << /ActualText (Label) >> BDC {plain} EMC");
+    let a = render(&group_page("/Fm Do", "", "/Group << /S /Transparency /I true /K true >>", plain));
+    let b = render(&group_page("/Fm Do", "", "/Group << /S /Transparency /I true /K true >>", &marked));
+    for y in 0..100 {
+        for x in 0..200 {
+            assert!(near(a.get(x, y), b.get(x, y)), "pixel {x},{y}");
+        }
+    }
+}
+
+#[test]
+fn actual_text_end_keeps_soft_mask_and_overlapping_paints() {
+    let plain = "/GS1 gs 1 0 0 rg 0 0 100 100 re f 0 0 1 rg 50 0 100 100 re f";
+    let marked = "/Span << /ActualText (Label) >> BDC /GS1 gs 1 0 0 rg 0 0 100 100 re f EMC 0 0 1 rg 50 0 100 100 re f";
+    let draw = |ops| {
+        let bytes = page_pdf(
+            ops,
+            "/ExtGState << /GS1 << /SMask << /S /Luminosity /G 10 0 R >> >> >>",
+            vec![(
+                10,
+                "<< /Type /XObject /Subtype /Form /BBox [0 0 200 100] /Group << /S /Transparency /CS /DeviceGray >> >>".into(),
+                Some(b"0.5 g 0 0 200 100 re f".to_vec()),
+            )],
+        );
+        render(&parse(&bytes).unwrap())
+    };
+    let (a, b) = (draw(plain), draw(marked));
+    for y in 0..100 {
+        for x in 0..200 {
+            assert!(near(a.get(x, y), b.get(x, y)), "pixel {x},{y}");
+        }
+    }
+}

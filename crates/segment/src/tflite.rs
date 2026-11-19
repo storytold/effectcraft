@@ -131,6 +131,8 @@ const MAX_VALUES: u64 = 1 << 30;
 const MAX_LIVE: u64 = 1 << 29;
 /// The most constant values decoded and laid out at load (a weight shared by several tensors or
 /// operators counts once per use).
+/// Bytes of tensor names and shapes a model may carry in all (the official ones take well under 1 MB).
+const MAX_META: usize = 1 << 24;
 const MAX_CONSTS: usize = 1 << 27;
 
 /// Tensor types (`TensorType`).
@@ -261,6 +263,7 @@ impl Model {
         let mut ints: Vec<Option<Vec<i32>>> = vec![None; n];
         let mut data: Vec<(usize, u8, usize, &[u8])> = vec![];
         let mut consts = 0usize;
+        let mut meta = 0usize;
         for (i, t) in tensors.iter().enumerate() {
             let shape: Vec<usize> = fb
                 .ints(*t, 0)?
@@ -269,7 +272,13 @@ impl Model {
                 .collect::<std::result::Result<_, _>>()?;
             let ty = fb.byte(*t, 1, FLOAT32)?;
             let buf = fb.int(*t, 2, 0)? as u32 as usize;
-            names.push(fb.string(*t, 3)?);
+            let name = fb.string(*t, 3)?;
+            // Names and shapes are copied per tensor: bound them in all.
+            meta = meta.saturating_add(name.len()).saturating_add(shape.len().saturating_mul(8));
+            if meta > MAX_META {
+                return Err("the model's tensor metadata is too large".into());
+            }
+            names.push(name);
             // Every size computed from shapes later stays in range, even a product of some of the
             // dimensions (a zero dimension does not let the others grow without bound).
             let count = shape.iter().try_fold(1usize, |a, &d| a.checked_mul(d)).ok_or("a tensor is too large")?;
@@ -329,6 +338,11 @@ impl Model {
                 && let Some(i) = ins.first().copied().flatten()
                 && let Some(len) = floats[i].as_ref().map(Vec::len)
             {
+                // The folded constant is what the graph outputs and the run's memory estimate count:
+                // it must be the declared size.
+                if shapes[output].iter().try_fold(1usize, |a, &d| a.checked_mul(d)) != Some(len) {
+                    return Err(format!("{}: DEQUANTIZE output size disagrees with its input", names[output]));
+                }
                 spend(len)?;
                 floats[output] = floats[i].clone();
                 continue;

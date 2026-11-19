@@ -14,5 +14,6 @@ effectcraft-geom = { workspace = true }
 effectcraft-keyframe = { workspace = true }
 effectcraft-raster = { workspace = true }
 kurbo = { workspace = true }
+log = { workspace = true }
 tiny-skia = { workspace = true }
 linesweeper = "0.5"

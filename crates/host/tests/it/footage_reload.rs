@@ -34,10 +34,14 @@ fn flat(rgba: [f32; 4], extra: bool) -> Vec<u8> {
     write(&d)
 }
 
-/// Write `bytes` to `path` so its modification time moves even on coarse file systems.
+/// Write `bytes` to `path` so its modification time moves even on coarse file systems. The file
+/// is replaced in one step, as an application's save does: written in place, a watcher looking
+/// every 20 ms can see it empty or half written and report the one save twice.
 fn save(path: &str, bytes: &[u8]) {
     std::thread::sleep(std::time::Duration::from_millis(30));
-    std::fs::write(path, bytes).unwrap();
+    let part = format!("{path}.part");
+    std::fs::write(&part, bytes).unwrap();
+    std::fs::rename(&part, path).unwrap();
 }
 
 fn footage(s: &Session, id: ItemId) -> Footage {
@@ -147,7 +151,7 @@ fn a_file_still_being_written_is_tried_again() {
 }
 
 /// The desktop app's watcher ([`footage_reload::Watcher`]) notices a footage file another app
-/// saved, hands its stamps over once, and reloads it through [`footage_reload::apply_stamps`];
+/// saved, hands its stamps over once, and reloads it through [`footage_reload::Scan::apply`];
 /// while nothing changes it hands over nothing (so the interface is never woken for it).
 #[test]
 fn the_watcher_notices_a_footage_file_changed_on_disk() {
@@ -186,14 +190,14 @@ fn the_watcher_notices_a_footage_file_changed_on_disk() {
         }
     };
     // First look: remembered, nothing to reload.
-    assert_eq!(footage_reload::apply_stamps(&mut s, next(&w, 1)).unwrap(), json!({"files": 0, "reloaded": 0}));
+    assert_eq!(next(&w, 1).apply(&mut s).unwrap(), json!({"files": 0, "reloaded": 0}));
     assert_eq!(wakes.load(Ordering::SeqCst), 1);
     std::thread::sleep(fast * 15);
     assert!(w.take().is_none(), "an unchanged file is never reported");
     assert_eq!(wakes.load(Ordering::SeqCst), 1, "and never wakes the interface");
     // Saved in another app: reported once, reloaded, shown.
     save(&path, &flat(GREEN, true));
-    assert_eq!(footage_reload::apply_stamps(&mut s, next(&w, 2)).unwrap(), json!({"files": 1, "reloaded": 1}));
+    assert_eq!(next(&w, 2).apply(&mut s).unwrap(), json!({"files": 1, "reloaded": 1}));
     assert!(near(pixel(&s, cid, 32, 24), GREEN));
     assert_eq!(wakes.load(Ordering::SeqCst), 2);
     std::thread::sleep(fast * 10);

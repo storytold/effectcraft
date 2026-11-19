@@ -1,8 +1,8 @@
 //! Photoshop document (PSD / PSB) reader, implemented from Adobe's public *Photoshop File Formats
 //! Specification* (see README.md), and a minimal writer ([`mod@write`]) for fixtures.
 //!
-//! [`Psd::parse`] reads the structure (header, layer records and their additional information,
-//! the layer tree) without decoding pixels; [`Psd::composite`] decodes the merged image and
+//! [`Psd::parse`] reads the structure with `craft_psd` (header, layer records and their
+//! additional information, the layer tree) without decoding pixels; [`Psd::composite`] decodes the merged image and
 //! [`Psd::layer_pixels`] one layer (with its layer mask applied to alpha) on demand. Pixels come
 //! out as straight (unpremultiplied) RGBA `f32` in 0..1, display-encoded (32-bit documents,
 //! which are linear, are encoded to sRGB).
@@ -32,7 +32,6 @@ pub use model::{
     Adjustment, ChannelInfo, ColorMode, Layer, LayerMask, LinkedFile, MAX_GROUP_DEPTH, Node, Pixels, Rect, Section, SmartObject, SubPath, TextInfo, VectorMask,
 };
 pub use parse::is_psd;
-pub(crate) use pixels::pack_bits;
 #[cfg(test)]
 use pixels::{lab_to_rgb, srgb_encode, unpack_bits};
 

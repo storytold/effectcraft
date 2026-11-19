@@ -12,85 +12,68 @@
 
 use std::io::{Seek, Write};
 
+use craft_exr::decode::{Compression, Result, SampleDepth};
 use effectcraft_project::render_queue::{ExrBitDepth, ExrCompression};
-use exr::prelude::{Blocks, Compression, Encoding, Image, Layer, LayerAttributes, LineOrder, SpecificChannels, Vec2, WritableImage, f16};
 
-/// The largest finite half float.
-const HALF_MAX: f32 = 65_504.0;
-
-/// A sample as half float: rounded to the nearest half (ties to even), held to ±65 504 so an
-/// over-range render doesn't turn into infinity. NaN stays NaN.
-fn to_half(v: f32) -> f16 {
-    f16::from_f32(v.clamp(-HALF_MAX, HALF_MAX))
-}
-
-/// The `exr` crate's compression for an Output Module setting.
+/// The `craft-exr` compression for an Output Module setting.
 pub fn compression(c: ExrCompression) -> Compression {
     match c {
-        ExrCompression::None => Compression::Uncompressed,
-        ExrCompression::Rle => Compression::RLE,
-        ExrCompression::Zips => Compression::ZIP1,
-        ExrCompression::Zip => Compression::ZIP16,
-        ExrCompression::Piz => Compression::PIZ,
-        ExrCompression::Pxr24 => Compression::PXR24,
+        ExrCompression::None => Compression::None,
+        ExrCompression::Rle => Compression::Rle,
+        ExrCompression::Zips => Compression::Zip1,
+        ExrCompression::Zip => Compression::Zip16,
+        ExrCompression::Piz => Compression::Piz,
+        ExrCompression::Pxr24 => Compression::Pxr24,
         ExrCompression::B44 => Compression::B44,
-        ExrCompression::B44a => Compression::B44A,
-        ExrCompression::Dwaa => Compression::DWAA(None),
-        ExrCompression::Dwab => Compression::DWAB(None),
+        ExrCompression::B44a => Compression::B44a,
+        ExrCompression::Dwaa => Compression::Dwaa,
+        ExrCompression::Dwab => Compression::Dwab,
     }
-}
-
-/// Scan lines, top to bottom, with compression `c`.
-fn encoding(c: ExrCompression) -> Encoding {
-    Encoding { compression: compression(c), blocks: Blocks::ScanLines, line_order: LineOrder::Increasing }
 }
 
 /// Write `w`×`h` RGBA pixels (`data`: four samples per pixel as they are to be written,
 /// premultiplied, rows top to bottom) as one OpenEXR frame, its blocks compressed in parallel as before. A pixel `data`
 /// doesn't cover is written as transparent black.
-pub fn write_rgba<W: Write + Seek>(file: &mut W, data: &[f32], (w, h): (usize, usize), (c, depth): (ExrCompression, ExrBitDepth)) -> exr::error::UnitResult {
-    let row = w.saturating_mul(4);
-    let px = move |p: Vec2<usize>| -> [f32; 4] {
-        let o = p.y().saturating_mul(row).saturating_add(p.x().saturating_mul(4));
-        match data.get(o..o.saturating_add(4)) {
-            Some(&[r, g, b, a]) => [r, g, b, a],
-            _ => [0.0; 4],
-        }
+///
+/// `chroma` is the primaries and white the samples are in (red, green, blue, white as CIE xy), written as the
+/// file's `chromaticities` attribute for Nuke, After Effects and Blender; `None` writes no attribute.
+pub fn write_rgba<W: Write + Seek>(
+    file: &mut W,
+    data: &[f32],
+    (w, h): (usize, usize),
+    (c, depth): (ExrCompression, ExrBitDepth),
+    chroma: Option<[[f32; 2]; 4]>,
+) -> Result<()> {
+    let sample_depth = match depth {
+        ExrBitDepth::Float => SampleDepth::Float,
+        ExrBitDepth::Half => SampleDepth::Half,
     };
-    match depth {
-        ExrBitDepth::Float => {
-            let image = Image::from_layer(Layer::new(
-                (w, h),
-                LayerAttributes::default(),
-                encoding(c),
-                SpecificChannels::rgba(move |p: Vec2<usize>| {
-                    let [r, g, b, a] = px(p);
-                    (r, g, b, a)
-                }),
-            ));
-            image.write().to_buffered(file)
-        }
-        ExrBitDepth::Half => {
-            let image = Image::from_layer(Layer::new(
-                (w, h),
-                LayerAttributes::default(),
-                encoding(c),
-                SpecificChannels::rgba(move |p: Vec2<usize>| {
-                    let [r, g, b, a] = px(p).map(to_half);
-                    (r, g, b, a)
-                }),
-            ));
-            image.write().to_buffered(file)
-        }
-    }
+    craft_exr::decode::write_rgba(file, data, w as u32, h as u32, sample_depth, compression(c), chroma)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use exr::prelude::{ReadChannels, ReadLayers};
-    use exr::prelude::{SampleType, read};
+    use exr::prelude::{
+        Encoding, Image, Layer, LayerAttributes, LineOrder, ReadChannels, ReadLayers, SampleType, SpecificChannels, Vec2, WritableImage, f16, read,
+    };
     use std::io::Cursor;
+
+    fn exr_compression(c: ExrCompression) -> exr::compression::Compression {
+        use exr::compression::Compression as C;
+        match c {
+            ExrCompression::None => C::Uncompressed,
+            ExrCompression::Rle => C::RLE,
+            ExrCompression::Zips => C::ZIP1,
+            ExrCompression::Zip => C::ZIP16,
+            ExrCompression::Piz => C::PIZ,
+            ExrCompression::Pxr24 => C::PXR24,
+            ExrCompression::B44 => C::B44,
+            ExrCompression::B44a => C::B44A,
+            ExrCompression::Dwaa => C::DWAA(None),
+            ExrCompression::Dwab => C::DWAB(None),
+        }
+    }
 
     /// A frame with a smooth gradient, grain, over-range highlights, a hard-edged high-contrast
     /// block and a soft alpha ramp (premultiplied), like a render with text over a plate.
@@ -118,7 +101,7 @@ mod tests {
 
     fn write(data: &[f32], size: (usize, usize), c: ExrCompression, depth: ExrBitDepth) -> Vec<u8> {
         let mut buf = Cursor::new(Vec::new());
-        write_rgba(&mut buf, data, size, (c, depth)).unwrap();
+        write_rgba(&mut buf, data, size, (c, depth), None).unwrap();
         buf.into_inner()
     }
 
@@ -156,7 +139,7 @@ mod tests {
             };
             let ty = if depth == ExrBitDepth::Half { SampleType::F16 } else { SampleType::F32 };
             for c in ExrCompression::ALL {
-                assert_eq!(c.is_lossy(depth), !compression(c).is_lossless_for(ty), "{c:?} {depth:?}");
+                assert_eq!(c.is_lossy(depth), !exr_compression(c).is_lossless_for(ty), "{c:?} {depth:?}");
                 let bytes = write(&src, (w, h), c, depth);
                 if c.is_lossy(depth) {
                     assert!(bytes.len() < write(&src, (w, h), ExrCompression::None, depth).len(), "{c:?} {depth:?}: smaller than None");
@@ -189,7 +172,7 @@ mod tests {
                 let meta = exr::meta::MetaData::read_from_buffered(Cursor::new(&bytes), false).unwrap();
                 assert_eq!(meta.headers.len(), 1);
                 assert_eq!(meta.headers[0].blocks, exr::meta::BlockDescription::ScanLines, "{c:?}");
-                assert_eq!(meta.headers[0].compression, compression(c), "{c:?}");
+                assert_eq!(meta.headers[0].compression, exr_compression(c), "{c:?}");
                 assert_eq!(meta.headers[0].line_order, LineOrder::Increasing);
             }
         }
@@ -233,5 +216,20 @@ mod tests {
         let (got, _) = read_back(&write(&[1.0, 0.5, 0.25, 1.0], (3, 2), ExrCompression::Zip, ExrBitDepth::Half));
         assert_eq!(&got[..4], &[1.0, 0.5, 0.25, 1.0]);
         assert!(got[4..].iter().all(|v| *v == 0.0));
+    }
+
+    /// The chromaticities attribute is written when given and absent otherwise.
+    #[test]
+    fn chromaticities_are_written_only_when_given() {
+        let rec709 = [[0.64, 0.33], [0.30, 0.60], [0.15, 0.06], [0.3127, 0.3290]];
+        for depth in [ExrBitDepth::Float, ExrBitDepth::Half] {
+            let mut with = Cursor::new(Vec::new());
+            write_rgba(&mut with, &[0.5; 4], (1, 1), (ExrCompression::Zip, depth), Some(rec709)).unwrap();
+            let meta = exr::meta::MetaData::read_from_buffered(Cursor::new(with.into_inner()), false).unwrap();
+            let got = meta.headers[0].shared_attributes.chromaticities.map(|c| [c.red, c.green, c.blue, c.white].map(|v| [v.0, v.1]));
+            assert_eq!(got, Some(rec709));
+            let meta = exr::meta::MetaData::read_from_buffered(Cursor::new(write(&[0.5; 4], (1, 1), ExrCompression::Zip, depth)), false).unwrap();
+            assert!(meta.headers[0].shared_attributes.chromaticities.is_none());
+        }
     }
 }

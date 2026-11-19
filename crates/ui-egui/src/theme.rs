@@ -111,6 +111,21 @@ pub struct Tokens {
     pub gradients: bool,
 }
 
+/// WCAG 2 relative luminance of an opaque sRGB colour (alpha is ignored).
+pub fn relative_luminance(c: Color32) -> f32 {
+    let f = |v: u8| {
+        let v = f32::from(v) / 255.0;
+        if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+    };
+    0.2126 * f(c.r()) + 0.7152 * f(c.g()) + 0.0722 * f(c.b())
+}
+
+/// WCAG 2 contrast ratio of two opaque sRGB colours (1 to 21).
+pub fn contrast_ratio(a: Color32, b: Color32) -> f32 {
+    let (x, y) = (relative_luminance(a), relative_luminance(b));
+    (x.max(y) + 0.05) / (x.min(y) + 0.05)
+}
+
 /// A vertical gradient fill (`top` → `bottom`) over `rect`.
 pub fn gradient_rect(painter: &egui::Painter, rect: egui::Rect, top: Color32, bottom: Color32) {
     let mut m = egui::Mesh::default();

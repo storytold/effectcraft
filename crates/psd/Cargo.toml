@@ -10,4 +10,8 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+craft-psd = { workspace = true }
 miniz_oxide = "0.9"
+
+[dev-dependencies]
+craft-psd = { workspace = true, features = ["testgen"] }

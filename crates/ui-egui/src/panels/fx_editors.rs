@@ -39,6 +39,7 @@ pub const COLORAMA: &str = "ec.color.colorama";
 pub const GLOW: &str = "ec.stylize.glow";
 pub const RESHAPE: &str = "ec.distort.reshape";
 pub const EXTRACTOR: &str = "ec.3d.extractor";
+pub const CRYPTOMATTE: &str = "ec.3d.cryptomatte";
 pub const MESH_WARP: &str = "ec.distort.meshwarp";
 
 fn str_value(layer: &Layer, ectx: &EvalCtx, g: &PropGroup, id: &str) -> String {
@@ -836,6 +837,17 @@ const NO_CHANNEL: &str = "(none)";
 /// Whether `prop` (in group `g`) is one of EXtractoR's channel parameters.
 pub fn is_extractor_channel(g: &PropGroup, prop: &effectcraft_engine::project::Property) -> bool {
     matches!(&g.kind, GroupKind::Effect { effect } if effect == EXTRACTOR) && EXTRACTOR_CHANNELS.contains(&prop.match_id.as_str())
+}
+
+/// Whether `prop` (in group `g`) is the Cryptomatte effect's Layer.
+pub fn is_crypto_layer(g: &PropGroup, prop: &effectcraft_engine::project::Property) -> bool {
+    matches!(&g.kind, GroupKind::Effect { effect } if effect == CRYPTOMATTE) && prop.match_id == "layer"
+}
+
+/// Whether `prop` is the Layer of a Cryptomatte effect on `layer` (the timeline finds it without
+/// its group).
+pub fn is_crypto_layer_of(layer: &Layer, prop: &effectcraft_engine::project::Property) -> bool {
+    layer.effects().is_some_and(|fx| fx.groups().any(|g| g.match_id == CRYPTOMATTE && g.get("layer").is_some_and(|q| q.uid == prop.uid)))
 }
 
 /// The OpenEXR layer EXtractoR's red, green and blue come from (`""`: the unnamed layer), or
