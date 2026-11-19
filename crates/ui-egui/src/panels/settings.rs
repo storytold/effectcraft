@@ -73,6 +73,7 @@ fn page_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, page: &Page, cur: &Value
             }
             Item::Labels => labels_ui(app, ui, cur, acts),
             Item::BrowserStorage => browser_storage_ui(app, ui, t, acts),
+            Item::MemoryUse => memory_use_ui(app, ui, t),
             Item::Models(task) => models_ui(app, ui, t, acts, task),
             Item::PluginLibrary => library_ui(app, ui, t, acts),
             Item::AudioDevices { key } => {
@@ -106,7 +107,9 @@ fn page_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, page: &Page, cur: &Value
             Item::Setting { key, label, kind, live } => {
                 let v = get(key);
                 let id = format!("settings.{key}");
-                let tip = (!live).then(|| tr("Stored, but not used by EffectCraft yet"));
+                let tip = (!live)
+                    .then(|| tr("Stored, but not used by EffectCraft yet"))
+                    .or_else(|| (key == "disk.networkFootageLocations").then(|| tr(LOCATIONS_HINT)));
                 let mut resp: Option<egui::Response> = None;
                 // What the control is set to, for assistive technology.
                 let mut value_text = String::new();
@@ -184,7 +187,11 @@ fn page_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, page: &Page, cur: &Value
                                 }
                                 Kind::Text | Kind::Path => {
                                     let mut s = v.as_str().unwrap_or("").to_string();
-                                    let r = ui.add(egui::TextEdit::singleline(&mut s).desired_width(if kind == Kind::Path { 230.0 } else { 260.0 }));
+                                    let mut edit = egui::TextEdit::singleline(&mut s).desired_width(if kind == Kind::Path { 230.0 } else { 260.0 });
+                                    if key == "disk.networkFootageLocations" {
+                                        edit = edit.hint_text(tr(LOCATIONS_HINT));
+                                    }
+                                    let r = ui.add(edit);
                                     value_text = s.clone();
                                     if r.changed() {
                                         acts.push(Act::Set(key.into(), json!(s)));
@@ -238,8 +245,75 @@ fn page_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, page: &Page, cur: &Value
                 if key == "disk.diskCacheMaxGb" {
                     disk_cache_limit_ui(app, ui, t);
                 }
+                if key == "disk.localizeFootage"
+                    && let Some(s) = app.session.localize_status()
+                {
+                    localize_status_ui(app, ui, t, &s);
+                }
             }
         }
+    }
+}
+
+/// The hint of Network Footage Locations: what the field takes.
+const LOCATIONS_HINT: &str = "Folders or drives, separated by ;";
+
+/// How soon to draw the localizer's status again: while it has files to copy, every half
+/// second; idle, not at all.
+pub(crate) fn localize_repaint(s: &effectcraft_engine::render::LocalizeReport) -> Option<std::time::Duration> {
+    (s.queued > 0 || s.copying.is_some()).then(|| std::time::Duration::from_millis(500))
+}
+
+/// Settings ▸ Disk, under Localize Network Footage (#3271): the local copies, what is queued and
+/// being copied, and which locations count as network. Automation id
+/// `settings.disk.localizeStatus`, labelled `files=… bytes=… queued=… skipped=…`.
+fn localize_status_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, t: &Tokens, s: &effectcraft_engine::render::LocalizeReport) {
+    const GB: f64 = (1u64 << 30) as f64;
+    // (the status changes on its own while files are copied: drawn again until it is idle)
+    if let Some(after) = localize_repaint(s) {
+        ui.ctx().request_repaint_after(after);
+    }
+    let mut lines = vec![tr_args(
+        "Local copies: {} files, {} of {} GB; {} queued, {} skipped",
+        &[&s.files, &format!("{:.1}", s.bytes as f64 / GB), &format!("{:.1}", s.max_bytes as f64 / GB), &s.queued, &s.skipped],
+    )];
+    if let Some(p) = &s.copying {
+        lines.push(tr_args("Copying {}", &[p]));
+    }
+    let mut network = vec![tr("UNC paths (\\\\server\\share)").to_string()];
+    network.extend(s.network.iter().cloned());
+    lines.push(tr_args("Network footage: {}", &[&network.join(", ")]));
+    if s.reserve_limited {
+        lines.push(tr("Limited by free disk space").to_string());
+    }
+    let r = ui
+        .vertical(|ui| {
+            for line in &lines {
+                ui.label(RichText::new(line).color(t.text_dim));
+            }
+        })
+        .response;
+    let label = format!("files={} bytes={} queued={} skipped={}", s.files, s.bytes, s.queued, s.skipped);
+    app.auto.add("settings.disk.localizeStatus", r.rect, &label);
+}
+
+/// Settings ▸ Memory & CPU, under RAM Reserved for Other Applications: the memory EffectCraft's
+/// caches may use (one budget they share, `Session::memory_budget`), of the installed RAM.
+/// Automation id `settings.memory.use`, labelled `budgetMb=… installedMb=… reduced=…` (the same
+/// in every interface language; `installedMb=unknown` without a reading).
+fn memory_use_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, t: &Tokens) {
+    let b = app.session.memory_budget();
+    let r = ui.label(RichText::new(memory_use_line(b.bytes as u64, b.installed)).color(t.text_dim));
+    let installed = b.installed.map_or_else(|| "unknown".to_string(), |i| (i >> 20).to_string());
+    app.auto.add("settings.memory.use", r.rect, &format!("budgetMb={} installedMb={installed} reduced={}", b.bytes >> 20, b.reduced));
+}
+
+/// The line [`memory_use_ui`] shows for a budget of `budget` bytes of `installed` bytes of RAM.
+pub(crate) fn memory_use_line(budget: u64, installed: Option<u64>) -> String {
+    let gb = |b: u64| format!("{:.1} GB", b as f64 / (1u64 << 30) as f64);
+    match installed {
+        Some(i) => tr_args("EffectCraft may use: {} of {}", &[&gb(budget), &gb(i)]),
+        None => tr_args("EffectCraft may use: {} (installed RAM unknown)", &[&gb(budget)]),
     }
 }
 
@@ -1272,6 +1346,29 @@ mod tests {
         assert!(actions.is_empty());
     }
 
+    /// Settings ▸ Memory & CPU shows what EffectCraft's caches may use, of the installed RAM
+    /// (#3298: one budget instead of three cache sizes), machine-readable for agents.
+    #[test]
+    fn the_memory_page_shows_what_the_caches_may_use() {
+        assert_eq!(memory_use_line((464u64 << 30) / 10, Some(64 << 30)), "EffectCraft may use: 46.4 GB of 64.0 GB");
+        assert_eq!(memory_use_line(5 << 30, None), "EffectCraft may use: 5.0 GB (installed RAM unknown)");
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        app.session.sys_memory = Some(effectcraft_engine::sysinfo::SysMemory { total: 64 << 30, available: 60 << 30 });
+        let page = pages().into_iter().find(|p| p.id == "memory").unwrap();
+        let ctx = egui::Context::default();
+        let tokens = app.tokens;
+        let cur = serde_json::to_value(&app.session.prefs).unwrap();
+        let mut actions = vec![];
+        let mut output = ctx
+            .run_ui(egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(900.0, 900.0))), ..Default::default() }, |ui| {
+                page_ui(&mut app, ui, &page, &cur, &tokens, &mut actions)
+            });
+        output.textures_delta.clear();
+        let budget = (58u64 << 30) * 80 / 100;
+        assert_eq!(app.auto.find("settings.memory.use").unwrap().label, format!("budgetMb={} installedMb=65536 reduced=false", budget >> 20));
+        assert!(actions.is_empty());
+    }
+
     /// Settings ▸ Disk shows the disk cache's limit in effect under Maximum Disk Cache Size, and
     /// says when free disk space holds it lower (a 20 GB cache held at 0 showed nothing).
     #[test]
@@ -1327,5 +1424,15 @@ mod tests {
         assert!(shown(&mut app).is_none());
         drop(dc);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #3271 review: the localizer's status is drawn again while files are queued or copied,
+    /// and not while it is idle.
+    #[test]
+    fn the_localizer_status_repaints_only_while_busy() {
+        use effectcraft_engine::render::LocalizeReport;
+        assert_eq!(super::localize_repaint(&LocalizeReport::default()), None, "idle");
+        assert!(super::localize_repaint(&LocalizeReport { queued: 2, ..Default::default() }).is_some(), "queued");
+        assert!(super::localize_repaint(&LocalizeReport { copying: Some("x.exr".into()), ..Default::default() }).is_some(), "copying");
     }
 }

@@ -120,9 +120,9 @@ pub use time_fx::{PixelMotion, TimewarpPlan, TwStep, pmb_plan, posterized_time, 
 pub use ocio::color_stabilizer_maps;
 // GPU effects, part B (3D Channel, Immersive Video, colour management, simulation render passes).
 pub use channel3d::{
-    CRYPTO_LAYERS, CryptoAux, EXTRACTOR_COPY, MATTE_ONLY_IN_ALPHA, aux_point, crypto_aux_image, crypto_aux_image_with, crypto_layer_choices, crypto_layer_menu,
-    crypto_layer_name, crypto_layer_named, extractor_aux_channel, extractor_own_channel, id_color, is_extractor_copy, matte_only_px, reads_aux,
-    selection_hashes,
+    CRYPTO_LAYERS, CryptoOutput, CryptoPlane, EXTRACTOR_COPY, MATTE_ONLY_IN_ALPHA, aux_need, aux_needs, aux_point, crypto_aux_image, crypto_box_scale,
+    crypto_layer_choices, crypto_layer_menu, crypto_layer_name, crypto_layer_named, crypto_plane, extractor_aux_channel, extractor_own_channel, id_color,
+    is_extractor_copy, matte_only_px, pixel_margin, reads_aux, selection_hashes,
 };
 pub use file_cache::{check_lut_files, lut_generation};
 pub use ocio::{ColorOp, Straight, Tf, color_program};
@@ -917,6 +917,8 @@ pub fn instantiate(spec: &EffectSpec, ids: &mut Ids, instance_name: &str, layer_
         if matches!(ps.ui, ParamUi::Checkbox | ParamUi::Popup { .. } | ParamUi::Layer) {
             pr.hold_only = true;
         }
+        // (the channels an effect reads: not animatable, as in After Effects)
+        pr.static_only = channel3d::selects_channels(spec.id, ps.id);
         match path.and_then(|path| nested_group(&mut g, ids, path)) {
             Some(sub) => sub.children.push(pr.into()),
             None => g.children.push(pr.into()),

@@ -112,6 +112,7 @@ mod ui_toolbar_gradient;
 mod ui_tracker;
 mod ui_unreadable_footage;
 mod ui_video_preview_off;
+mod ui_view_layout;
 mod ui_viewer;
 mod ui_viewer_trackpad;
 mod ui_viewers;
