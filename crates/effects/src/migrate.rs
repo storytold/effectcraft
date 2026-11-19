@@ -287,10 +287,9 @@ pub fn upgrade_instance(spec: &EffectSpec, g: &mut PropGroup, ids: &mut Ids, lay
     }
     // Polar Coordinates version 1 (saved without a Version) ran the other item's conversion
     // (#3708). Its choice moves to the item that names what it did, so it renders as saved.
-    if spec.id == "ec.distort.polar"
-        && g.get("version").is_none()
-        && let Some(pr) = g.get_mut("conversion")
-    {
+    // A version 1 instance that stored no choice ran what the second item now names.
+    let polar_v1 = spec.id == "ec.distort.polar" && g.get("version").is_none();
+    if polar_v1 && let Some(pr) = g.get_mut("conversion") {
         let other = |v: &mut Value| {
             if let Value::Enum(i @ 0..=1) = v {
                 *i = 1 - *i;
@@ -324,7 +323,11 @@ pub fn upgrade_instance(spec: &EffectSpec, g: &mut PropGroup, ids: &mut Ids, lay
                     pr
                 }
                 None => {
-                    let v = legacy_default(spec.id, ps.id).unwrap_or_else(|| default_value(ps, layer_size));
+                    let v = match legacy_default(spec.id, ps.id) {
+                        Some(v) => v,
+                        None if polar_v1 && ps.id == "conversion" => Value::Enum(1),
+                        None => default_value(ps, layer_size),
+                    };
                     let mut pr = Property::new(ids.alloc(), leaf, ps.name, v).with_ui(ps.ui.clone());
                     pr.spatial = matches!(ps.ui, ParamUi::Point);
                     pr.hold_only |= matches!(ps.ui, ParamUi::Checkbox | ParamUi::Popup { .. } | ParamUi::Layer);
@@ -902,6 +905,23 @@ not a stroke",
             assert!(!upgrade_instance(spec, &mut g, &mut Ids(&mut next), SIZE), "the second open changes nothing");
             assert_eq!(g.get("conversion").unwrap().value, Value::Enum(1 - saved));
         }
+    }
+
+    /// A version 1 Polar Coordinates instance that stored no Type of Conversion read as its first
+    /// item, which ran what Polar to Rect names now. With a Version, a missing choice is the default.
+    #[test]
+    fn polar_coordinates_saved_without_a_conversion_keeps_its_picture() {
+        let mut next = 1;
+        let (spec, mut g) = instance("ec.distort.polar", &mut next);
+        take_prop(&mut g, "conversion");
+        let mut current = g.clone();
+        take_prop(&mut g, "version");
+        assert!(upgrade_instance(spec, &mut g, &mut Ids(&mut next), SIZE));
+        assert_eq!(g.get("conversion").unwrap().value, Value::Enum(1));
+        assert_eq!(g.get("version").unwrap().value, Value::Scalar(2.0));
+        assert!(!upgrade_instance(spec, &mut g, &mut Ids(&mut next), SIZE), "the second open changes nothing");
+        assert!(upgrade_instance(spec, &mut current, &mut Ids(&mut next), SIZE));
+        assert_eq!(current.get("conversion").unwrap().value, Value::Enum(0));
     }
 
     #[test]
