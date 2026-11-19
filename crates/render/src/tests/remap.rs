@@ -84,3 +84,53 @@ fn layer_span_is_the_source_duration_in_layer_time() {
     let (first, end) = crate::eval::layer_span(&p, &pre).expect("a remapped layer has a visible span");
     assert!(end > first);
 }
+
+/// After Effects keeps Time Remap values as float32 seconds: a remap keyed onto a cut at 0.24 s
+/// reads 0.2399999946 s, and After Effects still shows the layer that starts at the cut. A
+/// remapped time that falls short of a nested in point by under about 1/1500 of a nested frame
+/// reaches it (After Effects 26.5 lab: 0.23999 shows the layer after a 30 fps cut at 0.2400065,
+/// 0.23998 the one before; 0.24999 / 0.24998 at 60 fps and 0.24998 / 0.24995 at 24 fps around
+/// 0.25). Before, the precomp was drawn just before the cut.
+#[test]
+fn a_remapped_time_just_short_of_a_cut_reaches_it() {
+    // (nested frame rate, cut, remapped value, the layer after the cut shows)
+    let cases = [
+        (FrameRate::FPS_30, 0.24000651041667, f64::from(0.24_f32), true),
+        (FrameRate::FPS_30, 0.24000651041667, f64::from(0.23999_f32), true),
+        (FrameRate::FPS_30, 0.24000651041667, f64::from(0.23998_f32), false),
+        (FrameRate::FPS_30, 0.24000651041667, f64::from(0.2399_f32), false),
+        (FrameRate::FPS_60, 0.25, f64::from(0.24999_f32), true),
+        (FrameRate::FPS_60, 0.25, f64::from(0.24998_f32), false),
+        (FrameRate::FPS_24, 0.25, f64::from(0.24998_f32), true),
+        (FrameRate::FPS_24, 0.25, f64::from(0.24995_f32), false),
+        (FrameRate::FPS_30, 0.25511068, 0.25511068 - 1e-5, true),
+        (FrameRate::FPS_30, 0.25511068, 0.25511068 - 5e-5, false),
+    ];
+    for (rate, cut, v, after) in cases {
+        let mut p = Project::default();
+        let outer = Comp::new(10, 10, FrameRate::FPS_30, s(2.0));
+        let mut inner = Comp::new(10, 10, rate, s(2.0));
+        let mut solid = |color: [f32; 3], from: Tick, to: Tick| {
+            let sid = p.add_item("S", Label::Red, None, ItemKind::Solid(Solid { color, width: 10, height: 10, pixel_aspect: 1.0 }));
+            let mut l = build::layer(&mut p, &inner, "S", LayerSource::Solid { item: sid }, (10, 10), None);
+            (l.in_point, l.out_point) = (from, to);
+            l
+        };
+        let before = solid([1.0, 0.0, 0.0], Tick::ZERO, s(cut));
+        let later = solid([0.0, 1.0, 0.0], s(cut), s(2.0));
+        inner.layers = vec![later, before].into();
+        let iid = p.add_item("Inner", Label::Sandstone, None, ItemKind::Comp(inner.into()));
+        let cid = p.add_item("Outer", Label::Sandstone, None, ItemKind::Comp(outer.clone().into()));
+        let mut pre = build::layer(&mut p, &outer, "Inner", LayerSource::Comp { item: iid }, (10, 10), None);
+        let mut next = p.next_id;
+        let mut tr = Ids(&mut next).prop("timeRemap", "Time Remap", Value::Scalar(0.0));
+        p.next_id = next;
+        let frame = FrameRate::FPS_30.tick_of(1);
+        tr.keys = vec![Keyframe::new(Tick::ZERO, Value::Scalar(0.0)), Keyframe::new(frame, Value::Scalar(v)), Keyframe::new(s(1.0), Value::Scalar(1.0))];
+        pre.props.children.push(Node::Prop(tr));
+        p.comp_mut(cid).unwrap().layers.push(pre);
+        let px = render_frame(&p, cid, frame, 1.0).get(5, 5);
+        let green = px[1] > 0.5 && px[0] < 0.5;
+        assert_eq!(green, after, "{rate:?} cut {cut} remapped to {v}: {px:?}");
+    }
+}

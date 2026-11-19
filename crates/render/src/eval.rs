@@ -49,6 +49,10 @@ pub struct EvalCtx<'a> {
     pub reads: Option<&'a crate::reads::ReadLog>,
 }
 
+/// The fraction of a nested comp's frame a time-remapped precomp time may fall short of a nested
+/// layer's in point and still reach it (see [`EvalCtx::source_time`]).
+const REMAP_SLACK_PER_FRAME: i64 = 1500;
+
 impl<'a> EvalCtx<'a> {
     /// A context for `comp` at `time` with no expressions, footage, overrides or read log.
     pub fn new(project: &'a Project, comp_id: ItemId, comp: &'a Comp, time: Tick) -> EvalCtx<'a> {
@@ -127,7 +131,18 @@ impl<'a> EvalCtx<'a> {
     /// (stretch-aware) layer time.
     pub fn source_time(&self, layer: &Layer) -> Tick {
         if let Some(tr) = layer.props.get("timeRemap") {
-            return Tick::from_seconds_f64(self.value(layer, tr).as_f64());
+            let t = Tick::from_seconds_f64(self.value(layer, tr).as_f64());
+            // After Effects keeps Time Remap values as float32 seconds (0.24 reads back as
+            // 0.2399999946) and still treats a remapped precomp time that falls short of a nested
+            // layer's in point by under about 1/1500 of the nested comp's frame as reaching it: a
+            // remap keyed onto a cut shows the layer after the cut, not the one before. Measured
+            // window: 1/1666 to 1/1258 of a frame at 24, 30 and 60 fps (stretch has no such slack).
+            if let LayerSource::Comp { item } = layer.source
+                && let Some(nc) = self.project.comp(item)
+            {
+                return Tick(t.0.saturating_add(nc.frame_duration().0 / REMAP_SLACK_PER_FRAME));
+            }
+            return t;
         }
         // Responsive Design — Time: a time-stretched precomp keeps its protected regions at
         // their original speed.
