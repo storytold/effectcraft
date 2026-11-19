@@ -158,7 +158,7 @@ fn todays_keys_survive_edits_that_keep_their_frames() {
     assert_eq!(saved(&s), before);
     // Offline and back online (#3534).
     for missing in [true, false] {
-        if let Some(effectcraft_project::ItemKind::Footage(f)) = std::sync::Arc::make_mut(&mut s.project).item_mut(ItemId(1)).map(|i| &mut i.kind) {
+        if let Some(effectcraft_project::ItemKind::Footage(f)) = s.project_mut().item_mut(ItemId(1)).map(|i| &mut i.kind) {
             f.missing = missing;
         }
         add_to_render_queue(&mut s);
@@ -210,7 +210,7 @@ fn offline_footage_keeps_analyses() {
     assert!(missing(&s));
     add_to_render_queue(&mut s);
     assert_eq!(saved(&s), before);
-    if let Some(effectcraft_project::ItemKind::Footage(f)) = std::sync::Arc::make_mut(&mut s.project).item_mut(ItemId(1)).map(|i| &mut i.kind) {
+    if let Some(effectcraft_project::ItemKind::Footage(f)) = s.project_mut().item_mut(ItemId(1)).map(|i| &mut i.kind) {
         f.missing = false;
     }
     add_to_render_queue(&mut s);
@@ -249,7 +249,7 @@ fn keys_saved_by_0_24_while_offline_still_match() {
     let roto = |s: &Session| saved(s)[2].clone();
     assert_eq!(roto(&s), ("saved frozen".into(), ROTO_INPUT_0_24_OFFLINE.into()));
     for missing in [true, false] {
-        if let Some(effectcraft_project::ItemKind::Footage(f)) = std::sync::Arc::make_mut(&mut s.project).item_mut(ItemId(1)).map(|i| &mut i.kind) {
+        if let Some(effectcraft_project::ItemKind::Footage(f)) = s.project_mut().item_mut(ItemId(1)).map(|i| &mut i.kind) {
             f.missing = missing;
         }
         add_to_render_queue(&mut s);
@@ -283,7 +283,7 @@ fn nested_values_are_written_as_fixed_words() {
         AlphaMode, CineonUnits, FieldOrder, FootageKind, GroupKind, ItemKind, LayerSource, MaskMode, MaskMotionBlur, Solid, SourceLayer,
     };
     let mut s = open(ANALYSED_0_24);
-    let p = std::sync::Arc::make_mut(&mut s.project);
+    let p = s.project_mut();
     if let Some(ItemKind::Footage(f)) = p.item_mut(ItemId(1)).map(|i| &mut i.kind) {
         f.kind = FootageKind::Sequence;
         f.sequence = vec!["a_0001.png".into(), "a_0002.png".into()];

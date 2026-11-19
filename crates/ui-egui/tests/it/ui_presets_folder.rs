@@ -47,7 +47,7 @@ fn presets_menu_copies_the_configured_folder_without_editing_the_project() {
             app
         });
         h.run_steps(3);
-        let before = serde_json::to_value(&h.state().session.project).unwrap();
+        let before = serde_json::to_value(&*h.state().session.project).unwrap();
         let revision = h.state().session.revision;
         assert!(h.state().auto.find("effects.copyPresetsFolderPath").is_none());
         click(&mut h, "effects.menu");
@@ -58,7 +58,7 @@ fn presets_menu_copies_the_configured_folder_without_editing_the_project() {
         assert_eq!(click(&mut h, "effects.copyPresetsFolderPath"), [expected.as_str()]);
         h.run_steps(2);
         assert!(h.state().auto.find("effects.copyPresetsFolderPath").is_none());
-        assert_eq!(serde_json::to_value(&h.state().session.project).unwrap(), before);
+        assert_eq!(serde_json::to_value(&*h.state().session.project).unwrap(), before);
         assert_eq!(h.state().session.revision, revision);
     }
 }

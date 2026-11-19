@@ -19,7 +19,7 @@ fn styles_of(s: &Session, layer: u64) -> Vec<(String, bool)> {
 
 impl Session {
     fn execute_query(&self, id: &str, p: serde_json::Value) -> serde_json::Value {
-        let mut c = Session { project: self.project.clone(), state: self.state.clone(), ..Default::default() };
+        let mut c = Session { project: craft_command::Tracked::new(self.project.clone()), state: self.state.clone(), ..Default::default() };
         c.execute(id, p).unwrap()
     }
 }
@@ -112,9 +112,9 @@ fn styles_render_and_round_trip() {
     assert!(img2.get(123, 50)[2] > 0.98 && img2.get(123, 50)[0] < 0.02);
     // Serde round trip keeps styles and the comp's Global Light.
     s.execute("layer.style.globalLight", json!({"angle": 33})).unwrap();
-    let json = serde_json::to_string(&*s.project).unwrap();
+    let json = serde_json::to_string(&**s.project).unwrap();
     let back: effectcraft_project::Project = serde_json::from_str(&json).unwrap();
-    assert_eq!(back, *s.project);
+    assert_eq!(back, **s.project);
     assert_eq!(back.comp(cid).unwrap().global_light.angle.value.as_f64(), 33.0);
 }
 

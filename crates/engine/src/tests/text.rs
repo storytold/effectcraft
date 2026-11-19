@@ -73,7 +73,7 @@ fn animator_indices_count_from_1_and_say_so() {
     // index 2 reaches the same animator.
     s.execute("layer.addTextAnimator", json!({"layer": t, "property": "opacity"})).unwrap();
     let cid = s.active_comp_id().unwrap();
-    let layer = std::sync::Arc::make_mut(&mut s.project).comp_mut(cid).unwrap().layer_mut(LayerId(t)).unwrap();
+    let layer = s.project_mut().comp_mut(cid).unwrap().layer_mut(LayerId(t)).unwrap();
     layer.props.group_mut("text/animators").unwrap().children[1].as_group_mut().unwrap().uid = 1;
     for (id, animator) in [("layer.addTextSelector", 1), ("text.addSelector", 1), ("layer.addTextSelector", 2)] {
         let r = s.execute(id, json!({"layer": t, "animator": animator, "kind": "wiggly"})).unwrap();
@@ -188,7 +188,7 @@ fn presets_apply_render_and_round_trip() {
     s.execute("layer.enablePerChar3D", json!({"layer": t})).unwrap();
     let json = s.project.to_json();
     let back = Project::from_json(&json).unwrap();
-    assert_eq!(*s.project, back);
+    assert_eq!(**s.project, back);
     let tg = text_group(&s);
     for m in ["pathOptions", "moreOptions"] {
         assert!(tg.sub(m).is_some(), "{m}");
@@ -220,7 +220,7 @@ fn cached_text_presets_keep_the_catalog_and_application_independent() {
             let result = s.execute("layer.applyTextPreset", json!({"layer": layer, "preset": id})).unwrap();
             assert!(!result["animators"].as_array().unwrap().is_empty(), "{id}");
             s.execute("edit.undo", json!({})).unwrap();
-            assert_eq!(s.project, project, "{id}: undo restores the document");
+            assert_eq!(*s.project, project, "{id}: undo restores the document");
         }
         assert_eq!(s.execute("text.presets", json!({})).unwrap(), catalog);
     }

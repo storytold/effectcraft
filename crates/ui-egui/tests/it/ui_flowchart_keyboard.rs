@@ -176,7 +176,7 @@ fn after_a_click_the_arrows_belong_to_the_chart_and_do_not_nudge_layers() {
     // Select the Mid layer in Main, then click a node: the arrows must not move the layer.
     h.state_mut().session.execute("layer.select", json!({"layers": ["#1"]})).ok();
     h.run_steps(3);
-    let before = serde_json::to_string(&h.state().session.project).unwrap_or_default();
+    let before = serde_json::to_string(&*h.state().session.project).unwrap_or_default();
     let node = h.state().auto.find("flowchart.node.item:3").or_else(|| h.state().auto.query("flowchart.node.").into_iter().next()).cloned().expect("a node");
     click_at(&mut h, pos2(node.rect[0] + node.rect[2] / 2.0, node.rect[1] + node.rect[3] / 2.0));
     assert_eq!(h.state().ui.focused, PanelKind::Flowchart);
@@ -184,7 +184,7 @@ fn after_a_click_the_arrows_belong_to_the_chart_and_do_not_nudge_layers() {
     key(&mut h, Key::ArrowDown, Modifiers::NONE);
     key(&mut h, Key::ArrowRight, Modifiers::NONE);
     assert_ne!(selected(&h), selected_before, "the arrow moved the chart's selection");
-    assert_eq!(serde_json::to_string(&h.state().session.project).unwrap_or_default(), before, "no layer was nudged");
+    assert_eq!(serde_json::to_string(&*h.state().session.project).unwrap_or_default(), before, "no layer was nudged");
 }
 
 #[test]

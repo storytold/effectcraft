@@ -1,0 +1,28 @@
+[package]
+name = "effectcraft-link"
+description = "EffectCraft side of Craft Link"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+craft-ipc = { workspace = true }
+craft-command = { workspace = true }
+effectcraft-engine = { workspace = true }
+effectcraft-interchange = { workspace = true }
+effectcraft-export = { workspace = true }
+effectcraft-project = { workspace = true }
+effectcraft-render = { workspace = true }
+effectcraft-time = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+egui = { workspace = true }
+log = { workspace = true }
+
+[dev-dependencies]
+effectcraft-media = { workspace = true }
+effectcraft-host = { workspace = true }

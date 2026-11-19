@@ -130,7 +130,7 @@ fn protocol_round_trips() {
         assert!(t.contains("\"kind\":"), "{kind:?}");
         let back: WorkerRequest = serde_json::from_str(&t).unwrap();
         assert_eq!(back.job.kind(), kind);
-        assert_eq!(Project::from_json(&back.project).unwrap(), *s.project);
+        assert_eq!(Project::from_json(&back.project).unwrap(), **s.project);
     }
     let g = s.active_comp().unwrap().layers[0].props.clone();
     for r in [

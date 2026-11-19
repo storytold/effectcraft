@@ -52,7 +52,7 @@ fn source_project(dir: &std::path::Path) -> String {
     let rig = s.execute("layer.newNull", json!({"name": "Rig"})).unwrap()["layer"].as_u64().unwrap();
     s.execute("layer.setParent", json!({"layers": [nest], "parent": rig})).unwrap();
     std::fs::write(dir.join("data.json"), b"{\"v\": 1}").unwrap();
-    let p = std::sync::Arc::make_mut(&mut s.project);
+    let p = s.project_mut();
     p.add_item("data.json", Default::default(), None, ItemKind::Footage(Footage { path: "data.json".into(), kind: FootageKind::Data, ..Default::default() }));
     p.add_item(
         "gone.mov",

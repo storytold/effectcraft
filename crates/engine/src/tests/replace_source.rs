@@ -1,8 +1,6 @@
 //! Layer ▸ Replace Source (#991, and the `replaceSource` part of #813): Alt-drag and Ctrl+Alt+/
 //! replace an AV layer's source while every other layer property stays.
 
-use std::sync::Arc;
-
 use effectcraft_color::Label;
 use effectcraft_project::{Footage, FootageKind, ItemId, ItemKind, LayerSource, Solid};
 use serde_json::json;
@@ -25,7 +23,7 @@ fn solid(s: &mut Session, name: &str) -> u64 {
 
 fn add_footage(s: &mut Session, name: &str, kind: FootageKind, width: u32, height: u32, has_audio: bool) -> ItemId {
     let f = Footage { path: format!("/tmp/{name}"), kind, width, height, has_video: kind != FootageKind::Data, has_audio, ..Default::default() };
-    Arc::make_mut(&mut s.project).add_item(name, Label::None, None, ItemKind::Footage(f))
+    s.project_mut().add_item(name, Label::None, None, ItemKind::Footage(f))
 }
 
 /// The replacement changes `source` and nothing else: name, label, comment, timing, stretch,
@@ -88,12 +86,8 @@ fn replace_source_crosses_types_and_adds_audio() {
     let after = layer(&s, a);
     assert_eq!(after.source, LayerSource::Footage { item: footage });
     assert!(after.props.sub("audio").is_some(), "the Audio group is preserved for the next source");
-    let new_solid = Arc::make_mut(&mut s.project).add_item(
-        "New Solid",
-        Label::None,
-        None,
-        ItemKind::Solid(Solid { color: [0.0, 1.0, 0.0], width: 10, height: 10, pixel_aspect: 1.0 }),
-    );
+    let new_solid =
+        s.project_mut().add_item("New Solid", Label::None, None, ItemKind::Solid(Solid { color: [0.0, 1.0, 0.0], width: 10, height: 10, pixel_aspect: 1.0 }));
     s.execute("layer.replaceSource", json!({"layers": [a], "item": new_solid.0})).unwrap();
     assert_eq!(layer(&s, a).source, LayerSource::Solid { item: new_solid });
     assert_eq!(s.active_comp().unwrap().layers.len(), 1);
@@ -107,7 +101,7 @@ fn replace_source_crosses_types_and_adds_audio() {
 fn replace_source_refuses_invalid_sources_targets_and_cycles() {
     let mut s = comp();
     let a = solid(&mut s, "Layer");
-    let folder = Arc::make_mut(&mut s.project).add_item("Folder", Label::None, None, ItemKind::Folder);
+    let folder = s.project_mut().add_item("Folder", Label::None, None, ItemKind::Folder);
     let data = add_footage(&mut s, "data.txt", FootageKind::Data, 0, 0, false);
     let model = add_footage(&mut s, "model.glb", FootageKind::Model, 10, 10, false);
     for (item, needle) in [(folder, "folder"), (data, "data"), (model, "3D model")] {
@@ -153,6 +147,9 @@ fn replace_source_uses_the_project_selection_and_skips_locked_layers() {
 /// After Effects' Ctrl+Alt+/ default (Cmd+Alt+/ in EffectCraft's shortcut syntax).
 #[test]
 fn replace_source_is_bound_to_ctrl_alt_slash() {
-    let b = crate::shortcuts::bindables(&[]).into_iter().find(|b| b.command == "layer.replaceSource").expect("layer.replaceSource is bindable");
+    let b = crate::shortcuts::bindables(&[], &crate::Session::default().registry)
+        .into_iter()
+        .find(|b| b.command == "layer.replaceSource")
+        .expect("layer.replaceSource is bindable");
     assert!(b.defaults.iter().any(|d| d == "Cmd+Alt+/"), "{:?}", b.defaults);
 }
