@@ -75,6 +75,8 @@ fn edge_preserving_blurs() {
 fn sharpen_and_unsharp_mask() {
     effect_case("ec.blur.sharpen", &[("amount", n(60.0))]);
     effect_case("ec.blur.sharpen", &[("amount", n(250.0))]);
+    // #3466: the top of After Effects' range (80 × the difference from the blur).
+    effect_case("ec.blur.sharpen", &[("amount", n(4000.0))]);
     effect_case("ec.blur.unsharp", &[("amount", n(120.0)), ("radius", n(4.0))]);
     effect_case("ec.blur.unsharp", &[("amount", n(80.0)), ("radius", n(2.5)), ("threshold", n(12.0))]);
 }
@@ -134,6 +136,24 @@ fn turbulent_noise() {
         &[("fractalType", e(5)), ("noiseType", e(1)), ("complexity", n(3.5)), ("transform/scale", n(40.0)), ("overflow", e(1)), ("blendingMode", e(0))],
     );
     effect_case("ec.noise.turbulent", &[("fractalType", e(7)), ("noiseType", e(0)), ("transform/perspectiveOffset", on()), ("opacity", n(70.0))]);
+}
+
+/// #3486: Sub Scaling above 100 % on both GPU paths (the `pointwise` kernel for the plain
+/// settings, `fxn_fractal` for Perspective Offset and Turbulent Noise), up to After Effects'
+/// 10000 at the highest Complexity.
+#[test]
+fn fractal_noise_sub_scaling_above_100() {
+    for sub in [200.0, 10000.0] {
+        effect_case("ec.noise.fractal", &[("subSettings/subScaling", n(sub)), ("complexity", n(20.0))]);
+        effect_case(
+            "ec.noise.fractal",
+            &[("subSettings/subScaling", n(sub)), ("complexity", n(20.0)), ("transform/perspectiveOffset", on()), ("evolution", n(90.0))],
+        );
+        effect_case(
+            "ec.noise.turbulent",
+            &[("subSettings/subScaling", n(sub)), ("complexity", n(20.0)), ("evolution", n(120.0)), ("evolutionOptions/turbulenceFactor", n(10.0))],
+        );
+    }
 }
 
 #[test]

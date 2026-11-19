@@ -134,46 +134,36 @@ impl Psd {
 
     /// Undo ZIP prediction in place; the 32-bit scratch row is charged to `budget`.
     pub(crate) fn unpredict(&self, v: &mut [u8], w: usize, h: usize, budget: &mut Budget) -> Result<()> {
-        match self.depth {
-            16 => {
-                for row in v.chunks_exact_mut(w * 2).take(h) {
-                    let mut prev = 0u16;
-                    for c in row.as_chunks_mut::<2>().0 {
-                        let x = u16::from_be_bytes([c[0], c[1]]).wrapping_add(prev);
-                        c.copy_from_slice(&x.to_be_bytes());
-                        prev = x;
-                    }
-                }
-            }
-            32 => {
-                // One scratch row for the whole plane, charged: a wide, short layer passes the
-                // decode's peak check and would otherwise allocate it on top.
-                let mut planar = budget.filled(w.checked_mul(4).ok_or_else(|| too_large(w, h))?, 0u8)?;
-                #[cfg(test)]
-                counters::bump(&counters::SCRATCH);
-                for row in v.chunks_exact_mut(w * 4).take(h) {
-                    for i in 1..row.len() {
-                        row[i] = row[i].wrapping_add(row[i - 1]);
-                    }
-                    // Bytes are stored plane by plane (all first bytes, then all second bytes…).
-                    planar.copy_from_slice(row);
-                    for x in 0..w {
-                        for b in 0..4 {
-                            row[x * 4 + b] = planar[b * w + x];
-                        }
-                    }
-                }
-                budget.release(planar.len() as u64);
-            }
-            _ => {
-                for row in v.chunks_exact_mut(w).take(h) {
-                    for i in 1..row.len() {
-                        row[i] = row[i].wrapping_add(row[i - 1]);
-                    }
-                }
-            }
+        // Preserve the reader's recovery behavior: decode only complete rows, at most h.
+        // The fallback depths historically used byte-wise prediction rather than packed bits.
+        let depth = match self.depth {
+            16 => 16,
+            32 => 32,
+            _ => 8,
+        };
+        let rowb = w.checked_mul(usize::from(depth / 8)).ok_or_else(|| too_large(w, h))?;
+        if rowb == 0 {
+            return Ok(());
         }
-        Ok(())
+        let rows = (v.len() / rowb).min(h);
+        let layout = craft_psd::compression::PlaneLayout {
+            planes: 1,
+            width: w,
+            height: rows,
+            depth,
+            version: if self.psb { craft_psd::Version::Psb } else { craft_psd::Version::Psd },
+        };
+        let mut scratch = if depth == 32 {
+            let scratch = budget.filled(rowb, 0u8)?;
+            #[cfg(test)]
+            counters::bump(&counters::SCRATCH);
+            scratch
+        } else {
+            Vec::new()
+        };
+        let result = craft_psd::compression::unpredict_with_scratch(&mut v[..rows * rowb], &layout, &mut scratch);
+        budget.release(scratch.len() as u64);
+        result.map_err(|e| Error::Invalid(e.to_string()))
     }
 
     /// Hand every sample of `raw` (`w`×`h`, row-major, in order) to `f` as a float. Samples a short
@@ -482,27 +472,12 @@ enum PlaneStream {
 
 /// PackBits decoding of one row (appends exactly `row` bytes, zero-padded).
 pub(crate) fn unpack_bits(src: &[u8], row: usize, out: &mut Vec<u8>) -> Result<()> {
-    let start = out.len();
-    let mut i = 0;
-    while i < src.len() && out.len() - start < row {
-        let n = src[i] as i8;
-        i += 1;
-        // A packet is written only up to the row's end, so the reserved plane never grows.
-        let room = row - (out.len() - start);
-        if n >= 0 {
-            let k = n as usize + 1;
-            let s = src.get(i..i + k).ok_or(Error::Truncated)?;
-            out.extend_from_slice(&s[..k.min(room)]);
-            i += k;
-        } else if n != -128 {
-            let k = (1 - n as isize) as usize;
-            let v = *src.get(i).ok_or(Error::Truncated)?;
-            out.extend(std::iter::repeat_n(v, k.min(room)));
-            i += 1;
-        }
-    }
-    out.resize(start + row, 0);
-    Ok(())
+    // The production caller already charges/reserves the complete plane in Budget.
+    // Keep the shared recovery API bounded to this row; never relax the app budget.
+    craft_psd::compression::packbits::decode_padded_into(src, row, row, out).map_err(|error| match error {
+        craft_psd::PsdError::Decompress(_) => Error::Truncated,
+        other => Error::Invalid(other.to_string()),
+    })
 }
 
 pub(crate) fn srgb_encode(v: f32) -> f32 {
