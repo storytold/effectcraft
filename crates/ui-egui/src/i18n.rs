@@ -148,7 +148,7 @@ fn first_supported(requested: Option<&str>, browser: &[String], drawable: impl F
 }
 
 /// Whether the web build can draw `language`'s interface. It installs no system fonts and its
-/// bundled faces have no CJK or Georgian glyphs, so Match System skips those browser languages
+/// bundled faces have no CJK, Georgian, or Hebrew glyphs, so Match System skips those browser languages
 /// rather than draw boxes; `?lang=` and a language chosen in Settings still select them.
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 fn web_draws(language: &str) -> bool {

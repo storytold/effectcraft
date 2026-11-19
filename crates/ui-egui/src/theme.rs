@@ -399,9 +399,8 @@ pub fn install(ctx: &egui::Context, t: &Tokens, language: &str) {
 
 /// Scripts the bundled fonts lack beyond CJK, each probed with one of its letters: names typed in
 /// them (layers, items, comments) are drawn by an installed face instead of missing-glyph boxes
-/// (#394). egui shapes each run of one face, so Arabic letters join and a word reads right to
-/// left; it has no bidirectional layout, so the words of a name still follow each other left to
-/// right.
+/// (#394). The pinned `storytold/egui` fork (`6d518fc7`) uses `unicode-bidi` for bidirectional text
+/// layout and shapes each run with `harfrust`, so RTL words and mixed-direction strings order cleanly.
 #[cfg(not(target_arch = "wasm32"))]
 const SCRIPT_PROBES: &[(char, &str)] = &[
     ('م', "arabic-system"),

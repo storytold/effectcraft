@@ -2313,8 +2313,7 @@ mod tests {
     /// The languages whose tables are complete: one row per effect in the registry and one row
     /// per category when they were written. A new effect without a row draws its English name (as
     /// in every language), so it does not block other work; the rows are guarded like [`PARTIAL`]'s.
-    const COMPLETE: &[(&str, &[Row])] =
-        &[("zh-hans", SIMPLIFIED_CHINESE), ("zh-hant", TRADITIONAL_CHINESE), ("he", crate::i18n::he_data::HEBREW_EFFECTS)];
+    const COMPLETE: &[(&str, &[Row])] = &[("zh-hans", SIMPLIFIED_CHINESE), ("zh-hant", TRADITIONAL_CHINESE), ("he", crate::i18n::he_data::HEBREW_EFFECTS)];
 
     /// The languages whose tables are being filled in: guarded row by row.
     const PARTIAL: &[(&str, &[Row])] = &[("ja", JAPANESE_EFFECTS), ("ka", GEORGIAN), ("sv", SWEDISH), ("fr", FRENCH)];
