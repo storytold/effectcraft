@@ -169,3 +169,136 @@ fn controls_and_overrides_are_written() {
     assert_eq!(ovg2.len(), 2);
     assert_eq!(ovg2[0].children().iter().filter(|k| k.is_list(b"CPrp")).count(), 5);
 }
+
+/// `Pre` with a solid `Box` and a text layer `Title`, the given controls; `Main` shows it once.
+fn single(controls: impl FnOnce(&effectcraft_project::Layer, &effectcraft_project::Layer) -> Vec<EgControl>) -> (Project, ItemId) {
+    let mut p = Project::default();
+    let pre = add_comp(&mut p, "Pre", 640, 360, FrameRate::new(25, 1), 2.0, None);
+    let s = add_solid(&mut p, "Box", 200, 100, [0.0, 0.5, 1.0], None);
+    add_layer(&mut p, pre, "Box", LayerSource::Solid { item: s }, (200, 100));
+    add_layer(&mut p, pre, "Title", LayerSource::Text, (640, 360));
+    with_layer(&mut p, pre, 0, |l| {
+        if let Some(st) = l.props.prop_mut("text/sourceText") {
+            st.value = Value::Text(Box::new(TextDoc::plain("A\r\nB")));
+        }
+    });
+    let comp = p.comp(pre).cloned().expect("pre");
+    let controls = controls(&comp.layers[0], &comp.layers[1]);
+    with_comp(&mut p, pre, |c| c.essential = Some(EssentialGraphics { name: "Card".into(), controls }));
+    let main = add_comp(&mut p, "Main", 1280, 720, FrameRate::new(25, 1), 2.0, None);
+    add_layer(&mut p, main, "A", LayerSource::Comp { item: pre }, (640, 360));
+    let before = p.clone();
+    sync_project(&before, &mut p);
+    (p, main)
+}
+
+fn prop_ctl(id: u64, name: &str, layer: &effectcraft_project::Layer, path: &str) -> EgControl {
+    EgControl {
+        id,
+        name: name.into(),
+        kind: EgKind::Property { layer: layer.id, prop: layer.props.prop(path).expect(path).uid, links: Vec::new() },
+        as_type: None,
+    }
+}
+
+fn comp_losses(r: &effectcraft_aep::export::ExportResult) -> Vec<String> {
+    r.report.losses.iter().filter(|l| l.category == LossCategory::CompositionOptions).flat_map(|l| l.details.clone()).collect()
+}
+
+fn cif2_names(bytes: &[u8]) -> Vec<String> {
+    let file = parse(bytes).expect("parse");
+    let mut cif2 = Vec::new();
+    for c in &file.chunks {
+        find_list(c, b"CIF2", &mut cif2);
+    }
+    cif2.first().map(|l| l.children().iter().filter(|k| k.is_list(b"CCtl")).map(name_of).collect()).unwrap_or_default()
+}
+
+/// Overrides `eg<id>` of instance A, wherever the panel groups put it.
+fn override_in(p: &mut Project, main: ItemId, id: u64, v: Value) {
+    fn find<'a>(g: &'a mut effectcraft_project::PropGroup, m: &str) -> Option<&'a mut effectcraft_project::Property> {
+        if g.get(m).is_some() {
+            return g.get_mut(m);
+        }
+        g.children.iter_mut().find_map(|n| match n {
+            effectcraft_project::Node::Group(sub) => find(sub, m),
+            _ => None,
+        })
+    }
+    let before = p.clone();
+    with_layer(p, main, 0, |l| {
+        let g = l.props.sub_mut("essential").expect("essential properties");
+        find(g, &format!("eg{id}")).expect("instance property").value = v;
+    });
+    sync_project(&before, p);
+}
+
+/// The override state (`tdsb`) and first value of `ADBE Opacity` in instance A's overrides.
+fn opacity_override(bytes: &[u8]) -> (Option<u32>, Option<f64>) {
+    let file = parse(bytes).expect("parse");
+    let mut layers = Vec::new();
+    for c in &file.chunks {
+        find_list(c, b"Layr", &mut layers);
+    }
+    let layr = layers.into_iter().find(|l| utf8s(l).first().map(String::as_str) == Some("A")).expect("A");
+    let root = layr.children().iter().find(|k| k.is_list(b"tdgp")).expect("root group");
+    let kids = root.children();
+    let at = kids.iter().position(|k| k.is(b"tdmn") && k.bytes().is_some_and(|b| b.starts_with(b"ADBE Layer Overrides\0"))).expect("overrides");
+    let g = kids.get(at + 2).expect("override records").children();
+    let i =
+        g.iter().position(|k| k.is(b"tdmn") && k.bytes().is_some_and(|b| b.split(|x| *x == 0).next() == Some(b"ADBE Opacity".as_slice()))).expect("opacity");
+    let rec = g.get(i + 1).expect("opacity record");
+    let first =
+        rec.children().iter().find(|k| k.is(b"cdat")).and_then(|k| k.bytes()).and_then(|b| b.get(..8)).map(|b| f64::from_be_bytes(b.try_into().unwrap()));
+    (u32_of(rec, b"tdsb"), first)
+}
+
+#[test]
+fn a_font_control_is_reported_not_written_as_a_text_control() {
+    let (p, _) = single(|title, bx| {
+        vec![
+            EgControl { as_type: Some(effectcraft_project::essential::ControlType::Font), ..prop_ctl(1, "Title font", title, "text/sourceText") },
+            prop_ctl(2, "Box opacity", bx, "transform/opacity"),
+        ]
+    });
+    let r = export_all(&p);
+    assert!(comp_losses(&r).iter().any(|d| d.contains("'Title font': a Font control is not written")), "{:?}", comp_losses(&r));
+    assert_eq!(cif2_names(&r.bytes), ["Box opacity"]);
+}
+
+#[test]
+fn a_control_in_a_panel_group_keeps_the_instance_override() {
+    let (mut p, main) = single(|_, bx| {
+        vec![EgControl {
+            id: 9,
+            name: "Group".into(),
+            kind: EgKind::Group { children: vec![prop_ctl(1, "Box opacity", bx, "transform/opacity")] },
+            as_type: None,
+        }]
+    });
+    override_in(&mut p, main, 1, Value::Scalar(25.0));
+    let r = export_all(&p);
+    assert_eq!(opacity_override(&r.bytes), (Some(1), Some(0.25)));
+}
+
+#[test]
+fn a_text_control_value_keeps_one_paragraph_break_for_crlf() {
+    let (p, _) = single(|title, _| vec![prop_ctl(1, "Title", title, "text/sourceText")]);
+    let r = export_all(&p);
+    let file = parse(&r.bytes).expect("parse");
+    let mut ctls = Vec::new();
+    for c in &file.chunks {
+        find_list(c, b"CCtl", &mut ctls);
+    }
+    let texts: Vec<String> = ctls.iter().flat_map(|c| utf8s(c)).collect();
+    assert!(texts.iter().any(|s| s == "A\rB"), "{texts:?}");
+    assert!(!texts.iter().any(|s| s.contains("\r\r")), "{texts:?}");
+}
+
+#[test]
+fn a_non_numeric_override_is_reported() {
+    let (mut p, main) = single(|_, bx| vec![prop_ctl(1, "Box opacity", bx, "transform/opacity")]);
+    override_in(&mut p, main, 1, Value::Scalar(f64::NAN));
+    let r = export_all(&p);
+    assert!(comp_losses(&r).iter().any(|d| d.contains("'Box opacity': the override is not a number")), "{:?}", comp_losses(&r));
+}

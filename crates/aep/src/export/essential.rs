@@ -13,7 +13,7 @@ use std::collections::HashMap;
 
 use effectcraft_keyframe::Value;
 use effectcraft_project::essential::{EgControl, EgKind};
-use effectcraft_project::{Comp, GroupKind, ItemId, Layer, LayerId, LayerSource, Project, Uid};
+use effectcraft_project::{Comp, GroupKind, ItemId, Layer, LayerId, LayerSource, Project, PropGroup, Uid};
 
 use crate::Chunk;
 use crate::export::report::{Collector, LossCategory};
@@ -205,7 +205,7 @@ fn ctl_value(driven: Driven, v: &Value, layer: &Layer) -> Option<CtlValue> {
         }
         Driven::SourceText => {
             let Value::Text(doc) = v else { return None };
-            CtlValue::Text { text: doc.text.replace('\n', "\r"), font: doc.font.clone(), size: doc.size }
+            CtlValue::Text { text: doc.text.replace("\r\n", "\r").replace('\n', "\r"), font: doc.font.clone(), size: doc.size }
         }
     })
 }
@@ -220,6 +220,12 @@ pub(crate) fn plan_controls(comp_id: ItemId, comp: &Comp, exported: &dyn Fn(Laye
     for c in list {
         if controls.len() >= MAX_CONTROLS {
             lost.push(format!("'{}': more than {MAX_CONTROLS} controls", c.name));
+            continue;
+        }
+        // A Font control sets only the font of an instance's text; written as a Source Text
+        // control its override would replace the whole text.
+        if c.as_type == Some(effectcraft_project::essential::ControlType::Font) {
+            lost.push(format!("'{}': a Font control is not written", c.name));
             continue;
         }
         let EgKind::Property { .. } = &c.kind else {
@@ -271,6 +277,15 @@ pub(crate) fn plan_controls(comp_id: ItemId, comp: &Comp, exported: &dyn Fn(Laye
     (Some(EgPlan { name: eg.name.clone(), controls }), lost)
 }
 
+/// The instance property `m` in an instance's Essential Properties group or one of its panel
+/// sub-groups (depth-limited: groups come from the file).
+fn instance_prop<'a>(g: &'a PropGroup, m: &str, depth: usize) -> Option<&'a effectcraft_project::Property> {
+    if depth > MAX_DEPTH {
+        return None;
+    }
+    g.get(m).or_else(|| g.groups().find_map(|sub| instance_prop(sub, m, depth + 1)))
+}
+
 /// The overrides of precomp layer `layer`, whose source `inner` has the written controls `eg`.
 pub(crate) fn plan_overrides(project: &Project, inner: &Comp, eg: &EgPlan, layer: &Layer, what: &str, col: &mut Collector) -> Vec<OvPlan> {
     let group = layer.props.sub(effectcraft_project::essential::GROUP);
@@ -282,7 +297,8 @@ pub(crate) fn plan_overrides(project: &Project, inner: &Comp, eg: &EgPlan, layer
     for c in &eg.controls {
         let Some(t) = c.targets.first() else { continue };
         let Some(src_layer) = inner.layers.iter().find(|l| l.id == t.layer) else { continue };
-        let instance = group.and_then(|g| g.get(&effectcraft_project::essential::match_id(c.id)));
+        // Controls inside a panel group sit in a sub-group of the instance's group.
+        let instance = group.and_then(|g| instance_prop(g, &effectcraft_project::essential::match_id(c.id), 0));
         let is_over = instance.is_some_and(|p| overridden.contains(&p.uid));
         if let Some(p) = instance.filter(|_| is_over) {
             if !p.keys.is_empty() {
@@ -302,6 +318,12 @@ pub(crate) fn plan_overrides(project: &Project, inner: &Comp, eg: &EgPlan, layer
             None => comp_value,
         };
         let Some(value) = value else { continue };
+        if is_over && value.components().iter().any(|x| !x.is_finite()) {
+            col.lose(
+                LossCategory::CompositionOptions,
+                format!("{what}: Essential Property '{}': the override is not a number, the default is written", c.name),
+            );
+        }
         let ((w, h), pixels) = anchor_unit(project, src_layer);
         let c3 = value.components();
         let get = |i: usize, d: f64| c3.get(i).copied().filter(|x| x.is_finite()).unwrap_or(d);
