@@ -7,6 +7,8 @@ use crate::EffectcraftApp;
 
 /// Effect names, keyed by effect id (#821).
 pub(crate) mod effects;
+/// Turkish (`tr`) interface translations.
+pub(crate) mod tr;
 /// Translations for the panels, tooltips and dialogs below the menu bar (see the module docs).
 pub(crate) mod ui;
 use effectcraft_engine::menus::{MenuEntry, MenuNode};
@@ -15,7 +17,7 @@ pub(crate) use ui::catalog_characters;
 pub(crate) use ui::{set_current, tr, tr_args};
 
 /// Every language with a catalog, in the order Settings ▸ General ▸ Language lists them.
-const CATALOG_CODES: [&str; 13] = ["cs", "de", "es", "fr", "pl", "pt-br", "sv", "ru", "uk", "ka", "ja", "zh-hans", "zh-hant"];
+const CATALOG_CODES: [&str; 14] = ["cs", "de", "es", "fr", "pl", "pt-br", "sv", "tr", "ru", "uk", "ka", "ja", "zh-hans", "zh-hant"];
 
 /// The active interface language: the stored preference when it names a catalog, otherwise `en`
 /// (English is the source of every label and needs no lookup).
@@ -157,6 +159,7 @@ fn supported(locale: Option<&str>) -> &'static str {
         "de" => "de",
         "fr" => "fr",
         "sv" => "sv",
+        "tr" => "tr",
         // The only Portuguese catalog: Brazil's, also for Portugal rather than English.
         "pt" => "pt-br",
         "zh" => {
@@ -183,6 +186,7 @@ const REVEAL_FINDER: &[(&str, &str, &str)] = &[
     ("pt-br", "Mostrar no Explorador", "Mostrar no gerenciador de arquivos"),
     ("fr", "Afficher dans l’Explorateur", "Afficher dans le gestionnaire de fichiers"),
     ("ru", "Показать в Проводнике", "Показать в файловом менеджере"),
+    ("tr", "Gezgin'de Göster", "Dosya Yöneticisinde Göster"),
 ];
 
 pub(crate) fn label<'a>(app: &EffectcraftApp, command: &str, source: &'a str) -> &'a str {
@@ -228,6 +232,7 @@ fn menu_catalog(language: &str) -> Option<&'static [(&'static str, &'static str,
         "pl" => POLISH,
         "ka" => GEORGIAN,
         "sv" => SWEDISH,
+        "tr" => tr::MENUS,
         _ => return None,
     })
 }
@@ -9242,6 +9247,7 @@ mod tests {
             ("pl", POLISH),
             ("ka", GEORGIAN),
             ("sv", SWEDISH),
+            ("tr", tr::MENUS),
         ] {
             for id in ["file.importAep", "file.exportAep"] {
                 let drawn = effectcraft_engine::menus::entries().into_iter().find(|(_, e)| e.command == id).map(|(_, e)| e.label.clone()).unwrap_or_default();
@@ -9262,6 +9268,7 @@ mod tests {
             ("pl", POLISH),
             ("ka", GEORGIAN),
             ("sv", SWEDISH),
+            ("tr", tr::MENUS),
         ] {
             for (command, en, translated) in catalog {
                 assert_eq!(en.contains("..."), translated.contains("..."), "{code} {command} / {en}: {translated}");
