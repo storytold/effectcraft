@@ -110,7 +110,9 @@ fn point(e: &mut Enc, id: &str, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
                 return None;
             }
             p.u[0] = [5, pr.e("inputPhase/mode"), smooth as u32, 0];
-            p.f[0] = [pr.f("outputCycle/cycles").max(0.0) as f32, f("inputPhase/phaseShift") / 360.0, 1.0 - f("blend") / 100.0, 0.0];
+            // The input range ends at the cycle's end, as `color_fx::colorama` (#3925).
+            let cycles = pr.f("outputCycle/cycles").max(0.0) as f32 * effectcraft_effects::COLORAMA_CYCLE_END;
+            p.f[0] = [cycles, f("inputPhase/phaseShift") / 360.0, 1.0 - f("blend") / 100.0, 0.0];
         }
         "ec.color.channelmixer" => {
             let g = |k: &str| f(k) / 100.0;

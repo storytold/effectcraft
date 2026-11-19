@@ -722,6 +722,11 @@ fn colorama_phase(c: [f32; 3], a: f32, mode: u32) -> f32 {
 
 /// Colorama's Output Cycle presets (our own palettes; Custom uses the Palette parameter).
 pub const COLORAMA_PRESETS: [&str; 9] = ["Hue Cycle", "Ramp Grayscale", "Fire", "Ice", "Ramp Red", "Ramp Green", "Ramp Blue", "Pastel Cycle", "Custom"];
+/// Where an input phase of 1 falls on the Output Cycle with one cycle and no shift. The wheel is
+/// cyclic, so position 1 is position 0 again: a ramp preset has its last stop here, just before
+/// the wrap, and the input range 0..1 ends on it. Scaling by 1 would wrap the brightest input
+/// round to the first stop, turning white black under every ramp (#3925).
+pub const COLORAMA_CYCLE_END: f32 = 0.999;
 /// Colorama's Modify options: which channels of the pixel take the palette colour.
 const COLORAMA_MODIFY: [&str; 12] =
     ["All", "Red", "Green", "Blue", "Hue", "Lightness", "Saturation", "Value", "Red & Green", "Green & Blue", "Blue & Red", "None"];
@@ -737,12 +742,14 @@ impl ColoramaPalette {
     pub fn preset(i: u32) -> ColoramaPalette {
         let s = |v: &[(f32, [f32; 3])]| ColoramaPalette { stops: v.iter().map(|(p, c)| (*p, [c[0], c[1], c[2], 1.0])).collect() };
         match i {
-            1 => s(&[(0.0, [0.0; 3]), (0.999, [1.0; 3])]),
-            2 => s(&[(0.0, [0.0, 0.0, 0.0]), (0.3, [0.7, 0.05, 0.0]), (0.6, [1.0, 0.55, 0.0]), (0.85, [1.0, 0.95, 0.4]), (0.999, [1.0, 1.0, 1.0])]),
-            3 => s(&[(0.0, [0.0, 0.0, 0.1]), (0.4, [0.1, 0.3, 0.8]), (0.75, [0.5, 0.85, 1.0]), (0.999, [1.0, 1.0, 1.0])]),
-            4 => s(&[(0.0, [0.0; 3]), (0.999, [1.0, 0.0, 0.0])]),
-            5 => s(&[(0.0, [0.0; 3]), (0.999, [0.0, 1.0, 0.0])]),
-            6 => s(&[(0.0, [0.0; 3]), (0.999, [0.0, 0.0, 1.0])]),
+            1 => s(&[(0.0, [0.0; 3]), (COLORAMA_CYCLE_END, [1.0; 3])]),
+            2 => {
+                s(&[(0.0, [0.0, 0.0, 0.0]), (0.3, [0.7, 0.05, 0.0]), (0.6, [1.0, 0.55, 0.0]), (0.85, [1.0, 0.95, 0.4]), (COLORAMA_CYCLE_END, [1.0, 1.0, 1.0])])
+            }
+            3 => s(&[(0.0, [0.0, 0.0, 0.1]), (0.4, [0.1, 0.3, 0.8]), (0.75, [0.5, 0.85, 1.0]), (COLORAMA_CYCLE_END, [1.0, 1.0, 1.0])]),
+            4 => s(&[(0.0, [0.0; 3]), (COLORAMA_CYCLE_END, [1.0, 0.0, 0.0])]),
+            5 => s(&[(0.0, [0.0; 3]), (COLORAMA_CYCLE_END, [0.0, 1.0, 0.0])]),
+            6 => s(&[(0.0, [0.0; 3]), (COLORAMA_CYCLE_END, [0.0, 0.0, 1.0])]),
             7 => s(&[(0.0, [1.0, 0.7, 0.7]), (1.0 / 3.0, [0.7, 1.0, 0.7]), (2.0 / 3.0, [0.7, 0.7, 1.0])]),
             _ => s(&[
                 (0.0, [1.0, 0.0, 0.0]),
@@ -825,7 +832,7 @@ fn colorama(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let pr = ctx.params;
     let shift = pr.f("inputPhase/phaseShift") as f32 / 360.0;
     let mode = pr.e("inputPhase/mode");
-    let cycles = pr.f("outputCycle/cycles").max(0.0) as f32;
+    let cycles = pr.f("outputCycle/cycles").max(0.0) as f32 * COLORAMA_CYCLE_END;
     let smooth = pr.get("outputCycle/interpolatePalette").is_none_or(|v| v.as_bool());
     let preset = pr.e("outputCycle/usePresetPalette");
     let palette = if preset as usize == COLORAMA_PRESETS.len() - 1 { ColoramaPalette::parse(pr.s("outputCycle/palette")) } else { None }

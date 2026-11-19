@@ -80,7 +80,7 @@ pub use color_fx::{
     BW_TINT_LUMA, EXPOSURE_LINEAR_GAMMA, HUESAT_CHANNELS, HUESAT_RANGES, LEVELS_CHANNELS, LUMA_601, PHOTO_FILTER_CUSTOM, PHOTO_FILTERS, exposure_settings,
     fill_uses_masks, huesat_ranges_identity, levels_channel_ids, levels_channel_settings, levels_channels_identity, levels_clip,
 };
-pub use color_fx::{COLORAMA_PRESETS, ColoramaPalette};
+pub use color_fx::{COLORAMA_CYCLE_END, COLORAMA_PRESETS, ColoramaPalette};
 pub use color2::{Curve, auto_correct_settings, color_link_mode, color_link_sample, equalize_tables, luma_clip_points, shadow_highlight_amounts};
 pub use color3::OffsetCurve;
 pub use distort::{transform_grow, transform_matrix_px, transform_shutter};
