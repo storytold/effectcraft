@@ -192,7 +192,7 @@ fn an_overridden_lut_file_renders_again() {
 #[test]
 fn ocio_files_render_again_from_warm_caches() {
     let dir = tempfile::tempdir().unwrap();
-    let (lut, config, grade) = (dir.path().join("file.cube"), dir.path().join("config.ocio"), dir.path().join("luts/grade.cube"));
+    let (lut, config, grade) = (dir.path().join("file.cube"), dir.path().join("config.ocio"), dir.path().join("luts").join("grade.cube"));
     std::fs::create_dir_all(dir.path().join("luts")).unwrap();
     write(&lut, BLACK, 1_000);
     write(&grade, BLACK, 1_000);

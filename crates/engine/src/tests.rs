@@ -47,6 +47,7 @@ mod motion_blur_depth;
 mod paint;
 mod panels;
 mod project_items;
+mod project_release;
 mod proxy;
 mod quick_offset;
 mod render_overwrite;

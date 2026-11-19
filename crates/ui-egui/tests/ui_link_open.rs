@@ -39,6 +39,7 @@ fn otio() -> String {
             has_alpha: false,
             bitrate: None,
             hdr: None,
+            color_assumed: None,
         }),
         audio_streams: Vec::new(),
         container: String::new(),
@@ -56,7 +57,7 @@ fn otio() -> String {
         proxy: None,
         identity: None,
     };
-    let item = doc.add_item("shot", fp::Label::Iris, fp::ItemKind::Media(clip), None);
+    let item = doc.add_item("shot", fp::Label::Iris, fp::ItemKind::Media(Box::new(clip)), None);
     let settings = fp::SequenceSettings { width: 320, height: 180, frame_rate: rate, ..Default::default() };
     let main = doc.new_sequence("Main", settings, 1, 0, None);
     let placed = doc

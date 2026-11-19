@@ -553,6 +553,7 @@ mod tests {
                 has_alpha: false,
                 bitrate: None,
                 hdr: None,
+                color_assumed: None,
             }),
             audio_streams: Vec::new(),
             container: String::new(),
@@ -570,7 +571,7 @@ mod tests {
             proxy: None,
             identity: None,
         };
-        let item = doc.add_item("shot", fp::Label::Iris, fp::ItemKind::Media(clip), None);
+        let item = doc.add_item("shot", fp::Label::Iris, fp::ItemKind::Media(Box::new(clip)), None);
         let settings = fp::SequenceSettings { width: 320, height: 180, frame_rate: ft::FrameRate { num: 25, den: 1 }, ..Default::default() };
         let main = doc.new_sequence("Main", settings, 1, 0, None);
         let rate = ft::FrameRate { num: 25, den: 1 };
@@ -1048,6 +1049,7 @@ mod tests {
                     has_alpha: false,
                     bitrate: None,
                     hdr: None,
+                    color_assumed: None,
                 }),
                 audio_streams: Vec::new(),
                 container: String::new(),
@@ -1065,7 +1067,7 @@ mod tests {
                 proxy: None,
                 identity: None,
             };
-            let item = doc.add_item(clip.name, fp::Label::Iris, fp::ItemKind::Media(media_clip), None);
+            let item = doc.add_item(clip.name, fp::Label::Iris, fp::ItemKind::Media(Box::new(media_clip)), None);
             let placed = doc
                 .make_track_item(
                     item,

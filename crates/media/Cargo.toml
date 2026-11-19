@@ -10,6 +10,7 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+craft-audio-markers = { package = "craft-audio", version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "30596f73c5ef851ba3dad9cf145669f391e2eb0d", default-features = false }
 craft-docpath = { workspace = true }
 effectcraft-time = { workspace = true }
 effectcraft-color = { workspace = true }
@@ -23,16 +24,14 @@ effectcraft-model = { workspace = true }
 filmcraft-codecs = { workspace = true }
 filmcraft-media = { workspace = true }
 craft-dpx = { workspace = true }
-craft-exr = { workspace = true }
-craft-gif = { workspace = true }
-craft-webp = { workspace = true }
-craft-audio = { workspace = true }
-craft-media = { workspace = true }
-filmcraft-mpegts = { workspace = true }
+craft-exr = { workspace = true, features = ["decode"] }
+craft-gif = { workspace = true, features = ["frames"] }
+craft-webp = { workspace = true, features = ["frames"] }
+craft-audio = { workspace = true, features = ["aac-decode"] }
+craft-media = { workspace = true, features = ["mpegts"] }
 filmcraft-frame = { workspace = true }
 filmcraft-color = { workspace = true }
 filmcraft-time = { workspace = true }
-exr = { workspace = true }
 image = { workspace = true, features = ["gif", "webp", "tiff", "bmp", "exr", "tga", "hdr"] }
 rayon = { workspace = true }
 serde_json = { workspace = true }
@@ -40,6 +39,7 @@ thiserror = { workspace = true }
 log = { workspace = true }
 
 [dev-dependencies]
+exr = { workspace = true }
 # Writes the animated GIFs of the tests.
 gif = { workspace = true }
 tempfile = { workspace = true }

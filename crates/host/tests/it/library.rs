@@ -157,6 +157,44 @@ fn a_wrong_checksum_or_a_bad_module_installs_nothing() {
 }
 
 #[test]
+fn downloads_are_release_assets_of_the_package_repository() {
+    let dir = tmp("assets");
+    let sum = "0".repeat(64);
+    let pkg =
+        |id: &str, repo: &str, url: &str| json!({"id": id, "name": id, "repo": repo, "versions": [{"version": "1", "api": 1, "url": url, "sha256": sum}]});
+    let catalog = write_catalog(
+        &dir,
+        json!([
+            pkg("org.test.other", "https://github.com/me/glow", "https://github.com/someone/else/releases/download/v1/glow.wasm"),
+            pkg("org.test.raw", "https://github.com/me/glow", "https://raw.githubusercontent.com/me/glow/main/glow.wasm"),
+            pkg("org.test.page", "", "https://github.com/me/glow/blob/main/glow.wasm"),
+            pkg("org.test.dots", "https://github.com/me/glow", "https://github.com/me/glow/releases/download/%2e%2e/%2E%2E/x/y/glow.wasm"),
+            pkg("org.test.tree", "https://github.com/me/glow/tree/main", "https://github.com/someone/else/releases/download/v1/glow.wasm"),
+            pkg("org.test.http", "http://github.com/me/glow", "https://github.com/me/glow/releases/download/v1/glow.wasm"),
+            pkg("org.test.blob", "https://github.com/me/glow/blob/main/README.md", "https://github.com/me/glow/releases/download/v1/glow.wasm"),
+        ]),
+    );
+    let mut s = session(&dir);
+    s.execute("library.refresh", json!({"catalog": catalog, "wait": true})).unwrap();
+    for (id, why) in [
+        ("org.test.other", "isn't a release asset of the package's repository https://github.com/me/glow"),
+        ("org.test.raw", "isn't a release asset"),
+        ("org.test.page", "isn't a release asset"),
+        ("org.test.dots", "isn't a release asset"),
+        ("org.test.tree", "isn't a release asset of the package's repository https://github.com/me/glow/tree/main"),
+        ("org.test.http", "org.test.http: the package's `repo` http://github.com/me/glow isn't a GitHub repository URL"),
+        ("org.test.blob", "org.test.blob: the package's `repo` https://github.com/me/glow/blob/main/README.md isn't a GitHub repository URL"),
+    ] {
+        for c in ["library.install", "library.preview"] {
+            let e = s.execute(c, json!({"id": id, "wait": true})).unwrap_err().to_string();
+            assert!(e.contains(why), "{c} {id}: {e}");
+        }
+    }
+    assert!(!dir.join("Plug-ins").join("Library").join("installed.json").exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn installed_packages_load_at_start_and_changed_files_are_refused() {
     let dir = tmp("startup");
     let lib = dir.join("Plug-ins").join("Library");

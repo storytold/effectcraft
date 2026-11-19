@@ -1,0 +1,7 @@
+asset:        pce61-ffmpeg.aac-fixture
+title:        Synthetic seven-channel AAC PCE tone fixture
+author:       Dylan M. Taylor
+source:       crates/media/tests/fixtures/README.md (reproducible generation recipe)
+license:      MIT OR Apache-2.0
+added:        2026-11-16
+notes:        Original sine-wave signals, no recorded audio or copied assets. Encoded using FFmpeg 7.1.5. SHA-256 07c460636dce4aa4163df8ef35f3b76f1214c38bf217aacd23243e608d87071e.

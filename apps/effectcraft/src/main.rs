@@ -447,6 +447,8 @@ fn run_desktop(reporter: &crash_report::Shutdown) -> eframe::Result {
                 #[cfg(target_os = "macos")]
                 menu: native_menu::NativeBar::new(&cc.egui_ctx),
                 #[cfg(target_os = "macos")]
+                menu_sync: Default::default(),
+                #[cfg(target_os = "macos")]
                 apple_events: apple_events.connect(&cc.egui_ctx),
                 app,
                 file_dialogs,
@@ -478,7 +480,7 @@ fn start_plugins(session: &mut effectcraft_engine::Session) -> Option<std::sync:
     };
     match effectcraft_plugins::PluginHost::start(session, cfg) {
         Ok(host) => {
-            host.set_file_picker(Box::new(|| rfd::FileDialog::new().add_filter("EffectCraft plug-in", &["wasm"]).pick_file()));
+            host.set_file_picker(Box::new(file_dialogs::pick_plugin));
             Some(host)
         }
         Err(e) => {
@@ -558,6 +560,8 @@ struct Desktop {
     dialog_errors: std::sync::mpsc::Receiver<String>,
     #[cfg(target_os = "macos")]
     menu: native_menu::NativeBar,
+    #[cfg(target_os = "macos")]
+    menu_sync: effectcraft_ui_egui::native_menu::MenuSync,
     /// Documents opened from Finder, the Dock or `open` (macOS).
     #[cfg(target_os = "macos")]
     apple_events: apple_events::Opened,
@@ -574,7 +578,7 @@ impl eframe::App for Desktop {
     /// file dialogs asked for and, last, hand a close to the platform quit.
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         #[cfg(target_os = "macos")]
-        self.menu.update(&mut self.app, ctx);
+        self.menu_sync.before(&mut self.app, |app| self.menu.update(app, ctx));
         self.app.tick(ctx, frame);
         self.app.finish_ime_logic(ctx);
         while let Ok(e) = self.dialog_errors.try_recv() {
@@ -588,6 +592,9 @@ impl eframe::App for Desktop {
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.app.ui(ui, frame);
+        // A file dialog this frame's commands opened (or one that closed) syncs the menu again.
+        #[cfg(target_os = "macos")]
+        self.menu_sync.after(&mut self.app, |app| self.menu.update(app, ui.ctx()));
         if let Some(asked) = &self.file_dialogs {
             file_dialogs::show_asked(asked, frame, ui.ctx());
         }
