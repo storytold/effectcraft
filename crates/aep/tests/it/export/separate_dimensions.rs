@@ -41,6 +41,8 @@ fn separated_position_is_written_as_x_y_and_z() {
         _ => panic!("{m}"),
     };
     assert_eq!(prop("ADBE Position").flags(), Some(0x803));
+    // The combined record holds the separated values (Y at its first key), not the stale 10, 10.
+    assert_eq!(prop("ADBE Position").static_value(), Some(vec![300.0, 40.0, 0.0]));
     let x = prop("ADBE Position_0");
     assert_eq!((x.flags(), x.static_value().and_then(|v| v.first().copied())), (Some(1), Some(300.0)));
     let y = prop("ADBE Position_1");
