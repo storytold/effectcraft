@@ -336,14 +336,110 @@ fn stroke_common(s: &mut PropGroup, g: &AepGroup<'_, '_>, cx: &mut Cx<'_, '_>) {
         set(s, id, g, m, Kind::EffectPopup(3), cx);
     }
     set(s, "miter", g, "ADBE Vector Stroke Miter Limit", Kind::Number, cx);
-    for (m, what) in [("ADBE Vector Stroke Dashes", "dashes"), ("ADBE Vector Stroke Taper", "taper"), ("ADBE Vector Stroke Wave", "wave")] {
-        if let Some(PropNode::Group(sub)) = g.get(m)
-            && sub.entries().iter().any(|e| !matches!(e.node, PropNode::Property(p) if !stored(&p)))
-        {
-            cx.col.lose(LossCategory::ShapeLayers, format!("{}: stroke {what} not imported", cx.what));
+    stroke_dashes(s, g, cx);
+    stroke_taper(s, g, cx);
+    stroke_wave(s, g, cx);
+    paint_switches(g, cx);
+}
+
+/// Whether `m` of `g` is a group with a property that holds a value of its own (a stroke's Dashes,
+/// Taper and Wave are always written, at their defaults when unused).
+fn has_values<'f, 'a>(g: &AepGroup<'f, 'a>, m: &str) -> Option<AepGroup<'f, 'a>> {
+    match g.get(m) {
+        Some(PropNode::Group(sub)) if sub.entries().iter().any(|e| !matches!(e.node, PropNode::Property(p) if !stored(&p))) => Some(sub),
+        _ => None,
+    }
+}
+
+/// Stroke ▸ Dashes (lab stroke-options): Dash 1 / Gap 1 / Offset, and the pairs the "+" button adds
+/// (Dash 2 / Gap 2, Dash 3 / Gap 3). Every one is written, at 10 when unused; only the ones that
+/// hold a value of their own are on, as Dash 0 is "no dashes" in EffectCraft.
+fn stroke_dashes(s: &mut PropGroup, g: &AepGroup<'_, '_>, cx: &mut Cx<'_, '_>) {
+    let Some(sub) = has_values(g, "ADBE Vector Stroke Dashes") else { return };
+    let Some(d) = s.sub_mut("dashes") else {
+        cx.col.lose(LossCategory::ShapeLayers, format!("{}: stroke dashes not imported", cx.what));
+        return;
+    };
+    let on = |m: &str| matches!(sub.get(m), Some(PropNode::Property(p)) if stored(&p));
+    for (k, (dash, gap)) in [("dash", "gap")].into_iter().chain(build::EXTRA_DASHES).enumerate() {
+        let (dm, gm) = (format!("ADBE Vector Stroke Dash {}", k + 1), format!("ADBE Vector Stroke Gap {}", k + 1));
+        if !on(&dm) && !on(&gm) {
+            continue;
+        }
+        if d.get(dash).is_none() {
+            // Before Offset, which stays last (as Stroke ▸ Dashes "+" puts it).
+            let at = d.children.iter().position(|n| n.match_id() == "offset").unwrap_or(d.children.len());
+            let n = k + 1;
+            d.children.insert(
+                at,
+                cx.ids.prop(gap, &format!("Gap {n}"), effectcraft_keyframe::Value::Scalar(0.0)).with_ui(effectcraft_project::ParamUi::Pixels).into(),
+            );
+            d.children.insert(
+                at,
+                cx.ids.prop(dash, &format!("Dash {n}"), effectcraft_keyframe::Value::Scalar(0.0)).with_ui(effectcraft_project::ParamUi::Pixels).into(),
+            );
+        }
+        set(d, dash, &sub, &dm, Kind::Number, cx);
+        set(d, gap, &sub, &gm, Kind::Number, cx);
+    }
+    if on("ADBE Vector Stroke Offset") {
+        set(d, "offset", &sub, "ADBE Vector Stroke Offset", Kind::Number, cx);
+    }
+}
+
+/// Stroke ▸ Taper (lab stroke-options). Length Units 1 is Percent and 2 Pixels (EffectCraft lists
+/// Pixels first); the lengths in percent are `Start Length` / `End Length`, in pixels
+/// `StartWidthPx` / `EndWidthPx`, whatever the names say.
+fn stroke_taper(s: &mut PropGroup, g: &AepGroup<'_, '_>, cx: &mut Cx<'_, '_>) {
+    let Some(sub) = has_values(g, "ADBE Vector Stroke Taper") else { return };
+    let Some(t) = s.sub_mut("taper") else {
+        cx.col.lose(LossCategory::ShapeLayers, format!("{}: stroke taper not imported", cx.what));
+        return;
+    };
+    let pixels = matches!(sub.get("ADBE Vector Taper Length Units"), Some(PropNode::Property(p)) if p.static_value().and_then(|v| v.first().copied()).is_some_and(|v| v.round() == 2.0));
+    // A width at After Effects' default, 0 %, has no value of its own in the file; EffectCraft's
+    // default is 100 %.
+    for id in ["startWidth", "endWidth"] {
+        if let Some(w) = t.get_mut(id) {
+            w.value = effectcraft_keyframe::Value::Scalar(0.0);
         }
     }
-    paint_switches(g, cx);
+    if let Some(u) = t.get_mut("units") {
+        u.value = effectcraft_keyframe::Value::Enum(if pixels { 0 } else { 1 });
+    }
+    let (start, end) = if pixels {
+        ("ADBE Vector Taper StartWidthPx", "ADBE Vector Taper EndWidthPx")
+    } else {
+        ("ADBE Vector Taper Start Length", "ADBE Vector Taper End Length")
+    };
+    for (id, m) in [
+        ("startLength", start),
+        ("endLength", end),
+        ("startWidth", "ADBE Vector Taper Start Width"),
+        ("endWidth", "ADBE Vector Taper End Width"),
+        ("startEase", "ADBE Vector Taper Start Ease"),
+        ("endEase", "ADBE Vector Taper End Ease"),
+    ] {
+        set(t, id, &sub, m, Kind::Number, cx);
+    }
+}
+
+/// Stroke ▸ Wave (lab stroke-options): Units 1 is Pixels (Wavelength), 2 Cycles, as in EffectCraft.
+fn stroke_wave(s: &mut PropGroup, g: &AepGroup<'_, '_>, cx: &mut Cx<'_, '_>) {
+    let Some(sub) = has_values(g, "ADBE Vector Stroke Wave") else { return };
+    let Some(w) = s.sub_mut("wave") else {
+        cx.col.lose(LossCategory::ShapeLayers, format!("{}: stroke wave not imported", cx.what));
+        return;
+    };
+    set(w, "units", &sub, "ADBE Vector Taper Wave Units", Kind::EffectPopup(2), cx);
+    for (id, m) in [
+        ("amount", "ADBE Vector Taper Wave Amount"),
+        ("wavelength", "ADBE Vector Taper Wavelength"),
+        ("cycles", "ADBE Vector Taper Wave Cycles"),
+        ("phase", "ADBE Vector Taper Wave Phase"),
+    ] {
+        set(w, id, &sub, m, Kind::Number, cx);
+    }
 }
 
 /// The blend mode and composite order of a fill or stroke (only the defaults, 1, are sampled).

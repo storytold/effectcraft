@@ -31,6 +31,7 @@ mod robustness;
 mod shape_path_expression;
 mod shapes;
 mod shapes_round2;
+mod stroke_options;
 mod styles;
 mod synthetic;
 mod text;
