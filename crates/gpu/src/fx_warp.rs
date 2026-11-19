@@ -93,13 +93,11 @@ fn warp(e: &mut Enc, ctx: &EffectCtx, mut b: GBuf) -> Option<GBuf> {
     let vertical = ctx.params.e("warpAxis") == 1;
     let (hx, hy) = (ctx.layer_size[0] * b.scale * 0.5, ctx.layer_size[1] * b.scale * 0.5);
     if !ctx.adjustment {
-        let pad = ((k.abs() + hd.abs() + vd.abs()) * 0.6 * hx.max(hy)).ceil().min(4096.0);
-        b.pad(e, pad as u32 + 1)?;
+        b.pad(e, effectcraft_effects::warp_pad(ctx, b.scale))?;
     }
     // Fisheye / Twist (a crease at the unit circle) bent past 50 % or with Horizontal /
-    // Vertical Distortion: Newton's inverse wanders chaotically before converging near the
-    // fold, so f32 would land on other pixels than the CPU's f64. The inverse map is solved on
-    // the CPU (the CPU effect's own solver) and sampled here.
+    // Vertical Distortion: near the crease the f32 and f64 solvers can converge on different
+    // pixels. The CPU effect's solver supplies the inverse map for the GPU sampler.
     if matches!(style, 11 | 14) && (k.abs() > 0.5 || hd != 0.0 || vd != 0.0) {
         let geo = Buf { img: Image::new(0, 0), offset: b.offset, scale: b.scale };
         let map = e.g.upload_image(&effectcraft_effects::warp_inverse_map(ctx, &geo, b.img.width, b.img.height))?;

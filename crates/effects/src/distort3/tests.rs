@@ -203,6 +203,62 @@ fn effects_on_text_reach_past_its_box() {
 }
 
 #[test]
+fn warp_vertical_distortion_shifts_edges() {
+    let im = Image::filled(64, 32, [1.0; 4]);
+    let out = run("ec.distort.warp", &[("verticalDistortion", num(50.0))], im, &[]);
+    // At y = 4.5 the right edge contracts to x = 52.5. At y = 28.5 it grows to x = 76.5.
+    assert!(alpha_at(&out, [50.5, 4.5]) > 0.99);
+    assert_eq!(alpha_at(&out, [55.5, 4.5]), 0.0);
+    assert!(alpha_at(&out, [72.5, 28.5]) > 0.99);
+    assert_eq!(alpha_at(&out, [78.5, 28.5]), 0.0);
+}
+
+#[test]
+fn warp_full_distortion_keeps_expanded_edges() {
+    let im = Image::filled(108, 108, [1.0; 4]);
+    let out = run("ec.distort.warp", &[("verticalDistortion", num(100.0))], im.clone(), &[]);
+    // The old pad put the output boundary at x = 142, before this opaque sample.
+    assert!(alpha_at(&out, [146.5, 102.5]) > 0.99);
+    // Horizontal distortion also needs room, even with no vertical distortion.
+    let out = run("ec.distort.warp", &[("horizontalDistortion", num(100.0))], im, &[]);
+    assert!(alpha_at(&out, [102.5, 146.5]) > 0.99);
+}
+
+#[test]
+fn warp_nearly_collapsed_perspective_samples_transparent_outside() {
+    let im = Image::filled(2048, 7, [1.0; 4]);
+    // On y = 10.5 the perspective scale is only one rounding step above zero.
+    let out = run("ec.distort.warp", &[("verticalDistortion", num(-49.99999999999999))], im, &[]);
+    assert!(alpha_at(&out, [1024.5, 3.5]) > 0.99);
+    assert_eq!(alpha_at(&out, [2100.5, 10.5]), 0.0);
+}
+
+#[test]
+fn warp_squeeze_ends_in_a_centred_tip() {
+    let im = Image::filled(65, 64, [1.0; 4]);
+    for (distortion, tip_y) in [(-100.0, 64.0), (-80.0, 72.0)] {
+        let settings = [("warpStyle", Value::Enum(13)), ("warpAxis", Value::Enum(0)), ("bend", num(100.0)), ("verticalDistortion", num(distortion))];
+        let out = run("ec.distort.warp", &settings, im.clone(), &[]);
+        assert!(alpha_at(&out, [31.5, tip_y - 7.5]) > 0.99, "the shape should be wider before the tip");
+        assert!(alpha_at(&out, [32.5, tip_y - 0.5]) > 0.99, "the tip should be visible at the centre");
+        let (_, row) = out.to_px([0.0, tip_y - 0.5]);
+        let mut rows = out.img.data.chunks_exact(out.img.width as usize);
+        let tip = rows.nth(row as usize).unwrap();
+        assert_eq!(tip.iter().filter(|px| px[3] > 0.0).count(), 1, "the tip should be one pixel wide at {distortion}");
+        assert!(rows.flatten().all(|px| px[3] == 0.0), "content folded below the tip at {distortion}");
+    }
+}
+
+#[test]
+fn warp_strength_zero_is_identity() {
+    let im = img(32, 24);
+    let settings = [("warpStyle", Value::Enum(13)), ("bend", num(0.0)), ("horizontalDistortion", num(0.0)), ("verticalDistortion", num(0.0))];
+    let out = run("ec.distort.warp", &settings, im.clone(), &[]);
+    assert_eq!(out.img, im);
+    assert_eq!(out.offset, [0.0, 0.0]);
+}
+
+#[test]
 fn every_warp_style_runs_and_bends() {
     let im = img(40, 30);
     for s in 0..WARP_STYLES.len() as u32 {
