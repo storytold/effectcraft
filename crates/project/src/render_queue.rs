@@ -1547,10 +1547,9 @@ pub fn log_path(output: &str) -> String {
     let p = std::path::Path::new(output);
     let stem = p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
     let mut stem = stem;
-    if let Some(i) = stem.find('#') {
-        // The run of `#`s, with its brackets when it has them (`[###]`, `[#####]`).
-        let n = stem[i..].chars().take_while(|c| *c == '#').count();
-        let (a, b) = if stem[..i].ends_with('[') && stem[i + n..].starts_with(']') { (i - 1, i + n + 1) } else { (i, i + n) };
+    // The frame-number run, with its brackets when it has them (`[###]`, `[#####]`); a `#` of
+    // the comp's name (`#_shot_[#####]`) stays.
+    if let Some((a, b, _)) = frame_run(&stem) {
         stem.replace_range(a..b, "");
     }
     let stem = stem.trim_end_matches(['_', '.', ' ']);
@@ -1677,10 +1676,12 @@ pub fn sequence_path(path: &str, frame: i64) -> String {
 /// counts, except a bare run (`#`, `###`) in a folder's name, which is part of that name: a folder
 /// such as `D:\#_shots\` is common, and numbering it put every frame in a new folder of its own
 /// (`D:\0_shots\…`, `D:\1_shots\…`). A bracketed run still numbers a folder
-/// (`shot_[###]/f.png`).
+/// (`shot_[###]/f.png`), and a bracketed run anywhere wins over a bare one in the file name: a
+/// comp named `#_shot` renders to `#_shot_[#####].png`, where the first `#` is the comp's.
 pub fn frame_run(path: &str) -> Option<(usize, usize, usize)> {
     let name = path.rfind(['/', '\\']).map_or(0, |i| i + 1);
     let bytes = path.as_bytes();
+    let mut bare = None;
     let mut i = 0;
     while let Some(off) = path.get(i..).and_then(|rest| rest.find('#')) {
         let start = i + off;
@@ -1690,12 +1691,12 @@ pub fn frame_run(path: &str) -> Option<(usize, usize, usize)> {
         if bracketed {
             return Some((start - 1, end + 1, len));
         }
-        if start >= name {
-            return Some((start, end, len));
+        if start >= name && bare.is_none() {
+            bare = Some((start, end, len));
         }
         i = end;
     }
-    None
+    bare
 }
 
 /// A sequence output path around its frame number: what comes before it, how many digits it is
@@ -1854,6 +1855,19 @@ mod tests {
         m.output = "#_shots/[compName].[fileExtension]".into();
         m.set_format(OutputFormat::TiffSequence);
         assert_eq!(m.output, "#_shots/[compName]_[#####].[fileExtension]");
+    }
+
+    /// A comp named with a `#` keeps it in its file name, and the frame number goes to the
+    /// bracketed run: `#_shot_[#####].png` wrote frame 5 to `5_shot_[#####].png`.
+    #[test]
+    fn a_hash_in_the_comp_name_is_not_the_frame_number() {
+        assert_eq!(sequence_path("/out/#_shot_[#####].png", 5), "/out/#_shot_00005.png");
+        assert_eq!(sequence_path(r"D:\#_shots\#_shot_[#####].png", 5), r"D:\#_shots\#_shot_00005.png");
+        assert_eq!(sequence_frame("/out/#_shot_[#####].png", "/out/#_shot_00012.png"), Some(12));
+        assert_eq!(log_path("#_shot_[#####].png"), "#_shot_RenderLog.txt");
+        // Without brackets the first bare run of the file name is still the frame number.
+        assert_eq!(sequence_path("/out/a_###.png", 5), "/out/a_005.png");
+        assert_eq!(sequence_path("/out/a_###_b_##.png", 5), "/out/a_005_b_##.png");
     }
 
     #[test]
