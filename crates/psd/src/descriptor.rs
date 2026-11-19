@@ -127,7 +127,7 @@ pub fn read_descriptor(r: &mut Reader) -> Result<Descriptor> {
     Ok(from_craft_descriptor(d))
 }
 
-fn desc_err(e: craft_psd::PsdError) -> Error {
+pub(crate) fn desc_err(e: craft_psd::PsdError) -> Error {
     match e {
         craft_psd::PsdError::UnexpectedEof { .. } => Error::Truncated,
         craft_psd::PsdError::Unsupported(s) => Error::Unsupported(s),
@@ -143,7 +143,7 @@ fn unit_str(u: &[u8; 4]) -> String {
     String::from_utf8_lossy(u).into_owned()
 }
 
-fn from_craft_descriptor(d: craft_psd::descriptor::Descriptor) -> Descriptor {
+pub(crate) fn from_craft_descriptor(d: craft_psd::descriptor::Descriptor) -> Descriptor {
     Descriptor {
         class_name: d.name.to_string_lossy(),
         class_id: id_str(&d.class_id),

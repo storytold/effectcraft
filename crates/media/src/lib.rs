@@ -20,8 +20,12 @@ mod convert;
 pub mod downmix;
 mod dpx;
 pub mod exr_channels;
+mod exr_index;
+mod exr_planes;
+mod exr_read;
 mod gif_anim;
 mod layered;
+mod localize;
 pub use layered::vector_doc;
 mod pool;
 mod probe;
@@ -36,7 +40,7 @@ pub use pool::{DEFAULT_BUDGET, MediaPool, PoolStats};
 pub use probe::{DEFAULT_SEQUENCE_RATE, probe, probe_bytes, probe_model, probe_noting};
 
 /// Errors from probing or decoding footage.
-#[derive(Debug, thiserror::Error)]
+#[derive(Clone, Debug, thiserror::Error)]
 pub enum MediaError {
     #[error("I/O error: {0}")]
     Io(String),
@@ -120,6 +124,21 @@ pub(crate) fn count_open(path: &std::path::Path) {
 #[cfg(test)]
 pub(crate) fn opens_under(dir: &std::path::Path) -> usize {
     OPENS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).iter().filter(|p| p.starts_with(dir)).count()
+}
+
+#[cfg(test)]
+static STAMP_CHECKS: std::sync::Mutex<Vec<std::path::PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+/// Count a check of a file's identity on disk (tests, #3334).
+#[cfg(test)]
+pub(crate) fn count_stamp(path: &std::path::Path) {
+    STAMP_CHECKS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(path.to_path_buf());
+}
+
+/// How many times the identity of files under `dir` was checked on disk so far (tests).
+#[cfg(test)]
+pub(crate) fn stamp_checks_under(dir: &std::path::Path) -> usize {
+    STAMP_CHECKS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).iter().filter(|p| p.starts_with(dir)).count()
 }
 
 pub(crate) fn ext_of(path: &std::path::Path) -> String {
