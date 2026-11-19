@@ -8784,6 +8784,7 @@ const GEORGIAN: &[(&str, &str)] = &[
     ("Footage Frame Cache", "ვიდეომასალის კადრების ქეში"),
     ("Preview (RAM) Cache", "წინასწარი ნახვის (RAM) ქეში"),
     ("Reduce Cache Size When System Is Low on Memory", "ქეშის ზომის შემცირება, როცა სისტემას მეხსიერება აკლია"),
+    ("GPU Frames Rendered at Once", "GPU-ზე ერთდროულად რენდერირებული კადრები"),
     ("Video", "ვიდეო"),
     ("Enable Video Preview Output", "ვიდეოს წინასწარი ნახვის გამოტანის ჩართვა"),
     ("Video Device", "ვიდეომოწყობილობა"),
