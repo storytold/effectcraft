@@ -847,6 +847,12 @@ mod tests {
         let ctx = EffectCtx { params: &params, time: 0.0, layer_size: [1920.0, 1080.0], seed: 1, adjustment: true, env: Default::default() };
         let (w, h, off) = crate::motion_tile_frame(&ctx, [4320.0, 0.0], (10560, 1080), 1.0);
         assert_eq!((w, h, off), (7680, 5940, [2880.0, 2430.0]));
+        // A band wider than a frame may be, though small enough for the budget: the kept part
+        // shrinks to 16 384 pixels and the new tile still grows the height.
+        let params = Params { values: [("outputWidth", num(100.0)), ("outputHeight", num(300.0))].into_iter().map(|(k, v)| (k.to_string(), v)).collect() };
+        let ctx = EffectCtx { params: &params, time: 0.0, layer_size: [1000.0, 100.0], seed: 1, adjustment: true, env: Default::default() };
+        let (w, h, _) = crate::motion_tile_frame(&ctx, [8000.0, 0.0], (16500, 100), 1.0);
+        assert!(w > 16000 && w <= 16384 && h == 300, "{w} x {h}");
     }
 
     #[test]

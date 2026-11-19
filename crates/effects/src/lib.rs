@@ -413,6 +413,9 @@ pub fn quad_bounds(q: &[[f64; 2]; 4]) -> ([f64; 2], [f64; 2]) {
     ([f(0, f64::INFINITY, f64::min), f(1, f64::INFINITY, f64::min)], [f(0, f64::NEG_INFINITY, f64::max), f(1, f64::NEG_INFINITY, f64::max)])
 }
 
+/// The widest or tallest frame Motion Tile on an adjustment layer makes, in pixels.
+const MAX_SIDE: f64 = 16384.0;
+
 /// Motion Tile's output frame for a buffer with layer origin `offset` (pixels) at `scale`:
 /// `(width, height, offset)`. Output Width / Height grow (or crop) the layer rectangle about its
 /// centre, on adjustment layers too, where the rectangle is the comp's and starts at the comp
@@ -443,12 +446,15 @@ pub fn motion_tile_frame(ctx: &EffectCtx, offset: [f64; 2], size: (u32, u32), sc
     let rect = |t: f64| -> [f64; 4] { std::array::from_fn(|i| (own[i] + (all[i] - own[i]) * t).round()) };
     let area = |r: [f64; 4]| (r[2] - r[0]) * (r[3] - r[1]);
     let budget = pixel_budget(w, h).max(nw * nh);
+    // Too big: past the budget, or wider or taller than a frame may be (the grown rectangle on its
+    // own may still fit).
+    let too_big = |r: [f64; 4]| area(r) > budget || r[2] - r[0] > MAX_SIDE || r[3] - r[1] > MAX_SIDE;
     let mut t = 1.0;
-    if area(rect(1.0)) > budget {
+    if too_big(rect(1.0)) {
         let (mut lo, mut hi) = (0.0, 1.0);
         for _ in 0..40 {
             let mid = (lo + hi) * 0.5;
-            if area(rect(mid)) > budget {
+            if too_big(rect(mid)) {
                 hi = mid;
             } else {
                 lo = mid;
@@ -458,7 +464,7 @@ pub fn motion_tile_frame(ctx: &EffectCtx, offset: [f64; 2], size: (u32, u32), sc
     }
     let [x0, y0, x1, y1] = rect(t);
     let (nw, nh) = (x1 - x0, y1 - y0);
-    let fits = [x0, y0, nw, nh].iter().all(|v| v.is_finite()) && nw <= 16384.0 && nh <= 16384.0;
+    let fits = [x0, y0, nw, nh].iter().all(|v| v.is_finite()) && nw <= MAX_SIDE && nh <= MAX_SIDE;
     if (pw == 100.0 && ph == 100.0) || (nw == w && nh == h && x0 == 0.0 && y0 == 0.0) || !fits {
         return (size.0, size.1, offset);
     }
