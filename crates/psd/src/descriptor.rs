@@ -220,11 +220,6 @@ pub(crate) fn put_utf16(out: &mut Vec<u8>, s: &str, terminated: bool) {
     }
 }
 
-/// A descriptor Unicode string: NUL-terminated.
-pub(crate) fn put_unicode(out: &mut Vec<u8>, s: &str) {
-    put_utf16(out, s, true);
-}
-
 use craft_psd::descriptor::borrowed::{ClassRef, DescriptorView, IdRef, ReferenceRef, ReferencesView, UnicodeRef, ValueRef, ValuesView};
 
 fn borrowed_id(id: &str) -> IdRef<'_> {

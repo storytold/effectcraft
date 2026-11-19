@@ -72,3 +72,39 @@ fn smart_object_prefix_keeps_asymmetric_raw_transform_and_optional_warp() {
     let warp = Descriptor::new("warp").with("raw ", DValue::Double(f64::from_bits(0xfff8_1234_5678_9abc)));
     check(smart_object_block_warped("u", quad, [10.0, 20.0], Some(warp)), *b"SoLd", expected);
 }
+
+#[test]
+fn type_layer_framing_keeps_raw_origin_and_distinct_text_policies() {
+    let block = text_block("A\r\nB\n\u{1f600}", [-0.0, f64::from_bits(0x7ff8_1234_5678_9abc)], "Test", 12.0, [1.0, 0.5, 0.0], 2);
+    assert_eq!(block.0, *b"TySh");
+    // Independent header and descriptor-field bytes; CRLF deliberately becomes CRCR.
+    let prefix = hex("00 01
+        3f f0 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+        00 00 00 00 00 00 00 00 3f f0 00 00 00 00 00 00
+        80 00 00 00 00 00 00 00 7f f8 12 34 56 78 9a bc
+        00 32 00 00 00 10
+        00 00 00 01 00 00 00 00 00 00 54 78 4c 72 00 00 00 04
+        00 00 00 00 54 78 74 20 54 45 58 54 00 00 00 08 00 41 00 0d 00 0d 00 42 00 0d d8 3d de 00 00 00
+        00 00 00 0c 74 65 78 74 47 72 69 64 64 69 6e 67
+        65 6e 75 6d 00 00 00 0c 74 65 78 74 47 72 69 64 64 69 6e 67 00 00 00 00 4e 6f 6e 65
+        00 00 00 00 4f 72 6e 74 65 6e 75 6d 00 00 00 00 4f 72 6e 74 00 00 00 00 48 72 7a 6e
+        00 00 00 0a 45 6e 67 69 6e 65 44 61 74 61 74 64 74 61");
+    assert!(block.1.starts_with(&prefix));
+    let raw_len = u32::from_be_bytes(block.1[prefix.len()..prefix.len() + 4].try_into().unwrap()) as usize;
+    let raw_start = prefix.len() + 4;
+    let raw_end = raw_start + raw_len;
+    // EngineData is opaque to the framing helper; independently assert its original text,
+    // including LF rather than the Txt field's CR replacement. This is not an EngineData golden.
+    let engine = craft_psd::engine_data::parse(&block.1[raw_start..raw_end]).unwrap();
+    assert_eq!(engine.path(&["EngineDict", "Editor", "Text"]).and_then(craft_psd::engine_data::Value::as_str), Some("A\r\nB\n\u{1f600}\r"));
+    assert_eq!(
+        &block.1[raw_end..],
+        &hex("00 01 00 00 00 10
+        00 00 00 01 00 00 00 00 00 00 77 61 72 70 00 00 00 01
+        00 00 00 09 77 61 72 70 53 74 79 6c 65 65 6e 75 6d
+        00 00 00 09 77 61 72 70 53 74 79 6c 65 00 00 00 08 77 61 72 70 4e 6f 6e 65
+        00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00")
+    );
+    let expected_payload = block.1.clone();
+    check(block, *b"TySh", expected_payload);
+}

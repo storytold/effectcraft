@@ -391,25 +391,13 @@ pub fn smart_object_block_warped(uuid: &str, quad: [[f64; 2]; 4], size: [f64; 2]
 /// `TySh`: a type layer with one style run; the text origin sits at `origin`.
 pub fn text_block(text: &str, origin: [f64; 2], font: &str, size: f64, color: [f64; 3], justification: u8) -> ([u8; 4], Vec<u8>) {
     let mut d = vec![];
-    put_u16(&mut d, 1);
-    for v in [1.0, 0.0, 0.0, 1.0, origin[0], origin[1]] {
-        d.extend_from_slice(&f64::to_be_bytes(v));
-    }
-    put_u16(&mut d, 50);
-    put_u32(&mut d, 16);
     let desc = Descriptor::new("TxLr")
         .with("Txt ", DValue::Text(text.replace('\n', "\r")))
         .with("textGridding", DValue::Enum("textGridding".into(), "None".into()))
         .with("Ornt", DValue::Enum("Ornt".into(), "Hrzn".into()))
         .with("EngineData", DValue::Raw(engine_data::minimal(text, font, size, color, justification)));
-    descriptor::write_descriptor(&mut d, &desc);
-    // Warp: version, descriptor version, an empty warp descriptor.
-    put_u16(&mut d, 1);
-    put_u32(&mut d, 16);
-    descriptor::write_descriptor(&mut d, &Descriptor::new("warp").with("warpStyle", DValue::Enum("warpStyle".into(), "warpNone".into())));
-    for _ in 0..4 {
-        put_u32(&mut d, 0);
-    }
+    let warp = Descriptor::new("warp").with("warpStyle", DValue::Enum("warpStyle".into(), "warpNone".into()));
+    craft_psd::text::append_type_layer_data_with_zero_bounds(&mut d, &[1.0, 0.0, 0.0, 1.0, origin[0], origin[1]], &desc, &warp);
     (*b"TySh", d)
 }
 
