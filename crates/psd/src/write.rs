@@ -434,30 +434,14 @@ pub fn solid_color_block(rgb: [f64; 3]) -> ([u8; 4], Vec<u8>) {
 
 /// `hue2`: Hue/Saturation (master).
 pub fn hue_sat_block(hue: i16, sat: i16, light: i16) -> ([u8; 4], Vec<u8>) {
-    let mut d = vec![];
-    put_u16(&mut d, 2);
-    d.extend_from_slice(&[0, 0]);
-    for v in [0i16, 0, 0, hue, sat, light] {
-        d.extend_from_slice(&v.to_be_bytes());
-    }
-    // Six colour ranges (unused).
-    d.resize(d.len() + 6 * 24, 0);
-    (*b"hue2", d)
+    let block = craft_psd::adjust::hue_saturation_block(hue, sat, light);
+    (block.key, block.data)
 }
 
 /// `levl`: Levels (composite record).
 pub fn levels_block(in_black: i16, in_white: i16, out_black: i16, out_white: i16, gamma: f64) -> ([u8; 4], Vec<u8>) {
-    let mut d = vec![];
-    put_u16(&mut d, 2);
-    for v in [in_black, in_white, out_black, out_white, (gamma * 100.0).round() as i16] {
-        d.extend_from_slice(&v.to_be_bytes());
-    }
-    for _ in 0..28 {
-        for v in [0i16, 255, 0, 255, 100] {
-            d.extend_from_slice(&v.to_be_bytes());
-        }
-    }
-    (*b"levl", d)
+    let block = craft_psd::adjust::levels_block(in_black, in_white, out_black, out_white, (gamma * 100.0).round() as i16);
+    (block.key, block.data)
 }
 
 pub fn invert_block() -> ([u8; 4], Vec<u8>) {
