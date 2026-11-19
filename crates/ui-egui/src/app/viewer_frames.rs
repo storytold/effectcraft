@@ -256,10 +256,16 @@ impl EffectcraftApp {
 
 #[cfg(test)]
 mod tests {
+    /// The LUT generation is process-wide: the LUT test moves it, and every app picks it up on its
+    /// next step, which changes its frame keys. Tests that read keys hold this lock.
+    /// The LUT test also stamps its deleted file before it releases the lock.
+    static LUT_GENERATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// #3493: the viewer shows the frame again once the LUT file it was graded with changes,
     /// though its key was otherwise the same (same project revision, frame and options).
     #[test]
     fn the_viewer_shows_a_lut_file_changed_on_disk() {
+        let _lut = LUT_GENERATION.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let lut = dir.path().join("viewer.cube");
         let write = |text: &str, secs: u64| {
@@ -292,6 +298,11 @@ mod tests {
         // (what the app's watcher does every two seconds)
         effectcraft_engine::lut_reload::check();
         settle(&mut harness, 255);
+        // The engine follows the LUT file for the whole process. Delete it and look now, under
+        // the lock, so no watcher sees it vanish (and moves the generation) in a later test.
+        drop(harness);
+        drop(dir);
+        effectcraft_engine::lut_reload::check();
     }
 
     /// #3539: a still re-saved at the same size and reloaded as changed on disk keeps the project
@@ -299,6 +310,7 @@ mod tests {
     /// frame having the key of the one on screen. A reload's purge gives the frames new keys, once.
     #[test]
     fn the_viewers_show_a_still_reloaded_at_the_same_size() {
+        let _lut = LUT_GENERATION.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let png = dir.path().join("still.png");
         let save = |rgb: [u8; 3]| image::RgbaImage::from_pixel(64, 36, image::Rgba([rgb[0], rgb[1], rgb[2], 255])).save(&png).unwrap();
