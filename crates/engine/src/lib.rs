@@ -18,6 +18,7 @@ pub mod history;
 mod home;
 mod interchange;
 pub mod menus;
+pub mod onion;
 mod output_guard;
 pub mod preview;
 pub mod render_queue;

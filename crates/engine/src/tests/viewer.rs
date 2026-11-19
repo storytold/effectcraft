@@ -1351,3 +1351,31 @@ fn a_shift_drag_snaps_only_along_its_axis() {
     // The point reaches only the tolerance off the axis.
     assert_eq!(snap_along(&[[448.0, 170.0]], &[corner], 8.0, true), None);
 }
+
+#[test]
+fn onion_skin_command_sets_options_and_round_trips() {
+    use crate::onion::OnionSkin;
+    let mut s = comp();
+    assert!(!s.state.viewer.onion.enabled);
+    s.execute("view.onionSkin", json!({})).unwrap();
+    assert!(s.state.viewer.onion.enabled);
+    s.execute(
+        "view.onionSkin",
+        json!({"value": true, "before": 3, "after": 99, "step": 2, "tintBefore": "#0000ff", "tintAfter": "#ffff00", "opacity": 0.7, "falloff": 0.25, "tintAmount": 1.0, "placement": "under"}),
+    )
+    .unwrap();
+    let o = s.state.viewer.onion.clone();
+    assert_eq!((o.before, o.after, o.step, o.under), (3, crate::onion::MAX_GHOSTS_PER_SIDE, 2, true));
+    assert_eq!((o.tint_before, o.tint_after), ([0, 0, 255], [255, 255, 0]));
+    assert!((o.opacity - 0.7).abs() < 1e-6 && (o.falloff - 0.25).abs() < 1e-6);
+    let back: OnionSkin = serde_json::from_str(&serde_json::to_string(&o).unwrap()).unwrap();
+    assert_eq!(back, o);
+    let opts: crate::commands::viewer_cmds::ViewOptions = serde_json::from_str(&serde_json::to_string(&s.state.viewer).unwrap()).unwrap();
+    assert_eq!(opts.onion, o);
+    s.execute("view.onionSkin", json!({"value": false})).unwrap();
+    assert!(!s.state.viewer.onion.enabled);
+    assert_eq!(s.state.viewer.onion.before, 3);
+    assert!(s.execute("view.onionSkin", json!({"tintBefore": "nope"})).is_err());
+    assert!(s.execute("view.onionSkin", json!({"placement": "sideways"})).is_err());
+    assert!(s.execute("view.onionSkin", json!({"opacity": "x"})).is_err());
+}
