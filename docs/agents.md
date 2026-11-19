@@ -340,8 +340,9 @@ build real projects through these interfaces; they are worked examples of everyt
 * **OCIO effects**: with Configuration ▸ Custom, `configFile` is a `.ocio` path or the config's
   text; `effect.warning {layer, effect}` says what Effect Controls warns about (a config it
   can't read, a colour space it lacks, transforms that pass colours through) or `null`.
-* **Multi-layer OpenEXR**: the footage shows the beauty pass (an unnamed RGBA layer, else
-  Combined / Beauty / Image / RGBA…, never Cryptomatte or depth). `layer.channels {layer}`
+* **Multi-layer OpenEXR**: the footage shows the main picture as After Effects does (the
+  unprefixed `R`, `G`, `B` (`A`) of the first part with them, else `Y` as grey; a file of named
+  layers only, such as Blender's `ViewLayer.Combined.R`, is black). `layer.channels {layer}`
   lists a footage layer's EXR layers and
   channels (`{"layers":[{"name":"diffuse","rgba":["diffuse.R","diffuse.G","diffuse.B",""]}]}`);
   EXtractoR shows them when its `red` / `green` / `blue` / `alpha` are set to those names
