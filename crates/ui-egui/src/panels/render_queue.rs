@@ -7,6 +7,11 @@
 //! registers an automation id: `renderQueue.render`, `renderQueue.stop`, `renderQueue.notify`,
 //! `renderQueue.item.<n>.{row,twirl,render,renderSettings,outputModule,outputTo,outputPath,log}`.
 //!
+//! Click selects an item, Shift-click the items from the last one clicked, Ctrl/⌘-click adds or
+//! removes one. With several selected, a change to one of them (its Render checkbox, Render
+//! Settings, Output Module, Output To, Log, Remove, Move, Delete) goes to all of them as one undo
+//! step; choosing a folder in Output To keeps each item's file name.
+//!
 //! The Render Settings and Output Module menus list the templates first (Edit ▸ Templates), then
 //! every setting; entries needing numbers (custom time span and frame rate, crop, resize, bitrate,
 //! key frame interval, Make Template) open a form that runs the same command.
@@ -69,6 +74,105 @@ pub fn utc_stamp(unix: u64) -> String {
 /// A queue item's row: its click area, keyboard focus and accessibility node.
 fn row_id(item: u64) -> egui::Id {
     egui::Id::unique(("rq-row", item))
+}
+
+/// The selected items of the queue, beside its anchor (`rq-ui`'s selected item).
+fn selection_id() -> egui::Id {
+    egui::Id::unique("rq-sel")
+}
+
+/// The Render Queue's selection. `anchor` is the item last clicked without Shift, where a
+/// Shift-click range starts, and is the one kept in `rq-ui`; `set` is every selected item. A set
+/// without the anchor was left behind by something that changed the anchor alone, which then is
+/// the whole selection.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Selection {
+    pub anchor: Option<u64>,
+    pub set: Vec<u64>,
+}
+
+impl Selection {
+    /// The panel's selection.
+    pub fn read(ctx: &egui::Context) -> Self {
+        let anchor = ctx.data(|d| d.get_temp::<(Vec<u64>, Option<u64>)>(egui::Id::unique("rq-ui"))).and_then(|(_, a)| a);
+        Self { anchor, set: ctx.data(|d| d.get_temp(selection_id())).unwrap_or_default() }
+    }
+
+    /// The selected items.
+    pub fn items(&self) -> Vec<u64> {
+        match self.anchor {
+            Some(a) if self.set.contains(&a) => self.set.clone(),
+            Some(a) => vec![a],
+            None => vec![],
+        }
+    }
+
+    /// The selected items that are in `order`, in its order.
+    pub fn in_order(&self, order: &[u64]) -> Vec<u64> {
+        let items = self.items();
+        order.iter().filter(|i| items.contains(i)).copied().collect()
+    }
+
+    /// Only `id`.
+    pub fn only(&mut self, id: u64) {
+        self.anchor = Some(id);
+        self.set = vec![id];
+    }
+
+    /// A click on `id` in a queue of `order`: alone it selects only `id`; `toggle` (Ctrl/⌘) adds
+    /// or removes it; `range` (Shift) selects from the anchor to it, added to the selection with
+    /// `toggle`. The anchor stays put through a range.
+    pub fn click(&mut self, order: &[u64], id: u64, range: bool, toggle: bool) {
+        let mut set = self.items();
+        if range
+            && let Some(a) = self.anchor.and_then(|a| order.iter().position(|i| *i == a))
+            && let Some(b) = order.iter().position(|i| *i == id)
+        {
+            if !toggle {
+                set.clear();
+            }
+            for i in order.get(a.min(b)..=a.max(b)).unwrap_or_default() {
+                if !set.contains(i) {
+                    set.push(*i);
+                }
+            }
+            self.set = set;
+        } else if toggle {
+            if set.contains(&id) {
+                set.retain(|i| *i != id);
+                if self.anchor == Some(id) {
+                    self.anchor = set.last().copied();
+                }
+            } else {
+                set.push(id);
+                self.anchor = Some(id);
+            }
+            self.set = set;
+        } else {
+            self.only(id);
+        }
+    }
+}
+
+/// `params` aimed at item `id`, or at all of `picked` when `id` is one of several selected.
+fn aim(params: &mut Value, id: u64, picked: &[u64]) {
+    if let Some(o) = params.as_object_mut() {
+        if picked.len() > 1 && picked.contains(&id) {
+            o.insert("items".into(), json!(picked));
+        } else {
+            o.insert("item".into(), json!(id));
+        }
+    }
+}
+
+/// Output To's folder for several items: the host's folder picker, else the folder of a file
+/// chosen in the save dialog. `None` without either; `Some(None)` when cancelled.
+fn pick_folder(app: &EffectcraftApp, it: &RenderQueueItem) -> Option<Option<String>> {
+    if let Some(pick) = &app.hooks.pick_folder {
+        return Some(pick());
+    }
+    let file = pick_output(app, it)?;
+    Some(file.and_then(|f| std::path::Path::new(&f).parent().map(|d| d.to_string_lossy().to_string())).filter(|d| !d.is_empty()))
 }
 
 fn status_color(t: &Tokens, s: &RenderStatus) -> Color32 {
@@ -469,9 +573,7 @@ fn queue_drop(app: &EffectcraftApp, ui: &egui::Ui, rect: Rect, p: &egui::Painter
             vec![*id]
         };
         if ui.input(|i| i.pointer.any_released()) {
-            for comp in ids {
-                actions.push(("renderQueue.add", json!({"comp": comp})));
-            }
+            actions.push(("renderQueue.add", if let [comp] = ids[..] { json!({"comp": comp}) } else { json!({"comps": ids}) }));
             egui::DragAndDrop::clear_payload(ui.ctx());
         } else {
             p.rect_stroke(rect.shrink(2.0), 0.0, Stroke::new(2.0, t.accent), StrokeKind::Inside);
@@ -597,29 +699,37 @@ fn footer(p: &egui::Painter, rect: Rect, rq: &RqView, t: &Tokens) {
     );
 }
 
-/// An item row's context menu: Duplicate, Remove and Move Up / Down (row `k` of `len`).
-fn row_menu(ui: &mut egui::Ui, actions: &mut Vec<Action>, item_id: u64, k: usize, len: usize) {
+/// An item row's context menu: Duplicate, Remove and Move Up / Down. Remove and Move take every
+/// selected item (`picked`) when the row is one of them; `order` is the queue.
+fn row_menu(ui: &mut egui::Ui, actions: &mut Vec<Action>, item_id: u64, picked: &[u64], order: &[u64]) {
+    let group: Vec<u64> = if picked.len() > 1 && picked.contains(&item_id) { picked.to_vec() } else { vec![item_id] };
+    let at = |id: Option<&u64>| id.and_then(|id| order.iter().position(|i| i == id));
+    let (Some(first), Some(last)) = (at(group.first()), at(group.last())) else { return };
+    let with = |mut p: Value| {
+        aim(&mut p, item_id, picked);
+        p
+    };
     if ui.button(tr("Duplicate")).clicked() {
         actions.push(("renderQueue.duplicate", json!({"item": item_id})));
         ui.close();
     }
     if ui.button(tr("Remove")).clicked() {
-        actions.push(("renderQueue.remove", json!({"item": item_id})));
+        actions.push(("renderQueue.remove", with(json!({}))));
         ui.close();
     }
-    if k > 0 && ui.button(tr("Move Up")).clicked() {
-        actions.push(("renderQueue.move", json!({"item": item_id, "to": k})));
+    if first > 0 && ui.button(tr("Move Up")).clicked() {
+        actions.push(("renderQueue.move", with(json!({"to": first}))));
         ui.close();
     }
-    if k + 1 < len && ui.button(tr("Move Down")).clicked() {
-        actions.push(("renderQueue.move", json!({"item": item_id, "to": k + 2})));
+    if last + 1 < order.len() && ui.button(tr("Move Down")).clicked() {
+        actions.push(("renderQueue.move", with(json!({"to": (last + 3).saturating_sub(group.len())}))));
         ui.close();
     }
 }
 
 /// Log: Errors Only / Plus Settings / Plus Per Frame Info.
 fn log_dropdown(app: &mut EffectcraftApp, ui: &mut egui::Ui, row: &ItemRow, it: &RenderQueueItem, actions: &mut Vec<Action>) {
-    let ItemRow { lp, r, n, rendering, .. } = *row;
+    let ItemRow { lp, r, n, rendering, picked, .. } = *row;
     let t = app.tokens;
     let aid = |s: &str| format!("renderQueue.item.{n}.{s}");
     let ld = Rect::from_min_size(pos2(r.max.x - 190.0, r.min.y + 3.0), vec2(150.0, ROW_H - 6.0));
@@ -635,7 +745,9 @@ fn log_dropdown(app: &mut EffectcraftApp, ui: &mut egui::Ui, row: &ItemRow, it: 
         if widgets::by_keyboard(ui) {
             log_resp.request_focus();
         }
-        actions.push(("renderQueue.setLog", json!({"item": it.id, "log": RenderLog::ALL[i].label()})));
+        let mut params = json!({"log": RenderLog::ALL[i].label()});
+        aim(&mut params, it.id, picked);
+        actions.push(("renderQueue.setLog", params));
     }
     app.auto.add(&aid("log"), ld, it.log.label());
 }
@@ -649,6 +761,8 @@ struct ItemRow<'a> {
     /// The item's 1-based position in the queue.
     n: usize,
     rendering: bool,
+    /// The selected items, in queue order.
+    picked: &'a [u64],
 }
 
 /// The expanded "Output To" line: the template menu, and the file name (click to choose it or
@@ -662,7 +776,8 @@ fn output_to(
     editing: &mut Option<(u64, String)>,
     actions: &mut Vec<Action>,
 ) {
-    let ItemRow { lp, list, r, n, rendering } = *row;
+    let ItemRow { lp, list, r, n, rendering, picked } = *row;
+    let several = picked.len() > 1 && picked.contains(&it.id);
     let t = app.tokens;
     let aid = |s: &str| format!("renderQueue.item.{n}.{s}");
     let ox = dd_right + 14.0;
@@ -687,14 +802,10 @@ fn output_to(
             out_resp.request_focus();
         }
         if omenu[i].1.get("choose").is_some() {
-            match pick_output(app, it) {
-                Some(Some(path)) => actions.push(("renderQueue.setOutput", json!({"item": it.id, "path": path}))),
-                Some(None) => {}
-                None => *editing = Some((it.id, it.output.output.clone())),
-            }
+            choose_output(app, it, picked, editing, actions);
         } else {
             let mut params = omenu[i].1.clone();
-            params["item"] = json!(it.id);
+            aim(&mut params, it.id, picked);
             actions.push(("renderQueue.setOutput", params));
         }
     }
@@ -723,34 +834,56 @@ fn output_to(
         // host without one, edits the name template in place.
         let dialog = app.hooks.pick_save_file.is_some();
         if resp.clicked() && !rendering {
-            let picked = if ui.input(|i| i.modifiers.alt) { None } else { pick_output(app, it) };
-            match picked {
-                Some(Some(path)) => actions.push(("renderQueue.setOutput", json!({"item": it.id, "path": path}))),
-                Some(None) => {}
-                None => *editing = Some((it.id, it.output.output.clone())),
+            if ui.input(|i| i.modifiers.alt) {
+                *editing = Some((it.id, it.output.output.clone()));
+            } else {
+                choose_output(app, it, picked, editing, actions);
             }
         }
-        let how = if dialog { "Click to choose where to save; Alt-click to edit the template" } else { "Click to edit" };
+        let how = match (dialog, several) {
+            (true, true) => "Click to choose the folder of every selected item; Alt-click to edit this template",
+            (true, false) => "Click to choose where to save; Alt-click to edit the template",
+            _ => "Click to edit",
+        };
         resp.on_hover_text(tr_args("Template: {}\n{}", &[&it.output.output, &how]));
         app.auto.add(&aid("outputPath"), path_rect, &shown);
     }
 }
 
-/// Delete removes the selected item when the panel has focus (`allowed`: not editing a path and
-/// not rendering).
-fn delete_selected(app: &EffectcraftApp, ui: &egui::Ui, allowed: bool, on_row: bool, selected: &mut Option<u64>, actions: &mut Vec<Action>) {
+/// Output To's dialog for item `it`: a file for it alone, or with several selected (`picked`) a
+/// folder for all of them, each keeping its file name. A host without a dialog edits the template.
+fn choose_output(app: &EffectcraftApp, it: &RenderQueueItem, picked: &[u64], editing: &mut Option<(u64, String)>, actions: &mut Vec<Action>) {
+    if picked.len() > 1 && picked.contains(&it.id) {
+        match pick_folder(app, it) {
+            Some(Some(folder)) => actions.push(("renderQueue.setOutput", json!({"items": picked, "folder": folder}))),
+            Some(None) => {}
+            None => *editing = Some((it.id, it.output.output.clone())),
+        }
+        return;
+    }
+    match pick_output(app, it) {
+        Some(Some(path)) => actions.push(("renderQueue.setOutput", json!({"item": it.id, "path": path}))),
+        Some(None) => {}
+        None => *editing = Some((it.id, it.output.output.clone())),
+    }
+}
+
+/// Delete removes the selected items (`picked`) when the panel has focus (`allowed`: not editing
+/// a path and not rendering). Returns whether it did.
+fn delete_selected(app: &EffectcraftApp, ui: &egui::Ui, allowed: bool, on_row: bool, picked: &[u64], actions: &mut Vec<Action>) -> bool {
     if app.ui.focused == crate::dock::PanelKind::RenderQueue
         && allowed
-        && let Some(id) = *selected
+        && let Some(id) = picked.first().copied()
         && app.dialog.is_none()
         && !crate::widgets::any_menu_open(ui.ctx())
         && ui.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace))
         // (A focused queue row is not typing; any other focused widget may be.)
         && (on_row || !crate::framework::widget_has_keyboard(ui.ctx()))
     {
-        actions.push(("renderQueue.remove", json!({"item": id})));
-        *selected = None;
+        actions.push(("renderQueue.remove", if picked.len() > 1 { json!({"items": picked}) } else { json!({"item": id}) }));
+        return true;
     }
+    false
 }
 
 // Keyboard: Up / Down move between the queued items, Home / End go to the first / last, Right
@@ -845,6 +978,36 @@ fn render_time_text(it: &RenderQueueItem, progress: Option<&effectcraft_engine::
     }
 }
 
+fn row_select(app: &mut EffectcraftApp, ui: &egui::Ui, row_resp: &egui::Response, sel: &mut Selection, order: &[u64], id: u64) {
+    if row_resp.clicked() {
+        let m = ui.input(|i| i.modifiers);
+        sel.click(order, id, m.shift, m.command);
+        app.ui.focused = crate::dock::PanelKind::RenderQueue;
+    } else if row_resp.gained_focus() {
+        if !sel.items().contains(&id) && !ui.input(|i| i.pointer.any_down() || i.pointer.any_released()) {
+            sel.only(id);
+        }
+        app.ui.focused = crate::dock::PanelKind::RenderQueue;
+    }
+}
+
+fn open_forms(app: &mut EffectcraftApp, forms: Vec<(RenderQueueItem, String)>, picked: &[u64]) {
+    for (it, f) in forms {
+        open_menu_form(app, &it, &f);
+        let form = &mut app.dialog_state.form;
+        if matches!(form.command.as_str(), "renderQueue.setRenderSettings" | "renderQueue.setOutputModule")
+            && form.base.get("item").and_then(Value::as_u64) == Some(it.id)
+        {
+            aim(&mut form.base, it.id, picked);
+            if form.base.get("items").is_some()
+                && let Some(o) = form.base.as_object_mut()
+            {
+                o.remove("item");
+            }
+        }
+    }
+}
+
 /// The Render Queue panel: the Current Render strip (elapsed and remaining time, Render/Stop and
 /// Notify, plus the progress bar), the column header, the queued items with their output template,
 /// status and timings, and the footer totals. Comps dragged from the Project are queued on
@@ -863,7 +1026,10 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     queue_drop(app, ui, rect, &p, rendering, &mut actions);
     let mut forms: Vec<(RenderQueueItem, String)> = Vec::new();
     let state_id = egui::Id::unique("rq-ui");
-    let (mut open, mut selected): (Vec<u64>, Option<u64>) = ui.data(|d| d.get_temp(state_id).unwrap_or_default());
+    let mut open: Vec<u64> = ui.data(|d| d.get_temp::<(Vec<u64>, Option<u64>)>(state_id)).map(|(o, _)| o).unwrap_or_default();
+    let mut sel = Selection::read(ui.ctx());
+    let order: Vec<u64> = queue.iter().map(|i| i.id).collect();
+    let picked = sel.in_order(&order);
 
     // ---------------------------------------------------------- Current Render strip
     let top = Rect::from_min_size(rect.min, vec2(rect.width(), TOP_H));
@@ -914,7 +1080,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         let aid = |s: &str| format!("renderQueue.item.{n}.{s}");
         let row = Rect::from_min_size(pos2(list.min.x, y), vec2(list.width(), ROW_H));
         y += ROW_H;
-        let is_sel = selected == Some(it.id);
+        let is_sel = picked.contains(&it.id);
         lp.rect_filled(
             row,
             0.0,
@@ -931,16 +1097,13 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         if a11y::take_pending_focus(&ctx, "rq", row_resp.id) {
             row_resp.request_focus();
         }
-        if row_resp.clicked() || row_resp.gained_focus() {
-            selected = Some(it.id);
-            app.ui.focused = crate::dock::PanelKind::RenderQueue;
-        }
+        row_select(app, ui, &row_resp, &mut sel, &order, it.id);
         if row_resp.has_focus() {
             lp.rect_stroke(row.shrink(0.5), 0.0, Stroke::new(1.0, t.accent), StrokeKind::Inside);
         }
         let comp_item = app.session.project.item(it.comp);
         let name = comp_item.map(|i| i.name.clone()).unwrap_or_else(|| "(missing composition)".into());
-        crate::widgets::context_menu(&row_resp, |ui| row_menu(ui, &mut actions, it.id, k, queue.len()));
+        crate::widgets::context_menu(&row_resp, |ui| row_menu(ui, &mut actions, it.id, &picked, &order));
         app.auto.add(&aid("row"), row, &format!("#{n}"));
         let is_open = open.contains(&it.id);
         let tw = Rect::from_center_size(pos2(cx_twirl + 8.0, row.center().y), vec2(14.0, 14.0));
@@ -958,7 +1121,9 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         let cb_resp = ui.add_enabled_ui(!rendering, |ui| widgets::checkbox(ui, cb, it.render, &t, egui::Id::unique(("rq-cb", it.id)))).inner;
         a11y::check_box(&cb_resp, &format!("{}: {name}", tr("Render")), it.render, !rendering);
         if cb_resp.changed() && !rendering {
-            actions.push(("renderQueue.setRender", json!({"item": it.id, "render": !it.render})));
+            let mut params = json!({"render": !it.render});
+            aim(&mut params, it.id, &picked);
+            actions.push(("renderQueue.setRender", params));
         }
         app.auto.add(&aid("render"), cb, if it.render { "Render: on" } else { "Render: off" });
         let label_col = comp_item.map(|i| t.label(i.label)).unwrap_or(t.text_faint);
@@ -1011,7 +1176,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 if let Some(f) = params.get("form").and_then(Value::as_str) {
                     forms.push((it.clone(), f.to_string()));
                 } else {
-                    params["item"] = json!(it.id);
+                    aim(&mut params, it.id, &picked);
                     actions.push((if sub == 0 { "renderQueue.setRenderSettings" } else { "renderQueue.setOutputModule" }, params));
                 }
             }
@@ -1030,10 +1195,10 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                     );
                     lp.text(pos2(dd.max.x + 14.0, r.center().y), Align2::LEFT_CENTER, info, Tokens::ui(11.0), t.text_faint);
                 }
-                log_dropdown(app, ui, &ItemRow { lp: &lp, list, r, n, rendering }, it, &mut actions);
+                log_dropdown(app, ui, &ItemRow { lp: &lp, list, r, n, rendering, picked: &picked }, it, &mut actions);
                 continue;
             }
-            output_to(app, ui, &ItemRow { lp: &lp, list, r, n, rendering }, it, dd.max.x, &mut editing, &mut actions);
+            output_to(app, ui, &ItemRow { lp: &lp, list, r, n, rendering, picked: &picked }, it, dd.max.x, &mut editing, &mut actions);
         }
     }
     let content = y + scroll.offset - list.min.y;
@@ -1045,18 +1210,26 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         None => d.remove::<(u64, String)>(editing_id),
     });
 
-    let on_row = list_keys(app, &ctx, &queue, (&mut open, &mut selected), editing.is_none(), &tops, list.height());
+    let anchor = sel.anchor;
+    let on_row = list_keys(app, &ctx, &queue, (&mut open, &mut sel.anchor), editing.is_none(), &tops, list.height());
+    if let Some(moved) = sel.anchor.filter(|a| Some(*a) != anchor) {
+        sel.only(moved);
+    }
 
-    delete_selected(app, ui, editing.is_none() && !rendering, on_row, &mut selected, &mut actions);
+    if delete_selected(app, ui, editing.is_none() && !rendering, on_row, &picked, &mut actions) {
+        sel = Selection::default();
+    }
 
     // ---------------------------------------------------------- footer
     footer(&p, rect, &rq, &t);
 
     open.retain(|id| queue.iter().any(|i| i.id == *id));
-    ui.data_mut(|d| d.insert_temp(state_id, (open, selected)));
-    for (it, f) in forms {
-        open_menu_form(app, &it, &f);
-    }
+    sel.set.retain(|id| order.contains(id));
+    ui.data_mut(|d| {
+        d.insert_temp(state_id, (open, sel.anchor));
+        d.insert_temp(selection_id(), sel.set);
+    });
+    open_forms(app, forms, &picked);
     for (id, params) in actions {
         if let Err(e) = crate::menus::invoke(app, &ctx, id, params) {
             app.ui.status = e;
@@ -1066,6 +1239,74 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
 
 #[cfg(test)]
 mod tests {
+    use super::Selection;
+
+    const Q: [u64; 5] = [10, 20, 30, 40, 50];
+
+    fn clicked(sel: &mut Selection, id: u64, range: bool, toggle: bool) -> Vec<u64> {
+        sel.click(&Q, id, range, toggle);
+        sel.in_order(&Q)
+    }
+
+    /// #3726: Shift-click selects from the anchor to the row, either way, and a second Shift-click
+    /// ranges from the same anchor; a plain click selects one row again.
+    #[test]
+    fn shift_click_selects_the_range_from_the_anchor() {
+        let mut sel = Selection::default();
+        assert_eq!(clicked(&mut sel, 20, false, false), [20]);
+        assert_eq!(clicked(&mut sel, 40, true, false), [20, 30, 40]);
+        assert_eq!(clicked(&mut sel, 10, true, false), [10, 20], "the anchor stays where the range began");
+        assert_eq!(sel.anchor, Some(20));
+        assert_eq!(clicked(&mut sel, 50, false, false), [50]);
+        let mut fresh = Selection::default();
+        assert_eq!(clicked(&mut fresh, 30, true, false), [30], "without an anchor Shift-click selects the row");
+    }
+
+    /// #3726: Ctrl/Cmd-click adds or removes one row; with Shift it adds the range to what is
+    /// selected.
+    #[test]
+    fn ctrl_click_toggles_one_row() {
+        let mut sel = Selection::default();
+        clicked(&mut sel, 10, false, false);
+        assert_eq!(clicked(&mut sel, 40, false, true), [10, 40]);
+        assert_eq!(clicked(&mut sel, 30, false, true), [10, 30, 40]);
+        assert_eq!(sel.anchor, Some(30), "the row added is where a range starts");
+        assert_eq!(clicked(&mut sel, 10, false, true), [30, 40]);
+        assert_eq!(clicked(&mut sel, 30, false, true), [40], "removing the anchor hands it to a row still selected");
+        assert_eq!(sel.anchor, Some(40));
+        assert_eq!(clicked(&mut sel, 50, true, true), [40, 50]);
+        clicked(&mut sel, 10, false, true);
+        assert_eq!(clicked(&mut sel, 30, true, true), [10, 20, 30, 40, 50], "Ctrl+Shift adds the range from the anchor");
+        for id in Q {
+            clicked(&mut sel, id, false, true);
+        }
+        assert_eq!(sel.items(), Vec::<u64>::new(), "every row toggled off");
+        assert_eq!(sel.anchor, None);
+    }
+
+    /// The anchor set alone (arrow keys, Duplicate, an agent) is the whole selection, and items
+    /// no longer queued drop out.
+    #[test]
+    fn a_set_without_the_anchor_is_stale() {
+        let sel = Selection { anchor: Some(50), set: vec![10, 20] };
+        assert_eq!(sel.items(), [50]);
+        let sel = Selection { anchor: Some(20), set: vec![99, 20, 10] };
+        assert_eq!(sel.in_order(&Q), [10, 20], "queue order, missing items dropped");
+    }
+
+    /// A change aims at every selected item only when the row is one of several selected.
+    #[test]
+    fn changes_aim_at_the_selection() {
+        let aimed = |id: u64, picked: &[u64]| {
+            let mut p = serde_json::json!({"quality": "draft"});
+            super::aim(&mut p, id, picked);
+            p
+        };
+        assert_eq!(aimed(20, &[10, 20]), serde_json::json!({"quality": "draft", "items": [10, 20]}));
+        assert_eq!(aimed(30, &[10, 20]), serde_json::json!({"quality": "draft", "item": 30}), "a row outside the selection is changed alone");
+        assert_eq!(aimed(20, &[20]), serde_json::json!({"quality": "draft", "item": 20}));
+    }
+
     #[test]
     fn stamps() {
         assert_eq!(super::utc_stamp(0), "1970-01-01 00:00:00");
