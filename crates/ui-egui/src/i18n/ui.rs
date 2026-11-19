@@ -248,6 +248,8 @@ const JAPANESE: &[(&str, &str)] = &[
     ("Import Anyway", "このまま読み込み"),
     ("{}: {} left out or changed", "{}：{} 件が省略または変更"),
     ("… and {} more", "…ほか {} 件"),
+    ("Copy Report", "レポートをコピー"),
+    ("Report copied", "レポートをコピーしました"),
     ("Casts Shadows", "シャドウを落とす"),
     ("Change Renderer…", "レンダラーを変更…"),
     (
@@ -1392,6 +1394,8 @@ const SIMPLIFIED_CHINESE: &[(&str, &str)] = &[
     ("Import Anyway", "仍然导入"),
     ("{}: {} left out or changed", "{}：{} 项被省略或更改"),
     ("… and {} more", "…以及另外 {} 项"),
+    ("Copy Report", "复制报告"),
+    ("Report copied", "已复制报告"),
     ("Casts Shadows", "投射阴影"),
     ("Change Renderer…", "更改渲染器…"),
     ("Changing a shortcut creates a custom preset; the default stays as it is.", "修改快捷键会创建自定义预设；默认预设保持不变。"),
@@ -2514,6 +2518,8 @@ const SWEDISH: &[(&str, &str)] = &[
     ("Import Anyway", "Importera ändå"),
     ("{}: {} left out or changed", "{}: {} utelämnas eller ändras"),
     ("… and {} more", "… och {} till"),
+    ("Copy Report", "Kopiera rapport"),
+    ("Report copied", "Rapporten kopierades"),
     ("Casts Shadows", "Kastar skuggor"),
     ("Change Renderer…", "Byt renderare…"),
     (
@@ -3790,6 +3796,8 @@ const TRADITIONAL_CHINESE: &[(&str, &str)] = &[
     ("Import Anyway", "仍要匯入"),
     ("{}: {} left out or changed", "{}：{} 項被省略或變更"),
     ("… and {} more", "…以及另外 {} 項"),
+    ("Copy Report", "複製報告"),
+    ("Report copied", "已複製報告"),
     ("Casts Shadows", "投射陰影"),
     ("Change Renderer…", "更改算圖引擎…"),
     ("Changing a shortcut creates a custom preset; the default stays as it is.", "修改快速鍵會創建自定義預設集；預設預設集保持不變。"),
@@ -4862,6 +4870,8 @@ const UKRAINIAN: &[(&str, &str)] = &[
     ("Import Anyway", "Усе одно імпортувати"),
     ("{}: {} left out or changed", "{}: {} пропущено або змінено"),
     ("… and {} more", "… і ще {}"),
+    ("Copy Report", "Копіювати звіт"),
+    ("Report copied", "Звіт скопійовано"),
     ("Casts Shadows", "Відкидає тіні"),
     ("Change Renderer…", "Змінити рушій рендерингу…"),
     (
@@ -5446,6 +5456,8 @@ const PORTUGUESE: &[(&str, &str)] = &[
     ("Import Anyway", "Importar mesmo assim"),
     ("{}: {} left out or changed", "{}: {} omitidos ou alterados"),
     ("… and {} more", "… e mais {}"),
+    ("Copy Report", "Copiar relatório"),
+    ("Report copied", "Relatório copiado"),
     ("Casts Shadows", "Projeta sombras"),
     ("Change Renderer…", "Alterar renderizador…"),
     (
@@ -6222,6 +6234,8 @@ const POLISH: &[(&str, &str)] = &[
     ("Import Anyway", "Importuj mimo to"),
     ("{}: {} left out or changed", "{}: {} pominięto lub zmieniono"),
     ("… and {} more", "… i {} więcej"),
+    ("Copy Report", "Kopiuj raport"),
+    ("Report copied", "Raport skopiowany"),
     ("Casts Shadows", "Rzuca cienie"),
     ("Change Renderer…", "Zmień renderer…"),
     (
@@ -6981,6 +6995,8 @@ const CZECH: &[(&str, &str)] = &[
     ("Import Anyway", "Přesto importovat"),
     ("{}: {} left out or changed", "{}: {} vynecháno nebo změněno"),
     ("… and {} more", "… a {} dalších"),
+    ("Copy Report", "Kopírovat zprávu"),
+    ("Report copied", "Zpráva zkopírována"),
     ("Casts Shadows", "Vrhat stíny"),
     ("Change Renderer…", "Změnit vykreslovací modul…"),
     (
@@ -7559,6 +7575,8 @@ const SPANISH: &[(&str, &str)] = &[
     ("Import Anyway", "Importar de todos modos"),
     ("{}: {} left out or changed", "{}: {} omitidos o cambiados"),
     ("… and {} more", "… y {} más"),
+    ("Copy Report", "Copiar informe"),
+    ("Report copied", "Informe copiado"),
     ("Casts Shadows", "Proyecta sombras"),
     ("Change Renderer…", "Cambiar motor de procesamiento…"),
     (
@@ -8128,6 +8146,8 @@ const GEORGIAN: &[(&str, &str)] = &[
     ("Import Anyway", "მაინც იმპორტი"),
     ("{}: {} left out or changed", "{}: {} გამოტოვებული ან შეცვლილი"),
     ("… and {} more", "… და კიდევ {}"),
+    ("Copy Report", "ანგარიშის კოპირება"),
+    ("Report copied", "ანგარიში დაკოპირდა"),
     ("Casts Shadows", "ჩრდილს აგდებს"),
     ("Change Renderer…", "რენდერერის შეცვლა…"),
     ("Changing a shortcut creates a custom preset; the default stays as it is.", "მალსახმობის შეცვლა ქმნის მორგებულ პრესეტს; ნაგულისხმევი უცვლელი რჩება."),
@@ -9103,6 +9123,8 @@ const FRENCH: &[(&str, &str)] = &[
     ("Import Anyway", "Importer quand même"),
     ("{}: {} left out or changed", "{} : {} omis ou modifiés"),
     ("… and {} more", "… et {} de plus"),
+    ("Copy Report", "Copier le rapport"),
+    ("Report copied", "Rapport copié"),
     ("Casts Shadows", "Projette des ombres"),
     ("Change Renderer…", "Changer de moteur de rendu…"),
     (

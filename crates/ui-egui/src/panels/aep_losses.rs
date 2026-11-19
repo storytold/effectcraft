@@ -6,7 +6,8 @@
 //! (File ▸ Import ▸ File…) are asked about one at a time: the others wait in the queue until the
 //! prompt is answered, and Cancel skips only the one it asks about.
 //!
-//! Automation ids: `dialog.aepLosses.continue`, `dialog.aepLosses.cancel`.
+//! Automation ids: `dialog.aepLosses.continue`, `dialog.aepLosses.cancel`,
+//! `dialog.aepLosses.copy`.
 
 use crate::i18n::{tr, tr_args};
 use egui::vec2;
@@ -97,8 +98,26 @@ pub fn lines(report: &Value) -> Vec<(String, Vec<String>)> {
         .collect()
 }
 
-/// Draw the prompt for the conversion waiting on it: its losses by category, Cancel and Import /
-/// Export Anyway (Escape cancels).
+/// The same lines the prompt shows, as plain text for the system clipboard.
+pub fn format_report(report: &Value) -> String {
+    let mut out = String::new();
+    for (head, details) in lines(report) {
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(&head);
+        out.push('\n');
+        for d in details {
+            out.push_str("    ");
+            out.push_str(&d);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// Draw the prompt for the conversion waiting on it: its losses by category, Copy Report, Cancel
+/// and Import / Export Anyway (Escape cancels).
 pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
     let Some((id, _, report)) = app.dialog_state.aep_losses.command.clone() else {
         app.dialog = None;
@@ -107,6 +126,7 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
     let import = id == "file.importAep";
     let title = if import { "Import Adobe After Effects Project" } else { "Export Adobe After Effects Project" };
     let mut answer: Option<bool> = None;
+    let mut copy = false;
     super::dialogs::modal(ctx, title, vec2(520.0, 340.0), t, |ui| {
         let text = if import {
             tr("Some parts of this project cannot be imported exactly (left out or changed):")
@@ -136,8 +156,17 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
             if r.clicked() {
                 answer = Some(false);
             }
+            let r = ui.button(tr("Copy Report"));
+            app.auto.add("dialog.aepLosses.copy", r.rect, "Copy Report");
+            if r.clicked() {
+                copy = true;
+            }
         });
     });
+    if copy {
+        ctx.copy_text(format_report(&report));
+        app.ui.status = tr("Report copied").to_string();
+    }
     if answer.is_none() && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
         answer = Some(false);
     }
@@ -189,6 +218,13 @@ mod tests {
         assert_eq!(l[0], ("Layer styles: 4 left out or changed".to_string(), vec!["a".to_string(), "b".into(), "c".into(), "d".into()]));
         assert_eq!(l[1], ("Effects: 1 left out or changed".to_string(), vec!["… and 1 more".to_string()]));
         assert!(lines(&json!({})).is_empty());
+    }
+
+    #[test]
+    fn the_report_formats_as_plain_text_for_the_clipboard() {
+        let report = json!({"losses": [{"category": "effects", "count": 2, "details": ["RSMB"], "unlisted": 1}]});
+        assert_eq!(format_report(&report), "Effects: 2 left out or changed\n    RSMB\n    … and 1 more\n");
+        assert_eq!(format_report(&json!({})), "");
     }
 
     /// #3365: every detail line shows, then how many occurrences have none: the report's
