@@ -465,21 +465,13 @@ pub fn invert_block() -> ([u8; 4], Vec<u8>) {
 }
 
 pub fn brightness_block(brightness: i16, contrast: i16) -> ([u8; 4], Vec<u8>) {
-    let mut d = vec![];
-    for v in [brightness, contrast, 127] {
-        d.extend_from_slice(&v.to_be_bytes());
-    }
-    d.push(0);
-    (*b"brit", d)
+    let block = craft_psd::adjust::brightness_contrast_block(brightness, contrast);
+    (block.key, block.data)
 }
 
 pub fn exposure_block(exposure: f32, offset: f32, gamma: f32) -> ([u8; 4], Vec<u8>) {
-    let mut d = vec![];
-    put_u16(&mut d, 1);
-    for v in [exposure, offset, gamma] {
-        d.extend_from_slice(&v.to_be_bytes());
-    }
-    (*b"expA", d)
+    let block = craft_psd::adjust::exposure_block(exposure, offset, gamma);
+    (block.key, block.data)
 }
 
 /// `vmsk`: a vector mask from closed polygons/curves given as (in, anchor, out) knots in pixels.

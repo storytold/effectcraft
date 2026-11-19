@@ -969,12 +969,16 @@ fn bottom_bar_contents(app: &mut EffectcraftApp, ui: &mut egui::Ui, bar: Rect, z
             let _ = app.session.execute("view.set3DView", json!({"view": View3D::ALL[i].id()}));
         }
         x = r.max.x + 4.0;
+        x = layout_switch(app, ui, x, cy, &t);
         // Extended Viewer (Settings ▸ 3D): custom views and Draft 3D show past the comp frame.
         let on = app.session.prefs.three_d.extended_viewer;
         if tog(ui, &mut app.auto, &mut x, Icon::ExtendedViewer, on, "extendedViewer", "Extended Viewer").0 {
             let _ = app.session.execute("view.extendedViewer", json!({}));
         }
         x += 2.0;
+    } else {
+        // A 2D comp has no 3D View menu, but it can still be in a 2/4-view layout: keep the way back.
+        x = layout_switch(app, ui, x, cy, &t);
     }
     // Current time.
     let tc = crate::panels::timecode(&app.session, comp, time);
@@ -1003,6 +1007,34 @@ fn go_to_time_on_click(app: &mut EffectcraftApp, resp: &egui::Response) {
     if resp.clicked() && !resp.ctx.input(|i| i.modifiers.command) {
         crate::panels::forms::open_form(app, "time.set", &json!({}));
     }
+}
+
+/// The "Views: 1 | 2 | 4" switch (#3391): a label and three text buttons, the current layout
+/// highlighted; a click runs `view.layout`. Returns the x after it.
+fn layout_switch(app: &mut EffectcraftApp, ui: &mut egui::Ui, mut x: f32, cy: f32, t: &Tokens) -> f32 {
+    let label = crate::i18n::tr("Views:");
+    let g = ui.painter().layout_no_wrap(label.to_string(), Tokens::ui(11.0), t.text_dim);
+    ui.painter().galley(pos2(x, cy - g.size().y / 2.0), g.clone(), t.text_dim);
+    x += g.size().x + 4.0;
+    let current = app.session.state.view_layout;
+    for (n, text, tip) in [(1u8, "1", "1 View"), (2, "2", "2 Views"), (4, "4", "4 Views")] {
+        let r = Rect::from_min_size(pos2(x, cy - 10.0), vec2(26.0, 20.0));
+        let resp = widgets::text_button(ui, r, text, current == n, t, egui::Id::unique(("vw-layout", n)));
+        // The drawn text is just "1" / "2" / "4": the accessible name is the full "N View(s)", the group
+        // label ("Views") is its description, and the current layout is exposed as pressed.
+        let name = crate::i18n::command_label("view.layout", tip);
+        crate::a11y::choice_button(&resp, name, label.trim_end_matches([':', '：', ' ', '\u{a0}']), current == n);
+        let resp = resp.on_hover_text(name);
+        app.auto.add_response(&format!("viewer.layout.{n}"), &resp, tip);
+        if resp.clicked()
+            && current != n
+            && let Err(e) = app.session.execute("view.layout", json!({"views": n}))
+        {
+            app.ui.status = e.to_string();
+        }
+        x = r.max.x + 2.0;
+    }
+    x + 4.0
 }
 
 #[cfg(test)]
