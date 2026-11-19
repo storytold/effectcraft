@@ -12,7 +12,7 @@ use effectcraft_render::render_frame;
 use effectcraft_time::{FrameRate, Tick};
 use serde_json::{Value as Json, json};
 
-use crate::{ExportOptions, export_comp, import};
+use crate::{ExportOptions, LottieError, export_comp, import};
 
 fn s(x: f64) -> Tick {
     Tick::from_seconds_f64(x)
@@ -381,7 +381,7 @@ fn offset_paths_miter_uses_animatable_lottie_value() {
     assert_eq!(shapes[0]["ml"]["k"][1]["s"], json!([9.0]));
     assert_eq!(shapes[1]["ml"], json!({"a": 0, "k": 6.0}));
     assert_eq!(shapes[2]["ty"], "st");
-    assert_eq!(shapes[2]["ml"], json!(7.0));
+    assert_eq!(shapes[2]["ml"].as_f64(), Some(7.0));
     assert!(compare_comps(&p, cid, &q, nc) > 10);
     let restored = &q.comp(nc).unwrap().layers[0];
     assert_eq!(restored.props.group("contents/offset").unwrap().get("miter").unwrap().keys.len(), 2);
@@ -799,6 +799,32 @@ fn dotlottie_archive_roundtrip() {
     assert_eq!(q.comp(imp.comp).unwrap().layers.len(), 1);
 }
 
+#[test]
+fn dotlottie_archive_without_animation_is_rejected() {
+    let zip = craft_lottie::zip::try_store(&[("manifest.json".into(), b"{}".to_vec())]).unwrap();
+    let mut project = Project::default();
+    let err = import(&mut project, &zip, "empty archive", "", &mut |_| None).unwrap_err();
+    assert!(matches!(err, LottieError::Parse(message) if message.contains("without a JSON animation")));
+}
+
+#[test]
+fn deflated_dotlottie_archive_imports() {
+    let (mut p, cid) = setup();
+    let l = solid_layer(&mut p, cid, [0.0, 1.0, 0.0], 40, 40);
+    push(&mut p, cid, l);
+    let res = export_comp(&p, cid, &ExportOptions::default(), &no_read).unwrap();
+    let manifest = serde_json::to_vec(&serde_json::json!({"version":"1","animations":[{"id":"main"}]})).unwrap();
+    let animation = serde_json::to_vec(&res.json).unwrap();
+    let zip = craft_lottie::zip::try_store_with_compression(
+        &[("manifest.json".into(), manifest), ("animations/main.json".into(), animation)],
+        craft_lottie::zip::Compression::Deflated,
+    )
+    .unwrap();
+    let mut q = Project::default();
+    let imp = import(&mut q, &zip, "compressed", "", &mut |_| None).unwrap();
+    assert_eq!(q.comp(imp.comp).unwrap().layers.len(), 1);
+}
+
 // ---------------------------------------------------------------- hand-written fixtures
 
 fn fixture(name: &str) -> (Project, ItemId, Vec<String>) {
@@ -997,6 +1023,53 @@ fn per_corner_roundness_exports_equal_radii_and_warns_when_mixed() {
     assert!(!warnings.iter().any(|w| w.contains("per-corner")), "{warnings:?}");
 }
 
+#[test]
+fn many_layers_and_precomps_import_with_their_parents_and_sizes() {
+    // 5 000 null layers each parented to the previous, and 2 000 empty precomp assets: the
+    // relationship and size passes index the layers instead of searching them per layer. (Each
+    // has its own name: `Comp::unique_layer_name` numbering one repeated name is a separate cost.)
+    let n = 5_000;
+    let layers: Vec<Json> = (1..=n).map(|i| json!({"ty": 3, "nm": format!("N{i}"), "ind": i, "parent": i - 1, "ip": 0, "op": 30, "st": 0, "ks": {}})).collect();
+    let mut assets: Vec<Json> = (0..2_000).map(|i| json!({"id": format!("c{i}"), "layers": []})).collect();
+    assets.push(json!({"id": "last", "layers": []}));
+    let mut layers = layers;
+    layers.push(json!({"ty": 0, "ind": n + 1, "refId": "last", "w": 50, "h": 40, "ip": 0, "op": 30, "st": 0, "ks": {}}));
+    let doc = json!({"w": 200, "h": 120, "fr": 30, "ip": 0, "op": 30, "assets": assets, "layers": layers});
+    let mut q = Project::default();
+    let nc = import(&mut q, doc.to_string().as_bytes(), "Imported", "", &mut |_| None).unwrap().comp;
+    let c = q.comp(nc).unwrap();
+    assert_eq!(c.layers.len(), n as usize + 1);
+    assert_eq!(c.layers.get(0).unwrap().parent, None);
+    assert_eq!(c.layers.get(1).unwrap().parent, Some(c.layers.get(0).unwrap().id));
+    let LayerSource::Comp { item } = c.layers.get(n as usize).unwrap().source else { panic!("not a precomp") };
+    let pc = q.comp(item).unwrap();
+    assert_eq!((pc.width, pc.height), (50, 40));
+}
+
+#[test]
+fn deeply_nested_shape_groups_and_long_font_names_import() {
+    let mut g = json!({"ty": "rc", "s": {"a": 0, "k": [10, 10]}, "p": {"a": 0, "k": [0, 0]}, "r": {"a": 0, "k": 0}});
+    // 50 levels: each is two levels of JSON, within serde_json's recursion limit of 128.
+    for _ in 0..50 {
+        g = json!({"ty": "gr", "it": [g, {"ty": "tr", "o": {"a": 0, "k": 100}}]});
+    }
+    let family = "F".repeat(100_000);
+    let keys: Vec<Json> = (0..50).map(|i| json!({"t": i, "s": {"t": "x", "f": "A", "s": 10}})).collect();
+    let doc = json!({"w": 200, "h": 120, "fr": 30, "ip": 0, "op": 60,
+    "fonts": {"list": [{"fName": "A", "fFamily": family, "fStyle": "Regular"}]},
+    "layers": [
+        {"ty": 4, "ind": 1, "ip": 0, "op": 60, "st": 0, "ks": {}, "shapes": [g]},
+        {"ty": 5, "ind": 2, "ip": 0, "op": 60, "st": 0, "ks": {}, "t": {"d": {"k": keys}}}
+    ]});
+    let mut q = Project::default();
+    let nc = import(&mut q, doc.to_string().as_bytes(), "Imported", "", &mut |_| None).unwrap().comp;
+    let c = q.comp(nc).unwrap();
+    let st = c.layers.get(1).unwrap().props.prop("text/sourceText").unwrap();
+    assert_eq!(st.keys.len(), 50);
+    let Value::Text(d) = &st.keys[0].value else { panic!("not text") };
+    assert_eq!(d.font.len(), 256);
+}
+
 /// A footage item called a still whose file is not an image is not embedded.
 #[test]
 fn only_image_bytes_are_embedded() {
@@ -1014,4 +1087,13 @@ fn only_image_bytes_are_embedded() {
     let res = export_comp(&p, cid, &ExportOptions::default(), &read).unwrap();
     assert!(res.json["assets"].as_array().is_none_or(|a| a.is_empty()), "{}", res.json["assets"]);
     assert!(res.warnings.iter().any(|w| w.contains("not a PNG")), "{:?}", res.warnings);
+}
+
+#[test]
+fn dotlottie_export_rejects_an_unrepresentable_entry_name() {
+    let (p, cid) = setup();
+    let res = export_comp(&p, cid, &ExportOptions::default(), &no_read).unwrap();
+    let err = crate::try_to_dotlottie(&res, &"a".repeat(usize::from(u16::MAX))).unwrap_err();
+    assert!(matches!(err, LottieError::Invalid(message) if message.contains("dotLottie ZIP")));
+    assert_eq!(crate::try_to_dotlottie(&res, "Main").unwrap(), crate::to_dotlottie(&res, "Main"));
 }

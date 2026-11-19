@@ -6,7 +6,7 @@
 
 use std::io;
 
-use filmcraft_aac::AudioSpecificConfig;
+use craft_audio::aac::AudioSpecificConfig;
 use filmcraft_media::ByteReader;
 
 /// How far into an MPEG TS / PS file the audio streams are looked for: the stream is indexed as
@@ -34,15 +34,16 @@ pub(crate) fn config(header: Option<&[u8]>, file: Option<&dyn ByteReader>) -> Op
 /// are in its fragments, not the `moov`).
 fn mp4(header: &[u8], file: Option<&dyn ByteReader>) -> Option<Vec<u8>> {
     let mp4 = match file {
-        Some(f) => filmcraft_isobmff::open(Head(f, f.len())),
-        None => filmcraft_isobmff::open(header),
+        Some(f) => craft_media::isobmff::open(Head(f, f.len())),
+        None => craft_media::isobmff::open(header),
     };
     let mp4 = mp4.ok()?;
-    let playable =
-        |t: &&filmcraft_isobmff::Track| t.kind == filmcraft_isobmff::TrackKind::Audio && !t.samples.is_empty() && !t.entries.is_empty() && t.timescale > 0;
+    let playable = |t: &&craft_media::isobmff::Track| {
+        t.kind == craft_media::isobmff::TrackKind::Audio && !t.samples.is_empty() && !t.entries.is_empty() && t.timescale > 0
+    };
     let track = mp4.tracks.iter().find(playable)?;
     match &track.entries.first()?.codec {
-        filmcraft_isobmff::CodecConfig::Aac(a) => Some(a.asc.clone()),
+        craft_media::isobmff::CodecConfig::Aac(a) => Some(a.asc.clone()),
         _ => None,
     }
 }
@@ -50,9 +51,9 @@ fn mp4(header: &[u8], file: Option<&dyn ByteReader>) -> Option<Vec<u8>> {
 /// The track FilmCraft's Matroska source plays: the first audio track with frames, found by
 /// indexing the clusters as that source does.
 fn matroska(file: &dyn ByteReader) -> Option<Vec<u8>> {
-    let mkv = filmcraft_matroska::open(Head(file, file.len())).ok()?;
-    match &mkv.tracks.iter().find(|t| t.kind == filmcraft_matroska::TrackKind::Audio && !t.samples.is_empty())?.codec {
-        filmcraft_matroska::Codec::Aac { asc } => Some(asc.clone()),
+    let mkv = craft_media::matroska::open(Head(file, file.len())).ok()?;
+    match &mkv.tracks.iter().find(|t| t.kind == craft_media::matroska::TrackKind::Audio && !t.samples.is_empty())?.codec {
+        craft_media::matroska::Codec::Aac { asc } => Some(asc.clone()),
         _ => None,
     }
 }
@@ -61,15 +62,15 @@ fn matroska(file: &dyn ByteReader) -> Option<Vec<u8>> {
 /// first unit it can read. Only AAC is asked about, so the streams before that one were refused
 /// whatever their codec, and an ADTS stream played has no configuration outside its frames.
 fn latm(file: &dyn ByteReader) -> Option<Vec<u8>> {
-    use filmcraft_mpegts::Codec;
+    use craft_media::mpegts::{self, Codec};
     let head = Head(file, file.len().min(MPEG_HEAD));
-    let mpeg = filmcraft_mpegts::open(&head).ok()?;
-    let audio = mpeg.streams.iter().enumerate().filter(|(_, s)| s.kind() == filmcraft_mpegts::Kind::Audio && !s.units.is_empty());
+    let mpeg = mpegts::open(&head).ok()?;
+    let audio = mpeg.streams.iter().enumerate().filter(|(_, s)| s.kind() == mpegts::Kind::Audio && !s.units.is_empty());
     let played = audio.take(filmcraft_media::MAX_AUDIO_STREAMS).find_map(|(i, s)| {
         let first = mpeg.read_unit(&head, i, 0).ok()?;
         match s.codec {
-            Codec::AacAdts => filmcraft_mpegts::frame_info(&s.codec, &first).map(|_| None),
-            Codec::AacLatm => filmcraft_codecs::audio::latm_config(&first).map(|c| Some(c.asc)),
+            Codec::AacAdts => mpegts::frame_info(&s.codec, &first).map(|_| None),
+            Codec::AacLatm => craft_audio::aac::latm_config(&first).map(|c| Some(c.asc)),
             _ => None,
         }
     });
@@ -88,25 +89,7 @@ impl Head<'_> {
     }
 }
 
-impl filmcraft_isobmff::ByteSource for Head<'_> {
-    fn len(&self) -> u64 {
-        self.1
-    }
-    fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
-        self.read(offset, buf)
-    }
-}
-
-impl filmcraft_matroska::ByteSource for Head<'_> {
-    fn len(&self) -> u64 {
-        self.1
-    }
-    fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
-        self.read(offset, buf)
-    }
-}
-
-impl filmcraft_mpegts::ByteSource for Head<'_> {
+impl craft_media::ByteSource for Head<'_> {
     fn len(&self) -> u64 {
         self.1
     }

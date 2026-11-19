@@ -183,6 +183,25 @@ fn offset_copies() {
 }
 
 #[test]
+fn offset_copies_are_budgeted_by_the_output_they_return() {
+    // An open one-segment subpath comes back as a closed outline of several elements, so the copies
+    // stop when the returned elements pass the budget, not when the input segments would.
+    let line = || {
+        let mut p = BezPath::new();
+        p.move_to((0.0, 0.0));
+        p.line_to((50.0, 0.0));
+        p
+    };
+    let one = offset_within(&[line()], 5.0, Join::Round, 4.0, 1.0, 0.0, usize::MAX)[0].elements().len();
+    assert!(one > 4, "{one}");
+    let o = offset_within(&[line()], 5.0, Join::Round, 4.0, 50.0, 0.0, one * 3);
+    let moves = o[0].elements().iter().filter(|e| matches!(e, PathEl::MoveTo(_))).count();
+    assert!((1..50).contains(&moves) && o[0].elements().len() <= one * 4, "{moves} contours, {} elements", o[0].elements().len());
+    // The first copy always comes back, however small the budget.
+    assert!(!offset_within(&[line()], 5.0, Join::Round, 4.0, 5.0, 0.0, 0)[0].elements().is_empty());
+}
+
+#[test]
 fn offset_open_path_outlines() {
     let mut l = BezPath::new();
     l.move_to((0.0, 0.0));
@@ -244,6 +263,22 @@ fn twist_of_centred_circle_keeps_it_round() {
     assert!(close(area(&t), area(&[c]), 1.0));
     let id = twist(&[sq(0.0, 0.0, 5.0)], 0.0, [0.0, 0.0]);
     assert_eq!(id[0], sq(0.0, 0.0, 5.0));
+}
+
+#[test]
+fn twist_keeps_requested_detail_when_the_whole_request_fits_the_budget() {
+    // One long segment asks for 64 pieces; 20,000 tiny ones ask for one each. Together that is
+    // far under the budget, so the long one is not cut to what a uniform 64 per segment would allow.
+    let mut long = BezPath::new();
+    long.move_to((0.0, 0.0));
+    long.line_to((5000.0, 0.0));
+    let mut tiny = BezPath::new();
+    tiny.move_to((0.0, 1.0));
+    for i in 1..=20_000 {
+        tiny.line_to((i as f64 * 1e-3, 1.0));
+    }
+    let t = twist(&[long, tiny], 90.0, [0.0, 0.0]);
+    assert_eq!(t[0].elements().len(), 1 + 64);
 }
 
 // ---------------------------------------------------------------- zig zag
@@ -416,4 +451,49 @@ fn normalize_and_filled_area() {
     assert!(close(crate::boolean::filled_area(&p, FillRule::EvenOdd), 10000.0, 1e-6));
     let n = crate::boolean::normalize(&p, FillRule::EvenOdd);
     assert!(close(n.area().abs(), 10000.0, 1e-6));
+}
+
+// ---------------------------------------------------------------- operator budget
+
+#[test]
+fn stacked_expanding_operators_stay_within_the_segment_budget() {
+    // Three Zig Zags at 1000 ridges would turn a square into 4 · 1001³ segments; each output
+    // is held to the budget instead, and the last operators still pass the geometry through.
+    let mut p = vec![sq(0.0, 0.0, 100.0)];
+    for _ in 0..3 {
+        p = zigzag(&p, 1.0, 1000.0, false);
+        let n: usize = p.iter().map(|q| q.elements().len()).sum();
+        assert!(n <= 2 * MAX_OPERATOR_SEGMENTS, "{n}");
+    }
+    let w = wiggle(&p, &WiggleParams { detail: 1000.0, ..Default::default() }, 0.0);
+    let n: usize = w.iter().map(|q| q.elements().len()).sum();
+    assert!(n <= 2 * MAX_OPERATOR_SEGMENTS, "{n}");
+    let o = offset(&[sq(0.0, 0.0, 100.0)], 1.0, Join::Miter, 4.0, 1000.0, 0.0);
+    assert!(!o[0].elements().is_empty());
+    // Within the budget nothing changes: 4 segments × 11 pieces.
+    assert_eq!(vertex_count(&zigzag(&[sq(0.0, 0.0, 100.0)], 1.0, 10.0, false)[0]), 44);
+}
+
+#[test]
+fn many_short_open_paths_keep_their_requested_detail_within_the_budget() {
+    // 1000 open lines at 1000 ridges: 1,001,000 segments fit the budget, so nothing is reduced.
+    let lines: Vec<BezPath> = (0..1000)
+        .map(|i| {
+            let mut p = BezPath::new();
+            p.move_to((0.0, i as f64));
+            p.line_to((100.0, i as f64));
+            p
+        })
+        .collect();
+    let z = zigzag(&lines, 1.0, 1000.0, false);
+    assert!(z.iter().all(|q| q.elements().len() == 1 + 1001));
+}
+
+#[test]
+fn open_subpaths_reserve_one_element_of_overhead() {
+    // 349,525 open lines: the move-to is the only extra element, so 2 copies fit the budget
+    // (a closed subpath's extra close-path would leave room for 1).
+    let line = BezPath::from_vec(vec![PathEl::MoveTo((0.0, 0.0).into()), PathEl::LineTo((1.0, 0.0).into())]);
+    let lines = vec![line; 349_525];
+    assert_eq!(pieces_within_budget(&lines, 3), 2);
 }

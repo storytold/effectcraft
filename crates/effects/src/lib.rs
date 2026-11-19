@@ -39,6 +39,7 @@ mod keying2;
 pub mod keylight;
 mod matte;
 
+mod file_cache;
 pub mod migrate;
 mod misc;
 pub mod mocha_shape;
@@ -83,7 +84,7 @@ pub use color_fx::{COLORAMA_PRESETS, ColoramaPalette};
 pub use color2::{Curve, auto_correct_settings, color_link_mode, color_link_sample, equalize_tables, luma_clip_points, shadow_highlight_amounts};
 pub use color3::OffsetCurve;
 pub use distort::{transform_grow, transform_matrix_px, transform_shutter};
-pub use distort2::{MAGNIFY_MODES, bezier_grid, parse_mesh};
+pub use distort2::{MAGNIFY_MODES, bezier_grid, parse_mesh, turbulent_amount_px};
 pub use distort3::{RESHAPE_POINTS, ReshapeSetup, SmearSetup, cc_smear_pad, reshape_setup, smear_setup, warp_inverse_map};
 pub use distort4::liquify_mesh;
 use effectcraft_keyframe::Value;
@@ -91,27 +92,27 @@ use effectcraft_project::build::Ids;
 use effectcraft_project::{GroupKind, ParamUi, PropGroup, Property};
 pub use effectcraft_raster::{AuxChannels, Image};
 pub use misc::{
-    GLOW_GAIN, GLOW_KNEE, INVERT_ALPHA, INVERT_CHANNELS, glow_ab_t, glow_operation, glow_sigma, linear_wipe_axis, linear_wipe_sigma, radial_wipe_sigma,
-    radial_wipe_wedge, venetian_cover, venetian_origin,
+    GLOW_GAIN, GLOW_KNEE, INVERT_ALPHA, INVERT_CHANNELS, drop_shadow_pad, glow_ab_t, glow_operation, glow_sigma, linear_wipe_axis, linear_wipe_sigma,
+    radial_wipe_sigma, radial_wipe_wedge, venetian_cover, venetian_origin,
 };
 pub use sim::particle_state;
 pub use sim3::{PgBlit, PgPlan, playground_plan, playground_state};
 pub use stylize2::strobe_on;
 // CPU helpers the GPU kernels share (effectcraft-gpu).
-pub use blur2::{camera_lens_plain, camera_lens_spans, radial_fast_pad};
-pub use generate::{four_color_softening, gen_mode};
+pub use blur2::{CAMERA_LENS_MAX_RADIUS, camera_lens_plain, camera_lens_radius, camera_lens_spans, radial_fast_pad};
+pub use generate::{four_color_jitter, four_color_softening, gen_mode};
 pub use generate2::pattern_kind as cell_pattern_kind;
 pub use generate2::{BoltSeg, Contour, Ghost, RadioPlan, Wave, flare_ghosts, lightning_segments, radio_plan};
 pub use generate3::{
     Coverage, MarksPlan, PaintPlan, Seg, eyedropper_color, marks_plan, paint_bucket_region, paint_plan, plan_reads_pixels, poly_segs, scribble_style,
 };
-pub use noise::GrainLook;
-pub use textfx::{BoltPlan, TextLook, TextPass, bolt_plan, text_passes};
+pub use noise::{GrainLook, MEDIAN_MAX_RADIUS};
+pub use textfx::{BoltPlan, TextLook, TextPass, bolt_plan, glyph_strokes, text_passes};
 pub use transition::{GridWipe, place_layer};
 // effectcraft-gpu fx_noise.
 pub use keying2::{InnerOuterPlan, inner_outer_plan};
 pub use noise::remove_grain_level;
-pub use noise3::{FractalGpu, NOISE_CELL, fractal_gpu};
+pub use noise3::{FractalGpu, NOISE_CELL, OCTAVE_SCALE_MAX, fractal_gpu, sub_scaling_ratio};
 pub use stylize3::{BumpLight, HexTile, bump_layer_id};
 pub use textfx::{TextLayer, text_layer};
 pub use time_fx::{PixelMotion, TimewarpPlan, TwStep, pmb_plan, posterized_time, time_frames, timewarp_crop, timewarp_plan};
@@ -119,17 +120,18 @@ pub use time_fx::{PixelMotion, TimewarpPlan, TwStep, pmb_plan, posterized_time, 
 pub use ocio::color_stabilizer_maps;
 // GPU effects, part B (3D Channel, Immersive Video, colour management, simulation render passes).
 pub use channel3d::{
-    CRYPTO_LAYERS, CryptoAux, EXTRACTOR_COPY, MATTE_ONLY_IN_ALPHA, aux_point, crypto_aux_image, crypto_aux_image_with, crypto_layer_choices, crypto_layer_menu,
-    crypto_layer_name, crypto_layer_named, extractor_aux_channel, extractor_own_channel, id_color, is_extractor_copy, matte_only_px, reads_aux,
-    selection_hashes,
+    CRYPTO_LAYERS, CryptoOutput, CryptoPlane, EXTRACTOR_COPY, MATTE_ONLY_IN_ALPHA, aux_need, aux_needs, aux_point, crypto_aux_image, crypto_box_scale,
+    crypto_layer_choices, crypto_layer_menu, crypto_layer_name, crypto_layer_named, crypto_plane, extractor_aux_channel, extractor_own_channel, id_color,
+    is_extractor_copy, matte_only_px, pixel_margin, reads_aux, selection_hashes,
 };
+pub use file_cache::{check_lut_files, lut_generation};
 pub use ocio::{ColorOp, Straight, Tf, color_program};
 pub use sim::{Acc, Blob, Bubble, Post, Shape, Sprite, SpritePlan, Tint, bubble_list, bubble_sample_bounds, drizzle_drops, mercury_blobs, sprite_plan};
 pub use sim2::{
     CausticsSetup, FoamDisc, FoamEnv, FoamPlan, Piece, PiecePlan, PieceTex, PixelPlan, WavePlan, Waves, caustics_setup, foam_full_plan, piece_plan, pixel_plan,
     wave_world_plan,
 };
-pub use utility::{Lut, load_lut};
+pub use utility::{Lut, cineon_gamma, cineon_gamma_scale, load_lut, lut_file, lut_files, lut_params};
 pub use vr::{equi_dir as vr_equi_dir, rotation as vr_rotation};
 
 /// Effect categories in Effects & Presets order.
@@ -915,6 +917,8 @@ pub fn instantiate(spec: &EffectSpec, ids: &mut Ids, instance_name: &str, layer_
         if matches!(ps.ui, ParamUi::Checkbox | ParamUi::Popup { .. } | ParamUi::Layer) {
             pr.hold_only = true;
         }
+        // (the channels an effect reads: not animatable, as in After Effects)
+        pr.static_only = channel3d::selects_channels(spec.id, ps.id);
         match path.and_then(|path| nested_group(&mut g, ids, path)) {
             Some(sub) => sub.children.push(pr.into()),
             None => g.children.push(pr.into()),

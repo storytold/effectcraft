@@ -17,7 +17,7 @@ fn export_lottie(s: &mut Session, p: &Value) -> Result<Value> {
     let dot = path.to_ascii_lowercase().ends_with(".lottie");
     let bytes = if dot {
         let stem = std::path::Path::new(&path).file_stem().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-        effectcraft_lottie::to_dotlottie(&res, &stem)
+        effectcraft_lottie::try_to_dotlottie(&res, &stem).map_err(|e| EngineError::Other(e.to_string()))?
     } else {
         res.to_string_compact().into_bytes()
     };

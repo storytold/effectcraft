@@ -49,78 +49,7 @@ pub struct ImportResult {
 /// a few levels per nested sequence; parsing several thousand levels overflowed the stack.
 pub const MAX_DEPTH: usize = 256;
 
-/// The deepest element nesting of an XML document (a quick scan that skips comments, CDATA,
-/// processing instructions, declarations and quoted attribute values).
-pub(crate) fn xml_depth(b: &[u8]) -> usize {
-    let (mut i, mut depth, mut max) = (0usize, 0usize, 0usize);
-    let skip_to = |from: usize, end: &[u8]| b.get(from..).and_then(|r| r.windows(end.len()).position(|w| w == end)).map_or(b.len(), |p| from + p + end.len());
-    while let Some(&c) = b.get(i) {
-        if c != b'<' {
-            i += 1;
-            continue;
-        }
-        let rest = b.get(i..).unwrap_or_default();
-        if rest.starts_with(b"<!--") {
-            i = skip_to(i + 4, b"-->");
-        } else if rest.starts_with(b"<![CDATA[") {
-            i = skip_to(i + 9, b"]]>");
-        } else if rest.starts_with(b"<?") {
-            i = skip_to(i + 2, b"?>");
-        } else if rest.starts_with(b"<!") {
-            i = skip_to(i + 2, b">");
-        } else if rest.starts_with(b"</") {
-            depth = depth.saturating_sub(1);
-            i = skip_to(i + 2, b">");
-        } else {
-            // A start tag: find its end outside quotes; `/>` closes it at once.
-            let mut j = i + 1;
-            let mut quote = None;
-            while let Some(&c) = b.get(j) {
-                match quote {
-                    Some(q) if c == q => quote = None,
-                    Some(_) => {}
-                    None if c == b'"' || c == b'\'' => quote = Some(c),
-                    None if c == b'>' => break,
-                    None => {}
-                }
-                j += 1;
-            }
-            if b.get(j.wrapping_sub(1)) != Some(&b'/') {
-                depth += 1;
-                max = max.max(depth);
-            }
-            i = j + 1;
-        }
-    }
-    max
-}
-
-/// The deepest array / object nesting of a JSON document (strings skipped).
-pub(crate) fn json_depth(b: &[u8]) -> usize {
-    let (mut depth, mut max, mut in_str, mut esc) = (0usize, 0usize, false, false);
-    for &c in b {
-        if in_str {
-            if esc {
-                esc = false;
-            } else if c == b'\\' {
-                esc = true;
-            } else if c == b'"' {
-                in_str = false;
-            }
-            continue;
-        }
-        match c {
-            b'"' => in_str = true,
-            b'[' | b'{' => {
-                depth += 1;
-                max = max.max(depth);
-            }
-            b']' | b'}' => depth = depth.saturating_sub(1),
-            _ => {}
-        }
-    }
-    max
-}
+pub(crate) use craft_timeline::preflight::{json_depth, xml_depth};
 
 pub fn import(
     project: &mut Project,
@@ -177,10 +106,12 @@ pub fn import(
     }
     let folder_name = if opts.name.is_empty() { "Imported Timeline".to_string() } else { opts.name.clone() };
     res.folder = project.add_item(&folder_name, Label::None, None, ItemKind::Folder);
+    let warned = res.warnings.iter().cloned().collect();
     let mut im = Importer {
         src: &imported.project,
         project,
         res,
+        warned,
         items: HashMap::new(),
         solids: HashMap::new(),
         solids_folder: None,
@@ -199,8 +130,8 @@ const EDL_MEDIA_TIME_NOTE: &str = "EDL source timecodes were imported as media t
 /// The largest start timecode, in frames, a file may have: a day at 1000 fps.
 const MAX_FILE_TIMECODE: i64 = 24 * 3600 * 1000;
 
-/// The paths an EDL reader guessed (media it flags offline: a line without `SOURCE FILE` names
-/// only its clip) that are not inside the list's folder: a clip name of `../x.mov` or an absolute
+/// The paths an EDL reader guessed (identified by its `Tape Name` metadata: a line without
+/// `SOURCE FILE` names only its clip) that are not inside the list's folder: a clip name of `../x.mov` or an absolute
 /// one would link a file elsewhere on the disk. They stay placeholders. A `SOURCE FILE` path is
 /// the list's own choice and is kept, also when another clip guesses the same path.
 fn guessed_outside(project: &fp::Project, base_dir: Option<&str>) -> HashSet<String> {
@@ -217,7 +148,9 @@ fn guessed_outside(project: &fp::Project, base_dir: Option<&str>) -> HashSet<Str
         if let fp::ItemKind::Media(m) = &it.kind
             && let fp::MediaRef::File { path } = &m.media
         {
-            if m.offline && !inside(path) {
+            // Film reserves `offline` for an explicit user action now. Its EDL reader sets
+            // Tape Name only on reel/clip-name guesses, never on SOURCE FILE references.
+            if it.metadata.contains_key("Tape Name") && !inside(path) {
                 guessed.insert(path.clone());
             } else {
                 named.insert(path.clone());
@@ -273,6 +206,8 @@ struct Importer<'a> {
     src: &'a fp::Project,
     project: &'a mut Project,
     res: ImportResult,
+    /// The warnings in `res`, to say each once without searching them all every time.
+    warned: HashSet<String>,
     /// Source item → created item (footage, comp).
     items: HashMap<fp::ItemId, ItemId>,
     /// Generator / adjustment solids by (source item, width, height).
@@ -290,7 +225,7 @@ struct Importer<'a> {
 impl Importer<'_> {
     fn warn(&mut self, m: impl Into<String>) {
         let m = m.into();
-        if !self.res.warnings.contains(&m) {
+        if self.warned.insert(m.clone()) {
             self.res.warnings.push(m);
         }
     }
@@ -429,23 +364,8 @@ impl Importer<'_> {
         comp.markers = seq.markers.iter().map(marker_in).collect();
         // Video: the top track's clips first (layer #1); later clips of a track above earlier ones
         // so incoming clips of dissolves cover outgoing ones.
-        for track in seq.video_tracks.iter().rev() {
-            let mut items: Vec<&fp::TrackItem> = track.items.iter().collect();
-            items.sort_by_key(|i| std::cmp::Reverse(i.start));
-            for ti in items {
-                if let Some(l) = self.clip_layer(&comp, seq, track, ti) {
-                    comp.layers.push(l);
-                }
-            }
-        }
-        for track in &seq.audio_tracks {
-            let mut items: Vec<&fp::TrackItem> = track.items.iter().collect();
-            items.sort_by_key(|i| std::cmp::Reverse(i.start));
-            for ti in items {
-                if let Some(l) = self.clip_layer(&comp, seq, track, ti) {
-                    comp.layers.push(l);
-                }
-            }
+        for track in seq.video_tracks.iter().rev().chain(&seq.audio_tracks) {
+            self.track_layers(&mut comp, seq, track);
         }
         if !seq.caption_tracks.is_empty() {
             self.warn("caption tracks are not imported");
@@ -508,7 +428,45 @@ impl Importer<'_> {
         }
     }
 
-    fn clip_layer(&mut self, comp: &Comp, seq: &fp::Sequence, track: &fp::Track, ti: &fp::TrackItem) -> Option<Layer> {
+    /// A track's clips as layers of `comp`, the latest first.
+    fn track_layers(&mut self, comp: &mut Comp, seq: &fp::Sequence, track: &fp::Track) {
+        let mut items: Vec<&fp::TrackItem> = track.items.iter().collect();
+        items.sort_by_key(|i| std::cmp::Reverse(i.start));
+        // Each clip's transitions, found once per track: scanning every transition of the track
+        // for every clip made a long flat edit (many clips and many transitions) quadratic.
+        let mut transitions: HashMap<fp::ClipId, Vec<&fp::Transition>> = HashMap::new();
+        for tr in &track.transitions {
+            for clip in [tr.from, tr.to].into_iter().flatten() {
+                let list = transitions.entry(clip).or_default();
+                // A transition from and to the same clip still counts once.
+                if !list.last().is_some_and(|last| std::ptr::eq(*last, tr)) {
+                    list.push(tr);
+                }
+            }
+        }
+        let mut any = false;
+        for ti in items {
+            let own = transitions.get(&ti.id).map(Vec::as_slice).unwrap_or_default();
+            if let Some(l) = self.clip_layer(comp, seq, track, ti, own) {
+                comp.layers.push(l);
+                any = true;
+            }
+        }
+        // What the track's transitions become, said once a clip of the track was imported.
+        if any && track.kind != fp::TrackKind::Audio {
+            for tr in &track.transitions {
+                let id = tr.effect.effect.as_str();
+                if !matches!(id, "cross_dissolve" | "dip_to_black" | "dip_to_white" | "film_dissolve" | "additive_dissolve" | "non_additive_dissolve") {
+                    self.warn(format!("transition \"{}\" was imported as a cross dissolve", tr.effect.def().map(|d| d.name).unwrap_or(id)));
+                }
+            }
+        }
+        if any && track.transitions.iter().any(|tr| tr.effect.effect == "dip_to_white") {
+            self.warn("Dip to White was imported as a dip to the background");
+        }
+    }
+
+    fn clip_layer(&mut self, comp: &Comp, seq: &fp::Sequence, track: &fp::Track, ti: &fp::TrackItem, transitions: &[&fp::Transition]) -> Option<Layer> {
         let audio_track = track.kind == fp::TrackKind::Audio;
         let (source, size, has_audio) = self.source_of(ti, comp.width, comp.height)?;
         let is_adjustment = matches!(self.src.item(ti.item).map(|i| &i.kind), Some(fp::ItemKind::AdjustmentLayer { .. }));
@@ -561,18 +519,9 @@ impl Importer<'_> {
         }
         // Transitions extend the layer over their handles.
         let mut fades: Vec<(Tick, Tick, f64, f64)> = vec![];
-        for tr in &track.transitions {
+        for tr in transitions {
             let (ts, te) = (tick_in(tr.start), tick_in(tr.end()));
-            let id = tr.effect.effect.as_str();
-            let dip = id.starts_with("dip_to");
-            if !audio_track
-                && !matches!(id, "cross_dissolve" | "dip_to_black" | "dip_to_white" | "film_dissolve" | "additive_dissolve" | "non_additive_dissolve")
-            {
-                self.warn(format!("transition \"{}\" was imported as a cross dissolve", tr.effect.def().map(|d| d.name).unwrap_or(id)));
-            }
-            if dip && id == "dip_to_white" {
-                self.warn("Dip to White was imported as a dip to the background");
-            }
+            let dip = tr.effect.effect.starts_with("dip_to");
             let mid = ts + Tick((te - ts).0 / 2);
             if tr.to == Some(ti.id) {
                 l.in_point = l.in_point.min(ts);

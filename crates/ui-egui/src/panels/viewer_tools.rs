@@ -48,21 +48,23 @@ pub(crate) fn snap(
     sources: &[[f64; 2]],
     mods: egui::Modifiers,
 ) -> [f64; 2] {
-    snap_with(app, ctx, ectx, map, &SnapQuery { exclude, sources, mods, extra: &[] })
+    snap_with(app, ctx, ectx, map, &SnapQuery { exclude, sources, mods, extra: &[], along_x: None })
 }
 
 /// What [`snap_with`] snaps: the dragged features and the layers to ignore, plus `extra` layer
-/// targets (the Pan Behind layer's own box).
+/// targets (the Pan Behind layer's own box). `along_x` is the axis a Shift drag keeps to
+/// (`Some(true)`: x), whose coordinate alone snaps ([`vw::snap_along`], #3229).
 pub(crate) struct SnapQuery<'a> {
     pub exclude: &'a [LayerId],
     pub sources: &'a [[f64; 2]],
     pub mods: egui::Modifiers,
     pub extra: &'a [vw::SnapTarget],
+    pub along_x: Option<bool>,
 }
 
 /// [`snap`] with extra layer targets.
 pub(crate) fn snap_with(app: &EffectcraftApp, ctx: &egui::Context, ectx: &EvalCtx, map: &ViewerMap, q: &SnapQuery) -> [f64; 2] {
-    let SnapQuery { exclude, sources, mods, extra } = *q;
+    let SnapQuery { exclude, sources, mods, extra, along_x } = *q;
     let layers = snapping_on(app, mods);
     let v = &app.ui.viewer;
     let guides = v.snap_guides && v.guides;
@@ -75,7 +77,12 @@ pub(crate) fn snap_with(app: &EffectcraftApp, ctx: &egui::Context, ectx: &EvalCt
     if layers {
         targets.extend_from_slice(extra);
     }
-    match vw::snap(sources, &targets, SNAP_PX / map.zoom.max(1e-3) as f64) {
+    let tol = SNAP_PX / map.zoom.max(1e-3) as f64;
+    let hit = match along_x {
+        Some(x) => vw::snap_along(sources, &targets, tol, x),
+        None => vw::snap(sources, &targets, tol),
+    };
+    match hit {
         Some(s) => {
             let d = s.delta;
             ctx.data_mut(|dd| dd.insert_temp(snap_id(), s));
@@ -962,12 +969,16 @@ fn bottom_bar_contents(app: &mut EffectcraftApp, ui: &mut egui::Ui, bar: Rect, z
             let _ = app.session.execute("view.set3DView", json!({"view": View3D::ALL[i].id()}));
         }
         x = r.max.x + 4.0;
+        x = layout_switch(app, ui, x, cy, &t);
         // Extended Viewer (Settings ▸ 3D): custom views and Draft 3D show past the comp frame.
         let on = app.session.prefs.three_d.extended_viewer;
         if tog(ui, &mut app.auto, &mut x, Icon::ExtendedViewer, on, "extendedViewer", "Extended Viewer").0 {
             let _ = app.session.execute("view.extendedViewer", json!({}));
         }
         x += 2.0;
+    } else {
+        // A 2D comp has no 3D View menu, but it can still be in a 2/4-view layout: keep the way back.
+        x = layout_switch(app, ui, x, cy, &t);
     }
     // Current time.
     let tc = crate::panels::timecode(&app.session, comp, time);
@@ -981,12 +992,49 @@ fn bottom_bar_contents(app: &mut EffectcraftApp, ui: &mut egui::Ui, bar: Rect, z
     }
     app.auto.add_response("viewer.timecode", &resp, "Current time");
     crate::panels::toggle_time_display(app, &resp);
+    go_to_time_on_click(app, &resp);
     // Right: render time.
     let ms = app.frames.last_ms.lock().map(|v| *v).unwrap_or(0.0);
     if tr.max.x + 50.0 < bar.max.x {
         p.text(pos2(bar.max.x - 10.0, cy), Align2::RIGHT_CENTER, format!("{ms:.0} ms"), Tokens::ui(11.0), t.text_faint);
     }
     (tr.right() + 8.0 - bar.left()).max(bar.width())
+}
+
+/// A plain click on the time display opens Go to Time, as it does in After Effects; Ctrl/Cmd+click
+/// is [`crate::panels::toggle_time_display`] (#3373).
+fn go_to_time_on_click(app: &mut EffectcraftApp, resp: &egui::Response) {
+    if resp.clicked() && !resp.ctx.input(|i| i.modifiers.command) {
+        crate::panels::forms::open_form(app, "time.set", &json!({}));
+    }
+}
+
+/// The "Views: 1 | 2 | 4" switch (#3391): a label and three text buttons, the current layout
+/// highlighted; a click runs `view.layout`. Returns the x after it.
+fn layout_switch(app: &mut EffectcraftApp, ui: &mut egui::Ui, mut x: f32, cy: f32, t: &Tokens) -> f32 {
+    let label = crate::i18n::tr("Views:");
+    let g = ui.painter().layout_no_wrap(label.to_string(), Tokens::ui(11.0), t.text_dim);
+    ui.painter().galley(pos2(x, cy - g.size().y / 2.0), g.clone(), t.text_dim);
+    x += g.size().x + 4.0;
+    let current = app.session.state.view_layout;
+    for (n, text, tip) in [(1u8, "1", "1 View"), (2, "2", "2 Views"), (4, "4", "4 Views")] {
+        let r = Rect::from_min_size(pos2(x, cy - 10.0), vec2(26.0, 20.0));
+        let resp = widgets::text_button(ui, r, text, current == n, t, egui::Id::unique(("vw-layout", n)));
+        // The drawn text is just "1" / "2" / "4": the accessible name is the full "N View(s)", the group
+        // label ("Views") is its description, and the current layout is exposed as pressed.
+        let name = crate::i18n::command_label("view.layout", tip);
+        crate::a11y::choice_button(&resp, name, label.trim_end_matches([':', '：', ' ', '\u{a0}']), current == n);
+        let resp = resp.on_hover_text(name);
+        app.auto.add_response(&format!("viewer.layout.{n}"), &resp, tip);
+        if resp.clicked()
+            && current != n
+            && let Err(e) = app.session.execute("view.layout", json!({"views": n}))
+        {
+            app.ui.status = e.to_string();
+        }
+        x = r.max.x + 2.0;
+    }
+    x + 4.0
 }
 
 #[cfg(test)]

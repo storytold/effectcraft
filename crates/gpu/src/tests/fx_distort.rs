@@ -38,6 +38,8 @@ fn twirl_bulge_ripple_wave_warp() {
 #[test]
 fn turbulent_displace_and_cc_lens() {
     effect_case("ec.distort.turbulentdisplace", &[("size", n(30.0)), ("amount", n(20.0))]);
+    // #3470: After Effects' maximum Random Seed.
+    effect_case("ec.distort.turbulentdisplace", &[("size", n(30.0)), ("amount", n(20.0)), ("evolutionOptions/randomSeed", n(100000.0))]);
     effect_case(
         "ec.distort.turbulentdisplace",
         &[("displacement", e(1)), ("complexity", n(3.5)), ("evolution", n(90.0)), ("size", n(25.0)), ("pinning", e(2)), ("resizeLayer", on())],
@@ -55,6 +57,14 @@ fn turbulent_displace_and_cc_lens() {
         ],
     );
     effect_case("ec.distort.turbulentdisplace", &[("displacement", e(8)), ("size", n(15.0)), ("pinning", e(6))]);
+    // #3469: both ends of After Effects' Amount range, resized and pinned, and an expression's
+    // Amount past it.
+    effect_case("ec.distort.turbulentdisplace", &[("size", n(30.0)), ("amount", n(10000.0))]);
+    effect_case(
+        "ec.distort.turbulentdisplace",
+        &[("displacement", e(1)), ("size", n(25.0)), ("amount", n(-10000.0)), ("pinning", e(1)), ("resizeLayer", on())],
+    );
+    effect_case("ec.distort.turbulentdisplace", &[("displacement", e(7)), ("amount", n(f64::INFINITY)), ("pinning", e(2))]);
     // #943: Evolution moves the pattern at a constant rate on both paths, including steps of a
     // few degrees and angles past a whole revolution, where an eased evolution axis diverges.
     for evolution in [10.0, 37.0, 400.0, 725.5] {

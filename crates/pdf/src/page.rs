@@ -209,7 +209,7 @@ pub(crate) struct Interp<'a> {
     cur: Option<Point>,
     start: Option<Point>,
     pending_clip: Option<FillRule>,
-    marked: Vec<Option<usize>>,
+    marked: Vec<Marked>,
     /// The page box in default user space (for `sh`).
     page_box: [f64; 4],
     budget: usize,
@@ -235,6 +235,12 @@ const MAX_TILES: usize = 4096;
 enum TextItem {
     Str(Vec<u8>),
     Adjust(f64),
+}
+
+enum Marked {
+    None,
+    Layer(usize),
+    Text,
 }
 
 impl<'a> Interp<'a> {
@@ -488,7 +494,7 @@ impl<'a> Interp<'a> {
                 }
                 "d1" => self.gs.lock_color = true,
                 "BI" => self.inline_image(&mut lx, res),
-                "BMC" => self.marked.push(None),
+                "BMC" => self.marked.push(Marked::None),
                 "BDC" => {
                     let layer = match (args.first().and_then(Obj::name), args.get(1)) {
                         (Some("OC"), Some(Obj::Name(prop))) => self
@@ -499,19 +505,37 @@ impl<'a> Interp<'a> {
                         (Some("OC"), Some(Obj::Dict(ocg))) => self.ocg_name(ocg),
                         _ => None,
                     };
-                    match layer {
-                        Some(name) => {
-                            self.marked.push(Some(self.b.depth()));
+                    let props = match args.get(1) {
+                        Some(Obj::Name(name)) => self.file.get_dict(res, "Properties").and_then(|p| self.file.get_dict(p, name)),
+                        Some(obj) => self.file.resolve(obj).dict(),
+                        None => None,
+                    };
+                    let actual_text =
+                        (args.first().and_then(Obj::name) == Some("Span")).then_some(props).flatten().and_then(|p| self.file.get(p, "ActualText")).and_then(
+                            |v| match v {
+                                Obj::Str(bytes) => Some(text_string(bytes)),
+                                _ => None,
+                            },
+                        );
+                    match (layer, actual_text) {
+                        (Some(name), _) => {
+                            self.marked.push(Marked::Layer(self.b.depth()));
                             self.b.open(&name, true);
                         }
-                        None => self.marked.push(None),
+                        (None, Some(text)) => {
+                            let mark = if self.b.begin_text(&text) { Marked::Text } else { Marked::None };
+                            self.marked.push(mark);
+                        }
+                        (None, None) => self.marked.push(Marked::None),
                     }
                 }
-                "EMC" => {
-                    if let Some(Some(d)) = self.marked.pop() {
-                        self.close_to(d);
+                "EMC" => match self.marked.pop() {
+                    Some(Marked::Layer(d)) => self.close_to(d),
+                    Some(Marked::Text) => {
+                        self.b.end_text();
                     }
-                }
+                    _ => {}
+                },
                 _ => {}
             }
             // Colour operands set by the device-space shorthands.
@@ -669,7 +693,12 @@ impl<'a> Interp<'a> {
                 let bc = f.get(&sm, "BC").map(|b| f.nums(b)).unwrap_or_default();
                 let gcs = f.get_dict(&gd, "Group").and_then(|gr| f.get(gr, "CS")).map(|c| color_space(f, c, Some(res))).unwrap_or(Cs::Rgb);
                 let backdrop = if bc.is_empty() { [0.0; 3] } else { gcs.to_rgb(&bc) };
-                let saved_b = std::mem::replace(&mut self.b, Builder::new());
+                // The mask it replaces closes first: its groups don't enclose the new one.
+                if let Some(d) = self.gs.mask_depth {
+                    self.close_to(d);
+                }
+                let inner = self.b.nested(2);
+                let saved_b = std::mem::replace(&mut self.b, inner);
                 let ctm = self.gs.ctm;
                 let saved_gs = std::mem::replace(&mut self.gs, GState { ctm, ..GState::default() });
                 let saved_stack = std::mem::take(&mut self.saved);
@@ -680,9 +709,6 @@ impl<'a> Interp<'a> {
                 let (nodes, _, sk) = mask_b.finish();
                 for s in sk {
                     self.b.skip(&s);
-                }
-                if let Some(d) = self.gs.mask_depth {
-                    self.close_to(d);
                 }
                 let mut content = Group::new("Soft Mask");
                 content.children = nodes;
@@ -784,8 +810,15 @@ impl<'a> Interp<'a> {
         if depth > 8 {
             return;
         }
+        // The `Pattern` and `Tile` wrappers must fit under the open groups too.
+        if !self.b.has_room(2) {
+            self.b.skip("group nesting limit");
+            return;
+        }
         // The cell, drawn once in pattern space.
-        let saved_b = std::mem::replace(&mut self.b, Builder::new());
+        // The cell ends up under the open groups and this pattern's `Pattern` and `Tile`.
+        let inner = self.b.nested(2);
+        let saved_b = std::mem::replace(&mut self.b, inner);
         let saved_gs = std::mem::take(&mut self.gs);
         let saved_stack = std::mem::take(&mut self.saved);
         let saved_path = std::mem::take(&mut self.path);

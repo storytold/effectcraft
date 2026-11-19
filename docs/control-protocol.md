@@ -86,7 +86,7 @@ The control transport's 60-second request timeout still applies to long renders.
 |---|---|---|
 | `ui.inspect` | `{}` | Window size, pixels per point, fps, serialized `UiState`, playback, time, active comp, selection, open dialog, last render ms, `keyboardFocus`, `windowFocused`, `workspaceStorageError`. |
 | `ui.elements` | `{prefix?}` | `[{id, label, rect: [x, y, w, h]}]`: the widgets drawn in the last frame, in points. |
-| `ui.set` | `{tool?, workspace?, theme?, focused?, viewer?, timeline?, menuBar?, home?}` | `viewer: {zoom (null = fit), res: Full\|Half\|Third\|Quarter\|Auto, pan: [x,y], grid, rulers, safeMargins, transparencyGrid}`; `timeline: {pps (null = fit), start, graphEditor, showModes, openLayers: [ids], openGroups: [uids]}`. |
+| `ui.set` | `{tool?, workspace?, theme?, focused?, viewer?, effectControlsLocked?, timeline?, menuBar?, home?}` | `viewer: {zoom (null = fit), res: Full\|Half\|Third\|Quarter\|Auto, pan: [x,y], grid, rulers, safeMargins, transparencyGrid}`; `effectControlsLocked: true` locks Effect Controls on the layer it shows (an error when it shows none, or while it is locked to a layer of another composition), `false` unlocks it (the tab's lock icon, `panel.tab.EffectControls.lock`; `ui.inspect` reports it as `effect_controls_lock: {comp, layer}`); `timeline: {pps (null = fit), start, graphEditor, showModes, openLayers: [ids], openGroups: [uids]}`. |
 | `ui.panel.show` / `ui.panel.close` | `{panel}` | Panels: `Project`, `Composition`, `Timeline`, `EffectControls`, `EffectsPresets`, `Info`, `Preview`, `Character`, `Paragraph`, `Align` and others. |
 | `ui.playback` | `{action: play\|stop\|toggle\|status}` | `{playing, time, audio, levelsDb, peaksDb}` (audio: an audio preview is running; L/R meter levels and held peaks in dBFS) |
 | `ui.resize` | `{width, height}` | Resizes the window (points). |
@@ -172,7 +172,9 @@ revolutions are `timeline.prop.<uid>.revolutions`, `effectControls.prop.<uid>.re
 `viewer.motionPath.<layer>.<key>[.in|.out]`, `viewer.puppetPin.<uid>[.rotate|.scale]`,
 `viewer.freeTransform.handle.<i>`, `viewer.cryptoPick` (the Cryptomatte eyedropper's hover chip; its
 label is the chip's text), `viewer.cryptoPick.error` (the chip when it shows an error; label `whole`, or
-`cut` when the message is cut off), `viewer.cryptoPick.highlight` (the hovered ID's highlighted area) and
+`cut` when the message is cut off), `viewer.cryptoPick.highlight` (the hovered ID's highlighted area),
+`viewer.cryptoSelect` (the Selection tool picking Cryptomatte IDs over the layer while its Cryptomatte
+effect is selected in Effect Controls, no eyedropper armed; label: the Selection's name) and
 `viewer.regionOfInterest`; the Graph Editor adds `timeline.graph.transformBox[.<i>]`,
 `timeline.graph.snap` and `timeline.graph.reference`. Use `ui.elements` to see what is on screen.
 

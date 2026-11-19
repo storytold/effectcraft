@@ -384,7 +384,7 @@ fn file_dialogs_can_answer_on_a_later_frame() {
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("Answered.ecproj");
     // Answered from another thread, as the host's dialog does.
-    std::thread::spawn(move || done(vec![path.to_string_lossy().to_string()])).join().unwrap();
+    std::thread::spawn(move || done(Ok(vec![path.to_string_lossy().to_string()]))).join().unwrap();
     app.run_dialog_answers();
     assert_eq!(app.session.path.as_deref(), Some(dir.join("Answered.ecproj").to_string_lossy().as_ref()));
     assert!(dir.join("Answered.ecproj").is_file());
@@ -392,7 +392,7 @@ fn file_dialogs_can_answer_on_a_later_frame() {
     invoke(&mut app, &ctx, "comp.saveFrameAs", json!({})).unwrap();
     let (dialog, done) = pending.lock().unwrap().pop().expect("a dialog was shown");
     assert_eq!(dialog, crate::FileDialog::Save { default: "Frame.png".into(), ext: "png".into(), project: false });
-    done(Vec::new());
+    done(Ok(Vec::new()));
     app.run_dialog_answers();
     assert!(!dir.join("Frame.png").exists());
     let _ = std::fs::remove_dir_all(&dir);
@@ -423,7 +423,7 @@ fn file_dialogs_block_floating_windows_only_while_up() {
     assert!(blocked(&mut app, true, 0.1), "blocked while the dialog takes the keyboard");
     assert!(blocked(&mut app, false, 0.2));
     let done = pending.lock().unwrap().pop().expect("a dialog was shown");
-    done(Vec::new());
+    done(Ok(Vec::new()));
     app.run_dialog_answers();
     assert!(!blocked(&mut app, false, 0.3));
     // Save As asks again; the sheet ends without answering.
@@ -440,12 +440,112 @@ fn file_dialogs_block_floating_windows_only_while_up() {
     assert!(!blocked(&mut app, true, 12.5));
     // Answers of dialogs taken for gone arrive late: nothing stays blocked.
     for done in pending.lock().unwrap().drain(..) {
-        done(Vec::new());
+        done(Ok(Vec::new()));
     }
     app.run_dialog_answers();
     assert!(!blocked(&mut app, false, 13.0));
     invoke(&mut app, &ctx, "file.saveAs", json!({})).unwrap();
     assert!(blocked(&mut app, false, 13.1), "a later dialog blocks again");
+}
+
+/// While a native file dialog is up, the Edit menu is disabled on macOS so the OS hands Cmd+A
+/// to the dialog instead of selecting in the Project panel behind it (#1986). Elsewhere the
+/// menu stays as it was.
+#[test]
+fn edit_menu_is_disabled_while_a_file_dialog_is_open() {
+    use std::sync::{Arc, Mutex};
+    let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+    app.session.execute("file.openDemoProject", json!({})).unwrap();
+    app.ui.focused = PanelKind::Project;
+    let ctx = egui::Context::default();
+    let entries = effectcraft_engine::menus::entries();
+    let select_all = entries.iter().map(|(_, e)| e).find(|e| e.command == "edit.selectAll").expect("Select All is in the menu");
+    let import = entries.iter().map(|(_, e)| e).find(|e| e.command == "file.import").expect("Import is in the menu");
+    assert!(entry_enabled(&app, select_all));
+    let steps_aside = cfg!(target_os = "macos");
+    let pending: Arc<Mutex<Vec<crate::DialogDone>>> = Arc::default();
+    let queue = pending.clone();
+    app.hooks.file_dialog_async = Some(Box::new(move |_, done| queue.lock().unwrap().push(done)));
+    invoke(&mut app, &ctx, "file.importMultiple", json!({})).unwrap();
+    assert_eq!(!entry_enabled(&app, select_all), steps_aside, "Cmd+A must reach the dialog on macOS only");
+    assert!(entry_enabled(&app, import), "only the Edit menu steps aside");
+    // Cancelled: the menu is back.
+    let done = pending.lock().unwrap().pop().expect("a dialog was shown");
+    done(Ok(Vec::new()));
+    app.run_dialog_answers();
+    assert!(entry_enabled(&app, select_all));
+    // Ended without answering: the menu is back once the dialog is taken for gone.
+    invoke(&mut app, &ctx, "file.importMultiple", json!({})).unwrap();
+    assert_eq!(!entry_enabled(&app, select_all), steps_aside);
+    let _ = app.file_dialogs.up(true, 0.0);
+    let _ = app.file_dialogs.up(false, 0.1);
+    let _ = app.file_dialogs.up(true, 0.2);
+    assert!(entry_enabled(&app, select_all));
+}
+
+/// #3084: a host whose dialog couldn't open (macOS: `+[NSOpenPanel openPanel]` returned nil)
+/// answers with the error. The status line says why, the command doesn't run and the dialog
+/// no longer blocks floating windows; the next dialog opens as usual.
+#[test]
+fn a_dialog_that_cannot_open_reports_an_error() {
+    use std::sync::{Arc, Mutex};
+    let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+    let ctx = egui::Context::default();
+    let pending: Arc<Mutex<Vec<crate::DialogDone>>> = Arc::default();
+    let queue = pending.clone();
+    app.hooks.file_dialog_async = Some(Box::new(move |_dialog, done| queue.lock().unwrap().push(done)));
+    let blocked = |app: &mut EffectcraftApp, focused: bool, time: f64| {
+        let input = egui::RawInput { focused, time: Some(time), ..Default::default() };
+        let mut out = false;
+        ctx.run_ui(input, |ui| out = app.floats_blocked(ui.ctx())).textures_delta.clear();
+        out
+    };
+    let items = app.session.project.items.len();
+    assert_eq!(invoke(&mut app, &ctx, "file.importAep", json!({})).unwrap(), json!({"dialog": "file.importAep"}));
+    assert!(blocked(&mut app, true, 0.1));
+    let done = pending.lock().unwrap().pop().expect("a dialog was asked for");
+    std::thread::spawn(move || done(Err("The Open dialog couldn't open".into()))).join().unwrap();
+    app.run_dialog_answers();
+    assert_eq!(app.ui.status, "The Open dialog couldn't open");
+    assert_eq!(app.session.project.items.len(), items, "nothing was imported");
+    assert!(!blocked(&mut app, false, 0.2), "the failed dialog doesn't block floating windows");
+    invoke(&mut app, &ctx, "file.importAep", json!({})).unwrap();
+    assert_eq!(pending.lock().unwrap().len(), 1, "the next dialog opens");
+}
+
+/// Coverage for #3084 (not its regression test, which needs macOS): every enabled File ▸ Import
+/// item that asks for a file asks through the host's one dialog path (`Hooks::file_dialog_async`
+/// where the host has it), never through a blocking picker; After Effects Project is no
+/// different from the others.
+#[test]
+fn every_import_item_asks_through_the_shared_dialog_path() {
+    use std::sync::{Arc, Mutex};
+    let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+    let ctx = egui::Context::default();
+    app.hooks.pick_files = Some(Box::new(|_: &[&str]| panic!("the blocking picker is not used")));
+    app.hooks.pick_open_project = Some(Box::new(|| panic!("the blocking picker is not used")));
+    app.hooks.pick_folder = Some(Box::new(|| panic!("the blocking picker is not used")));
+    let pending: Arc<Mutex<Vec<crate::FileDialog>>> = Arc::default();
+    let queue = pending.clone();
+    app.hooks.file_dialog_async = Some(Box::new(move |dialog, _done| queue.lock().unwrap().push(dialog)));
+    // Placeholder and Solid open a form of the app's own and ask for no file.
+    const IN_APP_FORM: &[&str] = &["file.importPlaceholder", "file.importSolid"];
+    let import: Vec<_> = effectcraft_engine::menus::entries()
+        .into_iter()
+        .filter(|(path, _)| path.iter().map(String::as_str).eq(["File", "Import"]))
+        .map(|(_, e)| e)
+        .filter(|e| app.session.is_enabled(&e.command) && !IN_APP_FORM.contains(&e.command.as_str()))
+        .collect();
+    assert!(import.iter().any(|e| e.command == "file.importAep"), "File ▸ Import has After Effects Project");
+    for entry in import {
+        let r = invoke(&mut app, &ctx, &entry.command, entry.params_or_empty());
+        assert_eq!(r, Ok(json!({"dialog": entry.command})), "{}", entry.command);
+        let dialog = pending.lock().unwrap().pop();
+        assert!(dialog.is_some(), "{}: asks through the shared dialog path", entry.command);
+        if entry.command == "file.importAep" {
+            assert_eq!(dialog, Some(crate::FileDialog::Open { exts: vec!["aep".into(), "aepx".into()], many: false }));
+        }
+    }
 }
 
 #[test]
@@ -461,6 +561,80 @@ fn tga_is_available_in_import_replace_and_proxy_dialogs() {
         let crate::FileDialog::Open { exts, .. } = pending.lock().unwrap().pop().unwrap() else { panic!("not an open dialog") };
         assert!(exts.iter().any(|ext| ext == "tga"), "{command}: {exts:?}");
     }
+}
+
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn dropped_files_keep_import_errors_alongside_local_drop_errors() {
+    #[derive(Debug)]
+    struct Drop(std::path::PathBuf);
+    impl egui::DroppedFile for Drop {
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+        fn bytes(&self) -> Result<Vec<u8>, String> {
+            std::fs::read(&self.0).map_err(|e| e.to_string())
+        }
+    }
+    let folder = std::env::temp_dir().join(format!("effectcraft-mixed-drop-{}", std::process::id()));
+    std::fs::create_dir_all(&folder).unwrap();
+    let path = folder.join("no-pdf.vectorcraft");
+    std::fs::write(&path, br#"{"format":"vectorcraft","version":4,"document":{"artboards":[],"layers":[]}}"#).unwrap();
+    let second = folder.join("also-no-pdf.vectorcraft");
+    std::fs::copy(&path, &second).unwrap();
+    let footage = folder.join("pending.png");
+    std::fs::write(&footage, b"not a PNG").unwrap();
+    for (bad_import, background) in [(false, false), (true, false), (true, true)] {
+        let mut app = EffectcraftApp::new(effectcraft_host::session());
+        app.session.prefs.import.drag_import_as = "comp".into();
+        let ctx = egui::Context::default();
+        let mut dropped_files: Vec<egui::DroppedFileHandle> = vec![std::sync::Arc::new(Drop("no-local-path".into()))];
+        if bad_import {
+            dropped_files.push(std::sync::Arc::new(Drop(path.clone())));
+            dropped_files.push(std::sync::Arc::new(Drop(second.clone())));
+        }
+        if background {
+            dropped_files.push(std::sync::Arc::new(Drop(footage.clone())));
+        }
+        ctx.run_ui(egui::RawInput { dropped_files, ..Default::default() }, |ui| {
+            crate::prefs_live::dropped_files(&mut app, ui, ui.max_rect());
+        })
+        .textures_delta
+        .clear();
+        assert!(app.ui.status.contains("without a local path"), "{}", app.ui.status);
+        if bad_import {
+            assert!(app.ui.status.contains("no-pdf.vectorcraft") && app.ui.status.contains("Create PDF-Compatible File"), "{}", app.ui.status);
+            let details = &app.error_toasts.back().expect("all import errors remain available").message;
+            assert!(details.contains("also-no-pdf.vectorcraft"), "{details}");
+            if background {
+                app.session.execute("jobs.wait", json!({})).unwrap();
+                app.handle_events(&ctx);
+                let details = &app.error_toasts.back().unwrap().message;
+                for name in ["no-pdf.vectorcraft", "also-no-pdf.vectorcraft", "pending.png"] {
+                    assert!(details.contains(name), "{details}");
+                }
+                assert!(app.ui.status.contains("without a local path"));
+            }
+        } else {
+            assert!(!app.ui.status.contains(";"), "{}", app.ui.status);
+        }
+    }
+    std::fs::remove_dir_all(folder).unwrap();
+}
+
+#[test]
+fn importing_without_a_form_shows_immediate_file_errors() {
+    let folder = std::env::temp_dir().join(format!("effectcraft-drop-import-{}", std::process::id()));
+    std::fs::create_dir_all(&folder).unwrap();
+    let path = folder.join("no-pdf.vectorcraft");
+    std::fs::write(&path, br#"{"format":"vectorcraft","version":4,"document":{"artboards":[],"layers":[]}}"#).unwrap();
+    let mut app = EffectcraftApp::new(effectcraft_host::session());
+    let ctx = egui::Context::default();
+    let r = invoke(&mut app, &ctx, "file.import", json!({"paths": [path], "importAs": "composition", "background": true, "drag": true})).unwrap();
+    assert!(app.dialog.is_none());
+    assert!(r["errors"][0].as_str().unwrap().contains("Create PDF-Compatible File"));
+    assert!(app.ui.status.contains("no-pdf.vectorcraft") && app.ui.status.contains("Create PDF-Compatible File"), "{}", app.ui.status);
+    std::fs::remove_dir_all(folder).unwrap();
 }
 
 /// Cmd+W with the Render Queue focused closes the queue; the composition next to it stays
@@ -677,7 +851,10 @@ fn opening_a_project_leaves_the_home_screen_whatever_its_composition_id() {
     assert!(!app.ui.start_screen, "File ▸ Open leaves the Home screen");
     // The path picked in a file dialog (`run_with_picked`).
     app.ui.start_screen = true;
-    super::frontend::dialog_answered(&mut app, crate::DialogAnswer { command: "file.open".into(), key: "path", params: json!({}), paths: vec![path.clone()] });
+    super::frontend::dialog_answered(
+        &mut app,
+        crate::DialogAnswer { command: "file.open".into(), key: "path", params: json!({}), paths: Ok(vec![path.clone()]) },
+    );
     assert_eq!(app.session.active_comp_id(), comp);
     assert!(!app.ui.start_screen, "a picked project leaves the Home screen");
     let _ = std::fs::remove_dir_all(&dir);
@@ -699,6 +876,35 @@ fn bundle_result_errors_show_compactly_in_the_status_line() {
     // A clean success leaves the status line alone.
     super::frontend::show_result_errors(&mut app, &json!({"installed": ["x.wasm"], "errors": []}));
     assert_eq!(app.ui.status, "a.wasm: already installed; b.wasm: does not load; c.wasm: cannot read it; +1 more");
+}
+
+/// A picked or menu import reports its errors twice: `report_import_errors` queues the details
+/// with a short status, and the command's result then writes the longer status. Dismissing that
+/// status still acknowledges the queued details, also when After Effects project errors lead it.
+/// Another command's errors do not take over an import's details, even with the same text.
+#[test]
+fn an_import_status_rewritten_by_its_result_still_acknowledges_its_details() {
+    let long = format!("first failed file {}", "x".repeat(20_000));
+    for first in ["first failed file", "first failed file\nwith a second line", long.as_str()] {
+        let import = json!({"errors": [first, "second failed file"]});
+        let with_aep = json!({"errors": ["project.aep: cannot read it", first, "second failed file"]});
+        for result in [&import, &with_aep] {
+            let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+            app.report_import_errors("file.import", &import);
+            super::frontend::show_command_result_errors(&mut app, "file.import", result);
+            assert!(app.ui.status.contains("first failed file"), "{}", app.ui.status);
+            assert_eq!(app.error_toasts.len(), 1);
+            assert!(app.error_toasts.back().unwrap().reported_by(&app.ui.status), "{first:.40}: {:.80}", app.ui.status);
+        }
+    }
+    let import = json!({"errors": ["first failed file", "second failed file"]});
+    for other in [json!({"errors": [{"file": "a.wasm", "error": "does not load"}]}), import.clone()] {
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        app.report_import_errors("file.import", &import);
+        super::frontend::show_command_result_errors(&mut app, "effect.installBundle", &other);
+        assert!(!app.ui.status.contains("(and"), "{}", app.ui.status);
+        assert!(!app.error_toasts.back().unwrap().reported_by(&app.ui.status), "{}", app.ui.status);
+    }
 }
 
 /// Effect ▸ Install Effect Plug-in… picks its dialog by params: a bundle asks for a folder,
@@ -755,7 +961,7 @@ fn import_file_dialog_offers_and_imports_after_effects_projects() {
     assert!(many && exts.iter().any(|e| e == "aep") && exts.iter().any(|e| e == "aepx"), "{exts:?}");
     assert!(exts.iter().any(|e| e == "png"), "footage too");
 
-    super::frontend::dialog_answered(&mut app, crate::DialogAnswer { command: "file.import".into(), key: "paths", params: json!({}), paths: vec![aep] });
+    super::frontend::dialog_answered(&mut app, crate::DialogAnswer { command: "file.import".into(), key: "paths", params: json!({}), paths: Ok(vec![aep]) });
     let comp = app.session.project.item(app.session.active_comp_id().expect("a composition is open")).unwrap();
     assert_eq!(comp.name, "Intro");
     assert_eq!(app.session.project.item(comp.parent.expect("in a folder")).unwrap().name, "Intro.aep");
@@ -816,7 +1022,10 @@ fn picked_projects_report_every_error() {
     std::fs::write(&aep, b"not an aep").unwrap();
     std::fs::write(&ecproj, b"not a project").unwrap();
     let paths = vec![aep.to_string_lossy().to_string(), ecproj.to_string_lossy().to_string()];
-    super::frontend::dialog_answered(&mut app, crate::DialogAnswer { command: "file.import".into(), key: "paths", params: json!({}), paths: paths.clone() });
+    super::frontend::dialog_answered(
+        &mut app,
+        crate::DialogAnswer { command: "file.import".into(), key: "paths", params: json!({}), paths: Ok(paths.clone()) },
+    );
     let status = &app.ui.status;
     assert!(status.contains("broken.aep") && status.contains("broken.ecproj"), "{status}");
     assert!(!status.contains('"'), "messages, not quoted JSON: {status}");
@@ -847,7 +1056,7 @@ fn a_picked_project_with_losses_asks_and_the_next_waits() {
     source.execute("comp.new", json!({"name": "Intro", "width": 64, "height": 36, "frameRate": 30, "duration": 1})).unwrap();
     source.execute("file.exportAep", json!({"path": intro, "allowLosses": true})).unwrap();
     let paths = vec![lossy.to_string_lossy().to_string(), intro.clone()];
-    super::frontend::dialog_answered(&mut app, crate::DialogAnswer { command: "file.import".into(), key: "paths", params: json!({}), paths });
+    super::frontend::dialog_answered(&mut app, crate::DialogAnswer { command: "file.import".into(), key: "paths", params: json!({}), paths: Ok(paths) });
     assert_eq!(app.dialog, Some(crate::Dialog::AepLosses));
     assert_eq!(app.dialog_state.aep_losses.queue, [intro]);
     assert!(app.session.project.items.is_empty(), "nothing imported before the answer");

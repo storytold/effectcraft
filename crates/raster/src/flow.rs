@@ -113,16 +113,63 @@ pub fn block_flow(a: &Image, b: &Image, block: u32, radius: i32) -> Flow {
     block_flow_window(a, b, block, block, radius)
 }
 
+/// Largest coarse search radius honoured (the effects use at most 64).
+const MAX_RADIUS: i32 = 1024;
+/// Upper bound on the pixel comparisons of one motion search (about 4·10¹²: minutes of work on
+/// many cores). A finer vector grid than this allows is made coarser, by doubling the tile.
+const MAX_SEARCH_WORK: f64 = 4.4e12;
+
+/// The pixel comparisons [`block_flow_window`] makes for tiles of `bs`: every tile, at every
+/// pyramid level, tries its candidate vectors with a `window`-sized block, then refines.
+/// The pyramid depth follows the requested tile `fine`, not the coarsened one, so a coarser vector
+/// grid keeps the full search range.
+fn search_work(w: usize, h: usize, bs: usize, fine: usize, win: i64, radius: i64) -> f64 {
+    let tiles = (w.div_ceil(bs).max(1) as f64) * (h.div_ceil(bs).max(1) as f64);
+    let reach = (fine as i64).max(win) as usize * 2;
+    let (mut lw, mut lh, mut top) = (w, h, 0u32);
+    while top < 3 && lw / 2 >= reach && lh / 2 >= reach {
+        (lw, lh, top) = (lw / 2, lh / 2, top + 1);
+    }
+    let mut per_tile = 5.0 * (win * win) as f64;
+    for level in 0..=top {
+        let lbs = (win >> level).max(4) as f64;
+        let (seeds, r) = if level == top { (1.0, radius as f64) } else { (6.0, 1.0) };
+        per_tile += seeds * (2.0 * r + 1.0).powi(2) * lbs * lbs;
+    }
+    tiles * per_tile
+}
+
+/// The tile size and radius to search with: `tile`, doubled (while it still fits the frame) and
+/// then, if that is not enough, the radius halved, until the search is within [`MAX_SEARCH_WORK`].
+fn planned(w: usize, h: usize, tile: usize, win: i64, radius: i64) -> (usize, i64) {
+    let (mut bs, mut r) = (tile, radius);
+    while bs * 2 <= w.min(h) && search_work(w, h, bs, tile, win, r) > MAX_SEARCH_WORK {
+        bs *= 2;
+    }
+    while r > 1 && search_work(w, h, bs, tile, win, r) > MAX_SEARCH_WORK {
+        r /= 2;
+    }
+    (bs, r)
+}
+
 /// [`block_flow`] with separate vector spacing and matching window: one vector per
 /// `tile × tile` tile, each matched with the `window × window` block centred on its tile
 /// (Timewarp's Vector Detail and Block Size).
 pub fn block_flow_window(a: &Image, b: &Image, tile: u32, window: u32, radius: i32) -> Flow {
-    let bs = tile.max(2) as usize;
     // The matching cost per vector grows with the window's area; 512 is far above any block size the effects offer.
     let win = i64::from(window.clamp(4, 512));
+    let radius = radius.min(MAX_RADIUS);
+    let fine = tile.max(2) as usize;
+    let (bs, radius) = planned(a.width as usize, a.height as usize, fine, win, i64::from(radius));
+    let coarse = bs != fine;
     // Window origin relative to the tile origin.
     let wo = bs as i64 / 2 - win / 2;
     let (w, h) = (a.width as usize, a.height as usize);
+    // A coarsened grid's last (partial) tiles keep their window inside the frame.
+    let origin = |c: i64, dim: usize| {
+        let o = c * bs as i64 + wo;
+        if coarse { o.clamp(0, (dim as i64 - win).max(0)) } else { o }
+    };
     let cols = w.div_ceil(bs).max(1);
     let rows = h.div_ceil(bs).max(1);
     let mut flow = Flow { width: a.width, height: a.height, block: bs as u32, cols, rows, v: vec![[0.0; 2]; cols * rows] };
@@ -132,7 +179,7 @@ pub fn block_flow_window(a: &Image, b: &Image, tile: u32, window: u32, radius: i
     // Pyramids (level 0 = full resolution); stop while blocks still fit.
     let mut pa = vec![Plane::luma(a)];
     let mut pb = vec![Plane::luma(b)];
-    while pa.len() < 4 && pa.last().is_some_and(|p| p.w / 2 >= (bs as i64).max(win) as usize * 2 && p.h / 2 >= (bs as i64).max(win) as usize * 2) {
+    while pa.len() < 4 && pa.last().is_some_and(|p| p.w / 2 >= (fine as i64).max(win) as usize * 2 && p.h / 2 >= (fine as i64).max(win) as usize * 2) {
         let (na, nb) = (pa.last().map(Plane::half), pb.last().map(Plane::half));
         pa.extend(na);
         pb.extend(nb);
@@ -145,14 +192,14 @@ pub fn block_flow_window(a: &Image, b: &Image, tile: u32, window: u32, radius: i
         let k = 1i64 << level;
         // The block covers the tile's footprint at this level (at least 4 pixels).
         let lbs = (win / k).max(4);
-        let r = if level == top { radius as i64 } else { 1 };
+        let r = if level == top { radius } else { 1 };
         let prev = cur.clone();
         cur = (0..cols * rows)
             .into_par_iter()
             .map(|i| {
                 let (c, rr) = ((i % cols) as i64, (i / cols) as i64);
-                let bx = (c * bs as i64 + wo) / k;
-                let by = (rr * bs as i64 + wo) / k;
+                let bx = origin(c, w) / k;
+                let by = origin(rr, h) / k;
                 // Candidates: this tile's and its neighbours' vectors from the coarser level.
                 let mut seeds: Vec<[i64; 2]> = vec![[0, 0]];
                 if level != top {
@@ -185,12 +232,11 @@ pub fn block_flow_window(a: &Image, b: &Image, tile: u32, window: u32, radius: i
     }
     // Sub-pixel refinement (parabola through the SAD of the neighbours) at full resolution.
     let (la, lb) = (&pa[0], &pb[0]);
-    let bsi = bs as i64;
     let wsi = win;
     let fine: Vec<[f32; 2]> = (0..cols * rows)
         .into_par_iter()
         .map(|i| {
-            let (bx, by) = ((i % cols) as i64 * bsi + wo, (i / cols) as i64 * bsi + wo);
+            let (bx, by) = (origin((i % cols) as i64, w), origin((i / cols) as i64, h));
             let d = cur[i];
             let e0 = sad(la, lb, bx, by, wsi, d[0], d[1]);
             let fit = |em: f32, ep: f32| {
@@ -294,6 +340,19 @@ mod tests {
             }
         }
         s / n as f32
+    }
+
+    #[test]
+    fn a_fine_vector_grid_with_a_huge_window_is_made_coarser() {
+        // 8K frame, a vector per 2 px, a 512-px window and a 1024-px search: far past the budget.
+        let (t, r) = super::planned(7680, 4320, 2, 512, 1024);
+        assert!(t > 2 && t <= 4320 && super::search_work(7680, 4320, t, 2, 512, r) <= super::MAX_SEARCH_WORK, "{t} {r}");
+        // The tile stays inside the frame, and the pyramid (search range) follows the requested tile.
+        let (t, _) = super::planned(7680, 4320, 2, 512, 710);
+        assert!(t <= 4320);
+        // Pixel Motion Blur's finest grid with its largest search keeps its grid on a 1080p frame.
+        assert_eq!(super::planned(1920, 1080, 2, 16, 64), (2, 64));
+        assert_eq!(super::planned(1920, 1080, 8, 64, 4), (8, 4));
     }
 
     #[test]

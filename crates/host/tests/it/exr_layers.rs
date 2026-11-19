@@ -39,8 +39,9 @@ fn extractor_shows_the_chosen_layer_and_channels_of_a_layered_exr() {
     assert_eq!(r["errors"], json!([]), "the file imports: {r}");
     s.execute("comp.new", json!({"name": "EXR", "width": 8, "height": 4, "frameRate": 24, "duration": 1})).unwrap();
     let layer = s.execute("layer.addItem", json!({"item": r["items"][0]})).unwrap()["layer"].clone();
-    // The picture is the colour layer (diffuse: orange).
-    assert!(near(px(&s), [1.0, 0.735, 0.0]), "{:?}", px(&s));
+    // No unnamed R, G, B: no main picture, black as in After Effects (the layers are reached by
+    // name, below).
+    assert!(near(px(&s), [0.0, 0.0, 0.0]), "{:?}", px(&s));
 
     let ch = s.execute("layer.channels", json!({"layer": layer})).unwrap();
     let names: Vec<&str> = ch["layers"].as_array().unwrap().iter().filter_map(|l| l["name"].as_str()).collect();
