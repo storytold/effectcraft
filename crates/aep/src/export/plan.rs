@@ -970,10 +970,8 @@ fn plan_transform(layer: &Layer, src: &LayerSrc, comp: &Comp, source_size: (u32,
         // the combined record in its default state (`emit::put_properties` marks it): the
         // combined record holds the separated values, without the stale keys or expression.
         if props.iter().any(|p| PropKind::SEPARATED.contains(&p.kind)) {
-            let value: Vec<f64> = PropKind::SEPARATED
-                .iter()
-                .map(|k| props.iter().find(|p| p.kind == *k).and_then(|p| p.value.first().copied()).unwrap_or(0.0))
-                .collect();
+            let value: Vec<f64> =
+                PropKind::SEPARATED.iter().map(|k| props.iter().find(|p| p.kind == *k).and_then(|p| p.value.first().copied()).unwrap_or(0.0)).collect();
             props.retain(|p| p.kind != PropKind::Position);
             props.push(PropPlan { kind: PropKind::Position, value, keys: Vec::new(), expr: None });
         }

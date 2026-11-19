@@ -45,6 +45,7 @@ fn separated_position_is_written_as_x_y_and_z() {
     assert_eq!((x.flags(), x.static_value().and_then(|v| v.first().copied())), (Some(1), Some(300.0)));
     let y = prop("ADBE Position_1");
     assert!(y.is_animated());
-    assert_eq!(y.keys().map(|k| k.keyframes().count()), Some(2));
+    let ys: Vec<_> = y.keys().map(|k| k.keyframes().filter_map(|f| f.value().and_then(|v| v.first().copied())).collect()).unwrap_or_default();
+    assert_eq!(ys, [40.0, 200.0]);
     assert_eq!(prop("ADBE Position_2").static_value().and_then(|v| v.first().copied()), Some(0.0));
 }
