@@ -114,18 +114,6 @@ impl Descriptor {
     }
 }
 
-pub(crate) fn read_unicode(r: &mut Reader) -> Result<String> {
-    let n = r.u32()? as usize;
-    let mut v = Vec::with_capacity(n.min(r.remaining() / 2));
-    for _ in 0..n {
-        v.push(r.u16()?);
-    }
-    while v.last() == Some(&0) {
-        v.pop();
-    }
-    Ok(String::from_utf16_lossy(&v))
-}
-
 /// Preserve the application parser's per-container limits in the shared parser.
 pub(crate) const PARSE_LIMITS: craft_psd::descriptor::ParseLimits =
     craft_psd::descriptor::ParseLimits { max_descriptor_items: 100_000, max_list_items: 1_000_000 };
@@ -139,7 +127,7 @@ pub fn read_descriptor(r: &mut Reader) -> Result<Descriptor> {
     Ok(from_craft_descriptor(d))
 }
 
-fn desc_err(e: craft_psd::PsdError) -> Error {
+pub(crate) fn desc_err(e: craft_psd::PsdError) -> Error {
     match e {
         craft_psd::PsdError::UnexpectedEof { .. } => Error::Truncated,
         craft_psd::PsdError::Unsupported(s) => Error::Unsupported(s),
@@ -155,7 +143,7 @@ fn unit_str(u: &[u8; 4]) -> String {
     String::from_utf8_lossy(u).into_owned()
 }
 
-fn from_craft_descriptor(d: craft_psd::descriptor::Descriptor) -> Descriptor {
+pub(crate) fn from_craft_descriptor(d: craft_psd::descriptor::Descriptor) -> Descriptor {
     Descriptor {
         class_name: d.name.to_string_lossy(),
         class_id: id_str(&d.class_id),

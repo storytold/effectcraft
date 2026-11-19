@@ -10,6 +10,7 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+craft-audio-markers = { package = "craft-audio", version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "30596f73c5ef851ba3dad9cf145669f391e2eb0d", default-features = false }
 craft-docpath = { workspace = true }
 effectcraft-time = { workspace = true }
 effectcraft-color = { workspace = true }
@@ -31,6 +32,7 @@ craft-media = { workspace = true, features = ["mpegts"] }
 filmcraft-frame = { workspace = true }
 filmcraft-color = { workspace = true }
 filmcraft-time = { workspace = true }
+half = { workspace = true }
 image = { workspace = true, features = ["gif", "webp", "tiff", "bmp", "exr", "tga", "hdr"] }
 rayon = { workspace = true }
 serde_json = { workspace = true }
@@ -38,6 +40,7 @@ thiserror = { workspace = true }
 log = { workspace = true }
 
 [dev-dependencies]
+# Writes the OpenEXR files of the tests (reading is craft-exr's).
 exr = { workspace = true }
 # Writes the animated GIFs of the tests.
 gif = { workspace = true }

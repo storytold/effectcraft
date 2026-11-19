@@ -66,6 +66,7 @@ mod text;
 mod text_edit;
 mod text_presets;
 mod three_d;
+mod thumbnails;
 mod time_reverse;
 mod timeline;
 mod timeline_interchange;
