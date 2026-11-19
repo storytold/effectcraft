@@ -309,8 +309,8 @@ fn a_queue_run_keeps_its_jobs_warm() {
 
 #[test]
 fn render_queue_runs_and_one_off_exports_follow_the_memory_budget() {
-    // #3941: a Render Queue run's two layer caches held 512 MiB together and a one-off export's
-    // 512 MiB each, whatever the memory budget. Both follow the session's budget now.
+    // #3941: a Render Queue run's two layer caches and a one-off export's held 512 MiB each
+    // (1 GiB together), whatever the memory budget. Both follow the session's budget now.
     type Seen = (Option<(usize, usize)>, Option<usize>);
     struct Budgets(Mutex<Vec<Seen>>);
     impl Exporter for Budgets {

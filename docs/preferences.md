@@ -192,13 +192,15 @@ Commands (CLI, MCP, control channel):
   cache's reserve free on their disk; earlier sessions' copies are adopted. The Disk page shows
   the local copies, what is queued and being copied, and the network locations
 - `memory.ramReservedGb`: RAM Reserved for Other Applications, the one memory setting (After
-  Effects has a setting of this name too). EffectCraft's big caches (processed layers, decoded
-  footage frames, decoded OpenEXR planes, RAM preview frames, and the disk cache's write queue)
-  share one budget: 80 % of the installed RAM left after the reserve. The other 20 % is room for
+  Effects has a setting of this name too). EffectCraft's big caches (processed layers, also those
+  of exports and Render Queue runs, decoded footage frames, decoded OpenEXR planes, RAM preview
+  frames, and the disk cache's write queue) share one budget: 80 % of the installed RAM left
+  after the reserve. The command-line tool and its MCP server read the installed RAM once at start
+  (with the default reserve: they don't read the app's settings). The other 20 % is room for
   EffectCraft's own working memory (decoders, render buffers, undo, GPU staging, the interface).
   With the default 6 GB reserved that is 8.0 GB on a 16 GB machine, 46.4 GB on 64 GB and 97.6 GB
   on 128 GB. The budget is at least 192 MB for all caches together; while the installed RAM is
-  unknown (a sandbox, the CLI, or the desktop before its first reading) it is 5 GB, in the browser 3.5 GB
+  unknown (a sandbox, or the desktop before its first reading) it is 5 GB, in the browser 3.5 GB
   (with the RAM preview at most 3 GB there). No cache has a share of its own: when they
   hold more than the budget together, the memory accountant frees the least valuable data first,
   whichever cache holds it, down to 90 % of the budget. An item's value is what it would cost to

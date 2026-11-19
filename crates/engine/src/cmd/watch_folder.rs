@@ -65,6 +65,9 @@ fn render_project(host: &Session, path: &Path) -> Value {
     s.exporter = host.exporter.clone();
     s.accel = host.accel.clone();
     s.prefs = host.prefs.clone();
+    // Its Render Queue caches take the host's memory budget (#3941), which follows its reading.
+    s.sys_memory = host.sys_memory;
+    s.memory_low = host.memory_low;
     let result = (|| -> std::result::Result<Value, String> {
         s.execute("file.open", json!({"path": name})).map_err(|e| e.to_string())?;
         let queued = s.project.render_queue.iter().filter(|i| i.render && i.status == RenderStatus::Queued).count();
