@@ -561,5 +561,5 @@ fn estimate_frame_rate(track: &Track) -> FrameRate {
         .filter(|&(_, off)| off <= 0.005)
         .min_by(|a, b| a.1.total_cmp(&b.1))
         .map(|(r, _)| r)
-        .unwrap_or_else(|| FrameRate::new(track.timescale, median))
+        .unwrap_or_else(|| FrameRate::new(i64::from(track.timescale), i64::from(median)))
 }
