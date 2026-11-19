@@ -3,7 +3,9 @@
 //! Output Module templates (Edit ▸ Templates).
 //!
 //! Items are addressed by `item` (the stable id from `renderQueue.add` / `renderQueue.list`) or
-//! `index` (1-based, the # column).
+//! `index` (1-based, the # column). Remove, Render checkbox, Render Settings, Output Module, Output
+//! To, Move, Apply Template and Log also take `items` (ids): one change to all of them, one undo
+//! step.
 
 use effectcraft_project::render_queue::{
     AlphaMode, AudioFormat, AudioOutput, Channels, ColorDepth, CurrentOrOff, DEFAULT_SEQUENCE_TEMPLATE, DEFAULT_TEMPLATE, EffectsMode, ExrBitDepth,
@@ -52,6 +54,47 @@ fn item_index(s: &Session, p: &Value, cmd: &str) -> Result<usize> {
         return Ok(0);
     }
     Err(bad(cmd, "pass `item` (id) or `index` (1-based)"))
+}
+
+/// Indices of the items named by `items` (ids; queue order, each once), else the one item of
+/// [`item_index`].
+fn item_indices(s: &Session, p: &Value, cmd: &str) -> Result<Vec<usize>> {
+    let Some(v) = p.get("items").filter(|v| !v.is_null()) else { return Ok(vec![item_index(s, p, cmd)?]) };
+    let ids = v.as_array().ok_or_else(|| bad(cmd, "items: [id, …]"))?;
+    let q = &s.project.render_queue;
+    let mut out: Vec<usize> = Vec::with_capacity(ids.len().min(q.len()));
+    for id in ids {
+        let id = id.as_u64().ok_or_else(|| bad(cmd, "items: [id, …]"))?;
+        let i = q.iter().position(|it| it.id == id).ok_or_else(|| bad(cmd, format!("no render queue item {id}")))?;
+        if !out.contains(&i) {
+            out.push(i);
+        }
+    }
+    if out.is_empty() {
+        return Err(bad(cmd, "items: name at least one item"));
+    }
+    out.sort_unstable();
+    Ok(out)
+}
+
+/// The answer of a command that changed the items at `ix`: the item's listing, or with `items`
+/// the listing of each.
+fn items_json(s: &Session, p: &Value, ix: &[usize]) -> Value {
+    let q = &s.project.render_queue;
+    let one = |i: usize| q.get(i).map(|it| item_json(s, it, i)).unwrap_or(Value::Null);
+    if p.get("items").is_some_and(|v| !v.is_null()) {
+        json!({"items": ix.iter().map(|i| one(*i)).collect::<Vec<_>>()})
+    } else {
+        ix.first().map(|i| one(*i)).unwrap_or(Value::Null)
+    }
+}
+
+/// `output` moved into `folder`, keeping its file name (or name template).
+fn in_folder(output: &str, folder: &str) -> String {
+    let name = output.rsplit(['/', '\\']).next().unwrap_or(output);
+    let sep = if folder.contains('\\') && !folder.contains('/') { '\\' } else { '/' };
+    let base = folder.trim_end_matches(['/', '\\']);
+    format!("{base}{sep}{name}")
 }
 
 fn time_p(p: &Value, k: &str) -> Option<Tick> {
@@ -545,8 +588,38 @@ fn item_json(s: &Session, it: &RenderQueueItem, index: usize) -> Value {
     v
 }
 
+/// `comps` (ids or names) each get an item, as one undo step; without it, the comp of
+/// [`Session::comp_for_queue`].
 fn add(s: &mut Session, p: &Value) -> Result<Value> {
-    let cid = s.comp_for_queue(p)?;
+    const C: &str = "renderQueue.add";
+    let Some(list) = p.get("comps").filter(|v| !v.is_null()) else {
+        let cid = s.comp_for_queue(p)?;
+        return add_one(s, cid, p);
+    };
+    let list = list.as_array().ok_or_else(|| bad(C, "comps: [id|name, …]"))?;
+    let mut cids = Vec::with_capacity(list.len().min(s.project.items.len()));
+    for c in list {
+        if !matches!(c, Value::Number(_) | Value::String(_)) {
+            return Err(bad(C, "comps: [id|name, …]"));
+        }
+        let cid = comp_id(s, &json!({"comp": c}))?;
+        if !cids.contains(&cid) {
+            cids.push(cid);
+        }
+    }
+    if cids.is_empty() {
+        return Err(bad(C, "comps: name at least one composition"));
+    }
+    let mut one = p.clone();
+    if let Some(o) = one.as_object_mut() {
+        o.remove("comps");
+    }
+    let added = super::app_more::grouped(s, "Add to Render Queue", |s| cids.iter().map(|cid| add_one(s, *cid, &one)).collect::<Result<Vec<_>>>())?;
+    let ids: Vec<Value> = added.iter().map(|v| v["item"].clone()).collect();
+    Ok(json!({"items": added, "added": ids}))
+}
+
+fn add_one(s: &mut Session, cid: effectcraft_project::ItemId, p: &Value) -> Result<Value> {
     let mut it = RenderQueueItem::new(0, cid);
     // New items start from the Movie Default templates (Edit ▸ Templates).
     let templates = s.project.render_templates.clone();
@@ -584,44 +657,92 @@ fn add(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 fn remove(s: &mut Session, p: &Value) -> Result<Value> {
-    let i = item_index(s, p, "renderQueue.remove")?;
+    let ix = item_indices(s, p, "renderQueue.remove")?;
     s.edit("Remove from Render Queue", None, |proj, _| {
-        proj.render_queue.remove(i);
+        for i in ix.iter().rev() {
+            proj.render_queue.remove(*i);
+        }
         Ok(())
     })?;
-    Ok(json!({"remaining": s.project.render_queue.len()}))
+    Ok(json!({"remaining": s.project.render_queue.len(), "removed": ix.len()}))
 }
 
+/// `render` (default: the first item's opposite) for the item or every one of `items`.
 fn set_render(s: &mut Session, p: &Value) -> Result<Value> {
-    let i = item_index(s, p, "renderQueue.setRender")?;
-    let on = b_p(p, "render").unwrap_or(!s.project.render_queue[i].render);
+    let ix = item_indices(s, p, "renderQueue.setRender")?;
+    let on = b_p(p, "render").unwrap_or(!s.project.render_queue[ix[0]].render);
     s.edit("Render Queue: Render", None, |proj, _| {
-        let it = &mut proj.render_queue[i];
-        it.render = on;
-        it.status = if on { RenderStatus::Queued } else { RenderStatus::Unqueued };
+        for i in &ix {
+            let it = &mut proj.render_queue[*i];
+            it.render = on;
+            it.status = if on { RenderStatus::Queued } else { RenderStatus::Unqueued };
+        }
         Ok(())
     })?;
     Ok(json!({"render": on}))
 }
 
+/// The same settings for the item or every one of `items`; each keeps what isn't given.
 fn set_render_settings(s: &mut Session, p: &Value) -> Result<Value> {
-    let i = item_index(s, p, "renderQueue.setRenderSettings")?;
-    let mut rs = s.project.render_queue[i].settings.clone();
-    if !apply_settings(&mut rs, &s.project.render_templates, p, "renderQueue.setRenderSettings")? {
-        return Err(bad("renderQueue.setRenderSettings", "nothing to change"));
+    const C: &str = "renderQueue.setRenderSettings";
+    let ix = item_indices(s, p, C)?;
+    let mut changed = Vec::with_capacity(ix.len());
+    let mut any = false;
+    for i in &ix {
+        let mut rs = s.project.render_queue[*i].settings.clone();
+        any |= apply_settings(&mut rs, &s.project.render_templates, p, C)?;
+        changed.push((*i, rs));
+    }
+    if !any {
+        return Err(bad(C, "nothing to change"));
     }
     s.edit("Render Settings", None, |proj, _| {
-        let it = &mut proj.render_queue[i];
-        it.settings = rs;
-        requeue(it);
+        for (i, rs) in changed {
+            let it = &mut proj.render_queue[i];
+            it.settings = rs;
+            requeue(it);
+        }
         Ok(())
     })?;
-    Ok(item_json(s, &s.project.render_queue[i], i))
+    Ok(items_json(s, p, &ix))
 }
 
+/// The same Output Module changes for the item or every one of `items` (at `module`); each keeps
+/// its own output name unless `output` is given.
 fn set_output_module(s: &mut Session, p: &Value) -> Result<Value> {
-    let i = item_index(s, p, "renderQueue.setOutputModule")?;
-    let m = module_p(s, i, p, "renderQueue.setOutputModule")?;
+    const C: &str = "renderQueue.setOutputModule";
+    let ix = item_indices(s, p, C)?;
+    let post = match str_p(p, "postRenderAction") {
+        Some(a) => Some(post_render_parse(a).ok_or_else(|| bad(C, "postRenderAction: none|import|importAndReplace|setProxy"))?),
+        None => None,
+    };
+    let mut modules = Vec::with_capacity(ix.len());
+    let mut any = false;
+    for i in &ix {
+        let m = module_p(s, *i, p, C)?;
+        let (om, changed) = output_module_change(s, *i, m, p)?;
+        any |= changed;
+        modules.push((*i, m, om));
+    }
+    if !any && post.is_none() {
+        return Err(bad(C, "nothing to change"));
+    }
+    s.edit("Output Module Settings", None, |proj, _| {
+        for (i, m, om) in modules {
+            let it = &mut proj.render_queue[i];
+            *module_mut(it, m) = om;
+            if let Some(a) = post {
+                it.post_render = a;
+            }
+            requeue(it);
+        }
+        Ok(())
+    })?;
+    Ok(items_json(s, p, &ix))
+}
+
+/// Item `i`'s module `m` with the changes of `p`, and whether there were any.
+fn output_module_change(s: &Session, i: usize, m: usize, p: &Value) -> Result<(OutputModule, bool)> {
     let mut om = module_ref(&s.project.render_queue[i], m).clone();
     let changed = apply_output(&mut om, &s.project.render_templates, s.state.region_of_interest, p, "renderQueue.setOutputModule")?;
 
@@ -640,51 +761,61 @@ fn set_output_module(s: &mut Session, p: &Value) -> Result<Value> {
         let (cw, ch) = crop_only.frame_size(w, h, item.settings.effective_scale(comp));
         om.resize.width = ((om.resize.height as f64 * cw as f64 / ch as f64).round() as u32).clamp(1, 30_000);
     }
-    let post = match str_p(p, "postRenderAction") {
-        Some(a) => Some(post_render_parse(a).ok_or_else(|| bad("renderQueue.setOutputModule", "postRenderAction: none|import|importAndReplace|setProxy"))?),
-        None => None,
-    };
-    if !changed && post.is_none() {
-        return Err(bad("renderQueue.setOutputModule", "nothing to change"));
-    }
-    s.edit("Output Module Settings", None, |proj, _| {
-        let it = &mut proj.render_queue[i];
-        *module_mut(it, m) = om;
-        if let Some(a) = post {
-            it.post_render = a;
-        }
-        requeue(it);
-        Ok(())
-    })?;
-    Ok(item_json(s, &s.project.render_queue[i], i))
+    Ok((om, changed))
 }
 
+/// Output To for the item or every one of `items`: `path` (a file or name template), or `folder`,
+/// which moves each output there and keeps its file name.
 fn set_output(s: &mut Session, p: &Value) -> Result<Value> {
-    let i = item_index(s, p, "renderQueue.setOutput")?;
-    let path = str_p(p, "path").or(str_p(p, "output")).ok_or_else(|| bad("renderQueue.setOutput", "pass `path` (file path or template)"))?;
-    let m = module_p(s, i, p, "renderQueue.setOutput")?;
-    let mut om = module_ref(&s.project.render_queue[i], m).clone();
-    apply_output(&mut om, &s.project.render_templates, None, &json!({"output": path}), "renderQueue.setOutput")?;
+    const C: &str = "renderQueue.setOutput";
+    let ix = item_indices(s, p, C)?;
+    let path = str_p(p, "path").or(str_p(p, "output"));
+    let folder = str_p(p, "folder").map(str::trim).filter(|f| !f.is_empty());
+    if path.is_none() && folder.is_none() {
+        return Err(bad(C, "pass `path` (file path or template) or `folder`"));
+    }
+    let mut modules = Vec::with_capacity(ix.len());
+    for i in &ix {
+        let m = module_p(s, *i, p, C)?;
+        let mut om = module_ref(&s.project.render_queue[*i], m).clone();
+        let out = match (folder, path) {
+            (Some(f), _) => in_folder(&om.output, f),
+            (None, Some(path)) => path.to_string(),
+            (None, None) => return Err(bad(C, "pass `path` (file path or template) or `folder`")),
+        };
+        apply_output(&mut om, &s.project.render_templates, None, &json!({"output": out}), C)?;
+        modules.push((*i, m, om));
+    }
     s.edit("Output To", None, |proj, _| {
-        let it = &mut proj.render_queue[i];
-        *module_mut(it, m) = om;
-        requeue(it);
+        for (i, m, om) in modules {
+            let it = &mut proj.render_queue[i];
+            *module_mut(it, m) = om;
+            requeue(it);
+        }
         Ok(())
     })?;
-    Ok(item_json(s, &s.project.render_queue[i], i))
+    Ok(items_json(s, p, &ix))
 }
 
+/// The item, or every one of `items` in queue order, to `to`: the 1-based position the (first)
+/// moved item takes.
 fn move_item(s: &mut Session, p: &Value) -> Result<Value> {
-    let i = item_index(s, p, "renderQueue.move")?;
-    let n = s.project.render_queue.len();
-    let to = p.get("to").and_then(Value::as_u64).ok_or_else(|| bad("renderQueue.move", "pass `to` (1-based position)"))? as usize;
-    let to = to.clamp(1, n) - 1;
+    let ix = item_indices(s, p, "renderQueue.move")?;
+    let to = p.get("to").and_then(Value::as_u64).ok_or_else(|| bad("renderQueue.move", "pass `to` (1-based position)"))?;
+    let rest = s.project.render_queue.len().saturating_sub(ix.len());
+    let at = usize::try_from(to).unwrap_or(usize::MAX).clamp(1, rest + 1) - 1;
     s.edit("Reorder Render Queue", None, |proj, _| {
-        let it = proj.render_queue.remove(i);
-        proj.render_queue.insert(to, it);
+        let mut moved = Vec::with_capacity(ix.len());
+        for i in ix.iter().rev() {
+            moved.push(proj.render_queue.remove(*i));
+        }
+        moved.reverse();
+        for (k, it) in moved.into_iter().enumerate() {
+            proj.render_queue.insert(at + k, it);
+        }
         Ok(())
     })?;
-    Ok(json!({"index": to + 1}))
+    Ok(json!({"index": at + 1}))
 }
 
 fn duplicate(s: &mut Session, p: &Value) -> Result<Value> {
@@ -984,51 +1115,60 @@ fn set_template_default(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"slot": format!("{slot:?}"), "name": name}))
 }
 
-/// Apply templates to an item: `renderSettings` and/or `outputModule` (to `module`).
+/// Apply templates to an item, or every one of `items`: `renderSettings` and/or `outputModule`
+/// (to `module`). Each Output Module keeps its output name.
 fn apply_template(s: &mut Session, p: &Value) -> Result<Value> {
     const C: &str = "renderQueue.applyTemplate";
-    let i = item_index(s, p, C)?;
-    let m = module_p(s, i, p, C)?;
+    let ix = item_indices(s, p, C)?;
     let t = s.project.render_templates.clone();
     let rs = match str_p(p, "renderSettings") {
         Some(n) => Some(t.render_settings(n).ok_or_else(|| bad(C, format!("no Render Settings template “{n}”")))?),
         None => None,
     };
-    let om = match str_p(p, "outputModule") {
-        Some(n) => {
-            let tpl = t.output_module(n).ok_or_else(|| bad(C, format!("no Output Module template “{n}”")))?;
-            let mut om = module_ref(&s.project.render_queue[i], m).clone();
-            apply_om_template(&mut om, &tpl);
-            Some(om)
-        }
+    let tpl = match str_p(p, "outputModule") {
+        Some(n) => Some(t.output_module(n).ok_or_else(|| bad(C, format!("no Output Module template “{n}”")))?),
         None => None,
     };
-    if rs.is_none() && om.is_none() {
+    if rs.is_none() && tpl.is_none() {
         return Err(bad(C, "pass `renderSettings` and/or `outputModule` (template names)"));
     }
+    let mut modules = Vec::with_capacity(ix.len());
+    for i in &ix {
+        let m = module_p(s, *i, p, C)?;
+        let om = tpl.as_ref().map(|tpl| {
+            let mut om = module_ref(&s.project.render_queue[*i], m).clone();
+            apply_om_template(&mut om, tpl);
+            om
+        });
+        modules.push((*i, m, om));
+    }
     s.edit("Apply Template", None, |proj, _| {
-        let it = &mut proj.render_queue[i];
-        if let Some(rs) = rs {
-            it.settings = rs;
+        for (i, m, om) in modules {
+            let it = &mut proj.render_queue[i];
+            if let Some(rs) = &rs {
+                it.settings = rs.clone();
+            }
+            if let Some(om) = om {
+                *module_mut(it, m) = om;
+            }
+            requeue(it);
         }
-        if let Some(om) = om {
-            *module_mut(it, m) = om;
-        }
-        requeue(it);
         Ok(())
     })?;
-    Ok(item_json(s, &s.project.render_queue[i], i))
+    Ok(items_json(s, p, &ix))
 }
 
 fn set_log(s: &mut Session, p: &Value) -> Result<Value> {
     const C: &str = "renderQueue.setLog";
-    let i = item_index(s, p, C)?;
+    let ix = item_indices(s, p, C)?;
     let log = enum_p(p, "log", C, RenderLog::parse, "errorsOnly|plusSettings|plusPerFrameInfo")?.ok_or_else(|| bad(C, "pass `log`"))?;
     s.edit("Render Queue: Log", None, |proj, _| {
-        proj.render_queue[i].log = log;
+        for i in &ix {
+            proj.render_queue[*i].log = log;
+        }
         Ok(())
     })?;
-    Ok(item_json(s, &s.project.render_queue[i], i))
+    Ok(items_json(s, p, &ix))
 }
 
 fn set_notify(s: &mut Session, p: &Value) -> Result<Value> {
@@ -1061,18 +1201,26 @@ pub fn specs() -> Vec<CommandSpec> {
             "Add to Render Queue",
             ["Composition"],
             ["Cmd+M", "Cmd+Shift+/"],
-            "{comp?: id|name, template?: Render Settings template, format?: h264|hevc|av1|prores|uncompressed|webm|png|jpeg|tiff|exr|tga|gif|wav|aiff, output?: path|template, log?: errorsOnly|plusSettings|plusPerFrameInfo, quality?: best|draft|1-100 (jpeg, webm), resolution?: full|half|third|quarter|scale, proxyUse?, effects?, solo?, guideLayers?, colorDepth?, frameBlending?, fieldRender?, pulldown?, motionBlur?, timeSpan?: workArea|comp|custom, start?: s, end?: s, duration?: s, frameRate?: fps|null, skipExisting?: bool, storageOverflow?: bool, channels?: rgb|rgba|alpha, color?, bitrate?: kbps, webmBitrate?, keyframeInterval?, proresProfile?, exrCompression?, exrBitDepth?, profile?, level?, rateControl?, webmCodec?, audioBitrate?, opusApplication?, crop?, resize?, includeProjectLink?, audio?: auto|on|off, sampleRate?, audioChannels?, audioFormat?, loop?: bool (values as in setRenderSettings / setOutputModule)}",
+            "{comp?: id|name, comps?: [id|name, …] (one item each, one undo step), template?: Render Settings template, format?: h264|hevc|av1|prores|uncompressed|webm|png|jpeg|tiff|exr|tga|gif|wav|aiff, output?: path|template, log?: errorsOnly|plusSettings|plusPerFrameInfo, quality?: best|draft|1-100 (jpeg, webm), resolution?: full|half|third|quarter|scale, proxyUse?, effects?, solo?, guideLayers?, colorDepth?, frameBlending?, fieldRender?, pulldown?, motionBlur?, timeSpan?: workArea|comp|custom, start?: s, end?: s, duration?: s, frameRate?: fps|null, skipExisting?: bool, storageOverflow?: bool, channels?: rgb|rgba|alpha, color?, bitrate?: kbps, webmBitrate?, keyframeInterval?, proresProfile?, exrCompression?, exrBitDepth?, profile?, level?, rateControl?, webmCodec?, audioBitrate?, opusApplication?, crop?, resize?, includeProjectLink?, audio?: auto|on|off, sampleRate?, audioChannels?, audioFormat?, loop?: bool (values as in setRenderSettings / setOutputModule)}",
             can_add,
             add
         ),
-        cmd!("renderQueue.remove", "Remove from Render Queue", [], None, "{item?: id, index?: n}", has_items, remove),
-        cmd!("renderQueue.setRender", "Render Queue: Render Checkbox", [], None, "{item?|index?, render?: bool (toggles)}", has_items, set_render),
+        cmd!("renderQueue.remove", "Remove from Render Queue", [], None, "{item?: id, index?: n, items?: [id, …]}", has_items, remove),
+        cmd!(
+            "renderQueue.setRender",
+            "Render Queue: Render Checkbox",
+            [],
+            None,
+            "{item?|index?|items?: [id, …], render?: bool (toggles the first)}",
+            has_items,
+            set_render
+        ),
         cmd!(
             "renderQueue.setRenderSettings",
             "Render Settings...",
             [],
             None,
-            "{item?|index?, template?: name, quality?: best|draft, resolution?: full|half|third|quarter|scale, proxyUse?: current|all|comp|none, effects?: current|allOn|allOff, solo?: current|allOff, guideLayers?: current|allOff, colorDepth?: current|8|16|32, frameBlending?: current|onForChecked|offForAll, fieldRender?: off|upper|lower, pulldown?: off|WSSWW|SSWWW|SWWWS|WWWSS|WWSSW, motionBlur?: bool|current|onForChecked|offForAll, timeSpan?: workArea|comp|custom, start?: s, end?: s, duration?: s, frameRate?: fps|null, skipExisting?: bool, storageOverflow?: bool}",
+            "{item?|index?|items?: [id, …], template?: name, quality?: best|draft, resolution?: full|half|third|quarter|scale, proxyUse?: current|all|comp|none, effects?: current|allOn|allOff, solo?: current|allOff, guideLayers?: current|allOff, colorDepth?: current|8|16|32, frameBlending?: current|onForChecked|offForAll, fieldRender?: off|upper|lower, pulldown?: off|WSSWW|SSWWW|SWWWS|WWWSS|WWSSW, motionBlur?: bool|current|onForChecked|offForAll, timeSpan?: workArea|comp|custom, start?: s, end?: s, duration?: s, frameRate?: fps|null, skipExisting?: bool, storageOverflow?: bool}",
             has_items,
             set_render_settings
         ),
@@ -1081,7 +1229,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Output Module Settings...",
             [],
             None,
-            "{item?|index?, module?: n (1 = first), template?: name, format?: h264|hevc|av1|prores|uncompressed|webm|png|jpeg|tiff|exr|tga|gif|wav|aiff, channels?: rgb|rgba|alpha, color?: straight|premultiplied, quality?: 1-100, bitrate?: kbps, webmBitrate?: bool, keyframeInterval?: frames (0 = auto), proresProfile?: proxy|lt|standard|hq|4444|4444xq, exrCompression?: none|rle|zips|zip|piz|pxr24|b44|b44a|dwaa|dwab (OpenEXR, scan lines; default zip; lossy: pxr24 on float, b44/b44a on half, dwaa/dwab), exrBitDepth?: half|float (OpenEXR; default float), profile?: main|main10 (HEVC/AV1), level?: auto|4.1, rateControl?: bitrate|quality, webmCodec?: vp9|av1, audioBitrate?: Opus kbps, opusApplication?: audio|voice, crop?: bool|{useRoi?, roi?, top?, left?, bottom?, right?}, cropTop?, cropLeft?, cropBottom?, cropRight?, resize?: bool|{preset?, width?, height?, lockAspect?, quality?: low|high}, resizeWidth?, resizeHeight?, postRenderAction?: none|import|importAndReplace|setProxy, includeProjectLink?: bool, audio?: auto|on|off, sampleRate?, audioChannels?: mono|stereo, audioFormat?: 16|24|32, loop?: bool, output?}",
+            "{item?|index?|items?: [id, …], module?: n (1 = first), template?: name, format?: h264|hevc|av1|prores|uncompressed|webm|png|jpeg|tiff|exr|tga|gif|wav|aiff, channels?: rgb|rgba|alpha, color?: straight|premultiplied, quality?: 1-100, bitrate?: kbps, webmBitrate?: bool, keyframeInterval?: frames (0 = auto), proresProfile?: proxy|lt|standard|hq|4444|4444xq, exrCompression?: none|rle|zips|zip|piz|pxr24|b44|b44a|dwaa|dwab (OpenEXR, scan lines; default zip; lossy: pxr24 on float, b44/b44a on half, dwaa/dwab), exrBitDepth?: half|float (OpenEXR; default float), profile?: main|main10 (HEVC/AV1), level?: auto|4.1, rateControl?: bitrate|quality, webmCodec?: vp9|av1, audioBitrate?: Opus kbps, opusApplication?: audio|voice, crop?: bool|{useRoi?, roi?, top?, left?, bottom?, right?}, cropTop?, cropLeft?, cropBottom?, cropRight?, resize?: bool|{preset?, width?, height?, lockAspect?, quality?: low|high}, resizeWidth?, resizeHeight?, postRenderAction?: none|import|importAndReplace|setProxy, includeProjectLink?: bool, audio?: auto|on|off, sampleRate?, audioChannels?: mono|stereo, audioFormat?: 16|24|32, loop?: bool, output?}",
             has_items,
             set_output_module
         ),
@@ -1090,7 +1238,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Output To...",
             [],
             None,
-            "{item?|index?, module?: n, path: file path or template like [compName].[fileExtension]}",
+            "{item?|index?|items?: [id, …], module?: n, path?: file path or template like [compName].[fileExtension], folder?: folder (each output keeps its file name)}",
             has_items,
             set_output
         ),
@@ -1105,7 +1253,15 @@ pub fn specs() -> Vec<CommandSpec> {
         ),
         cmd!("render.preRender", "Pre-render...", ["Composition"], None, "{comp?, output?: path|template, format?}", can_add, pre_render),
         cmd!("render.saveCurrentPreview", "Save Current Preview...", ["Composition"], None, "{comp?, path}", has_comp, save_current_preview),
-        cmd!("renderQueue.move", "Move in Render Queue", [], None, "{item?|index?, to: n (1-based)}", has_items, move_item),
+        cmd!(
+            "renderQueue.move",
+            "Move in Render Queue",
+            [],
+            None,
+            "{item?|index?|items?: [id, …], to: n (1-based; the moved items stay together)}",
+            has_items,
+            move_item
+        ),
         cmd!("renderQueue.duplicate", "Duplicate Render Item", [], None, "{item?|index?}", has_items, duplicate),
         cmd!("renderQueue.render", "Render", [], None, "{wait?: bool (default true; the UI renders in the background)}", has_queued, render),
         cmd!("renderQueue.stop", "Stop Rendering", [], None, "{}", rendering, stop),
@@ -1135,11 +1291,19 @@ pub fn specs() -> Vec<CommandSpec> {
             "Apply Template",
             [],
             None,
-            "{item?|index?, renderSettings?: template name, outputModule?: template name, module?: n}",
+            "{item?|index?|items?: [id, …], renderSettings?: template name, outputModule?: template name, module?: n}",
             has_items,
             apply_template
         ),
-        cmd!("renderQueue.setLog", "Render Queue: Log", [], None, "{item?|index?, log: errorsOnly|plusSettings|plusPerFrameInfo}", has_items, set_log),
+        cmd!(
+            "renderQueue.setLog",
+            "Render Queue: Log",
+            [],
+            None,
+            "{item?|index?|items?: [id, …], log: errorsOnly|plusSettings|plusPerFrameInfo}",
+            has_items,
+            set_log
+        ),
         cmd!("renderQueue.setNotify", "Notify When Done", [], None, "{notify?: bool (toggles)}", always, set_notify),
         cmd!(
             "renderQueue.setOverflowFolders",
