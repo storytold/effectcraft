@@ -383,10 +383,8 @@ pub fn smart_object_block_warped(uuid: &str, quad: [[f64; 2]; 4], size: [f64; 2]
     if let Some(w) = warp {
         d = d.with("warp", DValue::Descriptor(w));
     }
-    let mut out = b"soLD".to_vec();
-    put_u32(&mut out, 4);
-    put_u32(&mut out, 16);
-    descriptor::write_descriptor(&mut out, &d);
+    let mut out = vec![];
+    craft_psd::tagged::append_smart_object_data(&mut out, &d);
     (*b"SoLd", out)
 }
 
