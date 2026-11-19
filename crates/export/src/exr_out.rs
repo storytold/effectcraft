@@ -54,9 +54,26 @@ pub fn write_rgba<W: Write + Seek>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use exr::prelude::{ReadChannels, ReadLayers};
-    use exr::prelude::{SampleType, read};
+    use exr::prelude::{
+        Encoding, Image, Layer, LayerAttributes, LineOrder, ReadChannels, ReadLayers, SampleType, SpecificChannels, Vec2, WritableImage, f16, read,
+    };
     use std::io::Cursor;
+
+    fn exr_compression(c: ExrCompression) -> exr::compression::Compression {
+        use exr::compression::Compression as C;
+        match c {
+            ExrCompression::None => C::Uncompressed,
+            ExrCompression::Rle => C::RLE,
+            ExrCompression::Zips => C::ZIP1,
+            ExrCompression::Zip => C::ZIP16,
+            ExrCompression::Piz => C::PIZ,
+            ExrCompression::Pxr24 => C::PXR24,
+            ExrCompression::B44 => C::B44,
+            ExrCompression::B44a => C::B44A,
+            ExrCompression::Dwaa => C::DWAA(None),
+            ExrCompression::Dwab => C::DWAB(None),
+        }
+    }
 
     /// A frame with a smooth gradient, grain, over-range highlights, a hard-edged high-contrast
     /// block and a soft alpha ramp (premultiplied), like a render with text over a plate.
@@ -122,7 +139,7 @@ mod tests {
             };
             let ty = if depth == ExrBitDepth::Half { SampleType::F16 } else { SampleType::F32 };
             for c in ExrCompression::ALL {
-                assert_eq!(c.is_lossy(depth), !compression(c).is_lossless_for(ty), "{c:?} {depth:?}");
+                assert_eq!(c.is_lossy(depth), !exr_compression(c).is_lossless_for(ty), "{c:?} {depth:?}");
                 let bytes = write(&src, (w, h), c, depth);
                 if c.is_lossy(depth) {
                     assert!(bytes.len() < write(&src, (w, h), ExrCompression::None, depth).len(), "{c:?} {depth:?}: smaller than None");
@@ -155,7 +172,7 @@ mod tests {
                 let meta = exr::meta::MetaData::read_from_buffered(Cursor::new(&bytes), false).unwrap();
                 assert_eq!(meta.headers.len(), 1);
                 assert_eq!(meta.headers[0].blocks, exr::meta::BlockDescription::ScanLines, "{c:?}");
-                assert_eq!(meta.headers[0].compression, compression(c), "{c:?}");
+                assert_eq!(meta.headers[0].compression, exr_compression(c), "{c:?}");
                 assert_eq!(meta.headers[0].line_order, LineOrder::Increasing);
             }
         }
