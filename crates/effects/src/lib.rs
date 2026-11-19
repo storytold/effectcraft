@@ -431,9 +431,35 @@ pub fn motion_tile_frame(ctx: &EffectCtx, offset: [f64; 2], size: (u32, u32), sc
     }
     // The grown rectangle's top-left in the buffer below, on whole pixels so the result lines
     // up with the comp again when the stack ends.
-    let (x0, y0) = ((offset[0] - grow[0]).round(), (offset[1] - grow[1]).round());
+    let (gx, gy) = ((offset[0] - grow[0]).round(), (offset[1] - grow[1]).round());
+    // The frame also keeps all of the buffer below: an earlier Motion Tile may have grown it past
+    // the comp, and After Effects keeps that growth through a following Motion Tile whose Output
+    // Width or Height is 100 % (tile 550 % wide, then 550 % high, tiles the whole grown area).
+    // Past the effect pixel budget the kept part shrinks towards the grown rectangle, evenly on
+    // every side, so a long chain cannot ask for gigabytes.
+    let (w, h) = (f64::from(size.0), f64::from(size.1));
+    let own = [gx, gy, gx + nw, gy + nh];
+    let all = [gx.min(0.0), gy.min(0.0), (gx + nw).max(w), (gy + nh).max(h)];
+    let rect = |t: f64| -> [f64; 4] { std::array::from_fn(|i| (own[i] + (all[i] - own[i]) * t).round()) };
+    let area = |r: [f64; 4]| (r[2] - r[0]) * (r[3] - r[1]);
+    let budget = pixel_budget(w, h).max(nw * nh);
+    let mut t = 1.0;
+    if area(rect(1.0)) > budget {
+        let (mut lo, mut hi) = (0.0, 1.0);
+        for _ in 0..40 {
+            let mid = (lo + hi) * 0.5;
+            if area(rect(mid)) > budget {
+                hi = mid;
+            } else {
+                lo = mid;
+            }
+        }
+        t = lo;
+    }
+    let [x0, y0, x1, y1] = rect(t);
+    let (nw, nh) = (x1 - x0, y1 - y0);
     let fits = [x0, y0, nw, nh].iter().all(|v| v.is_finite()) && nw <= 16384.0 && nh <= 16384.0;
-    if (pw == 100.0 && ph == 100.0) || !fits {
+    if (pw == 100.0 && ph == 100.0) || (nw == w && nh == h && x0 == 0.0 && y0 == 0.0) || !fits {
         return (size.0, size.1, offset);
     }
     (nw as u32, nh as u32, [offset[0] - x0, offset[1] - y0])
