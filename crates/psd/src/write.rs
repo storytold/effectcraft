@@ -10,7 +10,7 @@ use craft_psd::{
     BlendMode, BlendingRanges, ChannelData, Compression, GlobalLayerMask, Header, ImageData, LayerFlags, LayerInfoPlacement, MaskData, PsdFile, Version,
 };
 
-use crate::descriptor::{self, DValue, Descriptor, put_u16, put_u32, put_utf16};
+use crate::descriptor::{DValue, Descriptor, put_u16, put_u32, put_utf16};
 use crate::limits::finite_sample;
 use crate::{ColorMode, Rect, Section, engine_data};
 
