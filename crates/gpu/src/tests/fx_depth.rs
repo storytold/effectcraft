@@ -259,7 +259,7 @@ fn ids_and_cryptomatte() {
 }
 
 /// The GPU skips the ID colours for displays that do not read them
-/// ([`effectcraft_effects::CryptoAux::for_display`]): every display × Matte Only must still match
+/// ([`effectcraft_effects::CryptoOutput::for_display`]): every display × Matte Only must still match
 /// the CPU effect, so a shader that starts reading RGB in another mode fails here. Matte Only is
 /// checked both ways: the matte in RGB over alpha 1 (#3127) and, for older projects, in alpha too.
 #[test]
@@ -277,6 +277,189 @@ fn cryptomatte_every_display_matches_the_cpu() {
             );
         }
     }
+}
+
+/// Cryptomatte alone on a `scale` buffer of the 70 × 44 layer over `host`, on the GPU and the
+/// CPU: (GPU, CPU, the Cryptomatte planes the GPU uploaded, the uploads counted by the context).
+fn crypto_direct(host: &AuxHost, vals: &[(&str, Value)], scale: f64) -> Option<(Image, Image, Vec<(effectcraft_effects::CryptoOutput, u32, u32, usize)>, u64)> {
+    let g = gpu()?;
+    let spec = effectcraft_effects::find("ec.3d.cryptomatte").unwrap();
+    let size = [70.0, 44.0];
+    let mut params =
+        effectcraft_effects::Params { values: spec.params.iter().map(|ps| (ps.id.to_string(), effectcraft_effects::default_value(ps, size))).collect() };
+    for (k, v) in vals {
+        params.values.insert(k.to_string(), v.clone());
+    }
+    let (w, h) = ((size[0] * scale) as u32, (size[1] * scale) as u32);
+    let buf = effectcraft_effects::Buf { img: pattern(5, w, h), offset: [0.0; 2], scale };
+    let ctx = || effectcraft_effects::EffectCtx {
+        params: &params,
+        time: 0.0,
+        layer_size: size,
+        seed: 0,
+        adjustment: false,
+        env: EffectEnv { host: Some(host), ..Default::default() },
+    };
+    let cpu = (spec.render)(&ctx(), buf.clone());
+    let planes = || crate::fx_depth::PLANE_UPLOADS.lock().unwrap().len();
+    let (before, uploads) = (planes(), g.ctx.transfer_stats().uploads);
+    let out = effectcraft_render::Accelerator::effects(g, &[effectcraft_render::FxStep { spec, ctx: ctx() }], &buf, None).expect("the GPU runs the effect");
+    let uploads = g.ctx.transfer_stats().uploads - uploads;
+    let uploaded = crate::fx_depth::PLANE_UPLOADS.lock().unwrap()[before..].to_vec();
+    Some((out.img, cpu.img, uploaded, uploads))
+}
+
+/// #3334: at full resolution the GPU's Cryptomatte is bit-identical to the CPU effect (whose
+/// full-resolution path is unchanged) in the displays whose output is the plane or one product
+/// with it (Matte Only, Colors, Matte); the Preview tint within rounding. It uploads one plane:
+/// the matte as R32F at source resolution (the Colors display its RGBA pixels), and nothing
+/// else of the channels (the context's own uploads are the layer's buffer alone).
+#[test]
+fn cryptomatte_full_resolution_uploads_only_the_matte_and_is_bit_identical() {
+    use effectcraft_effects::CryptoOutput;
+    let host = AuxHost(Arc::new(aux_scene(70, 44, 1.0)));
+    for (vals, output, exact) in [
+        (vec![("matteOnly", on())], CryptoOutput::Matte, true),
+        (vec![("display", e(0))], CryptoOutput::Colors, true),
+        (vec![("display", e(1))], CryptoOutput::Matte, true),
+        (vec![("display", e(2))], CryptoOutput::Matte, false),
+    ] {
+        let mut vals = vals;
+        vals.push(("selection", Value::Str("beta, delta".into())));
+        let Some((gpu_img, cpu_img, planes, uploads)) = crypto_direct(&host, &vals, 1.0) else { return };
+        let bytes = 70 * 44 * output.channels() * 4;
+        assert_eq!(planes, [(output, 70, 44, bytes)], "{vals:?}: one plane, at source resolution");
+        assert_eq!(uploads, 1, "{vals:?}: the layer's buffer, no channel");
+        if exact {
+            for (i, (g, c)) in gpu_img.data.iter().zip(&cpu_img.data).enumerate() {
+                assert_eq!(g.map(f32::to_bits), c.map(f32::to_bits), "{vals:?}: pixel {i}");
+            }
+        } else {
+            let d = diff(&cpu_img, &gpu_img, 1e-6);
+            assert_eq!(d.over, 0, "{vals:?}: max {}, worst {:?}", d.max, d.worst);
+        }
+    }
+}
+
+/// #3334: at half resolution the GPU uploads the box-filtered matte (a quarter of the pixels,
+/// four bytes each) and shows what the CPU effect shows.
+#[test]
+fn cryptomatte_half_resolution_uploads_the_filtered_matte() {
+    use effectcraft_effects::CryptoOutput;
+    let host = AuxHost(Arc::new(aux_scene(70, 44, 1.0)));
+    let vals = [("selection", Value::Str("beta, delta".into())), ("matteOnly", on())];
+    let Some((gpu_img, cpu_img, planes, uploads)) = crypto_direct(&host, &vals, 0.5) else { return };
+    assert_eq!(planes, [(CryptoOutput::Matte, 35, 22, 35 * 22 * 4)]);
+    assert_eq!(uploads, 1);
+    for (i, (g, c)) in gpu_img.data.iter().zip(&cpu_img.data).enumerate() {
+        assert_eq!(g.map(f32::to_bits), c.map(f32::to_bits), "pixel {i}");
+    }
+    assert!(gpu_img.data.iter().any(|p| p[0] > 0.0 && p[0] < 1.0), "partial coverage where objects meet");
+}
+
+/// #3334: the finished planes are kept per footage frame (its channels), layer, selection,
+/// output and render scale: the same frame again makes none; another selection, output or
+/// scale makes its own. Once the frame's channels are gone, its planes are the first the memory
+/// accountant drops, at no cost.
+#[test]
+fn cryptomatte_planes_are_kept_per_frame_and_selection() {
+    use crate::fx_depth::matte_cache;
+    use effectcraft_effects::CryptoOutput;
+    crate::tests::hold_gpu_lock();
+    let a = Arc::new(aux_scene(70, 44, 1.0));
+    let sel = vec![crypto_hash("beta")];
+    let made = matte_cache::made();
+    let one = matte_cache::plane(&a, "CryptoObject", &sel, CryptoOutput::Matte, 1.0);
+    assert_eq!(matte_cache::made(), made + 1);
+    let again = matte_cache::plane(&a, "CryptoObject", &sel, CryptoOutput::Matte, 1.0);
+    assert!(Arc::ptr_eq(&one, &again) && matte_cache::made() == made + 1, "kept");
+    matte_cache::plane(&a, "CryptoObject", &[crypto_hash("gamma")], CryptoOutput::Matte, 1.0);
+    matte_cache::plane(&a, "CryptoObject", &sel, CryptoOutput::Colors, 1.0);
+    matte_cache::plane(&a, "CryptoObject", &sel, CryptoOutput::Matte, 0.5);
+    assert_eq!(matte_cache::made(), made + 4, "one per selection, output and scale");
+    // Another frame (other channels, equal values) makes its own.
+    let other = Arc::new(aux_scene(70, 44, 1.0));
+    matte_cache::plane(&other, "CryptoObject", &sel, CryptoOutput::Matte, 1.0);
+    assert_eq!(matte_cache::made(), made + 5);
+    // The frame's channels go: its planes are worth nothing.
+    drop(other);
+    let holder = matte_cache::holder();
+    let next = holder.oldest().unwrap();
+    assert_eq!(next.cost_us, 0, "{next:?}");
+    let kept = matte_cache::kept();
+    assert_eq!(holder.drop_oldest(), 70 * 44 * 4);
+    assert_eq!(matte_cache::kept(), kept - 1);
+    assert!(Arc::ptr_eq(&one, &matte_cache::plane(&a, "CryptoObject", &sel, CryptoOutput::Matte, 1.0)), "the live frame's plane stays");
+}
+
+/// #3301 review: a plane over the cache's own byte limit is not kept by a render without a
+/// common budget (nothing would trim it); with a budget that holds it, it is kept and the budget
+/// trims it.
+#[test]
+fn a_plane_over_the_byte_limit_is_kept_only_under_a_budget() {
+    use crate::fx_depth::matte_cache;
+    use effectcraft_effects::CryptoOutput;
+    crate::tests::hold_gpu_lock();
+    let sel = vec![crypto_hash("beta")];
+    let a = Arc::new(aux_scene(70, 44, 1.0));
+    // (one Matte plane: 70 × 44 × 4 bytes, over a 100-byte limit)
+    let first = matte_cache::plane_held_to(&a, "CryptoObject", &sel, CryptoOutput::Matte, 100, usize::MAX);
+    let again = matte_cache::plane_held_to(&a, "CryptoObject", &sel, CryptoOutput::Matte, 100, usize::MAX);
+    assert!(!Arc::ptr_eq(&first, &again), "no budget: an oversized plane is not kept");
+    let b = Arc::new(aux_scene(70, 44, 1.0));
+    let first = matte_cache::plane_held_to(&b, "CryptoObject", &sel, CryptoOutput::Matte, 100, 1 << 30);
+    let again = matte_cache::plane_held_to(&b, "CryptoObject", &sel, CryptoOutput::Matte, 100, 1 << 30);
+    assert!(Arc::ptr_eq(&first, &again), "a budget that holds it: kept");
+}
+
+/// #3750 review: a plane a render still holds is not offered to the memory accountant, even
+/// once its frame's channels are gone (dropping it would free nothing while the render holds it).
+#[test]
+fn a_held_plane_of_gone_channels_is_not_offered() {
+    use crate::fx_depth::matte_cache;
+    use effectcraft_effects::CryptoOutput;
+    crate::tests::hold_gpu_lock();
+    let gone = Arc::new(aux_scene(70, 44, 1.0));
+    let held = matte_cache::plane(&gone, "CryptoObject", &[crypto_hash("beta")], CryptoOutput::Matte, 1.0);
+    drop(gone);
+    let holder = matte_cache::holder();
+    // (everything nobody holds goes; at most as many rounds as planes kept)
+    for _ in 0..=matte_cache::kept() {
+        if holder.drop_oldest() == 0 {
+            break;
+        }
+    }
+    assert!(matte_cache::keeps(&held), "the held plane was offered and dropped");
+}
+
+/// #3750 review: when renders hold every plane kept, a new plane is handed out but not kept, so
+/// the cache never stays over its entry limit (32) once they let go.
+#[test]
+fn the_entry_limit_holds_while_renders_hold_every_plane() {
+    use crate::fx_depth::matte_cache;
+    use effectcraft_effects::CryptoOutput;
+    crate::tests::hold_gpu_lock();
+    let a = Arc::new(aux_scene(70, 44, 1.0));
+    let held: Vec<_> = (0..40u32).map(|i| matte_cache::plane_held_to(&a, "CryptoObject", &[i], CryptoOutput::Matte, usize::MAX, usize::MAX)).collect();
+    assert!(matte_cache::kept() <= 32, "{} planes kept", matte_cache::kept());
+    drop(held);
+}
+
+/// #3750 review: a plane over the cache's byte limit kept under a common budget is kept also
+/// while a render holds another plane (only the entry limit, or a plane within the byte limit
+/// that can't fit beside the held ones, hands a new plane out without keeping it).
+#[test]
+fn an_oversized_plane_is_kept_beside_a_held_one_under_a_budget() {
+    use crate::fx_depth::matte_cache;
+    use effectcraft_effects::CryptoOutput;
+    crate::tests::hold_gpu_lock();
+    let a = Arc::new(aux_scene(70, 44, 1.0));
+    // (each Matte plane: 70 × 44 × 4 bytes, over a 100-byte limit; the budget holds them)
+    let neighbour = matte_cache::plane_held_to(&a, "CryptoObject", &[crypto_hash("beta")], CryptoOutput::Matte, 100, 1 << 30);
+    let first = matte_cache::plane_held_to(&a, "CryptoObject", &[crypto_hash("gamma")], CryptoOutput::Matte, 100, 1 << 30);
+    let again = matte_cache::plane_held_to(&a, "CryptoObject", &[crypto_hash("gamma")], CryptoOutput::Matte, 100, 1 << 30);
+    assert!(Arc::ptr_eq(&first, &again), "kept beside the held plane");
+    drop(neighbour);
 }
 
 #[test]

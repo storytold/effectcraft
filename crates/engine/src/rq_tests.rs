@@ -308,6 +308,38 @@ fn a_queue_run_keeps_its_jobs_warm() {
 }
 
 #[test]
+fn render_queue_runs_and_one_off_exports_follow_the_memory_budget() {
+    // #3941: a Render Queue run's two layer caches and a one-off export's held 512 MiB each
+    // (1 GiB together), whatever the memory budget. Both follow the session's budget now.
+    type Seen = (Option<(usize, usize)>, Option<usize>);
+    struct Budgets(Mutex<Vec<Seen>>);
+    impl Exporter for Budgets {
+        fn formats(&self) -> Vec<OutputFormat> {
+            OutputFormat::ALL.to_vec()
+        }
+        fn export(&self, job: &ExportJob, _: &mut dyn FnMut(u64, u64) -> bool) -> Result<ExportResult, String> {
+            self.0.lock().unwrap().push((job.caches.map(|c| (c.gpu.budget(), c.cpu.budget())), job.cache_budget));
+            Ok(ExportResult { path: job.path.to_string(), ..Default::default() })
+        }
+    }
+    let mut s = demo();
+    let ex = Arc::new(Budgets(Mutex::new(vec![])));
+    s.exporter = Some(ex.clone());
+    // A 64 GB machine: 46.4 GB with the default reserve.
+    s.take_memory_reading(Some(crate::sysinfo::SysMemory { total: 64 << 30, available: 48 << 30 }));
+    let budget = s.memory_budget().bytes;
+    assert_eq!(budget as u64, (64 - 6) * (1 << 30) * 80 / 100);
+    assert_eq!(s.export_cache_budget(), budget, "on the desktop the layer cache's budget is the whole budget");
+
+    s.execute("renderQueue.add", json!({"output": crate::tests::stubs::tmp_out("rq/budget.mp4")})).unwrap();
+    s.execute("renderQueue.render", json!({})).unwrap();
+    assert_eq!(ex.0.lock().unwrap().last().copied(), Some((Some((budget, budget)), Some(budget))), "a Render Queue run's caches");
+
+    s.execute("render.saveCurrentPreview", json!({"path": crate::tests::stubs::tmp_out("rq/budget_preview.mp4")})).unwrap();
+    assert_eq!(ex.0.lock().unwrap().last().copied(), Some((None, Some(budget))), "a one-off export's own caches");
+}
+
+#[test]
 fn the_gpu_frames_setting_reaches_every_render_queue_job() {
     // #3335: Settings ▸ Memory & CPU ▸ GPU Frames Rendered at Once is Auto (`None`) or 1–3.
     struct Seen(Mutex<Vec<Option<usize>>>);

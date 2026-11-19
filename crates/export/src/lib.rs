@@ -129,6 +129,11 @@ pub struct JobOptions<'a> {
     /// a GPU frame measured a frame's working memory. `None`: CPU frames are capped only by
     /// `EFFECTCRAFT_CPU_INFLIGHT`.
     pub free_memory: Option<&'a (dyn Fn() -> Option<u64> + Sync)>,
+    /// What each of the job's own two layer caches (one per compositor) may hold when it has no
+    /// Render Queue run's caches (#3941): the session's budget for an export's caches. Both are
+    /// in the memory accountant's common budget, so together with the other caches they stay
+    /// within it. `None`: [`CACHE_BUDGET`].
+    pub cache_budget: Option<usize>,
 }
 
 /// The layer caches of a Render Queue run (see [`JobOptions::caches`]): one per compositor,
