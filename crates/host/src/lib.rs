@@ -69,6 +69,7 @@ impl Exporter for FileExporter {
                     renderer: job.renderer,
                     gpu_frames: job.gpu_frames,
                     free_memory: Some(&free_memory),
+                    cache_budget: job.cache_budget,
                 },
                 nested_switches: job.nested_switches,
             };
@@ -115,11 +116,22 @@ pub fn session() -> Session {
     effectcraft_script::install(&mut s);
     // The caches' common budget from the start (#3298): the CLI and the MCP server never load
     // the settings, and the caches have no limits of their own below it. Without a memory
-    // reading yet, the budget for unknown RAM.
+    // reading yet, the budget for unknown RAM ([`headless_session`] takes one).
     s.apply_cache_budgets();
-    // The CLI and the MCP server read no memory: a request for a file's planes over the fixed
-    // limit asks for it once (#3749).
+    // A session without a memory reading: a request for a file's planes over the fixed limit
+    // asks for it once (#3749).
     effectcraft_engine::render::memory::set_decode_limit_source(Some(installed_memory_budget));
+    s
+}
+
+/// [`session`] for a frontend without a window (the CLI, its MCP server, scripts and replays):
+/// reads the system's memory once (#3941), so the caches share the budget of the installed RAM
+/// as in the desktop app instead of the budget for unknown RAM. The desktop app reads it in the
+/// background every few seconds instead (`Session::memory_tick`); this waits for the reading
+/// (about a second on Windows). A session that can't read it keeps the budget for unknown RAM.
+pub fn headless_session() -> Session {
+    let mut s = session();
+    s.take_memory_reading(effectcraft_engine::sysinfo::memory());
     s
 }
 

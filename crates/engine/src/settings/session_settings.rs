@@ -136,6 +136,16 @@ impl Session {
         }
     }
 
+    /// What each of an export's two layer caches (one per compositor) may hold (#3941): the
+    /// session's layer cache budget. On the desktop that is the whole common budget, and both are
+    /// in the memory accountant, which keeps them within it together with the session's caches.
+    /// In the browser each gets half the layer cache's cap, so the two together keep it.
+    pub fn export_cache_budget(&self) -> usize {
+        let web = cfg!(target_arch = "wasm32");
+        let layer = self.memory_budget().caps(web).layer;
+        if web { layer / 2 } else { layer }
+    }
+
     /// The memory the caches share for the last memory reading ([`Prefs::memory_budget`]), kept
     /// reduced through a low-memory episode until the system has recovered
     /// ([`crate::sysinfo::SysMemory::still_low`]), so the budget (and the toast) doesn't flip
