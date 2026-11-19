@@ -329,7 +329,7 @@ pub async fn start(canvas_id: String) -> Result<(), JsValue> {
                 if n > 0 {
                     app.frames.set_remote(Some(Arc::new(frames::WebFrames::start(n, !query_flag("nogpuworkers")))));
                 }
-                app.frames.set_virtual_media(files::STORE.media_epoch(), Arc::new(|path| files::STORE.file_identity(path)));
+                app.frames.set_virtual_id(Arc::new(|path| files::STORE.file_identity(path)));
                 let (tx, rx) = std::sync::mpsc::channel();
                 api::set_sender(tx);
                 app = app.with_control(rx);

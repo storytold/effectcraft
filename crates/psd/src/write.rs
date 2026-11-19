@@ -1,10 +1,18 @@
 //! A minimal Photoshop document writer, per the same specification as the reader: RGB, CMYK or
 //! Grayscale, 8 or 16 bits, raw or RLE channels, pixel layers with layer masks, groups and any
 //! additional-information blocks (helpers below build text, effects, fill and adjustment
-//! blocks). Used to generate test fixtures; not a full exporter.
+//! blocks). Used to generate test fixtures; not a full exporter. The file itself is laid out and
+//! encoded by craft-psd ([`craft_psd::PsdFile::to_bytes`]).
+
+use craft_psd::layer::{LayerInfo, LayerRecord};
+use craft_psd::tagged::{SectionType, TaggedBlock};
+use craft_psd::{
+    BlendMode, BlendingRanges, ChannelData, Compression, GlobalLayerMask, Header, ImageData, LayerFlags, LayerInfoPlacement, MaskData, PsdFile, Version,
+};
 
 use crate::descriptor::{self, DValue, Descriptor, put_u16, put_u32, put_utf16};
-use crate::{ColorMode, Rect, Section, engine_data, pack_bits};
+use crate::limits::finite_sample;
+use crate::{ColorMode, Rect, Section, engine_data};
 
 /// A layer mask for [`WLayer`].
 #[derive(Clone, Debug)]
@@ -93,7 +101,7 @@ impl WLayer {
 pub struct WDoc {
     pub width: u32,
     pub height: u32,
-    /// 8 or 16.
+    /// 8, 16 or 32 (32-bit samples are written as floats).
     pub depth: u16,
     /// Rgb, Cmyk or Grayscale.
     pub mode: ColorMode,
@@ -128,10 +136,14 @@ fn mode_channels(mode: ColorMode, p: [f32; 4]) -> Vec<f32> {
 }
 
 fn encode_samples(v: &[f32], depth: u16) -> Vec<u8> {
-    let mut out = Vec::with_capacity(v.len() * if depth == 16 { 2 } else { 1 });
+    let mut out = Vec::with_capacity(v.len() * usize::from(depth.div_ceil(8)));
     for &x in v {
-        let x = x.clamp(0.0, 1.0);
-        if depth == 16 {
+        // Integer depths are stored in 0..1. 32-bit documents keep finite samples
+        // outside that range (HDR); NaN and infinities use the reader's mapping.
+        let x = if depth == 32 { finite_sample(x) } else { x.clamp(0.0, 1.0) };
+        if depth == 32 {
+            out.extend_from_slice(&x.to_be_bytes());
+        } else if depth == 16 {
             put_u16(&mut out, (x * 65535.0).round() as u16);
         } else {
             out.push((x * 255.0).round() as u8);
@@ -140,139 +152,81 @@ fn encode_samples(v: &[f32], depth: u16) -> Vec<u8> {
     out
 }
 
-/// One channel's data (compression field + data) for a `w`×`h` plane.
-fn channel_data(v: &[f32], w: usize, h: usize, depth: u16, rle: bool) -> Vec<u8> {
-    let raw = encode_samples(v, depth);
-    let mut out = vec![];
-    let rowb = raw.len() / h.max(1);
-    if !rle || w == 0 || h == 0 {
-        put_u16(&mut out, 0);
-        out.extend_from_slice(&raw);
-        return out;
-    }
-    put_u16(&mut out, 1);
-    let rows: Vec<Vec<u8>> = raw.chunks(rowb.max(1)).map(pack_bits).collect();
-    for r in &rows {
-        put_u16(&mut out, r.len() as u16);
-    }
-    for r in rows {
-        out.extend_from_slice(&r);
-    }
-    out
+/// The layer and merged-image compression of `doc`.
+fn compression(doc: &WDoc) -> Compression {
+    if doc.rle { Compression::Rle } else { Compression::Raw }
 }
 
-fn pascal4(out: &mut Vec<u8>, s: &str) {
-    let b: Vec<u8> = s.bytes().map(|c| if c < 0x80 { c } else { b'?' }).take(255).collect();
-    out.push(b.len() as u8);
-    out.extend_from_slice(&b);
-    let total = 1 + b.len();
-    out.resize(out.len() + total.div_ceil(4) * 4 - total, 0);
+/// One channel of a `w`×`h` plane, encoded by craft-psd. An empty plane is written raw.
+fn channel(id: i16, v: &[f32], w: usize, h: usize, doc: &WDoc) -> craft_psd::Result<ChannelData> {
+    let c = if w == 0 || h == 0 { Compression::Raw } else { compression(doc) };
+    let samples = encode_samples(v, doc.depth);
+    // A PSD RLE row holds at most 65535 bytes; a wider plane is written raw.
+    ChannelData::encode(id, c, &samples, w, h, doc.depth, Version::Psd)
+        .or_else(|_| ChannelData::encode(id, Compression::Raw, &samples, w, h, doc.depth, Version::Psd))
 }
 
-fn block(out: &mut Vec<u8>, key: &[u8; 4], data: &[u8]) {
-    out.extend_from_slice(b"8BIM");
-    out.extend_from_slice(key);
-    let padded = data.len().div_ceil(2) * 2;
-    put_u32(out, padded as u32);
-    out.extend_from_slice(data);
-    out.resize(out.len() + padded - data.len(), 0);
+/// The `luni` block: the UTF-16 length and code units, unpadded, as this writer has always
+/// written it (`TaggedBlock::unicode_name` adds a terminator, which would change exported files).
+fn unicode_name(name: &str) -> TaggedBlock {
+    let units: Vec<u16> = name.encode_utf16().collect();
+    let mut data = (units.len() as u32).to_be_bytes().to_vec();
+    data.extend(units.iter().flat_map(|u| u.to_be_bytes()));
+    TaggedBlock::new(*b"luni", data)
 }
 
-fn layer_info(doc: &WDoc) -> Vec<u8> {
-    let mut out = vec![];
-    out.extend_from_slice(&(-(doc.layers.len() as i16)).to_be_bytes());
-    let mut chan_data: Vec<Vec<(i16, Vec<u8>)>> = vec![];
-    for l in &doc.layers {
-        let (w, h) = (l.rect.width() as usize, l.rect.height() as usize);
-        let mut chans: Vec<(i16, Vec<u8>)> = vec![];
-        let n = w * h;
-        let alpha: Vec<f32> = l.pixels.iter().take(n).map(|p| p[3]).collect();
-        chans.push((-1, channel_data(&alpha, w, h, doc.depth, doc.rle)));
-        let cc = doc.mode.color_channels();
-        let planes: Vec<Vec<f32>> = l.pixels.iter().take(n).map(|p| mode_channels(doc.mode, *p)).collect();
-        for c in 0..cc {
-            let plane: Vec<f32> = planes.iter().map(|v| v[c]).collect();
-            chans.push((c as i16, channel_data(&plane, w, h, doc.depth, doc.rle)));
-        }
-        if let Some(m) = &l.mask {
-            chans.push((-2, channel_data(&m.data, m.rect.width() as usize, m.rect.height() as usize, doc.depth, doc.rle)));
-        }
-        // record
-        for v in [l.rect.top, l.rect.left, l.rect.bottom, l.rect.right] {
-            out.extend_from_slice(&v.to_be_bytes());
-        }
-        put_u16(&mut out, chans.len() as u16);
-        for (id, d) in &chans {
-            out.extend_from_slice(&id.to_be_bytes());
-            put_u32(&mut out, d.len() as u32);
-        }
-        out.extend_from_slice(b"8BIM");
-        out.extend_from_slice(&l.blend);
-        out.push(l.opacity);
-        out.push(l.clipping as u8);
-        let mut flags = 8u8;
-        if l.hidden {
-            flags |= 2;
-        }
-        out.push(flags);
-        out.push(0);
-        let mut extra = vec![];
-        match &l.mask {
-            Some(m) => {
-                put_u32(&mut extra, 20);
-                for v in [m.rect.top, m.rect.left, m.rect.bottom, m.rect.right] {
-                    extra.extend_from_slice(&v.to_be_bytes());
-                }
-                extra.push(m.default_color);
-                extra.push(if m.disabled { 2 } else { 0 });
-                extra.extend_from_slice(&[0, 0]);
-            }
-            None => put_u32(&mut extra, 0),
-        }
-        put_u32(&mut extra, 0); // blending ranges
-        pascal4(&mut extra, &l.name);
-        let luni = unicode_plain(&l.name);
-        block(&mut extra, b"luni", &luni);
-        match l.section {
-            Section::Layer => {}
-            s => {
-                let mut d = vec![];
-                put_u32(
-                    &mut d,
-                    match s {
-                        Section::OpenFolder => 1,
-                        Section::ClosedFolder => 2,
-                        _ => 3,
-                    },
-                );
-                d.extend_from_slice(b"8BIM");
-                d.extend_from_slice(&l.blend);
-                block(&mut extra, b"lsct", &d);
-            }
-        }
-        for (k, d) in &l.blocks {
-            block(&mut extra, k, d);
-        }
-        put_u32(&mut out, extra.len() as u32);
-        out.extend_from_slice(&extra);
-        chan_data.push(chans);
-    }
-    for chans in chan_data {
-        for (_, d) in chans {
-            out.extend_from_slice(&d);
-        }
-    }
-    if out.len() % 2 == 1 {
-        out.push(0);
-    }
-    out
+/// A legacy Pascal name: ASCII, anything else as `?`, at most 255 bytes.
+fn legacy_name(s: &str) -> Vec<u8> {
+    s.bytes().map(|c| if c < 0x80 { c } else { b'?' }).take(255).collect()
 }
 
-/// A Unicode string without the terminating NUL (the layer-name `luni` form).
-fn unicode_plain(s: &str) -> Vec<u8> {
-    let mut out = vec![];
-    put_utf16(&mut out, s, false);
-    out
+fn psd_rect(r: Rect) -> craft_psd::Rect {
+    craft_psd::Rect { top: r.top, left: r.left, bottom: r.bottom, right: r.right }
+}
+
+/// The layer record of `l`: pixels, mask, name, section and blocks.
+fn record(l: &WLayer, doc: &WDoc) -> craft_psd::Result<LayerRecord> {
+    let (w, h) = (l.rect.width() as usize, l.rect.height() as usize);
+    let n = w * h;
+    let alpha: Vec<f32> = l.pixels.iter().take(n).map(|p| p[3]).collect();
+    let mut channels = vec![channel(-1, &alpha, w, h, doc)?];
+    let planes: Vec<Vec<f32>> = l.pixels.iter().take(n).map(|p| mode_channels(doc.mode, *p)).collect();
+    for c in 0..doc.mode.color_channels() {
+        let plane: Vec<f32> = planes.iter().map(|v| v[c]).collect();
+        channels.push(channel(c as i16, &plane, w, h, doc)?);
+    }
+    let mut mask = MaskData::None;
+    if let Some(m) = &l.mask {
+        channels.push(channel(-2, &m.data, m.rect.width() as usize, m.rect.height() as usize, doc)?);
+        mask = MaskData::Mask(craft_psd::LayerMask::new(psd_rect(m.rect), m.default_color, if m.disabled { 2 } else { 0 }));
+    }
+    let mut flags = LayerFlags(8);
+    flags.set_hidden(l.hidden);
+    let mut blocks = vec![unicode_name(&l.name)];
+    let kind = match l.section {
+        Section::Layer => None,
+        Section::OpenFolder => Some(SectionType::OpenFolder),
+        Section::ClosedFolder => Some(SectionType::ClosedFolder),
+        Section::Divider => Some(SectionType::BoundingDivider),
+    };
+    if let Some(kind) = kind {
+        blocks.push(TaggedBlock::section_divider(kind, Some(BlendMode::from_key(l.blend)), None));
+    }
+    blocks.extend(l.blocks.iter().map(|(k, d)| TaggedBlock::new(*k, d.clone())));
+    Ok(LayerRecord {
+        rect: psd_rect(l.rect),
+        channels,
+        blend_mode: BlendMode::from_key(l.blend),
+        opacity: l.opacity,
+        clipping: u8::from(l.clipping),
+        flags,
+        filler: 0,
+        mask,
+        blending_ranges: BlendingRanges::default(),
+        name: legacy_name(&l.name),
+        blocks,
+        extra_trailing: vec![],
+    })
 }
 
 /// Normal "over" of the visible pixel layers (groups ignored), straight alpha.
@@ -298,76 +252,55 @@ fn flatten(doc: &WDoc) -> Vec<[f32; 4]> {
     acc
 }
 
-/// Serialise a document.
+/// Serialise a document with craft-psd.
 pub fn write(doc: &WDoc) -> Vec<u8> {
+    // Every input `WDoc` describes is in range for the writer; a failure is a bug in the caller.
+    #[allow(clippy::expect_used)]
+    build(doc).and_then(|f| f.to_bytes()).expect("a WDoc is always writable")
+}
+
+fn build(doc: &WDoc) -> craft_psd::Result<PsdFile> {
     let cc = doc.mode.color_channels();
-    let mut out = vec![];
-    out.extend_from_slice(b"8BPS");
-    put_u16(&mut out, 1);
-    out.extend_from_slice(&[0; 6]);
-    put_u16(&mut out, (cc + 1) as u16);
-    put_u32(&mut out, doc.height);
-    put_u32(&mut out, doc.width);
-    put_u16(&mut out, doc.depth);
-    put_u16(&mut out, doc.mode.to_u16());
-    put_u32(&mut out, 0); // colour mode data
-    put_u32(&mut out, 0); // image resources
-    // Layer and mask information.
-    let mut lm = vec![];
-    if !doc.layers.is_empty() {
-        let li = layer_info(doc);
-        if doc.depth == 16 {
-            put_u32(&mut lm, 0);
-            put_u32(&mut lm, 0); // global layer mask info
-            let mut padded = li;
-            while !padded.len().is_multiple_of(4) {
-                padded.push(0);
-            }
-            lm.extend_from_slice(b"8BIM");
-            lm.extend_from_slice(b"Lr16");
-            put_u32(&mut lm, padded.len() as u32);
-            lm.extend_from_slice(&padded);
-        } else {
-            put_u32(&mut lm, li.len() as u32);
-            lm.extend_from_slice(&li);
-            put_u32(&mut lm, 0);
-        }
-        if !doc.linked.is_empty() {
-            let d = linked_block(&doc.linked);
-            lm.extend_from_slice(b"8BIM");
-            lm.extend_from_slice(b"lnk2");
-            put_u32(&mut lm, d.len() as u32);
-            lm.extend_from_slice(&d);
-        }
+    let header = Header::new(Version::Psd, doc.width, doc.height, (cc + 1) as u16, doc.depth, craft_psd::ColorMode::from_u16(doc.mode.to_u16()));
+    let layers = doc.layers.iter().map(|l| record(l, doc)).collect::<craft_psd::Result<Vec<_>>>()?;
+    let has_layers = !layers.is_empty();
+    let mut global_blocks = vec![];
+    if has_layers && !doc.linked.is_empty() {
+        global_blocks.push(TaggedBlock::new(*b"lnk2", linked_block(&doc.linked)));
     }
-    put_u32(&mut out, lm.len() as u32);
-    out.extend_from_slice(&lm);
     // Merged image.
     let comp = doc.composite.clone().unwrap_or_else(|| flatten(doc));
-    let w = doc.width as usize;
     let planes: Vec<Vec<f32>> = comp.iter().map(|p| mode_channels(doc.mode, *p)).collect();
-    let mut chans: Vec<Vec<f32>> = (0..cc).map(|c| planes.iter().map(|v| v[c]).collect()).collect();
-    chans.push(comp.iter().map(|p| p[3]).collect());
-    if doc.rle {
-        put_u16(&mut out, 1);
-        let rows: Vec<Vec<Vec<u8>>> =
-            chans.iter().map(|c| encode_samples(c, doc.depth).chunks((w * if doc.depth == 16 { 2 } else { 1 }).max(1)).map(pack_bits).collect()).collect();
-        for c in &rows {
-            for r in c {
-                put_u16(&mut out, r.len() as u16);
-            }
-        }
-        for c in rows {
-            for r in c {
-                out.extend_from_slice(&r);
-            }
-        }
-    } else {
-        put_u16(&mut out, 0);
-        for c in &chans {
-            out.extend_from_slice(&encode_samples(c, doc.depth));
-        }
+    let mut merged = vec![];
+    for c in 0..cc {
+        merged.extend(encode_samples(&planes.iter().map(|v| v[c]).collect::<Vec<_>>(), doc.depth));
     }
+    merged.extend(encode_samples(&comp.iter().map(|p| p[3]).collect::<Vec<_>>(), doc.depth));
+    let image_data = ImageData::encode(compression(doc), &merged, &header).or_else(|_| ImageData::encode(Compression::Raw, &merged, &header))?;
+    Ok(PsdFile {
+        header,
+        color_mode_data: vec![],
+        resources: vec![],
+        layer_info: has_layers.then_some(LayerInfo { merged_alpha: true, layers, padding: None }),
+        // 16- and 32-bit layers go in an `Lr16` / `Lr32` block, as Photoshop writes them.
+        layer_info_placement: match doc.depth {
+            16 | 32 if has_layers => {
+                LayerInfoPlacement::GlobalBlock { index: 0, signature: *b"8BIM", key: craft_psd::tiff::layer_info_key(doc.depth), padding: None }
+            }
+            _ => LayerInfoPlacement::Section,
+        },
+        global_layer_mask: has_layers.then(GlobalLayerMask::default),
+        global_blocks,
+        layer_mask_trailing: vec![],
+        image_data,
+        write_as_psb: false,
+    })
+}
+
+/// A Unicode string without the terminating NUL (the layer-name `luni` form).
+fn unicode_plain(s: &str) -> Vec<u8> {
+    let mut out = vec![];
+    put_utf16(&mut out, s, false);
     out
 }
 
@@ -501,30 +434,14 @@ pub fn solid_color_block(rgb: [f64; 3]) -> ([u8; 4], Vec<u8>) {
 
 /// `hue2`: Hue/Saturation (master).
 pub fn hue_sat_block(hue: i16, sat: i16, light: i16) -> ([u8; 4], Vec<u8>) {
-    let mut d = vec![];
-    put_u16(&mut d, 2);
-    d.extend_from_slice(&[0, 0]);
-    for v in [0i16, 0, 0, hue, sat, light] {
-        d.extend_from_slice(&v.to_be_bytes());
-    }
-    // Six colour ranges (unused).
-    d.resize(d.len() + 6 * 24, 0);
-    (*b"hue2", d)
+    let block = craft_psd::adjust::hue_saturation_block(hue, sat, light);
+    (block.key, block.data)
 }
 
 /// `levl`: Levels (composite record).
 pub fn levels_block(in_black: i16, in_white: i16, out_black: i16, out_white: i16, gamma: f64) -> ([u8; 4], Vec<u8>) {
-    let mut d = vec![];
-    put_u16(&mut d, 2);
-    for v in [in_black, in_white, out_black, out_white, (gamma * 100.0).round() as i16] {
-        d.extend_from_slice(&v.to_be_bytes());
-    }
-    for _ in 0..28 {
-        for v in [0i16, 255, 0, 255, 100] {
-            d.extend_from_slice(&v.to_be_bytes());
-        }
-    }
-    (*b"levl", d)
+    let block = craft_psd::adjust::levels_block(in_black, in_white, out_black, out_white, (gamma * 100.0).round() as i16);
+    (block.key, block.data)
 }
 
 pub fn invert_block() -> ([u8; 4], Vec<u8>) {
@@ -532,21 +449,13 @@ pub fn invert_block() -> ([u8; 4], Vec<u8>) {
 }
 
 pub fn brightness_block(brightness: i16, contrast: i16) -> ([u8; 4], Vec<u8>) {
-    let mut d = vec![];
-    for v in [brightness, contrast, 127] {
-        d.extend_from_slice(&v.to_be_bytes());
-    }
-    d.push(0);
-    (*b"brit", d)
+    let block = craft_psd::adjust::brightness_contrast_block(brightness, contrast);
+    (block.key, block.data)
 }
 
 pub fn exposure_block(exposure: f32, offset: f32, gamma: f32) -> ([u8; 4], Vec<u8>) {
-    let mut d = vec![];
-    put_u16(&mut d, 1);
-    for v in [exposure, offset, gamma] {
-        d.extend_from_slice(&v.to_be_bytes());
-    }
-    (*b"expA", d)
+    let block = craft_psd::adjust::exposure_block(exposure, offset, gamma);
+    (block.key, block.data)
 }
 
 /// `vmsk`: a vector mask from closed polygons/curves given as (in, anchor, out) knots in pixels.

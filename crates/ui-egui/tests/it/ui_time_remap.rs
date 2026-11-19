@@ -200,6 +200,9 @@ fn selected_remaps_keep_their_offsets_when_dragged_and_share_typed_values() {
     assert_eq!(value(&h, layer, uid), 1.5);
     assert_eq!(value(&h, other, other_uid), 2.5);
     h.run_steps(2);
+    type_value(&mut h, uid, "+15f", Key::Enter);
+    assert_eq!(value(&h, layer, uid), 2.0);
+    assert_eq!(value(&h, other, other_uid), 3.0);
     type_value(&mut h, uid, "60", Key::Enter);
     assert_eq!(value(&h, layer, uid), 2.0);
     assert_eq!(value(&h, other, other_uid), 2.0);

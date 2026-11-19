@@ -47,12 +47,18 @@ pub enum Item {
     },
     /// Read-only information line.
     Note(&'static str),
+    /// Memory & CPU: how much RAM EffectCraft's caches may use, of the installed RAM
+    /// (`Prefs::memory_budget`, `Session::memory_budget`).
+    MemoryUse,
     /// The browser's storage manager (web app only, `storage.*`): usage and quota, persistent
     /// storage, Clear buttons. Not shown where there is no browser storage.
     BrowserStorage,
     /// A task's trained models (`roto.models`, `face.models`): authors, licence, size, install,
     /// choose.
     Models(effectcraft_segment::Task),
+    /// The Plug-in Library (`library.*`): the community catalog's packages, installed ones,
+    /// install / update / remove.
+    PluginLibrary,
 }
 
 /// One page of the Settings dialog.
@@ -89,6 +95,7 @@ pub fn pages() -> Vec<Page> {
                 s("general.showToolTips", "Show Tool Tips", B, true),
                 s("general.viewerWheelScrubbing", "Scrub Composition Frames with Mouse Wheel", B, true),
                 s("general.createLayersAtCompStart", "Create Layers at Composition Start Time", B, true),
+                s("general.fitNewLayersToWorkArea", "Fit New Layers to Work Area", B, true),
                 s("general.switchesAffectNestedComps", "Switches Affect Nested Comps", B, true),
                 s("general.defaultSpatialLinear", "Default Spatial Interpolation to Linear", B, true),
                 s("general.preserveConstantVertexCount", "Preserve Constant Vertex and Feather Point Count when Editing Masks", B, true),
@@ -167,6 +174,7 @@ pub fn pages() -> Vec<Page> {
             title: "Previews",
             items: vec![
                 s("previews.adaptiveResolutionLimit", "Adaptive Resolution Limit", Kind::Choice(ON_OFF_RES), true),
+                s("previews.adaptivePlayback", "Lower Resolution When Playback Can't Keep Up", B, true),
                 s("previews.showInternalWireframes", "Show Internal Wireframes", B, true),
                 s("previews.cacheFramesWhenIdle", "Cache Frames When Idle", B, true),
                 s("previews.fastPreviews", "Fast Previews (Draft 3D, Faster Effects)", B, true),
@@ -295,6 +303,11 @@ pub fn pages() -> Vec<Page> {
                 Section("Media Cache"),
                 s("disk.mediaCacheFolder", "Database and Cache Folder", Kind::Path, true),
                 s("disk.conformedMediaFolder", "Conformed Audio Folder", Kind::Path, true),
+                Section("Network Footage"),
+                s("disk.localizeFootage", "Localize Network Footage", B, true),
+                s("disk.localizeMaxGb", "Maximum Local Copies Size", Kind::Int(1, 100_000, "GB"), true),
+                s("disk.localizeFolder", "Local Copies Folder", Kind::Path, true),
+                s("disk.networkFootageLocations", "Network Footage Locations", Kind::Text, true),
             ],
         },
         Page {
@@ -302,11 +315,9 @@ pub fn pages() -> Vec<Page> {
             title: "Memory & CPU",
             items: vec![
                 s("memory.ramReservedGb", "RAM Reserved for Other Applications", Kind::Int(0, 1024, "GB"), true),
-                Section("Cache Budgets"),
-                s("memory.layerCacheMb", "Layer Cache", Kind::Int(64, 1 << 20, "MB"), true),
-                s("memory.mediaCacheMb", "Footage Frame Cache", Kind::Int(64, 1 << 20, "MB"), true),
-                s("memory.previewCacheMb", "Preview (RAM) Cache", Kind::Int(64, 1 << 20, "MB"), true),
+                MemoryUse,
                 s("memory.reduceCacheWhenLow", "Reduce Cache Size When System Is Low on Memory", B, true),
+                s("memory.gpuFramesInFlight", "GPU Frames Rendered at Once", Kind::Choice(&[("Auto", "auto"), ("1", "1"), ("2", "2"), ("3", "3")]), true),
             ],
         },
         Page {
@@ -371,6 +382,17 @@ pub fn pages() -> Vec<Page> {
                 Models(effectcraft_segment::Task::Face),
             ],
         },
+        Page {
+            id: "library",
+            title: "Plug-in Library",
+            items: vec![
+                Section("Community Effect Plug-ins"),
+                Note(
+                    "Effect plug-ins published by the community and reviewed into one catalog. They are WebAssembly modules that run in a sandbox (no files, network or clock), downloaded only when you ask and checked against the catalog's SHA-256.",
+                ),
+                PluginLibrary,
+            ],
+        },
     ]
 }
 
@@ -422,7 +444,9 @@ pub fn pages_json() -> Value {
                     Item::Labels => json!({"labels": "labels.N.name / labels.N.color (N = 0..15)"}),
                     Item::AudioDevices { key } => json!({"type": "device", "key": key, "label": "Default Output"}),
                     Item::Note(t) => json!({"note": t}),
+                    Item::MemoryUse => json!({"memoryUse": "help.systemInfo → caches.budget / caches.inUse (what EffectCraft's caches may use, and use now)"}),
                     Item::BrowserStorage => json!({"browserStorage": "storage.info / storage.persist / storage.clear (web app)"}),
+                    Item::PluginLibrary => json!({"pluginLibrary": "library.list / library.refresh / library.install / library.update / library.uninstall"}),
                     Item::Models(task) => {
                         let p = if *task == effectcraft_segment::Task::Face { "face" } else { "roto" };
                         json!({"models": format!("{p}.models / {p}.model.select / {p}.model.download / {p}.model.install / {p}.model.remove"), "key": format!("{p}.model")})

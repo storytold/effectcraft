@@ -147,16 +147,20 @@ fn object_fill_recovers_background_and_is_stable() {
             holes.push(hole);
             gts.push(gt);
         }
-        let input = FillInput { frames, holes, references: vec![] };
-        let out = fill_sequence_with(input.clone(), &FillOpts::default(), g, &mut |_, _| true).expect("fill");
+        let input = FillInput {
+            frames: effectcraft_raster::inpaint::Frames::Memory(frames),
+            holes: holes.into_iter().map(|h| effectcraft_raster::inpaint::HoleMask::from_vec(&h)).collect(),
+            references: vec![],
+        };
+        let out = fill_sequence_with(input.clone(), &FillOpts::default(), g, &mut |_, _| true, None).expect("fill");
         for t in 0..out.len() {
-            let db = psnr(&out[t], &gts[t], Some(&input.holes[t]));
+            let db = psnr(&out[t], &gts[t], Some(&input.holes[t].to_vec()));
             assert!(db > 26.0, "frame {t} pan {pan}: {db:.1} dB");
             assert_eq!(out[t].data[0][3], 1.0);
         }
         if pan == 0.0 {
             for t in 1..out.len() {
-                let both: Vec<bool> = input.holes[t].iter().zip(&input.holes[t - 1]).map(|(a, b)| *a || *b).collect();
+                let both: Vec<bool> = input.holes[t].to_vec().iter().zip(input.holes[t - 1].to_vec().iter()).map(|(a, b)| *a || *b).collect();
                 let db = psnr(&out[t], &out[t - 1], Some(&both));
                 assert!(db > 30.0, "frames {}–{t} differ: {db:.1} dB", t - 1);
             }
@@ -172,13 +176,17 @@ fn edge_blend_takes_the_cpu_membrane() {
     let (w, h) = (80u32, 60u32);
     let gt = background(w, h, 0.0);
     let hole = rect_hole(w, h, 30, 20, 14);
-    let input = FillInput { frames: vec![cut(&gt, &hole); 4], holes: vec![hole.clone(); 4], references: vec![] };
+    let input = FillInput {
+        frames: effectcraft_raster::inpaint::Frames::Memory(vec![cut(&gt, &hole); 4]),
+        holes: vec![effectcraft_raster::inpaint::HoleMask::from_vec(&hole); 4],
+        references: vec![],
+    };
     let opts = FillOpts { method: effectcraft_raster::inpaint::FillMethod::EdgeBlend, ..Default::default() };
-    let edge = fill_sequence_with(input.clone(), &opts, g, &mut |_, _| true).expect("fill");
+    let edge = fill_sequence_with(input.clone(), &opts, g, &mut |_, _| true, None).expect("fill");
     for t in 1..4 {
         assert!(psnr(&edge[t], &edge[0], Some(&hole)) > 40.0, "frame {t}");
     }
-    assert!(psnr(&edge[0], &membrane_fill(&input.frames[0], &hole), Some(&hole)) > 60.0);
+    assert!(psnr(&edge[0], &membrane_fill(&input.frames.get(0), &hole), Some(&hole)) > 60.0);
 }
 
 /// The dilation the level plans are built from (kept honest: the flags' target bit is `near`).
@@ -299,11 +307,15 @@ fn sequence_fill_with_the_device_flow_matches_the_cpu() {
             frames.push(cut(&gt, &hole));
             holes.push(hole);
         }
-        let input = FillInput { frames, holes, references: vec![] };
-        let dev = fill_sequence_with(input.clone(), &FillOpts::default(), g, &mut |_, _| true).expect("gpu fill");
-        let ref_cpu = fill_sequence_with(input.clone(), &FillOpts::default(), &cpu, &mut |_, _| true).expect("cpu fill");
+        let input = FillInput {
+            frames: effectcraft_raster::inpaint::Frames::Memory(frames),
+            holes: holes.into_iter().map(|h| effectcraft_raster::inpaint::HoleMask::from_vec(&h)).collect(),
+            references: vec![],
+        };
+        let dev = fill_sequence_with(input.clone(), &FillOpts::default(), g, &mut |_, _| true, None).expect("gpu fill");
+        let ref_cpu = fill_sequence_with(input.clone(), &FillOpts::default(), &cpu, &mut |_, _| true, None).expect("cpu fill");
         for t in 0..dev.len() {
-            let db = psnr(&dev[t], &ref_cpu[t], Some(&input.holes[t]));
+            let db = psnr(&dev[t], &ref_cpu[t], Some(&input.holes[t].to_vec()));
             assert!(db > 40.0, "frame {t} pan {pan}: device vs CPU {db:.1} dB");
         }
     }

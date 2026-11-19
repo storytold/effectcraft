@@ -117,6 +117,26 @@ impl Pipe {
         Conversion::new(ws, self.linear, self.out, false)
     }
 
+    /// The pipe without the HDR step (Clip), as [`crate::RenderOpts::skip_hdr_step`] renders
+    /// with: [`Pipe::output`] converts to the output space as it is.
+    pub fn without_hdr_step(self) -> Pipe {
+        Pipe { hdr: HdrMode::Clip, ..self }
+    }
+
+    /// The top-level frame of a [`Pipe::without_hdr_step`] render (output-encoded, straight colour)
+    /// → linear light in the output space's primaries: the output space's curve, or the Working
+    /// Gamma's when unmanaged (sRGB at 2.2, a pure 2.4 power curve at 2.4). The identity for a
+    /// linear output (ACES).
+    pub fn output_linear(&self) -> Conversion {
+        Conversion::linearize(self.output_linear_space())
+    }
+
+    /// The space whose primaries and white the frame of [`Pipe::output_linear`] is in: the output
+    /// space, or the Working Gamma's (sRGB or Rec. 709, the same primaries) when unmanaged.
+    pub fn output_linear_space(&self) -> ColorSpace {
+        if self.space.is_some() { self.out } else { self.curve() }
+    }
+
     /// Output with HDR compand / tone mapping (standard-dynamic-range outputs only): working
     /// space → linear output primaries, the HDR curve, then the output's encoding.
     pub fn output_hdr(&self) -> Option<(Option<Conversion>, HdrMode, Conversion)> {
@@ -131,6 +151,26 @@ impl Pipe {
             quantize_px(&mut p, l, 1.0 / l);
         }
         p
+    }
+
+    /// A copy of `src` converted by `c` and quantised to the bit depth, in one pass: one read and
+    /// one write of the frame instead of a copy, a conversion and a quantise pass (a 1080p float
+    /// frame is 33 MB, and these passes are limited by memory speed). The same pixels as
+    /// [`convert`] then [`Pipe::quantize`].
+    pub fn copy_converted(&self, src: &Image, c: Option<&Conversion>) -> Image {
+        let levels = self.levels;
+        let data = src
+            .data
+            .par_iter()
+            .map(|&p| {
+                let mut p = c.map_or(p, |c| convert_px(p, c));
+                if let Some(l) = levels {
+                    quantize_px(&mut p, l, 1.0 / l);
+                }
+                p
+            })
+            .collect();
+        Image { width: src.width, height: src.height, data }
     }
 
     /// Clamp and quantise to the bit depth (no-op in 32 bpc).
@@ -245,14 +285,18 @@ fn quantize_rect(img: &mut Image, r: PxRect, levels: f32) {
 
 /// Convert premultiplied pixels (on straight colour).
 pub fn convert(img: &mut Image, c: &Conversion) {
-    img.data.par_iter_mut().for_each(|p| {
-        let a = p[3];
-        if a <= 0.0 {
-            return;
-        }
-        let o = c.apply([p[0] / a, p[1] / a, p[2] / a]);
-        *p = [o[0] * a, o[1] * a, o[2] * a, a];
-    });
+    img.data.par_iter_mut().for_each(|p| *p = convert_px(*p, c));
+}
+
+/// [`convert`] of one pixel.
+#[inline]
+fn convert_px(p: [f32; 4], c: &Conversion) -> [f32; 4] {
+    let a = p[3];
+    if a <= 0.0 {
+        return p;
+    }
+    let o = c.apply([p[0] / a, p[1] / a, p[2] / a]);
+    [o[0] * a, o[1] * a, o[2] * a, a]
 }
 
 /// Compand: an exponential knee from 80%, approaching 1.0 (linear light, per channel).
@@ -325,6 +369,35 @@ mod tests {
                     let w = if x >= r.x0 && x < r.x1 && y >= r.y0 && y < r.y1 { want.data[i] } else { *p };
                     assert_eq!(g.map(f32::to_bits), w.map(f32::to_bits), "{levels} {r:?} px ({x}, {y})");
                 }
+            }
+        }
+    }
+
+    /// The fused footage pass gives the pixels of a copy, a conversion and a quantise pass, bit
+    /// for bit, at every depth, with and without a conversion.
+    #[test]
+    fn copy_converted_is_convert_then_quantize() {
+        let mut img = Image::new(17, 5);
+        for (i, p) in img.data.iter_mut().enumerate() {
+            *p = match i % 7 {
+                0 => [0.3, -0.2, 0.71, 0.9],
+                1 => [-0.0, 0.0, 0.0, 0.0],
+                2 => [1.7, 0.4, f32::NAN, 0.5],
+                3 => [0.0; 4],
+                _ => [i as f32 / 90.0, 0.5, 0.25, 1.0],
+            };
+        }
+        for depth in [effectcraft_project::BitDepth::Bpc8, effectcraft_project::BitDepth::Bpc16, effectcraft_project::BitDepth::Bpc32] {
+            let pipe = Pipe::of(&ProjectSettings { bit_depth: depth, ..Default::default() });
+            for c in [None, Some(Conversion::linearize(ColorSpace::Srgb))] {
+                let mut want = img.clone();
+                if let Some(c) = &c {
+                    convert(&mut want, c);
+                }
+                pipe.quantize(&mut want);
+                let got = pipe.copy_converted(&img, c.as_ref());
+                let bits = |i: &Image| i.data.iter().map(|p| p.map(f32::to_bits)).collect::<Vec<_>>();
+                assert_eq!(bits(&got), bits(&want), "{depth:?} conversion {}", c.is_some());
             }
         }
     }

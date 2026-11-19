@@ -9,8 +9,9 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::support::write_tone;
 use effectcraft_color::Label;
-use effectcraft_export::render_queue::{AudioOutput, Channels, OutputFormat, OutputModule, ProResProfile, RenderSettings, TimeSpan, sequence_path};
+use effectcraft_export::render_queue::{AlphaMode, AudioOutput, Channels, OutputFormat, OutputModule, ProResProfile, RenderSettings, TimeSpan, sequence_path};
 use effectcraft_export::{Job, Progress, export};
 use effectcraft_media::MediaPool;
 use effectcraft_project::{Comp, ItemId, ItemKind, LayerSource, Project, Solid, build};
@@ -70,6 +71,7 @@ fn settings() -> RenderSettings {
     RenderSettings { time_span: TimeSpan::LengthOfComp, ..Default::default() }
 }
 
+/// Exports the standard test comp and checks progress for all [`FRAMES`] frames.
 fn run(p: &Project, cid: ItemId, footage: &dyn FootageSource, om: &OutputModule, path: &Path) -> effectcraft_export::Report {
     run_frames(p, cid, footage, om, path, FRAMES)
 }
@@ -251,6 +253,65 @@ fn prores_4444_with_alpha() {
     }
 }
 
+/// Checks stored alpha run codewords in exported MOVs across both 4444 profiles,
+/// alpha modes and motion-blur settings, without relying on permissive decoders.
+#[test]
+fn prores_alpha_final_run_is_present_in_exported_movies() {
+    let dir = out_dir("prores-alpha-final-run");
+    let png = dir.join("alpha.png");
+    // One macroblock with 255 transparent pixels followed by one opaque pixel.
+    // The last alpha difference is -1 (modulo 65536), requiring a singleton run.
+    let mut pixels = image::RgbaImage::new(16, 16);
+    pixels.put_pixel(15, 15, image::Rgba([255, 80, 20, 255]));
+    pixels.save(&png).expect("synthetic alpha PNG");
+
+    for profile in [ProResProfile::P4444, ProResProfile::P4444Xq] {
+        for alpha_mode in [AlphaMode::Straight, AlphaMode::Premultiplied] {
+            for motion_blur in [false, true] {
+                let mut project = Project::default();
+                let rate = FrameRate::FPS_30;
+                let mut comp = Comp::new(16, 16, rate, rate.tick_of(1));
+                comp.enable_motion_blur = motion_blur;
+                let footage = effectcraft_media::probe(&png).expect("probe synthetic PNG");
+                let item = project.add_item("Alpha", Label::SeaFoam, None, ItemKind::Footage(footage));
+                let mut layer = build::layer(&mut project, &comp, "Alpha", LayerSource::Footage { item }, (16, 16), None);
+                layer.switches.motion_blur = motion_blur;
+                comp.layers.push(layer);
+                let comp = project.add_item("Alpha", Label::Sandstone, None, ItemKind::Comp(comp.into()));
+                let output = OutputModule {
+                    channels: Channels::Rgba,
+                    prores_profile: profile,
+                    alpha_mode,
+                    audio: AudioOutput::Off,
+                    ..OutputModule::for_format(OutputFormat::ProRes)
+                };
+                let path = dir.join(format!("{profile:?}-{alpha_mode:?}-blur-{motion_blur}.mov"));
+                run_frames(&project, comp, &MediaPool::new(), &output, &path, 1);
+
+                let bytes = std::fs::read(&path).expect("exported MOV");
+                let movie = craft_media::isobmff::open(bytes.as_slice()).expect("demux exported MOV");
+                let video = movie.tracks.iter().find(|track| track.kind == craft_media::isobmff::TrackKind::Video).expect("video track");
+                assert_eq!(video.samples.len(), 1);
+                let sample = &video.samples[0];
+                let frame = &bytes[sample.offset as usize..][..sample.size as usize];
+                let (header, start, size) = craft_video::prores::FrameHeader::parse(frame).expect("ProRes header");
+                assert_eq!((header.width, header.height), (16, 16));
+                let picture = &frame[start..size];
+                let header = craft_video::prores::PictureHeader::parse(picture).expect("picture header");
+                assert_eq!(header.num_slices, 1);
+                let slice = &picture[header.header_size + 2..];
+                let color_bytes: usize = slice[2..8].as_chunks::<2>().0.iter().map(|b| u16::from_be_bytes(*b) as usize).sum();
+                let alpha = &slice[(slice[0] >> 3) as usize + color_bytes..];
+                // RDD 36:2022 Tables 12–14: +1, run 255, -1, run 1, alignment.
+                // The old encoder stopped after -1, giving [00 00 fe 01]. Its
+                // own decoder and FFmpeg accept that truncated payload, so a
+                // round-trip alone cannot enforce the native decoder's syntax.
+                assert_eq!(alpha, [0x00, 0x00, 0xfe, 0x01, 0x80], "{profile:?}, {alpha_mode:?}, blur={motion_blur}");
+            }
+        }
+    }
+}
+
 fn check_still_dir(dir: &Path, ext: &str, tol: f32, alpha: bool) {
     for k in 0..FRAMES {
         let path = sequence_path(&dir.join(format!("f_[#####].{ext}")).to_string_lossy(), k as i64);
@@ -319,6 +380,105 @@ fn exr_sequence_writes_scan_lines() {
     assert_eq!(meta.headers[0].compression, exr::compression::Compression::ZIP16);
 }
 
+/// The RGBA samples of an EXR file, as stored (f16 widened to f32), and their sample types.
+fn exr_samples(path: &Path) -> (Vec<f32>, Vec<exr::prelude::SampleType>) {
+    use exr::prelude::{ReadChannels, ReadLayers};
+    let image = exr::prelude::read()
+        .no_deep_data()
+        .largest_resolution_level()
+        .rgba_channels(
+            |res, _| (res.width(), vec![0f32; res.width() * res.height() * 4]),
+            |(w, v): &mut (usize, Vec<f32>), p: exr::prelude::Vec2<usize>, (r, g, b, a): (f32, f32, f32, f32)| {
+                let o = (p.y() * *w + p.x()) * 4;
+                v[o..o + 4].copy_from_slice(&[r, g, b, a]);
+            },
+        )
+        .first_valid_layer()
+        .all_attributes()
+        .from_file(path)
+        .expect("read exr");
+    let c = &image.layer_data.channel_data.channels;
+    (image.layer_data.channel_data.pixels.1, vec![c.0.sample_type, c.1.sample_type, c.2.sample_type, c.3.as_ref().expect("alpha").sample_type])
+}
+
+/// Every OpenEXR compression at both bit depths renders through the Render Queue as scan lines
+/// with that compression and sample type, and reads back through the media pool (#2911):
+/// lossless 32-bit float matches the uncompressed render exactly, lossless half float stores
+/// exactly the half rounding of it, and lossy methods stay within the tolerance the docs give.
+#[test]
+fn exr_compressions_and_bit_depths_round_trip() {
+    use effectcraft_export::render_queue::{ExrBitDepth, ExrCompression};
+    use exr::prelude::{SampleType, f16};
+    let (p, cid) = project(None);
+    let render = |c: ExrCompression, d: ExrBitDepth| {
+        let dir = out_dir(&format!("seq-exr-{}-{}", c.name(), d.name()));
+        let om = OutputModule { channels: Channels::Rgba, exr_compression: c, exr_bit_depth: d, ..OutputModule::for_format(OutputFormat::ExrSequence) };
+        run(&p, cid, &NoFootage, &om, &dir.join("f_[#####].exr"));
+        dir.join("f_00007.exr")
+    };
+    let pooled = |path: &Path| {
+        let f = effectcraft_media::probe(path).expect("probe");
+        MediaPool::new().frame_at(&f, Tick(0)).expect("decode")
+    };
+    let reference = render(ExrCompression::None, ExrBitDepth::Float);
+    let (want, _) = exr_samples(&reference);
+    let want_pooled = pooled(&reference);
+    assert!(want.iter().any(|v| *v > 0.5) && want.contains(&0.0), "the frame has red, background and transparent corners");
+    for d in ExrBitDepth::ALL {
+        let ty = if d == ExrBitDepth::Half { SampleType::F16 } else { SampleType::F32 };
+        for c in ExrCompression::ALL {
+            let path = render(c, d);
+            let bytes = std::fs::read(&path).expect("exr");
+            assert_eq!(&bytes[4..6], &[2, 0], "{c:?} {d:?}: single-part scan lines");
+            let meta = exr::meta::MetaData::read_from_buffered(std::io::Cursor::new(&bytes), false).expect("exr header");
+            assert_eq!(meta.headers[0].blocks, exr::meta::BlockDescription::ScanLines, "{c:?} {d:?}");
+            assert_eq!(meta.headers[0].compression.to_string(), exr_compression_name(c), "{c:?} {d:?}");
+            let (got, types) = exr_samples(&path);
+            assert_eq!(types, [ty; 4], "{c:?} {d:?}");
+            let lossy = c.is_lossy(d);
+            for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+                let w = if d == ExrBitDepth::Half { f16::from_f32(*w).to_f32() } else { *w };
+                if lossy {
+                    assert!((g - w).abs() <= 0.03 + 0.06 * w.abs(), "{c:?} {d:?} sample {i}: {g} vs {w}");
+                } else {
+                    assert_eq!(g.to_bits(), w.to_bits(), "{c:?} {d:?} sample {i}: {g} vs {w}");
+                }
+            }
+            let img = pooled(&path);
+            assert_eq!((img.width, img.height), (W, H));
+            let tol = if lossy {
+                0.06
+            } else if d == ExrBitDepth::Half {
+                2e-3
+            } else {
+                0.0
+            };
+            for (k, (a, b)) in img.data.iter().zip(&want_pooled.data).enumerate() {
+                assert!(a.iter().zip(b).all(|(x, y)| (x - y).abs() <= tol), "{c:?} {d:?} pixel {k}: {a:?} vs {b:?}");
+            }
+        }
+    }
+}
+
+/// The `exr` crate's name for the compression an Output Module setting writes.
+fn exr_compression_name(c: effectcraft_export::render_queue::ExrCompression) -> String {
+    use effectcraft_export::render_queue::ExrCompression::*;
+    use exr::compression::Compression as X;
+    match c {
+        None => X::Uncompressed,
+        Rle => X::RLE,
+        Zips => X::ZIP1,
+        Zip => X::ZIP16,
+        Piz => X::PIZ,
+        Pxr24 => X::PXR24,
+        B44 => X::B44,
+        B44a => X::B44A,
+        Dwaa => X::DWAA(Option::None),
+        Dwab => X::DWAB(Option::None),
+    }
+    .to_string()
+}
+
 /// A 32 bpc project whose only layer is a full-frame opaque solid of the given colour.
 fn bright_project(color: [f32; 3]) -> (Project, ItemId) {
     let mut p = Project::default();
@@ -384,21 +544,47 @@ fn exr_sequence_values_at_or_below_one_are_unchanged() {
         assert!((c[0] - 1.0).abs() < 1e-4 && (c[1] - lin(0.4)).abs() < 1e-4 && c[2].abs() < 1e-6, "{channels:?}: {c:?}");
     }
 }
-#[test]
-fn gif_roundtrip() {
+/// Render the test project as a GIF with `om` into `out_dir(name)`, and open it for RGBA decoding.
+fn render_gif(name: &str, om: &OutputModule) -> (PathBuf, gif::Decoder<std::fs::File>) {
     let (p, cid) = project(None);
-    let d = out_dir("gif");
-    let om = OutputModule::for_format(OutputFormat::Gif);
-    let path = d.join("anim.gif");
-    run(&p, cid, &NoFootage, &om, &path);
+    let path = out_dir(name).join("anim.gif");
+    run(&p, cid, &NoFootage, om, &path);
     let mut opts = gif::DecodeOptions::new();
     opts.set_color_output(gif::ColorOutput::RGBA);
-    let mut dec = opts.read_info(std::fs::File::open(&path).expect("open")).expect("gif header");
+    let dec = opts.read_info(std::fs::File::open(&path).expect("open")).expect("gif header");
+    (path, dec)
+}
+
+/// The test project's frames, rendered as PNGs, re-encoded through the former app-local gif 0.13
+/// path (`Frame::from_rgba_speed` at speed 10, 1/10 s per frame, looping).
+fn reference_gif() -> Vec<u8> {
+    let (p, cid) = project(None);
+    let png_pattern = out_dir("gif-byte-parity").join("frame_[#####].png");
+    run(&p, cid, &NoFootage, &OutputModule::for_format(OutputFormat::PngSequence), &png_pattern);
+    let png_pattern = png_pattern.to_string_lossy();
+    let mut expected = Vec::new();
+    let mut encoder = gif::Encoder::new(&mut expected, W as u16, H as u16, &[]).expect("reference GIF encoder");
+    encoder.set_repeat(gif::Repeat::Infinite).expect("reference GIF repeat");
+    for frame_number in 0..FRAMES {
+        let mut rgba = image::open(sequence_path(&png_pattern, frame_number as i64)).expect("reference PNG").to_rgba8().into_raw();
+        let mut frame = gif::Frame::from_rgba_speed(W as u16, H as u16, &mut rgba, 10);
+        frame.delay = 10;
+        encoder.write_frame(&frame).expect("reference GIF frame");
+    }
+    drop(encoder);
+    expected
+}
+
+#[test]
+fn gif_roundtrip() {
+    let (path, mut dec) = render_gif("gif", &OutputModule::for_format(OutputFormat::Gif));
     assert_eq!((dec.width() as u32, dec.height() as u32), (W, H));
+    assert_eq!(dec.repeat(), gif::Repeat::Infinite);
     let mut k = 0;
     let mut total_delay = 0u32;
     while let Some(f) = dec.read_next_frame().expect("frame") {
         assert_eq!((f.width as u32, f.height as u32), (W, H));
+        assert_eq!(f.dispose, gif::DisposalMethod::Keep);
         total_delay += f.delay as u32;
         let img = Image::from_rgba8(W, H, &f.buffer);
         check_frame(&img, k, 0.06);
@@ -409,6 +595,30 @@ fn gif_roundtrip() {
     if let Some(s) = ffprobe(&path) {
         assert!(s.starts_with("gif|64|48"), "{s}");
     }
+}
+
+#[test]
+fn gif_matches_the_former_encoder_byte_for_byte() {
+    // The shared writer must keep the complete output, quantization and LZW data included.
+    let (path, _) = render_gif("gif-parity", &OutputModule::for_format(OutputFormat::Gif));
+    let actual = std::fs::read(&path).expect("GIF bytes");
+    let expected = reference_gif();
+    let difference = actual.iter().zip(&expected).position(|(a, b)| a != b);
+    assert!(
+        actual.len() == expected.len() && difference.is_none(),
+        "GIF bytes differ: {} vs {} bytes, first difference at {difference:?}",
+        actual.len(),
+        expected.len()
+    );
+}
+
+#[test]
+fn gif_rgba_keeps_background_disposal_and_non_looping() {
+    let om = OutputModule { channels: Channels::Rgba, gif_loop: false, ..OutputModule::for_format(OutputFormat::Gif) };
+    let (_, mut dec) = render_gif("gif-rgba", &om);
+    assert_eq!(dec.repeat(), gif::Repeat::Finite(0));
+    let first = dec.read_next_frame().expect("frame").expect("first frame");
+    assert_eq!(first.dispose, gif::DisposalMethod::Background);
 }
 
 #[test]
@@ -435,33 +645,6 @@ fn cancel_stops_early() {
     assert!(matches!(r, Err(effectcraft_export::ExportError::Cancelled)));
     let written = std::fs::read_dir(&d).map(|r| r.count()).unwrap_or(0);
     assert_eq!(written, 0, "cancelled before the first batch");
-}
-
-/// 16-bit stereo WAV with a 440 Hz sine at amplitude 0.5 (left) and silence (right).
-fn write_tone(path: &Path, secs: f64) {
-    let sr = 48_000u32;
-    let n = (secs * sr as f64) as usize;
-    let mut data = Vec::with_capacity(n * 4);
-    for i in 0..n {
-        let s = (0.5 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / sr as f64).sin() * 32767.0).round() as i16;
-        data.extend_from_slice(&s.to_le_bytes());
-        data.extend_from_slice(&0i16.to_le_bytes());
-    }
-    let mut w = Vec::new();
-    w.extend_from_slice(b"RIFF");
-    w.extend_from_slice(&(36 + data.len() as u32).to_le_bytes());
-    w.extend_from_slice(b"WAVEfmt ");
-    w.extend_from_slice(&16u32.to_le_bytes());
-    w.extend_from_slice(&1u16.to_le_bytes());
-    w.extend_from_slice(&2u16.to_le_bytes());
-    w.extend_from_slice(&sr.to_le_bytes());
-    w.extend_from_slice(&(sr * 4).to_le_bytes());
-    w.extend_from_slice(&4u16.to_le_bytes());
-    w.extend_from_slice(&16u16.to_le_bytes());
-    w.extend_from_slice(b"data");
-    w.extend_from_slice(&(data.len() as u32).to_le_bytes());
-    w.extend_from_slice(&data);
-    std::fs::write(path, w).expect("write wav");
 }
 
 fn rms(v: impl Iterator<Item = f32>) -> f32 {

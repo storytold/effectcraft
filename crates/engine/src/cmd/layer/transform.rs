@@ -157,7 +157,7 @@ pub(super) fn transform_op(s: &mut Session, p: &Value) -> Result<Value> {
 /// layers, which are solids) edit their Solid Settings. With `affectAll: false`, a solid other
 /// layers also use is copied into a new solid for this layer instead of being changed for all of
 /// them (After Effects' "Affect all layers that use this solid"). `name` renames the layer and
-/// its solid.
+/// its solid; an empty one makes a text layer's name follow its text again.
 pub(super) fn layer_settings(s: &mut Session, p: &Value) -> Result<Value> {
     let (cid, lid) = layer_p(s, p, "layer.settings")?;
     // Cameras and lights open their own settings (Camera Settings / Light Settings).
@@ -171,11 +171,18 @@ pub(super) fn layer_settings(s: &mut Session, p: &Value) -> Result<Value> {
     let h = p.get("height").and_then(Value::as_u64).map(limits::size);
     let pixel_aspect = pixel_aspect_p(p)?;
     let name = str_p(p, "name").map(str::trim).filter(|n| !n.is_empty()).map(str::to_string);
+    // An empty name gives a text layer its text's name again, as `layer.rename` does (#3233);
+    // other layers keep theirs.
+    let follow_text = str_p(p, "name").is_some_and(|n| n.trim().is_empty());
     let affect_all = p.get("affectAll").and_then(Value::as_bool).unwrap_or(true);
+    let t = s.time();
     let solid = s.edit("Layer Settings", None, |proj, _| {
         let src = layer_mut(proj, cid, lid)?.source.clone();
         if let Some(n) = &name {
-            layer_mut(proj, cid, lid)?.name = n.clone();
+            // A user name: a text layer's name stops following its text (#3233).
+            super::switches::set_layer_name(layer_mut(proj, cid, lid)?, n, t);
+        } else if follow_text && matches!(src, LayerSource::Text) {
+            super::switches::set_layer_name(layer_mut(proj, cid, lid)?, "", t);
         }
         let LayerSource::Solid { item } = src else { return Ok(None) };
         let shared = proj.comps().flat_map(|(_, c)| &c.layers).filter(|l| l.source == src).count() > 1;

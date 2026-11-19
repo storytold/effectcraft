@@ -13,8 +13,9 @@
 
 use crate::i18n::{tr, tr_args};
 use effectcraft_engine::project::render_queue::{
-    AlphaMode, AudioFormat, AudioOutput, Channels, ColorDepth, CurrentOrOff, EffectsMode, FieldRender, OpusApplication, OutputFormat, PostRenderAction,
-    ProResProfile, Pulldown, RESIZE_PRESETS, RenderLog, RenderQuality, RenderQueueItem, RenderStatus, ResizeQuality, SwitchOverride, TimeSpan, WebmVideoCodec,
+    AlphaMode, AudioFormat, AudioOutput, Channels, ColorDepth, CurrentOrOff, EffectsMode, ExrBitDepth, ExrCompression, FieldRender, OpusApplication,
+    OutputFormat, PostRenderAction, ProResProfile, Pulldown, RESIZE_PRESETS, RenderLog, RenderQuality, RenderQueueItem, RenderStatus, ResizeQuality,
+    SwitchOverride, TimeSpan, WebmVideoCodec,
 };
 use effectcraft_engine::project::render_templates::RenderTemplates;
 use egui::{Align2, Color32, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
@@ -177,6 +178,7 @@ fn output_menu(it: &RenderQueueItem, available: &[OutputFormat], templates: &Ren
                 v.push((mark(o.prores_profile == p, p.label()), json!({"proresProfile": format!("{p:?}")})));
             }
         }
+        OutputFormat::ExrSequence => exr_menu(o, &mut v),
         OutputFormat::H264 => {
             v.push(("-".into(), Value::Null));
             for kbps in [2_000, 5_000, 10_000, 15_000, 20_000, 40_000] {
@@ -270,6 +272,26 @@ fn output_menu(it: &RenderQueueItem, available: &[OutputFormat], templates: &Ren
         }
     }
     v
+}
+
+/// OpenEXR options: compression (marked where lossy at the module's bit depth) and bit depth.
+fn exr_menu(o: &effectcraft_engine::project::render_queue::OutputModule, v: &mut Vec<(String, Value)>) {
+    v.push(("-".into(), Value::Null));
+    for c in ExrCompression::ALL {
+        let d = o.exr_bit_depth;
+        let label = if c.is_lossy(d) {
+            "EXR Compression: {} (lossy)"
+        } else if c != ExrCompression::None && c.stores_uncompressed(d) {
+            "EXR Compression: {} (uncompressed at float)"
+        } else {
+            "EXR Compression: {}"
+        };
+        v.push((mark(o.exr_compression == c, &tr_args(label, &[&(c.label())])), json!({"exrCompression": c.name()})));
+    }
+    v.push(("-".into(), Value::Null));
+    for d in ExrBitDepth::ALL {
+        v.push((mark(o.exr_bit_depth == d, &tr_args("EXR Bit Depth: {}", &[&(d.label())])), json!({"exrBitDepth": d.name()})));
+    }
 }
 
 /// HEVC / AV1 options: profile, level, rate control (bitrate or constant quality), key frames.
@@ -1075,5 +1097,36 @@ mod tests {
         assert_eq!(super::live_times(&ctx, &pr, 301.0), (31.0, Some(72.0)));
         pr.finished = true;
         assert_eq!(super::live_times(&ctx, &pr, 400.0), (31.0, Some(72.0)), "a finished job stands still");
+    }
+
+    /// #2911: an OpenEXR module's menu offers every compression and both bit depths, ticks the
+    /// current ones and marks the methods that are lossy at the current depth; other formats
+    /// don't show them.
+    #[test]
+    fn exr_menu_offers_compression_and_bit_depth() {
+        use effectcraft_engine::project::render_queue::{ExrBitDepth, OutputFormat, OutputModule, RenderQueueItem};
+        use effectcraft_engine::project::{ItemId, render_templates::RenderTemplates};
+        crate::i18n::ui::set_current("en");
+        let mut it = RenderQueueItem::new(1, ItemId(1));
+        it.output = OutputModule::for_format(OutputFormat::ExrSequence);
+        let menu = |it: &RenderQueueItem| super::output_menu(it, &OutputFormat::ALL, &RenderTemplates::default());
+        let find = |m: &[(String, serde_json::Value)], label: &str| m.iter().find(|(l, _)| l.trim_start_matches('✓').trim() == label).cloned();
+        let m = menu(&it);
+        assert_eq!(find(&m, "EXR Compression: ZIP (16 scan lines)").unwrap().0, "✓ EXR Compression: ZIP (16 scan lines)");
+        assert_eq!(find(&m, "EXR Compression: PIZ").unwrap().1, serde_json::json!({"exrCompression": "piz"}));
+        assert!(find(&m, "EXR Compression: PXR24 (lossy)").is_some() && find(&m, "EXR Compression: B44 (uncompressed at float)").is_some());
+        assert_eq!(find(&m, "EXR Compression: ZIPS (1 scan line)").unwrap().1, serde_json::json!({"exrCompression": "zips"}));
+        assert_eq!(find(&m, "EXR Bit Depth: 32-bit Float").unwrap().0, "✓ EXR Bit Depth: 32-bit Float");
+        assert_eq!(find(&m, "EXR Bit Depth: 16-bit Half Float").unwrap().1, serde_json::json!({"exrBitDepth": "half"}));
+        assert_eq!(m.iter().filter(|(l, _)| l.contains("EXR Compression: ")).count(), 10);
+        it.output.exr_bit_depth = ExrBitDepth::Half;
+        let m = menu(&it);
+        assert!(
+            find(&m, "EXR Compression: PXR24").is_some()
+                && find(&m, "EXR Compression: B44 (lossy)").is_some()
+                && find(&m, "EXR Compression: DWAA (lossy)").is_some()
+        );
+        it.output = OutputModule::for_format(OutputFormat::PngSequence);
+        assert!(!menu(&it).iter().any(|(l, _)| l.contains("EXR Compression") || l.contains("EXR Bit Depth")));
     }
 }

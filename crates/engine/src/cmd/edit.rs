@@ -6,7 +6,7 @@ use effectcraft_project::{Comp, Expression, ItemId, ItemKind, Layer, LayerId, La
 use effectcraft_time::Tick;
 use serde_json::{Value, json};
 
-use super::{CommandSpec, has_comp, has_layers, layers_or, layers_p, match_path_of, selected_leaf_props, str_p};
+use super::{CommandSpec, has_comp, has_layers, layers_or, layers_p, match_path_of, merge_p, selected_leaf_props, str_p};
 use crate::{EngineError, KeyRef, LinkClip, Result, Session, cmd};
 
 fn can_undo(s: &Session) -> std::result::Result<(), String> {
@@ -145,7 +145,8 @@ fn duplicate(s: &mut Session, p: &Value) -> Result<Value> {
         Some(layer) => layers_or(s, p, &[layer])?,
         None => layers_p(s, p)?,
     };
-    let new = s.edit("Duplicate", None, |proj, st| {
+    // `merge` folds the copy and the drag that follows it (Alt-drag in the viewer) into one undo step.
+    let new = s.edit("Duplicate", merge_p(p), |proj, st| {
         let mut next = proj.next_id;
         let comp = proj.comp_mut(cid).ok_or(crate::EngineError::NoComp)?;
         let mut created = vec![];
@@ -552,7 +553,8 @@ fn paste_links(s: &mut Session, clip: LinkClip) -> Result<Value> {
             let l = super::layer_mut(proj, cid, *lid)?;
             for (path, e) in &pairs {
                 let path = super::resolve_effect_path(l, path);
-                if let Some(pr) = l.props.prop_mut(&path) {
+                // (a property that can't be animated takes no expression)
+                if let Some(pr) = l.props.prop_mut(&path).filter(|pr| !pr.static_only) {
                     pr.expr = Some(e.clone());
                     n += 1;
                 }
@@ -1007,7 +1009,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Duplicate",
             ["Edit"],
             Some("Cmd+D"),
-            "{layers?} (without layers: during a text edit the edited layer, else the selected effects, shape items or text animators, else the selected layers)",
+            "{layers?, merge?} (without layers: during a text edit the edited layer, else the selected effects, shape items or text animators, else the selected layers)",
             layers_or_text_edit,
             duplicate
         ),

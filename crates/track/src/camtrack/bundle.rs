@@ -485,6 +485,14 @@ fn adjust_impl(cams: &mut [BaCam], pts: &mut [V3], obs: &[BaObs], o: &BaOpts, al
         let build_point = |j: usize, s_acc: &mut Vec<f64>, bc: &mut Vec<f64>| -> PtSys {
             let mut ps = PtSys { v: [[0.0; 3]; 3], bp: [0.0; 3], w: vec![] };
             let mut jc = CameraJacobian::new();
+            // Observations that repeat a camera add to the same parameters: combine them, so the
+            // point's entries stay at most one per parameter (the reduction is quadratic in them).
+            let mut cams_seen: Vec<u32> = by_pt[j].iter().map(|&oi| obs[oi as usize].cam).collect();
+            cams_seen.sort_unstable();
+            let repeated_camera = cams_seen.windows(2).any(|p| p[0] == p[1]);
+            // Parameter index → entry in `ps.w`, for points that repeat a camera (a linear search
+            // per entry would be quadratic in their observations).
+            let mut slot: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
             for &oi in &by_pt[j] {
                 let ob = &obs[oi as usize];
                 let ci = ob.cam as usize;
@@ -537,6 +545,16 @@ fn adjust_impl(cams: &mut [BaCam], pts: &mut [V3], obs: &[BaObs], o: &BaOpts, al
                         // Each observation of a point is on another camera: only the shared focal
                         // length repeats.
                         let repeats = Some(*ia) == l.shared || l.dist.is_some_and(|g| *ia == g || *ia == g + 1);
+                        if repeated_camera {
+                            match slot.get(ia) {
+                                Some(&k) => ps.w[k].1 = add(ps.w[k].1, wv),
+                                None => {
+                                    slot.insert(*ia, ps.w.len());
+                                    ps.w.push((*ia, wv));
+                                }
+                            }
+                            continue;
+                        }
                         let found = if repeats { ps.w.iter_mut().find(|e| e.0 == *ia) } else { None };
                         match found {
                             Some(e) => e.1 = add(e.1, wv),
@@ -818,6 +836,25 @@ mod tests {
 
     fn test_camera() -> BaCam {
         BaCam { pose: Pose::IDENTITY, f: 900.0, dist: Distortion::NONE }
+    }
+
+    /// Many observations of one point by one camera combine into one contribution per parameter:
+    /// the point's reduction used to compare every duplicate with every later one.
+    #[test]
+    fn repeated_observations_of_one_camera_are_combined() {
+        let cams = [test_camera(), BaCam { pose: Pose { c: [1.0, 0.0, 0.0], ..Pose::IDENTITY }, ..test_camera() }];
+        let truth = [0.2, -0.1, 5.0];
+        let mut obs = Vec::new();
+        for _ in 0..30_000 {
+            for (cam, c) in cams.iter().enumerate() {
+                let uv = residual(c, truth, [0.0; 2]).unwrap();
+                obs.push(BaObs { cam: cam as u32, pt: 0, uv });
+            }
+        }
+        let (mut cams, mut pts) = (cams, [[0.25, -0.05, 5.2]]);
+        let o = BaOpts::default();
+        let r = adjust(&mut cams, &mut pts, &obs, &o).unwrap();
+        assert!(r.cost <= r.initial_cost, "{r:?}");
     }
 
     #[test]

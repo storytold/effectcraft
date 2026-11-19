@@ -109,6 +109,8 @@ fn arbitrary_map_signed_fractional_and_near_zero_wraps() {
 #[test]
 fn scatter_brush_strokes() {
     effect_case("ec.stylize.scatter", &[("amount", n(5.0))]);
+    // #3477: After Effects' maximum, far beyond the layer.
+    effect_case("ec.stylize.scatter", &[("amount", n(1000.0))]);
     effect_case("ec.stylize.scatter", &[("amount", n(3.0)), ("grain", e(1))]);
     effect_case("ec.stylize.scatter", &[("amount", n(7.0)), ("grain", e(2)), ("randomizeEveryFrame", on())]);
     effect_case("ec.stylize.brushstrokes", &[]);
@@ -174,6 +176,7 @@ fn mirror_offset_polar_spherize_corner_pin() {
     effect_case("ec.distort.spherize", &[("radius", n(35.0)), ("center", pt(30.0, 25.0))]);
     effect_case("ec.distort.cornerpin", &[("ul", pt(5.0, 3.0)), ("ur", pt(60.0, 8.0)), ("lr", pt(66.0, 40.0)), ("ll", pt(2.0, 44.0))]);
     effect_case("ec.distort.cornerpin", &[("ul", pt(-8.0, 6.0)), ("ur", pt(75.0, -4.0)), ("lr", pt(50.0, 30.0)), ("ll", pt(12.0, 50.0))]);
+    effect_case("ec.distort.cornerpin", &[("ul", pt(70.0, 55.0)), ("ur", pt(120.0, 55.0)), ("lr", pt(120.0, 90.0)), ("ll", pt(70.0, 90.0))]);
 }
 
 #[test]
@@ -215,6 +218,13 @@ fn twirl_legacy_ripple_pulse_power_pin() {
     // Perspective below 100 %: blended toward the bilinear inverse.
     effect_case("ec.distort.ccpowerpin", &[("topRight", pt(80.0, -6.0)), ("bottomLeft", pt(-4.0, 50.0)), ("perspective", n(0.0))]);
     effect_case("ec.distort.ccpowerpin", &[("topLeft", pt(12.0, 6.0)), ("bottomRight", pt(75.0, 30.0)), ("perspective", n(40.0)), ("expandTop", n(15.0))]);
+    // #3492: Expansion down to -200; opposite sides adding up to less than -100 % flip the source,
+    // and Top -50 / Bottom -50 leave it zero high.
+    effect_case("ec.distort.ccpowerpin", &[("topRight", pt(80.0, -6.0)), ("expandTop", n(-200.0)), ("expandBottom", n(-100.0)), ("expandLeft", n(-150.0))]);
+    effect_case(
+        "ec.distort.ccpowerpin",
+        &[("bottomLeft", pt(-4.0, 50.0)), ("perspective", n(40.0)), ("expandTop", n(-50.0)), ("expandBottom", n(-50.0)), ("expandRight", n(-200.0))],
+    );
 }
 
 #[test]

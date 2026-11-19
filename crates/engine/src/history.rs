@@ -293,6 +293,16 @@ impl Session {
             path.push(p);
         }
         path.reverse();
+        // Across branches, the same UID can name different masks on either side. Keep only
+        // pending reveals whose masks also existed at the shared ancestor.
+        let mut common = a.current;
+        while !path.contains(&common) {
+            let Some(parent) = a.parent.get(common).copied().flatten() else { break };
+            common = parent;
+        }
+        if let Some(project) = a.state.get(common) {
+            self.retain_mask_reveals_in(project);
+        }
         // Continue past the target: the working line where it runs on, else each branch's own
         // continuation (its first child).
         let mut new_line = path.clone();

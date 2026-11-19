@@ -40,6 +40,8 @@ pub(crate) struct MemCap {
     floor: AtomicU64,
     /// Set after the first over-cap sample where non-reclaimable memory alone exceeds the cap.
     warned: AtomicBool,
+    /// The most the allocator held in any sample (what frames in flight are sized by, #3335).
+    peak: AtomicU64,
     #[cfg(test)]
     timeout_ns: AtomicU64,
 }
@@ -59,6 +61,7 @@ impl MemCap {
             waits: AtomicU64::new(0),
             floor: AtomicU64::new(0),
             warned: AtomicBool::new(false),
+            peak: AtomicU64::new(0),
             #[cfg(test)]
             timeout_ns: AtomicU64::new(crate::readback::TIMEOUT.as_nanos() as u64),
         }
@@ -74,12 +77,28 @@ impl MemCap {
             waits: AtomicU64::new(0),
             floor: AtomicU64::new(0),
             warned: AtomicBool::new(false),
+            peak: AtomicU64::new(0),
             timeout_ns: AtomicU64::new(self.timeout_ns.load(Relaxed)),
         }
     }
 
     pub(crate) fn cap(&self) -> u64 {
         self.cap
+    }
+
+    /// Remember an allocator sample: the peak only grows.
+    pub(crate) fn note(&self, allocated: u64) {
+        self.peak.fetch_max(allocated, Relaxed);
+    }
+
+    /// The most the allocator held in any sample so far.
+    pub(crate) fn peak(&self) -> u64 {
+        self.peak.load(Relaxed)
+    }
+
+    /// Whether frames have had to wait for memory (the device ran over the cap).
+    pub(crate) fn pressed(&self) -> bool {
+        self.waits.load(Relaxed) > 0
     }
 
     /// Whether to sample the allocator on this call.

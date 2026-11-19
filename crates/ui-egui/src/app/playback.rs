@@ -35,15 +35,20 @@ impl EffectcraftApp {
             plan: Some(plan),
             caching: plan.cache_first && plan.video,
             res: preset.resolution.factor(preset.custom_resolution),
+            adaptive: None,
             overlays: preset.include_overlays,
             layer_controls: preset.include_layer_controls,
             restore_max,
             audio_frame: (!plan.video).then_some(plan.first),
             audio_held: false,
+            silent_project: None,
             starting: false,
             starting_since: now,
             first_cached: None,
             shown_at: Default::default(),
+            pace: 0.0,
+            pace_acc: None,
+            paced_at: None,
         };
         if !self.playback.caching {
             if plan.video {
@@ -56,12 +61,10 @@ impl EffectcraftApp {
         }
     }
 
-    /// The preview includes audio at the comp's frame rate and the comp has something audible.
-    fn audio_plays(&self) -> bool {
+    /// The preview includes audio and the comp has something audible.
+    pub(super) fn audio_plays(&self) -> bool {
         let (Some(pl), Some(cid)) = (self.playback.plan, self.session.active_comp_id()) else { return false };
-        let Some(c) = self.session.project.comp(cid) else { return false };
-        // A preview at another frame rate plays slower or faster than real time: silent.
-        pl.audio && (pl.fps - c.frame_rate.as_f64()).abs() <= 0.01 && effectcraft_engine::render::audio::comp_has_audio(&self.session.project, cid)
+        pl.audio && effectcraft_engine::render::audio::comp_has_audio(&self.session.project, cid)
     }
 
     /// Start audio preview from comp time `t` when [`Self::audio_plays`] and an output device
@@ -75,7 +78,17 @@ impl EffectcraftApp {
         let Some(dev) = self.hooks.audio_device.as_ref().and_then(|f| f(&out)) else { return };
         let mix = self.session.prefs.audio.preview_sample_rate;
         let fr = c.frame_rate;
-        match audio::AudioPlayback::start(dev, self.render_source(), cid, t, fr.tick_of(pl.start), fr.tick_of(pl.end + 1), pl.looping, mix) {
+        match audio::AudioPlayback::start_at_speed(
+            dev,
+            self.render_source(),
+            cid,
+            t,
+            fr.tick_of(pl.start),
+            fr.tick_of(pl.end + 1),
+            pl.looping,
+            mix,
+            pl.fps / fr.as_f64(),
+        ) {
             Ok(a) => self.audio = Some(a),
             Err(e) => log::warn!("audio preview: {e}"),
         }

@@ -1,4 +1,5 @@
 use super::*;
+use kurbo::Shape as _;
 
 const BASIC: &[u8] = include_bytes!("../tests/fixtures/basic-shapes.svg");
 const PATHS: &[u8] = include_bytes!("../tests/fixtures/paths-gradients.svg");
@@ -28,6 +29,426 @@ fn raster_surface_budget_rejects_oversized_destination_before_allocation() {
     let img = rasterize(&doc, 16_384, 16_384, 1.0);
     assert!(img.data.is_empty());
     assert_eq!((img.width, img.height), (0, 0));
+    assert!(matches!(try_rasterize(&doc, 16_384, 16_384, 1.0), Err(RasterError::SurfaceLimit(_))), "the refusal is reported, not silent");
+}
+
+/// Pattern fills and strokes repeat from the tile origin.
+#[test]
+fn static_pattern_fill_and_stroke_repeat_with_tile_origin() {
+    let doc = parse(
+        br#"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="4">
+            <defs><pattern id="p" patternUnits="userSpaceOnUse" x="1" width="2" height="2">
+                <rect x="1" width="1" height="2" fill="red"/>
+                <rect x="2" width="1" height="2" fill="blue"/>
+            </pattern></defs>
+            <rect id="filled" width="8" height="4" fill="url(#p)"/>
+            <path d="M0 3 H8" fill="none" stroke="url(#p)" stroke-width="2"/>
+        </svg>"#,
+    )
+    .unwrap();
+    let shapes = doc.flatten();
+    assert!(matches!(shapes[0].2.fill.as_ref(), Some(Paint::Pattern(_))));
+    assert!(matches!(shapes[1].2.stroke.as_ref().map(|s| &s.paint), Some(Paint::Pattern(_))));
+
+    let img = rasterize(&doc, 8, 4, 1.0);
+    // The tile occupies [1, 3): blue wraps into x=0, red starts at x=1.
+    assert!(near(px(&img, 0, 1), [0.0, 0.0, 1.0, 1.0], 1e-3));
+    assert!(near(px(&img, 1, 1), [1.0, 0.0, 0.0, 1.0], 1e-3));
+    assert!(near(px(&img, 2, 1), [0.0, 0.0, 1.0, 1.0], 1e-3));
+    // The same pattern server paints the stroke.
+    assert!(near(px(&img, 1, 2), [1.0, 0.0, 0.0, 1.0], 1e-3));
+}
+
+/// objectBoundingBox pattern units map tile and content coordinates to the shape's box.
+#[test]
+fn object_bounding_box_pattern_units_map_tile_and_content_coordinates() {
+    let doc = parse(
+        br#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="8">
+            <defs><pattern id="p" patternUnits="objectBoundingBox" width="0.5" height="1" patternContentUnits="objectBoundingBox">
+                <rect width="25%" height="100%" fill="green"/>
+            </pattern></defs>
+            <rect x="10" y="2" width="8" height="4" fill="url(#p)" stroke="url(#p)" stroke-width="1"/>
+        </svg>"#,
+    )
+    .unwrap();
+    let shapes = doc.flatten();
+    assert!(matches!(shapes[0].2.fill.as_ref(), Some(Paint::Pattern(_))));
+    assert!(matches!(shapes[0].2.stroke.as_ref().map(|stroke| &stroke.paint), Some(Paint::Pattern(_))));
+    let img = rasterize(&doc, 20, 8, 1.0);
+    assert!(near(px(&img, 10, 3), [0.0, 128.0 / 255.0, 0.0, 1.0], 1e-3));
+    assert_eq!(px(&img, 12, 3)[3], 0.0);
+    assert!(near(px(&img, 14, 3), [0.0, 128.0 / 255.0, 0.0, 1.0], 1e-3));
+    assert_eq!(px(&img, 16, 3)[3], 0.0);
+}
+
+/// patternTransform scales tile spacing and content together.
+#[test]
+fn pattern_transform_scales_tile_spacing_and_its_content_together() {
+    let doc = parse(
+        br#"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="2">
+            <defs><pattern id="p" patternUnits="userSpaceOnUse" width="2" height="2" patternTransform="scale(2)">
+                <rect width="1" height="2" fill="red"/>
+            </pattern></defs>
+            <rect width="8" height="2" fill="url(#p)"/>
+        </svg>"#,
+    )
+    .unwrap();
+    let img = rasterize(&doc, 8, 2, 1.0);
+    assert!(near(px(&img, 0, 0), [1.0, 0.0, 0.0, 1.0], 1e-3));
+    assert!(near(px(&img, 1, 0), [1.0, 0.0, 0.0, 1.0], 1e-3));
+    assert_eq!(px(&img, 2, 0)[3], 0.0);
+    assert_eq!(px(&img, 3, 0)[3], 0.0);
+    assert!(near(px(&img, 4, 0), [1.0, 0.0, 0.0, 1.0], 1e-3));
+}
+
+/// A pattern href inherits units and content, and plain `href` wins over `xlink:href`.
+#[test]
+fn pattern_href_inherits_units_and_content_and_prefers_plain_href() {
+    let doc = parse(
+        br##"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="8" height="2">
+            <defs>
+                <pattern id="base" patternUnits="userSpaceOnUse" width="2" height="2">
+                    <rect width="1" height="2" fill="red"/>
+                </pattern>
+                <pattern id="other" patternUnits="userSpaceOnUse" width="2" height="2">
+                    <rect width="2" height="2" fill="blue"/>
+                </pattern>
+                <pattern id="derived" href="#base" xlink:href="#other"/>
+                <pattern id="xlink-derived" xlink:href="#base"/>
+            </defs>
+            <rect width="8" height="2" fill="url(#derived)"/>
+            <rect x="8" width="8" height="2" fill="url(#xlink-derived)"/>
+        </svg>"##,
+    )
+    .unwrap();
+    let img = rasterize(&doc, 16, 2, 1.0);
+    assert!(near(px(&img, 0, 0), [1.0, 0.0, 0.0, 1.0], 1e-3));
+    assert_eq!(px(&img, 1, 0)[3], 0.0);
+    assert!(near(px(&img, 2, 0), [1.0, 0.0, 0.0, 1.0], 1e-3));
+    assert!(near(px(&img, 8, 0), [1.0, 0.0, 0.0, 1.0], 1e-3));
+    assert_eq!(px(&img, 9, 0)[3], 0.0);
+}
+
+/// Pattern content inherits styles from the pattern's ancestors.
+#[test]
+fn pattern_content_inherits_styles_from_its_ancestors() {
+    let doc = parse(
+        br#"<svg xmlns="http://www.w3.org/2000/svg" width="2" height="2" fill="red">
+            <defs><pattern id="p" patternUnits="userSpaceOnUse" width="2" height="2">
+                <rect width="2" height="2"/>
+            </pattern></defs>
+            <rect width="2" height="2" fill="url(#p) blue"/>
+        </svg>"#,
+    )
+    .unwrap();
+    let img = rasterize(&doc, 2, 2, 1.0);
+    assert!(near(px(&img, 0, 0), [1.0, 0.0, 0.0, 1.0], 1e-3));
+}
+
+/// Content reached through `href` inherits styles from the pattern that owns it, not the referrer.
+#[test]
+fn pattern_href_content_inherits_styles_from_the_owning_pattern() {
+    let doc = parse(
+        br##"<svg xmlns="http://www.w3.org/2000/svg" width="2" height="2">
+            <defs>
+                <g fill="red"><pattern id="base" patternUnits="userSpaceOnUse" width="2" height="2">
+                    <rect width="2" height="2"/>
+                </pattern></g>
+                <pattern id="derived" href="#base"/>
+            </defs>
+            <rect width="2" height="2" fill="url(#derived)"/>
+        </svg>"##,
+    )
+    .unwrap();
+    let img = rasterize(&doc, 2, 2, 1.0);
+    assert!(near(px(&img, 0, 0), [1.0, 0.0, 0.0, 1.0], 1e-3));
+}
+
+/// Descriptive children (title, desc) do not count as inheritable pattern content.
+#[test]
+fn pattern_href_ignores_descriptive_children_when_inheriting_content() {
+    let doc = parse(
+        br##"<svg xmlns="http://www.w3.org/2000/svg" width="2" height="2">
+            <defs>
+                <pattern id="base" patternUnits="userSpaceOnUse" width="2" height="2">
+                    <rect width="2" height="2" fill="red"/>
+                </pattern>
+                <pattern id="derived" href="#base">
+                    <title>Documentation only</title>
+                    <desc>Still documentation only</desc>
+                    <metadata><author>Test</author></metadata>
+                </pattern>
+            </defs>
+            <rect width="2" height="2" fill="url(#derived)"/>
+        </svg>"##,
+    )
+    .unwrap();
+    let img = rasterize(&doc, 2, 2, 1.0);
+    assert!(near(px(&img, 0, 0), [1.0, 0.0, 0.0, 1.0], 1e-3));
+}
+
+/// The pattern cache is shared for equal viewports but split for different percentage-sized ones.
+#[test]
+fn cached_patterns_reuse_same_viewport_but_separate_percentage_sized_viewports() {
+    let doc = parse(
+        br##"<svg xmlns="http://www.w3.org/2000/svg" width="120" height="10" viewBox="0 0 120 10">
+            <defs><pattern id="p" patternUnits="userSpaceOnUse" width="50%" height="100%">
+                <rect width="4" height="100%" fill="red"/>
+            </pattern></defs>
+            <svg width="40" height="10" viewBox="0 0 40 10">
+                <rect id="small-one" width="20" height="10" fill="url(#p) blue"/>
+                <rect id="small-two" x="20" width="20" height="10" fill="url(#p) green"/>
+            </svg>
+            <svg x="40" width="80" height="10" viewBox="0 0 80 10">
+                <rect id="large" width="80" height="10" fill="url(#p) yellow"/>
+            </svg>
+        </svg>"##,
+    )
+    .unwrap();
+    let shapes = doc.flatten();
+    let Some((_, _, small_one)) = shapes.iter().find(|(_, _, shape)| shape.name == "small-one") else { panic!("small-one expected") };
+    let Some(Paint::Pattern(small_one)) = small_one.fill.as_ref() else { panic!("small-one pattern expected") };
+    let Some((_, _, small_two)) = shapes.iter().find(|(_, _, shape)| shape.name == "small-two") else { panic!("small-two expected") };
+    let Some(Paint::Pattern(small_two)) = small_two.fill.as_ref() else { panic!("small-two pattern expected") };
+    let Some((_, _, large)) = shapes.iter().find(|(_, _, shape)| shape.name == "large") else { panic!("large expected") };
+    let Some(Paint::Pattern(large)) = large.fill.as_ref() else { panic!("large pattern expected") };
+    assert_eq!(small_one.width, 20.0);
+    assert_eq!(small_two.width, 20.0);
+    assert_eq!(large.width, 40.0);
+    assert_eq!(small_one.fallback, Some([0.0, 0.0, 1.0, 1.0]));
+    assert_eq!(small_two.fallback, Some([0.0, 128.0 / 255.0, 0.0, 1.0]));
+    assert_eq!(large.fallback, Some([1.0, 1.0, 0.0, 1.0]));
+    assert!(std::sync::Arc::ptr_eq(&small_one.content, &small_two.content));
+    assert!(!std::sync::Arc::ptr_eq(&small_one.content, &large.content));
+
+    let img = rasterize(&doc, 120, 10, 1.0);
+    for x in [1, 21, 41, 81] {
+        assert!(near(px(&img, x, 5), [1.0, 0.0, 0.0, 1.0], 1e-3), "x={x}");
+    }
+    for x in [5, 25, 45, 85] {
+        assert_eq!(px(&img, x, 5)[3], 0.0, "x={x}");
+    }
+}
+
+/// Different symbol viewports use distinct pattern cache entries for percentage sizes.
+#[test]
+fn symbol_viewports_select_distinct_percentage_sized_pattern_cache_entries() {
+    let doc = parse(
+        br##"<svg xmlns="http://www.w3.org/2000/svg" width="60" height="10">
+            <defs>
+                <pattern id="p" patternUnits="userSpaceOnUse" width="50%" height="100%">
+                    <rect width="4" height="100%" fill="red"/>
+                </pattern>
+                <symbol id="small-symbol" viewBox="0 0 20 10">
+                    <rect id="small-symbol-shape" width="20" height="10" fill="url(#p) blue"/>
+                </symbol>
+                <symbol id="large-symbol" viewBox="0 0 40 10">
+                    <rect id="large-symbol-shape" width="40" height="10" fill="url(#p) green"/>
+                </symbol>
+            </defs>
+            <use href="#small-symbol" width="20" height="10"/>
+            <use href="#large-symbol" x="20" width="40" height="10"/>
+        </svg>"##,
+    )
+    .unwrap();
+    let shapes = doc.flatten();
+    let Some((_, _, small)) = shapes.iter().find(|(_, _, shape)| shape.name == "small-symbol-shape") else { panic!("small symbol shape expected") };
+    let Some(Paint::Pattern(small)) = small.fill.as_ref() else { panic!("small symbol pattern expected") };
+    let Some((_, _, large)) = shapes.iter().find(|(_, _, shape)| shape.name == "large-symbol-shape") else { panic!("large symbol shape expected") };
+    let Some(Paint::Pattern(large)) = large.fill.as_ref() else { panic!("large symbol pattern expected") };
+    assert_eq!(small.width, 10.0);
+    assert_eq!(large.width, 20.0);
+
+    let img = rasterize(&doc, 60, 10, 1.0);
+    assert!(near(px(&img, 1, 5), [1.0, 0.0, 0.0, 1.0], 1e-3));
+    assert_eq!(px(&img, 5, 5)[3], 0.0);
+    assert!(near(px(&img, 21, 5), [1.0, 0.0, 0.0, 1.0], 1e-3));
+    assert_eq!(px(&img, 25, 5)[3], 0.0);
+    assert!(near(px(&img, 41, 5), [1.0, 0.0, 0.0, 1.0], 1e-3));
+}
+
+/// Bare `url()` and href values without `#` do not resolve to local pattern ids.
+#[test]
+fn bare_urls_and_hrefs_do_not_resolve_as_local_pattern_ids() {
+    let doc = parse(
+        br##"<svg xmlns="http://www.w3.org/2000/svg" width="6" height="2">
+            <defs>
+                <pattern id="target" patternUnits="userSpaceOnUse" width="2" height="2">
+                    <rect width="2" height="2" fill="red"/>
+                </pattern>
+                <pattern id="bare-href" href="target" width="2" height="2"/>
+            </defs>
+            <rect width="2" height="2" fill="url(target) blue"/>
+            <rect x="2" width="2" height="2" fill="url(#bare-href) green"/>
+            <rect x="4" width="2" height="2" fill="url(#target)"/>
+        </svg>"##,
+    )
+    .unwrap();
+    let shapes = doc.flatten();
+    assert_eq!(shapes[0].2.fill, Some(Paint::Color([0.0, 0.0, 1.0])));
+    assert_eq!(shapes[1].2.fill, Some(Paint::Color([0.0, 128.0 / 255.0, 0.0])));
+    assert!(matches!(shapes[2].2.fill.as_ref(), Some(Paint::Pattern(_))));
+    let img = rasterize(&doc, 6, 2, 1.0);
+    assert!(near(px(&img, 0, 0), [0.0, 0.0, 1.0, 1.0], 1e-3));
+    assert!(near(px(&img, 2, 0), [0.0, 128.0 / 255.0, 0.0, 1.0], 1e-3));
+    assert!(near(px(&img, 4, 0), [1.0, 0.0, 0.0, 1.0], 1e-3));
+}
+
+/// A valid but empty pattern paints nothing rather than its fallback.
+#[test]
+fn empty_valid_pattern_is_transparent_instead_of_using_its_fallback() {
+    let doc = parse(
+        br##"<svg xmlns="http://www.w3.org/2000/svg" width="4" height="2">
+            <defs><pattern id="empty" patternUnits="userSpaceOnUse" width="2" height="2"/></defs>
+            <rect width="4" height="2" fill="url(#empty) red"/>
+        </svg>"##,
+    )
+    .unwrap();
+    let Some(Paint::Pattern(pattern)) = doc.flatten()[0].2.fill.as_ref() else { panic!("valid pattern expected") };
+    assert_eq!(pattern.fallback, Some([1.0, 0.0, 0.0, 1.0]));
+    let img = rasterize(&doc, 4, 2, 1.0);
+    assert_eq!(px(&img, 0, 0)[3], 0.0);
+    assert_eq!(px(&img, 3, 0)[3], 0.0);
+}
+
+/// Pattern content attribute work stays bounded across many distinct viewports.
+#[test]
+fn pattern_content_attribute_work_is_bounded_across_distinct_viewports() {
+    let large_attribute = "x".repeat(2 * 1024 * 1024);
+    let shapes: String = (0..12)
+        .map(|index| format!(r##"<svg x="{index}" width="1" height="1" viewBox="0 0 {} 1"><rect width="1" height="1" fill="url(#p)"/></svg>"##, index + 1))
+        .collect();
+    let svg = format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="12" height="1"><defs>
+            <pattern id="p" data-repeat="{large_attribute}" patternUnits="userSpaceOnUse" width="50%" height="100%">
+                <rect width="1" height="1" fill="red"/>
+            </pattern></defs>{shapes}</svg>"##
+    );
+    let error = parse(svg.as_bytes()).unwrap_err();
+    assert!(error.to_string().contains("<pattern> references scans more than"), "{error}");
+}
+
+/// Exceeding the pattern href depth limit uses the paint fallback.
+#[test]
+fn pattern_href_depth_limit_uses_paint_fallback() {
+    let patterns: String = (0..=16)
+        .map(|index| {
+            if index == 16 {
+                format!(r#"<pattern id="p{index}" patternUnits="userSpaceOnUse" width="1" height="1"/>"#)
+            } else {
+                format!(r##"<pattern id="p{index}" href="#p{}"/>"##, index + 1)
+            }
+        })
+        .collect();
+    let svg = format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"><defs>{patterns}</defs><rect width="1" height="1" fill="url(#p0) blue"/></svg>"##
+    );
+    let doc = parse(svg.as_bytes()).unwrap();
+    assert_eq!(doc.flatten()[0].2.fill, Some(Paint::Color([0.0, 0.0, 1.0])));
+}
+
+/// Ancestor attribute work for patterns stays bounded across many distinct viewports.
+#[test]
+fn pattern_ancestor_attribute_work_is_bounded_across_distinct_viewports() {
+    let large_attribute = "x".repeat(2 * 1024 * 1024);
+    let shapes: String = (0..12)
+        .map(|index| format!(r##"<svg x="{index}" width="1" height="1" viewBox="0 0 {} 1"><rect width="1" height="1" fill="url(#p)"/></svg>"##, index + 1))
+        .collect();
+    let svg = format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="12" height="1"><defs data-repeat="{large_attribute}">
+            <pattern id="p" patternUnits="userSpaceOnUse" width="50%" height="100%">
+                <rect width="1" height="1" fill="red"/>
+            </pattern></defs>{shapes}</svg>"##
+    );
+    let error = parse(svg.as_bytes()).unwrap_err();
+    assert!(error.to_string().contains("<pattern> references scans more than"), "{error}");
+}
+
+/// Pattern tile alpha composites as premultiplied color.
+#[test]
+fn pattern_tile_alpha_composites_as_premultiplied_color() {
+    let doc = parse(
+        br#"<svg xmlns="http://www.w3.org/2000/svg" width="2" height="2">
+            <defs><pattern id="p" patternUnits="userSpaceOnUse" width="1" height="1">
+                <rect width="1" height="1" fill="red" fill-opacity="0.5"/>
+            </pattern></defs>
+            <rect width="2" height="2" fill="url(#p)"/>
+        </svg>"#,
+    )
+    .unwrap();
+    let img = rasterize(&doc, 2, 2, 1.0);
+    assert!(near(px(&img, 0, 0), [0.5, 0.0, 0.0, 0.5], 1e-3));
+    assert!(near(px(&img, 1, 1), [0.5, 0.0, 0.0, 0.5], 1e-3));
+}
+
+/// An oversized pattern tile uses the fallback without allocating it.
+#[test]
+fn oversized_pattern_tile_falls_back_without_allocating() {
+    let doc = parse(
+        br##"<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1">
+            <defs><pattern id="huge" patternUnits="userSpaceOnUse" width="1e300" height="1e300">
+                <rect width="1" height="1" fill="red"/>
+            </pattern></defs>
+            <rect width="1" height="1" fill="url(#huge) gold"/>
+        </svg>"##,
+    )
+    .unwrap();
+    let img = rasterize(&doc, 1, 1, 1.0);
+    assert!(near(px(&img, 0, 0), [1.0, 215.0 / 255.0, 0.0, 1.0], 1e-3));
+}
+
+/// Invalid or cyclic patterns use the paint fallback without being expanded.
+#[test]
+fn invalid_or_cyclic_pattern_uses_paint_fallback_without_expanding() {
+    let doc = parse(
+        br##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="2">
+            <defs>
+                <pattern id="bad" width="0" height="1"/>
+                <pattern id="viewbox" width="1" height="1" viewBox="0 0 1 1"/>
+                <pattern id="collapsed" patternUnits="userSpaceOnUse" width="1" height="1" patternTransform="scale(0)"/>
+                <pattern id="a" href="#b"/>
+                <pattern id="b" href="#a"/>
+                <pattern id="self" href="#self"/>
+            </defs>
+            <rect width="2" height="2" fill="url(#bad) blue"/>
+            <rect x="2" width="2" height="2" fill="url(#viewbox) red"/>
+            <rect x="4" width="2" height="2" fill="url(#collapsed) yellow"/>
+            <rect x="6" width="2" height="2" fill="url(#a) green"/>
+            <rect x="8" width="2" height="2" fill="url(#self) cyan"/>
+        </svg>"##,
+    )
+    .unwrap();
+    let shapes = doc.flatten();
+    assert_eq!(shapes[0].2.fill, Some(Paint::Color([0.0, 0.0, 1.0])));
+    assert_eq!(shapes[1].2.fill, Some(Paint::Color([1.0, 0.0, 0.0])));
+    assert_eq!(shapes[2].2.fill, Some(Paint::Color([1.0, 1.0, 0.0])));
+    assert_eq!(shapes[3].2.fill, Some(Paint::Color([0.0, 128.0 / 255.0, 0.0])));
+    assert_eq!(shapes[4].2.fill, Some(Paint::Color([0.0, 1.0, 1.0])));
+    let img = rasterize(&doc, 10, 2, 1.0);
+    assert!(near(px(&img, 0, 0), [0.0, 0.0, 1.0, 1.0], 1e-3));
+    assert!(near(px(&img, 3, 0), [1.0, 0.0, 0.0, 1.0], 1e-3));
+    assert!(near(px(&img, 5, 0), [1.0, 1.0, 0.0, 1.0], 1e-3));
+    assert!(near(px(&img, 7, 0), [0.0, 128.0 / 255.0, 0.0, 1.0], 1e-3));
+    assert!(near(px(&img, 9, 0), [0.0, 1.0, 1.0, 1.0], 1e-3));
+}
+
+/// A one-pixel pattern tiles a large rectangle from a single surface.
+#[test]
+fn one_pixel_pattern_tiles_a_large_rectangle_from_one_surface() {
+    let doc = parse(
+        br#"<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024">
+            <defs><pattern id="p" patternUnits="userSpaceOnUse" width="1" height="1">
+                <rect width="1" height="1" fill="red"/>
+            </pattern></defs>
+            <rect width="1024" height="1024" fill="url(#p)"/>
+        </svg>"#,
+    )
+    .unwrap();
+    let img = rasterize(&doc, 1024, 1024, 1.0);
+    assert_eq!((img.width, img.height), (1024, 1024));
+    for (x, y) in [(0, 0), (511, 511), (1023, 1023)] {
+        assert!(near(px(&img, x, y), [1.0, 0.0, 0.0, 1.0], 1e-3), "({x}, {y})");
+    }
 }
 
 #[test]
@@ -105,6 +526,41 @@ fn paths_gradients_css_use() {
     assert!(c[0] > 0.9 && c[3] > 0.9, "{c:?}");
 }
 
+/// Repeated gradient paints share one cached stop list.
+#[test]
+fn repeated_gradient_paints_share_their_cached_stop_storage() {
+    let doc = parse(
+        br#"<svg xmlns="http://www.w3.org/2000/svg" width="4" height="2">
+            <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="0">
+                <stop offset="0" stop-color="red"/><stop offset="1" stop-color="blue"/>
+            </linearGradient></defs>
+            <rect id="first" width="2" height="2" fill="url(#g)"/>
+            <rect id="second" x="2" width="2" height="2" fill="url(#g)"/>
+        </svg>"#,
+    )
+    .unwrap();
+    let shapes = doc.flatten();
+    let Some((_, _, first)) = shapes.iter().find(|(_, _, shape)| shape.name == "first") else { panic!("first shape expected") };
+    let Some(Paint::Gradient(first_gradient)) = first.fill.as_ref() else { panic!("first gradient expected") };
+    let Some((_, _, second)) = shapes.iter().find(|(_, _, shape)| shape.name == "second") else { panic!("second shape expected") };
+    let Some(Paint::Gradient(second_gradient)) = second.fill.as_ref() else { panic!("second gradient expected") };
+    assert!(std::sync::Arc::ptr_eq(&first_gradient.stops, &second_gradient.stops));
+}
+
+/// Oversized path geometry fails with a bounded import error.
+#[test]
+fn oversized_svg_path_geometry_fails_with_a_bounded_import_error() {
+    let data = format!("M0 0{}", "h1".repeat(pathdata::MAX_PATH_ELEMENTS + 1));
+    let svg = format!(r#"<svg xmlns="http://www.w3.org/2000/svg"><path d="{data}"/></svg>"#);
+    let error = parse(svg.as_bytes()).unwrap_err();
+    assert!(error.to_string().contains("bounded path-data work budget"), "{error}");
+
+    let points = (0..=pathdata::MAX_PATH_ELEMENTS).map(|x| format!("{x} 0")).collect::<Vec<_>>().join(" ");
+    let svg = format!(r#"<svg xmlns="http://www.w3.org/2000/svg"><polyline points="{points}"/></svg>"#);
+    let error = parse(svg.as_bytes()).unwrap_err();
+    assert!(error.to_string().contains("bounded path-data work budget"), "{error}");
+}
+
 #[test]
 fn root_svg_percentages_use_the_document_viewport() {
     for (attrs, width, height) in [
@@ -160,6 +616,72 @@ fn nested_svg_percentages_use_the_nearest_viewport() {
     assert_eq!(px(&img, 55, 65)[3], 0.0);
 }
 
+/// A symbol viewport sets percentage pattern units and the cache key.
+#[test]
+fn symbol_viewport_sets_percentage_pattern_units_and_cache_key() {
+    let doc = parse(
+        br##"<svg xmlns="http://www.w3.org/2000/svg" width="60" height="10">
+            <defs>
+                <pattern id="p" patternUnits="userSpaceOnUse" width="50%" height="100%">
+                    <rect width="4" height="100%" fill="red"/>
+                </pattern>
+                <symbol id="small" viewBox="0 0 20 10">
+                    <rect id="small-shape" width="20" height="10" fill="url(#p)"/>
+                </symbol>
+                <symbol id="large" viewBox="0 0 40 10">
+                    <rect id="large-shape" width="40" height="10" fill="url(#p)"/>
+                </symbol>
+            </defs>
+            <use href="#small" width="20" height="10"/>
+            <use href="#large" x="20" width="40" height="10"/>
+        </svg>"##,
+    )
+    .unwrap();
+    let shapes = doc.flatten();
+    let Some((_, _, small)) = shapes.iter().find(|(_, _, shape)| shape.name == "small-shape") else { panic!("small symbol shape expected") };
+    let Some(Paint::Pattern(small)) = small.fill.as_ref() else { panic!("small symbol pattern expected") };
+    let Some((_, _, large)) = shapes.iter().find(|(_, _, shape)| shape.name == "large-shape") else { panic!("large symbol shape expected") };
+    let Some(Paint::Pattern(large)) = large.fill.as_ref() else { panic!("large symbol pattern expected") };
+    assert_eq!(small.width, 10.0);
+    assert_eq!(large.width, 20.0);
+}
+
+/// Non-finite opacity values never write NaN pixels.
+#[test]
+fn non_finite_opacity_values_do_not_write_nan_pixels() {
+    let doc = parse(
+        br#"<svg xmlns="http://www.w3.org/2000/svg" width="6" height="2">
+            <defs><linearGradient id="g"><stop offset="0" stop-color="red" stop-opacity="NaN"/><stop offset="1" stop-color="blue"/></linearGradient></defs>
+            <rect width="2" height="2" fill="red" fill-opacity="NaN"/>
+            <rect x="2" width="2" height="2" fill="blue" opacity="1e400"/>
+            <rect x="4" width="2" height="2" fill="url(#g)"/>
+        </svg>"#,
+    )
+    .unwrap();
+    let img = rasterize(&doc, 6, 2, 1.0);
+    assert!(img.data.iter().flatten().all(|channel| channel.is_finite()));
+    assert!(near(px(&img, 0, 0), [1.0, 0.0, 0.0, 1.0], 1e-3));
+    assert!(near(px(&img, 3, 1), [0.0, 0.0, 1.0, 1.0], 1e-3));
+    assert!(px(&img, 4, 1)[3].is_finite());
+}
+
+/// Basic shapes whose derived bounds overflow are skipped.
+#[test]
+fn basic_shapes_with_overflowing_derived_bounds_are_skipped() {
+    let doc = parse(
+        br#"<svg xmlns="http://www.w3.org/2000/svg" width="2" height="2">
+            <rect x="1e308" y="0" width="1e308" height="1" fill="red"/>
+            <circle cx="1e308" cy="0" r="1e308" fill="blue"/>
+            <circle cx="0" cy="0" r="1e300" fill="green"/>
+        </svg>"#,
+    )
+    .unwrap();
+
+    assert!(doc.flatten().is_empty());
+    let image = rasterize(&doc, 2, 2, 1.0);
+    assert!(image.data.iter().flatten().all(|channel| channel.is_finite()));
+}
+
 #[test]
 fn non_finite_viewboxes_do_not_panic_or_produce_nan_geometry() {
     for attrs in ["viewBox=\"0 0 1e400 100\"", "viewBox=\"0 0 100 1e400\"", "viewBox=\"-1e400 0 100 100\""] {
@@ -208,6 +730,8 @@ fn malformed_input() {
     assert_eq!(d.skipped, vec!["text".to_string()]);
     assert!(looks_like_svg(BASIC));
     assert!(!looks_like_svg(b"\x89PNG"));
+    // The first element must be the `svg`: an HTML page with an inline SVG is not one.
+    assert!(!looks_like_svg(b"<html><body><svg/></body></html>"));
 }
 
 #[test]
@@ -245,7 +769,7 @@ fn deep_nesting_errors_instead_of_overflowing_the_stack() {
         "<g>".repeat(1000),
         "<rect/>".repeat(1000)
     );
-    assert_eq!(crate::xml_depth(&s), 2);
+    assert!(!craft_svg::guard::deeper_than(&s, 3) && craft_svg::guard::deeper_than(&s, 2));
     assert!(crate::parse(s.as_bytes()).is_ok());
 }
 
@@ -355,27 +879,6 @@ fn selector_lists_keep_the_css_cascade() {
 }
 
 #[test]
-fn a_comma_list_stores_its_declarations_once() {
-    let sels = vec!["rect"; 1000].join(",");
-    let decls: String = (0..50).map(|i| format!("p{i}:v;")).collect();
-    let mut sheet = StyleSheet::default();
-    parse_css(&format!("{sels}{{{decls}}}"), &mut sheet).unwrap();
-    assert_eq!(sheet.rules.len(), 1000);
-    assert_eq!(sheet.blocks.len(), 1);
-    assert_eq!(sheet.decls, 50);
-}
-
-#[test]
-fn rules_of_unsupported_selectors_store_no_blocks() {
-    let mut sheet = StyleSheet::default();
-    parse_css(&"a b{}".repeat(100_000), &mut sheet).unwrap();
-    parse_css("a b{fill:red} a>b, rect{fill:blue} c:hover, d{fill:red}", &mut sheet).unwrap();
-    assert_eq!(sheet.rules.len(), 2);
-    assert_eq!(sheet.blocks.len(), 2);
-    assert!(sheet.rules.iter().all(|r| sheet.blocks.get(r.block).is_some_and(|b| b.len() == 1)));
-}
-
-#[test]
 fn huge_class_lists_count_against_the_matching_budget() {
     // One rule, but a 1 MB class attribute re-split on each of 100 `<use>` copies (#2140).
     let class = "a ".repeat(500_000);
@@ -435,14 +938,408 @@ fn font_size_percentage_resolves_against_the_parent_font_size() {
     }
 }
 
+/// Build a `w` x `h` document from `nodes` for sparse-content render tests.
+fn sparse_doc(w: f64, h: f64, nodes: Vec<Node>) -> Doc {
+    let mut root = Group::new("root");
+    root.children = nodes;
+    Doc { width: w, height: h, root, skipped: Vec::new() }
+}
+
+/// A tiny image on a large canvas is still drawn.
 #[test]
-fn at_rule_blocks_are_skipped_by_brace_depth() {
-    let mut sheet = StyleSheet::default();
-    parse_css("@media print { .a{fill:#ff0000} .b{fill:#0000ff} } .c{fill:red}", &mut sheet).unwrap();
-    assert_eq!(sheet.rules.len(), 1);
-    assert_eq!(sheet.rules[0].classes, vec!["c".to_string()]);
-    let mut sheet = StyleSheet::default();
-    parse_css("@media x { @supports y { .c{} } .d{} } .e{fill:red}", &mut sheet).unwrap();
-    assert_eq!(sheet.rules.len(), 1);
-    assert_eq!(sheet.rules[0].classes, vec!["e".to_string()]);
+fn sparse_minified_image_on_a_large_canvas_is_still_drawn() {
+    let image = Image {
+        name: "i".into(),
+        transform: Affine::scale(1.0 / 8.0),
+        width: 8,
+        height: 8,
+        rgba: std::sync::Arc::new([255u8, 0, 0, 255].repeat(64)),
+        opacity: 1.0,
+    };
+    let doc = sparse_doc(2049.0, 2049.0, vec![Node::Image(image)]);
+    let img = try_rasterize(&doc, 2049, 2049, 1.0).expect("sparse image is within budget");
+    assert!(px(&img, 0, 0)[3] > 0.99, "the covered pixel must not be dropped by whole-canvas budgeting");
+}
+
+/// A small shape with a many-element clip is still drawn.
+#[test]
+fn sparse_shape_with_a_many_element_clip_is_still_drawn() {
+    let mut clip = kurbo::BezPath::new();
+    clip.move_to((0.0, 0.0));
+    for i in 0..1026 {
+        clip.line_to((2.0 * (i % 2) as f64, 2.0 * ((i + 1) % 2) as f64));
+    }
+    clip.line_to((2.0, 2.0));
+    clip.line_to((0.0, 2.0));
+    clip.close_path();
+    assert!(clip.elements().len() > 1000);
+    let mut g = Group::new("clipped");
+    g.clip = vec![(clip, FillRule::NonZero)];
+    let doc = parse(br#"<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512"><rect width="2" height="2" fill="red"/></svg>"#).unwrap();
+    g.children = doc.root.children.clone();
+    let doc = sparse_doc(512.0, 512.0, vec![Node::Group(g)]);
+    let img = try_rasterize(&doc, 512, 512, 1.0).expect("sparse clip is within budget");
+    assert!(img.data.iter().any(|p| p[3] > 0.5), "clip work is charged by clip area, not canvas area");
+}
+
+/// Sparse pattern fills on a 4K canvas all render.
+#[test]
+fn sparse_pattern_fills_on_a_4k_canvas_all_render() {
+    let rects: String = (0..6).map(|i| format!(r#"<rect x="{}" y="0" width="2" height="2" fill="url(#p)"/>"#, i * 4)).collect();
+    let svg = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="3840" height="2160">
+            <defs><pattern id="p" patternUnits="userSpaceOnUse" width="1" height="1"><rect width="1" height="1" fill="red"/></pattern></defs>
+            {rects}</svg>"#
+    );
+    let doc = parse(svg.as_bytes()).unwrap();
+    let img = try_rasterize(&doc, 3840, 2160, 1.0).expect("sparse patterns are within budget");
+    for i in 0..6 {
+        assert!(px(&img, i * 4, 0)[3] > 0.99, "rect {i} must be painted");
+    }
+}
+
+/// A genuinely huge covered area is still refused.
+#[test]
+fn genuinely_huge_covered_area_is_still_refused() {
+    // A 16392x1 strip squeezed 8:1 across the whole canvas needs 8x8 taps per pixel everywhere.
+    let image = Image {
+        name: "i".into(),
+        transform: Affine::scale_non_uniform(1.0 / 8.0, 2049.0),
+        width: 16392,
+        height: 1,
+        rgba: std::sync::Arc::new([255u8, 0, 0, 255].repeat(16392)),
+        opacity: 1.0,
+    };
+    let doc = sparse_doc(2049.0, 2049.0, vec![Node::Image(image)]);
+    assert_eq!(
+        try_rasterize(&doc, 2049, 2049, 1.0).err(),
+        Some(RasterError::WorkLimit("image sampling")),
+        "a fully covered 64-tap canvas exceeds the work cap"
+    );
+    let img = rasterize(&doc, 2049, 2049, 1.0);
+    assert!(img.data.iter().all(|p| p[3] == 0.0), "the lossy wrapper drops the refused image");
+}
+
+/// A group of `count` 1x1 red rects, each inside its own tiny clip, spread over a large canvas.
+fn tiny_clipped_rects(count: usize) -> Vec<Node> {
+    (0..count)
+        .map(|i| {
+            let (x, y) = ((i % 100) as f64 * 4.0, (i / 100) as f64 * 4.0);
+            let mut g = Group::new("clipped");
+            g.clip = vec![(kurbo::Rect::new(x, y, x + 2.0, y + 2.0).to_path(0.01), FillRule::NonZero)];
+            let mut rect = Group::new("r");
+            rect.children = parse(
+                format!(r#"<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"><rect x="{x}" y="{y}" width="1" height="1" fill="red"/></svg>"#)
+                    .as_bytes(),
+            )
+            .map(|d| d.root.children)
+            .unwrap_or_default();
+            g.children = rect.children;
+            Node::Group(g)
+        })
+        .collect()
+}
+
+/// Thousands of tiny clipped items on a big canvas cost region-proportional work: a clipped
+/// group works on a crop of its clip region, so the render finishes quickly and completely.
+#[test]
+fn thousands_of_tiny_clips_on_a_large_canvas_finish_quickly() {
+    let doc = sparse_doc(2048.0, 2048.0, tiny_clipped_rects(3000));
+    let start = std::time::Instant::now();
+    let img = try_rasterize(&doc, 2048, 2048, 1.0).expect("tiny clips stay within every budget");
+    assert!(start.elapsed() < std::time::Duration::from_secs(20), "region-bounded work: {:?}", start.elapsed());
+    assert!(px(&img, 0, 0)[3] > 0.99 && px(&img, 396, 28 * 4)[3] > 0.99);
+}
+
+/// Thousands of tiny pattern-filled shapes and tiny images on a big canvas finish quickly because
+/// masks and scans cover only each item's region.
+#[test]
+fn thousands_of_tiny_pattern_and_image_items_on_a_large_canvas_finish_quickly() {
+    let mut nodes = Vec::new();
+    let rects: String = (0..3000).map(|i| format!(r#"<rect x="{}" y="{}" width="2" height="2" fill="url(#p)"/>"#, (i % 100) * 4, (i / 100) * 4)).collect();
+    let svg = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="3840" height="2160">
+            <defs><pattern id="p" patternUnits="userSpaceOnUse" width="1" height="1"><rect width="1" height="1" fill="red"/></pattern></defs>
+            {rects}</svg>"#
+    );
+    nodes.extend(parse(svg.as_bytes()).unwrap().root.children);
+    for i in 0..3000 {
+        nodes.push(Node::Image(Image {
+            name: "i".into(),
+            transform: Affine::translate(((i % 100) as f64 * 4.0, 100.0 + (i / 100) as f64 * 4.0)),
+            width: 1,
+            height: 1,
+            rgba: std::sync::Arc::new(vec![0, 255, 0, 255]),
+            opacity: 1.0,
+        }));
+    }
+    let doc = sparse_doc(3840.0, 2160.0, nodes);
+    let start = std::time::Instant::now();
+    let img = try_rasterize(&doc, 3840, 2160, 1.0).expect("tiny items stay within every budget");
+    assert!(start.elapsed() < std::time::Duration::from_secs(20), "region-bounded work: {:?}", start.elapsed());
+    assert!(px(&img, 396, 0)[3] > 0.99 && px(&img, 396, 100)[3] > 0.99);
+}
+
+#[test]
+fn gradient_stops_shared_across_references_are_not_charged_per_copy() {
+    // 4,000 stops referenced by 2,100 shapes would be 8.4 million stops if copied, but resolved
+    // gradients share one stop array, so the import keeps only the 4,000 and succeeds.
+    let stops: String = (0..4000).map(|i| format!("<stop offset=\"{}\" stop-color=\"red\"/>", i as f64 / 4000.0)).collect();
+    let rects = "<rect width=\"1\" height=\"1\" fill=\"url(#g)\"/>".repeat(2100);
+    let svg = format!("<svg xmlns=\"http://www.w3.org/2000/svg\"><defs><linearGradient id=\"g\">{stops}</linearGradient></defs>{rects}</svg>");
+    assert!(parse(svg.as_bytes()).is_ok());
+}
+
+#[test]
+fn nested_knockout_groups_stop_at_the_draw_budget() {
+    // Each knockout level draws its children twice and each non-isolated level twice more:
+    // 30 nested levels would be 4^30 draws. The draw budget ends it. The wait is long because the
+    // budget is a count of draws, not time: the render took 1 s on a quiet CI machine and over 20 s
+    // on a loaded one, and 4^30 draws would never finish at all.
+    let mut g = Group::new("leaf");
+    g.children.push(Node::Shape(Shape {
+        name: "s".into(),
+        geom: Geom::Rect { x: 0.0, y: 0.0, w: 4.0, h: 4.0, rx: 0.0, ry: 0.0 },
+        transform: Affine::IDENTITY,
+        fill: Some(Paint::Color([1.0, 0.0, 0.0])),
+        fill_opacity: 1.0,
+        fill_rule: FillRule::NonZero,
+        stroke: None,
+        opacity: 1.0,
+    }));
+    for _ in 0..30 {
+        let mut p = Group::new("k");
+        p.knockout = true;
+        p.isolated = false;
+        p.children.push(Node::Group(g));
+        g = p;
+    }
+    let doc = Doc { width: 4.0, height: 4.0, root: g, skipped: vec![] };
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || tx.send(rasterize(&doc, 4, 4, 1.0).width).ok());
+    assert_eq!(rx.recv_timeout(std::time::Duration::from_secs(120)).expect("rendering finishes"), 4);
+}
+
+fn solid_rect(r: kurbo::Rect, c: [f64; 3]) -> Node {
+    Node::Shape(Shape {
+        name: "rect".into(),
+        geom: Geom::Rect { x: r.x0, y: r.y0, w: r.width(), h: r.height(), rx: 0.0, ry: 0.0 },
+        transform: Affine::IDENTITY,
+        fill: Some(Paint::Color(c)),
+        fill_opacity: 1.0,
+        fill_rule: FillRule::NonZero,
+        stroke: None,
+        opacity: 1.0,
+    })
+}
+
+/// A PDF-style clipping group (not isolated: blend modes inside reach the backdrop).
+fn clip_group(r: kurbo::Rect, children: Vec<Node>) -> Node {
+    let mut g = Group::new("Clip Group");
+    g.clip.push((kurbo::Shape::to_path(&r, 0.1), FillRule::NonZero));
+    g.isolated = false;
+    g.children = children;
+    Node::Group(g)
+}
+
+fn doc_of(w: f64, h: f64, children: Vec<Node>) -> Doc {
+    let mut root = Group::new("page");
+    root.children = children;
+    Doc { width: w, height: h, root, skipped: vec![] }
+}
+
+/// Nested clipping groups over a backdrop: the content shows where every clip covers, half
+/// where a clip edge halves a pixel, and the backdrop everywhere else (#2895: plain clipping
+/// groups are drawn on surfaces the size of their clip).
+#[test]
+fn nested_clip_groups_keep_the_backdrop_outside_their_clips() {
+    let blue = [0.0, 0.0, 1.0];
+    let red = [1.0, 0.0, 0.0];
+    let inner = clip_group(kurbo::Rect::new(10.5, 0.0, 20.0, 40.0), vec![solid_rect(kurbo::Rect::new(0.0, 0.0, 40.0, 40.0), red)]);
+    let doc =
+        doc_of(40.0, 40.0, vec![solid_rect(kurbo::Rect::new(0.0, 0.0, 40.0, 40.0), blue), clip_group(kurbo::Rect::new(5.0, 5.0, 35.0, 35.0), vec![inner])]);
+    let img = rasterize(&doc, 40, 40, 1.0);
+    let (r, b) = ([1.0, 0.0, 0.0, 1.0], [0.0, 0.0, 1.0, 1.0]);
+    for (x, y, want) in [(15, 20, r), (11, 6, r), (19, 34, r), (25, 20, b), (15, 2, b), (15, 36, b), (9, 20, b), (21, 20, b)] {
+        assert!(near(px(&img, x, y), want, 1e-3), "({x}, {y}): {:?}", px(&img, x, y));
+    }
+    assert!(near(px(&img, 10, 20), [0.5, 0.0, 0.5, 1.0], 0.02), "half-covered edge pixel {:?}", px(&img, 10, 20));
+    // Scaled 4×: the clip edge at 10.5 lands on a pixel boundary (42), hard on both sides.
+    let big = rasterize(&doc, 160, 160, 4.0);
+    assert!(near(px(&big, 41, 80), b, 0.01) && near(px(&big, 42, 80), r, 0.01), "{:?} {:?}", px(&big, 41, 80), px(&big, 42, 80));
+}
+
+/// A clipping group whose content blends (Multiply) still composites with the real backdrop:
+/// red multiplied over blue is black inside the clip, blue outside.
+#[test]
+fn a_blend_mode_inside_a_clip_group_reaches_the_backdrop() {
+    let mut multiply = Group::new("Multiply");
+    multiply.blend = BlendMode::Multiply;
+    multiply.children = vec![solid_rect(kurbo::Rect::new(0.0, 0.0, 20.0, 20.0), [1.0, 0.0, 0.0])];
+    let doc = doc_of(
+        20.0,
+        20.0,
+        vec![
+            solid_rect(kurbo::Rect::new(0.0, 0.0, 20.0, 20.0), [0.0, 0.0, 1.0]),
+            clip_group(kurbo::Rect::new(5.0, 5.0, 15.0, 15.0), vec![Node::Group(multiply)]),
+        ],
+    );
+    let img = rasterize(&doc, 20, 20, 1.0);
+    assert!(near(px(&img, 10, 10), [0.0, 0.0, 0.0, 1.0], 1e-3), "{:?}", px(&img, 10, 10));
+    assert!(near(px(&img, 2, 10), [0.0, 0.0, 1.0, 1.0], 1e-3), "{:?}", px(&img, 2, 10));
+}
+
+/// A pattern tile is a tree of its own: a clip group inside it that blends (Multiply) against the
+/// tile's backdrop must not be drawn as a plain clip just because the pattern fill sits inside an
+/// outer plain clipping group. Red multiplied over the tile's blue is black inside the inner clip.
+#[test]
+fn a_pattern_inside_a_plain_clip_group_keeps_its_own_backdrop_analysis() {
+    let mut multiply = Group::new("Multiply");
+    multiply.blend = BlendMode::Multiply;
+    multiply.children = vec![solid_rect(kurbo::Rect::new(0.0, 0.0, 20.0, 20.0), [1.0, 0.0, 0.0])];
+    let mut content = Group::new("tile");
+    content.children = vec![
+        solid_rect(kurbo::Rect::new(0.0, 0.0, 20.0, 20.0), [0.0, 0.0, 1.0]),
+        clip_group(kurbo::Rect::new(8.0, 8.0, 12.0, 12.0), vec![Node::Group(multiply)]),
+    ];
+    let pattern = Pattern {
+        x: 0.0,
+        y: 0.0,
+        width: 20.0,
+        height: 20.0,
+        pattern_units: PatternUnits::UserSpaceOnUse,
+        content_units: PatternUnits::UserSpaceOnUse,
+        transform: Affine::IDENTITY,
+        content: std::sync::Arc::new(content),
+        render_complexity: 4,
+        fallback: None,
+    };
+    let Node::Shape(mut filled) = solid_rect(kurbo::Rect::new(0.0, 0.0, 20.0, 20.0), [0.0; 3]) else { return };
+    filled.fill = Some(Paint::Pattern(pattern));
+    let doc = doc_of(20.0, 20.0, vec![clip_group(kurbo::Rect::new(2.0, 2.0, 18.0, 18.0), vec![Node::Shape(filled)])]);
+    let img = rasterize(&doc, 20, 20, 1.0);
+    assert!(near(px(&img, 10, 10), [0.0, 0.0, 0.0, 1.0], 1e-3), "inner clip {:?}", px(&img, 10, 10));
+    assert!(near(px(&img, 4, 10), [0.0, 0.0, 1.0, 1.0], 1e-3), "tile backdrop {:?}", px(&img, 4, 10));
+    assert!(px(&img, 0, 10)[3] < 1e-3, "outside the outer clip {:?}", px(&img, 0, 10));
+}
+
+/// A stroke reaches past its path's bounds by half its width: a horizontal line (a path
+/// without height) stroked 4 px wide covers 4 rows, and its butt caps end at the path's ends.
+#[test]
+fn a_stroke_draws_its_full_width_past_the_path_bounds() {
+    let mut line = BezPath::new();
+    line.move_to((5.0, 20.0));
+    line.line_to((35.0, 20.0));
+    let shape = Node::Shape(Shape {
+        name: "line".into(),
+        geom: Geom::Path(line),
+        transform: Affine::IDENTITY,
+        fill: None,
+        fill_opacity: 1.0,
+        fill_rule: FillRule::NonZero,
+        stroke: Some(Stroke { paint: Paint::Color([0.0, 0.0, 0.0]), opacity: 1.0, width: 4.0, cap: Cap::Butt, join: Join::Miter, miter: 4.0, dash: None }),
+        opacity: 1.0,
+    });
+    let img = rasterize(&doc_of(40.0, 40.0, vec![shape]), 40, 40, 1.0);
+    for y in 18..22 {
+        assert!(px(&img, 20, y)[3] > 0.99, "row {y}: {:?}", px(&img, 20, y));
+    }
+    for (x, y) in [(20, 17), (20, 22), (3, 20), (36, 20)] {
+        assert!(px(&img, x, y)[3] < 0.01, "({x}, {y}): {:?}", px(&img, x, y));
+    }
+}
+
+/// Bytes of `n` RGBA f32 surfaces of `w`×`h` pixels (a surface budget for the tests below).
+fn surfaces(n: f64, w: u32, h: u32) -> usize {
+    (n * f64::from(w) * f64::from(h) * 16.0) as usize
+}
+
+/// #2895: an A4 page continuously rasterised at 400 % is a 128 MB surface, and every nested
+/// clipping group used to copy the backdrop and draw on a second surface of that size, so the
+/// second level of clips ran past the 512 MB surface budget and its artwork was dropped. Clip
+/// groups now draw on surfaces the size of their clip: with room for four canvas-size surfaces,
+/// artwork inside four nested clips still draws (it used to need nine).
+#[test]
+fn deeply_clipped_artwork_draws_within_the_surface_budget() {
+    let red = [1.0, 0.0, 0.0];
+    let mut node = solid_rect(kurbo::Rect::new(0.0, 0.0, 300.0, 300.0), red);
+    for i in 1..=4 {
+        let inset = 10.0 * f64::from(i);
+        node = clip_group(kurbo::Rect::new(inset, inset, 300.0 - inset, 300.0 - inset), vec![node]);
+    }
+    let img = crate::raster::rasterize_with_budget(&doc_of(300.0, 300.0, vec![node]), 300, 300, Affine::IDENTITY, surfaces(4.0, 300, 300));
+    assert_eq!((img.width, img.height), (300, 300));
+    assert!(near(px(&img, 150, 150), [1.0, 0.0, 0.0, 1.0], 1e-3), "centre {:?}", px(&img, 150, 150));
+    assert!(near(px(&img, 45, 150), [1.0, 0.0, 0.0, 1.0], 1e-3), "just inside every clip {:?}", px(&img, 45, 150));
+    assert!(px(&img, 35, 150)[3] < 0.01, "outside the outermost clip {:?}", px(&img, 35, 150));
+}
+
+/// #2895: clips that cover the whole canvas around the artwork inside them (a page clip, an
+/// artboard clip, the outermost groups of most PDF pages) change no pixel, so they are drawn
+/// without a surface: with room for two and a half canvas-size surfaces, the artwork inside two
+/// of them still draws, and an inner clip still cuts it.
+#[test]
+fn canvas_covering_clips_draw_without_a_surface() {
+    let red = [1.0, 0.0, 0.0];
+    let art = clip_group(kurbo::Rect::new(150.0, 0.0, 300.0, 350.0), vec![solid_rect(kurbo::Rect::new(100.0, 100.0, 250.0, 250.0), red)]);
+    let page = clip_group(kurbo::Rect::new(0.0, 0.0, 350.0, 350.0), vec![art]);
+    let outer = clip_group(kurbo::Rect::new(-1.0, -1.0, 351.0, 351.0), vec![page]);
+    let img = crate::raster::rasterize_with_budget(&doc_of(350.0, 350.0, vec![outer]), 350, 350, Affine::IDENTITY, surfaces(2.5, 350, 350));
+    assert_eq!((img.width, img.height), (350, 350));
+    for (x, y) in [(200, 200), (151, 101), (248, 248)] {
+        assert!(near(px(&img, x, y), [1.0, 0.0, 0.0, 1.0], 1e-3), "({x}, {y}): {:?}", px(&img, x, y));
+    }
+    for (x, y) in [(120, 200), (148, 200), (200, 90), (260, 200)] {
+        assert!(px(&img, x, y)[3] < 0.01, "({x}, {y}): {:?}", px(&img, x, y));
+    }
+}
+
+/// Take a tree apart without recursing (a deep one would overflow the stack when dropped).
+fn dismantle(mut nodes: Vec<Node>) {
+    while let Some(n) = nodes.pop() {
+        if let Node::Group(mut g) = n {
+            nodes.append(&mut g.children);
+        }
+    }
+}
+
+/// Never crash: drawing recurses, and clipping groups nested twenty thousand deep (a crafted
+/// file) are drawn without running out of stack, on a thread with a small one; groups past the
+/// nesting limit are not drawn, shallower artwork is.
+#[test]
+fn clip_groups_nested_without_end_do_not_overflow_the_stack() {
+    let run = std::thread::Builder::new().stack_size(4 << 20).spawn(|| {
+        let mut node = solid_rect(kurbo::Rect::new(0.0, 0.0, 64.0, 64.0), [1.0, 0.0, 0.0]);
+        for _ in 0..20_000 {
+            node = clip_group(kurbo::Rect::new(0.0, 0.0, 64.0, 64.0), vec![node]);
+        }
+        let shallow = solid_rect(kurbo::Rect::new(0.0, 0.0, 8.0, 8.0), [0.0, 0.0, 1.0]);
+        let doc = doc_of(64.0, 64.0, vec![node, shallow]);
+        let img = rasterize(&doc, 64, 64, 1.0);
+        let out = (img.width, img.height, px(&img, 4, 4), px(&img, 40, 40));
+        dismantle(vec![Node::Group(doc.root)]);
+        out
+    });
+    let (w, h, shallow, deep) = run.unwrap().join().unwrap();
+    assert_eq!((w, h), (64, 64));
+    assert!(near(shallow, [0.0, 0.0, 1.0, 1.0], 1e-3), "{shallow:?}");
+    assert!(deep[3] < 0.01, "artwork past the nesting limit is not drawn: {deep:?}");
+}
+
+/// Only a rectangle along the pixel grid's axes counts as a clip that can be skipped: a
+/// rotated square or a path that folds back on itself does not.
+#[test]
+fn axis_rect_recognises_only_axis_aligned_rectangles() {
+    use crate::raster::axis_rect;
+    let rect = kurbo::Shape::to_path(&kurbo::Rect::new(1.0, 2.0, 5.0, 7.0), 0.1);
+    assert_eq!(axis_rect(&rect, Affine::IDENTITY), Some(kurbo::Rect::new(1.0, 2.0, 5.0, 7.0)));
+    assert_eq!(axis_rect(&rect, Affine::scale(2.0)), Some(kurbo::Rect::new(2.0, 4.0, 10.0, 14.0)));
+    assert_eq!(axis_rect(&rect, Affine::rotate(0.3)), None);
+    let mut folded = BezPath::new();
+    folded.move_to((0.0, 0.0));
+    folded.line_to((10.0, 0.0));
+    folded.line_to((10.0, 10.0));
+    folded.line_to((10.0, 0.0));
+    folded.close_path();
+    assert_eq!(axis_rect(&folded, Affine::IDENTITY), None);
 }

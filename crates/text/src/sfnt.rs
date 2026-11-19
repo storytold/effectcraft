@@ -257,7 +257,12 @@ fn name_string(b: &[u8], id: u16) -> Option<String> {
     // Best rank first; a blank record falls through to the next. Decoding is lazy, so aliased
     // records are not decoded once a usable one is found.
     cands.sort_by_key(|c| c.0);
+    // Records may alias one string: each (encoding, bytes) is decoded at most once.
+    let mut tried = std::collections::HashSet::new();
     cands.into_iter().find_map(|(_, plat, enc, raw)| {
+        if !tried.insert((plat, enc, raw.as_ptr(), raw.len())) {
+            return None;
+        }
         let s = match (plat, enc) {
             (3, 1 | 10) | (0, _) => {
                 let u: Vec<u16> = raw.as_chunks::<2>().0.iter().map(|c| u16::from_be_bytes([c[0], c[1]])).collect();
