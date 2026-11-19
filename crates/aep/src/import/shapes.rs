@@ -351,7 +351,7 @@ fn has_values<'f, 'a>(g: &AepGroup<'f, 'a>, m: &str) -> Option<AepGroup<'f, 'a>>
     }
 }
 
-/// Stroke ▸ Dashes (lab stroke-options): Dash 1 / Gap 1 / Offset, and the pairs the "+" button adds
+/// Stroke ▸ Dashes: Dash 1 / Gap 1 / Offset, and the pairs the "+" button adds
 /// (Dash 2 / Gap 2, Dash 3 / Gap 3). Every one is written, at 10 when unused; only the ones that
 /// hold a value of their own are on, as Dash 0 is "no dashes" in EffectCraft.
 fn stroke_dashes(s: &mut PropGroup, g: &AepGroup<'_, '_>, cx: &mut Cx<'_, '_>) {
@@ -387,7 +387,7 @@ fn stroke_dashes(s: &mut PropGroup, g: &AepGroup<'_, '_>, cx: &mut Cx<'_, '_>) {
     }
 }
 
-/// Stroke ▸ Taper (lab stroke-options). Length Units 1 is Percent and 2 Pixels (EffectCraft lists
+/// Stroke ▸ Taper. Length Units 1 is Percent and 2 Pixels (EffectCraft lists
 /// Pixels first); the lengths in percent are `Start Length` / `End Length`, in pixels
 /// `StartWidthPx` / `EndWidthPx`, whatever the names say.
 fn stroke_taper(s: &mut PropGroup, g: &AepGroup<'_, '_>, cx: &mut Cx<'_, '_>) {
@@ -424,7 +424,7 @@ fn stroke_taper(s: &mut PropGroup, g: &AepGroup<'_, '_>, cx: &mut Cx<'_, '_>) {
     }
 }
 
-/// Stroke ▸ Wave (lab stroke-options): Units 1 is Pixels (Wavelength), 2 Cycles, as in EffectCraft.
+/// Stroke ▸ Wave: Units 1 is Pixels (Wavelength), 2 Cycles, as in EffectCraft.
 fn stroke_wave(s: &mut PropGroup, g: &AepGroup<'_, '_>, cx: &mut Cx<'_, '_>) {
     let Some(sub) = has_values(g, "ADBE Vector Stroke Wave") else { return };
     let Some(w) = s.sub_mut("wave") else {

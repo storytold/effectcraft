@@ -1,4 +1,4 @@
-//! Stroke ▸ Dashes, Taper and Wave of a shape stroke (After Effects 26.5 lab stroke-options).
+//! Stroke ▸ Dashes, Taper and Wave of a shape stroke, as After Effects 26.5 writes them.
 //!
 //! After Effects writes all three groups on every stroke, at their defaults when unused (Dash and
 //! Gap 10, Taper widths 0 %), and only the properties set by hand carry a value of their own
