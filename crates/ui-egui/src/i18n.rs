@@ -310,6 +310,8 @@ pub(crate) fn entry(app: &EffectcraftApp, e: &MenuEntry, shown: String) -> Strin
         // A colon before the history's (untranslated) action name: "Отменить: Comp1".
         "ru" => Some(("Отменить:", "Нечего отменять", "Повторить:", "Нечего повторять")),
         "sv" => Some(("Ångra", "Det går inte att ångra", "Gör om", "Det går inte att göra om")),
+        // A colon before the history's (untranslated) action name: "Geri Al: Comp1".
+        "tr" => Some(("Geri Al:", "Geri alınacak işlem yok", "Yinele:", "Yinelenecek işlem yok")),
         _ => None,
     };
     match e.command.as_str() {
