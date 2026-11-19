@@ -190,3 +190,10 @@ fn a_wave_arrives() {
     assert_eq!(v(&s, "wave/units"), Value::Enum(1), "Cycles");
     assert_eq!(["wave/amount", "wave/wavelength", "wave/cycles", "wave/phase"].map(|p| v(&s, p)), [40.0, 100.0, 5.0, 30.0].map(Value::Scalar));
 }
+
+/// A wave in pixels at After Effects' default Wavelength, 100, which has no value of its own.
+#[test]
+fn a_wave_at_the_default_wavelength_is_100_px() {
+    let s = stroke(&with(&[("ADBE Vector Stroke Wave", &[("ADBE Vector Taper Wave Amount", 50.0, true), ("ADBE Vector Taper Wave Units", 1.0, true)])]));
+    assert_eq!((v(&s, "wave/units"), v(&s, "wave/wavelength")), (Value::Enum(0), Value::Scalar(100.0)));
+}

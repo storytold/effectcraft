@@ -431,6 +431,11 @@ fn stroke_wave(s: &mut PropGroup, g: &AepGroup<'_, '_>, cx: &mut Cx<'_, '_>) {
         cx.col.lose(LossCategory::ShapeLayers, format!("{}: stroke wave not imported", cx.what));
         return;
     };
+    // A Wavelength at After Effects' default, 100 px, has no value of its own in the file;
+    // EffectCraft's default is 20.
+    if let Some(l) = w.get_mut("wavelength") {
+        l.value = effectcraft_keyframe::Value::Scalar(100.0);
+    }
     set(w, "units", &sub, "ADBE Vector Taper Wave Units", Kind::EffectPopup(2), cx);
     for (id, m) in [
         ("amount", "ADBE Vector Taper Wave Amount"),
