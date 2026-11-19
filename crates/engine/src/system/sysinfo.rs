@@ -24,7 +24,20 @@ pub struct SysMemory {
 impl SysMemory {
     /// The system is low on memory: less than 10% (or less than 1 GB) is available.
     pub fn is_low(&self) -> bool {
-        self.total > 0 && (self.available < self.total / 10 || self.available < 1 << 30)
+        self.total > 0 && self.available < self.low_threshold()
+    }
+
+    /// Below this much available memory the system is low: 10% of the total, at least 1 GB.
+    fn low_threshold(&self) -> u64 {
+        (self.total / 10).max(1 << 30)
+    }
+
+    /// Still low on memory, given whether it was (`was_low`): a low episode ends only once twice
+    /// the low threshold is available again. Without that margin, halving the caches frees just
+    /// enough memory to end it, the budgets double again and fill it, and the system is low
+    /// again a reading later.
+    pub fn still_low(&self, was_low: bool) -> bool {
+        if was_low { self.total > 0 && self.available < self.low_threshold().saturating_mul(2) } else { self.is_low() }
     }
 }
 
@@ -137,6 +150,20 @@ pub fn parse_freebsd_sysctl(text: &str) -> Option<SysMemory> {
     let page = it.next()??;
     let free = it.next()??.saturating_add(it.next()??);
     Some(SysMemory { total, available: free.saturating_mul(page).min(total) })
+}
+
+/// The physical memory this process uses now (its resident set, the working set on Windows), in
+/// bytes; `None` where it can't be read (the browser). Cheap: the memory accountant reads it
+/// with each balance (at most every 250 ms).
+pub fn process_memory() -> Option<u64> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        memory_stats::memory_stats().and_then(|m| u64::try_from(m.physical_mem).ok())
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        None
+    }
 }
 
 /// Total and available physical memory, when the system reports them.

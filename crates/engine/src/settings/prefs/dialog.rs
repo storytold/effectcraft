@@ -47,6 +47,9 @@ pub enum Item {
     },
     /// Read-only information line.
     Note(&'static str),
+    /// Memory & CPU: how much RAM EffectCraft's caches may use, of the installed RAM
+    /// (`Prefs::memory_budget`, `Session::memory_budget`).
+    MemoryUse,
     /// The browser's storage manager (web app only, `storage.*`): usage and quota, persistent
     /// storage, Clear buttons. Not shown where there is no browser storage.
     BrowserStorage,
@@ -300,6 +303,11 @@ pub fn pages() -> Vec<Page> {
                 Section("Media Cache"),
                 s("disk.mediaCacheFolder", "Database and Cache Folder", Kind::Path, true),
                 s("disk.conformedMediaFolder", "Conformed Audio Folder", Kind::Path, true),
+                Section("Network Footage"),
+                s("disk.localizeFootage", "Localize Network Footage", B, true),
+                s("disk.localizeMaxGb", "Maximum Local Copies Size", Kind::Int(1, 100_000, "GB"), true),
+                s("disk.localizeFolder", "Local Copies Folder", Kind::Path, true),
+                s("disk.networkFootageLocations", "Network Footage Locations", Kind::Text, true),
             ],
         },
         Page {
@@ -307,10 +315,7 @@ pub fn pages() -> Vec<Page> {
             title: "Memory & CPU",
             items: vec![
                 s("memory.ramReservedGb", "RAM Reserved for Other Applications", Kind::Int(0, 1024, "GB"), true),
-                Section("Cache Budgets"),
-                s("memory.layerCacheMb", "Layer Cache", Kind::Int(64, 1 << 20, "MB"), true),
-                s("memory.mediaCacheMb", "Footage Frame Cache", Kind::Int(64, 1 << 20, "MB"), true),
-                s("memory.previewCacheMb", "Preview (RAM) Cache", Kind::Int(64, 1 << 20, "MB"), true),
+                MemoryUse,
                 s("memory.reduceCacheWhenLow", "Reduce Cache Size When System Is Low on Memory", B, true),
                 s("memory.gpuFramesInFlight", "GPU Frames Rendered at Once", Kind::Choice(&[("Auto", "auto"), ("1", "1"), ("2", "2"), ("3", "3")]), true),
             ],
@@ -439,6 +444,7 @@ pub fn pages_json() -> Value {
                     Item::Labels => json!({"labels": "labels.N.name / labels.N.color (N = 0..15)"}),
                     Item::AudioDevices { key } => json!({"type": "device", "key": key, "label": "Default Output"}),
                     Item::Note(t) => json!({"note": t}),
+                    Item::MemoryUse => json!({"memoryUse": "help.systemInfo → caches.budget / caches.inUse (what EffectCraft's caches may use, and use now)"}),
                     Item::BrowserStorage => json!({"browserStorage": "storage.info / storage.persist / storage.clear (web app)"}),
                     Item::PluginLibrary => json!({"pluginLibrary": "library.list / library.refresh / library.install / library.update / library.uninstall"}),
                     Item::Models(task) => {

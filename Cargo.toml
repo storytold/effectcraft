@@ -19,10 +19,10 @@ craft-quit = { version = "0.1.0", git = "https://github.com/storytold/craft-libs
 craft-ecproj-format = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "5a7a63a21dd03dd1a2bc6c308a3a6ce818caae87" }
 craft-dpx = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "5a7a63a21dd03dd1a2bc6c308a3a6ce818caae87" }
 craft-ps = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "808730f49b9637b7909fe2ae56f9d63fdb100cae", default-features = false, features = ["read"] }
-craft-exr = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "5a7a63a21dd03dd1a2bc6c308a3a6ce818caae87" }
+craft-exr = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "3b8e426a260695af840a2cd79a064d40778f939e" }
 craft-gif = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "5a7a63a21dd03dd1a2bc6c308a3a6ce818caae87" }
-craft-psd = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "fa4741d0bbba8da303dd1bb1a93cbcb78e7747a0" }
-craft-svg = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "77686f24fe8665c21369f1b593f4d65a973e2a45" }
+craft-psd = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "08da5e1486ee640de1d2cccd8fe8dd32b1d3b62c" }
+craft-svg = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "08da5e1486ee640de1d2cccd8fe8dd32b1d3b62c" }
 craft-webp = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "5a7a63a21dd03dd1a2bc6c308a3a6ce818caae87" }
 craft-lottie = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "5a7a63a21dd03dd1a2bc6c308a3a6ce818caae87" }
 craft-mesh = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "5a7a63a21dd03dd1a2bc6c308a3a6ce818caae87", default-features = false, features = ["stl", "obj", "gltf", "fbx"] }
@@ -34,12 +34,12 @@ craft-update = { git = "https://github.com/storytold/craft-libs", version = "=0.
 # Craft Link and the plug-in host. These crates are in craft-libs pull requests that are still open
 # (craft-command, craft-ipc, craft-plugin-abi, craft-plugin-host, craft-plugin-ui). They share one rev.
 # Move it to the merged commit.
-craft-command = { git = "https://github.com/storytold/craft-libs", rev = "1a0d597d781982ddd65bdbb082a4ea62d21a5dd0", version = "=0.1.0" }
-craft-ipc = { git = "https://github.com/storytold/craft-libs", rev = "1a0d597d781982ddd65bdbb082a4ea62d21a5dd0", version = "=0.1.0" }
+craft-command = { git = "https://github.com/storytold/craft-libs", rev = "8bb1adcfb631e32ba7fa32f0417fc0e03287979f", version = "=0.1.0" }
+craft-ipc = { git = "https://github.com/storytold/craft-libs", rev = "8bb1adcfb631e32ba7fa32f0417fc0e03287979f", version = "=0.1.0" }
 # The plug-in host lifecycle is native only.
-craft-plugin-host = { git = "https://github.com/storytold/craft-libs", rev = "1a0d597d781982ddd65bdbb082a4ea62d21a5dd0", version = "=0.1.0", default-features = false }
-craft-plugin-abi = { git = "https://github.com/storytold/craft-libs", rev = "1a0d597d781982ddd65bdbb082a4ea62d21a5dd0", version = "=0.1.0" }
-craft-plugin-ui = { git = "https://github.com/storytold/craft-libs", rev = "1a0d597d781982ddd65bdbb082a4ea62d21a5dd0", version = "=0.1.0" }
+craft-plugin-host = { git = "https://github.com/storytold/craft-libs", rev = "8bb1adcfb631e32ba7fa32f0417fc0e03287979f", version = "=0.1.0", default-features = false }
+craft-plugin-abi = { git = "https://github.com/storytold/craft-libs", rev = "8bb1adcfb631e32ba7fa32f0417fc0e03287979f", version = "=0.1.0" }
+craft-plugin-ui = { git = "https://github.com/storytold/craft-libs", rev = "8bb1adcfb631e32ba7fa32f0417fc0e03287979f", version = "=0.1.0" }
 # internal
 effectcraft-time = { path = "crates/time" }
 effectcraft-geom = { path = "crates/geom" }
@@ -80,6 +80,8 @@ thiserror = "2"
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 log = "0.4"
+# The process's own memory use for the memory accountant (#3301; MIT OR Apache-2.0).
+memory-stats = "1.2"
 # All date/time conversion goes through chrono (no hand-rolled calendar code beyond the 400-year range extension; AGENTS.md).
 chrono = { version = "0.4.45", default-features = false, features = ["std"] }
 rayon = "1"

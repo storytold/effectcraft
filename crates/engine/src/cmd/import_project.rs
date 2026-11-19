@@ -61,7 +61,8 @@ fn root_comps(project: &Project) -> Vec<ItemId> {
 fn import_project(s: &mut Session, p: &Value) -> Result<Value> {
     let path = str_p(p, "path").ok_or_else(|| bad(C, "missing `path` (.ecproj)"))?.to_string();
     let (mut sub, saved_by) = read_project(s, &path)?;
-    crate::upgrade_effects(&mut sub);
+    // (channel selection can't be animated, as in After Effects: said with the import's warnings)
+    let lost = crate::upgrade_effects(&mut sub);
     let file = std::path::Path::new(&path);
     let missing = resolve_footage(s, &mut sub, &path);
     s.stored_paths.add(&sub, Some(&path));
@@ -96,6 +97,10 @@ fn import_project(s: &mut Session, p: &Value) -> Result<Value> {
         .collect();
     let primary = if let [one] = roots.as_slice() { Some(one.0) } else { None };
     let mut warnings = vec![];
+    if !lost.is_empty() {
+        log::warn!("channel selection is static: keyframes or expressions dropped on {}", lost.join("; "));
+        warnings.push(format!("channel selection can't be animated: kept the first value of {}", lost.join(", ")));
+    }
     if let Some(v) = saved_by.as_deref().filter(|v| effectcraft_project::is_newer_version(v, effectcraft_project::APP_VERSION)) {
         warnings.push(format!("saved by EffectCraft {v}, newer than this version ({})", effectcraft_project::APP_VERSION));
     }

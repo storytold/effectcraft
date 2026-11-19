@@ -40,6 +40,21 @@ fn tmp(name: &str) -> PathBuf {
     canonical(&d).unwrap_or(d).join(name)
 }
 
+/// #3941: a command-line session reads the system's memory at start, so its caches share the
+/// budget of the installed RAM (as in the desktop app), not the budget for unknown RAM.
+#[test]
+fn the_caches_follow_the_installed_ram() {
+    let Some(memory) = effectcraft_engine::sysinfo::memory() else {
+        eprintln!("the system's memory can't be read here: not checked");
+        return;
+    };
+    let v = ok_json(&["exec", "help.systemReport", r#"{"quiet":true}"#, "--empty"]);
+    let reduced = v["caches"]["reduced"].as_bool().unwrap();
+    let want = effectcraft_engine::prefs::Prefs::default().memory_budget(Some(memory), reduced).bytes;
+    let gb = |b: usize| format!("{:.1} GB", b as f64 / (1u64 << 30) as f64);
+    assert_eq!(v["caches"]["budget"], gb(want), "{v}");
+}
+
 #[test]
 fn info_and_commands() {
     let v = ok_json(&["info"]);
