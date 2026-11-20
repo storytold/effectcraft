@@ -1035,7 +1035,10 @@ fn light_sweep(ctx: &EffectCtx, mut b: Buf) -> Buf {
         let (xi, yi) = (x as i64, y as i64);
         let gx = soft_a.get_clamped(xi + 1, yi) - soft_a.get_clamped(xi - 1, yi);
         let gy = soft_a.get_clamped(xi, yi + 1) - soft_a.get_clamped(xi, yi - 1);
-        let edge = ((gx * gx + gy * gy).sqrt() * 2.0).min(1.0);
+        // The edge highlight is directional: only the side the sweep reaches first glows, the
+        // opposite edge stays dark (#3295). `g` points towards the opaque side, so `g · n > 0`
+        // is the edge the light travelling along `n` meets first.
+        let edge = (2.0 * (gx as f64 * nx + gy as f64 * ny)).clamp(0.0, 1.0) as f32;
         let light = band * sweep + band * edge * edge_i;
         let a = px[3];
         match mode {

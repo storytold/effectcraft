@@ -307,3 +307,34 @@ fn cell_pattern_hq_variants_antialias() {
     assert_ne!(std, hq);
     assert!(distinct(&hq) > distinct(&std) * 2, "{} vs {}", distinct(&hq), distinct(&std));
 }
+
+#[test]
+fn light_sweep_edge_light_follows_the_sweep_direction() {
+    // A black opaque square on transparency: the sweep's edge highlight lights only the side
+    // the light reaches first, not both sides like a stroke (#3295).
+    let mut img = Image::new(64, 64);
+    for y in 16..48 {
+        for x in 16..48 {
+            img.set(x, y, [0.0, 0.0, 0.0, 1.0]);
+        }
+    }
+    let set = |direction: f64| {
+        [
+            ("center", Value::Vec2([32.0, 32.0])),
+            ("direction", num(direction)),
+            ("width", num(64.0)),
+            ("sweepIntensity", num(0.0)),
+            ("edgeIntensity", num(100.0)),
+            ("edgeThickness", num(0.0)),
+        ]
+    };
+    // Direction 0°: the light travels to the right, so the left edge is lit and the right edge
+    // stays dark.
+    let right = run("ec.generate.cclightsweep", &set(0.0), img.clone());
+    assert!(right.img.get(16, 32)[0] > 0.4, "left edge lit: {:?}", right.img.get(16, 32));
+    assert!(right.img.get(47, 32)[0] < 0.05, "right edge dark: {:?}", right.img.get(47, 32));
+    // Turning the sweep around lights the other side.
+    let left = run("ec.generate.cclightsweep", &set(180.0), img);
+    assert!(left.img.get(47, 32)[0] > 0.4, "right edge lit: {:?}", left.img.get(47, 32));
+    assert!(left.img.get(16, 32)[0] < 0.05, "left edge dark: {:?}", left.img.get(16, 32));
+}

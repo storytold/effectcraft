@@ -168,7 +168,9 @@ fn flt_sweep(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     let gx = tex_get_clamped(aux, p.x + 1, p.y).x - tex_get_clamped(aux, p.x - 1, p.y).x;
     let gy = tex_get_clamped(aux, p.x, p.y + 1).x - tex_get_clamped(aux, p.x, p.y - 1).x;
-    let edge = min(sqrt(gx * gx + gy * gy) * 2.0, 1.0);
+    // Directional edge light, as the CPU effect: only the side the sweep reaches first glows
+    // (#3295).
+    let edge = clamp(2.0 * (gx * P.f[0].z + gy * P.f[0].w), 0.0, 1.0);
     let light = band * P.f[1].y + band * edge * P.f[1].z;
     let lc = P.f[2].xyz;
     let a = px.w;
