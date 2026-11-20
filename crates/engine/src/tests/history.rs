@@ -138,6 +138,32 @@ fn undo_levels_trim_branches() {
     assert_eq!(list(&mut s).len(), 4);
 }
 
+/// A batch is one undo level however many steps it runs: the undo limit must not trim away the
+/// batch's pre-state while its steps record, or the steps stay separate entries.
+#[test]
+fn a_batch_larger_than_the_undo_levels_is_still_one_step() {
+    let mut s = Session::default();
+    s.prefs.general.undo_levels = 4;
+    s.execute("comp.new", json!({"name": "H", "width": 64, "height": 64, "duration": 5})).unwrap();
+    solid(&mut s, "A");
+    let keys: Vec<Value> = (0..9)
+        .map(|i| json!({"command": "prop.addKey", "params": {"layer": "A", "path": "transform/rotation", "time": i as f64 * 0.1, "value": 10}}))
+        .collect();
+    let r = s.execute_checked("engine.batch", json!({"label": "9 keys", "steps": keys})).unwrap();
+    assert_eq!(r["steps"], 9);
+    let labels: Vec<&str> = s.history.undo.iter().map(|(l, _)| l.as_str()).collect();
+    assert_eq!(labels, ["New Composition", "New Solid", "9 keys"], "{labels:?}");
+    let st = list(&mut s);
+    assert!(st.iter().any(|n| n["label"] == "9 keys"), "{st:?}");
+    assert!(st.iter().all(|n| n["label"] != "Add Keyframe"), "{st:?}");
+    // One Undo takes the whole batch back, to the state before it.
+    assert!(s.undo());
+    let st = list(&mut s);
+    let current = st.iter().find(|n| n["current"] == true).unwrap();
+    assert_eq!(current["label"], "New Solid", "{st:?}");
+    assert_eq!(s.history.undo.len(), 2);
+}
+
 #[test]
 fn modified_mark_follows_undo_and_no_op_edits_record_nothing() {
     let mut s = Session::default();

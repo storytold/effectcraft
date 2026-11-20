@@ -68,6 +68,10 @@ fn batch(s: &mut Session, p: &Value) -> Result<Value> {
     let label = str_p(p, "label").unwrap_or("Batch").to_string();
     let atomic = p.get("atomic").and_then(Value::as_bool).unwrap_or(true);
     let (project, history, state) = (s.project.clone(), s.history.clone(), s.state.clone());
+    // The batch is one undo level however many steps it has: while it runs, its steps record
+    // without trimming, so the pre-batch state stays reachable as `fold`'s anchor (a batch larger
+    // than the undo limit would otherwise stay separate steps). `close_batch` trims once.
+    s.history.batch_depth += 1;
     // Rolled-back steps may have queued events (an `OpenComp`, a Toast) for the state that is
     // about to be dropped: the UI must not act on them.
     let event_mark = s.events.len();
@@ -108,14 +112,14 @@ fn batch(s: &mut Session, p: &Value) -> Result<Value> {
                     s.bump();
                     "; the batch was rolled back (nothing changed)".to_string()
                 } else {
-                    fold(s, &project, &label);
+                    close_batch(s, &project, &label);
                     format!("; steps 1–{i} were applied")
                 };
                 return Err(EngineError::Other(format!("step {} ({id}): {e}{note}", i + 1)));
             }
         }
     }
-    fold(s, &project, &label);
+    close_batch(s, &project, &label);
     Ok(json!({"steps": results.len(), "results": results}))
 }
 
@@ -127,6 +131,18 @@ fn fold(s: &mut Session, snap: &Arc<effectcraft_project::Project>, label: &str) 
     h.undo.truncate(start);
     h.undo.push((label.to_string(), first));
     h.merge_key = None;
+}
+
+/// End a batch: leave the transaction, fold its steps into one undo level named `label`, then
+/// apply the undo-level limit once. The limit was suspended while the batch ran so its pre-state
+/// stayed reachable as the fold anchor; trimming here keeps the history at `general.undoLevels`.
+fn close_batch(s: &mut Session, snap: &Arc<effectcraft_project::Project>, label: &str) {
+    s.history.batch_depth = s.history.batch_depth.saturating_sub(1);
+    fold(s, snap, label);
+    if s.history.batch_depth == 0 {
+        let levels = s.prefs.general.undo_levels.max(1) as usize;
+        s.history.trim(levels, &s.project);
+    }
 }
 
 pub fn specs() -> Vec<CommandSpec> {
