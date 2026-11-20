@@ -228,8 +228,9 @@ impl Protected {
     /// `None` when the folder can't be resolved.
     #[cfg(not(target_arch = "wasm32"))]
     fn real_path(&self, path: &Path) -> Option<String> {
-        let lexical = lexical(path);
-        let (folder, name) = (lexical.parent()?, lexical.file_name()?);
+        let (folder, name) = (path.parent()?, path.file_name()?);
+        // Resolve parents in filesystem order: `link/..` follows the link before ascending.
+        let folder = if folder.as_os_str().is_empty() { Path::new(".") } else { folder };
         let real = {
             let mut known = self.real_folders.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             known.entry(folder.to_path_buf()).or_insert_with(|| real_folder(folder)).clone()
@@ -1463,6 +1464,31 @@ mod tests {
         assert!(twice);
         assert_eq!(folders, 2, "the output's folder and the footage's, once each");
         assert!(real.is_err(), "an output in the real folder of footage imported through the link");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_output_through_a_link_then_parent_is_its_footage() {
+        let root = tempfile::tempdir().unwrap();
+        let plates = root.path().join("plates");
+        let nested = plates.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        let alias = root.path().join("render-alias");
+        std::os::unix::fs::symlink(&nested, &alias).unwrap();
+
+        let source = plates.join("source.exr");
+        std::fs::write(&source, b"the footage").unwrap();
+        let through = alias.join("..").join("source.exr");
+        assert_eq!(std::fs::canonicalize(&through).unwrap(), std::fs::canonicalize(&source).unwrap());
+
+        let mut session = Session::default();
+        let footage = Footage { path: source.to_string_lossy().into_owned(), has_video: true, ..Default::default() };
+        Arc::make_mut(&mut session.project).add_item("plates", crate::color::Label::Aqua, None, ItemKind::Footage(footage));
+
+        let through = through.to_str().unwrap();
+        assert!(session.refuse_export(through).is_err());
+        assert!(session.write_output(through, b"a render").is_err());
+        assert_eq!(std::fs::read(&source).unwrap(), b"the footage");
     }
 
     /// The verbatim and plain forms of a network path name one file.

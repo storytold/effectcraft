@@ -120,29 +120,89 @@ pub fn drop_folder(project: &effectcraft_engine::project::Project, row: Option<I
     if it.is_folder() { Some(it.id) } else { it.parent }
 }
 
-/// A thumbnail being rendered off the UI thread: (revision, result slot).
-type PendingThumb = (u64, Arc<Mutex<Option<Option<(u32, u32, Vec<u8>)>>>>);
+/// A Project panel thumbnail: (the content key it shows, its texture).
+#[derive(Clone)]
+struct Thumb(u128, egui::TextureHandle);
 
-/// Thumbnail of a comp (its current time) or footage (first frame), cached per item/revision.
-/// Rendered on a background thread (inline on wasm32): until the new one lands the previous
-/// thumbnail stays up, so selecting a big comp or editing it never stalls the panel.
+/// A thumbnail being rendered off the UI thread: (content key, result slot).
+#[derive(Clone)]
+struct PendingThumb(u128, Arc<Mutex<Option<Option<(u32, u32, Vec<u8>)>>>>);
+
+/// The Project panel's thumbnail texture of `item`, once its render has landed.
+pub fn cached_thumbnail(ctx: &egui::Context, item: ItemId) -> Option<egui::TextureHandle> {
+    ctx.data(|d| d.get_temp::<Thumb>(egui::Id::unique(("proj-thumb", item.0)))).map(|Thumb(_, t)| t)
+}
+
+/// Let go of every Project panel thumbnail and the renders in flight for them (a cache purge, or
+/// a project closed: the next project's item ids can be the closed one's).
+pub fn forget_thumbnails(ctx: &egui::Context) {
+    ctx.data_mut(|d| {
+        d.remove_by_type::<Thumb>();
+        d.remove_by_type::<PendingThumb>();
+    });
+}
+
+/// The content key of item `it`'s thumbnail at `t` ([`effectcraft_engine::Session::thumbnail_key`]),
+/// worked out again only when the project's revision, the footage reloads (Reload Footage or a
+/// watched file that changed: the project's revision stays), the preferences (Switches Affect
+/// Nested Comps and real-time shadows change what a comp shows) or the time changed. `false`
+/// with it: the key is of an earlier state (held back while edits come fast), so no render of
+/// the state now may be made under it.
+fn thumbnail_key(app: &EffectcraftApp, ctx: &egui::Context, it: &Item, t: effectcraft_engine::time::Tick) -> (u128, bool) {
+    let id = egui::Id::unique(("proj-thumb-key", it.id.0));
+    let rev = app.session.revision;
+    let reloads = app.session.footage_reloads.load(std::sync::atomic::Ordering::Relaxed);
+    let prefs = app.session.prefs_revision;
+    let now = ctx.input(|i| i.time);
+    if let Some((r, n, pr, at, k, when)) = ctx.data(|d| d.get_temp::<ThumbKey>(id)) {
+        if r == rev && n == reloads && pr == prefs && at == t.0 {
+            return (k, true);
+        }
+        // (the key hashes the comp's content: while edits come fast, at most every 0.25 s)
+        if now - when < THUMB_KEY_EVERY {
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(THUMB_KEY_EVERY));
+            return (k, false);
+        }
+    }
+    // (no key: the revision stands in, as before)
+    let k = app.session.thumbnail_key(it.id, t, THUMB_SIDE).unwrap_or(u128::from(rev) | (1 << 127));
+    ctx.data_mut(|d| d.insert_temp::<ThumbKey>(id, (rev, reloads, prefs, t.0, k, now)));
+    (k, true)
+}
+
+/// A thumbnail's content key as last worked out: (project revision, footage reloads, preferences
+/// revision, time, key, when, in seconds of UI time).
+type ThumbKey = (u64, u64, u64, i64, u128, f64);
+
+/// The longest side of a Project panel thumbnail, in pixels.
+const THUMB_SIDE: u32 = 192;
+
+/// A thumbnail's content key is worked out again at most this often (seconds) while the
+/// project keeps changing.
+const THUMB_KEY_EVERY: f64 = 0.25;
+
+/// Thumbnail of a comp (its current time) or footage (first frame), cached per item by what it
+/// shows ([`thumbnail_key`], #3271): an edit that doesn't change the picture doesn't render it
+/// again. Rendered on a background thread (inline on wasm32): until the new one lands the
+/// previous thumbnail stays up, so selecting a big comp or editing it never stalls the panel.
 fn thumbnail(app: &EffectcraftApp, ctx: &egui::Context, it: &Item) -> Option<egui::TextureHandle> {
     let key = egui::Id::unique(("proj-thumb", it.id.0));
     let pkey = egui::Id::unique(("proj-thumb-pending", it.id.0));
-    let rev = app.session.revision;
-    let cached: Option<(u64, egui::TextureHandle)> = ctx.data(|d| d.get_temp(key));
-    let mut tex = cached.as_ref().map(|(_, t)| t.clone());
-    let have = cached.as_ref().map(|(r, _)| *r);
+    let t = app.session.state.times.get(&it.id).copied().unwrap_or_default();
+    let (rev, current) = thumbnail_key(app, ctx, it, t);
+    let cached: Option<Thumb> = ctx.data(|d| d.get_temp(key));
+    let mut tex = cached.as_ref().map(|Thumb(_, t)| t.clone());
+    let have = cached.as_ref().map(|Thumb(r, _)| *r);
     // A finished render: upload it.
     let pending: Option<PendingThumb> = ctx.data(|d| d.get_temp(pkey));
-    if let Some((prev, slot)) = &pending {
+    if let Some(PendingThumb(prev, slot)) = &pending {
         let done = slot.lock().ok().and_then(|mut s| s.take());
         match done {
             Some(Some((w, h, px))) => {
                 let ci = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &px);
                 let t = ctx.load_texture(format!("proj-thumb-{}", it.id.0), ci, egui::TextureOptions::LINEAR);
                 ctx.data_mut(|d| {
-                    d.insert_temp(key, (*prev, t.clone()));
+                    d.insert_temp(key, Thumb(*prev, t.clone()));
                     d.remove::<PendingThumb>(pkey);
                 });
                 tex = Some(t);
@@ -160,11 +220,12 @@ fn thumbnail(app: &EffectcraftApp, ctx: &egui::Context, it: &Item) -> Option<egu
             }
         }
     }
-    if have == Some(rev) {
+    // (a key held back is of an earlier state: a render of the state now must not be kept under
+    // it, so the thumbnail shown stays until the key is worked out again)
+    if have == Some(rev) || !current {
         return tex;
     }
-    let t = app.session.state.times.get(&it.id).copied().unwrap_or_default();
-    let job = app.session.thumbnail_job(it.id, t, 192)?;
+    let job = app.session.thumbnail_job(it.id, t, THUMB_SIDE)?;
     let slot: Arc<Mutex<Option<Option<(u32, u32, Vec<u8>)>>>> = Arc::default();
     if cfg!(target_arch = "wasm32") {
         *slot.lock().ok()? = Some(job());
@@ -180,7 +241,7 @@ fn thumbnail(app: &EffectcraftApp, ctx: &egui::Context, it: &Item) -> Option<egu
             return tex;
         }
     }
-    ctx.data_mut(|d| d.insert_temp::<PendingThumb>(pkey, (rev, slot)));
+    ctx.data_mut(|d| d.insert_temp(pkey, PendingThumb(rev, slot)));
     ctx.request_repaint();
     tex
 }
@@ -1510,6 +1571,55 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    /// #2042: closing the project drops the Project panel's thumbnails (and renders in flight),
+    /// so their textures go with it and an item of the next project with a closed one's id never
+    /// shows the closed project's picture.
+    #[test]
+    fn closing_the_project_forgets_its_thumbnails() {
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        let ctx = egui::Context::default();
+        let (key, pkey) = (egui::Id::unique(("proj-thumb", 1u64)), egui::Id::unique(("proj-thumb-pending", 1u64)));
+        let tex = ctx.load_texture("t", egui::ColorImage::from_rgba_unmultiplied([1, 1], &[255; 4]), egui::TextureOptions::LINEAR);
+        ctx.data_mut(|d| {
+            d.insert_temp(key, Thumb(u128::from(app.session.revision), tex));
+            d.insert_temp(pkey, PendingThumb(u128::from(app.session.revision), Arc::default()));
+        });
+        app.session.execute("file.closeProject", serde_json::json!({})).unwrap();
+        app.handle_events(&ctx);
+        assert!(ctx.data(|d| d.get_temp::<Thumb>(key)).is_none(), "the closed project's thumbnail is kept");
+        assert!(ctx.data(|d| d.get_temp::<PendingThumb>(pkey)).is_none(), "a closed project's render is awaited");
+    }
+
+    /// #3301 review: while edits come fast the thumbnail's key is held back (it is of an
+    /// earlier state); no render of the state now is started under it, so it can never be kept
+    /// as the earlier state's picture. The thumbnail shown stays.
+    #[test]
+    fn no_thumbnail_render_starts_under_a_held_back_key() {
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        let comp = ItemId(
+            app.session.execute("comp.new", serde_json::json!({"name": "C", "width": 8, "height": 6, "duration": 1})).unwrap()["comp"].as_u64().unwrap(),
+        );
+        let ctx = egui::Context::default();
+        let it = app.session.project.item(comp).unwrap().clone();
+        let (key, pkey, kkey) =
+            (egui::Id::unique(("proj-thumb", comp.0)), egui::Id::unique(("proj-thumb-pending", comp.0)), egui::Id::unique(("proj-thumb-key", comp.0)));
+        let tex = ctx.load_texture("t", egui::ColorImage::from_rgba_unmultiplied([1, 1], &[255; 4]), egui::TextureOptions::LINEAR);
+        // A key worked out just now for an earlier revision, and a thumbnail of another state.
+        let now = ctx.input(|i| i.time);
+        let (rev, prefs) = (app.session.revision, app.session.prefs_revision);
+        ctx.data_mut(|d| {
+            d.insert_temp::<ThumbKey>(kkey, (rev.wrapping_sub(1), 0, prefs, 0, 7, now));
+            d.insert_temp(key, Thumb(5, tex));
+        });
+        assert!(thumbnail(&app, &ctx, &it).is_some(), "the thumbnail shown stays");
+        assert!(ctx.data(|d| d.get_temp::<PendingThumb>(pkey)).is_none(), "no render under a held-back key");
+        // Worked out again (the key is current): the render starts.
+        ctx.data_mut(|d| d.remove::<ThumbKey>(kkey));
+        thumbnail(&app, &ctx, &it);
+        assert!(ctx.data(|d| d.get_temp::<PendingThumb>(pkey)).is_some(), "a current key: rendered");
+        app.session.execute("file.closeProject", serde_json::json!({})).unwrap();
     }
 
     /// Long names show in full: the Name column fits them (it stopped at 260 points with "…")

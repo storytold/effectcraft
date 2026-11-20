@@ -62,6 +62,9 @@ pub(crate) fn run_engine(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str
     } else if COPY_COMMANDS.contains(&id) && app.session.state.text_edit.is_none() {
         ctx.copy_text(clipboard_text(&app.session));
     }
+    if let Ok(result) = &r {
+        app.report_import_errors(id, result);
+    }
     // Frontend events below may show the Home screen again (Help ▸ In-App Tutorials).
     leave_home_if_opened(app, before, r.is_ok());
     let events = app.session.drain_events();
@@ -683,8 +686,10 @@ pub(super) fn file_dialog(app: &mut EffectcraftApp, id: &str, params: &Value) ->
         "png", "jpg", "jpeg", "gif", "webp", "tif", "tiff", "bmp", "exr", "dpx", "cin", "wav", "aif", "aiff", "mp3", "flac", "ogg", "opus", "svg", "pdf", "ai",
         "eps", "psd", "psb", "tga", "hdr", "gltf", "glb", "obj", "stl", "fbx", "json", "csv", "tsv",
     ];
+    // VectorCraft documents, read through the PDF they carry.
+    let media = [MEDIA, &["vectorcraft"]].concat();
     let footage = |more: &[&'static str]| effectcraft_project::VIDEO_EXTENSIONS.iter().chain(more).copied().collect::<Vec<_>>();
-    let importable = |more: &[&'static str]| footage(MEDIA).into_iter().chain(more.iter().copied()).collect::<Vec<_>>();
+    let importable = |more: &[&'static str]| footage(&media).into_iter().chain(more.iter().copied()).collect::<Vec<_>>();
     // A host whose blocking dialogs are unsafe inside this frame shows the dialog without
     // blocking — macOS: the nested event loop re-entered winit's handler on a drag over the
     // window and aborted the app (#511); Linux: the desktop portal's answer never gets pumped,
@@ -763,7 +768,7 @@ pub(crate) fn dialog_answered(app: &mut EffectcraftApp, answer: crate::DialogAns
     };
     let Some(v) = picked_value(answer.key, paths) else { return };
     match run_with_picked(app, &answer.command, answer.key, &answer.params, v) {
-        Ok(result) => show_result_errors(app, &result),
+        Ok(result) => show_command_result_errors(app, &answer.command, &result),
         Err(e) => app.ui.status = e,
     }
 }
@@ -789,6 +794,27 @@ pub(crate) fn show_result_errors(app: &mut EffectcraftApp, result: &Value) {
         msg.push_str(&format!("; +{} more", parts.len() - 3));
     }
     app.ui.status = msg;
+}
+
+/// [`show_result_errors`] for the result of command `id`. An import has already queued its
+/// details with the shorter status `report_import_errors` set; this status reports the same
+/// errors in its place, so the details move to it and dismissing it still acknowledges them.
+pub(crate) fn show_command_result_errors(app: &mut EffectcraftApp, id: &str, result: &Value) {
+    show_result_errors_after_import(app, matches!(id, "file.import" | "file.importMultiple"), result);
+}
+
+/// [`show_result_errors`]; when `reported` is set, `report_import_errors` has just queued the
+/// details of the import whose result this is, last, with the status shown before this call.
+fn show_result_errors_after_import(app: &mut EffectcraftApp, reported: bool, result: &Value) {
+    let previous = app.ui.status.clone();
+    show_result_errors(app, result);
+    if reported
+        && app.ui.status != previous
+        && let Some(toast) = app.error_toasts.back_mut().filter(|toast| toast.reported_by(&previous))
+    {
+        app.ui.status = crate::ErrorToast::bounded_text([app.ui.status.as_str()]);
+        toast.restate(&app.ui.status);
+    }
 }
 
 /// Run command `id` with the path picked for it in parameter `key`.
@@ -833,6 +859,9 @@ fn run_with_picked(app: &mut EffectcraftApp, id: &str, key: &str, params: &Value
     let r = app.session.execute(id, Value::Object(p)).map_err(|e| e.to_string());
     if let Err(e) = &r {
         app.ui.status = e.clone();
+    }
+    if let Ok(result) = &r {
+        app.report_import_errors(id, result);
     }
     leave_home_if_opened(app, before, r.is_ok());
     r
@@ -882,8 +911,9 @@ fn import_picked_with_aep(app: &mut EffectcraftApp, id: &str, key: &str, params:
                 result = json!({"result": result});
             }
             let own = result.get("errors").and_then(Value::as_array).cloned().unwrap_or_default();
+            let reported = !own.is_empty();
             result["errors"] = Value::Array(errors.into_iter().map(Value::from).chain(own).collect());
-            show_result_errors(app, &result);
+            show_result_errors_after_import(app, reported, &result);
             Ok(result)
         }
         Err(e) => {

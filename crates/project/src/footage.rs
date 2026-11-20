@@ -172,12 +172,12 @@ impl CineonSettings {
     }
 }
 
-/// Cineon log to linear, shared by Interpret Footage ▸ Cineon Settings and the Cineon Converter
-/// effect. `v` is a code value as 0–1 of the 10-bit range; `black` and `white` are the 10 Bit
+/// Cineon log to linear for Interpret Footage ▸ Cineon Settings and version 1 Cineon Converter
+/// effects. `v` is a code value as 0–1 of the 10-bit range; `black` and `white` are the 10 Bit
 /// Black and White Points. The result is 0 at the black point and 1 at the white point, raised to
 /// `scale / gamma`, with values above `1 - rolloff / 100` ramped off toward 1 (Highlight Rolloff
 /// 0–100; 0 keeps over-range values). A Gamma below 0.01 is raised to 0.01. Cineon Settings passes
-/// a `scale` of 1 (Gamma 1 gives linear light) and the Cineon Converter passes 1.7 (its default
+/// a `scale` of 1 (Gamma 1 gives linear light) and a version 1 Cineon Converter passes 1.7 (its
 /// Gamma 1.7 gives linear light).
 pub fn cineon_log_to_lin(v: f32, black: f32, white: f32, scale: f32, gamma: f32, rolloff: f32) -> f32 {
     // Kodak printing density: 0.002 density per code value, negative gamma 0.6.
