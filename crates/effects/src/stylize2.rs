@@ -386,12 +386,14 @@ fn repetile(ctx: &EffectCtx, b: Buf) -> Buf {
     );
     // On an adjustment layer the buffer is the composite below (the renderer forces the effect
     // origin to 0 there), so tile that whole rectangle; elsewhere tile the layer rectangle
-    // inside the buffer. Without this the effect returned early and did nothing (#3923).
+    // inside the buffer. Without this the effect returned early and did nothing (#3923). The
+    // source starts at the image origin: `b.offset` is where the effect origin sits in buffer
+    // pixels, not the start of the image, and a preceding effect can have moved it.
     if r + l + d + u < 0.5 {
         return b;
     }
     let mode = ctx.params.e("tiling");
-    let (x0, y0, w, h) = if ctx.adjustment { (b.offset[0], b.offset[1], f64::from(b.img.width), f64::from(b.img.height)) } else { layer_rect(ctx, &b) };
+    let (x0, y0, w, h) = if ctx.adjustment { (0.0, 0.0, f64::from(b.img.width), f64::from(b.img.height)) } else { layer_rect(ctx, &b) };
     if w < 1.0 || h < 1.0 {
         return b;
     }
@@ -419,7 +421,10 @@ fn repetile(ctx: &EffectCtx, b: Buf) -> Buf {
             *px = src.sample_bilinear(x0 + fx, y0 + fy);
         }
     });
-    Buf { img: out, offset: [l, u], scale: s }
+    // `(left, up)` is the output pixel holding the effect origin on a regular layer; on an
+    // adjustment layer the buffer origin sits at `b.offset`, so it shifts with it.
+    let offset = if ctx.adjustment { [b.offset[0] + l, b.offset[1] + u] } else { [l, u] };
+    Buf { img: out, offset, scale: s }
 }
 
 // ---- Motion Tile ----
@@ -816,6 +821,33 @@ mod tests {
         // Same Repeat tiling as the non-adjustment path.
         let b = ramp(10, 8).get(3, 2);
         let a = out.img.get(13, 6);
+        for c in 0..4 {
+            assert!((a[c] - b[c]).abs() < 1e-5);
+        }
+    }
+
+    /// A second RepeTile on an adjustment stack tiles the image from its own origin and keeps
+    /// the buffer origin in the output offset (#3923).
+    #[test]
+    fn repetile_tiles_from_the_buffer_origin_on_an_adjustment_layer() {
+        let small = ramp(10, 8);
+        let mut large = Image::new(13, 10);
+        small.data.iter().enumerate().for_each(|(i, px)| {
+            large.set((i % 10) as u32 + 3, (i / 10) as u32 + 2, *px);
+        });
+        let s = crate::find("ec.stylize.ccrepetile").unwrap();
+        let mut params = Params { values: s.params.iter().map(|p| (p.id.to_string(), p.default.clone())).collect() };
+        for (k, v) in [("expandRight", num(10.0)), ("expandUp", num(4.0))] {
+            params.values.insert(k.to_string(), v);
+        }
+        // The buffer is a grown composite (13×10) whose effect origin sits at (3, 2).
+        let ctx = EffectCtx { params: &params, time: 0.0, layer_size: [4.0, 4.0], seed: 1, adjustment: true, env: Default::default() };
+        let out = crate::apply(s, &ctx, Buf { img: large, offset: [3.0, 2.0], scale: 1.0 });
+        assert_eq!((out.img.width, out.img.height), (23, 14));
+        assert_eq!(out.offset, [3.0, 6.0]);
+        // Output pixel (left, up) is the buffer's pixel (0, 0); (3, 6) shows the ramp's (0, 0).
+        let a = out.img.get(3, 6);
+        let b = small.get(0, 0);
         for c in 0..4 {
             assert!((a[c] - b[c]).abs() < 1e-5);
         }

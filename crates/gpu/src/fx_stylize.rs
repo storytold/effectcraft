@@ -663,11 +663,13 @@ fn repetile(e: &mut Enc, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
     );
     // On an adjustment layer the buffer is the composite below (the renderer forces the effect
     // origin to 0 there), so tile that whole rectangle; elsewhere tile the layer rectangle
-    // inside the buffer. Without this the effect returned early and did nothing (#3923).
+    // inside the buffer. Without this the effect returned early and did nothing (#3923). The
+    // source starts at the image origin: `b.offset` is where the effect origin sits in buffer
+    // pixels, not the start of the image, and a preceding effect can have moved it.
     if r + l + d + u < 0.5 {
         return Some(b);
     }
-    let (x0, y0, w, h) = if ctx.adjustment { (b.offset[0], b.offset[1], f64::from(b.img.width), f64::from(b.img.height)) } else { layer_rect(ctx, &b) };
+    let (x0, y0, w, h) = if ctx.adjustment { (0.0, 0.0, f64::from(b.img.width), f64::from(b.img.height)) } else { layer_rect(ctx, &b) };
     if w < 1.0 || h < 1.0 {
         return Some(b);
     }
@@ -687,7 +689,10 @@ fn repetile(e: &mut Enc, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
     let buf = e.data(&data);
     let out = e.scratch(nw, nh);
     e.pixels("fxs_repetile", &p, &b.img, None, &out, Some(&buf));
-    Some(GBuf { img: out, offset: [l, u], scale: s })
+    // `(left, up)` is the output pixel holding the effect origin on a regular layer; on an
+    // adjustment layer the buffer origin sits at `b.offset`, so it shifts with it.
+    let offset = if ctx.adjustment { [b.offset[0] + l, b.offset[1] + u] } else { [l, u] };
+    Some(GBuf { img: out, offset, scale: s })
 }
 
 fn magnify(e: &mut Enc, ctx: &EffectCtx, mut b: GBuf) -> Option<GBuf> {
