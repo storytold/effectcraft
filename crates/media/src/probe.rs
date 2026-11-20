@@ -27,7 +27,7 @@ pub fn probe(path: impl AsRef<Path>) -> Result<Footage> {
     let path = path.as_ref();
     // A movie is read in place (its index), not loaded whole.
     if let Some(src) = crate::stream::probe_source(path) {
-        let mut f = footage_from_info(&path.to_string_lossy(), src?.info());
+        let mut f = footage_from_source(&path.to_string_lossy(), &src?);
         let header = crate::stream::movie_header(path);
         let turn = header.as_deref().map_or(Orientation::NoTransforms, video_turn);
         turn_footage(&mut f, turn);
@@ -137,8 +137,8 @@ pub fn probe_bytes(path: &str, bytes: Arc<[u8]>) -> Result<Footage> {
     let shown = video_shown(&bytes);
     // A WAV's cue points and XMP markers become the footage's markers.
     let markers = crate::wav_markers::read(&bytes);
-    let src = filmcraft_codecs::open_bytes(&name, bytes)?;
-    let mut f = footage_from_info(path, src.info());
+    let src = crate::stream::open_bytes(&name, bytes)?;
+    let mut f = footage_from_source(path, &src);
     f.markers = markers;
     turn_footage(&mut f, turn);
     correct_rate(&mut f, rate);
@@ -190,6 +190,64 @@ fn turn_footage(f: &mut Footage, turn: Orientation) {
         if f.pixel_aspect > 0.0 {
             f.pixel_aspect = 1.0 / f.pixel_aspect;
         }
+    }
+}
+
+pub(crate) fn footage_from_source(path: &str, src: &crate::stream::MediaSource) -> Footage {
+    match src {
+        crate::stream::MediaSource::Craft(s) => footage_from_craft_info(path, s.info()),
+        crate::stream::MediaSource::Film(s) => footage_from_info(path, s.info()),
+    }
+}
+
+pub(crate) fn footage_from_craft_info(path: &str, info: &craft_media_source::MediaInfo) -> Footage {
+    let v = info.video.as_ref();
+    let kind = match (info.kind, v) {
+        (craft_media_source::MediaKind::Still, _) => FootageKind::Still,
+        (_, Some(_)) => FootageKind::Video,
+        (_, None) => FootageKind::Audio,
+    };
+    let rate = v.map_or(FrameRate::FPS_30, |v| {
+        if v.frame_rate.num > 0 && v.frame_rate.den > 0 { FrameRate::new(v.frame_rate.num, v.frame_rate.den) } else { FrameRate::FPS_30 }
+    });
+    let codec = match (v, info.audio()) {
+        (Some(v), _) => v.codec.clone(),
+        (None, Some(a)) => a.codec.clone(),
+        _ => String::new(),
+    };
+    Footage {
+        path: path.to_string(),
+        kind,
+        width: v.map_or(0, |v| v.width),
+        height: v.map_or(0, |v| v.height),
+        pixel_aspect: v.map_or(1.0, |v| if v.par.1 > 0 { v.par.0 as f64 / v.par.1 as f64 } else { 1.0 }),
+        frame_rate: rate,
+        native_rate: None,
+        duration: if kind == FootageKind::Still { Tick::ZERO } else { Tick(info.duration.0) },
+        has_video: v.is_some(),
+        has_audio: info.has_audio(),
+        alpha: if v.is_some_and(|v| v.has_alpha) { AlphaMode::Straight } else { AlphaMode::Ignore },
+        premul_color: [0.0; 3],
+        loop_count: 1,
+        codec,
+        missing: false,
+        sequence: Vec::new(),
+        color_profile: v.and_then(|v| profile_of_craft(&v.color)),
+        file_timecode: v.and(info.start_timecode),
+        ..Default::default()
+    }
+}
+
+fn profile_of_craft(c: &craft_color::ColorInfo) -> Option<effectcraft_project::ColorSpace> {
+    use craft_color::{Primaries, Transfer};
+    use effectcraft_project::ColorSpace;
+    match (c.primaries, c.transfer) {
+        (Primaries::Bt2020, Transfer::Pq) => Some(ColorSpace::Rec2100Pq),
+        (Primaries::Bt2020, Transfer::Hlg) => Some(ColorSpace::Rec2100Hlg),
+        (Primaries::Bt2020, _) => Some(ColorSpace::Rec2020),
+        (Primaries::P3D65, _) => Some(ColorSpace::DisplayP3),
+        (_, Transfer::Bt709) => Some(ColorSpace::Rec709),
+        _ => None,
     }
 }
 
