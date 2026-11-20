@@ -11,7 +11,7 @@ use effectcraft_time::Tick;
 
 use crate::{Cx, ExportError, Result, State, exr_out, publish_sequence_frame};
 
-pub(crate) async fn write(cx: &Cx<'_>, comp: &Comp, selection: &ExrSelection, size: (u32, u32), f0: i64, st: &mut State<'_>) -> Result<u64> {
+pub(crate) async fn write(cx: &Cx<'_>, comp: &Comp, selection: &ExrSelection, size: (u32, u32), f0: i64, st: &mut State<'_>) -> Result<(u64, bool)> {
     selection.validate(comp).map_err(|e| ExportError::Unsupported(e.into()))?;
     let om = cx.output;
     if selection.depth && om.exr_compression.is_lossy(ExrBitDepth::Float) {
@@ -27,10 +27,13 @@ pub(crate) async fn write(cx: &Cx<'_>, comp: &Comp, selection: &ExrSelection, si
     let pipe = Pipe::of(&cx.project.settings);
     let chroma = Some(pipe.output_linear_space().exr_chromaticities());
     let mut bytes = 0u64;
+    let mut reused_frames = false;
     // Keep one frame's source buffers live at a time. Ordinary stills use the parallel path.
     for i in 0..st.total {
         let path = sequence_path(cx.path, f0 + i as i64);
-        if !(cx.settings.skip_existing && cx.frame_exists(&path)) {
+        if cx.settings.skip_existing && cx.frame_exists(&path) {
+            reused_frames = true;
+        } else {
             let mut channels = if selection.multipart { exr_out::Channels::new_multipart(size) } else { exr_out::Channels::new(size) };
             if selection.composite {
                 let img = cx.frame_async(comp, i).await;
@@ -50,7 +53,7 @@ pub(crate) async fn write(cx: &Cx<'_>, comp: &Comp, selection: &ExrSelection, si
         }
         st.advance(1)?;
     }
-    Ok(bytes)
+    Ok((bytes, reused_frames))
 }
 
 fn encode_error(e: craft_exr::decode::Error) -> ExportError {

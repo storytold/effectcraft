@@ -376,6 +376,8 @@ build real projects through these interfaces; they are worked examples of everyt
   same selection and defaults to the composite and visible layers. Pre-render and Set Proxy
   require the composite in the first output module. A saved queue with a pass-only first
   module can still export its passes, and skips any saved post-render replacement or proxy action.
+  If the first OpenEXR sequence reused frames, turn off **Skip Existing Files** and render again
+  before replacing composition usage or setting a proxy.
   **A render never writes one file twice either:** when two outputs of the job (two items, a
   `renderQueue.duplicate` copy, output modules, segments) name the same file, the whole render is
   refused before anything is written, naming both items. Sequences clash only on frames both

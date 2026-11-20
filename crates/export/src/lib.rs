@@ -184,6 +184,8 @@ pub struct Report {
     pub seconds: f64,
     pub bytes: u64,
     pub audio: bool,
+    /// At least one sequence frame was kept by Skip Existing Files.
+    pub reused_frames: bool,
     /// The render log, when one was written.
     pub log: Option<String>,
     /// Files that went to an overflow folder.
@@ -321,8 +323,19 @@ async fn sequence(cx: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut State<'_>) 
     if fmt == OutputFormat::ExrSequence
         && let Some(selection) = &cx.output.exr_selection
     {
-        let bytes = exr_sequence::write(cx, comp, selection, (w, h), f0, st).await?;
-        return Ok(Report { path: sequence_path(cx.path, f0), frames: 0, width: w, height: h, seconds: 0.0, bytes, audio: false, log: None, overflow: vec![] });
+        let (bytes, reused_frames) = exr_sequence::write(cx, comp, selection, (w, h), f0, st).await?;
+        return Ok(Report {
+            path: sequence_path(cx.path, f0),
+            frames: 0,
+            width: w,
+            height: h,
+            seconds: 0.0,
+            bytes,
+            audio: false,
+            reused_frames,
+            log: None,
+            overflow: vec![],
+        });
     }
     let channels = match cx.output.channels {
         Channels::Rgba if !fmt.supports_alpha() => Channels::Rgb,
@@ -330,10 +343,12 @@ async fn sequence(cx: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut State<'_>) 
     };
     let batch = batch_size();
     let mut bytes = 0u64;
+    let mut reused_frames = false;
     let mut i = 0;
     while i < st.total {
         let end = (i + batch).min(st.total);
         let ks: Vec<u64> = (i..end).filter(|k| !(cx.settings.skip_existing && cx.frame_exists(&sequence_path(cx.path, f0 + *k as i64)))).collect();
+        reused_frames |= (ks.len() as u64) < end - i;
         let written: Vec<Result<u64>> = cx
             .frames(comp, ks, |k, img| {
                 let path = sequence_path(cx.path, f0 + k as i64);
@@ -349,7 +364,18 @@ async fn sequence(cx: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut State<'_>) 
         st.advance(end - i)?;
         i = end;
     }
-    Ok(Report { path: sequence_path(cx.path, f0), frames: 0, width: w, height: h, seconds: 0.0, bytes, audio: false, log: None, overflow: vec![] })
+    Ok(Report {
+        path: sequence_path(cx.path, f0),
+        frames: 0,
+        width: w,
+        height: h,
+        seconds: 0.0,
+        bytes,
+        audio: false,
+        reused_frames,
+        log: None,
+        overflow: vec![],
+    })
 }
 
 fn publish_sequence_frame(cx: &Cx<'_>, path: &str, data: &[u8]) -> Result<u64> {
@@ -453,7 +479,7 @@ async fn gif_export(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut State<'_
     }
     let _ = enc.finish().map_err(|e| ExportError::Encode(e.to_string()))?;
     let bytes = file.finish()?;
-    Ok(Report { path, frames: 0, width: w, height: h, seconds: 0.0, bytes, audio: false, log: None, overflow: vec![] })
+    Ok(Report { path, frames: 0, width: w, height: h, seconds: 0.0, bytes, audio: false, reused_frames: false, log: None, overflow: vec![] })
 }
 
 fn validate_gif_dimensions(w: u32, h: u32) -> Result<()> {

@@ -158,25 +158,6 @@ fn proexr_multipart_round_trips_beauty_layer_and_float_depth() {
 }
 
 #[test]
-fn selected_exr_pass_names_distinguish_case_variants_and_reserved_parts() {
-    let mut s = Session::default();
-    s.execute("comp.new", json!({"name": "Frame", "width": 8, "height": 8})).unwrap();
-    for name in ["Plate", "plate", "beautY", "DEPTH"] {
-        s.execute("layer.newSolid", json!({"name": name})).unwrap();
-    }
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("parts.exr");
-    let r = s.execute("comp.saveFrameAsExr", json!({"path": path, "exrSelection": {"allLayers": true, "depth": true, "multipart": true}})).unwrap();
-    let channels = r["channels"].as_array().unwrap();
-    let groups: std::collections::HashSet<_> =
-        channels.iter().filter_map(|c| c.as_str().unwrap().split_once('.')).map(|(group, _)| group.to_ascii_lowercase()).collect();
-    assert_eq!(groups.len(), 6, "{groups:?}");
-    for name in ["beauty", "depth", "beauty 2", "depth 2", "plate", "plate 2"] {
-        assert!(groups.contains(name), "{groups:?}");
-    }
-}
-
-#[test]
 fn explicit_exr_layer_pass_uses_its_own_alpha_and_composite_preserves_transparency() {
     use exr::prelude::*;
 

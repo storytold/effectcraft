@@ -913,6 +913,7 @@ impl Session {
                             status: RenderStatus::Failed(error),
                             seconds: 0.0,
                             output: None,
+                            reused_exr_frames: false,
                         });
                     }
                 }

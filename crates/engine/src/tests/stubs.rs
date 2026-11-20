@@ -378,19 +378,21 @@ fn saved_exr_pass_selection_exports_and_skips_incompatible_post_render_actions()
         // A project saved by a version that allowed replacement/proxy actions without a composite.
         Arc::make_mut(&mut s.project).render_queue.last_mut().unwrap().post_render = action;
     }
+    let all = json!({"composite": true, "layers": [], "depth": false, "allLayers": true});
+    s.execute_checked("renderQueue.add", json!({"comp": inner.0, "output": dir.path().join("all.exr"), "exrSelection": all})).unwrap();
+    s.execute_checked("renderQueue.add", json!({"comp": inner.0, "output": dir.path().join("default.exr")})).unwrap();
     let path = dir.path().join("passes.ecproj");
     s.execute_checked("file.saveAs", json!({"path": path})).unwrap();
     let mut reopened = Session::default();
     reopened.exporter = Some(exporter.clone());
     reopened.importer = Some(Arc::new(MockImporter));
     reopened.execute_checked("file.open", json!({"path": path})).unwrap();
-    for item in &reopened.project.render_queue {
-        assert_eq!(json!(item.output.exr_selection), passes);
-    }
+    let restored: Vec<_> = reopened.project.render_queue.iter().map(|item| json!(item.output.exr_selection)).collect();
+    assert_eq!(restored, [passes.clone(), passes.clone(), passes, all, serde_json::Value::Null]);
     let items_before = reopened.project.items.len();
     reopened.drain_events();
     reopened.execute_checked("renderQueue.render", json!({})).unwrap();
-    assert_eq!(exporter.log.lock().unwrap().len(), 3, "all pass-only exports complete");
+    assert_eq!(exporter.log.lock().unwrap().len(), 5, "all exports complete");
     assert_eq!(reopened.project.items.len(), items_before);
     assert!(matches!(reopened.project.comp(outer).unwrap().layers[0].source, LayerSource::Comp { item } if item == inner));
     assert!(reopened.project.item(inner).unwrap().proxy.is_none());

@@ -82,6 +82,7 @@ impl Exporter for FileExporter {
                     bytes: r.bytes,
                     seconds: r.seconds,
                     audio: r.audio,
+                    reused_frames: r.reused_frames,
                     log: r.log,
                     overflow: r.overflow,
                 }),
