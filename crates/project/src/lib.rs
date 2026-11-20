@@ -36,13 +36,17 @@ mod footage;
 mod item;
 mod layer;
 mod layers;
+mod linked_transport;
 mod reach;
 mod settings;
 
 pub use comp::{Comp, Guide, Renderer, Resolution};
-pub use footage::{AlphaMode, CineonSettings, CineonUnits, FieldOrder, Footage, FootageKind, Proxy, Solid, SourceLayer, VIDEO_EXTENSIONS, cineon_log_to_lin};
+pub use footage::{
+    AlphaMode, CineonSettings, CineonUnits, FieldOrder, Footage, FootageKind, LinkedColorSpace, LinkedComposition, Proxy, Solid, SourceLayer, VIDEO_EXTENSIONS,
+    cineon_log_to_lin,
+};
 pub use item::NO_LAYER;
-pub use item::{Heard, Item, ItemId, ItemKind, LayerId};
+pub use item::{Heard, Item, ItemId, ItemKind, LayerId, new_identity, try_new_identity};
 pub use layer::{
     AutoOrient, FrameBlend, Layer, LayerSource, LightKind, MatteKind, PrimitiveKind, Quality, Sampling, Switches, TrackMatte, is_audio_effect,
     reads_other_frames, text_layer_name,
@@ -57,6 +61,10 @@ pub use settings::{
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Project {
     pub schema: u32,
+    /// Durable source-project identity, allocated before history snapshots of a new project.
+    /// Older files acquire one when upgraded by their host and saved successfully.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub project_id: String,
     pub settings: ProjectSettings,
     pub items: BTreeMap<ItemId, Item>,
     pub next_id: u64,

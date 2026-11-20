@@ -158,6 +158,7 @@ macro_rules! query {
 }
 
 mod enabled;
+mod linked_compositions;
 mod params;
 mod schema;
 
@@ -177,6 +178,7 @@ pub fn command_specs() -> &'static [CommandSpec] {
     SPECS.get_or_init(|| {
         let mut v = Vec::new();
         v.extend(file::specs());
+        v.extend(linked_compositions::specs());
         v.extend(crate::models::specs());
         v.extend(crate::library::specs());
         v.extend(edit::specs());

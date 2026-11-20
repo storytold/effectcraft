@@ -9,7 +9,7 @@
 //! The commands that write to a path they are given (Save Frame As, Export Lottie, Save a Copy,
 //! Collect Files, Export Timeline…) never replace one of those files either, with no flag:
 //! they write through [`Session::write_output`], the one place that checks. Save and Save As
-//! write the project's own file and do not.
+//! may write the destination project's own file, but never a linked source or its known media.
 //!
 //! Nor does a render write one file twice. When two outputs of one job name the same file (two
 //! items with one Output To, a duplicated item, output modules or segments that meet), the one
@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use effectcraft_project::render_queue::{RenderQueueItem, log_path, numbered_template, sequence_frame, sequence_parts, sequence_path};
-use effectcraft_project::{Footage, ItemKind};
+use effectcraft_project::{Footage, FootageKind, ItemKind, Project};
 use serde_json::{Value, json};
 
 use crate::Session;
@@ -111,17 +111,44 @@ pub(crate) struct Protected {
 
 impl Protected {
     pub(crate) fn of(s: &Session) -> Protected {
+        Self::from_items(s, false)
+    }
+
+    /// Linked source files and their known dependencies, excluding the destination's own
+    /// project file. Save may replace that file, but not something the source project owns.
+    fn linked(s: &Session) -> Protected {
+        Self::from_items(s, true)
+    }
+
+    fn from_items(s: &Session, linked_only: bool) -> Protected {
         let mut found = Protected::default();
+        let mut seen_sources = HashSet::<*const Project>::new();
         for item in s.project.items.values() {
+            if linked_only && !matches!(&item.kind, ItemKind::Footage(f) if f.kind == FootageKind::LinkedComposition) {
+                continue;
+            }
             let name: Arc<str> = item.name.as_str().into();
             if let ItemKind::Footage(f) = &item.kind {
                 found.add_footage(s, f, &Source::Footage(name.clone()));
+                if let Some(source) = f.linked_comp.as_ref().and_then(|l| l.resolved.as_ref().or(l.last_known_source.as_ref()))
+                    && seen_sources.insert(Arc::as_ptr(source))
+                {
+                    for dependency in source.items.values() {
+                        let source_kind = Source::Footage(dependency.name.as_str().into());
+                        if let ItemKind::Footage(df) = &dependency.kind {
+                            found.add_footage(s, df, &source_kind);
+                        }
+                        if let Some(proxy) = &dependency.proxy {
+                            found.add_footage(s, &proxy.footage, &source_kind);
+                        }
+                    }
+                }
             }
             if let Some(proxy) = &item.proxy {
                 found.add_footage(s, &proxy.footage, &Source::Proxy(name));
             }
         }
-        if let Some(path) = s.path.as_deref().filter(|p| !p.is_empty()) {
+        if !linked_only && let Some(path) = s.path.as_deref().filter(|p| !p.is_empty()) {
             found.add(PathBuf::from(path), Source::Project);
         }
         found
@@ -495,6 +522,15 @@ pub(crate) fn duplicate_refusal(duplicates: &[DuplicateOutput]) -> Option<String
 }
 
 impl Session {
+    /// Save can write the destination's file, but never a linked source or one of its known
+    /// media files. Compare native identities as well as paths, including missing paths.
+    pub(crate) fn refuse_linked_source_save(&self, path: &str) -> crate::Result<()> {
+        if Protected::linked(self).find(Path::new(path)).is_some() {
+            return Err(crate::EngineError::Other(format!("Cannot save {path}: it is a linked composition source or dependency; choose another project file")));
+        }
+        Ok(())
+    }
+
     /// The files the project reads.
     pub(crate) fn protected_files(&self) -> Protected {
         Protected::of(self)
@@ -532,7 +568,7 @@ impl Session {
 
     /// Write `bytes` to `path` through the host's services, unless the project reads the file
     /// there ([`Session::refuse_export`]). Every command that writes to a path it is given
-    /// writes through this; Save and Save As (the project's own file) do not.
+    /// writes through this; Save and Save As use their linked-source check instead.
     pub fn write_output(&self, path: &str, bytes: &[u8]) -> crate::Result<()> {
         self.write_output_with(&self.protected_files(), path, bytes)
     }

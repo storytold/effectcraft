@@ -92,6 +92,7 @@ impl std::fmt::Debug for FootageText<'_> {
         // Every field is named so that a new one doesn't compile until it is decided here: a new
         // field was never in these keys, so it stays out.
         let Footage {
+            linked_comp: _,
             path,
             kind,
             width,

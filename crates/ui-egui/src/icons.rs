@@ -69,6 +69,8 @@ pub enum Icon {
     // project items
     Folder,
     Comp,
+    /// A composition with a chain badge at the lower right: an external source.
+    LinkedComp,
     Footage,
     Image,
     Audio,
@@ -492,6 +494,26 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             pen.rect(2.0, 3.0, 14.0, 13.0);
             pen.rect_fill(4.0, 5.0, 8.0, 9.0);
             pen.rect(7.0, 7.5, 12.0, 11.0);
+        }
+        LinkedComp => {
+            // Leave the badge's corner open instead of covering it with a background colour,
+            // so this original glyph works on selected rows and in every theme.
+            pen.line(&[(6.5, 13.0), (2.0, 13.0), (2.0, 3.0), (14.0, 3.0), (14.0, 6.0)]);
+            pen.rect_fill(4.0, 5.0, 8.0, 9.0);
+            pen.line(&[(7.0, 10.5), (7.0, 7.5), (9.0, 7.5)]);
+            // Two overlapping diagonal capsule links remain distinct at the 13 px timeline
+            // size, rather than shrinking the full-size Link glyph into an unreadable badge.
+            let badge = Pen16 { width: 1.1, ..pen };
+            let link = |x: f32, y: f32| {
+                let r = 1.15;
+                let n = r * std::f32::consts::FRAC_1_SQRT_2;
+                badge.arc(x + 2.0, y - 2.0, r, 225.0, 405.0);
+                badge.line(&[(x + 2.0 + n, y - 2.0 + n), (x + n, y + n)]);
+                badge.arc(x, y, r, 45.0, 225.0);
+                badge.line(&[(x - n, y - n), (x + 2.0 - n, y - 2.0 - n)]);
+            };
+            link(8.8, 12.8);
+            link(11.2, 10.4);
         }
         Footage => {
             pen.rect(2.0, 3.0, 14.0, 13.0);

@@ -13,6 +13,44 @@ pub enum FootageKind {
     /// A data file (JSON, CSV, TSV) for data-driven animation: read by expressions through
     /// `footage(name).sourceData` / `sourceText` / `dataValue`; it has no pixels.
     Data,
+    /// A saved composition in another project, rendered as a self-contained timeline source.
+    /// A distinct kind makes readers without linked-composition support refuse the file.
+    LinkedComposition,
+}
+
+/// The encoding of a linked composition's working pixels, before output or view transforms.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LinkedColorSpace {
+    pub space: ColorSpace,
+    pub linear: bool,
+}
+
+/// A reference to a composition owned by another saved EffectCraft project. The containing
+/// footage item's path names the source project; identities, rather than names, select its comp.
+/// Resolution belongs to the host, so project files contain no source layers or dependencies.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct LinkedComposition {
+    pub source_project_id: String,
+    pub composition_id: String,
+    pub last_known_name: String,
+    /// The last known source working-space tag. An assigned footage profile overrides this
+    /// interpretation in the destination; source refreshes replace the tag, not the override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_color: Option<LinkedColorSpace>,
+    /// The successfully loaded source generation, shared by links to the same project.
+    #[serde(skip)]
+    pub resolved: Option<std::sync::Arc<crate::Project>>,
+    /// Guard-only ownership retained after a failed refresh. Rendering never reads this
+    /// snapshot, and project files do not embed it. It protects media already known to belong
+    /// to an offline source until a successful refresh supplies its current dependencies.
+    #[serde(skip)]
+    pub last_known_source: Option<std::sync::Arc<crate::Project>>,
+    #[serde(skip)]
+    pub resolved_comp: Option<crate::ItemId>,
+    #[serde(skip)]
+    pub error: Option<String>,
+    #[serde(skip)]
+    pub generation: u64,
 }
 
 /// Interpret Footage ▸ Fields and Pulldown ▸ Separate Fields.
@@ -197,6 +235,8 @@ pub fn cineon_log_to_lin(v: f32, black: f32, white: f32, scale: f32, gamma: f32,
 pub struct Footage {
     pub path: String,
     pub kind: FootageKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linked_comp: Option<LinkedComposition>,
     pub width: u32,
     pub height: u32,
     pub pixel_aspect: f64,
@@ -219,7 +259,8 @@ pub struct Footage {
     /// Image sequence files (when kind = Sequence).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sequence: Vec<String>,
-    /// Colour profile (from the file's metadata, or Interpret Footage). `None` = sRGB.
+    /// Colour profile (from the file's metadata, or Interpret Footage). `None` = sRGB for
+    /// ordinary footage; linked compositions instead use their automatic source-space tag.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color_profile: Option<ColorSpace>,
     /// One layer of a layered file (Photoshop) instead of its merged image.
@@ -232,6 +273,8 @@ pub struct Footage {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub invert_alpha: bool,
     /// Interpret Footage ▸ Color ▸ Interpret As Linear Light: the file's values are linear.
+    /// For linked compositions this belongs to an assigned profile; automatic mode follows
+    /// the source-space tag's encoding instead.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub linear_light: bool,
     /// Interpret Footage ▸ Color ▸ Preserve RGB: the file's values enter the composition
@@ -287,6 +330,7 @@ impl Default for Footage {
         Footage {
             path: String::new(),
             kind: FootageKind::Still,
+            linked_comp: None,
             width: 0,
             height: 0,
             pixel_aspect: 1.0,
@@ -320,6 +364,19 @@ impl Default for Footage {
 }
 
 impl Footage {
+    /// Effective interpretation of a linked composition. The destination owns an assigned
+    /// `color_profile` and its `linear_light` flag; automatic interpretation follows the source.
+    pub fn linked_color_space(&self) -> Option<LinkedColorSpace> {
+        if self.kind != FootageKind::LinkedComposition {
+            return None;
+        }
+        if let Some(space) = self.color_profile {
+            return Some(LinkedColorSpace { space, linear: self.linear_light || space.is_linear() });
+        }
+        let link = self.linked_comp.as_ref()?;
+        link.source_color.or_else(|| link.resolved.as_ref().map(|source| source.settings.linked_color_space()))
+    }
+
     /// The file is DPX or Cineon (the formats Interpret Footage ▸ Cineon Settings applies to).
     pub fn is_cineon_file(&self) -> bool {
         let ext = std::path::Path::new(&self.path).extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();

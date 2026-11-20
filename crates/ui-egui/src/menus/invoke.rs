@@ -192,6 +192,9 @@ pub fn waits_on_dialog(result: &Value) -> bool {
 /// Execute a UI or engine command by id.
 pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: Value) -> Result<Value, String> {
     crate::control::check_script_render(app, id)?;
+    if id == "file.linkComposition" && params.get("comp").is_none() && params.get("comps").is_none() {
+        crate::panels::linked_import::prepare(app, ctx);
+    }
     if matches!(id, "effects.copyPresetsFolderPath" | "mediaBrowser.copySourcePath") {
         return frontend(app, ctx, id, params);
     }
@@ -691,6 +694,9 @@ pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: V
             }
             if let Some(r) = file_dialog(app, id, &params) {
                 return r;
+            }
+            if id == "file.linkComposition" && params.get("comp").is_none() && params.get("comps").is_none() {
+                return crate::panels::linked_import::open(app, params["path"].as_str().unwrap_or_default());
             }
             if id == "layer.precompose" && params.get("name").is_none() {
                 crate::panels::precomp::open(app, &params)?;

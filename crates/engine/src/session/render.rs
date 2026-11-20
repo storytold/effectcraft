@@ -71,6 +71,9 @@ impl Session {
     /// Render a comp frame (comp time `t`) as opaque 8-bit RGBA over the comp background, scaled
     /// so the longest side is at most `max_side` pixels (0 = full size). Returns (width, height, rgba).
     pub fn render_rgba8(&self, comp: ItemId, t: Tick, max_side: u32) -> Result<(u32, u32, Vec<u8>)> {
+        if let Some(why) = crate::linked_compositions::render_problem(&self.project, comp) {
+            return Err(EngineError::Other(why));
+        }
         let c = self.project.comp(comp).ok_or(EngineError::NoComp)?;
         let long = c.width.max(c.height).max(1) as f64;
         let scale = if max_side == 0 { 1.0 } else { (max_side as f64 / long).min(1.0) };
@@ -88,6 +91,26 @@ impl Session {
         let it = self.project.item(item)?;
         let (footage, closed) = (self.footage.clone(), self.project_closed.clone());
         match &it.kind {
+            effectcraft_project::ItemKind::Footage(f) if f.kind == effectcraft_project::FootageKind::LinkedComposition => {
+                let link = f.linked_comp.as_ref()?;
+                if f.missing || link.error.is_some() {
+                    return None;
+                }
+                let project = self.project.clone();
+                let linked = f.clone();
+                let expr = self.expr.clone();
+                let scale = (max_side.max(1) as f64 / f.width.max(f.height).max(1) as f64).min(1.0);
+                Some(Box::new(move || {
+                    if closed.load(Ordering::SeqCst) {
+                        return None;
+                    }
+                    let src = CancellableFootage { inner: footage.as_ref(), cancel: closed.clone() };
+                    let mut renderer = Renderer::new(&project, &src, RenderOpts { scale, ..Default::default() });
+                    renderer.expr = expr.as_deref();
+                    let image = renderer.linked_footage_preview(&linked, t)?;
+                    (!closed.load(Ordering::SeqCst)).then(|| (image.width, image.height, image.to_rgba8()))
+                }))
+            }
             effectcraft_project::ItemKind::Comp(c) => {
                 let (project, expr, cache) = (self.project.clone(), self.expr.clone(), self.layer_cache.clone());
                 let long = c.width.max(c.height).max(1) as f64;
@@ -187,6 +210,9 @@ impl Session {
     /// [`Session::render_rgba8`], or with `transparent` the frame's own straight alpha (what a
     /// render with RGB + Alpha channels writes) instead of compositing over the background.
     pub fn render_rgba8_alpha(&self, comp: ItemId, t: Tick, max_side: u32, transparent: bool) -> Result<(u32, u32, Vec<u8>)> {
+        if let Some(why) = crate::linked_compositions::render_problem(&self.project, comp) {
+            return Err(EngineError::Other(why));
+        }
         if !transparent {
             return self.render_rgba8(comp, t, max_side);
         }

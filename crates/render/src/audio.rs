@@ -20,7 +20,7 @@
 
 use effectcraft_effects::Params;
 use effectcraft_effects::audio_fx;
-use effectcraft_project::{Comp, GroupKind, ItemId, ItemKind, Layer, LayerSource, Node, Project};
+use effectcraft_project::{Comp, FootageKind, GroupKind, ItemId, ItemKind, Layer, LayerSource, Node, Project};
 use effectcraft_time::{TICKS_PER_SECOND, Tick};
 
 use crate::{EvalCtx, ExprHost, FootageSource};
@@ -246,7 +246,31 @@ impl MixEnv<'_> {
         let src_n = ((frac + m as f64 * speed).ceil() as usize).saturating_add(usize::from(!same)).max(1);
         let buf = match &l.source {
             LayerSource::Footage { item } => match self.project.item(*item).map(|i| &i.kind) {
-                Some(ItemKind::Footage(f)) if f.has_audio => self.footage.audio(*item, f, from, src_n, rate).unwrap_or_else(|| vec![0.0; src_n * 2]),
+                Some(ItemKind::Footage(f)) if f.kind == FootageKind::LinkedComposition && f.has_audio && !f.missing => {
+                    let link = f.linked_comp.as_ref()?;
+                    if link.error.is_some() {
+                        return None;
+                    }
+                    let project = link.resolved.as_deref()?;
+                    let comp_id = link.resolved_comp?;
+                    let comp = project.comp(comp_id)?;
+                    let mut sub = vec![0.0f32; src_n * 2];
+                    let a = (-s0).clamp(0, src_n as i64) as usize;
+                    let b = (units_ceil(comp.duration, rate) - s0).clamp(0, src_n as i64) as usize;
+                    if a < b {
+                        mix_into(
+                            &AudioSources { project, footage: self.footage, expr: self.expr, rate },
+                            comp_id,
+                            sample_tick(s0 + a as i64, rate),
+                            &mut sub[a * 2..b * 2],
+                            self.depth + 1,
+                        );
+                    }
+                    sub
+                }
+                Some(ItemKind::Footage(f)) if f.has_audio && f.kind != FootageKind::LinkedComposition => {
+                    self.footage.audio(*item, f, from, src_n, rate).unwrap_or_else(|| vec![0.0; src_n * 2])
+                }
                 _ => return None,
             },
             LayerSource::Comp { item } => {

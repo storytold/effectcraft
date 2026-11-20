@@ -179,6 +179,7 @@ fn the_import_menu_groups_the_project_imports() {
             "Adobe After Effects Project...",
             "Adobe Premiere Pro Project...",
             "EffectCraft Project...",
+            "Linked EffectCraft Composition...",
             "Vanishing Point (.vpe)...",
             "Placeholder...",
             "Solid...",

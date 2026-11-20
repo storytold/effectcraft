@@ -54,7 +54,7 @@ use crate::{Event, Session};
 #[serde(rename_all = "camelCase")]
 pub struct WorkerRequest {
     pub id: u64,
-    /// The project ([`Project::to_json`]).
+    /// The resolved render snapshot ([`Project::to_render_json`]).
     pub project: String,
     /// Footage files the job reads; the host ships their bytes before the request.
     pub files: Vec<String>,
@@ -310,19 +310,34 @@ pub fn next_id() -> u64 {
     NEXT_ID.fetch_add(1, Ordering::Relaxed)
 }
 
-/// Footage files a project reads (paths, sequence frames; missing items read none).
+/// Footage files a project reads, including the private dependencies of resolved links
+/// (paths, sequence frames and proxies; missing items read none). A linked `.ecproj` is
+/// carried as a resolved snapshot, never sent to a footage decoder.
 pub fn footage_files(p: &Project) -> Vec<String> {
-    let mut v: Vec<String> = p
-        .items
-        .values()
-        .filter_map(|i| match &i.kind {
-            ItemKind::Footage(f) if !f.path.is_empty() && !f.missing => {
-                Some(std::iter::once(f.path.clone()).chain(f.sequence.iter().cloned()).collect::<Vec<_>>())
+    let mut v = Vec::new();
+    let mut projects = vec![p];
+    let mut seen = std::collections::HashSet::new();
+    while let Some(project) = projects.pop() {
+        if !seen.insert(std::ptr::from_ref(project)) {
+            continue;
+        }
+        for item in project.items.values() {
+            let original = match &item.kind {
+                ItemKind::Footage(f) => Some(f),
+                _ => None,
+            };
+            for f in original.into_iter().chain(item.proxy.as_ref().map(|proxy| &proxy.footage)).filter(|f| !f.missing) {
+                if f.kind == effectcraft_project::FootageKind::LinkedComposition {
+                    if let Some(source) = f.linked_comp.as_ref().and_then(|link| link.resolved.as_deref()) {
+                        projects.push(source);
+                    }
+                } else if !f.path.is_empty() {
+                    v.push(f.path.clone());
+                    v.extend(f.sequence.iter().cloned());
+                }
             }
-            _ => None,
-        })
-        .flatten()
-        .collect();
+        }
+    }
     v.sort();
     v.dedup();
     v
@@ -454,7 +469,7 @@ pub async fn run_request_async(s: &mut Session, req: WorkerRequest, post: &Post)
     }
     JOB_ACCEL.with(|a| *a.borrow_mut() = accel);
     QUEUED.with(|q| *q.borrow_mut() = Some(vec![]));
-    match Project::from_json(&req.project) {
+    match Project::from_render_json(&req.project) {
         Ok(p) => {
             s.replace_project(p, None);
             if let Err(e) = run_job(s, req.job, post.clone()).await {
@@ -752,7 +767,7 @@ impl Session {
         let id = next_id();
         let inbox = Arc::new(Inbox::default());
         let base = self.project.comp(comp).and_then(|c| c.layer(layer)).and_then(|l| l.props.find_group(uid)).cloned().map(Box::new);
-        let req = WorkerRequest { id, project: self.project.to_json(), files: footage_files(&self.project), job };
+        let req = WorkerRequest { id, project: self.project.to_render_json().map_err(|e| e.to_string())?, files: footage_files(&self.project), job };
         off.start(req, inbox.clone())?;
         self.offloaded.push(OffloadedJob {
             id,

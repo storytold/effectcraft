@@ -110,6 +110,8 @@ const READS: &[(&str, &[&str])] = &[
     // unchecked.
     ("essential.templateInfo", &["path"]),
     ("file.importProject", &["path"]),
+    ("file.linkComposition", &["path"]),
+    ("file.linkableCompositions", &["path"]),
     ("footage.relink", &["path"]),
     ("layer.newModel", &["path"]),
     ("mediaBrowser.fileInfo", &["path"]),
@@ -605,6 +607,10 @@ impl Services for ConfinedServices {
         self.confinement.check(path, Access::Read).map_err(|e| std::io::Error::new(std::io::ErrorKind::PermissionDenied, e.to_string()))?;
         self.inner.read_file(path)
     }
+    fn read_file_bounded(&self, path: &str, max: u64) -> std::io::Result<Vec<u8>> {
+        self.confinement.check(path, Access::Read).map_err(|e| std::io::Error::new(std::io::ErrorKind::PermissionDenied, e.to_string()))?;
+        self.inner.read_file_bounded(path, max)
+    }
     fn write_file(&self, path: &str, data: &[u8]) -> std::io::Result<()> {
         self.inner.write_file(path, data)
     }
@@ -821,6 +827,44 @@ mod tests {
         assert!(read(&footage(&inside)).1.is_complete());
     }
 
+    /// Linked project loading must keep its allocation bound through the confinement wrapper,
+    /// rather than falling back to an unbounded read followed by a length check.
+    #[test]
+    fn confined_bounded_reads_keep_the_inner_limit_and_refuse_outside_paths() {
+        use std::sync::atomic::Ordering;
+
+        struct BoundedOnly(AtomicBool);
+        impl Services for BoundedOnly {
+            fn read_file(&self, _: &str) -> std::io::Result<Vec<u8>> {
+                Err(std::io::Error::other("an unbounded read was requested"))
+            }
+            fn read_file_bounded(&self, _: &str, max: u64) -> std::io::Result<Vec<u8>> {
+                self.0.store(true, Ordering::Relaxed);
+                let bytes = b"project";
+                if bytes.len() as u64 > max { Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "input exceeds limit")) } else { Ok(bytes.to_vec()) }
+            }
+            fn write_file(&self, _: &str, _: &[u8]) -> std::io::Result<()> {
+                Err(std::io::Error::other("read-only test service"))
+            }
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let inside = tmp.path().join("in");
+        let outside = tmp.path().join("elsewhere");
+        std::fs::create_dir(&inside).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        let inner = Arc::new(BoundedOnly(AtomicBool::new(false)));
+        let c = Confinement::new(std::slice::from_ref(&inside), &[]).unwrap();
+        let services = ConfinedServices::new(inner.clone(), c);
+        let path = inside.join("titles.ecproj").to_string_lossy().into_owned();
+        assert_eq!(services.read_file_bounded(&path, 16).unwrap(), b"project");
+        assert_eq!(services.read_file_bounded(&path, 2).unwrap_err().kind(), std::io::ErrorKind::InvalidData);
+        inner.0.store(false, Ordering::Relaxed);
+        let outside = outside.join("titles.ecproj").to_string_lossy().into_owned();
+        assert_eq!(services.read_file_bounded(&outside, 16).unwrap_err().kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(!inner.0.load(Ordering::Relaxed), "a refused source must not reach the inner reader");
+    }
+
     #[test]
     fn watch_folder_and_edit_original_are_refused_while_confined() {
         let dir = std::env::temp_dir();
@@ -845,6 +889,8 @@ mod tests {
         for (id, key) in [
             ("essential.templateInfo", "path"),
             ("file.importProject", "path"),
+            ("file.linkComposition", "path"),
+            ("file.linkableCompositions", "path"),
             ("footage.relink", "path"),
             ("layer.newModel", "path"),
             ("mediaBrowser.fileInfo", "path"),

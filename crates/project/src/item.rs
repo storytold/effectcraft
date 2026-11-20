@@ -4,6 +4,27 @@ use super::layer::LayerSource;
 use super::settings::{APP_VERSION, ProjectError, ProjectSettings, SCHEMA_VERSION, SavedView};
 use super::{Arc, BTreeMap, Deserialize, FrameRate, Label, Project, Serialize, Tick, file_check, limits};
 
+/// A durable identity for a newly authored project or item, independent of its undoable
+/// numeric allocation counter. Empty means the host could not obtain entropy; save/link hosts
+/// must retry with [`try_new_identity`] and report failure rather than save an unidentified link.
+pub fn new_identity() -> String {
+    try_new_identity().unwrap_or_default()
+}
+
+/// A 128-bit identity from the operating system's random source (Web Crypto in a browser).
+/// Failing explicitly keeps unavailable browser entropy from silently producing duplicate IDs.
+pub fn try_new_identity() -> Result<String, ProjectError> {
+    let mut bytes = [0u8; 16];
+    getrandom::fill(&mut bytes).map_err(|e| ProjectError::Invalid(format!("could not generate a stable identity: {e}")))?;
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut identity = String::with_capacity(32);
+    for byte in bytes {
+        identity.push(HEX[(byte >> 4) as usize] as char);
+        identity.push(HEX[(byte & 15) as usize] as char);
+    }
+    Ok(identity)
+}
+
 /// `base` numbered with the lowest counter from 2 for which `taken` is false: a copy of an item or
 /// another layer of the same name. A number set off by a space is a counter and is replaced
 /// (`Red Solid 1` → `Red Solid 2`, `shot 2` → `shot 3`); digits that end a word belong to the
@@ -47,6 +68,9 @@ pub enum ItemKind {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Item {
     pub id: ItemId,
+    /// Durable external identity, independent of the undoable numeric allocator.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub stable_id: String,
     pub name: String,
     pub label: Label,
     #[serde(default)]
@@ -79,6 +103,7 @@ impl Item {
                 FootageKind::Audio => "Audio",
                 FootageKind::Model => "3D Model",
                 FootageKind::Data => "Data",
+                FootageKind::LinkedComposition => "Linked Composition",
             },
             ItemKind::Solid(_) => "Solid",
         }
@@ -108,7 +133,7 @@ impl Item {
     pub fn frame_rate(&self) -> Option<FrameRate> {
         match &self.kind {
             ItemKind::Comp(c) => Some(c.frame_rate),
-            ItemKind::Footage(f) if f.kind == FootageKind::Video || f.kind == FootageKind::Sequence => Some(f.frame_rate),
+            ItemKind::Footage(f) if matches!(f.kind, FootageKind::Video | FootageKind::Sequence | FootageKind::LinkedComposition) => Some(f.frame_rate),
             _ => None,
         }
     }
@@ -118,6 +143,7 @@ impl Default for Project {
     fn default() -> Self {
         Project {
             schema: SCHEMA_VERSION,
+            project_id: new_identity(),
             settings: ProjectSettings::default(),
             items: BTreeMap::new(),
             next_id: 1,
@@ -250,7 +276,7 @@ impl Project {
     pub fn add_item(&mut self, name: &str, label: Label, parent: Option<ItemId>, mut kind: ItemKind) -> ItemId {
         limits::repair_kind(name, &mut kind, &mut vec![]);
         let id = ItemId(self.alloc());
-        self.items.insert(id, Item { id, name: name.into(), label, comment: String::new(), parent, kind, proxy: None });
+        self.items.insert(id, Item { id, stable_id: new_identity(), name: name.into(), label, comment: String::new(), parent, kind, proxy: None });
         id
     }
     /// Children of a folder (None = root), folders first then by name.
@@ -352,9 +378,16 @@ impl Project {
                 (ItemKind::Comp(x), ItemKind::Comp(y)) => Arc::ptr_eq(x, y) || x == y,
                 (x, y) => x == y,
             };
-            kind && a.id == b.id && a.name == b.name && a.label == b.label && a.comment == b.comment && a.parent == b.parent && a.proxy == b.proxy
+            kind && a.id == b.id
+                && a.stable_id == b.stable_id
+                && a.name == b.name
+                && a.label == b.label
+                && a.comment == b.comment
+                && a.parent == b.parent
+                && a.proxy == b.proxy
         };
         self.schema == other.schema
+            && self.project_id == other.project_id
             && self.next_id == other.next_id
             && self.settings == other.settings
             && self.items.len() == other.items.len()
@@ -373,6 +406,10 @@ impl Project {
     /// [`Project::to_file_json`] that also records the open compositions ([`SavedView`]), on one
     /// line when `compact` (Settings ▸ Project ▸ Save Compact Project Files).
     pub fn to_file_json_with_view(&self, view: &SavedView, compact: bool) -> Result<String, ProjectError> {
+        let mut identities = std::collections::BTreeSet::new();
+        if self.project_id.is_empty() || self.items.values().any(|item| item.stable_id.is_empty() || !identities.insert(&item.stable_id)) {
+            return Err(ProjectError::Invalid("the project can't be saved: stable identities are missing or duplicated".into()));
+        }
         craft_ecproj_format::check_schema(self.schema)
             .map_err(|e| ProjectError::Invalid(format!("the project can't be saved: it holds a value a project file can't store ({e})")))?;
         let file = craft_ecproj_format::File::new(APP_VERSION, view, self);
@@ -463,6 +500,7 @@ mod availability_tests {
         let footage = crate::Footage { path: "/original.png".into(), ..Default::default() };
         let mut item = Item {
             id: ItemId(1),
+            stable_id: String::new(),
             name: "Plate".into(),
             label: Label::None,
             comment: String::new(),

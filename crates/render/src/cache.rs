@@ -838,6 +838,17 @@ fn mask_motion_blur(ctx: &EvalCtx, layer: &Layer, blur: bool) -> bool {
         })
 }
 
+/// Conservative link reach, including named/computed expressions and media replacement.
+/// An asset which no rendered comp can reach must not disable unrelated cached layers.
+pub(crate) fn comp_has_linked_dependencies(project: &effectcraft_project::Project, comp: effectcraft_project::ItemId) -> bool {
+    let mut linked = project.items.values().filter(|item| matches!(&item.kind, ItemKind::Footage(f) if f.kind == FootageKind::LinkedComposition)).peekable();
+    if linked.peek().is_none() {
+        return false;
+    }
+    let reach = project.pixel_reach(comp, &project.heard_layers());
+    linked.any(|item| reach.items.as_ref().is_none_or(|items| items.contains(&item.id)))
+}
+
 fn has_expression(g: &PropGroup) -> bool {
     g.children.iter().any(|c| match c {
         Node::Prop(p) => p.has_expression(),
@@ -878,6 +889,16 @@ fn key_with(ctx: &EvalCtx, layer: &Layer, scale: f64, draft: bool, blur: bool, f
 /// `blur`: the layer is motion blurred in this render (`Renderer::mb_on`). `effects`: how far
 /// the effect stack reaches into the key (see [`EffectScope`]).
 fn key_any(ctx: &EvalCtx, layer: &Layer, scale: f64, draft: bool, blur: bool, footage: bool, effects: EffectScope) -> Option<u64> {
+    // Another layer's effect or expression may sample linked pixels. Bypass the reachable
+    // comp, including a collapsed instance's actual media replacements.
+    if comp_has_linked_dependencies(ctx.project, ctx.comp_id)
+        || ctx
+            .media_overrides
+            .iter()
+            .any(|over| matches!(ctx.project.item(over.item).map(|item| &item.kind), Some(ItemKind::Footage(f)) if f.kind == FootageKind::LinkedComposition))
+    {
+        return None;
+    }
     let mut h = KeyHasher(0xcbf2_9ce4_8422_2325);
     ctx.comp.frame_rate.as_f64().to_bits().hash(&mut h);
     ctx.comp.enable_frame_blending.hash(&mut h);

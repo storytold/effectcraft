@@ -651,6 +651,7 @@ pub(super) fn file_dialog(app: &mut EffectcraftApp, id: &str, params: &Value) ->
         "file.importLottie" => ("path", Ask::Open(&["json", "lottie"])),
         "file.importAep" => ("path", Ask::Open(&["aep", "aepx"])),
         "file.importProject" => ("path", Ask::Open(&["ecproj", "ecprojx"])),
+        "file.linkComposition" => ("path", Ask::Open(&["ecproj"])),
         "file.importTimeline" => ("path", Ask::Open(&["xml", "fcpxml", "otio", "edl", "aaf", "omf"])),
         "render.saveCurrentPreview" => ("path", Ask::Save("Preview.mp4".into())),
         "file.runScript" if params.get("name").is_none() && params.get("recent").is_none() => ("path", Ask::Open(&["jsx", "js", "jsonl", "json", "txt"])),
@@ -837,6 +838,9 @@ fn run_with_picked(app: &mut EffectcraftApp, id: &str, key: &str, params: &Value
     // image sequence. Not while the losses prompt of an After Effects project picked with them
     // shows: one dialog at a time, so they import with the defaults.
     let picked = Value::Object(p.clone());
+    if id == "file.linkComposition" && picked.get("comp").is_none() && picked.get("comps").is_none() {
+        return crate::panels::linked_import::open(app, picked["path"].as_str().unwrap_or_default());
+    }
     let asking = crate::panels::aep_losses::asking(app);
     if !asking
         && (id == "file.import" && crate::panels::dialogs::open_form(app, id, &picked)

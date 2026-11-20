@@ -28,6 +28,14 @@ pub enum FieldKind {
     /// Explanatory text (no parameter).
     Note(String),
     Bool(bool),
+    /// A linked source's encoding control remembers whether opening the form used its
+    /// automatic tag, so accepting an unchanged form does not create a manual override.
+    LinkedLinear {
+        value: bool,
+        initial: bool,
+        automatic: bool,
+        source: Option<effectcraft_engine::project::LinkedColorSpace>,
+    },
     /// Options as (label, value); `sel` is the chosen index.
     Choice {
         options: Vec<(String, Value)>,
@@ -88,7 +96,7 @@ impl Form {
                 FieldKind::Number { value, .. } => json!(value),
                 FieldKind::Text(s) | FieldKind::Path { value: s, .. } | FieldKind::SavePath(s) => json!(s),
                 FieldKind::Note(_) => continue,
-                FieldKind::Bool(b) => json!(b),
+                FieldKind::Bool(b) | FieldKind::LinkedLinear { value: b, .. } => json!(b),
                 FieldKind::Choice { options, sel } => options.get(*sel).map(|o| o.1.clone()).unwrap_or(Value::Null),
             };
             match f.key.split_once('[') {
@@ -105,6 +113,31 @@ impl Form {
                 None => {
                     m.insert(f.key.clone(), v);
                 }
+            }
+        }
+        if m.get("colorProfile").and_then(Value::as_str) == Some("auto")
+            && let Some((value, initial, automatic)) = self.fields.iter().find_map(|field| match &field.kind {
+                FieldKind::LinkedLinear { value, initial, automatic, .. } => Some((*value, *initial, *automatic)),
+                _ => None,
+            })
+        {
+            if automatic && value != initial {
+                // Only the encoding changed: preserve the source's primaries while creating
+                // an explicit interpretation of its values.
+                m.remove("colorProfile");
+            } else {
+                // An unchanged automatic tag, or a deliberate reset from a manual profile.
+                m.remove("linearLight");
+            }
+        }
+        if self.fields.iter().any(|field| field.key == "linkedSelection") {
+            for key in ["colorProfile", "linearLight", "preserveRgb"] {
+                if m.get(key).is_some_and(Value::is_null) {
+                    m.remove(key);
+                }
+            }
+            if m.get("colorProfile").and_then(Value::as_str) == Some("auto") {
+                m.remove("linearLight");
             }
         }
         Value::Object(m)
@@ -233,14 +266,113 @@ fn new_comp_from_selection_form(s: &effectcraft_engine::Session) -> (String, Vec
     )
 }
 
+fn interpretation_items(s: &effectcraft_engine::Session, params: &Value) -> Vec<effectcraft_engine::project::ItemId> {
+    use effectcraft_engine::project::{ItemId, ItemKind, LayerSource};
+    let footage = |id: &ItemId| matches!(s.project.item(*id).map(|item| &item.kind), Some(ItemKind::Footage(_)));
+    if let Some(value) = params.get("items").or_else(|| params.get("item")) {
+        return match value {
+            Value::Array(items) => items.iter().filter_map(Value::as_u64).map(ItemId).filter(footage).collect(),
+            Value::Number(number) => number.as_u64().map(ItemId).filter(footage).into_iter().collect(),
+            _ => Vec::new(),
+        };
+    }
+    let selected: Vec<_> = s.state.project_selection.iter().copied().filter(footage).collect();
+    if !selected.is_empty() {
+        return selected;
+    }
+    s.active_comp()
+        .into_iter()
+        .flat_map(|comp| s.state.selected_layers.iter().filter_map(move |id| comp.layer(*id)))
+        .filter_map(|layer| if let LayerSource::Footage { item } = layer.source { Some(item) } else { None })
+        .collect()
+}
+
 /// The Interpret Footage dialog for the selected footage (or its proxy), if there is one.
 fn interpret_footage_form(s: &effectcraft_engine::Session, proxy: bool, base: &mut Value) -> Option<(String, Vec<Field>)> {
-    let f = s.state.project_selection.first().and_then(|i| s.project.item(*i)).and_then(|it| match (&it.kind, &it.proxy) {
+    use effectcraft_engine::project::{FootageKind, ItemKind};
+    let items = interpretation_items(s, base);
+    if !proxy
+        && items.len() > 1
+        && items.iter().any(|id| matches!(s.project.item(*id).map(|item| &item.kind), Some(ItemKind::Footage(f)) if f.kind == FootageKind::LinkedComposition))
+    {
+        if !base.is_object() {
+            *base = json!({});
+        }
+        base["items"] = json!(items.iter().map(|id| id.0).collect::<Vec<_>>());
+        let mut profiles = vec![("Keep individual profiles", Value::Null), ("Automatic / source profile", json!("auto"))];
+        profiles.extend(effectcraft_engine::project::ColorSpace::ALL.iter().map(|space| (space.label(), json!(space.id()))));
+        return Some((
+            "Interpret Footage".into(),
+            vec![
+                Field::note("linkedSelection", "Several sources are selected. Keep the individual settings to leave each source unchanged."),
+                Field::choice("colorProfile", "Assign Profile", &profiles, 0),
+                Field::choice(
+                    "linearLight",
+                    "Interpret As Linear Light",
+                    &[("Keep individual encodings", Value::Null), ("Encoded", json!(false)), ("Linear light", json!(true))],
+                    0,
+                ),
+                Field::choice(
+                    "preserveRgb",
+                    "Preserve RGB",
+                    &[("Keep individual conversions", Value::Null), ("Convert into working space", json!(false)), ("Preserve RGB", json!(true))],
+                    0,
+                ),
+                Field::note("linkedSourceOwnership", "Only color interpretation is shared. Source frame rates, alpha and composition contents stay unchanged."),
+                Field::note("linkedAutomaticEncoding", "Automatic follows each linked source's own color space and encoding."),
+            ],
+        ));
+    }
+    let selected = if proxy { s.state.project_selection.first().copied() } else { items.first().copied() };
+    let f = selected.and_then(|i| s.project.item(i)).and_then(|it| match (&it.kind, &it.proxy) {
         (_, Some(px)) if proxy => Some(px.footage.clone()),
         (effectcraft_engine::project::ItemKind::Footage(f), _) if !proxy => Some(f.clone()),
         _ => None,
     });
     let f = f?;
+    if f.kind == effectcraft_engine::project::FootageKind::LinkedComposition {
+        let source =
+            f.linked_comp.as_ref().and_then(|link| link.source_color.or_else(|| link.resolved.as_ref().map(|project| project.settings.linked_color_space())));
+        let encoding = |linear| if linear { tr("Linear light") } else { tr("Encoded") };
+        let link = f.linked_comp.as_ref();
+        let note = match (source, link.and_then(|link| link.resolved.as_ref())) {
+            (Some(tag), _) if f.missing || link.is_none_or(|link| link.error.is_some()) => {
+                tr_args("Last known linked color interpretation: {} ({}). The source is offline.", &[&tag.space.label(), &encoding(tag.linear)])
+            }
+            (Some(tag), Some(project)) if project.settings.working_space.is_none() => tr_args(
+                "Unmanaged source: assuming {} ({}). Assign a profile if its RGB values use another space.",
+                &[&tag.space.label(), &encoding(tag.linear)],
+            ),
+            (Some(tag), Some(_)) => tr_args("Automatic source color space: {} ({})", &[&tag.space.label(), &encoding(tag.linear)]),
+            (Some(tag), None) => {
+                tr_args("Last known linked color interpretation: {} ({}). The source is offline.", &[&tag.space.label(), &encoding(tag.linear)])
+            }
+            (None, _) => tr("Automatic source color space is unavailable while the link is offline.").to_owned(),
+        };
+        let effective_linear = f.linked_color_space().is_some_and(|tag| tag.linear);
+        let mut profiles = vec![("Automatic source color space", json!("auto"))];
+        profiles.extend(effectcraft_engine::project::ColorSpace::ALL.iter().map(|space| (space.label(), json!(space.id()))));
+        return Some((
+            "Interpret Footage".into(),
+            vec![
+                Field::note("linkedSourceColor", &note),
+                Field::choice(
+                    "colorProfile",
+                    "Assign Profile",
+                    &profiles,
+                    f.color_profile
+                        .map_or(0, |profile| 1 + effectcraft_engine::project::ColorSpace::ALL.iter().position(|space| *space == profile).unwrap_or(0)),
+                ),
+                Field {
+                    key: "linearLight".into(),
+                    label: "Interpret As Linear Light".into(),
+                    kind: FieldKind::LinkedLinear { value: effective_linear, initial: effective_linear, automatic: f.color_profile.is_none(), source },
+                },
+                Field::bool("preserveRgb", "Preserve RGB", f.preserve_rgb),
+                Field::note("linkedSourceOwnership", "Source frame rate, alpha and composition contents are controlled by the source project."),
+            ],
+        ));
+    }
     let hex = |c: [f32; 3]| format!("#{:02x}{:02x}{:02x}", (c[0] * 255.0).round() as u8, (c[1] * 255.0).round() as u8, (c[2] * 255.0).round() as u8);
     let mut fields = vec![
         // Main Options ▸ Alpha.
@@ -690,6 +822,7 @@ pub fn open_form(app: &mut EffectcraftApp, id: &str, p: &Value) -> bool {
                     "invertAlpha",
                     "matteColor",
                     "linearLight",
+                    "preserveRgb",
                     "startFrame",
                     "logConversion",
                     "cineonUnits",
@@ -845,9 +978,15 @@ pub fn open_form(app: &mut EffectcraftApp, id: &str, p: &Value) -> bool {
 
 /// The label and control rows of a form: the part of [`show_form`] that scrolls.
 fn form_grid(ui: &mut egui::Ui, f: &mut Form, regs: &mut Vec<(String, egui::Rect, String)>, browse: &mut Option<usize>, focused: &mut bool) {
+    let linked_selection = f.fields.iter().any(|field| field.key == "linkedSelection");
+    let linked_color = linked_selection || f.fields.iter().any(|field| matches!(field.kind, FieldKind::LinkedLinear { .. }));
+    let assigned_profile = f.fields.iter().find_map(|field| match &field.kind {
+        FieldKind::Choice { options, sel } if field.key == "colorProfile" => options.get(*sel).and_then(|(_, value)| value.as_str()).map(str::to_string),
+        _ => None,
+    });
     egui::Grid::new("form-grid").num_columns(2).spacing([14.0, 10.0]).show(ui, |ui| {
         for (i, fl) in f.fields.iter_mut().enumerate() {
-            ui.label(tr(&fl.label));
+            let label = ui.label(tr(&fl.label));
             let r = match &mut fl.kind {
                 FieldKind::Number { value, speed } => {
                     let dec = if *speed < 0.01 { 5 } else { 3 };
@@ -900,28 +1039,79 @@ fn form_grid(ui: &mut egui::Ui, f: &mut Form, regs: &mut Vec<(String, egui::Rect
                     .inner
                     .rect
                 }
-                FieldKind::Bool(b) => crate::widgets::labelled_checkbox(ui, b, "").rect,
+                FieldKind::Bool(b) => {
+                    let response = crate::widgets::labelled_checkbox(ui, b, "");
+                    if linked_color { response.labelled_by(label.id) } else { response }.rect
+                }
+                FieldKind::LinkedLinear { value, automatic, source, .. } => {
+                    let automatic_profile = assigned_profile.as_deref() == Some("auto");
+                    if automatic_profile && !*automatic {
+                        *value = source.is_some_and(|tag| tag.linear);
+                    }
+                    let intrinsic_linear = if automatic_profile {
+                        source.is_some_and(|tag| tag.space.is_linear())
+                    } else {
+                        assigned_profile.as_deref().and_then(effectcraft_engine::project::ColorSpace::parse).is_some_and(|space| space.is_linear())
+                    };
+                    if intrinsic_linear {
+                        *value = true;
+                    }
+                    ui.add_enabled_ui(!intrinsic_linear && (!automatic_profile || (*automatic && source.is_some())), |ui| {
+                        crate::widgets::labelled_checkbox(ui, value, "").labelled_by(label.id)
+                    })
+                    .inner
+                    .rect
+                }
                 FieldKind::Choice { options, sel } => {
+                    let enabled = !(linked_selection && fl.key == "linearLight" && assigned_profile.as_deref() == Some("auto"));
+                    if !enabled {
+                        *sel = 0;
+                    }
                     let cur = options.get(*sel).map(|o| o.0.clone()).unwrap_or_default();
                     // The column keeps its width: a long choice (a GPU adapter's name) ends in an
                     // ellipsis instead of widening the form past the dialog (#978).
-                    craft_ui::ComboBox::from_id_salt(("form", fl.key.as_str()))
-                        .selected_text(tr(&cur))
-                        .width(240.0)
-                        .truncate()
-                        .show_ui(ui, |ui| {
-                            for (i, (l, _)) in options.iter().enumerate() {
-                                ui.selectable_value(sel, i, tr(l));
-                            }
-                        })
-                        .response
-                        .rect
+                    let mut choice = |ui: &mut egui::Ui| {
+                        craft_ui::ComboBox::from_id_salt(("form", fl.key.as_str()))
+                            .selected_text(tr(&cur))
+                            .width(240.0)
+                            .truncate()
+                            .show_ui(ui, |ui| {
+                                for (i, (l, _)) in options.iter().enumerate() {
+                                    ui.selectable_value(sel, i, tr(l));
+                                }
+                            })
+                            .response
+                    };
+                    let response = if enabled { choice(ui) } else { ui.add_enabled_ui(false, choice).inner };
+                    if linked_color && !std::mem::replace(focused, true) {
+                        let pass = ui.ctx().cumulative_pass_nr();
+                        let shown = response.id.with("linked-profile-focus-pass");
+                        let previous = ui.ctx().data_mut(|data| {
+                            let previous = data.get_temp::<u64>(shown);
+                            data.insert_temp(shown, pass);
+                            previous
+                        });
+                        if previous.is_none_or(|previous| previous.saturating_add(1) < pass) {
+                            response.request_focus();
+                        }
+                    }
+                    if linked_color { response.labelled_by(label.id) } else { response }.rect
                 }
             };
             regs.push((format!("form.field.{}", fl.key), r, fl.label.clone()));
             ui.end_row();
         }
     });
+    if linked_color
+        && assigned_profile.as_deref() != Some("auto")
+        && f.fields.iter().any(|field| matches!(&field.kind, FieldKind::Choice { options, sel } if field.key == "colorProfile" && options.get(*sel).is_some_and(|(_, value)| value == "auto")))
+    {
+        for field in &mut f.fields {
+            if let FieldKind::LinkedLinear { value, source, .. } = &mut field.kind {
+                *value = source.is_some_and(|tag| tag.linear);
+            }
+        }
+    }
 }
 
 pub fn show_form(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {

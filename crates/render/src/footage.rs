@@ -177,6 +177,7 @@ pub trait FootageSource: Send + Sync {
                 missing_problem(&px.footage, "Use Set Proxy to locate the proxy file.").or_else(|| self.problem(&px.footage)).map(|why| format!("Proxy: {why}"))
             }
             None => match &item.kind {
+                ItemKind::Footage(f) if f.kind == effectcraft_project::FootageKind::LinkedComposition => missing_problem(f, ""),
                 ItemKind::Footage(f) => missing_problem(f, "Use File ▸ Dependencies ▸ Relink Missing Footage or Replace Footage.").or_else(|| self.problem(f)),
                 _ => None,
             },
@@ -186,6 +187,14 @@ pub trait FootageSource: Send + Sync {
 
 /// A known offline source, without filesystem access while painting or querying.
 fn missing_problem(f: &Footage, remedy: &str) -> Option<String> {
+    if f.kind == effectcraft_project::FootageKind::LinkedComposition {
+        return match &f.linked_comp {
+            Some(link) => link.error.clone().or_else(|| {
+                (f.missing || link.resolved.is_none() || link.resolved_comp.is_none()).then(|| format!("Linked composition is offline: {}", f.path))
+            }),
+            None => Some("Linked composition has no source reference".into()),
+        };
+    }
     (f.missing && !f.path.is_empty() && f.kind != effectcraft_project::FootageKind::Data).then(|| format!("Missing footage: {}. {remedy}", f.path))
 }
 

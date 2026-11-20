@@ -74,7 +74,7 @@ impl Backend {
 
     /// Run an engine command by id (checked against the [`Confinement`], if any).
     pub fn exec(&mut self, id: &str, params: Value) -> Result<Value> {
-        let params = if params.is_null() { json!({}) } else { params };
+        let mut params = if params.is_null() { json!({}) } else { params };
         if let Some(c) = self.confinement.clone() {
             for lookup in c.check_command(id, &params)? {
                 let found = match lookup {
@@ -82,6 +82,9 @@ impl Backend {
                     Lookup::RenderOutputs => self.run("renderQueue.list", json!({}))?,
                 };
                 c.check_lookup(&lookup, &found)?;
+            }
+            if self.is_bridge() {
+                confined_bridge_params(id, &mut params, 0)?;
             }
         }
         self.run(id, params)
@@ -225,6 +228,45 @@ impl Backend {
     }
 }
 
+/// The desktop session has no automation-root wrapper around its transitive reads. Until
+/// those roots can be passed to the owning session, linked projects are headless-only while
+/// confined. Open still works for ordinary projects, but the owning engine must refuse a
+/// linked document before resolving any source; inspecting the file here would race a swap.
+fn confined_bridge_params(id: &str, params: &mut Value, depth: usize) -> Result<()> {
+    if depth > 64 {
+        return Err(Error::BadArgs("nested command batches exceed the confinement limit".into()));
+    }
+    match id {
+        "file.linkComposition" | "file.linkableCompositions" | "project.refreshLinkedCompositions" => {
+            return Err(Error::BadArgs(
+                "linked compositions need headless automation while file access is confined; the connected desktop session cannot enforce transitive automation read roots yet".into(),
+            ));
+        }
+        "file.openRecent" | "file.revert" => {
+            return Err(Error::BadArgs(
+                "use file.open with an explicit path in confined bridge mode; linked-source reads must be disabled in the owning session".into(),
+            ));
+        }
+        "file.open" | "file.reloadFootage" => {
+            let params = params.as_object_mut().ok_or_else(|| Error::BadArgs(format!("{id} parameters must be an object")))?;
+            params.insert("resolveLinks".into(), json!(false));
+        }
+        "engine.batch" => {
+            for step in params.get_mut("steps").and_then(Value::as_array_mut).into_iter().flatten() {
+                let Some(id) = step.get("command").or_else(|| step.get("id")).and_then(Value::as_str).map(str::to_string) else { continue };
+                let Some(step) = step.as_object_mut() else { continue };
+                let params = step.entry("params").or_insert_with(|| json!({}));
+                if params.is_null() {
+                    *params = json!({});
+                }
+                confined_bridge_params(&id, params, depth + 1)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 /// `render.frame` parameters for an inline (base64) frame.
 fn frame_params(comp: Option<&Value>, time: Option<f64>, max_side: u32, transparent: bool) -> Value {
     let mut p = json!({"max_side": max_side, "base64": true});
@@ -257,3 +299,38 @@ fn no_comp(comp: Option<&Value>) -> Error {
 
 pub const NEED_BRIDGE: &str =
     "this tool drives the live app: start it with `effectcraft --control 9877` and run the MCP server as `effectcraft-cli mcp --bridge 9877`";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn confined_bridge_opens_disable_link_resolution_in_nested_batches() {
+        let mut params = json!({"steps": [
+            {"command": "file.open", "params": {"path": "/sandbox/main.ecproj", "resolveLinks": true}},
+            {"id": "engine.batch", "params": {"steps": [
+                {"id": "file.open", "params": {"path": "/sandbox/other.ecproj"}},
+                {"id": "file.reloadFootage", "params": {"items": [1], "resolveLinks": true}},
+                {"command": "comp.new", "params": {"name": "Local"}}
+            ]}}
+        ]});
+        confined_bridge_params("engine.batch", &mut params, 0).unwrap();
+        assert_eq!(params["steps"][0]["params"]["resolveLinks"], false);
+        let nested = &params["steps"][1]["params"]["steps"];
+        assert_eq!(nested[0]["params"]["resolveLinks"], false);
+        assert_eq!(nested[0]["params"]["path"], "/sandbox/other.ecproj");
+        assert_eq!(nested[1]["params"]["resolveLinks"], false);
+        assert_eq!(nested[1]["params"]["items"], json!([1]));
+        assert_eq!(nested[2]["params"], json!({"name": "Local"}));
+    }
+
+    #[test]
+    fn confined_bridge_cannot_refresh_links_through_a_batch() {
+        for id in ["file.linkComposition", "file.linkableCompositions", "project.refreshLinkedCompositions", "file.openRecent", "file.revert"] {
+            let mut direct = json!({"path": "/sandbox/titles.ecproj"});
+            assert!(confined_bridge_params(id, &mut direct, 0).is_err(), "{id}");
+            let mut batch = json!({"steps": [{"command": "engine.batch", "params": {"steps": [{"id": id, "params": direct}]}}]});
+            assert!(confined_bridge_params("engine.batch", &mut batch, 0).is_err(), "batched {id}");
+        }
+    }
+}

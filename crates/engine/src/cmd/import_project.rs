@@ -78,6 +78,8 @@ fn import_project(s: &mut Session, p: &Value) -> Result<Value> {
         let folder = proj.add_item(&folder_name, Label::Yellow, None, ItemKind::Folder);
         let mut items = vec![];
         for (id, mut it) in std::mem::take(&mut sub.items) {
+            // Import makes new local objects; their external identities must not alias copies.
+            it.stable_id.clear();
             if it.parent.is_none() {
                 it.parent = Some(folder);
             }
@@ -86,9 +88,11 @@ fn import_project(s: &mut Session, p: &Value) -> Result<Value> {
         }
         proj.next_id = proj.next_id.max(sub.next_id);
         proj.fix_next_id();
+        crate::linked_compositions::identify(proj)?;
         st.project_selection = vec![folder];
         Ok((folder, items))
     })?;
+    let _ = crate::linked_compositions::refresh(s, None)?;
     let comps: Vec<Value> = s
         .project
         .comps()

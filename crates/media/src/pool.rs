@@ -27,6 +27,9 @@ pub const DEFAULT_BUDGET: usize = 1 << 30;
 /// The cache path of a missing image-sequence frame (no file can have this name).
 const PLACEHOLDER: &str = "\0missing frame";
 
+/// Linked compositions are rendered from resolved project snapshots by the compositor.
+const LINKED_SOURCE: &str = "Linked compositions require the project renderer; they cannot be decoded as media files";
+
 /// What a missing image-sequence frame shows: 75 % colour bars (white, yellow, cyan, green,
 /// magenta, red, blue), the usual "no picture here" frame.
 fn colour_bars(w: u32, h: u32) -> Image {
@@ -1031,7 +1034,7 @@ impl MediaPool {
     /// sources are downmixed to stereo ([`crate::downmix`]). Silence where there is no audio (or before the media starts).
     /// With a conformed audio folder, reads come from the conformed file once it is written.
     pub fn audio_samples(&self, footage: &Footage, start: Tick, frames: usize, rate: u32) -> Vec<f32> {
-        if !footage.has_audio || footage.missing || rate == 0 || frames == 0 {
+        if !footage.has_audio || footage.missing || footage.kind == FootageKind::LinkedComposition || rate == 0 || frames == 0 {
             return vec![0.0; frames * 2];
         }
         #[cfg(not(target_arch = "wasm32"))]
@@ -1070,6 +1073,9 @@ impl MediaPool {
 
     /// [`MediaPool::decode_audio`], failing when the source can't be opened or read.
     fn try_decode_audio(&self, footage: &Footage, start: Tick, frames: usize, rate: u32) -> std::result::Result<Vec<f32>, String> {
+        if footage.kind == FootageKind::LinkedComposition {
+            return Err(LINKED_SOURCE.into());
+        }
         let path: Arc<str> = footage.path.as_str().into();
         let Opened { src, order, .. } = self.inner.opened(&path).ok_or("the file can't be opened")?;
         let s0 = start.to_units_floor(rate as i64);
@@ -1279,7 +1285,7 @@ impl Inner {
 
     /// Where the frame of `footage` at `t` comes from (file, frame or media time) and its cache
     /// key, at the footage's own size.
-    fn locate(footage: &Footage, t: Tick, float: FloatCurve) -> Loc {
+    fn locate(footage: &Footage, t: Tick, float: FloatCurve) -> Result<Loc> {
         let alpha = match footage.alpha {
             AlphaMode::Straight => 0,
             AlphaMode::Premultiplied => 1,
@@ -1295,7 +1301,8 @@ impl Inner {
             | (u8::from(footage.placed_page) << 4);
         let matte = if footage.alpha == AlphaMode::Premultiplied { footage.premul_color.map(f32::to_bits) } else { [0; 3] };
         let key = |path: &str, frame| Key { path: path.into(), frame, interp, matte, size: (0, 0), nominal: (0, 0), rows: None, q8: false };
-        match footage.kind {
+        Ok(match footage.kind {
+            FootageKind::LinkedComposition => return Err(MediaError::Unsupported(LINKED_SOURCE.into())),
             FootageKind::Sequence if !footage.sequence.is_empty() => {
                 let i = Self::frame_index(footage.frame_rate, t, footage.sequence_frames(), footage.loop_count);
                 match footage.sequence_file_held(i) {
@@ -1324,7 +1331,7 @@ impl Inner {
                 let mt = native.tick_of(i) + Tick(native.frame_duration().0 / 4);
                 Loc { key: key(&footage.path, i), media_t: Some(mt), float }
             }
-        }
+        })
     }
 
     /// The frame of `footage` at `t`, resampled to `size` (see [`FootageSource::frame_at_size`]):
@@ -1342,7 +1349,7 @@ impl Inner {
     /// Whether a request for some rows of `footage` at `t` reads only those: an OpenEXR frame
     /// (not a movie) whose channels no effect reads.
     fn reads_rows(&self, footage: &Footage, t: Tick) -> bool {
-        let loc = Self::locate(footage, t, FloatCurve::Srgb);
+        let Ok(loc) = Self::locate(footage, t, FloatCurve::Srgb) else { return false };
         loc.media_t.is_none() && crate::exr_planes::is_exr(&loc.key.path) && lock(&self.aux_footage).plan(&footage.path).is_none()
     }
 
@@ -1384,7 +1391,7 @@ impl Inner {
         if !footage.has_video {
             return Err(MediaError::Unsupported(format!("{}: no video", footage.path)));
         }
-        let mut loc = Self::locate(footage, t, float);
+        let mut loc = Self::locate(footage, t, float)?;
         loc.key.q8 = q8;
         let movie = loc.media_t.is_some();
         loc.key.rows = rows.filter(|_| self.reads_rows(footage, t));
@@ -1591,7 +1598,7 @@ impl Inner {
         let prev = c.last.insert(loc.key.path.clone(), loc.key.frame);
         if prev == Some(loc.key.frame - 1) && self.read_ahead.load(Ordering::Relaxed) {
             let next_t = t + footage.frame_rate.frame_duration();
-            let mut next = Self::locate(footage, next_t, float);
+            let Ok(mut next) = Self::locate(footage, next_t, float) else { return };
             next.key.size = loc.key.size;
             next.key.q8 = loc.key.q8;
             if next.key != loc.key && !c.lru.map.contains_key(&next.key) && !c.inflight.contains_key(&next.key) {
@@ -1842,7 +1849,7 @@ impl MediaPool {
         if footage.missing || !footage.has_video {
             return None;
         }
-        let loc = Inner::locate(footage, t, FloatCurve::Srgb);
+        let loc = Inner::locate(footage, t, FloatCurve::Srgb).ok()?;
         if loc.media_t.is_some() || !crate::exr_planes::is_exr(&loc.key.path) {
             return None;
         }
@@ -1914,6 +1921,9 @@ impl FootageSource for MediaPool {
     }
 
     fn problem(&self, footage: &Footage) -> Option<String> {
+        if footage.kind == FootageKind::LinkedComposition {
+            return Some(LINKED_SOURCE.into());
+        }
         if footage.missing || (footage.kind != FootageKind::Video && !effectcraft_render::is_vector_footage(footage)) {
             return None;
         }
@@ -1921,7 +1931,7 @@ impl FootageSource for MediaPool {
     }
 
     fn vector_frame(&self, _item: ItemId, footage: &Footage, scale: f64) -> Option<Arc<Image>> {
-        if footage.missing || !effectcraft_render::is_vector_footage(footage) {
+        if footage.missing || footage.kind == FootageKind::LinkedComposition || !effectcraft_render::is_vector_footage(footage) {
             return None;
         }
         let bytes = self.inner.read(&footage.path).ok()?;
@@ -1999,7 +2009,7 @@ impl FootageSource for MediaPool {
     }
 
     fn audio(&self, _item: ItemId, footage: &Footage, t: Tick, frames: usize, rate: u32) -> Option<Vec<f32>> {
-        if !footage.has_audio || footage.missing {
+        if !footage.has_audio || footage.missing || footage.kind == FootageKind::LinkedComposition {
             return None;
         }
         Some(self.audio_samples(footage, t, frames, rate))
@@ -2642,7 +2652,7 @@ mod tests {
         let pool = MediaPool::new();
         let f = plate(&pool, "/plate.exr");
         let flight = current_flight(&pool);
-        lock(&pool.inner.cache).inflight.insert(Key { size: (0, 0), nominal: (0, 0), ..Inner::locate(&f, Tick::ZERO, FloatCurve::Srgb).key }, flight);
+        lock(&pool.inner.cache).inflight.insert(Key { size: (0, 0), nominal: (0, 0), ..Inner::locate(&f, Tick::ZERO, FloatCurve::Srgb).unwrap().key }, flight);
         let decoding = Decoding::new();
         let started = std::time::Instant::now();
         assert!(pool.frame_at(&f, Tick::ZERO).is_ok());
@@ -2657,7 +2667,7 @@ mod tests {
         let pool = MediaPool::new();
         let f = plate(&pool, "/plate.exr");
         let flight = current_flight(&pool);
-        lock(&pool.inner.cache).inflight.insert(Key { size: (0, 0), nominal: (0, 0), ..Inner::locate(&f, Tick::ZERO, FloatCurve::Srgb).key }, flight);
+        lock(&pool.inner.cache).inflight.insert(Key { size: (0, 0), nominal: (0, 0), ..Inner::locate(&f, Tick::ZERO, FloatCurve::Srgb).unwrap().key }, flight);
         let cancel = Arc::new(AtomicBool::new(false));
         let started = std::time::Instant::now();
         std::thread::scope(|s| {

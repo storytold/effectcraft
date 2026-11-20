@@ -49,6 +49,7 @@ pub struct DialogState {
     pub shortcuts: super::shortcut_editor::EditorState,
     /// The open parameter form.
     pub form: super::forms::Form,
+    pub linked_import: super::linked_import::Draft,
     /// Message box (title, body).
     pub info: (String, String),
     pub camera: super::dialogs_3d::CameraDraft,
@@ -296,6 +297,7 @@ pub(crate) fn above_footer(ui: &mut egui::Ui, height: f32, footer: impl FnOnce(&
 }
 
 pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context) {
+    super::linked_import::restore_focus(app, ctx);
     let Some(d) = app.dialog else { return };
     let t = app.tokens;
     match d {
@@ -307,6 +309,7 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context) {
         Dialog::Shortcuts => super::shortcut_editor::show(app, ctx, &t),
         Dialog::Recovery => super::settings::recovery(app, ctx, &t),
         Dialog::Form => super::forms::show_form(app, ctx, &t),
+        Dialog::LinkedImport => super::linked_import::show(app, ctx, &t),
         Dialog::Info => super::forms::show_info(app, ctx, &t),
         Dialog::ViewOptions => super::forms::show_view_options(app, ctx, &t),
         Dialog::CameraSettings => super::dialogs_3d::camera(app, ctx, &t),

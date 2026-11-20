@@ -32,9 +32,23 @@ fn item_icon(it: &Item) -> Icon {
             effectcraft_engine::project::FootageKind::Still | effectcraft_engine::project::FootageKind::Sequence => Icon::Image,
             effectcraft_engine::project::FootageKind::Audio => Icon::Audio,
             effectcraft_engine::project::FootageKind::Model => Icon::Cube,
+            effectcraft_engine::project::FootageKind::LinkedComposition => Icon::LinkedComp,
             _ => Icon::Footage,
         },
     }
+}
+
+fn linked_source_description(item: &Item, problem: Option<&str>) -> Option<String> {
+    let ItemKind::Footage(footage) = &item.kind else { return None };
+    if footage.kind != effectcraft_engine::project::FootageKind::LinkedComposition {
+        return None;
+    }
+    let composition = footage.linked_comp.as_ref().map_or(item.name.as_str(), |link| link.last_known_name.as_str());
+    let status = problem.map_or_else(|| crate::i18n::tr("Ready — saved source snapshot").to_owned(), |why| crate::i18n::tr_args("Offline: {}", &[&why]));
+    Some(crate::i18n::tr_args(
+        "Source project: {}\nSource composition: {}\n{}\nUse Reload Footage to refresh the saved source.",
+        &[&footage.path, &composition, &status],
+    ))
 }
 
 /// Duration as AE prints it in the Project panel header: `0:00:10:00` (h:mm:ss:ff).
@@ -465,6 +479,15 @@ pub(crate) fn reveal(app: &mut EffectcraftApp, ctx: &egui::Context, items: &[Ite
     app.show_panel(crate::dock::PanelKind::Project);
 }
 
+/// Linked sources reserve two extra lines for their saved project path and loading status.
+fn details_height(app: &EffectcraftApp, panel_height: f32) -> f32 {
+    let selected_link =
+        app.session.state.project_selection.first().and_then(|id| app.session.project.item(*id)).is_some_and(
+            |item| matches!(&item.kind, ItemKind::Footage(footage) if footage.kind == effectcraft_engine::project::FootageKind::LinkedComposition),
+        );
+    if selected_link { (panel_height - 110.0).clamp(74.0, 116.0) } else { 74.0 }
+}
+
 /// The selected item's thumbnail and details (with the comps that use it), or a hint.
 fn details_header(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, ctx: &egui::Context, head: Rect) {
     let t = app.tokens;
@@ -549,6 +572,33 @@ fn details_header(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter
         for (i, l) in lines.iter().enumerate() {
             let r = widgets::text_fit(p, pos2(tx, thumb.min.y + 22.0 + 13.0 * i as f32), Align2::LEFT_CENTER, l, Tokens::ui(11.0), max_w, t.text_dim);
             app.auto.add(&format!("project.details.{i}"), r, l);
+        }
+        let problem = app.session.footage.item_problem(&it).or_else(|| effectcraft_engine::render::missing_item_problem(&it));
+        if let Some(description) = linked_source_description(&it, problem.as_deref()) {
+            let source = Rect::from_min_max(head.min + vec2(10.0, 74.0), head.max - vec2(10.0, 4.0));
+            if source.is_positive() {
+                let mut child =
+                    ui.new_child(egui::UiBuilder::new().id_salt("linked-source-details").max_rect(source).layout(egui::Layout::top_down(egui::Align::Min)));
+                child.set_clip_rect(source.intersect(ui.clip_rect()));
+                child.spacing_mut().item_spacing.y = 2.0;
+                let ItemKind::Footage(footage) = &it.kind else { return };
+                let label = crate::i18n::tr_args("Source project: {}", &[&footage.path]);
+                let response = child.add(egui::Label::new(egui::RichText::new(&label).small().color(t.text)).truncate()).on_hover_text(&description);
+                app.auto.add("project.details.linkedSource", response.rect, &label);
+                let status = problem
+                    .as_deref()
+                    .map_or_else(|| crate::i18n::tr("Ready — saved source snapshot").to_owned(), |why| crate::i18n::tr_args("Offline: {}", &[&why]));
+                let response = child
+                    .add(egui::Label::new(egui::RichText::new(&status).small().color(if problem.is_some() { t.danger } else { t.text_dim })).truncate())
+                    .on_hover_text(&description);
+                ctx.accesskit_node_builder(response.id, |node| {
+                    node.set_role(egui::accesskit::Role::Status);
+                    node.set_live(egui::accesskit::Live::Polite);
+                    node.set_label(&status);
+                    node.set_description(&description);
+                });
+                app.auto.add("project.details.linkedStatus", response.rect, &status);
+            }
         }
     } else {
         let hint = "Select an item to see its details";
@@ -1292,7 +1342,8 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let p = ui.painter().clone();
     let ctx = ui.ctx().clone();
     // Preview header.
-    let head = Rect::from_min_size(rect.min, vec2(rect.width(), 74.0));
+    let height = details_height(app, rect.height());
+    let head = Rect::from_min_size(rect.min, vec2(rect.width(), height));
     details_header(app, ui, &p, &ctx, head);
     // Search.
     let sr = Rect::from_min_size(pos2(rect.min.x + 8.0, head.max.y + 2.0), vec2(rect.width() - 16.0, 22.0));
@@ -1392,12 +1443,17 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         let open = it.is_folder().then(|| {
             app.ui.project_open_folders.contains(&id.0) || !app.ui.project_search.is_empty() || app.ui.project_status != crate::state::ProjectStatus::All
         });
+        let problem = app.session.footage.item_problem(it).or_else(|| effectcraft_engine::render::missing_item_problem(it));
+        let description = linked_source_description(it, problem.as_deref());
         resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::TreeItem, true, format!("{}, {}", it.name, crate::i18n::tr(it.type_name()))));
         ctx.accesskit_node_builder(resp.id, |n| {
             n.set_selected(selected);
             n.set_level(depth.saturating_add(1));
             if let Some(open) = open {
                 n.set_expanded(open);
+            }
+            if let Some(description) = &description {
+                n.set_description(description);
             }
         });
         if resp.has_focus() {
@@ -1416,7 +1472,6 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         proxy_indicator(app, ui, &g, it, &mut actions);
         // Footage (or the proxy in use) that can't be decoded (no decoder for its codec /
         // profile): a warning marker at the end of the name cell, the reason on hover.
-        let problem = app.session.footage.item_problem(it).or_else(|| effectcraft_engine::render::missing_item_problem(it));
         let name_clip =
             Rect::from_min_max(pos2(x0 + 30.0, r.min.y), pos2(r.min.x + name_w + 4.0 - if problem.is_some() { 16.0 } else { 0.0 }, r.max.y)).intersect(list);
         if let Some(why) = &problem {

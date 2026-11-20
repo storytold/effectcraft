@@ -248,6 +248,15 @@ fn gamma_22() -> f64 {
 }
 
 impl ProjectSettings {
+    /// The encoding of composition pixels at a link boundary. Output profiles, HDR mapping
+    /// and display views are applied after this boundary and do not change its source tag.
+    pub fn linked_color_space(&self) -> crate::LinkedColorSpace {
+        crate::LinkedColorSpace {
+            space: self.working_space.unwrap_or(if self.working_gamma_24() { ColorSpace::Rec709 } else { ColorSpace::Srgb }),
+            linear: self.working_space.is_some_and(|space| self.linearize || space.is_linear()),
+        }
+    }
+
     /// Working Gamma is 2.4 (anything else reads as 2.2).
     pub fn working_gamma_24(&self) -> bool {
         (self.working_gamma - 2.4).abs() < 0.05

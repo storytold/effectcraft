@@ -45,6 +45,11 @@ fn reload_paths(s: &Session) -> BTreeSet<String> {
     let mut paths = BTreeSet::new();
     for it in s.project.items.values() {
         if let ItemKind::Footage(f) = &it.kind {
+            // The linked-source refresh command owns project reads and snapshot replacement.
+            // A generic media probe must never reinterpret an .ecproj as movie footage.
+            if f.kind == FootageKind::LinkedComposition {
+                continue;
+            }
             if (!f.sequence.is_empty() && !sequences) || s.stored_paths.check(f).is_err() {
                 continue;
             }
@@ -243,10 +248,20 @@ fn refreshed(s: &Session, f: &Footage, probed: Footage) -> Footage {
     nf
 }
 
-/// Reload footage items `ids` from their files (File ▸ Reload Footage): an undo step; items
-/// whose file can't be read are marked missing. Returns how many items were reloaded.
+/// Reload footage items `ids` from their files (File ▸ Reload Footage). Ordinary footage
+/// interpretation is undoable; linked source generations remain external disk state.
+/// Returns how many items were reloaded, including links sharing a selected source project.
 pub fn reload_items(s: &mut Session, ids: &[ItemId]) -> crate::Result<usize> {
-    Ok(reload(s, ids, true)?.0)
+    let (linked, ordinary): (Vec<_>, Vec<_>) = ids
+        .iter()
+        .copied()
+        .partition(|id| matches!(s.project.item(*id).map(|i| &i.kind), Some(ItemKind::Footage(f)) if f.kind == FootageKind::LinkedComposition));
+    if !ordinary.is_empty() && s.importer.is_none() {
+        return Err(crate::EngineError::Other("media import is not available in this build".into()));
+    }
+    let refreshed = crate::linked_compositions::reload_items(s, &linked)?;
+    let reloaded = if ordinary.is_empty() { 0 } else { reload(s, &ordinary, true)?.0 };
+    Ok(refreshed + reloaded)
 }
 
 /// Reload items `ids`. `undoable` makes it an edit; otherwise it records the disk without
@@ -254,6 +269,9 @@ pub fn reload_items(s: &mut Session, ids: &[ItemId]) -> crate::Result<usize> {
 /// writing it) is left as it was. Returns the number reloaded and the files that couldn't be read
 /// (only without `undoable`).
 fn reload(s: &mut Session, ids: &[ItemId], undoable: bool) -> crate::Result<(usize, BTreeSet<String>)> {
+    if ids.iter().any(|id| matches!(s.project.item(*id).map(|i| &i.kind), Some(ItemKind::Footage(f)) if f.kind == FootageKind::LinkedComposition)) {
+        return Err(crate::EngineError::Other("Use project.refreshLinkedCompositions for linked sources".into()));
+    }
     let Some(importer) = s.importer.clone() else {
         return Err(crate::EngineError::Other("media import is not available in this build".into()));
     };

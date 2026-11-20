@@ -182,11 +182,25 @@ mod tests {
     use crate::container::{AepFile, Body, Chunk, parse, write};
 
     /// Asserts the two destination projects are structurally equal and serialize identically (layers,
-    /// properties and values included, which `ImportResult` does not carry). Nothing is normalized:
-    /// the import is deterministic, ids and timestamps included.
+    /// properties and values included, which `ImportResult` does not carry). Independently
+    /// authored projects/items receive distinct durable identities. Only those fields are
+    /// normalized after checking them; numeric IDs, timestamps and all imported content remain
+    /// part of the deterministic parser comparison.
     fn same_project(a: &Project, b: &Project, name: &str) {
-        assert!(a == b, "{name}: the imported projects differ through the index");
-        let (ja, jb) = (serde_json::to_string(a).ok(), serde_json::to_string(b).ok());
+        let mut identities = std::collections::BTreeSet::new();
+        for project in [a, b] {
+            for identity in std::iter::once(&project.project_id).chain(project.items.values().map(|item| &item.stable_id)) {
+                assert!(!identity.is_empty() && identities.insert(identity), "{name}: independent imports need nonempty, distinct durable identities");
+            }
+        }
+        assert!(a.items.keys().eq(b.items.keys()), "{name}: the imported item IDs differ through the index");
+        let mut normalized = b.clone();
+        normalized.project_id.clone_from(&a.project_id);
+        for (id, item) in &mut normalized.items {
+            item.stable_id.clone_from(&a.items[id].stable_id);
+        }
+        assert!(a == &normalized, "{name}: the imported projects differ through the index");
+        let (ja, jb) = (serde_json::to_string(a).ok(), serde_json::to_string(&normalized).ok());
         assert!(ja.is_some() && ja == jb, "{name}: the serialized projects differ through the index");
     }
 

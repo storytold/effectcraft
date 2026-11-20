@@ -19,13 +19,20 @@ fn new_project(s: &mut Session, _: &Value) -> Result<Value> {
         let bytes = s.services.read_file(&tpl).map_err(|e| EngineError::Other(format!("cannot read the new project template {tpl}: {e}")))?;
         let text = String::from_utf8(bytes).map_err(|_| EngineError::Other("the new project template is not a project file".into()))?;
         let mut proj = Project::from_json(&text)?;
+        proj.project_id.clear();
+        for item in proj.items.values_mut() {
+            item.stable_id.clear();
+        }
+        crate::linked_compositions::identify(&mut proj)?;
         crate::doc_path::resolve_footage(&mut proj, Some(&tpl));
         s.replace_project(proj, None);
         s.stored_paths.add(&s.project, Some(&tpl));
         s.update_sentinel();
         return Ok(json!({"template": tpl}));
     }
-    s.replace_project(Project::default(), None);
+    let mut proj = Project::default();
+    crate::linked_compositions::identify(&mut proj)?;
+    s.replace_project(proj, None);
     s.update_sentinel();
     Ok(Value::Null)
 }
@@ -48,12 +55,22 @@ pub(crate) fn open(s: &mut Session, p: &Value) -> Result<Value> {
     let text = if crate::xml_project::is_xml(&text) { crate::xml_project::from_xml(&text).map_err(EngineError::Other)? } else { text };
     let (mut proj, repaired) =
         Project::from_json_repaired(&text).map_err(|e| EngineError::Other(format!("{path} is not a project EffectCraft can open: {e}")))?;
+    if !b_p(p, "resolveLinks").unwrap_or(true) && crate::linked_compositions::has_links(&proj) {
+        return Err(EngineError::Other(
+            "Opening linked compositions through a confined desktop bridge is not supported in this sandbox; use a headless session".into(),
+        ));
+    }
+    // Legacy identities enter the session before any undo snapshot can be recorded.
+    // They become durable only when this candidate is successfully saved.
+    crate::linked_compositions::identify(&mut proj)?;
     // Footage saved with a relative path (imported by the CLI or an agent as `clip.mp4`, or
     // written by hand) is found next to the project file, as After Effects looks for footage
     // relative to the project (#652).
     let refused = crate::doc_path::resolve_footage(&mut proj, Some(path));
     s.replace_project(proj, Some(path.to_string()));
     s.stored_paths.add(&s.project, Some(path));
+    let linked = crate::linked_compositions::refresh(s, None)?;
+    s.mark_saved();
     s.restore_view(&effectcraft_project::saved_view(&text));
     s.note_project_path(path);
     // Values past the limits (a corrupt or hostile file) were brought within them (#788).
@@ -80,21 +97,42 @@ pub(crate) fn open(s: &mut Session, p: &Value) -> Result<Value> {
     if s.check_footage_on_open {
         crate::footage_check::start(s, None, false)?;
     }
-    Ok(json!({"path": path, "savedBy": saved_by, "repaired": repaired}))
+    Ok(json!({"path": path, "savedBy": saved_by, "repaired": repaired, "linkedCompositions": linked}))
 }
 
 /// The project file's text for `path`: `.ecproj` JSON, or XML for `.ecprojx` / `.xml` (a
 /// project opened from an XML copy saves as XML again). Fails, writing nothing, when the project
 /// wouldn't read back.
 pub(crate) fn file_text(s: &Session, path: &str) -> Result<String> {
+    file_text_of(s, path, &s.project)
+}
+
+fn file_text_of(s: &Session, path: &str, project: &Project) -> Result<String> {
+    let mut saved = project.clone();
+    // Runtime paths stay absolute (including in auto-saves); a regular saved link prefers a
+    // relative path when its source is inside the destination's folder.
+    if let Some(parent) = std::path::absolute(path).ok().and_then(|p| p.parent().map(std::path::Path::to_path_buf)) {
+        for item in saved.items.values_mut() {
+            if let ItemKind::Footage(f) = &mut item.kind
+                && f.kind == FootageKind::LinkedComposition
+                && let Ok(relative) = std::path::Path::new(&f.path).strip_prefix(&parent)
+            {
+                f.path = relative.to_string_lossy().into_owned();
+            }
+        }
+    }
     let compact = s.prefs.project.compact_project_files && !crate::xml_project::is_xml_path(path);
-    let json = s.project.to_file_json_with_view(&s.saved_view(), compact)?;
+    let json = saved.to_file_json_with_view(&s.saved_view(), compact)?;
     if crate::xml_project::is_xml_path(path) { crate::xml_project::to_xml(&json).map_err(EngineError::Other) } else { Ok(json) }
 }
 
 fn save_to(s: &mut Session, path: &str) -> Result<Value> {
-    let json = file_text(s, path)?;
+    let mut project = (*s.project).clone();
+    crate::linked_compositions::identify(&mut project)?;
+    let json = file_text_of(s, path, &project)?;
+    s.refuse_linked_source_save(path)?;
     s.services.write_file(path, json.as_bytes()).map_err(|e| EngineError::Other(format!("cannot write {path}: {e}")))?;
+    s.project = std::sync::Arc::new(project);
     s.path = Some(path.to_string());
     s.mark_saved();
     s.note_project_path(path);
@@ -536,7 +574,7 @@ fn add_footage(s: &mut Session, pending: PendingImport, probed: Vec<std::result:
                 let label = match footage.kind {
                     FootageKind::Still | FootageKind::Sequence => Label::Lavender,
                     FootageKind::Audio => Label::SeaFoam,
-                    FootageKind::Video | FootageKind::Model => Label::Aqua,
+                    FootageKind::Video | FootageKind::Model | FootageKind::LinkedComposition => Label::Aqua,
                     FootageKind::Data => Label::Sandstone,
                 };
                 let id = proj.add_item(&name, label, None, ItemKind::Footage(footage));
@@ -802,7 +840,15 @@ pub fn specs() -> Vec<CommandSpec> {
     vec![
         cmd!("file.newProject", "New Project", ["File", "New"], Some("Cmd+Alt+N"), "{}", always, new_project),
         cmd!("file.openDemoProject", "Open Demo Project", ["Help"], None, "{}", always, demo),
-        cmd!("file.open", "Open Project...", ["File"], Some("Cmd+O"), "{path}", always, open),
+        cmd!(
+            "file.open",
+            "Open Project...",
+            ["File"],
+            Some("Cmd+O"),
+            "{path, resolveLinks?: bool (default true; false refuses linked projects)}",
+            always,
+            open
+        ),
         cmd!("file.save", "Save", ["File"], Some("Cmd+S"), "{path?}", always, save),
         cmd!("file.saveAs", "Save As...", ["File", "Save As"], Some("Cmd+Shift+S"), "{path}", always, save_as),
         cmd!("file.incrementAndSave", "Increment and Save", ["File"], Some("Cmd+Alt+Shift+S"), "{}", has_path, increment_save),

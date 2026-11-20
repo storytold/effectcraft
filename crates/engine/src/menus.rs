@@ -587,6 +587,7 @@ File
     Adobe After Effects Project... | file.importAep
     Adobe Premiere Pro Project... | file.importTimeline
     EffectCraft Project... | file.importProject
+    Linked EffectCraft Composition... | file.linkComposition
     Vanishing Point (.vpe)... | file.importVanishingPoint
     Placeholder... | file.importPlaceholder
     Solid... | file.importSolid

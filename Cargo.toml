@@ -68,7 +68,8 @@ effectcraft-helper-host = { path = "crates/helper-host" }
 # foundation
 thiserror = "2"
 serde = { version = "1", features = ["derive", "rc"] }
-serde_json = { version = "1", features = ["float_roundtrip"] }
+serde_json = { version = "1", features = ["float_roundtrip", "raw_value"] }
+getrandom = { version = "0.3.4", features = ["wasm_js"] }
 log = "0.4"
 # The process's own memory use for the memory accountant (#3301; MIT OR Apache-2.0).
 memory-stats = "1.2"
