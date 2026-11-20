@@ -71,8 +71,8 @@ encode.open → encode.opened → (encode.frame → encode.packets)… → encod
 | `{"op":"encode.open","job":1,"device":"nvenc:0","codec":"h264","width":1920,"height":1080,"rate":[30,1],"bitrate_kbps":15000,"profile":"high","keyint":60,"colour":{"primaries":1,"transfer":1,"matrix":1,"range":"limited"},"slots":[{"in":{"offset":0,"len":3110400},"out":{"offset":3110400,"len":1048576}},…]}` | `{"op":"encode.opened","job":1,"codec_config":"<base64 avcC>","delay":2}` | `job` is chosen by EffectCraft and is never reused. `slots` is the memory the helper may use, decided by EffectCraft. `codec_config` is the `avcC` (H.264) or `hvcC` (HEVC) record for the MP4 sample entry. `delay` is the number of frames the encoder holds back (B-frames). |
 | `{"op":"encode.frame","job":1,"frame":0,"slot":0}` | `{"op":"encode.packets","job":1,"frame":0,"packets":[{"offset":0,"len":41230,"pts":0,"dts":-2,"key":true}]}` | The picture is in `slots[0].in`. The reply means the slot may be reused and says where the packets are, inside `slots[0].out`. It may hold no packets (the encoder is still holding frames) or several. |
 | `{"op":"encode.flush","job":1,"out":{"offset":…,"len":…}}` | `{"op":"encode.packets","job":1,"frame":null,"packets":[…]}` then `{"op":"encode.flushed","job":1}` | The rest of the stream, inside `out`. EffectCraft sizes `out` for the frames the encoder still holds: at least `(delay + 1)` times the length of a slot's `out` region. A packet that still does not fit is `packet_too_large`. |
-| `{"op":"encode.close","job":1}` | none | Free everything for the job. |
-| `{"op":"cancel","job":1}` | `{"op":"cancelled","job":1}` | Stop now. EffectCraft ignores any other reply for the job after it sends `cancel`. |
+| `{"op":"encode.close","job":1}` | none | Free everything for the job. EffectCraft sends it only when no frame is outstanding, after `encode.flushed` or after `cancelled`, and frees or reuses the job's regions only then. |
+| `{"op":"cancel","job":1}` | `{"op":"cancelled","job":1}` | Stop now. After it sends `cancel`, EffectCraft ignores every reply for the job except `cancelled`, so replies for frames still in flight are not protocol breaks. The helper stops using the job's regions before it replies `cancelled`. |
 
 - **Packets are MP4 samples.** Each is a sequence of length-prefixed NAL units, every length a
   4-byte big-endian number, which is what `codec_config` declares (`lengthSizeMinusOne` 3). A
@@ -103,10 +103,13 @@ encode.open → encode.opened → (encode.frame → encode.packets)… → encod
   `EFFECTCRAFT_HELPER_VIDEO_TIMEOUT`, as `EFFECTCRAFT_HELPER_TIMEOUT` is for effects), EffectCraft
   stops the helper. A GPU that hangs without exiting ends the helper instead
   of making the export look busy. `encode.open` and `encode.flush` use the load timeout (600 s).
+  After `cancel` the frames of that job have no timeout; `cancelled` is due within the same 30 s,
+  or EffectCraft stops the helper.
 - **`{"op":"error","job":1,"frame":3,"code":"…","message":"…"}`** answers one request. `frame` is
   there when it answers an `encode.frame` (it ends that frame's timeout) and absent for
   `encode.open` and `encode.flush`. The helper process carries on, but the job is over:
-  EffectCraft sends `encode.close`. Codes: `unsupported` (the settings are declined),
+  EffectCraft sends `cancel`, then `encode.close` once `cancelled` arrives. Frames sent before the
+  error are not answered. Codes: `unsupported` (the settings are declined),
   `device_lost`, `out_of_memory`, `packet_too_large`, `encoder`.
 - **EffectCraft stops the helper** when it exits, closes stdout, sends a line that does not parse
   or does not fit, breaks the rules above, or misses a timeout. After 3 stops it is turned off and
