@@ -671,22 +671,26 @@ pub fn with_overrides(project: &Project, comp: ItemId, overrides: &[Override]) -
         match &ctl.kind {
             EgKind::Property { .. } if ctl.as_type == Some(ControlType::Font) => {
                 for (layer, prop) in ctl.kind.targets() {
-                    if let Some(pr) = c.layer_mut(layer).and_then(|l| l.props.find_mut(prop)) {
+                    let Some(l) = c.layer_mut(layer) else { continue };
+                    if let Some(pr) = l.props.find_mut(prop) {
                         merge_font(&mut pr.value, &o.value);
                         for k in &mut pr.keys {
                             merge_font(&mut k.value, &o.value);
                         }
                         any = true;
                     }
+                    mark_nested_override(l, prop);
                 }
             }
             EgKind::Property { .. } => {
                 for (layer, prop) in ctl.kind.targets() {
-                    if let Some(pr) = c.layer_mut(layer).and_then(|l| l.props.find_mut(prop)) {
+                    let Some(l) = c.layer_mut(layer) else { continue };
+                    if let Some(pr) = l.props.find_mut(prop) {
                         pr.keys.clear();
                         pr.value = o.value.clone();
                         any = true;
                     }
+                    mark_nested_override(l, prop);
                 }
             }
             EgKind::Media { layer } => {
@@ -704,6 +708,19 @@ pub fn with_overrides(project: &Project, comp: ItemId, overrides: &[Override]) -
         }
     }
     any.then_some(p)
+}
+
+/// A control on a nested instance's Essential Property (`prop`, anywhere in the instance's
+/// group, also inside a panel group): the instance renders only the values it overrides, so the
+/// outer instance's value counts as one.
+fn mark_nested_override(l: &mut Layer, prop: Uid) {
+    if let Some(g) = l.props.sub_mut(GROUP)
+        && g.find(prop).is_some()
+        && let GroupKind::Essential { overridden } = &mut g.kind
+        && !overridden.contains(&prop)
+    {
+        overridden.push(prop);
+    }
 }
 
 // ------------------------------------------------------------------------------ id remapping
