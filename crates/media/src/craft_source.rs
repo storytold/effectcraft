@@ -617,8 +617,11 @@ fn to_craft_frame(vf: DecodedVideoFrame, container_color: Option<ColorInfo>, def
     let subsampling = vf.subsampling();
     let family = vf.family();
     let tags = vf.color;
-    let raw_par = vf.sar.filter(|&(n, d)| n > 0 && d > 0).unwrap_or(default_par);
-    let par = if rotation % 2 == 1 { (raw_par.1, raw_par.0) } else { raw_par };
+    let par = match vf.sar.filter(|&(n, d)| n > 0 && d > 0) {
+        Some((n, d)) if rotation % 2 == 1 => (d, n),
+        Some(sar) => sar,
+        None => default_par,
+    };
     let color = resolve_color(tags, container_color);
     let bit_depth = vf.bit_depth();
     let (planes, alpha) = vf.into_planes();
@@ -1079,5 +1082,28 @@ mod tests {
         assert_eq!(snap_common_fps(f64::NAN), None);
         assert_eq!(tick_to_matroska_units(Tick(craft_time::TICKS_PER_SECOND), (1, 1000)), 1000);
         assert_eq!(tick_to_units(Tick(craft_time::TICKS_PER_SECOND), 90000), 90000);
+    }
+
+    #[test]
+    fn rotated_frame_preserves_container_par_without_double_inversion() {
+        let make_vf = |sar: Option<(u32, u32)>| {
+            let y = Plane::packed(2, 2, 8, Samples::U8(vec![1, 2, 3, 4])).ok()?;
+            let cb = Plane::packed(1, 1, 8, Samples::U8(vec![128])).ok()?;
+            let cr = Plane::packed(1, 1, 8, Samples::U8(vec![128])).ok()?;
+            let mut vf = DecodedVideoFrame::new(2, 2, ColorFamily::YCbCr, Subsampling::S420, vec![y, cb, cr], None).ok()?;
+            vf.sar = sar;
+            Some(vf)
+        };
+        // `default_par` is already rotated by the container opener (e.g. (4, 3) -> (3, 4) for 90°).
+        let container_rotated_par = (3, 4);
+        if let Some(vf_no_sar) = make_vf(None) {
+            let out = to_craft_frame(vf_no_sar, None, container_rotated_par, 1, Tick::ZERO).ok();
+            assert_eq!(out.map(|f| f.par), Some((3, 4)));
+        }
+        // Decoder-supplied SAR is in coded coordinates and must be inverted once under 90° rotation.
+        if let Some(vf_with_sar) = make_vf(Some((4, 3))) {
+            let out = to_craft_frame(vf_with_sar, None, container_rotated_par, 1, Tick::ZERO).ok();
+            assert_eq!(out.map(|f| f.par), Some((3, 4)));
+        }
     }
 }
