@@ -547,6 +547,8 @@ fn rasterize(buf: &Buf, tris: &[([[f64; 2]; 3], [[f64; 2]; 3], f64)], neighbors:
                 }
             }
         }
+        // Reused across the row's pixels: only the contents change per pixel and subsample.
+        let mut accepted: Vec<usize> = Vec::new();
         for (i, px) in line.iter_mut().enumerate() {
             let c = cover[i].count_ones();
             let Some(k) = center[i].or(any[i]) else { continue };
@@ -569,7 +571,6 @@ fn rasterize(buf: &Buf, tris: &[([[f64; 2]; 3], [[f64; 2]; 3], f64)], neighbors:
             // edge samples the same surface once, and distinct overlapping parts blend (#3705).
             let x = (ox + i as i64) as f64;
             let mut sum = [0.0f32; 4];
-            let mut accepted: Vec<usize> = Vec::new();
             for o in SUB {
                 let q = [x + o[0], y + o[1]];
                 let mut acc = [0.0f32; 4];
