@@ -69,19 +69,17 @@ EffectCraft is an open-source, Rust-native motion-graphics and compositing app (
 - Layers, checked by `cargo xtask layers`: nothing below L5 depends on egui, eframe, winit, rfd or cpal; L0-L4 build for wasm32. Details: [`docs/architecture.md`](docs/architecture.md).
 - Time is `effectcraft_time::Tick` (254 016 000 000 per second); keyframe times are layer time.
 - Everything animatable is a `Property` in the layer's `PropGroup` tree, addressed by path (`transform/position`, `effects/#1/blurriness`, `@uid`).
-- Commands live in `crates/engine` (id, label, menu path, shortcut, params, `enabled()`, `run()`); the UI, CLI, control channel and MCP dispatch by id. Interactive widgets register an automation id; UI state is serde.
+- Commands live in `crates/engine` (id, label, menu path, shortcut, params, `enabled()`, `run()`); the UI, CLI, control channel and MCP dispatch by id. Interactive widgets have automation ids; UI state is serde.
 - Progress docs: [`ROADMAP.md`](ROADMAP.md), [`docs/gaps.md`](docs/gaps.md) (ranked work list), [`docs/target-app-parity.md`](docs/target-app-parity.md). Other docs: [`CONTRIBUTING.md`](CONTRIBUTING.md), [`docs/testing.md`](docs/testing.md), [`docs/agents.md`](docs/agents.md) (driving the app over MCP and the control channel), [`docs/control-protocol.md`](docs/control-protocol.md), [`docs/contributors.md`](docs/contributors.md).
 
 ### Checks
-For the crates you changed: `cargo fmt`, `cargo clippy -p <crate> --all-targets`, `cargo test -p <crate>`, or `cargo xtask ci --affected` (the gates scoped to the crates a change can affect). Full `cargo xtask ci`: fmt, clippy, tests, pdf-deps, lock-patches, layers, assets, wasm. New workspace crates set `[lints] workspace = true`.
+For the crates you changed: `cargo fmt`, `cargo clippy -p <crate> --all-targets`, `cargo test -p <crate>`, or `cargo xtask ci --affected` (the gates scoped to the crates a change can affect). Full `cargo xtask ci`: fmt, clippy, tests, pdf-deps, lock-patches, layers, assets, wasm.
 
 ### Paths and conventions
 - `unsafe`: none; the workspace sets `unsafe_code = "forbid"`.
 - Attribution: each asset `X` has a sidecar `X.attribution` (asset, title, author, source, license, license-file, added, notes), and a line in [`ATTRIBUTION.md`](ATTRIBUTION.md); `cargo xtask assets` checks both. Code-drawn assets (`crates/ui-egui/src/icons.rs`, `crates/engine/src/demo.rs`, `crates/effects`) are listed there too. The ArtCraft marks in `docs/brand/` use `LicenseRef-ArtCraft-Trademark` under `docs/brand/LICENSE-brand.txt`.
-- Spec edition for a codec or format is recorded in the crate README. ffmpeg and ffprobe are test oracles and fixture generators only.
 - Large real-file corpora: [storytold/photocraft-corpus](https://github.com/storytold/photocraft-corpus), fetched pinned and sha256-verified.
 - Run: `cargo run -p effectcraft -- --control 9877` (JSON lines, `docs/control-protocol.md`); the headless `snapshot` example renders a frame.
-- Commit subjects start with the task id (`M6.3: trim paths`).
 - Community links (Help menu, About, header Discord button): https://discord.gg/artcraft, https://getartcraft.com, https://getartcraft.com/apps/effectcraft, https://github.com/storytold/effectcraft.
 - About-window credits: `contributors/people.toml`; `contributors/contributors.json` is generated. See `docs/contributors.md`.
 - `plan/` is an optional gitignored notebook (`plan/aftereffects/` may hold reference notes).
