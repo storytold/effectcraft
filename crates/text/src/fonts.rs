@@ -431,9 +431,21 @@ pub fn add_font_data(data: Vec<u8>) -> Vec<FaceId> {
 /// face) and the text laid out with them (text in the new family, or that fell back, lays out
 /// again).
 fn faces_added() {
+    // First, so a lookup that started without the new faces finds out and doesn't store its result.
+    FACES_ADDED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     family_faces_cache().write().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
     fallback_cache().write().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
     crate::layout::clear_cache();
+}
+
+/// Advanced by [`faces_added`] before it clears the caches. A lookup reads it before it starts and
+/// stores its result only while it is unchanged, so a lookup that was already running when a face
+/// arrived cannot put back what was just cleared.
+static FACES_ADDED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The current [`FACES_ADDED`] count.
+pub(crate) fn faces_generation() -> u64 {
+    FACES_ADDED.load(std::sync::atomic::Ordering::SeqCst)
 }
 
 /// Held for a whole system scan: a concurrent caller waits for the complete list instead of
@@ -1140,6 +1152,7 @@ fn fallback_with_locale(c: char, prefer: FaceId, locale: impl FnOnce() -> CjkLoc
         }
     }
     let key = (c as u32 >> 8, prefer);
+    let generation = faces_generation();
     if let Some(cached) = fallback_cache().read().unwrap_or_else(std::sync::PoisonError::into_inner).get(&key).copied() {
         match cached {
             Some(id) if face(id).has_char(c) => return id,
@@ -1151,7 +1164,10 @@ fn fallback_with_locale(c: char, prefer: FaceId, locale: impl FnOnce() -> CjkLoc
         scan_system();
     }
     let found = system_fallback(c, &p.info.style);
-    fallback_cache().write().unwrap_or_else(std::sync::PoisonError::into_inner).insert(key, found);
+    let mut cache = fallback_cache().write().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if faces_generation() == generation {
+        cache.insert(key, found);
+    }
     found.unwrap_or(prefer)
 }
 
@@ -1159,6 +1175,7 @@ fn fallback_with_locale(c: char, prefer: FaceId, locale: impl FnOnce() -> CjkLoc
 /// for `script`, in the order they are tried, each in the style of `prefer`. For CJK, the other CJK
 /// languages' families follow in the locale's order.
 fn family_faces(script: FallbackScript, prefer: &Face, locale: CjkLocale) -> Arc<Vec<FaceId>> {
+    let generation = faces_generation();
     if let Some(faces) = family_faces_cache().read().unwrap_or_else(std::sync::PoisonError::into_inner).get(&(script, prefer.id, locale)) {
         return faces.clone();
     }
@@ -1175,7 +1192,10 @@ fn family_faces(script: FallbackScript, prefer: &Face, locale: CjkLocale) -> Arc
     let style = &prefer.info.style;
     let faces: Arc<Vec<FaceId>> =
         Arc::new(order.into_iter().flat_map(|s| families_for(s, locale)).filter_map(|fam| resolve_in(fam, style)).map(|r| r.face).collect());
-    family_faces_cache().write().unwrap_or_else(std::sync::PoisonError::into_inner).insert((script, prefer.id, locale), faces.clone());
+    let mut cache = family_faces_cache().write().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if faces_generation() == generation {
+        cache.insert((script, prefer.id, locale), faces.clone());
+    }
     faces
 }
 

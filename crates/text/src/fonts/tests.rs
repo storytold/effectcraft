@@ -683,8 +683,10 @@ fn a_font_added_later_replaces_cached_layouts_and_fallbacks() {
 
     let ids = add_font_data(test_font("Late Font Test"));
     let &[id] = ids.as_slice() else { panic!("one face expected: {ids:?}") };
-    let named = layout("\u{e001}", &st("Late Font Test"), &para);
-    assert!(!named.glyphs.is_empty() && named.glyphs.iter().all(|g| g.face == id && g.id != 0), "its family now draws with it");
+    // The fallback first: once the named layout loads the new face, the search over loaded faces
+    // would find it even with a stale fallback cache.
     let fallback = layout("\u{e001}", &st(DEFAULT_FAMILY), &para);
     assert!(!fallback.glyphs.is_empty() && fallback.glyphs.iter().all(|g| g.face == id && g.id != 0), "the fallback finds it");
+    let named = layout("\u{e001}", &st("Late Font Test"), &para);
+    assert!(!named.glyphs.is_empty() && named.glyphs.iter().all(|g| g.face == id && g.id != 0), "its family now draws with it");
 }

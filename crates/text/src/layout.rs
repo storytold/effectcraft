@@ -1324,6 +1324,7 @@ pub fn layout_rich(text: &str, runs: &[(Range<usize>, TextStyle)], paras: &[Para
     runs.hash(&mut h);
     paras.hash(&mut h);
     let key = h.finish();
+    let generation = crate::fonts::faces_generation();
     static CLOCK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let now = CLOCK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     if let Some(e) = cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner).get_mut(&key) {
@@ -1332,6 +1333,10 @@ pub fn layout_rich(text: &str, runs: &[(Range<usize>, TextStyle)], paras: &[Para
     }
     let l = Arc::new(layout_rich_uncached(text, runs, paras));
     let mut c = cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    // A font arrived while this was laid out: the result may miss it, so it isn't kept.
+    if crate::fonts::faces_generation() != generation {
+        return l;
+    }
     if c.len() >= 512 {
         // evict the oldest quarter
         let mut ages: Vec<u64> = c.values().map(|v| v.0).collect();
