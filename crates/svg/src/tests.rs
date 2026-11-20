@@ -1365,8 +1365,8 @@ fn css_cascade_specificity_display_visibility_and_group_opacity_parity() {
             <rect x="10" y="10" width="10" height="10" style="fill: #00ff00" visibility="visible"/>
         </g>
         <g opacity="0.5">
-            <rect x="20" y="10" width="10" height="10" fill="#ff0000"/>
-            <rect x="20" y="10" width="10" height="10" fill="#0000ff"/>
+            <rect x="20" y="10" width="10" height="10" style="fill: #ff0000"/>
+            <rect x="20" y="10" width="10" height="10" style="fill: #0000ff"/>
         </g>
     </svg>"##;
     let doc = parse(svg).unwrap();
@@ -1559,7 +1559,7 @@ fn paint_references_gradients_fallbacks_and_stroke_styles_parity() {
         <rect id="rad-rect" x="40" y="0" width="20" height="20" fill="url(#rad)"/>
         <rect id="fallback" x="0" y="20" width="10" height="10" fill="url(#missing) #ff00ff" stroke="url(#missing) #00ffff" stroke-width="2"/>
         <path id="evenodd" d="M20 20 H36 V36 H20 Z M24 24 V32 H32 V24 Z" fill="#00ff00" fill-rule="evenodd"/>
-        <path id="dashed" d="M40 30 H76" fill="none" stroke="#ffffff" stroke-width="4" stroke-linecap="square" stroke-dasharray="6 4" stroke-dashoffset="0"/>
+        <path id="dashed" d="M40 30 H76" fill="none" stroke="#ffffff" stroke-width="4" stroke-linecap="square" stroke-dasharray="6 8" stroke-dashoffset="0"/>
     </svg>"##;
     let doc = parse(svg).unwrap();
     let shapes = doc.flatten();
@@ -1583,7 +1583,7 @@ fn paint_references_gradients_fallbacks_and_stroke_styles_parity() {
     // Even-odd hole at (28, 28) is transparent, outer ring at (22, 28) is green.
     assert_eq!(px(&img, 28, 28)[3], 0.0);
     assert!(near(px(&img, 22, 28), [0.0, 1.0, 0.0, 1.0], 1e-3));
-    // Dashed stroke: on at x=43, gap at x=48.
+    // Dashed stroke (6 on, 8 off, square cap extends each end by 2): on at x=43, gap at x=50.
     assert!(near(px(&img, 43, 30), [1.0, 1.0, 1.0, 1.0], 1e-3));
-    assert_eq!(px(&img, 48, 30)[3], 0.0);
+    assert_eq!(px(&img, 50, 30)[3], 0.0);
 }
