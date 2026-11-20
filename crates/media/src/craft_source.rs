@@ -167,19 +167,6 @@ impl ContainerFile {
             }
         }
     }
-
-    fn audio_discard_padding_samples(&self, track_idx: usize, sample_idx: usize, native_rate: u32) -> usize {
-        match self {
-            ContainerFile::Isobmff(_) => 0,
-            ContainerFile::Matroska(f) => f
-                .tracks
-                .get(track_idx)
-                .and_then(|t| t.samples.get(sample_idx))
-                .and_then(|s| s.discard_padding_ns)
-                .filter(|&ns| ns > 0)
-                .map_or(0, |ns| ((i128::from(ns) * i128::from(native_rate)) / 1_000_000_000) as usize),
-        }
-    }
 }
 
 fn open_audio_tracks<'a, I>(container: &ContainerFile, source: &dyn ByteSource, candidates: I) -> Option<(Vec<AudioTrackEntry>, Vec<AudioStreamInfo>)>
@@ -567,11 +554,9 @@ fn decode_audio_range(
         let pkt = file.read_sample(source, track_idx, idx)?;
         state.next_sample = idx + 1;
         let block = state.decoder.decode(&pkt).map_err(|e| MediaError::Decode(e.to_string()))?;
-        let discard = file.audio_discard_padding_samples(track_idx, idx, native_rate);
         for (c, ch) in state.buf.iter_mut().enumerate() {
             if let Some(src_ch) = block.channels.get(c) {
-                let keep = src_ch.len().saturating_sub(discard);
-                ch.extend_from_slice(&src_ch[..keep]);
+                ch.extend_from_slice(src_ch);
             }
         }
     }
