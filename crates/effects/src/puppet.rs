@@ -569,9 +569,11 @@ fn rasterize(buf: &Buf, tris: &[([[f64; 2]; 3], [[f64; 2]; 3], f64)], neighbors:
             // edge samples the same surface once, and distinct overlapping parts blend (#3705).
             let x = (ox + i as i64) as f64;
             let mut sum = [0.0f32; 4];
+            let mut accepted: Vec<usize> = Vec::new();
             for o in SUB {
                 let q = [x + o[0], y + o[1]];
-                let mut acc: Option<([f32; 4], usize)> = None;
+                let mut acc = [0.0f32; 4];
+                accepted.clear();
                 for &k in row_tris[row].iter().rev() {
                     let (bx0, bx1, by0, by1) = boxes[k];
                     if q[0] < bx0 || q[0] > bx1 || q[1] < by0 || q[1] > by1 {
@@ -587,19 +589,21 @@ fn rasterize(buf: &Buf, tris: &[([[f64; 2]; 3], [[f64; 2]; 3], f64)], neighbors:
                     if t[3] <= TRANSPARENT {
                         continue;
                     }
-                    acc = Some(match acc {
-                        None => (t, k),
-                        // Sharing a rest-space edge makes two triangles one continuous surface:
-                        // keep the front sample instead of counting it twice.
-                        Some((a, owner)) if neighbors[owner].contains(&k) => (a, owner),
-                        Some((a, _)) => {
-                            let over = 1.0 - a[3];
-                            ([a[0] + t[0] * over, a[1] + t[1] * over, a[2] + t[2] * over, a[3] + t[3] * over], k)
-                        }
-                    });
+                    // Sharing a rest-space edge with any accepted triangle makes a candidate part
+                    // of the same continuous surface: keep the front sample, count it once.
+                    if accepted.iter().any(|&owner| neighbors[owner].contains(&k)) {
+                        continue;
+                    }
+                    if accepted.is_empty() {
+                        acc = t;
+                    } else {
+                        let over = 1.0 - acc[3];
+                        acc = [acc[0] + t[0] * over, acc[1] + t[1] * over, acc[2] + t[2] * over, acc[3] + t[3] * over];
+                    }
+                    accepted.push(k);
                 }
-                if let Some((a, _)) = acc {
-                    sum = [sum[0] + a[0], sum[1] + a[1], sum[2] + a[2], sum[3] + a[3]];
+                if !accepted.is_empty() {
+                    sum = [sum[0] + acc[0], sum[1] + acc[1], sum[2] + acc[2], sum[3] + acc[3]];
                 }
             }
             *px = [sum[0] * 0.25, sum[1] * 0.25, sum[2] * 0.25, sum[3] * 0.25];

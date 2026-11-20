@@ -435,3 +435,16 @@ fn two_distinct_parts_with_equal_samples_still_blend() {
     let got = out.img.get(4, 4);
     assert!((0..4).all(|c| (got[c] - [0.75, 0.0, 0.0, 0.75][c]).abs() < 1e-5), "{got:?}");
 }
+
+/// A distinct translucent part between two adjacent triangles does not break the shared-edge
+/// dedupe: every accepted triangle stays known, so the rear neighbour is still recognised (#3705).
+#[test]
+fn a_distinct_middle_part_keeps_the_shared_edge_dedupe() {
+    let buf = Buf { img: Image::filled(8, 8, [0.5, 0.5, 0.5, 0.5]), offset: [0.0, 0.0], scale: 1.0 };
+    let lower = ([[3.0, 3.0], [6.0, 3.0], [3.0, 6.0]], [[3.0, 3.0], [6.0, 3.0], [3.0, 6.0]], 0.0);
+    let middle = ([[3.5, 3.5], [7.0, 3.5], [3.5, 7.0]], [[3.5, 3.5], [7.0, 3.5], [3.5, 7.0]], 1.0);
+    let upper = ([[6.0, 3.0], [6.0, 6.0], [3.0, 6.0]], [[6.0, 3.0], [6.0, 6.0], [3.0, 6.0]], 2.0);
+    // Only lower and upper share an edge; middle is a distinct overlapping part.
+    let out = rasterize(&buf, &[lower, middle, upper], &[vec![2], vec![], vec![0]]);
+    assert_eq!(out.img.get(2, 2), [0.75, 0.75, 0.75, 0.75]);
+}
