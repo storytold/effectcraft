@@ -456,10 +456,25 @@ fn rasterize(buf: &Buf, tris: &[([[f64; 2]; 3], [[f64; 2]; 3], f64)]) -> Buf {
     let mut out = Image::new(w, h);
     // Triangle y-ranges for row bucketing.
     let ranges: Vec<(f64, f64)> = tris.iter().map(|(_, d, _)| (d[0][1].min(d[1][1]).min(d[2][1]), d[0][1].max(d[1][1]).max(d[2][1]))).collect();
+    // Bounding boxes, so a subsample only tests the triangles that can cover it.
+    let boxes: Vec<(f64, f64, f64, f64)> = tris
+        .iter()
+        .map(|(_, d, _)| {
+            let xs = [d[0][0], d[1][0], d[2][0]];
+            let ys = [d[0][1], d[1][1], d[2][1]];
+            (
+                xs.iter().copied().fold(f64::INFINITY, f64::min),
+                xs.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+                ys.iter().copied().fold(f64::INFINITY, f64::min),
+                ys.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+            )
+        })
+        .collect();
     const SUB: [[f64; 2]; 4] = [[0.25, 0.25], [0.75, 0.25], [0.25, 0.75], [0.75, 0.75]];
-    /// A sample at or above this alpha is opaque and keeps its place in front; a transparent one
-    /// lets the triangles behind it show through (#3705).
+    /// A sample at or above this alpha is opaque and keeps the pixel to itself.
     const OPAQUE: f32 = 1.0 - 1e-6;
+    /// A sample below this alpha counts as transparency and lets the triangles behind show.
+    const TRANSPARENT: f32 = 1e-6;
     out.rows_mut().for_each(|(row, line)| {
         let y = (oy + row as i64) as f64;
         let n = line.len();
@@ -506,46 +521,33 @@ fn rasterize(buf: &Buf, tris: &[([[f64; 2]; 3], [[f64; 2]; 3], f64)]) -> Buf {
                 *px = [s[0] * cov, s[1] * cov, s[2] * cov, s[3] * cov];
                 continue;
             }
-            // The front-most triangle is transparent here, so the parts behind it would be hidden.
-            // Composite the covering triangles back to front instead: an opaque one shows, a
-            // partly transparent one blends over what is behind it.
-            let mut acc = [0.0f32; 4];
-            for (r, d, _) in tris.iter() {
-                let (ya, yb) = (d[0][1].min(d[1][1]).min(d[2][1]), d[0][1].max(d[1][1]).max(d[2][1]));
-                if yb < y || ya > y + 1.0 {
-                    continue;
-                }
-                let xa = (d[0][0].min(d[1][0]).min(d[2][0]).floor() as i64 - ox).max(0) as usize;
-                let xb = ((d[0][0].max(d[1][0]).max(d[2][0]).ceil() as i64 - ox + 1).max(0) as usize).min(n);
-                if i < xa || i >= xb {
-                    continue;
-                }
-                let x = (ox + i as i64) as f64;
-                let mut subsamples = 0u8;
-                for o in SUB {
-                    if let Some(l) = bary(d[0], d[1], d[2], [x + o[0], y + o[1]])
-                        && l.iter().all(|v| *v >= -1e-9)
-                    {
-                        subsamples += 1;
+            // The front-most triangle samples transparency here (an Expansion margin past the
+            // layer's content), so the parts behind it would be hidden. Each subsample takes the
+            // front-most covering triangle that has content: a shared mesh edge is counted once,
+            // and the opaque part behind a transparent one shows through (#3705).
+            let x = (ox + i as i64) as f64;
+            let mut sum = [0.0f32; 4];
+            for o in SUB {
+                let q = [x + o[0], y + o[1]];
+                for k in (0..tris.len()).rev() {
+                    let (bx0, bx1, by0, by1) = boxes[k];
+                    if q[0] < bx0 || q[0] > bx1 || q[1] < by0 || q[1] > by1 {
+                        continue;
+                    }
+                    let (r, d, _) = &tris[k];
+                    let Some(l) = bary(d[0], d[1], d[2], q) else { continue };
+                    if l.iter().any(|v| *v < -1e-9) {
+                        continue;
+                    }
+                    let src = [l[0] * r[0][0] + l[1] * r[1][0] + l[2] * r[2][0], l[0] * r[0][1] + l[1] * r[1][1] + l[2] * r[2][1]];
+                    let t = buf.img.sample_bilinear(src[0], src[1]);
+                    if t[3] > TRANSPARENT {
+                        sum = [sum[0] + t[0], sum[1] + t[1], sum[2] + t[2], sum[3] + t[3]];
+                        break;
                     }
                 }
-                let centered = bary(d[0], d[1], d[2], [x + 0.5, y + 0.5]).is_some_and(|l| l.iter().all(|v| *v >= -1e-9));
-                if subsamples == 0 && !centered {
-                    continue;
-                }
-                let cj = if centered && subsamples == 4 { 1.0 } else { subsamples.max(1) as f32 / 4.0 };
-                let Some(l) = bary(d[0], d[1], d[2], p) else { continue };
-                let src = [l[0] * r[0][0] + l[1] * r[1][0] + l[2] * r[2][0], l[0] * r[0][1] + l[1] * r[1][1] + l[2] * r[2][1]];
-                let t = buf.img.sample_bilinear(src[0], src[1]);
-                if t[3] >= OPAQUE {
-                    acc = [t[0] * cj, t[1] * cj, t[2] * cj, t[3] * cj];
-                } else if t[3] > 0.0 {
-                    let a = t[3] * cj;
-                    let behind = 1.0 - a;
-                    acc = [t[0] * cj + acc[0] * behind, t[1] * cj + acc[1] * behind, t[2] * cj + acc[2] * behind, a + acc[3] * behind];
-                }
             }
-            *px = acc;
+            *px = [sum[0] * 0.25, sum[1] * 0.25, sum[2] * 0.25, sum[3] * 0.25];
         }
     });
     Buf { img: out, offset: [buf.offset[0] - ox as f64, buf.offset[1] - oy as f64], scale: buf.scale }

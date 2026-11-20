@@ -374,3 +374,25 @@ fn a_transparent_front_triangle_does_not_hide_the_part_behind() {
     // The buffer starts at layer (2, 2), so layer pixel (4, 4) is buffer pixel (2, 2).
     assert_eq!(out.img.get(2, 2), [1.0, 1.0, 1.0, 1.0], "the transparent margin hid the part behind");
 }
+
+/// Two adjacent triangles of one mesh share an edge through the pixel: each subsample belongs to
+/// one triangle, so a uniform translucent square keeps its alpha once (#3705).
+#[test]
+fn a_shared_mesh_edge_keeps_the_uniform_alpha_once() {
+    let buf = Buf { img: Image::filled(8, 8, [0.5, 0.5, 0.5, 0.5]), offset: [0.0, 0.0], scale: 1.0 };
+    let lower = ([[3.0, 3.0], [6.0, 3.0], [3.0, 6.0]], [[3.0, 3.0], [6.0, 3.0], [3.0, 6.0]], 0.0);
+    let upper = ([[6.0, 3.0], [6.0, 6.0], [3.0, 6.0]], [[6.0, 3.0], [6.0, 6.0], [3.0, 6.0]], 1.0);
+    let out = rasterize(&buf, &[lower, upper]);
+    assert_eq!(out.img.get(2, 2), [0.5, 0.5, 0.5, 0.5]);
+}
+
+/// A small opaque triangle in front of a fully covered opaque rear triangle leaves the pixel
+/// opaque: the front one owns only its own subsample (#3705).
+#[test]
+fn a_partial_opaque_front_keeps_the_pixel_opaque() {
+    let buf = Buf { img: Image::filled(8, 8, [1.0, 1.0, 1.0, 1.0]), offset: [0.0, 0.0], scale: 1.0 };
+    let rear = ([[2.0, 2.0], [8.0, 2.0], [2.0, 8.0]], [[2.0, 2.0], [8.0, 2.0], [2.0, 8.0]], 0.0);
+    let front = ([[4.1, 4.1], [4.4, 4.1], [4.1, 4.4]], [[4.1, 4.1], [4.4, 4.1], [4.1, 4.4]], 1.0);
+    let out = rasterize(&buf, &[rear, front]);
+    assert_eq!(out.img.get(2, 2), [1.0, 1.0, 1.0, 1.0]);
+}
