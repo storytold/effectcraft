@@ -1531,11 +1531,12 @@ fn matroska_opus_audio_timing_and_seek() {
     let f = probe(&p).expect("probe webm with opus");
     assert!(f.has_audio, "opus audio stream detected");
     let pool = MediaPool::new();
-    let start_audio = pool.audio(&f, 0, 4800, 48000);
-    assert_eq!(start_audio.len(), 1);
-    let peak_start = start_audio[0].iter().map(|s| s.abs()).fold(0.0f32, f32::max);
-    assert!(peak_start > 0.1, "opus audio at t=0 should be non-silent (peak={peak_start})");
-    let seek_audio = pool.audio(&f, 24000, 4800, 48000);
-    let peak_seek = seek_audio[0].iter().map(|s| s.abs()).fold(0.0f32, f32::max);
-    assert!(peak_seek > 0.1, "opus audio after seek should be non-silent (peak={peak_seek})");
+    let start_audio = pool.audio_samples(&f, Tick::ZERO, 4800, 48_000);
+    assert_eq!(start_audio.len(), 9600);
+    let rms_start = (start_audio.iter().map(|v| v * v).sum::<f32>() / start_audio.len() as f32).sqrt();
+    assert!((rms_start - 0.0625).abs() < 0.02, "opus audio at t=0 rms {rms_start}");
+    let seek_audio = pool.audio_samples(&f, Tick(TICKS_PER_SECOND / 2), 4800, 48_000);
+    assert_eq!(seek_audio.len(), 9600);
+    let rms_seek = (seek_audio.iter().map(|v| v * v).sum::<f32>() / seek_audio.len() as f32).sqrt();
+    assert!((rms_seek - 0.0625).abs() < 0.02, "opus audio after seek rms {rms_seek}");
 }
