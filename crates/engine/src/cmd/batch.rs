@@ -14,8 +14,20 @@ use crate::{EngineError, Result, Session};
 ///
 /// The `file.*` commands replace the whole project, which resets history
 /// ([`crate::Session::replace_project`]) and with it the anchor the batch folds its steps onto.
-const NOT_IN_BATCH: &[&str] =
-    &["engine.batch", "edit.purgeUndo", "file.newProject", "file.open", "file.openDemoProject", "file.closeProject", "file.revert", "file.openRecent"];
+/// `edit.undo` and `edit.history.goto` walk the project across the undo line, which moves that
+/// anchor out of `History::undo` before `fold` runs.
+const NOT_IN_BATCH: &[&str] = &[
+    "engine.batch",
+    "edit.purgeUndo",
+    "edit.undo",
+    "edit.history.goto",
+    "file.newProject",
+    "file.open",
+    "file.openDemoProject",
+    "file.closeProject",
+    "file.revert",
+    "file.openRecent",
+];
 
 /// Resolve a `$N` / `$N.key.0.key` reference against the results so far.
 fn reference(s: &str, results: &[Value]) -> Option<Result<Value>> {
@@ -276,5 +288,28 @@ mod tests {
         assert!(std::sync::Arc::ptr_eq(&s.project, &before_batch));
         assert_eq!(s.history.batch_depth, 0);
         assert!(s.undo(), "the pre-batch state stays reachable");
+    }
+
+    /// Undo and history jumps walk the project across the undo line, which moves the batch's fold
+    /// anchor out of `History::undo` before `fold` runs, so they are refused too.
+    #[test]
+    fn a_batch_refuses_history_navigation() {
+        for (id, params) in [("edit.undo", json!({})), ("edit.history.goto", json!({"steps": -1}))] {
+            let mut s = Session::default();
+            s.execute("comp.new", json!({"name": "B", "width": 100, "height": 100})).unwrap();
+            s.execute("layer.newSolid", json!({"name": "Box", "color": "#ff0000"})).unwrap();
+            let before_batch = s.project.clone();
+            let e = s
+                .execute_checked(
+                    "engine.batch",
+                    json!({"label": "nav", "steps": [{"command": "layer.newNull", "params": {}}, {"command": id, "params": params}]}),
+                )
+                .unwrap_err()
+                .to_string();
+            assert!(e.contains(id) && e.contains("can't run inside a batch"), "{id}: {e}");
+            // Refused and rolled back: the project and its anchor are exactly as before.
+            assert!(std::sync::Arc::ptr_eq(&s.project, &before_batch));
+            assert_eq!(s.history.batch_depth, 0);
+        }
     }
 }
