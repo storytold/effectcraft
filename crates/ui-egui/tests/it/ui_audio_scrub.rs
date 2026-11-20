@@ -985,6 +985,11 @@ fn scrub_reports_excessive_audio_work() {
         // Use a separate app/device so the gesture cannot inherit the direct call's error.
         let project = app.session.project.clone();
         let expr = app.session.expr.clone();
+        let layer = &mut Arc::make_mut(&mut app.session.project).comp_mut(cid).unwrap().layers[0];
+        layer.props.prop_mut("timeRemap").unwrap().expr = None;
+        app.scrub_audio(cid, Tick::from_units(1, 30), 0.2);
+        assert!(feed.queued_frames() > 0, "editing the failed frame allows a retry without moving");
+        assert!(feed.error().is_none());
         drop(app);
         let fake = Fake::default();
         let (mut app, fresh_cid) = setup(true, &fake);

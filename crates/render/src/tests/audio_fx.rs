@@ -177,10 +177,7 @@ fn audio_time_remap_hold_is_silent_with_faded_edges() {
     let fade = SR as usize * 2 / 1000;
     let half = SR as usize / 2;
     let left = |i: usize| samples[i * 2] as f64;
-    // The remap holds from the second sample to the key at 0.5 s: no sound in between.
-    assert!((1..half).all(|i| samples[i * 2] == 0.0 && samples[i * 2 + 1] == 0.0), "the held span is silent");
-    // The first sample is the one before the hold: faded to 1/fade.
-    assert!((left(0) - 0.75 / fade as f64).abs() < 1e-6, "the sound fades into the hold: {}", left(0));
+    assert!(samples[..half * 2].iter().all(|&sample| sample == 0.0), "the hold is silent from the in point");
     // After it the sound fades in over `fade` samples, then plays the ramp from the second key's time.
     for d in 0..fade + 8 {
         let gain = ((d + 1) as f64 / fade as f64).min(1.0);
@@ -196,6 +193,39 @@ fn audio_time_remap_hold_is_silent_with_faded_edges() {
         blocked.extend(mix(&p, &Signal(ramp), cid, first as f64 / SR as f64, 137.min(SR as usize - first)));
     }
     assert_eq!(samples, blocked, "block sizes must not change the audio");
+}
+
+#[test]
+fn audio_time_remap_fades_into_an_interior_hold() {
+    let (mut p, cid) = comp_with(None, &[], false);
+    remap(&mut p, cid, &[(0.0, 0.25), (0.25, 0.5), (0.5, 0.75), (1.0, 1.25)]);
+    p.comp_mut(cid).unwrap().layers[0].props.prop_mut("timeRemap").unwrap().keys[1].out_interp = effectcraft_keyframe::Interp::Hold;
+    let fade = SR as usize * 2 / 1000;
+    let at = SR as usize / 4;
+    let samples = mix(&p, &Signal(|_| (0.5, -0.5)), cid, 0.0, SR as usize);
+    assert_eq!(samples[2 * (at + 1)], 0.0);
+    assert!((samples[2 * at] - 0.5 / fade as f32).abs() < 1e-6);
+    assert_eq!(samples[2 * (at + 1 - fade)], 0.5);
+}
+
+#[test]
+fn explicit_audio_work_limit_includes_the_output() {
+    use crate::audio::{AudioError, MixControl, MixSources, mix_comp_with_control};
+    let (p, cid) = comp_with(None, &[], false);
+    let source = Signal(|_| (0.5, -0.5));
+    let sources = MixSources { project: &p, footage: &source, expr: None };
+    let mix = |max_work| mix_comp_with_control(&sources, cid, Tick::ZERO, 2, SR, &MixControl { max_work: Some(max_work), ..Default::default() });
+    assert_eq!(mix(5), Err(AudioError::WorkLimit));
+    assert_eq!(mix(6).unwrap(), vec![0.5, -0.5, 0.5, -0.5]);
+}
+
+#[test]
+fn audio_time_remap_fast_sequential_reads_use_the_work_budget() {
+    let (mut p, cid) = comp_with(None, &[], false);
+    remap(&mut p, cid, &[(0.0, 0.0), (1.0, 100.0)]);
+    let samples = mix_comp(&p, &Signal(ramp), None, cid, Tick::ZERO, 16_384, 48_000).unwrap();
+    assert!((samples[480 * 2] - 1.0).abs() < 1e-6);
+    assert!(samples[1000 * 2..].iter().all(|&sample| sample == 0.0));
 }
 
 #[test]
@@ -223,7 +253,7 @@ fn audio_time_remap_large_jump_keeps_source_requests_bounded() {
     // The hold in front of the jump is silent; after it the audio plays from the distant source.
     assert!(samples[fade * 2..(half - fade) * 2].iter().all(|v| *v == 0.0));
     assert!(samples[(half + fade) * 2..].iter().all(|v| *v == 0.25));
-    assert_eq!(src.0.lock().unwrap().len(), 2, "one fetch for the page the fade into the hold reads, one for the page it plays");
+    assert_eq!(src.0.lock().unwrap().len(), 1, "only the distant moving segment needs a page");
 }
 
 #[test]
@@ -756,7 +786,7 @@ fn strongly_stretched_audio_reads_bounded_chunks() {
                     assert!((samples[i * 2] - expected).abs() < 1e-6, "rate={rate} speed={speed} nested={nested} sample={i}");
                     assert_eq!(samples[i * 2], -samples[i * 2 + 1]);
                 }
-                assert!(source.0.load(std::sync::atomic::Ordering::Relaxed) <= 1_048_576);
+                assert!(source.0.load(std::sync::atomic::Ordering::Relaxed) <= MAX_READ);
             }
         }
     }

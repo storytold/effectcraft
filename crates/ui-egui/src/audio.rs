@@ -91,7 +91,7 @@ impl AudioFeed {
     /// Stop feeding and keep an actionable error for the UI.
     fn fail(&self, error: String) {
         *self.error.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(error);
-        self.finished.store(true, Ordering::Relaxed);
+        self.finished.store(true, Ordering::Release);
     }
 
     fn resume(&self) {
@@ -159,7 +159,7 @@ impl AudioFeed {
     }
 
     pub fn finished(&self) -> bool {
-        self.finished.load(Ordering::Relaxed) && self.queued_frames() == 0
+        self.finished.load(Ordering::Acquire) && self.queued_frames() == 0
     }
 }
 
@@ -559,6 +559,8 @@ pub struct AudioScrub {
     pub rate: u32,
     /// The comp and frame last played (holding still repeats nothing).
     last: Option<(ItemId, i64)>,
+    /// A failed attempt may be retried as soon as the project snapshot changes.
+    failed_project: Option<std::sync::Weak<Project>>,
     /// When it last played (UI seconds): an idle scrub closes the device.
     pub last_used: f64,
 }
@@ -568,7 +570,7 @@ impl AudioScrub {
         let rate = device.sample_rate().max(8000);
         let feed = Arc::new(AudioFeed::default());
         device.start(feed.clone())?;
-        Ok(AudioScrub { feed, device, rate, last: None, last_used: now })
+        Ok(AudioScrub { feed, device, rate, last: None, failed_project: None, last_used: now })
     }
 
     /// Play the frame of `comp` at `t` (one frame long, 30–100 ms) unless it was the last one
@@ -577,7 +579,7 @@ impl AudioScrub {
         self.last_used = now;
         let Some(c) = src.project.comp(comp) else { return false };
         let frame = c.frame_rate.frame_at(t);
-        if self.last == Some((comp, frame)) {
+        if self.last == Some((comp, frame)) && self.failed_project.as_ref().is_none_or(|p| p.ptr_eq(&Arc::downgrade(&src.project))) {
             return false;
         }
         self.last = Some((comp, frame));
@@ -590,6 +592,7 @@ impl AudioScrub {
             Ok(buf) => buf,
             Err(error) => {
                 // What is still queued came from another frame: drop it, then say why.
+                self.failed_project = Some(Arc::downgrade(&src.project));
                 self.feed.clear();
                 self.feed.fail(error.to_string());
                 return false;
@@ -604,6 +607,7 @@ impl AudioScrub {
             buf[2 * i + 1] *= g;
         }
         self.feed.clear();
+        self.failed_project = None;
         self.feed.resume();
         self.feed.push(&buf);
         true

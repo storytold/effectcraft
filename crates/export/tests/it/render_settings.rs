@@ -750,20 +750,80 @@ fn audio_mix_failures_abort_export() {
     assert!(result.unwrap_err().contains("audio mixing exceeded its work limit"));
 }
 
-/// Valid low-frame-rate movie exports must split large audio requests into bounded mixes.
+/// A single video frame can span many audio blocks. Check decoded audio at every block join.
 #[test]
 fn low_frame_rate_audio_exports_are_not_rejected_by_the_mix_limit() {
-    let (mut p, cid) = project(FrameRate::new(1, 30), |_, _| {});
+    const RATE: u32 = 48_000;
+    const FRAMES: usize = 30 * RATE as usize;
+    const BLOCK: usize = 16_384;
+    struct Chirp;
+    fn signal(i: usize) -> f32 {
+        let t = i as f64 / f64::from(RATE);
+        (0.5 * (std::f64::consts::TAU * (173.0 * t + 3.0 * t * t)).sin()) as f32
+    }
+    impl effectcraft_render::FootageSource for Chirp {
+        fn frame(&self, _: ItemId, _: &effectcraft_project::Footage, _: Tick) -> Option<Arc<Image>> {
+            None
+        }
+        fn audio(&self, _: ItemId, _: &effectcraft_project::Footage, start: Tick, frames: usize, _: u32) -> Option<Vec<f32>> {
+            let first = usize::try_from(start.to_units_floor(i64::from(RATE))).ok()?;
+            Some((first..first + frames).flat_map(|i| [signal(i); 2]).collect())
+        }
+    }
+    let (mut p, cid) = project(FrameRate::new(1, 30), |p, comp| {
+        let f = effectcraft_project::Footage { has_audio: true, duration: Tick::from_seconds_f64(30.0), ..Default::default() };
+        let item = p.add_item("Chirp", Label::SeaFoam, None, ItemKind::Footage(f));
+        let mut layer = build::layer(p, comp, "Chirp", LayerSource::Footage { item }, (0, 0), None);
+        layer.out_point = Tick::from_seconds_f64(30.0);
+        comp.layers.push(layer);
+    });
     p.comp_mut(cid).unwrap().duration = Tick::from_seconds_f64(30.0);
-    for (format, codec) in
-        [(OutputFormat::Uncompressed, WebmVideoCodec::Vp9), (OutputFormat::WebM, WebmVideoCodec::Vp9), (OutputFormat::WebM, WebmVideoCodec::Av1)]
-    {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = custom(0.0, 30.0);
+    for (format, codec, name) in [
+        (OutputFormat::Uncompressed, WebmVideoCodec::Vp9, "pcm.mov"),
+        (OutputFormat::WebM, WebmVideoCodec::Vp9, "vp9.webm"),
+        (OutputFormat::WebM, WebmVideoCodec::Av1, "av1.webm"),
+    ] {
         let mut om = OutputModule::for_format(format);
         om.webm_codec = codec;
         om.audio = AudioOutput::On;
-        om.audio_sample_rate = 48000;
-        let (result, files) = run_with(&p, cid, &custom(0.0, 30.0), &om, "/slow.mov", JobOptions::default(), false);
-        assert!(result.is_ok(), "{format:?}/{codec:?}: {result:?}");
-        assert_eq!(files.lock().unwrap().len(), 1);
+        om.audio_sample_rate = RATE;
+        let files: Files = Default::default();
+        let captured = files.clone();
+        let sink = move |path: &str, data: Vec<u8>| captured.lock().unwrap().push((path.to_string(), data));
+        let job = Job {
+            project: &p,
+            footage: &Chirp,
+            expr: None,
+            accel: None,
+            comp: cid,
+            settings: &settings,
+            output: &om,
+            path: name,
+            sink: Some(&sink),
+            options: JobOptions::default(),
+            nested_switches: true,
+        };
+        assert!(export(&job, &mut |_| true).unwrap().audio, "{name}");
+        let mut files = files.lock().unwrap();
+        assert_eq!(files.len(), 1, "{name}");
+        let path = dir.path().join(name);
+        std::fs::write(&path, files.pop().unwrap().1).unwrap();
+        let footage = effectcraft_media::probe(&path).unwrap();
+        assert!((footage.duration.seconds() - 30.0).abs() < 0.03, "{name}: {:?}", footage.duration);
+        let pcm = effectcraft_media::MediaPool::new().audio_samples(&footage, Tick::ZERO, FRAMES, RATE);
+        assert_eq!(pcm.len(), FRAMES * 2, "{name}");
+        for center in (BLOCK..FRAMES - 1024).step_by(BLOCK).chain([FRAMES - 2048]) {
+            let (mut dot, mut actual, mut expected) = (0.0, 0.0, 0.0);
+            for i in center - 1024..center + 1024 {
+                let got = pcm[2 * i];
+                let want = signal(i);
+                dot += got * want;
+                actual += got * got;
+                expected += want * want;
+            }
+            assert!(actual > expected * 0.4 && dot > 0.85 * (actual * expected).sqrt(), "{name}: audio discontinuity near sample {center}");
+        }
     }
 }

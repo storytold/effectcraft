@@ -307,3 +307,25 @@ fn property_read_pass_limits_abort_audio_and_recover() {
     let (p, cid) = workload::project(1, 0, Some("Math.sin(time)"));
     assert!(mix_comp(&p, &source, Some(&Expressions), cid, Tick::ZERO, 32, 48000).is_ok());
 }
+
+#[test]
+fn audio_result_copy_shares_the_expression_budget() {
+    let (p, cid) = workload::project(1, 0, Some("Array(65536).fill(1)"));
+    let source = workload::Source::default();
+    let control = MixControl { max_expression_yields: Some(0), ..Default::default() };
+    assert_eq!(
+        mix_comp_with_control(&MixSources { project: &p, footage: &source, expr: Some(&Expressions) }, cid, Tick::ZERO, 32, 48000, &control),
+        Err(AudioError::WorkLimit)
+    );
+    let (p, cid) = workload::project(1, 0, Some("Math.sin(time)"));
+    assert!(mix_comp(&p, &source, Some(&Expressions), cid, Tick::ZERO, 32, 48000).is_ok());
+}
+
+#[test]
+fn audio_finalization_does_not_invoke_returned_accessors() {
+    let (p, cid) = workload::project(1, 0, Some("({ get __isProp() { return true; }, value: 0.5 + time })"));
+    let source = workload::Source::default();
+    let expected = mix_comp(&p, &source, None, cid, Tick::ZERO, 32, 48000).unwrap();
+    let actual = mix_comp(&p, &source, Some(&Expressions), cid, Tick::ZERO, 32, 48000).unwrap();
+    assert_eq!(actual, expected, "an accessor result uses the keyframed value");
+}
