@@ -12,7 +12,7 @@ use crate::{EngineError, Result, Session};
 /// Commands that can't run inside a batch (they nest batches or discard the history the batch
 /// folds onto), besides the commands that run scripts ([`super::scripts::RUNS_SCRIPTS`]).
 ///
-/// The `file.*` commands replace the whole project, which resets history
+/// The project-replacing commands (`file.*`, `templates.create`) reset history
 /// ([`crate::Session::replace_project`]) and with it the anchor the batch folds its steps onto.
 /// `edit.undo` and `edit.history.goto` walk the project across the undo line, which moves that
 /// anchor out of `History::undo` before `fold` runs.
@@ -27,6 +27,7 @@ const NOT_IN_BATCH: &[&str] = &[
     "file.closeProject",
     "file.revert",
     "file.openRecent",
+    "templates.create",
 ];
 
 /// Resolve a `$N` / `$N.key.0.key` reference against the results so far.
@@ -280,7 +281,7 @@ mod tests {
         s.execute("comp.new", json!({"name": "B", "width": 100, "height": 100})).unwrap();
         s.execute("layer.newSolid", json!({"name": "Box", "color": "#ff0000"})).unwrap();
         let before_batch = s.project.clone();
-        for id in ["file.newProject", "file.open", "file.openDemoProject", "file.closeProject", "file.revert", "file.openRecent"] {
+        for id in ["file.newProject", "file.open", "file.openDemoProject", "file.closeProject", "file.revert", "file.openRecent", "templates.create"] {
             let e = s.execute_checked("engine.batch", json!({"label": "switch", "steps": [{"command": id, "params": {}}]})).unwrap_err().to_string();
             assert!(e.contains(id) && e.contains("can't run inside a batch"), "{id}: {e}");
         }
