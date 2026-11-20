@@ -5503,8 +5503,9 @@ fn text_anim_popups(
     let per_char = layer.props.prop("text/perChar3d").is_some_and(|q| q.value.as_bool());
     // The layer font's variable axes at the current time, offered by both menus: Animate Text makes a
     // new animator for the axis, the animator's Add menu puts it on that animator (#3964). This is
-    // the same helper `text.animatorFontAxes` validates the chosen axis against.
-    let axes = effectcraft_engine::commands::text_anim::font_axes_now(&app.session, layer);
+    // the same helper `text.animatorFontAxes` validates the chosen axis against. Resolving them lays
+    // out the whole document, so do it only while this pop-up is open.
+    let axes = widgets::popup_is_open(ui, pop).then(|| effectcraft_engine::commands::text_anim::font_axes_now(&app.session, layer));
     let mut opts: Vec<String> = Vec::new();
     let mut acts: Vec<(String, serde_json::Value)> = Vec::new();
     if key == "animate" {
@@ -5521,11 +5522,11 @@ fn text_anim_popups(
             acts.push(if *k == "-" { (String::new(), json!(null)) } else { ("layer.addTextAnimator".into(), json!({"layer": layer.id.0, "property": k})) });
         }
         // Variable Font Axes of the layer's font.
-        if !axes.is_empty() {
+        if axes.as_deref().is_some_and(|a| !a.is_empty()) {
             opts.push("-".into());
             acts.push((String::new(), json!(null)));
         }
-        for a in &axes {
+        for a in axes.as_deref().unwrap_or_default() {
             opts.push(tr_args("Variable Font Axes: {}", &[&a.name]));
             acts.push(("text.animatorFontAxes".into(), json!({"layer": layer.id.0, "axis": a.tag})));
         }
@@ -5545,11 +5546,11 @@ fn text_anim_popups(
             });
         }
         // The font's variable axes go on this animator, as After Effects' Add menu lists them.
-        if !axes.is_empty() {
+        if axes.as_deref().is_some_and(|a| !a.is_empty()) {
             opts.push("-".into());
             acts.push((String::new(), json!(null)));
         }
-        for a in &axes {
+        for a in axes.as_deref().unwrap_or_default() {
             opts.push(tr_args("Variable Font Axes: {}", &[&a.name]));
             acts.push(("text.animatorFontAxes".into(), json!({"layer": layer.id.0, "animator": uid, "axis": a.tag})));
         }
