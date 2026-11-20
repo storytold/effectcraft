@@ -52,6 +52,7 @@ fn looks_like_matroska(head: &[u8]) -> bool {
 
 /// Open an in-place ISO-BMFF or Matroska/WebM source via `craft-media` / `craft-video`.
 /// Returns `None` when the container/codec/audio combination should fall back to `filmcraft-codecs`.
+#[cfg(any(unix, windows))]
 pub(crate) fn open_reader(name: &str, head: &[u8], reader: &SharedBytes) -> Option<Result<SharedSource>> {
     if looks_like_isobmff(head) {
         return open_isobmff(name, reader.clone());
@@ -75,7 +76,7 @@ pub(crate) fn open_bytes(name: &str, bytes: Arc<[u8]>) -> Option<Result<SharedSo
 
 enum ContainerFile {
     Isobmff(Mp4File),
-    Matroska(MkvFile),
+    Matroska(Box<MkvFile>),
 }
 
 impl ContainerFile {
@@ -169,7 +170,7 @@ impl ContainerFile {
     }
 }
 
-fn open_audio_tracks<'a, I>(container: &ContainerFile, source: &dyn ByteSource, candidates: I) -> Option<(Vec<AudioTrackEntry>, Vec<AudioStreamInfo>)>
+fn open_audio_tracks<I>(container: &ContainerFile, source: &dyn ByteSource, candidates: I) -> Option<(Vec<AudioTrackEntry>, Vec<AudioStreamInfo>)>
 where
     I: IntoIterator<Item = (usize, usize, CodecParams, u64)>,
 {
@@ -313,7 +314,7 @@ fn open_matroska(name: &str, source: SharedBytes) -> Option<Result<SharedSource>
         .map(|(idx, t)| (idx, t.samples.len(), t.codec_params(), t.codec_delay_ns))
         .collect();
 
-    let container = ContainerFile::Matroska(file);
+    let container = ContainerFile::Matroska(Box::new(file));
     let (audio_tracks, audio_infos) = open_audio_tracks(&container, &*source, audio_candidates)?;
 
     let video_decoder = match TrackDecoder::with_options(&video_params, TrackDecoderOptions { threads: Some(worker_cap()), draft: false }) {
@@ -1030,5 +1031,59 @@ mod tests {
         };
         let out = plane_u8(p).ok();
         assert_eq!(out.as_deref(), Some(&[10, 20, 30, 255][..]));
+    }
+
+    #[test]
+    fn rotate_frame_covers_180_270_c422_and_yuv16() {
+        let f16 = VideoFrame {
+            width: 4,
+            height: 2,
+            data: PixelData::Yuv16 {
+                planes: [Arc::new(vec![1, 2, 3, 4, 5, 6, 7, 8]), Arc::new(vec![10, 20, 30, 40]), Arc::new(vec![50, 60, 70, 80])],
+                chroma: Chroma::C422,
+                bits: 10,
+                alpha: Some(Arc::new(vec![100; 8])),
+            },
+            color: ColorInfo::REC709,
+            par: (1, 1),
+            pts: Tick::ZERO,
+        };
+        let r180 = rotate_frame(f16.clone(), 2);
+        assert_eq!((r180.width, r180.height), (4, 2));
+        if let PixelData::Yuv16 { planes: [y, ..], chroma, .. } = &r180.data {
+            assert_eq!(*chroma, Chroma::C422);
+            assert_eq!(&**y, &[8, 7, 6, 5, 4, 3, 2, 1]);
+        }
+        let r270 = rotate_frame(f16, 1);
+        assert_eq!((r270.width, r270.height), (2, 4));
+        if let PixelData::Yuv16 { chroma, .. } = &r270.data {
+            assert_eq!(*chroma, Chroma::C444);
+        }
+    }
+
+    #[test]
+    fn plane_stride_and_container_helpers_cover_variants() {
+        if let Ok(p8) = Plane::new(2, 2, 4, 8, Samples::U8(vec![1, 2, 9, 9, 3, 4])) {
+            assert_eq!(plane_u8(p8).ok().as_deref(), Some(&[1, 2, 3, 4][..]));
+        }
+        if let Ok(p16) = Plane::new(2, 2, 4, 10, Samples::U16(vec![10, 20, 99, 99, 30, 40])) {
+            assert_eq!(plane_u16(p16).ok().as_deref(), Some(&[10, 20, 30, 40][..]));
+        }
+        if let Ok(p8_as_16) = Plane::packed(2, 1, 8, Samples::U8(vec![7, 8])) {
+            assert_eq!(plane_u16(p8_as_16).ok().as_deref(), Some(&[7, 8][..]));
+        }
+
+        let nclc = color_from_isobmff(&isobmff::ColorInfo::Nclc { primaries: 1, transfer: 1, matrix: 1 });
+        assert_eq!(nclc, ColorInfo::REC709);
+        let icc = color_from_isobmff(&isobmff::ColorInfo::Icc { profile: Vec::new() });
+        assert_eq!(icc, ColorInfo::REC709);
+
+        let v = matroska::VideoInfo { display_width: Some(1280), display_height: Some(720), display_unit: 0, ..Default::default() };
+        assert_eq!(matroska_par(Some(&v), 640, 720), (1280 * 720, 720 * 640));
+        assert_eq!(matroska_par(None, 640, 360), (1, 1));
+        assert_eq!(snap_common_fps(23.976), Some(FrameRate::FPS_23_976));
+        assert_eq!(snap_common_fps(f64::NAN), None);
+        assert_eq!(tick_to_matroska_units(Tick(craft_time::TICKS_PER_SECOND), (1, 1000)), 1000);
+        assert_eq!(tick_to_units(Tick(craft_time::TICKS_PER_SECOND), 90000), 90000);
     }
 }
