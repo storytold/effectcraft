@@ -14,7 +14,8 @@ use crate::{EngineError, Result, Session};
 ///
 /// The `file.*` commands replace the whole project, which resets history
 /// ([`crate::Session::replace_project`]) and with it the anchor the batch folds its steps onto.
-const NOT_IN_BATCH: &[&str] = &["engine.batch", "edit.purgeUndo", "file.newProject", "file.open", "file.openDemoProject", "file.closeProject"];
+const NOT_IN_BATCH: &[&str] =
+    &["engine.batch", "edit.purgeUndo", "file.newProject", "file.open", "file.openDemoProject", "file.closeProject", "file.revert", "file.openRecent"];
 
 /// Resolve a `$N` / `$N.key.0.key` reference against the results so far.
 fn reference(s: &str, results: &[Value]) -> Option<Result<Value>> {
@@ -267,7 +268,7 @@ mod tests {
         s.execute("comp.new", json!({"name": "B", "width": 100, "height": 100})).unwrap();
         s.execute("layer.newSolid", json!({"name": "Box", "color": "#ff0000"})).unwrap();
         let before_batch = s.project.clone();
-        for id in ["file.newProject", "file.open", "file.openDemoProject", "file.closeProject"] {
+        for id in ["file.newProject", "file.open", "file.openDemoProject", "file.closeProject", "file.revert", "file.openRecent"] {
             let e = s.execute_checked("engine.batch", json!({"label": "switch", "steps": [{"command": id, "params": {}}]})).unwrap_err().to_string();
             assert!(e.contains(id) && e.contains("can't run inside a batch"), "{id}: {e}");
         }
