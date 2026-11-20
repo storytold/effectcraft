@@ -406,8 +406,10 @@ pub fn add_source(src: &dyn FontSource) -> usize {
             n += 1;
         }
     }
-    // A new face can belong to one of a script's usual families.
-    family_faces_cache().write().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
+    drop(d);
+    if n > 0 {
+        faces_added();
+    }
     n
 }
 
@@ -416,9 +418,22 @@ pub fn add_font_data(data: Vec<u8>) -> Vec<FaceId> {
     let data = Arc::new(data);
     let names = read_faces_bytes(&data);
     let mut d = db().write().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let ids = names.into_iter().map(|n| push(&mut d, info_from(n, FaceData::Shared(data.clone()), "user"))).collect();
-    family_faces_cache().write().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
+    let ids: Vec<FaceId> = names.into_iter().map(|n| push(&mut d, info_from(n, FaceData::Shared(data.clone()), "user"))).collect();
+    drop(d);
+    if !ids.is_empty() {
+        faces_added();
+    }
     ids
+}
+
+/// Forget what was worked out without the faces just added (#3996): a script's usual families
+/// (a new face can belong to one), the fallback searches (one that found nothing may find the new
+/// face) and the text laid out with them (text in the new family, or that fell back, lays out
+/// again).
+fn faces_added() {
+    family_faces_cache().write().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
+    fallback_cache().write().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
+    crate::layout::clear_cache();
 }
 
 /// Held for a whole system scan: a concurrent caller waits for the complete list instead of

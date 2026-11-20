@@ -46,6 +46,13 @@
     import init, * as ec from "./effectcraft_web.js";
     const t0 = performance.now();
     window.effectcraftLoad = {};
+    // A `File`/`Blob` or a URL to fetch, as [name, bytes].
+    const fileBytes = async (fileOrUrl, name) => {
+      if (typeof fileOrUrl === "string") {
+        return [name ?? fileOrUrl.split("/").pop(), new Uint8Array(await (await fetch(fileOrUrl)).arrayBuffer())];
+      }
+      return [name ?? fileOrUrl.name, new Uint8Array(await fileOrUrl.arrayBuffer())];
+    };
     // The agent / test API: the desktop control channel as promises (docs/web.md).
     window.effectcraft = {
       request: (method, params) => ec.request(method, params ?? {}),
@@ -56,17 +63,9 @@
       renderFrame: (params) => ec.request("render.frame", { base64: true, ...(params ?? {}) }),
       files: () => ec.files(),
       readFile: (path) => ec.readFile(path),
-      addFile: async (fileOrUrl, name) => {
-        let bytes;
-        if (typeof fileOrUrl === "string") {
-          bytes = new Uint8Array(await (await fetch(fileOrUrl)).arrayBuffer());
-          name = name ?? fileOrUrl.split("/").pop();
-        } else {
-          bytes = new Uint8Array(await fileOrUrl.arrayBuffer());
-          name = name ?? fileOrUrl.name;
-        }
-        return ec.addFile(name, bytes);
-      },
+      addFile: async (fileOrUrl, name) => ec.addFile(...(await fileBytes(fileOrUrl, name))),
+      // A font file (TrueType / OpenType) for this session, on the page and in the render workers.
+      addFont: async (fileOrUrl, name) => ec.addFont(...(await fileBytes(fileOrUrl, name))),
       info: () => ({
         ...ec.info(),
         crossOriginIsolated: self.crossOriginIsolated,

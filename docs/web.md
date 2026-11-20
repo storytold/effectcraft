@@ -414,6 +414,7 @@ with the method's `result`, errors reject with the message.
 | `effectcraft.renderFrame(params)` | `render.frame` with `base64: true`: `{comp, time, width, height, png}` |
 | `effectcraft.screenshot(params)` | `ui.screenshot`; without `path` the PNG comes back inline as `png` (base64) |
 | `effectcraft.addFile(fileOrUrl, name?)` | put a `File`/`Blob` (or fetched URL) into the file table (stored) and open (`.ecproj`) or import it; resolves with its path |
+| `effectcraft.addFont(fileOrUrl, name?)` | give the engine a TrueType or OpenType font (a `File`/`Blob` or fetched URL) for this session: it is registered on the page and in every render worker, text already drawn without it is drawn again, and it lists in `text.fonts` with origin `user`; resolves with the families it added, and rejects a file that is not a font. Fonts are not stored: add them again after a reload |
 | `effectcraft.files()` / `effectcraft.readFile(path)` | the file table `[{path, size}]` / a file's bytes (`Uint8Array`), e.g. a render |
 | `effectcraft.saveToBrowser(path?)` | save the project to browser storage without downloading it (default: its path, or `/<name>.ecproj`); resolves with `{path, bytes}` |
 | `effectcraft.listStored()` | `{backend, usage, quota, persisted, pending, files: [{path, size, modified}], config: [name]}` |

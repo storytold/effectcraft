@@ -83,6 +83,21 @@ pub fn add_file(name: String, data: js_sys::Uint8Array) -> String {
     path
 }
 
+/// Give the engine a font file (TrueType or OpenType, a collection too) for this session: text set
+/// in its families renders with it, on the page and in every render worker, and text already
+/// drawn without it is drawn again. Resolves with the families it added; a file that is not a font
+/// is refused.
+#[wasm_bindgen(js_name = addFont)]
+pub fn add_font(name: String, data: js_sys::Uint8Array) -> Result<JsValue, JsValue> {
+    let families = crate::fonts::add(&name, data.to_vec()).map_err(|e| JsValue::from_str(&e))?;
+    crate::post(|app| {
+        app.session.layer_cache.clear();
+        app.session.events.push(effectcraft_engine::Event::PurgeCaches);
+    });
+    crate::repaint();
+    Ok(to_js(&json!(families)))
+}
+
 /// Backend and build facts.
 #[wasm_bindgen]
 pub fn info() -> JsValue {

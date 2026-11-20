@@ -114,8 +114,17 @@ impl WebFrames {
             s.next_id += 1;
             let id = s.next_id;
             let Some(k) = s.workers.iter().position(|w| w.alive && w.busy.is_none()) else { return Err((done, "no idle frame worker".to_string())) };
-            // Footage the worker hasn't got yet.
             let w = &mut s.workers[k];
+            // The host's fonts the worker hasn't got yet.
+            for (p, d) in crate::fonts::all() {
+                if w.files.contains_key(&p) {
+                    continue;
+                }
+                let bytes = js_sys::Uint8Array::from(&d[..]);
+                frame_worker_post(w.index, &obj(&[("type", "file".into()), ("path", p.as_str().into()), ("bytes", bytes.into())]), &js_sys::Array::new());
+                w.files.insert(p, 0);
+            }
+            // Footage the worker hasn't got yet.
             for p in footage_files(&job.project) {
                 let Some((d, version)) = crate::files::get_versioned(&p) else { continue };
                 if w.files.get(&p) == Some(&version) {
@@ -412,6 +421,16 @@ fn post_reply(r: &FrameReply, px: Option<&[u8]>) {
     if let Err(e) = res {
         log::warn!("frame worker: postMessage: {e:?}");
     }
+}
+
+/// A frame worker's side: a font arrived ([`crate::fonts`]), so layers drawn without it are drawn
+/// again.
+pub(crate) fn fonts_changed() {
+    SERVER.with(|c| {
+        if let Some(s) = c.borrow().as_ref() {
+            s.cache.clear();
+        }
+    });
 }
 
 fn new_server() -> FrameServer {

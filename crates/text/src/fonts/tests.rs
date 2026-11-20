@@ -656,3 +656,35 @@ fn a_font_file_replaced_at_the_same_path_is_read_again() {
     assert_eq!(new_meta.len(), 11);
     assert_eq!(old.as_slice(), b"old");
 }
+
+/// A font added while the app runs (a web page's `effectcraft.addFont`, #3996) is used by text
+/// laid out before it was there: by text set in its family, and by text that fell back to no face
+/// at all for a character it covers. Neither the layout cache nor the fallback search keeps the
+/// old result. In a child process, so the fixture's faces reach no other test.
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn a_font_added_later_replaces_cached_layouts_and_fallbacks() {
+    const CHILD: &str = "EFFECTCRAFT_TEST_ISOLATED_LATE_FONT";
+    if std::env::var_os(CHILD).is_none() {
+        run_in_child(CHILD, "fonts::tests::a_font_added_later_replaces_cached_layouts_and_fallbacks");
+        return;
+    }
+    {
+        let mut d = db().write().unwrap();
+        d.scanned = true; // This test process uses only bundled and synthetic fonts.
+    }
+    use crate::layout::{ParagraphStyle, TextStyle, layout};
+    let st = |family: &str| TextStyle { family: family.into(), style: "Regular".into(), size: 50.0, ..Default::default() };
+    let para = ParagraphStyle::default();
+    // Before: the family is missing, and nothing installed draws U+E001.
+    let named = layout("\u{e001}", &st("Late Font Test"), &para);
+    let fallback = layout("\u{e001}", &st(DEFAULT_FAMILY), &para);
+    assert!(named.glyphs.iter().chain(&fallback.glyphs).all(|g| g.id == 0), "no face draws it yet");
+
+    let ids = add_font_data(test_font("Late Font Test"));
+    let &[id] = ids.as_slice() else { panic!("one face expected: {ids:?}") };
+    let named = layout("\u{e001}", &st("Late Font Test"), &para);
+    assert!(!named.glyphs.is_empty() && named.glyphs.iter().all(|g| g.face == id && g.id != 0), "its family now draws with it");
+    let fallback = layout("\u{e001}", &st(DEFAULT_FAMILY), &para);
+    assert!(!fallback.glyphs.is_empty() && fallback.glyphs.iter().all(|g| g.face == id && g.id != 0), "the fallback finds it");
+}

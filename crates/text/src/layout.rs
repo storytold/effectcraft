@@ -1303,6 +1303,12 @@ fn cache() -> &'static Mutex<HashMap<u64, (u64, Arc<Layout>)>> {
     C.get_or_init(Default::default)
 }
 
+/// Drop every cached layout: the installed fonts changed, so the same text and styles may lay out
+/// with other faces.
+pub(crate) fn clear_cache() {
+    cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
+}
+
 /// Lay out `text` in one style (cached by text and styles).
 pub fn layout(text: &str, style: &TextStyle, para: &ParagraphStyle) -> Arc<Layout> {
     layout_rich(text, &[(0..text.len(), style.clone())], std::slice::from_ref(para))
