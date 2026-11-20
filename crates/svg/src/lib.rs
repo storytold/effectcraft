@@ -11,12 +11,14 @@ mod color;
 mod pathdata;
 mod raster;
 
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 pub use color::parse_color;
+use craft_svg::doc_style::{self, PaintRef, ResolvedPaint, Style, UrlPaint, viewbox, viewbox_transform};
+pub use craft_svg::doc_style::{Cap, FillRule, Join};
 pub use kurbo::{Affine, BezPath};
 pub use pathdata::parse_path_data;
-pub use raster::{blend_pixel, rasterize, rasterize_with};
+pub use raster::{RasterError, blend_pixel, rasterize, rasterize_with, try_rasterize, try_rasterize_with};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Error {
@@ -35,34 +37,9 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-/// Quick sniff: an XML document whose root looks like `<svg`.
+/// Quick sniff: the first element is `<svg` (`craft_svg::sniff::is_svg`).
 pub fn looks_like_svg(bytes: &[u8]) -> bool {
-    let head = &bytes[..bytes.len().min(2048)];
-    let s = String::from_utf8_lossy(head);
-    s.contains("<svg") && (s.trim_start().starts_with('<') || s.starts_with('\u{feff}'))
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum FillRule {
-    #[default]
-    NonZero,
-    EvenOdd,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Cap {
-    #[default]
-    Butt,
-    Round,
-    Square,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Join {
-    #[default]
-    Miter,
-    Round,
-    Bevel,
+    craft_svg::sniff::is_svg(bytes)
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -71,6 +48,15 @@ pub enum Spread {
     Pad,
     Reflect,
     Repeat,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// How pattern tile coordinates are interpreted.
+pub enum PatternUnits {
+    /// Coordinates are fractions of the painted shape's bounding box.
+    ObjectBoundingBox,
+    /// Coordinates are expressed in the current user space.
+    UserSpaceOnUse,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -83,7 +69,7 @@ pub enum GradientKind {
 pub struct Gradient {
     pub kind: GradientKind,
     /// (offset 0..1, straight RGBA 0..1), sorted.
-    pub stops: Vec<(f64, [f64; 4])>,
+    pub stops: Arc<[(f64, [f64; 4])]>,
     /// `gradientUnits="objectBoundingBox"` (the default): coordinates are fractions of the
     /// shape's bounding box.
     pub bbox_units: bool,
@@ -92,9 +78,35 @@ pub struct Gradient {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+/// A resolved `<pattern>` paint: tile geometry, coordinate units and shared content.
+pub struct Pattern {
+    /// Tile origin and size in `pattern_units` coordinates.
+    pub x: f64,
+    /// Tile origin y in `pattern_units` coordinates.
+    pub y: f64,
+    /// Tile width in `pattern_units` coordinates.
+    pub width: f64,
+    /// Tile height in `pattern_units` coordinates.
+    pub height: f64,
+    /// Coordinate system used for the tile origin and size.
+    pub pattern_units: PatternUnits,
+    /// Coordinate system used by the tile's child shapes.
+    pub content_units: PatternUnits,
+    /// Transform applied to the repeating tile.
+    pub transform: Affine,
+    /// Immutable tile content shared by every use of the resolved pattern.
+    pub content: Arc<Group>,
+    /// Conservative shape/path traversal cost per tile pixel, charged during rasterisation.
+    pub render_complexity: usize,
+    /// The fallback from `url(#id) fallback`, used if the target bbox or tile is invalid.
+    pub fallback: Option<[f64; 4]>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum Paint {
     Color([f64; 3]),
     Gradient(Gradient),
+    Pattern(Pattern),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -345,252 +357,17 @@ impl Doc {
 
 // ---------------------------------------------------------------- styles
 
-/// Inherited style state.
-#[derive(Clone, Debug)]
-struct Style {
-    fill: Option<PaintRef>,
-    fill_opacity: f64,
-    fill_rule: FillRule,
-    stroke: Option<PaintRef>,
-    stroke_opacity: f64,
-    stroke_width: f64,
-    cap: Cap,
-    join: Join,
-    miter: f64,
-    dash: Option<Vec<f64>>,
-    dash_offset: f64,
-    color: [f64; 4],
-    visible: bool,
-    font_size: f64,
+#[cfg(test)]
+use craft_svg::simple_css::{MAX_CSS_DECLARATIONS, MAX_CSS_SELECTORS};
+use craft_svg::simple_css::{MAX_CSS_WORK, StyleSheet};
+
+fn parse_css(text: &str, sheet: &mut StyleSheet) -> Result<(), Error> {
+    craft_svg::simple_css::parse(text, sheet).map_err(|error| Error::Xml(error.to_string()))
 }
-
-impl Default for Style {
-    fn default() -> Self {
-        Style {
-            fill: Some(PaintRef::Color([0.0, 0.0, 0.0, 1.0])),
-            fill_opacity: 1.0,
-            fill_rule: FillRule::NonZero,
-            stroke: None,
-            stroke_opacity: 1.0,
-            stroke_width: 1.0,
-            cap: Cap::Butt,
-            join: Join::Miter,
-            miter: 4.0,
-            dash: None,
-            dash_offset: 0.0,
-            color: [0.0, 0.0, 0.0, 1.0],
-            visible: true,
-            font_size: 16.0,
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-enum PaintRef {
-    Color([f64; 4]),
-    Url(String, Option<[f64; 4]>),
-    Current,
-}
-
-/// The most selectors (each entry of a comma list counts) the `<style>` sheets of a document may
-/// hold (#2140).
-const MAX_CSS_SELECTORS: usize = 20_000;
-/// The most declarations the `<style>` sheets of a document may hold, each block counted once.
-const MAX_CSS_DECLARATIONS: usize = 50_000;
-
-/// The most matching work (candidate rules checked plus declarations applied) the elements of a
-/// document may cost, `<use>` copies included: a bound on elements x rules x declarations.
-const MAX_CSS_WORK: usize = 50_000_000;
-
-/// A CSS rule: selector (type, class, id; `*`) with its specificity and declaration block.
-#[derive(Clone, Debug)]
-struct Rule {
-    tag: Option<String>,
-    classes: Vec<String>,
-    id: Option<String>,
-    specificity: u32,
-    order: usize,
-    /// Index into [`StyleSheet::blocks`]: every selector of a comma list shares one block.
-    block: usize,
-}
-
-/// The rules of a document's `<style>` sheets, indexed by the part of the selector an element
-/// must have (id, else first class, else type) so an element only checks rules that can match.
-#[derive(Default, Debug)]
-struct StyleSheet {
-    rules: Vec<Rule>,
-    blocks: Vec<Vec<(String, String)>>,
-    /// Declarations over all blocks.
-    decls: usize,
-    by_id: HashMap<String, Vec<usize>>,
-    by_class: HashMap<String, Vec<usize>>,
-    by_tag: HashMap<String, Vec<usize>>,
-    universal: Vec<usize>,
-}
-
-impl StyleSheet {
-    fn index(&mut self) {
-        for (i, r) in self.rules.iter().enumerate() {
-            let bucket = if let Some(id) = &r.id {
-                self.by_id.entry(id.clone()).or_default()
-            } else if let Some(c) = r.classes.first() {
-                self.by_class.entry(c.clone()).or_default()
-            } else if let Some(t) = &r.tag {
-                self.by_tag.entry(t.clone()).or_default()
-            } else {
-                &mut self.universal
-            };
-            bucket.push(i);
-        }
-    }
-}
-
-fn parse_decls(s: &str) -> Vec<(String, String)> {
-    s.split(';')
-        .filter_map(|d| {
-            let (k, v) = d.split_once(':')?;
-            let v = v.trim().trim_end_matches("!important").trim();
-            Some((k.trim().to_ascii_lowercase(), v.to_string()))
-        })
-        .filter(|(k, _)| !k.is_empty())
-        .collect()
-}
-
-fn strip_comments(s: &str) -> String {
-    let mut out = String::new();
-    let mut rest = s;
-    while let Some(i) = rest.find("/*") {
-        out.push_str(&rest[..i]);
-        match rest[i + 2..].find("*/") {
-            Some(j) => rest = &rest[i + 2 + j + 2..],
-            None => return out,
-        }
-    }
-    out.push_str(rest);
-    out
-}
-
-/// Splits one simple selector (`tag.class#id`) into its tag, classes and id.
-fn parse_compound(one: &str) -> (Option<String>, Vec<String>, Option<String>) {
-    let mut tag = None;
-    let mut classes = vec![];
-    let mut id = None;
-    let mut cur = String::new();
-    let mut kind = 't';
-    let flush = |kind: char, cur: &mut String, tag: &mut Option<String>, classes: &mut Vec<String>, id: &mut Option<String>| {
-        if !cur.is_empty() {
-            match kind {
-                '.' => classes.push(std::mem::take(cur)),
-                '#' => *id = Some(std::mem::take(cur)),
-                _ => {
-                    if cur != "*" {
-                        *tag = Some(std::mem::take(cur));
-                    }
-                    cur.clear();
-                }
-            }
-        }
-    };
-    for c in one.chars() {
-        if c == '.' || c == '#' {
-            flush(kind, &mut cur, &mut tag, &mut classes, &mut id);
-            kind = c;
-        } else {
-            cur.push(c);
-        }
-    }
-    flush(kind, &mut cur, &mut tag, &mut classes, &mut id);
-    (tag, classes, id)
-}
-
-/// Add the rules of one `<style>` sheet. Errs once the sheets exceed [`MAX_CSS_SELECTORS`] or
-/// [`MAX_CSS_DECLARATIONS`] (#2140).
-fn parse_css(css: &str, sheet: &mut StyleSheet) -> Result<(), Error> {
-    let css = strip_comments(css);
-    let mut rest = css.as_str();
-    while let Some(open) = rest.find('{') {
-        let sel = rest[..open].trim();
-        if sel.starts_with('@') {
-            // Skip the whole at-rule block, matching nested braces by depth.
-            let mut depth = 0usize;
-            let mut end = None;
-            for (i, c) in rest[open..].char_indices() {
-                match c {
-                    '{' => depth = depth.saturating_add(1),
-                    '}' => {
-                        depth = depth.saturating_sub(1);
-                        if depth == 0 {
-                            end = Some(open + i + 1);
-                            break;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            let Some(end) = end else { break };
-            rest = &rest[end..];
-            continue;
-        }
-        let Some(close) = rest[open..].find('}') else { break };
-        let body = &rest[open + 1..open + close];
-        rest = &rest[open + close + 1..];
-        let mut decls = parse_decls(body);
-        sheet.decls = sheet.decls.saturating_add(decls.len());
-        if sheet.decls > MAX_CSS_DECLARATIONS {
-            return Err(Error::Xml(format!("its <style> sheets hold more than {MAX_CSS_DECLARATIONS} declarations")));
-        }
-        // Stored with the rule's first accepted selector: a rule of unsupported selectors only
-        // (`a b{}`, repeated) adds no block.
-        let mut block = None;
-        for one in sel.split(',') {
-            let one = one.trim();
-            // Only simple selectors (no combinators / pseudo-classes / attributes).
-            if one.is_empty() || one.contains([' ', '>', '+', '~', ':', '[']) {
-                continue;
-            }
-            if sheet.rules.len() >= MAX_CSS_SELECTORS {
-                return Err(Error::Xml(format!("its <style> sheets hold more than {MAX_CSS_SELECTORS} selectors")));
-            }
-            let block = *block.get_or_insert_with(|| {
-                let i = sheet.blocks.len();
-                sheet.blocks.push(std::mem::take(&mut decls));
-                i
-            });
-            let (tag, classes, id) = parse_compound(one);
-            let specificity = (id.is_some() as u32 * 100)
-                .saturating_add(u32::try_from(classes.len()).unwrap_or(u32::MAX).saturating_mul(10))
-                .saturating_add(tag.is_some() as u32);
-            let order = sheet.rules.len();
-            sheet.rules.push(Rule { tag, classes, id, specificity, order, block });
-        }
-    }
-    Ok(())
-}
-
-const PROPS: &[&str] = &[
-    "fill",
-    "fill-opacity",
-    "fill-rule",
-    "stroke",
-    "stroke-width",
-    "stroke-opacity",
-    "stroke-linecap",
-    "stroke-linejoin",
-    "stroke-miterlimit",
-    "stroke-dasharray",
-    "stroke-dashoffset",
-    "opacity",
-    "display",
-    "visibility",
-    "color",
-    "font-size",
-    "transform",
-    "stop-color",
-    "stop-opacity",
-];
 
 struct Parser<'a, 'i> {
     ids: HashMap<String, roxmltree::Node<'a, 'i>>,
+    /// The parsed `<style>` sheets.
     css: StyleSheet,
     /// CSS matching work done so far; past [`MAX_CSS_WORK`] rules stop applying and the import errs.
     css_work: std::cell::Cell<usize>,
@@ -603,6 +380,32 @@ struct Parser<'a, 'i> {
     /// The `<use>` targets being expanded, outermost first: a reference back into one is a
     /// cycle and is skipped.
     using: Vec<roxmltree::NodeId>,
+    /// Pattern contents may use only solid paints; nested paint servers invalidate that pattern.
+    in_pattern_content: bool,
+    /// Set once pattern content uses a paint server, invalidating that pattern.
+    invalid_pattern_content: bool,
+    /// Work revisited while resolving patterns, bounded across all references.
+    pattern_work: usize,
+    /// Maximum pattern resolution work allowed for this import.
+    pattern_work_budget: usize,
+    /// Set when pattern resolution work passed its budget.
+    pattern_work_exceeded: bool,
+    /// Path data bytes (weighted) parsed so far.
+    path_data_work: usize,
+    /// Path elements produced so far across all shapes.
+    path_element_work: usize,
+    /// Maximum weighted path data work allowed for this import.
+    path_work_budget: usize,
+    /// Set when path data or element work passed its budget.
+    path_work_exceeded: bool,
+    /// Parsed pattern content is viewport-dependent because lengths may be percentages; the cache is bounded.
+    pattern_cache: HashMap<(roxmltree::NodeId, u64, u64), Option<Pattern>>,
+    /// Resolved gradients share their stop arrays across repeated paint references.
+    gradient_cache: HashMap<(roxmltree::NodeId, u64, u64), Gradient>,
+    /// Gradient resolution work done so far.
+    gradient_work: usize,
+    /// Set when gradient work passed [`MAX_GRADIENT_WORK`].
+    gradient_work_exceeded: bool,
     /// Path elements and gradient stops kept so far, `<use>` copies and repeated gradient
     /// references included; past [`MAX_RETAINED`] the import errs.
     retained: std::cell::Cell<usize>,
@@ -620,19 +423,7 @@ impl<'a, 'i> Parser<'a, 'i> {
     /// The declared properties of an element: presentation attributes, then CSS rules (by
     /// specificity), then the `style` attribute.
     fn declared(&self, n: roxmltree::Node) -> HashMap<String, String> {
-        let mut out = HashMap::new();
-        for a in n.attributes() {
-            if PROPS.contains(&a.name()) && a.name() != "transform" {
-                out.insert(a.name().to_string(), a.value().to_string());
-            }
-        }
-        self.apply_rules(n, &mut out);
-        if let Some(st) = n.attribute("style") {
-            for (k, v) in parse_decls(st) {
-                out.insert(k, v);
-            }
-        }
-        out
+        doc_style::declared(n, &self.css, |work| self.charge_css(work))
     }
 
     /// Charge `n` kept path elements or gradient stops; false once [`MAX_RETAINED`] is passed.
@@ -649,200 +440,132 @@ impl<'a, 'i> Parser<'a, 'i> {
         w <= MAX_CSS_WORK
     }
 
-    /// Apply the matching `<style>` rules to `out`, by specificity then source order.
-    fn apply_rules(&self, n: roxmltree::Node, out: &mut HashMap<String, String>) {
-        let css = &self.css;
-        if css.rules.is_empty() {
-            return;
+    /// Charge work while resolving pattern references. Attribute bytes and each traversed child
+    /// both count so a cache miss cannot repeatedly scan an enormous descriptive-only pattern.
+    fn charge_pattern_work(&mut self, work: usize) -> bool {
+        self.pattern_work = self.pattern_work.saturating_add(work);
+        if self.pattern_work > self.pattern_work_budget {
+            self.pattern_work_exceeded = true;
+            return false;
         }
-        // Splitting and sorting the class list is work too: charge its length first.
-        let class = n.attribute("class").unwrap_or_default();
-        if !self.charge_css(class.len()) {
-            return;
+        true
+    }
+
+    /// Charge gradient resolution work; false once the budget is exceeded.
+    fn charge_gradient_work(&mut self, work: usize) -> bool {
+        self.gradient_work = self.gradient_work.saturating_add(work);
+        if self.gradient_work > MAX_GRADIENT_WORK {
+            self.gradient_work_exceeded = true;
+            return false;
         }
-        let tag = n.tag_name().name();
-        let mut classes: Vec<&str> = class.split_whitespace().collect();
-        classes.sort_unstable();
-        classes.dedup();
-        let id = n.attribute("id");
-        // Each rule sits in exactly one bucket and the classes are distinct: no rule twice.
-        let mut buckets: Vec<&Vec<usize>> = vec![&css.universal];
-        buckets.extend(id.and_then(|i| css.by_id.get(i)));
-        buckets.extend(classes.iter().filter_map(|c| css.by_class.get(*c)));
-        buckets.extend(css.by_tag.get(tag));
-        if !self.charge_css(buckets.iter().map(|b| b.len()).fold(0, usize::saturating_add)) {
-            return;
+        true
+    }
+
+    /// Charge path data bytes against the path work budget; false once exceeded.
+    fn charge_path_data(&mut self, bytes: usize) -> bool {
+        self.path_data_work = self.path_data_work.saturating_add(bytes.saturating_mul(PATH_DATA_WORK_FACTOR));
+        if self.path_data_work > self.path_work_budget {
+            self.path_work_exceeded = true;
+            return false;
         }
-        let candidates = || buckets.iter().flat_map(|b| b.iter()).filter_map(|&i| css.rules.get(i));
-        // A selector like `.z.z.z…` checks each of its classes: charge them too.
-        if !self.charge_css(candidates().map(|r| r.classes.len()).fold(0, usize::saturating_add)) {
-            return;
+        true
+    }
+
+    /// Charge produced path elements against the per-import cap; false once exceeded.
+    fn charge_path_elements(&mut self, elements: usize) -> bool {
+        self.path_element_work = self.path_element_work.saturating_add(elements);
+        if self.path_element_work > MAX_PATH_ELEMENTS_PER_IMPORT {
+            self.path_work_exceeded = true;
+            return false;
         }
-        let mut matching: Vec<&Rule> = candidates()
-            .filter(|r| {
-                r.tag.as_deref().is_none_or(|t| t == tag)
-                    && r.id.as_deref().is_none_or(|i| Some(i) == id)
-                    && r.classes.iter().all(|c| classes.binary_search(&c.as_str()).is_ok())
-            })
-            .collect();
-        matching.sort_by_key(|r| (r.specificity, r.order));
-        let blocks: Vec<&Vec<(String, String)>> = matching.iter().filter_map(|r| css.blocks.get(r.block)).collect();
-        if !self.charge_css(blocks.iter().map(|b| b.len()).fold(0, usize::saturating_add)) {
-            return;
-        }
-        for (k, v) in blocks.into_iter().flatten() {
-            out.insert(k.clone(), v.clone());
-        }
+        true
+    }
+
+    /// Charge a pattern node's attributes and traversal while resolving a pattern reference.
+    fn charge_pattern_attributes(&mut self, n: roxmltree::Node) -> bool {
+        let bytes = n.attributes().map(|attribute| attribute.name().len().saturating_add(attribute.value().len())).fold(0usize, usize::saturating_add);
+        self.charge_pattern_work(bytes.saturating_add(1))
     }
 
     fn length(&self, s: &str, axis: char, font: f64) -> Option<f64> {
-        let s = s.trim();
-        let num_end = s.find(|c: char| !(c.is_ascii_digit() || matches!(c, '.' | '-' | '+' | 'e' | 'E'))).unwrap_or(s.len());
-        // "e" also starts "em"/"ex": back off if the number does not parse.
-        let (mut num, mut unit) = (&s[..num_end], &s[num_end..]);
-        if num.parse::<f64>().is_err() && (num.ends_with('e') || num.ends_with('E')) {
-            num = &s[..num_end - 1];
-            unit = &s[num_end - 1..];
-        }
-        let v: f64 = num.parse().ok()?;
-        Some(match unit.trim() {
-            "" | "px" => v,
-            "pt" => v * 4.0 / 3.0,
-            "pc" => v * 16.0,
-            "mm" => v * 96.0 / 25.4,
-            "cm" => v * 96.0 / 2.54,
-            "in" => v * 96.0,
-            "em" => v * font,
-            "ex" => v * font / 2.0,
-            "%" => {
-                let base = match axis {
-                    'x' => self.vw,
-                    'y' => self.vh,
-                    _ => ((self.vw * self.vw + self.vh * self.vh) / 2.0).sqrt(),
-                };
-                v / 100.0 * base
-            }
-            _ => v,
-        })
+        doc_style::length(s, axis, font, self.vw, self.vh)
     }
 
     fn attr_len(&self, n: roxmltree::Node, name: &str, axis: char, st: &Style) -> f64 {
-        n.attribute(name).and_then(|v| self.length(v, axis, st.font_size)).unwrap_or(0.0)
-    }
-
-    fn paint_ref(&self, v: &str) -> Option<Option<PaintRef>> {
-        let v = v.trim();
-        if v == "none" {
-            return Some(None);
-        }
-        if v == "currentColor" || v == "currentcolor" {
-            return Some(Some(PaintRef::Current));
-        }
-        if let Some(rest) = v.strip_prefix("url(") {
-            let (url, fallback) = rest.split_once(')').unwrap_or((rest, ""));
-            let id = url.trim().trim_matches(['"', '\'']).trim_start_matches('#').to_string();
-            let fb = fallback.trim();
-            let fb = if fb.is_empty() || fb == "none" { None } else { parse_color(fb) };
-            return Some(Some(PaintRef::Url(id, fb)));
-        }
-        if v == "inherit" {
-            return None;
-        }
-        parse_color(v).map(|c| Some(PaintRef::Color(c)))
+        doc_style::attr_len(n, name, axis, st, self.vw, self.vh)
     }
 
     /// Apply an element's declared inherited properties to `st`. Returns (opacity, display).
     fn cascade(&self, n: roxmltree::Node, st: &mut Style) -> (f64, bool) {
-        let d = self.declared(n);
-        let num =
-            |k: &str| d.get(k).and_then(|v| v.trim().trim_end_matches('%').parse::<f64>().ok().map(|x| if v.trim().ends_with('%') { x / 100.0 } else { x }));
-        if let Some(c) = d.get("color").and_then(|v| parse_color(v)) {
-            st.color = c;
-        }
-        let font_size = d.get("font-size").and_then(|v| match v.trim().strip_suffix('%') {
-            Some(p) => p.trim().parse::<f64>().ok().map(|p| p / 100.0 * st.font_size),
-            None => self.length(v, 'o', st.font_size),
-        });
-        if let Some(v) = font_size.filter(|v| v.is_finite()) {
-            st.font_size = v;
-        }
-        if let Some(p) = d.get("fill").and_then(|v| self.paint_ref(v)) {
-            st.fill = p;
-        }
-        if let Some(p) = d.get("stroke").and_then(|v| self.paint_ref(v)) {
-            st.stroke = p;
-        }
-        if let Some(v) = num("fill-opacity") {
-            st.fill_opacity = v.clamp(0.0, 1.0);
-        }
-        if let Some(v) = num("stroke-opacity") {
-            st.stroke_opacity = v.clamp(0.0, 1.0);
-        }
-        if let Some(v) = d.get("stroke-width").and_then(|v| self.length(v, 'o', st.font_size)) {
-            st.stroke_width = v.max(0.0);
-        }
-        if let Some(v) = num("stroke-miterlimit") {
-            st.miter = v.max(1.0);
-        }
-        if let Some(v) = d.get("fill-rule") {
-            st.fill_rule = if v.trim() == "evenodd" { FillRule::EvenOdd } else { FillRule::NonZero };
-        }
-        if let Some(v) = d.get("stroke-linecap") {
-            st.cap = match v.trim() {
-                "round" => Cap::Round,
-                "square" => Cap::Square,
-                _ => Cap::Butt,
-            };
-        }
-        if let Some(v) = d.get("stroke-linejoin") {
-            st.join = match v.trim() {
-                "round" => Join::Round,
-                "bevel" => Join::Bevel,
-                _ => Join::Miter,
-            };
-        }
-        if let Some(v) = d.get("stroke-dasharray") {
-            st.dash = if v.trim() == "none" {
-                None
-            } else {
-                let a: Vec<f64> =
-                    v.split(|c: char| c == ',' || c.is_whitespace()).filter(|t| !t.is_empty()).filter_map(|t| self.length(t, 'o', st.font_size)).collect();
-                if a.iter().all(|x| *x >= 0.0) && a.iter().any(|x| *x > 0.0) { Some(a) } else { None }
-            };
-        }
-        if let Some(v) = d.get("stroke-dashoffset").and_then(|v| self.length(v, 'o', st.font_size)) {
-            st.dash_offset = v;
-        }
-        if let Some(v) = d.get("visibility") {
-            st.visible = !matches!(v.trim(), "hidden" | "collapse");
-        }
-        let display = d.get("display").is_none_or(|v| v.trim() != "none");
-        (num("opacity").unwrap_or(1.0).clamp(0.0, 1.0), display)
+        doc_style::cascade(n, &self.css, st, self.vw, self.vh, |work| self.charge_css(work))
     }
 
-    fn resolve_paint(&self, p: &PaintRef, st: &Style) -> Option<(Paint, f64)> {
-        match p {
-            PaintRef::Color(c) => Some((Paint::Color([c[0], c[1], c[2]]), c[3])),
-            PaintRef::Current => Some((Paint::Color([st.color[0], st.color[1], st.color[2]]), st.color[3])),
-            PaintRef::Url(id, fb) => match self.gradient(id, 0) {
-                Some(g) if g.stops.len() == 1 => {
-                    let c = g.stops[0].1;
-                    Some((Paint::Color([c[0], c[1], c[2]]), c[3]))
-                }
-                Some(g) if !g.stops.is_empty() => Some((Paint::Gradient(g), 1.0)),
-                Some(_) => None,
-                None => fb.map(|c| (Paint::Color([c[0], c[1], c[2]]), c[3])),
-            },
+    /// Resolve a paint reference, retaining a per-reference fallback for patterns.
+    fn resolve_paint(&mut self, p: &PaintRef, st: &Style) -> Option<(Paint, f64)> {
+        if self.in_pattern_content && matches!(p, PaintRef::Url(..)) {
+            self.invalid_pattern_content = true;
+            return None;
         }
+        let resolved = doc_style::resolve_paint(p, st, |id, fallback| match self.gradient(id, 0) {
+            Some(g) if g.stops.len() == 1 => match g.stops.first() {
+                Some((_, c)) => UrlPaint::Color(*c),
+                None => UrlPaint::None,
+            },
+            Some(g) if !g.stops.is_empty() => UrlPaint::Server(Paint::Gradient(g)),
+            Some(_) => UrlPaint::None,
+            None => match self.pattern(id) {
+                Some(mut pattern) => {
+                    pattern.fallback = fallback;
+                    UrlPaint::Server(Paint::Pattern(pattern))
+                }
+                None => UrlPaint::Fallback,
+            },
+        })?;
+        Some(match resolved {
+            ResolvedPaint::Color(c, a) => (Paint::Color(c), a),
+            ResolvedPaint::Server(paint) => (paint, 1.0),
+        })
+    }
+
+    /// Read a local `href` or namespaced `xlink:href` value from an SVG element.
+    fn href_value(n: roxmltree::Node<'a, 'i>) -> Option<String> {
+        /// XML namespace of `xlink:href`.
+        const XLINK: &str = "http://www.w3.org/1999/xlink";
+        let href = n
+            .attributes()
+            .find(|a| a.name() == "href" && a.namespace().is_none())
+            .or_else(|| n.attributes().find(|a| a.name() == "href" && a.namespace() == Some(XLINK)))?;
+        Some(href.value().to_string())
     }
 
     fn href(&self, n: roxmltree::Node<'a, 'i>) -> Option<roxmltree::Node<'a, 'i>> {
-        let h = n.attributes().find(|a| a.name() == "href").map(|a| a.value())?;
-        self.ids.get(h.trim().trim_start_matches('#')).copied()
+        let h = Self::href_value(n)?;
+        let id = h.trim().strip_prefix('#')?;
+        if id.is_empty() {
+            return None;
+        }
+        self.ids.get(id).copied()
     }
 
-    /// A gradient by id, with `href` inheritance of attributes and stops.
-    fn gradient(&self, id: &str, depth: usize) -> Option<Gradient> {
+    /// A gradient by id, with a viewport-specific cache for its resolved attributes and stops.
+    fn gradient(&mut self, id: &str, depth: usize) -> Option<Gradient> {
+        let node = *self.ids.get(id)?;
+        if !matches!(node.tag_name().name(), "linearGradient" | "radialGradient") || depth > 16 {
+            return None;
+        }
+        let key = (node.id(), self.vw.to_bits(), self.vh.to_bits());
+        if let Some(gradient) = self.gradient_cache.get(&key) {
+            return Some(gradient.clone());
+        }
+        let gradient = self.parse_gradient(id, depth)?;
+        if self.gradient_cache.len() < MAX_GRADIENT_CACHE_ENTRIES {
+            self.gradient_cache.insert(key, gradient.clone());
+        }
+        Some(gradient)
+    }
+
+    /// Parse a gradient by id, charging reference-chain and stop work before retaining the result.
+    fn parse_gradient(&mut self, id: &str, depth: usize) -> Option<Gradient> {
         let n = *self.ids.get(id)?;
         let tag = n.tag_name().name();
         if !matches!(tag, "linearGradient" | "radialGradient") || depth > 16 {
@@ -851,24 +574,31 @@ impl<'a, 'i> Parser<'a, 'i> {
         // Chain: this element, then what it references.
         let mut chain = vec![n];
         let mut cur = n;
+        if !self.charge_gradient_work(cur.attributes().map(|a| a.name().len().saturating_add(a.value().len())).fold(1usize, usize::saturating_add)) {
+            return None;
+        }
         while let Some(next) = self.href(cur) {
             if chain.len() > 16 || chain.contains(&next) {
                 break;
             }
             chain.push(next);
             cur = next;
+            if !self.charge_gradient_work(cur.attributes().map(|a| a.name().len().saturating_add(a.value().len())).fold(1usize, usize::saturating_add)) {
+                return None;
+            }
         }
         let attr = |name: &str| chain.iter().find_map(|e| e.attribute(name));
         let bbox_units = attr("gradientUnits") != Some("userSpaceOnUse");
         let st = Style::default();
         let len = |name: &str, axis: char, def: &str| -> f64 {
             let v = attr(name).unwrap_or(def);
-            if bbox_units {
+            let value = if bbox_units {
                 let v = v.trim();
                 if let Some(p) = v.strip_suffix('%') { p.parse::<f64>().unwrap_or(0.0) / 100.0 } else { v.parse::<f64>().unwrap_or(0.0) }
             } else {
                 self.length(v, axis, st.font_size).unwrap_or(0.0)
-            }
+            };
+            if value.is_finite() { value } else { 0.0 }
         };
         let kind = if tag == "linearGradient" {
             GradientKind::Linear { x1: len("x1", 'x', "0%"), y1: len("y1", 'y', "0%"), x2: len("x2", 'x', "100%"), y2: len("y2", 'y', "0%") }
@@ -888,13 +618,29 @@ impl<'a, 'i> Parser<'a, 'i> {
         };
         // Stops: from the first element in the chain that has any.
         let mut stops = vec![];
-        if let Some(src) = chain.iter().find(|e| e.children().any(|c| c.is_element() && c.tag_name().name() == "stop")) {
+        let mut source = None;
+        'source: for candidate in &chain {
+            for child in candidate.children().filter(|child| child.is_element()) {
+                if !self.charge_gradient_work(1) {
+                    return None;
+                }
+                if child.tag_name().name() == "stop" {
+                    source = Some(*candidate);
+                    break 'source;
+                }
+            }
+        }
+        if let Some(src) = source {
             // Charged before the stops are read: every reference reads and keeps them again.
             if !self.charge_retained(src.children().filter(|c| c.is_element()).count()) {
                 return None;
             }
             let mut last = 0.0f64;
             for s in src.children().filter(|c| c.is_element() && c.tag_name().name() == "stop") {
+                let stop_work = s.attributes().map(|a| a.name().len().saturating_add(a.value().len())).fold(1usize, usize::saturating_add);
+                if !self.charge_gradient_work(stop_work) {
+                    return None;
+                }
                 let d = self.declared(s);
                 let off = s
                     .attribute("offset")
@@ -910,11 +656,207 @@ impl<'a, 'i> Parser<'a, 'i> {
                     .get("stop-color")
                     .and_then(|c| if c.trim() == "currentColor" { d.get("color").and_then(|x| parse_color(x)) } else { parse_color(c) })
                     .unwrap_or([0.0, 0.0, 0.0, 1.0]);
-                let o = d.get("stop-opacity").and_then(|v| v.trim().parse::<f64>().ok()).unwrap_or(1.0).clamp(0.0, 1.0);
+                let o = d.get("stop-opacity").and_then(|v| v.trim().parse::<f64>().ok()).filter(|v| v.is_finite()).unwrap_or(1.0).clamp(0.0, 1.0);
                 stops.push((off, [c[0], c[1], c[2], c[3] * o]));
             }
         }
-        Some(Gradient { kind, stops, bbox_units, transform, spread })
+        Some(Gradient { kind, stops: Arc::from(stops.into_boxed_slice()), bbox_units, transform, spread })
+    }
+
+    /// Parse a pattern length using the coordinate system selected by its units attribute.
+    fn pattern_length(&self, value: &str, axis: char, font: f64, units: PatternUnits) -> Option<f64> {
+        let value = value.trim();
+        let length = match units {
+            PatternUnits::ObjectBoundingBox => match value.strip_suffix('%') {
+                Some(percent) => percent.trim().parse::<f64>().ok()? / 100.0,
+                None => value.parse::<f64>().ok()?,
+            },
+            PatternUnits::UserSpaceOnUse => {
+                let number_end = value.find(|c: char| !(c.is_ascii_digit() || matches!(c, '.' | '-' | '+' | 'e' | 'E'))).unwrap_or(value.len());
+                let (mut number, mut unit) = (&value[..number_end], &value[number_end..]);
+                // The length scanner admits `e` for exponents; back it off when it starts `em` or
+                // `ex`, or follows a complete exponent (for example `1e2em`).
+                if number.parse::<f64>().is_err() && (number.ends_with('e') || number.ends_with('E')) {
+                    number = &number[..number.len().saturating_sub(1)];
+                    unit = &value[number_end.saturating_sub(1)..];
+                }
+                number.parse::<f64>().ok()?;
+                let unit = unit.trim();
+                if !matches!(unit, "" | "px" | "pt" | "pc" | "mm" | "cm" | "in" | "em" | "ex" | "%") {
+                    return None;
+                }
+                self.length(value, axis, font)?
+            }
+        };
+        length.is_finite().then_some(length)
+    }
+
+    /// Resolve a local static pattern. The nearest chain member supplies each attribute;
+    /// child content comes from the first member with non-descriptive element children.
+    fn pattern(&mut self, id: &str) -> Option<Pattern> {
+        let target = *self.ids.get(id)?;
+        if target.tag_name().name() != "pattern" {
+            return None;
+        }
+        let key = (target.id(), self.vw.to_bits(), self.vh.to_bits());
+        if let Some(pattern) = self.pattern_cache.get(&key) {
+            return pattern.clone();
+        }
+        let pattern = self.parse_pattern(id);
+        if pattern.is_some() && self.pattern_cache.len() < MAX_PATTERN_CACHE_ENTRIES {
+            self.pattern_cache.insert(key, pattern.clone());
+        }
+        pattern
+    }
+
+    /// Parse one pattern and account for all work done while resolving its inheritance chain.
+    fn parse_pattern(&mut self, id: &str) -> Option<Pattern> {
+        /// Longest `href` inheritance chain followed when resolving a pattern.
+        const MAX_PATTERN_HREF_DEPTH: usize = 16;
+        let first = *self.ids.get(id)?;
+        if first.tag_name().name() != "pattern" {
+            return None;
+        }
+        let mut chain = vec![first];
+        loop {
+            let current = *chain.last()?;
+            if !self.charge_pattern_attributes(current) {
+                return None;
+            }
+            let Some(href) = Self::href_value(current) else { break };
+            if chain.len() >= MAX_PATTERN_HREF_DEPTH {
+                return None;
+            }
+            let target_id = href.trim().strip_prefix('#')?;
+            if target_id.is_empty() {
+                return None;
+            }
+            let target = *self.ids.get(target_id)?;
+            if target.tag_name().name() != "pattern" || chain.iter().any(|seen| seen.id() == target.id()) {
+                return None;
+            }
+            chain.push(target);
+        }
+        // This implementation has no viewBox mapper for pattern contents; don't silently paint
+        // them in the wrong coordinate system.
+        if chain.iter().any(|node| node.attribute("viewBox").is_some()) {
+            return None;
+        }
+
+        let attr = |name: &str| chain.iter().find_map(|node| node.attribute(name).map(str::to_string));
+        let mut content_style = Style::default();
+        let mut content_opacity = 1.0;
+        let ancestors: Vec<_> = first.ancestors().filter(|node| node.is_element()).collect();
+        for ancestor in ancestors.into_iter().rev() {
+            if ancestor.id() != first.id() && !self.charge_pattern_attributes(ancestor) {
+                return None;
+            }
+            let (opacity, _) = self.cascade(ancestor, &mut content_style);
+            if ancestor.id() == first.id() {
+                content_opacity = opacity;
+            }
+        }
+        let font_size = content_style.font_size;
+        let units = match attr("patternUnits").as_deref() {
+            None | Some("objectBoundingBox") => PatternUnits::ObjectBoundingBox,
+            Some("userSpaceOnUse") => PatternUnits::UserSpaceOnUse,
+            Some(_) => return None,
+        };
+        let content_units = match attr("patternContentUnits").as_deref() {
+            None | Some("userSpaceOnUse") => PatternUnits::UserSpaceOnUse,
+            Some("objectBoundingBox") => PatternUnits::ObjectBoundingBox,
+            Some(_) => return None,
+        };
+        let x = match attr("x").as_deref() {
+            Some(value) => self.pattern_length(value, 'x', font_size, units)?,
+            None => 0.0,
+        };
+        let y = match attr("y").as_deref() {
+            Some(value) => self.pattern_length(value, 'y', font_size, units)?,
+            None => 0.0,
+        };
+        let width = self.pattern_length(attr("width")?.as_str(), 'x', font_size, units)?;
+        let height = self.pattern_length(attr("height")?.as_str(), 'y', font_size, units)?;
+        if width <= 0.0 || height <= 0.0 {
+            return None;
+        }
+        let transform = attr("patternTransform").as_deref().map(parse_transform).unwrap_or(Affine::IDENTITY);
+        let coeffs = transform.as_coeffs();
+        let determinant = coeffs[0] * coeffs[3] - coeffs[1] * coeffs[2];
+        if !coeffs.iter().all(|v| v.is_finite())
+            || !determinant.is_finite()
+            || determinant == 0.0
+            || !transform.inverse().as_coeffs().iter().all(|v| v.is_finite())
+        {
+            return None;
+        }
+        let (old_pattern_content, old_invalid) = (self.in_pattern_content, self.invalid_pattern_content);
+        let (old_vw, old_vh) = (self.vw, self.vh);
+        self.in_pattern_content = true;
+        self.invalid_pattern_content = false;
+        if content_units == PatternUnits::ObjectBoundingBox {
+            self.vw = 1.0;
+            self.vh = 1.0;
+        }
+        let source = chain.iter().copied().find(|node| {
+            node.children().any(|child| {
+                if !self.charge_pattern_work(1) {
+                    // Stop the scan immediately; the exceeded flag below rejects this pattern.
+                    return true;
+                }
+                child.is_element() && !matches!(child.tag_name().name(), "title" | "desc" | "metadata")
+            })
+        });
+        if self.pattern_work_exceeded {
+            return None;
+        }
+        // Content inherits from the element that actually owns it, which differs from `first`
+        // when the content comes through an `href` chain.
+        if let Some(source) = source.filter(|s| s.id() != first.id()) {
+            let mut inherited = Style::default();
+            let owners: Vec<_> = source.ancestors().filter(|node| node.is_element()).collect();
+            for owner in owners.into_iter().rev() {
+                if !self.charge_pattern_attributes(owner) {
+                    self.in_pattern_content = old_pattern_content;
+                    self.invalid_pattern_content = old_invalid;
+                    self.vw = old_vw;
+                    self.vh = old_vh;
+                    return None;
+                }
+                self.cascade(owner, &mut inherited);
+            }
+            content_style = inherited;
+        }
+        let mut children = Vec::new();
+        if let Some(source) = source {
+            for child in source.children() {
+                self.node(child, &content_style, &mut children, 1);
+                if self.pattern_work_exceeded {
+                    break;
+                }
+            }
+        }
+        let invalid = self.invalid_pattern_content;
+        self.in_pattern_content = old_pattern_content;
+        self.invalid_pattern_content = old_invalid;
+        self.vw = old_vw;
+        self.vh = old_vh;
+        if invalid || self.pattern_work_exceeded {
+            return None;
+        }
+        let render_complexity = pattern_render_complexity(&children);
+        let content = Group {
+            name: source.map_or_else(|| Self::element_name(first), Self::element_name),
+            transform: Affine::IDENTITY,
+            opacity: content_opacity,
+            children,
+            clip: vec![],
+            blend: BlendMode::Normal,
+            mask: None,
+            isolated: true,
+            knockout: false,
+        };
+        Some(Pattern { x, y, width, height, pattern_units: units, content_units, transform, content: Arc::new(content), render_complexity, fallback: None })
     }
 
     fn element_name(n: roxmltree::Node) -> String {
@@ -926,10 +868,19 @@ impl<'a, 'i> Parser<'a, 'i> {
         if depth > 64 || !is_svg_ns(&n) || self.work > self.budget {
             return;
         }
+        if self.in_pattern_content && !self.charge_pattern_attributes(n) {
+            return;
+        }
         // Every element converted counts, each `<use>` copy again: a few references to groups
         // that reference each other several times can multiply into billions (#1236).
         self.work += 1;
         let tag = n.tag_name().name();
+        if self.in_pattern_content
+            && !matches!(tag, "g" | "rect" | "circle" | "ellipse" | "path" | "line" | "polyline" | "polygon" | "defs" | "title" | "desc" | "metadata" | "style")
+        {
+            self.invalid_pattern_content = true;
+            return;
+        }
         match tag {
             "defs" | "title" | "desc" | "metadata" | "style" | "linearGradient" | "radialGradient" | "symbol" | "clipPath" | "mask" | "pattern" | "marker"
             | "script" => return,
@@ -1009,9 +960,12 @@ impl<'a, 'i> Parser<'a, 'i> {
                     let mut inner = vec![];
                     let mut sst = st.clone();
                     let (o, _) = self.cascade(target, &mut sst);
+                    let saved_viewport = (self.vw, self.vh);
+                    (self.vw, self.vh) = viewbox(target).map_or((w, h), |(_, vw, vh)| (vw, vh));
                     for c in target.children() {
                         self.node(c, &sst, &mut inner, depth + 1);
                     }
+                    (self.vw, self.vh) = saved_viewport;
                     children.push(Node::Group(Group {
                         name: Self::element_name(target),
                         transform: vb,
@@ -1043,7 +997,40 @@ impl<'a, 'i> Parser<'a, 'i> {
                 if !st.visible {
                     return;
                 }
-                let Some(geom) = self.geometry(n, &st) else { return };
+                let (path_data, points) = match tag {
+                    "path" => {
+                        let Some(data) = n.attribute("d") else { return };
+                        if !self.charge_path_data(data.len()) {
+                            return;
+                        }
+                        let (path, exceeded) = pathdata::parse_path_data_bounded(data, MAX_PATH_ELEMENTS_PER_IMPORT_ELEMENT);
+                        if exceeded || !self.charge_path_elements(path.elements().len()) {
+                            self.path_work_exceeded = true;
+                            return;
+                        }
+                        (Some(path), None)
+                    }
+                    "polyline" | "polygon" => {
+                        let Some(data) = n.attribute("points") else { return };
+                        if !self.charge_path_data(data.len()) {
+                            return;
+                        }
+                        let max_values = MAX_PATH_ELEMENTS_PER_IMPORT_ELEMENT.saturating_sub(1).saturating_mul(2);
+                        let (points, exceeded) = pathdata::numbers_bounded(data, max_values);
+                        if exceeded {
+                            self.path_work_exceeded = true;
+                            return;
+                        }
+                        let point_count = points.len() / 2;
+                        let elements = point_count.saturating_add(usize::from(tag == "polygon"));
+                        if points.len() >= 4 && !self.charge_path_elements(elements) {
+                            return;
+                        }
+                        (None, Some(points))
+                    }
+                    _ => (None, None),
+                };
+                let Some(geom) = self.geometry(n, &st, path_data, points) else { return };
                 if let Geom::Path(p) = &geom
                     && !self.charge_retained(p.elements().len())
                 {
@@ -1099,11 +1086,12 @@ impl<'a, 'i> Parser<'a, 'i> {
         }
     }
 
-    fn geometry(&self, n: roxmltree::Node, st: &Style) -> Option<Geom> {
+    /// Resolve an element's geometry from its attributes, or from pre-parsed path data / points.
+    fn geometry(&self, n: roxmltree::Node, st: &Style, path_data: Option<BezPath>, points: Option<Vec<f64>>) -> Option<Geom> {
         let l = |name: &str, axis: char| self.attr_len(n, name, axis, st);
         Some(match n.tag_name().name() {
             "path" => {
-                let p = parse_path_data(n.attribute("d")?);
+                let p = path_data?;
                 if p.elements().is_empty() {
                     return None;
                 }
@@ -1114,6 +1102,10 @@ impl<'a, 'i> Parser<'a, 'i> {
                 if !(w > 0.0 && h > 0.0) {
                     return None;
                 }
+                let (x, y) = (l("x", 'x'), l("y", 'y'));
+                if !(x + w).is_finite() || !(y + h).is_finite() {
+                    return None;
+                }
                 let rx_a = n.attribute("rx").and_then(|v| self.length(v, 'x', st.font_size));
                 let ry_a = n.attribute("ry").and_then(|v| self.length(v, 'y', st.font_size));
                 let (rx, ry) = match (rx_a, ry_a) {
@@ -1122,21 +1114,29 @@ impl<'a, 'i> Parser<'a, 'i> {
                     (None, Some(y)) => (y, y),
                     (None, None) => (0.0, 0.0),
                 };
-                Geom::Rect { x: l("x", 'x'), y: l("y", 'y'), w, h, rx: rx.clamp(0.0, w / 2.0), ry: ry.clamp(0.0, h / 2.0) }
+                Geom::Rect { x, y, w, h, rx: rx.clamp(0.0, w / 2.0), ry: ry.clamp(0.0, h / 2.0) }
             }
             "circle" => {
                 let r = l("r", 'o');
-                if r <= 0.0 {
+                if !(r > 0.0 && r <= MAX_ELLIPSE_RADIUS) {
                     return None;
                 }
-                Geom::Ellipse { cx: l("cx", 'x'), cy: l("cy", 'y'), rx: r, ry: r }
+                let (cx, cy) = (l("cx", 'x'), l("cy", 'y'));
+                if ![cx - r, cx + r, cy - r, cy + r].iter().all(|value| value.is_finite()) {
+                    return None;
+                }
+                Geom::Ellipse { cx, cy, rx: r, ry: r }
             }
             "ellipse" => {
                 let (rx, ry) = (l("rx", 'x'), l("ry", 'y'));
-                if rx <= 0.0 || ry <= 0.0 {
+                if !(rx > 0.0 && rx <= MAX_ELLIPSE_RADIUS && ry > 0.0 && ry <= MAX_ELLIPSE_RADIUS) {
                     return None;
                 }
-                Geom::Ellipse { cx: l("cx", 'x'), cy: l("cy", 'y'), rx, ry }
+                let (cx, cy) = (l("cx", 'x'), l("cy", 'y'));
+                if ![cx - rx, cx + rx, cy - ry, cy + ry].iter().all(|value| value.is_finite()) {
+                    return None;
+                }
+                Geom::Ellipse { cx, cy, rx, ry }
             }
             "line" => {
                 let mut p = BezPath::new();
@@ -1145,14 +1145,16 @@ impl<'a, 'i> Parser<'a, 'i> {
                 Geom::Path(p)
             }
             "polyline" | "polygon" => {
-                let nums = pathdata::numbers(n.attribute("points")?);
+                let nums = points?;
                 if nums.len() < 4 {
                     return None;
                 }
                 let mut p = BezPath::new();
-                p.move_to((nums[0], nums[1]));
-                for c in nums[2..].as_chunks::<2>().0 {
-                    p.line_to((c[0], c[1]));
+                let first_pair = nums.get(..2)?;
+                let (Some(&first_x), Some(&first_y)) = (first_pair.first(), first_pair.get(1)) else { return None };
+                p.move_to((first_x, first_y));
+                for [x, y] in nums.get(2..).unwrap_or_default().as_chunks::<2>().0 {
+                    p.line_to((*x, *y));
                 }
                 if n.tag_name().name() == "polygon" {
                     p.close_path();
@@ -1164,140 +1166,57 @@ impl<'a, 'i> Parser<'a, 'i> {
     }
 }
 
-fn viewbox(n: roxmltree::Node) -> Option<([f64; 2], f64, f64)> {
-    let v = pathdata::numbers(n.attribute("viewBox")?);
-    (v.len() == 4 && v.iter().all(|x| x.is_finite()) && v[2] > 0.0 && v[3] > 0.0).then(|| ([v[0], v[1]], v[2], v[3]))
-}
-
-/// The viewBox → viewport transform (`preserveAspectRatio`, default `xMidYMid meet`).
-fn viewbox_transform(n: roxmltree::Node, w: f64, h: f64) -> Affine {
-    let Some(([x, y], vw, vh)) = viewbox(n) else { return Affine::IDENTITY };
-    let par = n.attribute("preserveAspectRatio").unwrap_or("xMidYMid meet");
-    let mut parts = par.split_whitespace();
-    let mut align = parts.next().unwrap_or("xMidYMid");
-    if align == "defer" {
-        align = parts.next().unwrap_or("xMidYMid");
-    }
-    let slice = parts.next() == Some("slice");
-    let (sx, sy) = (w / vw, h / vh);
-    if align == "none" {
-        return Affine::scale_non_uniform(sx, sy) * Affine::translate((-x, -y));
-    }
-    let s = if slice { sx.max(sy) } else { sx.min(sy) };
-    let fx = if align.contains("xMid") {
-        0.5
-    } else if align.contains("xMax") {
-        1.0
-    } else {
-        0.0
-    };
-    let fy = if align.contains("YMid") {
-        0.5
-    } else if align.contains("YMax") {
-        1.0
-    } else {
-        0.0
-    };
-    let tx = (w - vw * s) * fx;
-    let ty = (h - vh * s) * fy;
-    Affine::translate((tx, ty)) * Affine::scale(s) * Affine::translate((-x, -y))
+/// Estimate tile raster work from group traversal and the shape/path operations it contains.
+fn pattern_render_complexity(nodes: &[Node]) -> usize {
+    nodes.iter().fold(0usize, |total, node| {
+        let cost = match node {
+            Node::Group(group) => 4usize.saturating_add(pattern_render_complexity(&group.children)),
+            Node::Shape(shape) => {
+                let segments = match &shape.geom {
+                    Geom::Path(path) => path.elements().len().max(1),
+                    Geom::Rect { .. } | Geom::Ellipse { .. } => 8,
+                };
+                let paints = usize::from(shape.fill.is_some()).saturating_add(usize::from(shape.stroke.is_some()));
+                1usize.saturating_add(segments.saturating_mul(paints))
+            }
+            Node::Image(_) => 1,
+        };
+        total.saturating_add(cost)
+    })
 }
 
 /// Parse a `transform` list.
-pub fn parse_transform(s: &str) -> Affine {
-    let mut m = Affine::IDENTITY;
-    let mut rest = s;
-    while let Some(open) = rest.find('(') {
-        let name = rest[..open].trim().trim_start_matches(',').trim();
-        let Some(close) = rest[open..].find(')') else { break };
-        let a = pathdata::numbers(&rest[open + 1..open + close]);
-        rest = &rest[open + close + 1..];
-        let t = match (name, a.len()) {
-            ("matrix", 6) => Affine::new([a[0], a[1], a[2], a[3], a[4], a[5]]),
-            ("translate", 1) => Affine::translate((a[0], 0.0)),
-            ("translate", 2) => Affine::translate((a[0], a[1])),
-            ("scale", 1) => Affine::scale(a[0]),
-            ("scale", 2) => Affine::scale_non_uniform(a[0], a[1]),
-            ("rotate", 1) => Affine::rotate(a[0].to_radians()),
-            ("rotate", 3) => Affine::translate((a[1], a[2])) * Affine::rotate(a[0].to_radians()) * Affine::translate((-a[1], -a[2])),
-            ("skewX", 1) => Affine::new([1.0, 0.0, a[0].to_radians().tan(), 1.0, 0.0, 0.0]),
-            ("skewY", 1) => Affine::new([1.0, a[0].to_radians().tan(), 0.0, 1.0, 0.0, 0.0]),
-            _ => Affine::IDENTITY,
-        };
-        m *= t;
-    }
-    m
-}
+pub use craft_svg::transform_compat::parse_transform;
 
-/// The deepest element nesting accepted. The XML parser recurses per level and overflowed a
-/// 2 MiB thread's stack (aborting the app) at a few thousand levels; real documents stay far
-/// below this.
-const MAX_XML_DEPTH: usize = 256;
 /// The most elements an import converts, `<use>` copies included, unless the file itself has
 /// more than half as many (#1236).
 const MAX_EXPANDED_ELEMENTS: usize = 500_000;
-
-/// The deepest element nesting of `text` (a quick scan that skips comments, CDATA, processing
-/// instructions, declarations and quoted attribute values).
-fn xml_depth(text: &str) -> usize {
-    let b = text.as_bytes();
-    let (mut i, mut depth, mut max) = (0usize, 0usize, 0usize);
-    let skip_to = |from: usize, end: &[u8]| b.get(from..).and_then(|r| r.windows(end.len()).position(|w| w == end)).map_or(b.len(), |p| from + p + end.len());
-    while i < b.len() {
-        if b[i] != b'<' {
-            i += 1;
-            continue;
-        }
-        let rest = &b[i..];
-        if rest.starts_with(b"<!--") {
-            i = skip_to(i + 4, b"-->");
-        } else if rest.starts_with(b"<![CDATA[") {
-            i = skip_to(i + 9, b"]]>");
-        } else if rest.starts_with(b"<?") {
-            i = skip_to(i + 2, b"?>");
-        } else if rest.starts_with(b"<!") {
-            i = skip_to(i + 2, b">");
-        } else if rest.starts_with(b"</") {
-            depth = depth.saturating_sub(1);
-            i = skip_to(i + 2, b">");
-        } else {
-            // A start tag: find its end outside quotes; `/>` closes it at once.
-            let mut j = i + 1;
-            let mut quote = None;
-            while let Some(&c) = b.get(j) {
-                match quote {
-                    Some(q) if c == q => quote = None,
-                    Some(_) => {}
-                    None if c == b'"' || c == b'\'' => quote = Some(c),
-                    None if c == b'>' => break,
-                    None => {}
-                }
-                j += 1;
-            }
-            if b.get(j.wrapping_sub(1)) != Some(&b'/') {
-                depth += 1;
-                max = max.max(depth);
-            }
-            i = j + 1;
-        }
-    }
-    max
-}
-
-/// Nodes a document may expand to: a few kilobytes of nested internal entities
-/// (`<!ENTITY b "&a;&a;…">`) otherwise expand to millions and exhaust memory.
-const MAX_XML_NODES: u32 = 4_000_000;
+/// Bound path geometry expanded from a single path or point-list element.
+const MAX_PATH_ELEMENTS_PER_IMPORT_ELEMENT: usize = pathdata::MAX_PATH_ELEMENTS;
+/// Bound the path geometry retained across all path and point-list elements, including `<use>` copies.
+const MAX_PATH_ELEMENTS_PER_IMPORT: usize = 1_000_000;
+/// Bound repeated gradient-chain and stop scanning across the import.
+const MAX_GRADIENT_WORK: usize = 64 * 1024 * 1024;
+/// Bound viewport-specific resolved gradients; stop data is shared between clones.
+const MAX_GRADIENT_CACHE_ENTRIES: usize = 256;
+/// Bound ellipse expansion before kurbo approximates it with tolerance-dependent path segments.
+const MAX_ELLIPSE_RADIUS: f64 = 1.0e9;
+/// Weight applied to each path data byte when charging path work.
+const PATH_DATA_WORK_FACTOR: usize = 8;
+/// Aggregate work that pattern references may revisit, including attributes and scanned children,
+/// even when many shapes share one large pattern definition.
+const MAX_PATTERN_WORK_BYTES: usize = 256 * 1024 * 1024;
+/// Lower bound of the pattern work budget regardless of document size.
+const MIN_PATTERN_WORK_BYTES: usize = 8 * 1024 * 1024;
+/// Bound viewport-specific pattern results; uncached resolutions remain covered by the work budget.
+const MAX_PATTERN_CACHE_ENTRIES: usize = 256;
 
 /// Parse an SVG document.
 pub fn parse(bytes: &[u8]) -> Result<Doc, Error> {
     let text = String::from_utf8_lossy(bytes);
     let text = text.trim_start_matches('\u{feff}');
-    if xml_depth(text) > MAX_XML_DEPTH {
-        return Err(Error::Xml(format!("elements nested more than {MAX_XML_DEPTH} levels deep")));
-    }
-    // DTDs stay allowed (Illustrator's SVGs declare entities), but expansion is bounded (#2129).
-    let opts = roxmltree::ParsingOptions { allow_dtd: true, nodes_limit: MAX_XML_NODES, ..Default::default() };
-    let xml = roxmltree::Document::parse_with_options(text, opts).map_err(|e| Error::Xml(e.to_string()))?;
+    // Shared preflight: entity expansion, attribute work, nesting depth, and bounded DTD/node parsing (#2129).
+    let xml = craft_svg::preflight::parse_text(text, &craft_svg::preflight::Limits::default()).map_err(|e| Error::Xml(e.to_string()))?;
     let root = xml.root_element();
     if root.tag_name().name() != "svg" {
         return Err(Error::NotSvg);
@@ -1317,6 +1236,8 @@ pub fn parse(bytes: &[u8]) -> Result<Doc, Error> {
     let vb = viewbox(root);
     // Room for generous reuse, and always for every element of the file itself.
     let budget = MAX_EXPANDED_ELEMENTS.max(root.descendants().filter(|n| n.is_element()).count().saturating_mul(2));
+    let pattern_work_budget = bytes.len().saturating_mul(8).clamp(MIN_PATTERN_WORK_BYTES, MAX_PATTERN_WORK_BYTES);
+    let path_work_budget = pattern_work_budget;
     let mut p = Parser {
         ids,
         css,
@@ -1327,6 +1248,19 @@ pub fn parse(bytes: &[u8]) -> Result<Doc, Error> {
         work: 0,
         budget,
         using: vec![],
+        in_pattern_content: false,
+        invalid_pattern_content: false,
+        pattern_work: 0,
+        pattern_work_budget,
+        pattern_work_exceeded: false,
+        path_data_work: 0,
+        path_element_work: 0,
+        path_work_budget,
+        path_work_exceeded: false,
+        pattern_cache: HashMap::new(),
+        gradient_cache: HashMap::new(),
+        gradient_work: 0,
+        gradient_work_exceeded: false,
         retained: std::cell::Cell::new(0),
     };
     let st = Style::default();
@@ -1367,6 +1301,15 @@ pub fn parse(bytes: &[u8]) -> Result<Doc, Error> {
     if p.work > p.budget {
         // Never a silently partial drawing.
         return Err(Error::Xml(format!("its <use> references expand to more than {} elements", p.budget)));
+    }
+    if p.pattern_work_exceeded {
+        return Err(Error::Xml(format!("resolving its <pattern> references scans more than {} work units", p.pattern_work_budget)));
+    }
+    if p.path_work_exceeded {
+        return Err(Error::Xml("its SVG paths expand beyond the bounded path-data work budget".to_string()));
+    }
+    if p.gradient_work_exceeded {
+        return Err(Error::Xml(format!("resolving its gradients exceeds the {MAX_GRADIENT_WORK}-unit work budget")));
     }
     if p.retained.get() > MAX_RETAINED {
         return Err(Error::Xml(format!("its paths and gradients, with their copies, hold more than {MAX_RETAINED} elements")));

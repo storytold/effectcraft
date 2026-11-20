@@ -10,6 +10,7 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+craft-audio-markers = { package = "craft-audio", version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "30596f73c5ef851ba3dad9cf145669f391e2eb0d", default-features = false }
 craft-docpath = { workspace = true }
 effectcraft-time = { workspace = true }
 effectcraft-color = { workspace = true }
@@ -22,14 +23,21 @@ effectcraft-pdf = { workspace = true }
 effectcraft-model = { workspace = true }
 filmcraft-codecs = { workspace = true }
 filmcraft-media = { workspace = true }
-craft-audio = { workspace = true }
-craft-media = { workspace = true }
-filmcraft-mpegts = { workspace = true }
+craft-dpx = { workspace = true }
+craft-exr = { workspace = true, features = ["decode"] }
+craft-gif = { workspace = true, features = ["frames"] }
+craft-webp = { workspace = true, features = ["frames"] }
+craft-audio = { workspace = true, features = ["aac-decode", "alac-decode", "opus-decode", "ac3-decode", "mp3-decode", "mpa-decode"] }
+craft-color = { workspace = true }
+craft-frame = { workspace = true }
+craft-media = { workspace = true, features = ["mpegts"] }
+craft-media-source = { workspace = true }
+craft-time = { workspace = true }
+craft-video = { workspace = true, features = ["h264-decode", "threads"] }
 filmcraft-frame = { workspace = true }
 filmcraft-color = { workspace = true }
 filmcraft-time = { workspace = true }
-exr = { workspace = true }
-gif = { workspace = true }
+half = { workspace = true }
 image = { workspace = true, features = ["gif", "webp", "tiff", "bmp", "exr", "tga", "hdr"] }
 rayon = { workspace = true }
 serde_json = { workspace = true }
@@ -37,6 +45,10 @@ thiserror = { workspace = true }
 log = { workspace = true }
 
 [dev-dependencies]
+# Writes the OpenEXR files of the tests (reading is craft-exr's).
+exr = { workspace = true }
+# Writes the animated GIFs of the tests.
+gif = { workspace = true }
 tempfile = { workspace = true }
 # (tests render comps that read layers through effects; already a dependency of effectcraft-render)
 effectcraft-effects = { workspace = true }

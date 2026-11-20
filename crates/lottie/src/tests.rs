@@ -12,7 +12,7 @@ use effectcraft_render::render_frame;
 use effectcraft_time::{FrameRate, Tick};
 use serde_json::{Value as Json, json};
 
-use crate::{ExportOptions, export_comp, import};
+use crate::{ExportOptions, LottieError, export_comp, import};
 
 fn s(x: f64) -> Tick {
     Tick::from_seconds_f64(x)
@@ -381,7 +381,7 @@ fn offset_paths_miter_uses_animatable_lottie_value() {
     assert_eq!(shapes[0]["ml"]["k"][1]["s"], json!([9.0]));
     assert_eq!(shapes[1]["ml"], json!({"a": 0, "k": 6.0}));
     assert_eq!(shapes[2]["ty"], "st");
-    assert_eq!(shapes[2]["ml"], json!(7.0));
+    assert_eq!(shapes[2]["ml"].as_f64(), Some(7.0));
     assert!(compare_comps(&p, cid, &q, nc) > 10);
     let restored = &q.comp(nc).unwrap().layers[0];
     assert_eq!(restored.props.group("contents/offset").unwrap().get("miter").unwrap().keys.len(), 2);
@@ -799,6 +799,32 @@ fn dotlottie_archive_roundtrip() {
     assert_eq!(q.comp(imp.comp).unwrap().layers.len(), 1);
 }
 
+#[test]
+fn dotlottie_archive_without_animation_is_rejected() {
+    let zip = craft_lottie::zip::try_store(&[("manifest.json".into(), b"{}".to_vec())]).unwrap();
+    let mut project = Project::default();
+    let err = import(&mut project, &zip, "empty archive", "", &mut |_| None).unwrap_err();
+    assert!(matches!(err, LottieError::Parse(message) if message.contains("without a JSON animation")));
+}
+
+#[test]
+fn deflated_dotlottie_archive_imports() {
+    let (mut p, cid) = setup();
+    let l = solid_layer(&mut p, cid, [0.0, 1.0, 0.0], 40, 40);
+    push(&mut p, cid, l);
+    let res = export_comp(&p, cid, &ExportOptions::default(), &no_read).unwrap();
+    let manifest = serde_json::to_vec(&serde_json::json!({"version":"1","animations":[{"id":"main"}]})).unwrap();
+    let animation = serde_json::to_vec(&res.json).unwrap();
+    let zip = craft_lottie::zip::try_store_with_compression(
+        &[("manifest.json".into(), manifest), ("animations/main.json".into(), animation)],
+        craft_lottie::zip::Compression::Deflated,
+    )
+    .unwrap();
+    let mut q = Project::default();
+    let imp = import(&mut q, &zip, "compressed", "", &mut |_| None).unwrap();
+    assert_eq!(q.comp(imp.comp).unwrap().layers.len(), 1);
+}
+
 // ---------------------------------------------------------------- hand-written fixtures
 
 fn fixture(name: &str) -> (Project, ItemId, Vec<String>) {
@@ -1061,4 +1087,13 @@ fn only_image_bytes_are_embedded() {
     let res = export_comp(&p, cid, &ExportOptions::default(), &read).unwrap();
     assert!(res.json["assets"].as_array().is_none_or(|a| a.is_empty()), "{}", res.json["assets"]);
     assert!(res.warnings.iter().any(|w| w.contains("not a PNG")), "{:?}", res.warnings);
+}
+
+#[test]
+fn dotlottie_export_rejects_an_unrepresentable_entry_name() {
+    let (p, cid) = setup();
+    let res = export_comp(&p, cid, &ExportOptions::default(), &no_read).unwrap();
+    let err = crate::try_to_dotlottie(&res, &"a".repeat(usize::from(u16::MAX))).unwrap_err();
+    assert!(matches!(err, LottieError::Invalid(message) if message.contains("dotLottie ZIP")));
+    assert_eq!(crate::try_to_dotlottie(&res, "Main").unwrap(), crate::to_dotlottie(&res, "Main"));
 }

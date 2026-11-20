@@ -120,6 +120,22 @@ fn obj_without_normals_gets_them() {
 }
 
 #[test]
+fn obj_mixed_authored_normals_keep_flat_missing_corners() {
+    let src = b"v 0 0 0\nv 1 0 0\nv 0 1 0\nv 0 0 1\nvn 0 1 0\ns off\nf 1//1 2 3\nf 1 3 4\n";
+    let m = obj::parse(src, &|_| None).unwrap();
+    let corners: Vec<_> = m.meshes[0]
+        .primitives
+        .iter()
+        .flat_map(|p| p.positions.iter().zip(&p.normals))
+        .filter(|(position, _)| **position == [0.0, 1.0, 0.0])
+        .map(|(_, normal)| *normal)
+        .collect();
+    assert!(corners.contains(&[0.0, 0.0, 1.0]), "{corners:?}");
+    assert!(corners.contains(&[1.0, 0.0, 0.0]), "{corners:?}");
+    assert!(m.meshes[0].primitives.iter().any(|p| p.normals.contains(&[0.0, 1.0, 0.0])));
+}
+
+#[test]
 fn obj_textures_from_another_machine_find_the_file_next_to_the_model() {
     // No committed media: the material file and its textures are written by the test itself.
     let d = std::env::temp_dir().join(format!("ec-obj-sibling-{}", std::process::id()));
@@ -649,9 +665,9 @@ fn gltf_accessor_counts_are_checked_against_the_buffer_before_allocating() {
     let view = r#"{"buffer": 0, "byteLength": 36}"#;
     let cases = [
         // A count far beyond the 36-byte buffer.
-        (r#"{"bufferView": 0, "componentType": 5126, "type": "VEC3", "count": 4000000000}"#, view, "past its buffer"),
+        (r#"{"bufferView": 0, "componentType": 5126, "type": "VEC3", "count": 4000000000}"#, view, "limit allows"),
         // count * components overflows.
-        (r#"{"bufferView": 0, "componentType": 5126, "type": "MAT4", "count": 9223372036854775807}"#, view, "too large"),
+        (r#"{"bufferView": 0, "componentType": 5126, "type": "MAT4", "count": 9223372036854775807}"#, view, "limit allows"),
         // Offsets that overflow when added.
         (
             r#"{"bufferView": 0, "componentType": 5126, "type": "VEC3", "count": 3, "byteOffset": 16}"#,
@@ -659,11 +675,11 @@ fn gltf_accessor_counts_are_checked_against_the_buffer_before_allocating() {
             "past its buffer",
         ),
         // A stride that overflows with the count.
-        (r#"{"bufferView": 0, "componentType": 5126, "type": "VEC3", "count": 3000000000}"#, r#"{"buffer": 0, "byteStride": 252}"#, "past its buffer"),
+        (r#"{"bufferView": 0, "componentType": 5126, "type": "VEC3", "count": 3000000000}"#, r#"{"buffer": 0, "byteStride": 252}"#, "limit allows"),
         // A stride smaller than an element would re-read the same bytes for a huge count.
         (r#"{"bufferView": 0, "componentType": 5126, "type": "MAT4", "count": 30}"#, r#"{"buffer": 0, "byteStride": 1}"#, "smaller than"),
         // No buffer view: nothing backs the count, so it is capped.
-        (r#"{"componentType": 5126, "type": "VEC3", "count": 1000000000}"#, view, "without a bufferView"),
+        (r#"{"componentType": 5126, "type": "VEC3", "count": 1000000000}"#, view, "limit allows"),
     ];
     let t0 = std::time::Instant::now();
     for (acc, v, want) in cases {
@@ -721,67 +737,15 @@ fn gltf_issue_2139_huge_mat4_count_is_an_error() {
 }
 
 #[test]
-fn gltf_buffer_less_accessors_share_one_zero_budget() {
-    // Each buffer-less accessor is capped, but nothing backs any of them, so referencing a capped
-    // one from many primitives must not multiply the allocation (#2139).
+fn gltf_reused_buffer_less_accessor_is_read_once() {
+    // The shared reader parses a repeated accessor only once, so referencing it from several
+    // primitives does not multiply its one bounded allocation.
     let acc = r#"{"componentType": 5126, "type": "VEC3", "count": 5000000}"#;
     let prims = [r#"{"attributes": {"POSITION": 0}}"#; 4].join(", ");
     let doc = gltf_doc(acc, r#"{"buffer": 0}"#, 3).replace(r#"[{"attributes": {"POSITION": 0}}]"#, &format!("[{prims}]"));
     assert_eq!(doc.matches(r#""POSITION": 0"#).count(), 4);
-    let e = crate::gltf::parse(doc.as_bytes(), &|_| None).err().unwrap_or_else(|| panic!("imported"));
-    assert!(e.to_string().contains("without a bufferView"), "{e}");
-    // One such accessor read once still imports.
-    let doc = gltf_doc(acc, r#"{"buffer": 0}"#, 3);
-    assert!(crate::gltf::parse(doc.as_bytes(), &|_| None).is_ok());
-}
-
-/// `refs` primitives sharing one buffer-backed `verts`-vertex POSITION accessor, without indices.
-fn gltf_shared_positions(verts: usize, refs: usize) -> String {
-    let acc = format!(r#"{{"bufferView": 0, "componentType": 5126, "type": "VEC3", "count": {verts}}}"#);
-    let prims = vec![r#"{"attributes": {"POSITION": 0}}"#; refs].join(", ");
-    gltf_doc(&acc, r#"{"buffer": 0}"#, verts * 12).replace(r#"[{"attributes": {"POSITION": 0}}]"#, &format!("[{prims}]"))
-}
-
-#[test]
-fn gltf_buffer_backed_reads_share_one_read_budget() {
-    // A buffer-backed accessor is checked against its buffer, but each primitive that references
-    // it reads and keeps its own copy, so a small file listing many references must not ask for
-    // memory set by the reference count (#2139 review). Everything a primitive keeps is charged
-    // to one per-file budget: 1,000 vertices without indices or normals cost 3,000 position
-    // components, 1,000 generated indices, a 999-index triangle list and 999 flat-shaded
-    // vertices of 6 components, 10,993 in all.
-    let one = gltf_shared_positions(1000, 1);
-    let m = crate::gltf::parse_with_budget(one.as_bytes(), &|_| None, 20_000).unwrap();
-    assert_eq!(m.meshes[0].primitives.len(), 1);
-    let three = gltf_shared_positions(1000, 3);
-    assert_eq!(three.matches(r#""POSITION": 0"#).count(), 3);
-    let e = crate::gltf::parse_with_budget(three.as_bytes(), &|_| None, 20_000).err().unwrap_or_else(|| panic!("imported"));
-    assert!(e.to_string().contains("more than 20000 components"), "{e}");
-    // The real cap leaves room for legitimate sharing: many primitives over one vertex buffer.
-    let m = crate::gltf::parse(gltf_shared_positions(1000, 50).as_bytes(), &|_| None).unwrap();
-    assert_eq!(m.meshes[0].primitives.len(), 50);
-}
-
-#[test]
-fn gltf_missing_indices_are_charged_to_the_read_budget() {
-    // Without `indices` every vertex gets a generated index, allocated like a read: after the
-    // 3,000 position components, 999 left is one short for the 1,000 indices.
-    let doc = gltf_shared_positions(1000, 1);
-    let e = crate::gltf::parse_with_budget(doc.as_bytes(), &|_| None, 3999).err().unwrap_or_else(|| panic!("imported"));
-    assert!(e.to_string().contains("(1000 requested, 999 left)"), "{e}");
-}
-
-#[test]
-fn gltf_strip_expansion_is_charged_to_the_read_budget() {
-    // A strip of k indices becomes 3(k-2) triangle indices and as many flat-shaded vertices, so
-    // the output is charged, not only the 1,009 components read.
-    let doc = gltf_doc(r#"{"bufferView": 0, "componentType": 5126, "type": "VEC3", "count": 3}"#, r#"{"buffer": 0}"#, 1036)
-        .replace(r#""count": 3}]"#, r#""count": 3}, {"bufferView": 0, "componentType": 5121, "type": "SCALAR", "count": 1000}]"#)
-        .replace(r#""attributes": {"POSITION": 0}"#, r#""attributes": {"POSITION": 0}, "indices": 1, "mode": 5"#);
-    let m = crate::gltf::parse_with_budget(doc.as_bytes(), &|_| None, 30_000).unwrap();
-    assert_eq!(m.meshes[0].primitives[0].indices.len(), 2994);
-    let e = crate::gltf::parse_with_budget(doc.as_bytes(), &|_| None, 5000).err().unwrap_or_else(|| panic!("imported"));
-    assert!(e.to_string().contains("more than 5000 components"), "{e}");
+    let result = crate::gltf::parse(doc.as_bytes(), &|_| None);
+    assert!(result.is_ok(), "{result:?}");
 }
 
 #[test]

@@ -9,13 +9,11 @@
 //! every delay is a whole number of frames at (1000 / the greatest common divisor of the delays),
 //! so it is kept exactly. A still WebP (no animation flag, or a single frame) stays a still.
 
-use std::io::Cursor;
-
 use effectcraft_project::{AlphaMode, Footage, FootageKind};
 use effectcraft_time::{FrameRate, Tick};
-use image::{AnimationDecoder, DynamicImage, codecs::webp::WebPDecoder};
+use image::DynamicImage;
 
-use crate::gif_anim::{Anim, MAX_BYTES, MAX_FRAMES, gcd};
+use crate::gif_anim::{Anim, DECODE_FRAMES, MAX_BYTES, MAX_FRAMES, gcd};
 use crate::{MediaError, Result};
 
 /// The `Footage::codec` of an animated WebP.
@@ -23,7 +21,7 @@ pub(crate) const CODEC: &str = "WebP";
 
 /// Whether `bytes` start like a WebP file.
 pub(crate) fn is_webp(bytes: &[u8]) -> bool {
-    bytes.get(0..4) == Some(b"RIFF") && bytes.get(8..12) == Some(b"WEBP")
+    craft_webp::is_webp(bytes)
 }
 
 /// What the chunk headers of an animated WebP say.
@@ -35,46 +33,11 @@ struct Header {
     delays: Vec<u32>,
 }
 
-fn u24(b: &[u8]) -> Option<u32> {
-    match b {
-        [a, b, c, ..] => Some(u32::from(*a) | u32::from(*b) << 8 | u32::from(*c) << 16),
-        _ => None,
-    }
-}
-
 /// Read the `VP8X` header and the `ANMF` frame headers. `None` when the file isn't an animated
 /// WebP. A truncated tail keeps the frames before it.
 fn header(bytes: &[u8]) -> Option<Header> {
-    if !is_webp(bytes) {
-        return None;
-    }
-    let riff = bytes.get(4..8).and_then(|b| b.try_into().ok()).map(u32::from_le_bytes)?;
-    let end = usize::try_from(riff).ok()?.saturating_add(8).min(bytes.len());
-    let (mut at, mut canvas, mut delays) = (12usize, None, Vec::new());
-    while delays.len() < MAX_FRAMES {
-        let Some(head) = bytes.get(at..at.saturating_add(8)).filter(|_| at.saturating_add(8) <= end) else { break };
-        let size = head.get(4..8).and_then(|b| b.try_into().ok()).map(u32::from_le_bytes)?;
-        let size = usize::try_from(size).ok()?;
-        let body_end = at.saturating_add(8).saturating_add(size);
-        let Some(body) = bytes.get(at.saturating_add(8)..body_end).filter(|_| body_end <= end) else { break };
-        match head.get(0..4) {
-            Some(b"VP8X") => {
-                let flags = *body.first()?;
-                if flags & 0x02 == 0 {
-                    // No animation flag: a still.
-                    return None;
-                }
-                let w = u24(body.get(4..)?)?.saturating_add(1);
-                let h = u24(body.get(7..)?)?.saturating_add(1);
-                canvas = Some((w, h, flags & 0x10 != 0));
-            }
-            Some(b"ANMF") if body.len() >= 16 => delays.push(u24(body.get(12..)?)?),
-            _ => {}
-        }
-        at = body_end.saturating_add(size & 1);
-    }
-    let (width, height, alpha) = canvas?;
-    Some(Header { width, height, alpha, delays })
+    let info = craft_webp::scan(bytes, MAX_FRAMES).filter(|i| i.animated)?;
+    Some(Header { width: info.width, height: info.height, alpha: info.alpha, delays: info.frames.iter().map(|f| f.duration_ms).collect() })
 }
 
 /// The delay of a frame in milliseconds. Browsers show delays of 10 ms or less (that encoders
@@ -156,29 +119,29 @@ pub(crate) fn load(bytes: &[u8]) -> Result<Anim> {
     if frame_bytes.saturating_mul(h.delays.len()) > MAX_BYTES {
         return Err(MediaError::Unsupported(format!("animated WebP of {} frames of {}×{} is too large to hold in memory", h.delays.len(), h.width, h.height)));
     }
-    let dec = WebPDecoder::new(Cursor::new(bytes)).map_err(|e| MediaError::Decode(format!("WebP: {e}")))?;
-    // The budget above used the canvas this file's header scan found; the decoder must agree, or
-    // a second VP8X header could make it allocate a far larger canvas.
-    if image::ImageDecoder::dimensions(&dec) != (h.width, h.height) {
+    let mut limits = craft_webp::frames::FrameLimits::default();
+    limits.max_frames = DECODE_FRAMES;
+    limits.max_bytes = MAX_BYTES as u64;
+    limits.max_canvas_bytes = MAX_BYTES as u64;
+    let decoded = craft_webp::frames::read_frames(bytes, &limits).map_err(|e| match e {
+        craft_webp::frames::FrameError::Malformed(m) => MediaError::Decode(format!("WebP: {m}")),
+        craft_webp::frames::FrameError::LimitExceeded(m) => MediaError::Unsupported(format!("WebP: {m}")),
+    })?;
+    if matches!(&decoded.stop, craft_webp::frames::Stop::ByteLimit | craft_webp::frames::Stop::FrameLimit) {
+        return Err(MediaError::Unsupported("animated WebP is too large to hold in memory".into()));
+    }
+    if let craft_webp::frames::Stop::Damaged(ref e) = decoded.stop {
+        log::warn!("media: WebP stops after {} frames: {e}", decoded.frames.len());
+    }
+    if (decoded.width, decoded.height) != (h.width, h.height) {
         return Err(MediaError::Decode("WebP: conflicting canvas sizes".into()));
     }
-    let (mut frames, mut delays, mut size) = (Vec::new(), Vec::new(), 0usize);
-    for frame in dec.into_frames() {
-        let frame = match frame {
-            Ok(f) => f,
-            Err(e) if frames.is_empty() => return Err(MediaError::Decode(format!("WebP: {e}"))),
-            Err(e) => {
-                log::warn!("media: WebP stops after {} frames: {e}", frames.len());
-                break;
-            }
-        };
-        let (numer, denom) = frame.delay().numer_denom_ms();
-        delays.push(numer.checked_div(denom).unwrap_or(0));
-        let buf = frame.into_buffer();
-        size = size.saturating_add(buf.as_raw().len());
-        if size > MAX_BYTES {
-            return Err(MediaError::Unsupported("animated WebP is too large to hold in memory".into()));
-        }
+    let mut frames = Vec::with_capacity(decoded.frames.len());
+    let mut delays = Vec::with_capacity(decoded.frames.len());
+    for frame in decoded.frames {
+        delays.push(frame.delay_ms);
+        let buf = image::RgbaImage::from_raw(decoded.width, decoded.height, frame.rgba)
+            .ok_or_else(|| MediaError::Decode("WebP: invalid decoded frame dimensions".into()))?;
         frames.push(DynamicImage::ImageRgba8(buf));
     }
     let starts = timing(&delays).starts;
@@ -187,9 +150,11 @@ pub(crate) fn load(bytes: &[u8]) -> Result<Anim> {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Cursor;
+
     use effectcraft_project::{AlphaMode, Footage, FootageKind};
     use effectcraft_time::{FrameRate, Tick};
-    use image::{ExtendedColorType, ImageEncoder, codecs::webp::WebPEncoder};
+    use image::{AnimationDecoder, ExtendedColorType, ImageEncoder, codecs::webp::WebPDecoder, codecs::webp::WebPEncoder};
 
     use super::timing;
     use crate::{MediaPool, probe_bytes};
@@ -239,6 +204,43 @@ mod tests {
         chunk(b"RIFF", &body)
     }
 
+    /// Build an animation whose frames may cover only part of the canvas. `x` and `y` are even,
+    /// as required by ANMF; bit 1 of `flags` selects no-blend and bit 0 selects disposal.
+    fn webp_subframes(canvas: (u32, u32), frames: &[(u32, u32, u32, u32, [u8; 4], u32, u8)]) -> Vec<u8> {
+        let (w, h) = canvas;
+        let mut vp8x = vec![0x12, 0, 0, 0];
+        vp8x.extend_from_slice(&u24(w - 1));
+        vp8x.extend_from_slice(&u24(h - 1));
+        let mut body = b"WEBP".to_vec();
+        body.extend(chunk(b"VP8X", &vp8x));
+        body.extend(chunk(b"ANIM", &[0; 6]));
+        for &(x, y, fw, fh, rgba, delay, flags) in frames {
+            let mut anmf = Vec::new();
+            anmf.extend_from_slice(&u24(x / 2));
+            anmf.extend_from_slice(&u24(y / 2));
+            anmf.extend_from_slice(&u24(fw - 1));
+            anmf.extend_from_slice(&u24(fh - 1));
+            anmf.extend_from_slice(&u24(delay));
+            anmf.push(flags);
+            anmf.extend(vp8l(fw, fh, rgba));
+            body.extend(chunk(b"ANMF", &anmf));
+        }
+        chunk(b"RIFF", &body)
+    }
+
+    fn anmf_offsets(bytes: &[u8]) -> Vec<usize> {
+        let mut offsets = Vec::new();
+        let mut at = 12usize;
+        while at + 8 <= bytes.len() {
+            let size = u32::from_le_bytes(bytes[at + 4..at + 8].try_into().unwrap()) as usize;
+            if &bytes[at..at + 4] == b"ANMF" {
+                offsets.push(at);
+            }
+            at = at.saturating_add(8).saturating_add(size).saturating_add(size & 1);
+        }
+        offsets
+    }
+
     const RED: [u8; 4] = [255, 0, 0, 255];
     const GREEN: [u8; 4] = [0, 255, 0, 255];
     const BLUE: [u8; 4] = [0, 0, 255, 128];
@@ -271,6 +273,38 @@ mod tests {
         let last = pixel_at(&pool, &f, 0.17);
         assert!((last[3] - 128.0 / 255.0).abs() < 1e-3, "{last:?}");
         assert_eq!(pixel_at(&pool, &f, 5.0), last);
+    }
+
+    #[test]
+    fn shared_webp_frames_match_legacy_subrect_blending_and_disposal() {
+        // Includes a blended alpha patch, then a no-blend patch disposed to the background.
+        let bytes =
+            webp_subframes((4, 2), &[(0, 0, 4, 2, RED, 50, 0b10), (2, 0, 2, 2, BLUE, 60, 0b00), (0, 0, 2, 2, GREEN, 70, 0b11), (2, 0, 2, 2, RED, 80, 0b10)]);
+        let expected = WebPDecoder::new(Cursor::new(&bytes)).unwrap().into_frames().map(|frame| frame.unwrap().into_buffer()).collect::<Vec<_>>();
+        let actual = super::load(&bytes).unwrap();
+        assert_eq!(expected.len(), 4);
+        for (index, (start_ms, old)) in [(0, &expected[0]), (50, &expected[1]), (110, &expected[2]), (180, &expected[3])].into_iter().enumerate() {
+            let tick = Tick::from_units(start_ms, 1000);
+            let frame = actual.frame_at(tick).unwrap().to_rgba8();
+            assert_eq!(frame, *old, "frame {index} at {start_ms} ms");
+        }
+    }
+
+    #[test]
+    fn a_damaged_webp_tail_keeps_frames_already_decoded() {
+        let mut bytes = webp(4, 2, &[(RED, 50), (GREEN, 60), (BLUE, 70)]);
+        let offsets = anmf_offsets(&bytes);
+        assert_eq!(offsets.len(), 3);
+        bytes.truncate(offsets[2]);
+
+        let legacy =
+            WebPDecoder::new(Cursor::new(&bytes)).unwrap().into_frames().map_while(|frame| frame.ok()).map(|frame| frame.into_buffer()).collect::<Vec<_>>();
+        assert_eq!(legacy.len(), 2);
+        let actual = super::load(&bytes).unwrap();
+        for (index, old) in legacy.iter().enumerate() {
+            let tick = Tick::from_units(if index == 0 { 0 } else { 50 }, 1000);
+            assert_eq!(actual.frame_at(tick).unwrap().to_rgba8(), *old);
+        }
     }
 
     #[test]
@@ -346,5 +380,35 @@ mod tests {
         let riff = u32::try_from(bytes.len() - 8).unwrap();
         bytes[4..8].copy_from_slice(&riff.to_le_bytes());
         assert!(super::load(&bytes).is_err());
+    }
+
+    /// A 1×1 animated WebP of `n` identical frames.
+    fn tiny_webp(n: usize) -> Vec<u8> {
+        let mut anmf = vec![0; 6];
+        anmf.extend_from_slice(&u24(0));
+        anmf.extend_from_slice(&u24(0));
+        anmf.extend_from_slice(&u24(50));
+        anmf.push(0b10);
+        anmf.extend(vp8l(1, 1, RED));
+        let frame = chunk(b"ANMF", &anmf);
+        let mut vp8x = vec![0x12, 0, 0, 0];
+        vp8x.extend_from_slice(&u24(0));
+        vp8x.extend_from_slice(&u24(0));
+        let mut body = b"WEBP".to_vec();
+        body.extend(chunk(b"VP8X", &vp8x));
+        body.extend(chunk(b"ANIM", &[0; 6]));
+        for _ in 0..n {
+            body.extend_from_slice(&frame);
+        }
+        chunk(b"RIFF", &body)
+    }
+
+    #[test]
+    fn decoding_keeps_every_frame_past_the_probe_frame_count() {
+        // 1×1 frames fit the byte budget however many there are: the frame count refuses none.
+        for n in [crate::gif_anim::MAX_FRAMES, crate::gif_anim::MAX_FRAMES + 1] {
+            let anim = super::load(&tiny_webp(n)).unwrap();
+            assert_eq!(anim.len(), n);
+        }
     }
 }

@@ -118,7 +118,7 @@ See [MCP conventions](mcp.md) for core tools, resources, strict arguments, and r
 | `list_effects {filter?, compact?}` | Effect ids, names, categories, GPU / 32-bpc support and parameters; `compact` lists only ids, names and categories. |
 | `list_fonts {query?, variable?, rescan?}` | Font families text layers can use, bundled and installed, with their styles, origin, whether each is a variable font and own-language name; `variable` lists only variable fonts; `rescan` picks up fonts installed since launch. |
 | `add_effect {layer, effect, values?, comp?}` | Apply an effect and set its parameters in one call and one undo step (a failing value leaves nothing applied); returns the instance path (`effects/#n`) and its parameter paths. |
-| `render_frame {comp?, time?, max_side?, path?, inline?, transparent?}` | Returns a PNG image of a frame; `transparent: true` keeps the alpha (as an RGB + Alpha render writes it) instead of compositing over the comp background. |
+| `render_frame {comp?, time? \| times?, columns?, labels?, max_side?, path?, inline?, transparent?}` | Returns a PNG image of a frame; `transparent: true` keeps the alpha (as an RGB + Alpha render writes it) instead of compositing over the comp background. `times` (1 to 64 comp seconds, not with `time`) returns one contact-sheet PNG instead, the frames tiled row by row in the order given: `columns` sets the grid width (default near-square), `max_side` applies to each cell (default 320; a sheet is at most 7680 pixels on a side), `labels` (default true) draws each cell's time. The metadata gives `comp`, `times`, `columns`, `rows`, `cellWidth`, `cellHeight`, `width` and `height`. `path` writes the sheet in a headless session; bridged, a sheet comes back inline only. |
 | `open_project {path \| demo \| new}` / `save_project {path?}` | Open and save files. |
 | `undo {steps?}` / `redo {steps?}` | History. |
 | `history {goto?}` | The branching undo history (History panel): every state with its index, id, label, branch depth and whether it's current; `goto` (an index or id) jumps to any state, on any branch, without losing the others. |
@@ -129,7 +129,7 @@ See [MCP conventions](mcp.md) for core tools, resources, strict arguments, and r
 | `command_run {id, params?}` | Run a command. |
 | `command_batch {steps, stop_on_error?}` | Run commands in order with per-step results; each edit has its own undo step. |
 | `doc_inspect` | Project overview and active composition. |
-| `render_preview` | Render a PNG without writing a file (`comp`, `time`, `max_side`, `transparent`). |
+| `render_preview` | Render a PNG without writing a file (`comp`, `time`, `max_side`, `transparent`), or a contact sheet of several times (`times`, `columns`, `labels`, as `render_frame`). |
 
 Layers are referenced by id (from `get_comp`), `"#n"` (1-based index from the top) or name. Comps are
 referenced by id or name, and default to the active comp. An id may also be sent as a string (`"98"`):
@@ -340,8 +340,9 @@ build real projects through these interfaces; they are worked examples of everyt
 * **OCIO effects**: with Configuration ▸ Custom, `configFile` is a `.ocio` path or the config's
   text; `effect.warning {layer, effect}` says what Effect Controls warns about (a config it
   can't read, a colour space it lacks, transforms that pass colours through) or `null`.
-* **Multi-layer OpenEXR**: the footage shows the beauty pass (an unnamed RGBA layer, else
-  Combined / Beauty / Image / RGBA…, never Cryptomatte or depth). `layer.channels {layer}`
+* **Multi-layer OpenEXR**: the footage shows the main picture as After Effects does (the
+  unprefixed `R`, `G`, `B` (`A`) of the first part with them, else `Y` as grey; a file of named
+  layers only, such as Blender's `ViewLayer.Combined.R`, is black). `layer.channels {layer}`
   lists a footage layer's EXR layers and
   channels (`{"layers":[{"name":"diffuse","rgba":["diffuse.R","diffuse.G","diffuse.B",""]}]}`);
   EXtractoR shows them when its `red` / `green` / `blue` / `alpha` are set to those names

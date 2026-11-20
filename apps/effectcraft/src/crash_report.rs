@@ -426,6 +426,7 @@ mod tests {
     }
 
     fn helper_mode(dir: &Path, id: &str, interactive: bool) -> Reporter {
+        let _spawn_lock = crate::test_child_spawn_lock();
         let mut child = Command::new(std::env::current_exe().unwrap())
             .args(["--exact", &test_name("reporter_process"), "--ignored", "--nocapture"])
             .env(ROLE, "reporter")
@@ -550,6 +551,7 @@ mod tests {
     #[test]
     fn accepted_native_close_finishes_before_process_termination() {
         let dir = folder();
+        let _spawn_lock = crate::test_child_spawn_lock();
         let status = Command::new(std::env::current_exe().unwrap())
             .args(["--exact", &test_name("aborting_parent"), "--ignored", "--nocapture"])
             .env(ROLE, "native-close")
@@ -595,6 +597,7 @@ mod tests {
     #[test]
     fn an_aborting_parent_leaves_one_diagnostic_report() {
         let dir = folder();
+        let _spawn_lock = crate::test_child_spawn_lock();
         let status = Command::new(std::env::current_exe().unwrap())
             .args(["--exact", &test_name("aborting_parent"), "--ignored", "--nocapture"])
             .env(ROLE, "abort")
@@ -616,6 +619,7 @@ mod tests {
     fn an_unrelated_child_does_not_keep_the_control_pipe_open() {
         let dir = folder();
         let r = helper(&dir, "5-1");
+        let _spawn_lock = crate::test_child_spawn_lock();
         let mut unrelated = Command::new(std::env::current_exe().unwrap())
             .args(["--exact", &test_name("lingering_child"), "--ignored", "--nocapture"])
             .env(ROLE, "linger")
@@ -632,6 +636,7 @@ mod tests {
 
     #[test]
     fn an_unresponsive_helper_cannot_hang_clean_shutdown() {
+        let _spawn_lock = crate::test_child_spawn_lock();
         let mut child = Command::new(std::env::current_exe().unwrap())
             .args(["--exact", &test_name("lingering_child"), "--ignored", "--nocapture"])
             .env(ROLE, "linger")
@@ -704,6 +709,7 @@ mod tests {
     #[cfg(windows)]
     fn windows_report_preserves_real_unsigned_exit_bits() {
         let dir = folder();
+        let _spawn_lock = crate::test_child_spawn_lock();
         let status = Command::new(std::env::current_exe().unwrap())
             .args(["--exact", &test_name("aborting_parent"), "--ignored", "--nocapture"])
             .env(ROLE, "windows-status")
