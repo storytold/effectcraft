@@ -9,7 +9,8 @@ use std::sync::{Arc, Mutex};
 
 use craft_audio::{AudioBuffer, TrackDecoder as AudioTrackDecoder};
 use craft_color::{ColorInfo, Matrix, Primaries, Range, Transfer};
-use craft_frame::{Chroma, PixelData, VideoFrame};
+use craft_frame::{Chroma, PixelData, Region, VideoFrame};
+use craft_media::bitstream::unescape_rbsp;
 use craft_media::isobmff::{self, Mp4File};
 use craft_media::matroska::{self, MkvFile};
 use craft_media::{ByteSource, CodecId, CodecParams};
@@ -209,6 +210,63 @@ where
     Some((audio_tracks, audio_infos))
 }
 
+/// A probe hint only: a single configured SPS can signal a visible size different from the
+/// sample entry. Multiple or in-band parameter sets leave the initial hint to the container.
+fn nal_visible_size_hint(config: &isobmff::CodecConfig) -> Option<(u32, u32)> {
+    let (_, _, width, height) = match config {
+        isobmff::CodecConfig::Avc(avc) => {
+            if avc.pps.is_empty() {
+                return None;
+            }
+            let mut sets = avc.sps.iter().filter(|n| n.first().is_some_and(|h| h & 0x1f == 7));
+            let sps = sets.next()?;
+            if sets.next().is_some() {
+                return None;
+            }
+            craft_video::h264::decode::params::Sps::parse(&unescape_rbsp(sps.get(1..)?)).ok()?.crop_rect()
+        }
+        isobmff::CodecConfig::Hevc(hevc) => {
+            let (mut vps, mut sps, mut pps) = (false, None, false);
+            for nal in hevc.arrays.iter().filter(|a| (32..=34).contains(&a.nal_type)).flat_map(|a| &a.nalus) {
+                match nal.first().map(|h| (h >> 1) & 0x3f) {
+                    Some(32) => vps = true,
+                    Some(33) if sps.is_some() => return None,
+                    Some(33) => sps = Some(nal),
+                    Some(34) => pps = true,
+                    _ => {}
+                }
+            }
+            if !vps || !pps {
+                return None;
+            }
+            craft_video::hevc::decode::params::Sps::parse(&unescape_rbsp(sps?.get(2..)?)).ok()?.crop_rect()
+        }
+        _ => return None,
+    };
+    (width != 0 && height != 0).then_some((width, height))
+}
+
+/// Apply a valid container clean aperture in decoded-picture coordinates, before rotation.
+fn clean_aperture_region(aperture: isobmff::CleanAperture, (width, height): (u32, u32)) -> Option<Region> {
+    let ratio = |(n, d): (u32, u32)| (d != 0).then(|| f64::from(n) / f64::from(d));
+    let offset = |(n, d): (i32, u32)| (d != 0).then(|| f64::from(n) / f64::from(d));
+    let w = ratio(aperture.width)?.round();
+    let h = ratio(aperture.height)?.round();
+    let dx = offset(aperture.horiz_offset)?;
+    let dy = offset(aperture.vert_offset)?;
+    let (frame_width, frame_height) = (f64::from(width), f64::from(height));
+    if w < 1.0 || h < 1.0 || w > frame_width || h > frame_height {
+        return None;
+    }
+    let x = ((frame_width - w) / 2.0 + dx).round();
+    let y = ((frame_height - h) / 2.0 + dy).round();
+    if x < 0.0 || y < 0.0 || x + w > frame_width || y + h > frame_height {
+        return None;
+    }
+    let r = Region { x: x as usize, y: y as usize, w: w as usize, h: h as usize };
+    (!r.is_full(width as usize, height as usize)).then_some(r)
+}
+
 fn open_isobmff(name: &str, source: SharedBytes) -> Option<Result<SharedSource>> {
     let file = isobmff::open(source.clone()).ok()?;
     let video_idx =
@@ -226,6 +284,15 @@ fn open_isobmff(name: &str, source: SharedBytes) -> Option<Result<SharedSource>>
         .map(|v| (u32::from(v.width), u32::from(v.height)))
         .filter(|&(w, h)| w > 0 && h > 0)
         .unwrap_or((video_track.width, video_track.height));
+    // Probe needs dimensions before decoding. Retain the original rational aperture separately
+    // so frame conversion can use the actual visible size, even with in-band parameter sets.
+    let aperture = video_track.video().and_then(|v| v.clean_aperture);
+    if let Some(clap) = aperture {
+        (width, height) = nal_visible_size_hint(&video_track.entries[0].codec).unwrap_or((width, height));
+        if let Some(region) = clean_aperture_region(clap, (width, height)) {
+            (width, height) = (region.w as u32, region.h as u32);
+        }
+    }
     let mut par = video_track.video().and_then(|v| v.pixel_aspect).filter(|&(n, d)| n > 0 && d > 0).unwrap_or((1, 1));
     let rotation = video_track.display_rotation().unwrap_or(0) % 4;
     if rotation % 2 == 1 {
@@ -280,9 +347,7 @@ fn open_isobmff(name: &str, source: SharedBytes) -> Option<Result<SharedSource>>
         source,
         file: container,
         video_track_idx: video_idx,
-        container_color,
-        par,
-        rotation,
+        presentation: FramePresentation { container_color, par, rotation, aperture },
         video: Mutex::new(VideoState { decoder: video_decoder, next_decode_idx: 0, gop_start_idx: 0, flushed: false, decoded: Vec::new() }),
         audio_tracks,
     })))
@@ -362,9 +427,7 @@ fn open_matroska(name: &str, source: SharedBytes) -> Option<Result<SharedSource>
         source,
         file: container,
         video_track_idx: video_idx,
-        container_color,
-        par,
-        rotation,
+        presentation: FramePresentation { container_color, par, rotation, aperture: None },
         video: Mutex::new(VideoState { decoder: video_decoder, next_decode_idx: 0, gop_start_idx: 0, flushed: false, decoded: Vec::new() }),
         audio_tracks,
     })))
@@ -399,14 +462,20 @@ struct AudioTrackEntry {
     state: Mutex<AudioTrackState>,
 }
 
+#[derive(Clone, Copy)]
+struct FramePresentation {
+    container_color: Option<ColorInfo>,
+    par: (u32, u32),
+    rotation: u8,
+    aperture: Option<isobmff::CleanAperture>,
+}
+
 struct CraftMediaSource {
     info: MediaInfo,
     source: SharedBytes,
     file: ContainerFile,
     video_track_idx: usize,
-    container_color: Option<ColorInfo>,
-    par: (u32, u32),
-    rotation: u8,
+    presentation: FramePresentation,
     video: Mutex<VideoState>,
     audio_tracks: Vec<AudioTrackEntry>,
 }
@@ -451,11 +520,11 @@ impl MediaSource for CraftMediaSource {
                 let pkt = self.file.read_sample(&*self.source, self.video_track_idx, idx)?;
                 let frames = state.decoder.decode(&pkt, pts).map_err(|e| MediaError::Decode(e.to_string()))?;
                 state.next_decode_idx = idx + 1;
-                push_decoded(&mut state.decoded, frames, want_draft, self.container_color, self.par, self.rotation, &self.file, self.video_track_idx)?;
+                push_decoded(&mut state.decoded, frames, want_draft, self.presentation, &self.file, self.video_track_idx)?;
             } else if !state.flushed {
                 let frames = state.decoder.flush().map_err(|e| MediaError::Decode(e.to_string()))?;
                 state.flushed = true;
-                push_decoded(&mut state.decoded, frames, want_draft, self.container_color, self.par, self.rotation, &self.file, self.video_track_idx)?;
+                push_decoded(&mut state.decoded, frames, want_draft, self.presentation, &self.file, self.video_track_idx)?;
                 break;
             } else {
                 break;
@@ -600,21 +669,18 @@ fn decode_audio_range(
     Ok(out)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn push_decoded(
     cache: &mut Vec<CachedFrame>,
     frames: Vec<DecodedVideoFrame>,
     draft: bool,
-    container_color: Option<ColorInfo>,
-    par: (u32, u32),
-    rotation: u8,
+    presentation: FramePresentation,
     file: &ContainerFile,
     track_idx: usize,
 ) -> Result<()> {
     for vf in frames {
         let pts = vf.pts.unwrap_or(0);
         let pts_tick = file.pts_to_tick(track_idx, pts);
-        let frame = Arc::new(to_craft_frame(vf, container_color, par, rotation, pts_tick)?);
+        let frame = Arc::new(to_craft_frame(vf, presentation, pts_tick)?);
         cache.push(CachedFrame { pts, draft, frame });
     }
     if cache.len() > MAX_CACHED_FRAMES {
@@ -624,9 +690,9 @@ fn push_decoded(
     Ok(())
 }
 
-fn to_craft_frame(vf: DecodedVideoFrame, container_color: Option<ColorInfo>, default_par: (u32, u32), rotation: u8, pts: Tick) -> Result<VideoFrame> {
-    let width = vf.width();
-    let height = vf.height();
+fn to_craft_frame(vf: DecodedVideoFrame, presentation: FramePresentation, pts: Tick) -> Result<VideoFrame> {
+    let FramePresentation { container_color, par: default_par, rotation, aperture } = presentation;
+    let (mut width, mut height) = (vf.width(), vf.height());
     let subsampling = vf.subsampling();
     let family = vf.family();
     let tags = vf.color;
@@ -651,17 +717,24 @@ fn to_craft_frame(vf: DecodedVideoFrame, container_color: Option<ColorInfo>, def
             let (Some(y), Some(cb), Some(cr)) = (iter.next(), iter.next(), iter.next()) else {
                 return Err(MediaError::Decode("missing YUV planes".into()));
             };
+            let (luma, chroma_region) = aperture
+                .and_then(|clap| clean_aperture_region(clap, (width, height)))
+                .and_then(|r| aligned_aperture(r, width as usize, height as usize, chroma))
+                .unzip();
+            if let Some(r) = luma {
+                (width, height) = (r.w as u32, r.h as u32);
+            }
             if bit_depth <= 8 {
-                let y = Arc::new(plane_u8(y)?);
-                let cb = Arc::new(plane_u8(cb)?);
-                let cr = Arc::new(plane_u8(cr)?);
-                let a = alpha.map(plane_u8).transpose()?.map(Arc::new);
+                let y = Arc::new(plane_u8(y, luma)?);
+                let cb = Arc::new(plane_u8(cb, chroma_region)?);
+                let cr = Arc::new(plane_u8(cr, chroma_region)?);
+                let a = alpha.map(|p| plane_u8(p, luma)).transpose()?.map(Arc::new);
                 PixelData::Yuv8 { planes: [y, cb, cr], chroma, alpha: a }
             } else {
-                let y = Arc::new(plane_u16(y)?);
-                let cb = Arc::new(plane_u16(cb)?);
-                let cr = Arc::new(plane_u16(cr)?);
-                let a = alpha.map(plane_u16).transpose()?.map(Arc::new);
+                let y = Arc::new(plane_u16(y, luma)?);
+                let cb = Arc::new(plane_u16(cb, chroma_region)?);
+                let cr = Arc::new(plane_u16(cr, chroma_region)?);
+                let a = alpha.map(|p| plane_u16(p, luma)).transpose()?.map(Arc::new);
                 PixelData::Yuv16 { planes: [y, cb, cr], chroma, bits: u32::from(bit_depth), alpha: a }
             }
         }
@@ -670,6 +743,20 @@ fn to_craft_frame(vf: DecodedVideoFrame, container_color: Option<ColorInfo>, def
 
     let frame = VideoFrame { width, height, data, color, par, pts };
     Ok(rotate_frame(frame, rotation))
+}
+
+/// Move the origin onto the chroma grid before clipping, keeping the size when it fits.
+fn aligned_aperture(region: Region, width: usize, height: usize, chroma: Chroma) -> Option<(Region, Region)> {
+    let (sx, sy) = chroma.shifts();
+    let (xs, ys) = (1usize << sx, 1usize << sy);
+    let x = region.x.min(width) & !(xs - 1);
+    let y = region.y.min(height) & !(ys - 1);
+    let luma = Region { x, y, ..region }.clip(width, height);
+    if luma.is_empty() || luma.is_full(width, height) {
+        return None;
+    }
+    let chroma = Region { x: luma.x / xs, y: luma.y / ys, w: luma.w.div_ceil(xs), h: luma.h.div_ceil(ys) };
+    Some((luma, chroma))
 }
 
 fn rotate_plane<T: Copy + Default>(src: &[T], w: usize, h: usize, turns: u8) -> Vec<T> {
@@ -770,52 +857,62 @@ fn rotate_frame(mut frame: VideoFrame, turns: u8) -> VideoFrame {
     frame
 }
 
-fn plane_u8(p: Plane) -> Result<Vec<u8>> {
+fn plane_region(aperture: Option<Region>, width: usize, height: usize) -> Result<Region> {
+    let r = aperture.unwrap_or(Region { x: 0, y: 0, w: width, h: height });
+    if r.clip(width, height) != r {
+        return Err(MediaError::Decode("clean aperture exceeds a decoded plane".into()));
+    }
+    Ok(r)
+}
+
+fn plane_u8(p: Plane, aperture: Option<Region>) -> Result<Vec<u8>> {
     let (w, h, stride) = (p.width() as usize, p.height() as usize, p.stride());
+    let r = plane_region(aperture, w, h)?;
     match p.into_samples() {
         Samples::U8(mut v) => {
-            if stride == w {
+            if stride == w && r.is_full(w, h) {
                 v.truncate(w * h);
                 return Ok(v);
             }
-            let mut out = Vec::with_capacity(w * h);
-            for y in 0..h {
-                let row = y * stride;
-                out.extend_from_slice(&v[row..row + w]);
+            let mut out = Vec::with_capacity(r.w * r.h);
+            for y in r.y..r.y + r.h {
+                let row = y * stride + r.x;
+                out.extend_from_slice(&v[row..row + r.w]);
             }
             Ok(out)
         }
         Samples::U16(v) => {
-            let mut out = Vec::with_capacity(w * h);
-            for y in 0..h {
-                let row = y * stride;
-                out.extend(v[row..row + w].iter().map(|&s| s.min(255) as u8));
+            let mut out = Vec::with_capacity(r.w * r.h);
+            for y in r.y..r.y + r.h {
+                let row = y * stride + r.x;
+                out.extend(v[row..row + r.w].iter().map(|&s| s.min(255) as u8));
             }
             Ok(out)
         }
     }
 }
 
-fn plane_u16(p: Plane) -> Result<Vec<u16>> {
+fn plane_u16(p: Plane, aperture: Option<Region>) -> Result<Vec<u16>> {
     let (w, h, stride) = (p.width() as usize, p.height() as usize, p.stride());
+    let r = plane_region(aperture, w, h)?;
     match p.into_samples() {
         Samples::U16(mut v) => {
-            if stride == w {
+            if stride == w && r.is_full(w, h) {
                 v.truncate(w * h);
                 return Ok(v);
             }
-            let mut out = Vec::with_capacity(w * h);
-            for y in 0..h {
-                let row = y * stride;
-                out.extend_from_slice(&v[row..row + w]);
+            let mut out = Vec::with_capacity(r.w * r.h);
+            for y in r.y..r.y + r.h {
+                let row = y * stride + r.x;
+                out.extend_from_slice(&v[row..row + r.w]);
             }
             Ok(out)
         }
         Samples::U8(v) => {
-            let mut out = Vec::with_capacity(w * h);
-            for y in 0..h {
-                let row = y * stride;
-                out.extend(v[row..row + w].iter().map(|&s| u16::from(s)));
+            let mut out = Vec::with_capacity(r.w * r.h);
+            for y in r.y..r.y + r.h {
+                let row = y * stride + r.x;
+                out.extend(v[row..row + r.w].iter().map(|&s| u16::from(s)));
             }
             Ok(out)
         }
@@ -1039,7 +1136,7 @@ mod tests {
 
     #[test]
     fn plane_u8_handles_8bit_u16_storage_as_av1_produces() {
-        let out = Plane::packed(2, 2, 8, Samples::U16(vec![10, 20, 30, 255])).ok().and_then(|p| plane_u8(p).ok());
+        let out = Plane::packed(2, 2, 8, Samples::U16(vec![10, 20, 30, 255])).ok().and_then(|p| plane_u8(p, None).ok());
         assert_eq!(out.as_deref(), Some(&[10, 20, 30, 255][..]));
     }
 
@@ -1074,13 +1171,13 @@ mod tests {
     #[test]
     fn plane_stride_and_container_helpers_cover_variants() {
         if let Ok(p8) = Plane::new(2, 2, 4, 8, Samples::U8(vec![1, 2, 9, 9, 3, 4])) {
-            assert_eq!(plane_u8(p8).ok().as_deref(), Some(&[1, 2, 3, 4][..]));
+            assert_eq!(plane_u8(p8, None).ok().as_deref(), Some(&[1, 2, 3, 4][..]));
         }
         if let Ok(p16) = Plane::new(2, 2, 4, 10, Samples::U16(vec![10, 20, 99, 99, 30, 40])) {
-            assert_eq!(plane_u16(p16).ok().as_deref(), Some(&[10, 20, 30, 40][..]));
+            assert_eq!(plane_u16(p16, None).ok().as_deref(), Some(&[10, 20, 30, 40][..]));
         }
         if let Ok(p8_as_16) = Plane::packed(2, 1, 8, Samples::U8(vec![7, 8])) {
-            assert_eq!(plane_u16(p8_as_16).ok().as_deref(), Some(&[7, 8][..]));
+            assert_eq!(plane_u16(p8_as_16, None).ok().as_deref(), Some(&[7, 8][..]));
         }
 
         let nclc = color_from_isobmff(&isobmff::ColorInfo::Nclc { primaries: 1, transfer: 1, matrix: 1 });
@@ -1098,6 +1195,54 @@ mod tests {
     }
 
     #[test]
+    fn clean_aperture_rounds_signed_offsets_and_ignores_invalid_regions() {
+        let aperture = isobmff::CleanAperture { width: (17, 2), height: (15, 2), horiz_offset: (1, 2), vert_offset: (-1, 2) };
+        assert_eq!(clean_aperture_region(aperture, (16, 16)), Some(Region { x: 4, y: 4, w: 9, h: 8 }));
+        assert_eq!(clean_aperture_region(isobmff::CleanAperture { width: (17, 0), ..aperture }, (16, 16)), None);
+        assert_eq!(clean_aperture_region(isobmff::CleanAperture { horiz_offset: (10, 1), ..aperture }, (16, 16)), None);
+        let full = isobmff::CleanAperture { width: (16, 1), height: (16, 1), horiz_offset: (0, 1), vert_offset: (0, 1) };
+        assert_eq!(clean_aperture_region(full, (16, 16)), None);
+    }
+
+    #[test]
+    fn odd_clean_aperture_crops_luma_chroma_and_alpha_together() {
+        let luma = Plane::packed(6, 6, 8, Samples::U8((0..36).collect())).unwrap();
+        let chroma = Plane::packed(3, 3, 8, Samples::U8((0..9).collect())).unwrap();
+        let alpha = Plane::packed(6, 6, 8, Samples::U8((64..100).collect())).unwrap();
+        let frame = DecodedVideoFrame::new(6, 6, ColorFamily::YCbCr, Subsampling::S420, vec![luma, chroma.clone(), chroma], Some(alpha)).unwrap();
+        let aperture = Some(isobmff::CleanAperture { width: (3, 1), height: (3, 1), horiz_offset: (3, 2), vert_offset: (3, 2) });
+        let presentation = FramePresentation { container_color: None, par: (3, 2), rotation: 0, aperture };
+        let cropped = to_craft_frame(frame, presentation, Tick::ZERO).unwrap();
+        assert_eq!((cropped.width, cropped.height, cropped.par), (3, 3, (3, 2)));
+        let PixelData::Yuv8 { planes: [y, cb, cr], chroma: Chroma::C420, alpha: Some(a) } = cropped.data else {
+            panic!("expected cropped 4:2:0 with alpha");
+        };
+        assert_eq!(y.as_slice(), &[14, 15, 16, 20, 21, 22, 26, 27, 28]);
+        assert_eq!(cb.as_slice(), &[4, 5, 7, 8]);
+        assert_eq!(cr.as_slice(), cb.as_slice());
+        assert_eq!(a.as_slice(), &[78, 79, 80, 84, 85, 86, 90, 91, 92]);
+    }
+
+    #[test]
+    fn clean_aperture_uses_the_decoded_picture_not_a_coded_size_hint() {
+        let luma = Plane::packed(8, 6, 8, Samples::U8((0..48).collect())).unwrap();
+        let chroma = Plane::packed(8, 6, 8, Samples::U8(vec![128; 48])).unwrap();
+        let frame = DecodedVideoFrame::new(8, 6, ColorFamily::YCbCr, Subsampling::S444, vec![luma, chroma.clone(), chroma], None).unwrap();
+        let aperture = isobmff::CleanAperture { width: (4, 1), height: (4, 1), horiz_offset: (0, 1), vert_offset: (0, 1) };
+        // A coded/sample-entry size of 8×8 would put the crop one row too low on the decoded
+        // 8×6 picture. The aperture remains in rational form until this picture is available.
+        assert_eq!(clean_aperture_region(aperture, (8, 8)).unwrap().y, 2);
+        let presentation = FramePresentation { container_color: None, par: (1, 1), rotation: 0, aperture: Some(aperture) };
+        let cropped = to_craft_frame(frame, presentation, Tick::ZERO).unwrap();
+        assert_eq!((cropped.width, cropped.height), (4, 4));
+        let y = match &cropped.data {
+            PixelData::Yuv8 { planes, .. } => &planes[0],
+            _ => panic!("expected cropped luma"),
+        };
+        assert_eq!(y.as_slice(), &[10, 11, 12, 13, 18, 19, 20, 21, 26, 27, 28, 29, 34, 35, 36, 37]);
+    }
+
+    #[test]
     fn rotated_frame_preserves_container_par_without_double_inversion() {
         let make_vf = |sar: Option<(u32, u32)>| {
             let y = Plane::packed(2, 2, 8, Samples::U8(vec![1, 2, 3, 4])).ok()?;
@@ -1109,13 +1254,14 @@ mod tests {
         };
         // `default_par` is already rotated by the container opener (e.g. (4, 3) -> (3, 4) for 90°).
         let container_rotated_par = (3, 4);
+        let presentation = FramePresentation { container_color: None, par: container_rotated_par, rotation: 1, aperture: None };
         if let Some(vf_no_sar) = make_vf(None) {
-            let out = to_craft_frame(vf_no_sar, None, container_rotated_par, 1, Tick::ZERO).ok();
+            let out = to_craft_frame(vf_no_sar, presentation, Tick::ZERO).ok();
             assert_eq!(out.map(|f| f.par), Some((3, 4)));
         }
         // Decoder-supplied SAR is in coded coordinates and must be inverted once under 90° rotation.
         if let Some(vf_with_sar) = make_vf(Some((4, 3))) {
-            let out = to_craft_frame(vf_with_sar, None, container_rotated_par, 1, Tick::ZERO).ok();
+            let out = to_craft_frame(vf_with_sar, presentation, Tick::ZERO).ok();
             assert_eq!(out.map(|f| f.par), Some((3, 4)));
         }
     }
