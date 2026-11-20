@@ -9,9 +9,9 @@ use serde_json::{Value, json};
 use super::{CommandSpec, always, bad, str_p};
 use crate::{EngineError, Result, Session};
 
-/// Commands that can't run inside a batch (they nest batches), besides the commands that run
-/// scripts ([`super::scripts::RUNS_SCRIPTS`]).
-const NOT_IN_BATCH: &[&str] = &["engine.batch"];
+/// Commands that can't run inside a batch (they nest batches or discard the history the batch
+/// folds onto), besides the commands that run scripts ([`super::scripts::RUNS_SCRIPTS`]).
+const NOT_IN_BATCH: &[&str] = &["engine.batch", "edit.purgeUndo"];
 
 /// Resolve a `$N` / `$N.key.0.key` reference against the results so far.
 fn reference(s: &str, results: &[Value]) -> Option<Result<Value>> {
@@ -236,5 +236,23 @@ mod tests {
         // Bad references are reported.
         let e = s.execute_checked("engine.batch", json!({"steps": [{"command": "layer.rename", "params": {"layer": "$3.layer", "name": "x"}}]})).unwrap_err();
         assert!(e.to_string().contains("refers to step 3"), "{e}");
+    }
+
+    /// A purge would clear the history the batch folds onto, so it is refused like a nested batch.
+    #[test]
+    fn a_purge_cannot_run_inside_a_batch() {
+        let mut s = Session::default();
+        s.execute("comp.new", json!({"name": "B", "width": 100, "height": 100})).unwrap();
+        let e = s
+            .execute_checked(
+                "engine.batch",
+                json!({"steps": [
+                    {"command": "layer.newNull", "params": {}},
+                    {"command": "edit.purgeUndo", "params": {}}
+                ]}),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("edit.purgeUndo") && e.contains("can't run inside a batch"), "{e}");
     }
 }

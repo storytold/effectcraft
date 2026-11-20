@@ -164,6 +164,49 @@ fn a_batch_larger_than_the_undo_levels_is_still_one_step() {
     assert_eq!(s.history.undo.len(), 2);
 }
 
+/// A batch is one undo level even when the history already holds `general.undoLevels` entries:
+/// folding keeps the pre-batch state reachable and the limit still applies afterwards.
+#[test]
+fn a_full_history_batch_is_trimmed_to_the_limit_after_folding() {
+    let mut s = Session::default();
+    s.prefs.general.undo_levels = 4;
+    s.execute("comp.new", json!({"name": "H", "width": 64, "height": 64, "duration": 5})).unwrap();
+    for n in ["A", "B", "C", "D"] {
+        solid(&mut s, n);
+    }
+    assert_eq!(s.history.undo.len(), 4);
+    let before_batch = s.project.clone();
+    let keys: Vec<Value> = (0..5)
+        .map(|i| json!({"command": "prop.addKey", "params": {"layer": "A", "path": "transform/rotation", "time": i as f64 * 0.1, "value": 10}}))
+        .collect();
+    s.execute_checked("engine.batch", json!({"label": "5 keys", "steps": keys})).unwrap();
+    assert_eq!(s.history.undo.len(), 4, "the limit still applies after folding");
+    assert_eq!(s.history.undo.last().unwrap().0, "5 keys");
+    assert!(s.undo());
+    assert!(Arc::ptr_eq(&s.project, &before_batch), "one Undo restores the pre-batch project");
+}
+
+/// A settings change inside a batch must not trim away the batch's pre-state either.
+#[test]
+fn a_batch_survives_lowering_the_undo_levels_while_it_runs() {
+    let mut s = Session::default();
+    s.prefs.general.undo_levels = 8;
+    s.execute("comp.new", json!({"name": "H", "width": 64, "height": 64, "duration": 5})).unwrap();
+    solid(&mut s, "A");
+    let steps: Vec<Value> = (0..6)
+        .map(|i| {
+            if i == 3 {
+                json!({"command": "prefs.set", "params": {"key": "general.undoLevels", "value": 1}})
+            } else {
+                json!({"command": "prop.addKey", "params": {"layer": "A", "path": "transform/rotation", "time": i as f64 * 0.1, "value": 10}})
+            }
+        })
+        .collect();
+    s.execute_checked("engine.batch", json!({"label": "mixed", "steps": steps})).unwrap();
+    let labels: Vec<&str> = s.history.undo.iter().map(|(l, _)| l.as_str()).collect();
+    assert_eq!(labels, ["mixed"], "{labels:?}");
+}
+
 #[test]
 fn modified_mark_follows_undo_and_no_op_edits_record_nothing() {
     let mut s = Session::default();
