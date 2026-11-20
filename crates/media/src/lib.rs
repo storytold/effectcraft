@@ -27,6 +27,7 @@ mod exr_read;
 mod gif_anim;
 mod layered;
 mod localize;
+mod mp4_h264;
 mod pcraft;
 pub use layered::vector_doc;
 mod pool;
@@ -64,6 +65,18 @@ impl From<filmcraft_media::MediaError> for MediaError {
             F::Unsupported(s) => MediaError::Unsupported(s),
             F::Io(s) | F::Offline(s) => MediaError::Io(s),
             F::Cancelled => MediaError::Cancelled,
+            other => MediaError::Decode(other.to_string()),
+        }
+    }
+}
+
+impl From<craft_media_source::MediaError> for MediaError {
+    fn from(e: craft_media_source::MediaError) -> Self {
+        use craft_media_source::MediaError as C;
+        match e {
+            C::Unsupported(s) => MediaError::Unsupported(s),
+            C::Io(s) | C::Offline(s) => MediaError::Io(s),
+            C::Cancelled => MediaError::Cancelled,
             other => MediaError::Decode(other.to_string()),
         }
     }
