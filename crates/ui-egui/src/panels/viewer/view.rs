@@ -115,8 +115,11 @@ pub(super) fn aux_views(
         if changed {
             ctx.data_mut(|d| d.insert_temp(id, pic.clone()));
         }
-        // Never another comp's frame (after a comp switch), as the active pane does.
-        let drawn = pic.drawn.as_ref().filter(|(k, _)| k.comp == cid.0);
+        // Never another comp's frame (after a comp switch), as the active pane does, nor another
+        // view's (the pane was switched from Top to Left and Left's frame is still rendering): a
+        // press would act through Left's projection on Top's picture. The earlier revision of
+        // the same view stays (a drag), as `get_for_viewer` keeps it.
+        let drawn = pic.drawn.as_ref().filter(|(k, _)| k.comp == cid.0 && k.view == key.view);
         let pp = p.with_clip_rect(inner);
         let b = comp.background;
         pp.rect_filled(cr, 0.0, Color32::from_rgb((b[0] * 255.0) as u8, (b[1] * 255.0) as u8, (b[2] * 255.0) as u8));
@@ -204,10 +207,11 @@ pub fn shown_frame_key(ctx: &egui::Context, cid: effectcraft_engine::project::It
     pic.drawn.map(|(k, _)| k).filter(|k| k.comp == cid.0)
 }
 
-/// The last picture the side pane at layout position `pos` drew of comp `cid` (None: none yet).
-pub(super) fn side_picture(ctx: &egui::Context, cid: effectcraft_engine::project::ItemId, pos: usize) -> Option<egui::TextureId> {
+/// The last picture the side pane at layout position `pos` drew of comp `cid` through the view
+/// whose frame keys carry `view` (None: none yet, or of another view).
+pub(super) fn side_picture(ctx: &egui::Context, cid: effectcraft_engine::project::ItemId, pos: usize, view: u64) -> Option<egui::TextureId> {
     let pic: PanePicture = ctx.data(|d| d.get_temp(egui::Id::unique(("viewer-aux", pos))))?;
-    pic.drawn.filter(|(k, _)| k.comp == cid.0).map(|(_, tex)| tex.id())
+    pic.drawn.filter(|(k, _)| k.comp == cid.0 && k.view == view).map(|(_, tex)| tex.id())
 }
 
 /// The popup id of the view selector of the pane at layout position `pos` (its automation ids

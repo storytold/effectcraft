@@ -156,11 +156,7 @@ impl EffectcraftApp {
         drawn: Option<FrameKey>,
     ) -> (FrameKey, Option<(FrameKey, frames::FrameImage)>) {
         let opts = RenderOpts { view, draft: true, roi: None, ..self.frame_opts(comp, scale) };
-        let view_key = view.map_or(0, |cam| {
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            hash_camera(&cam, &mut h);
-            std::hash::Hasher::finish(&h) | 1
-        });
+        let view_key = view_key(view);
         let key = FrameKey {
             revision: self.session.revision,
             content: self.frames.content_of(&self.session.project, self.session.revision, comp),
@@ -299,6 +295,17 @@ impl EffectcraftApp {
 }
 
 /// Hash a 3D view camera (its view matrix, zoom and projection) into `h`, for frame keys.
+/// The `view` of a frame key rendered through the 3D view camera `view` (0: through the comp's
+/// own camera). The viewer's own key carries the same hash while no region is shown
+/// ([`EffectcraftApp::view_hash`]).
+pub(crate) fn view_key(view: Option<effectcraft_engine::render::three_d::CameraState>) -> u64 {
+    view.map_or(0, |cam| {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        hash_camera(&cam, &mut h);
+        std::hash::Hasher::finish(&h) | 1
+    })
+}
+
 fn hash_camera(cam: &effectcraft_engine::render::three_d::CameraState, h: &mut impl std::hash::Hasher) {
     use std::hash::Hash;
     for row in cam.view.0 {

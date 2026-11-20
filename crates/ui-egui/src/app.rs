@@ -12,7 +12,7 @@ mod playback;
 mod prefetch;
 mod prefs;
 mod screenshot;
-mod viewer_frames;
+pub(crate) mod viewer_frames;
 mod window;
 
 pub use gpu::{GPU_PREPARING, GpuBuild};

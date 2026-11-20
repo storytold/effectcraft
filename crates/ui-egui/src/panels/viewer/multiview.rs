@@ -239,7 +239,9 @@ pub(super) fn draw_selection(app: &mut EffectcraftApp, painter: &egui::Painter, 
 pub(super) fn stand_in(app: &EffectcraftApp, ctx: &egui::Context, cid: ItemId) -> Option<Option<egui::TextureId>> {
     let active = active_pos(app, cid);
     let (comp, pos) = app.ui.viewer.shown_for?;
-    (comp == cid.0 && pos != active).then(|| super::view::side_picture(ctx, cid, active))
+    // Only a picture of the active pane's own view: another view's would show Top while a press
+    // acts through Left (the pane was switched, and its frame is still rendering).
+    (comp == cid.0 && pos != active).then(|| super::view::side_picture(ctx, cid, active, crate::app::viewer_frames::view_key(app.session.view_camera(cid))))
 }
 
 /// The active pane's thin accent border while the layout shows more than one pane of comp `cid`,

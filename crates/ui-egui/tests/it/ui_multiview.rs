@@ -326,6 +326,36 @@ fn a_newly_active_pane_never_shows_the_previous_panes_frame() {
     assert!(!now.is_empty() && !now.contains(&top_picture), "then the viewer's own frame: {now:?}");
 }
 
+/// A frame source that starts every frame and never finishes it: the frames stay rendering.
+struct Never;
+impl effectcraft_ui_egui::frames::RemoteFrames for Never {
+    fn slots(&self) -> usize {
+        1024
+    }
+    fn start(&self, _: effectcraft_ui_egui::frames::RemoteJob, _: effectcraft_ui_egui::frames::RemoteDone) {}
+}
+
+/// A pane switched from Top to Left whose Left frame is still rendering shows no picture, not
+/// Top's, side pane or, once a press has made it the active pane, stand-in: a press would act
+/// through Left's projection on Top's picture.
+#[test]
+fn a_pane_never_shows_another_views_picture_while_its_frame_renders() {
+    let (mut h, _) = harness(4);
+    let top = rect_of(&h, "viewer.pane.0");
+    let in_top = |h: &Harness<'_, EffectcraftApp>| images(h).into_iter().filter(|(_, b)| top.contains_rect(*b)).map(|(t, _)| t).collect::<Vec<_>>();
+    let top_picture = *in_top(&h).first().unwrap_or_else(|| panic!("the Top pane draws its picture"));
+    h.state_mut().frames.set_remote(Some(std::sync::Arc::new(Never)));
+    h.state_mut().session.execute("view.setPaneView", json!({"position": 0, "view": "left"})).unwrap();
+    h.run_steps(4);
+    assert_eq!(views(&h).view_at(0), View3D::Left);
+    assert!(!in_top(&h).contains(&top_picture), "the Left pane draws Top's picture: {:?}", in_top(&h));
+    h.state_mut().session.execute("view.activatePane", json!({"position": 0})).unwrap();
+    h.run_steps(4);
+    assert_eq!(views(&h).active(), 0);
+    assert!(!in_top(&h).contains(&top_picture), "the active Left pane stands in with Top's picture: {:?}", in_top(&h));
+    assert!(h.state().frames.inflight() > 0, "the Left frame is still rendering");
+}
+
 /// Two panes on the same view at the same magnification want the same frame: the pane made active
 /// finds it on screen already, nothing is uploaded again, and it shows that frame rather than its
 /// side-pane picture (which stood in until the time or the comp changed). 32 bpc: the half-float
