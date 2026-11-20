@@ -132,7 +132,7 @@ fn layer_s() -> Value {
     json!({"type": ["integer", "string"], "description": "Layer id (from get_comp), \"#n\" (1-based index from the top) or layer name."})
 }
 fn path_s() -> Value {
-    json!({"type": "string", "description": "Property path from get_layer: match ids joined by `/`, `#n` for the nth child, or `@uid`. E.g. `transform/position`, `transform/opacity`, `transform/scale`, `transform/rotation`, `effects/#1/blurriness`, `masks/#1/feather`, `@57`."})
+    json!({"type": "string", "description": "Property path from get_layer: match ids joined by `/`, `#n` for the nth child, or `@uid`. Unambiguous simple group names also work; include enclosing SVG groups. Prefer the returned `path` for editing: `namePath` is display text and can be ambiguous. E.g. `transform/position`, `transform/opacity`, `transform/scale`, `transform/rotation`, `effects/#1/blurriness`, `masks/#1/feather`, `@57`."})
 }
 fn times_s() -> Value {
     json!({
@@ -264,7 +264,7 @@ fn add_effect(b: &mut Backend, a: &Value) -> Result<Reply> {
     let inst = effects_group(&tree).and_then(|g| g.get("children")).and_then(Value::as_array).and_then(|c| c.get(index - 1)).cloned();
     let mut params = vec![];
     if let Some(i) = &inst {
-        flatten(i, &mut params);
+        flatten(i, &mut params, None);
     }
     json_reply(json!({"layer": tree["id"], "index": index, "path": prefix, "name": inst.as_ref().map(|i| i["name"].clone()), "set": set, "params": params}))
 }
@@ -297,17 +297,36 @@ fn get_comp(b: &mut Backend, a: &Value) -> Result<Reply> {
     json_reply(b.exec("comp.info", obj(&[("comp", get(a, "comp"))]))?)
 }
 
-/// Flatten a `layer.tree` property tree into `[{path, type, value, keys?, expression?, options?}]`.
-fn flatten(node: &Value, out: &mut Vec<Value>) {
+/// Flatten a `layer.tree` property tree, optionally keeping its display-name hierarchy.
+/// `path` remains the editing address; names can repeat or contain path separators.
+fn flatten(node: &Value, out: &mut Vec<Value>, names: Option<&str>) {
+    let name_path = names.map(|prefix| {
+        let name = node["name"].as_str().unwrap_or_default();
+        if node["path"] == "" {
+            prefix.to_string() // Omit the layer's root group, just like the editing paths.
+        } else if prefix.is_empty() {
+            name.to_string()
+        } else {
+            format!("{prefix}/{name}")
+        }
+    });
     // A group cut off by `depth` stays visible (instead of vanishing from the flat list).
     if node.get("truncated").and_then(Value::as_bool) == Some(true) {
-        out.push(json!({"path": node["path"], "type": "group", "name": node["name"], "truncated": true}));
+        let mut group = json!({"path": node["path"], "type": "group", "name": node["name"], "truncated": true});
+        if let Some(path) = name_path {
+            group["namePath"] = json!(path);
+        }
+        out.push(group);
         return;
     }
     match node.get("children").and_then(Value::as_array) {
-        Some(ch) => ch.iter().for_each(|c| flatten(c, out)),
+        Some(ch) => ch.iter().for_each(|c| flatten(c, out, name_path.as_deref())),
         None => {
             let mut o = json!({"path": node["path"], "type": node["type"], "value": node["value"]});
+            if let Some(path) = name_path {
+                o["name"] = node["name"].clone();
+                o["namePath"] = json!(path);
+            }
             if let Some(k) = node.get("keys").and_then(Value::as_array) {
                 o["keys"] = json!(k.len());
             }
@@ -327,7 +346,7 @@ fn get_layer(b: &mut Backend, a: &Value) -> Result<Reply> {
     let mut r = b.exec("layer.tree", p)?;
     if get(a, "flat").and_then(Value::as_bool) == Some(true) {
         let mut props = vec![];
-        flatten(&r["properties"], &mut props);
+        flatten(&r["properties"], &mut props, Some(""));
         r["properties"] = json!(props);
     }
     json_reply(r)
@@ -720,7 +739,7 @@ static TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "get_layer",
-        description: "A layer's property tree (transform, masks, effects, text, shape contents, ...): leaf properties have a `path` usable with get_property/set_property/add_keyframe, plus uid, match id, name, type, value at `time`, keyframes and expression; popup (enum) properties add `options` ([{value, label}]). Groups contain children; inspect them here, then select a leaf path. `flat: true` returns just a list of {path, type, value, keys, expression, options} (compact).",
+        description: "A layer's property tree (transform, masks, effects, text, shape contents, ...): leaf properties have a `path` usable with get_property/set_property/add_keyframe, plus uid, match id, name, type, value at `time`, keyframes and expression; popup (enum) properties add `options` ([{value, label}]). Groups contain children; inspect them here, then select a leaf path. `flat: true` returns a compact list of {path, name, namePath, type, value, keys, expression, options}. `namePath` is a display-name trail including the parent groups; it may repeat or contain path separators, so use `path` for editing.",
         bridge_only: false,
         schema: || {
             schema(

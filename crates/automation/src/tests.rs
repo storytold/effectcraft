@@ -2112,3 +2112,73 @@ fn bridged_contact_sheet_keeps_the_times_asked_for() {
     let info = call_json(&mut s, "render_frame", json!({"times": [1.5, 0.25, 3], "inline": false}));
     assert_eq!(info["times"], json!([1.5, 0.25, 3.0]));
 }
+
+fn named_shape_item(s: &mut McpServer, layer: &Value, kind: &str, parent: Option<&Value>, name: &str) -> Value {
+    let mut params = json!({"layer":layer,"kind":kind});
+    if let Some(parent) = parent {
+        params["group"] = parent["uid"].clone();
+    }
+    let item = call_json(s, "execute_command", json!({"command":"layer.addShapeItem","params":params}));
+    call_json(s, "execute_command", json!({"command":"prop.renameGroup","params":{"layer":layer,"prop":item["uid"],"name":name}}));
+    item
+}
+
+#[test]
+fn flat_name_paths_identify_nested_shape_parts_and_keep_editing_paths() {
+    let mut s = server();
+    call_json(&mut s, "execute_command", json!({"command":"comp.new","params":{"frameRate":30,"duration":2}}));
+    let layer = call_json(&mut s, "execute_command", json!({"command":"layer.newShape","params":{"name":"Character"}}))["layer"].clone();
+    let head = named_shape_item(&mut s, &layer, "group", None, "Head");
+    let face = named_shape_item(&mut s, &layer, "group", Some(&head), "Face");
+    let bounds = named_shape_item(&mut s, &layer, "rect", Some(&face), "Bounds");
+    let path = format!("{}/size", bounds["path"].as_str().unwrap());
+    for (time, value) in [(0, json!([20, 30])), (1, json!([22, 33]))] {
+        call_json(&mut s, "set_property", json!({"layer":layer,"path":path,"time":time,"value":value}));
+    }
+    call_json(&mut s, "set_property", json!({"layer":layer,"path":path,"expression":"value"}));
+    let flat = call_json(&mut s, "get_layer", json!({"layer":layer,"flat":true,"time":1}));
+    let row = flat["properties"].as_array().unwrap().iter().find(|p| p["path"] == path).unwrap();
+    assert_eq!(row["name"], "Size");
+    assert_eq!(row["namePath"], "Contents/Head/Contents/Face/Contents/Bounds/Size");
+    assert_eq!(row["value"], json!([22.0, 33.0]));
+    assert_eq!(row["keys"], 2);
+    assert_eq!(row["expression"], "value");
+    // Unique simple group names already work as input; the canonical path remains the safe edit target.
+    let named = call_json(&mut s, "get_property", json!({"layer":layer,"path":row["namePath"],"time":1}));
+    let canonical = call_json(&mut s, "get_property", json!({"layer":layer,"path":row["path"],"time":1}));
+    assert_eq!(named["uid"], canonical["uid"]);
+    let limited = call_json(&mut s, "get_layer", json!({"layer":layer,"flat":true,"depth":2}));
+    let group = limited["properties"].as_array().unwrap().iter().find(|p| p["name"] == "Head").unwrap();
+    assert_eq!(group["type"], "group");
+    assert_eq!(group["truncated"], true);
+    assert_eq!(group["namePath"], "Contents/Head");
+    let tree = call_json(&mut s, "get_layer", json!({"layer":layer}));
+    assert!(tree["properties"].get("namePath").is_none(), "the tree response stays unchanged");
+    let effect = call_json(&mut s, "add_effect", json!({"layer":layer,"effect":"Gaussian Blur"}));
+    assert!(effect["params"].as_array().unwrap().iter().all(|p| p.get("namePath").is_none()), "effect parameter replies stay unchanged");
+}
+
+#[test]
+fn flat_name_paths_allow_duplicate_names_and_path_separators_as_display_text() {
+    let mut s = server();
+    call_json(&mut s, "execute_command", json!({"command":"comp.new","params":{"frameRate":30,"duration":2}}));
+    let layer = call_json(&mut s, "execute_command", json!({"command":"layer.newShape","params":{}}))["layer"].clone();
+    let group = named_shape_item(&mut s, &layer, "group", None, "Head/Face.1");
+    let mut paths = vec![];
+    for value in [10, 20] {
+        let rect = named_shape_item(&mut s, &layer, "rect", Some(&group), "Bounds");
+        let path = format!("{}/size", rect["path"].as_str().unwrap());
+        call_json(&mut s, "set_property", json!({"layer":layer,"path":path,"value":[value,value]}));
+        paths.push(path);
+    }
+    let flat = call_json(&mut s, "get_layer", json!({"layer":layer,"flat":true}));
+    let rows: Vec<_> = flat["properties"].as_array().unwrap().iter().filter(|r| paths.iter().any(|p| r["path"] == *p)).collect();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0]["namePath"], "Contents/Head/Face.1/Contents/Bounds/Size");
+    assert_eq!(rows[0]["namePath"], rows[1]["namePath"], "display names need not be unique");
+    assert_ne!(rows[0]["path"], rows[1]["path"], "editing paths must stay distinct");
+    for row in rows {
+        let read = call_json(&mut s, "get_property", json!({"layer":layer,"path":row["path"]}));
+        assert_eq!(read["value"], row["value"]);
+    }
+}

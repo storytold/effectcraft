@@ -1176,3 +1176,12 @@ top of this page and in items 16–18 above.
 | 2026-10-05 | minor | Checklist updated for M3.9–M4.12 (as `docs/parity.md`) |
 | 2026-10-04 | major | Checklist audit at `d39c0e8`: ≈ 99% weighted breadth, 89 / 3 / 0 of 92 |
 | 2026-10-02 | major | First audit: ≈ 64% weighted breadth |
+
+### Update: readable flat property names (#3644 item 2, 2026-11-14)
+
+Flat `get_layer` listings include `name` and `namePath` so imported shape parts can be identified
+by their group names without opening a separate tree listing. Existing editing paths and value
+metadata are preserved; truncated groups also carry the name trail. Display names can repeat or
+contain path separators, so clients should edit through `path`. Regression tests cover nested
+shape groups, key/expression metadata, duplicate names and depth limits. This improves agent
+property discovery and makes no new rendering or fidelity claim.

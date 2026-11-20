@@ -3,6 +3,17 @@
 Run `effectcraft-cli mcp` for a headless session, or `effectcraft-cli mcp --bridge 9877`
 to use the desktop app's control channel. Existing ports are unchanged.
 
+## Flat property names
+
+`get_layer {layer, flat: true}` (CLI: `props <comp> <layer> --flat --json`) includes each leaf's
+`name` and `namePath`, for example `Contents/Head/Contents/Face/Size`. The name trail includes
+parent groups, including imported SVG groups, and is also present on depth-truncated group rows.
+Existing `path`, type, value, key count, expression and enum options are preserved.
+
+Use `path` to edit a property. `namePath` is display text: duplicate names or names containing
+`/` or `.` can make it ambiguous. Simple unambiguous group names are already accepted as input
+paths, but enclosing SVG wrapper groups must be included. Tree listings are unchanged.
+
 ## Confining file access
 
 `--automation-read-root DIR` and `--automation-write-root DIR` (each repeatable, as in

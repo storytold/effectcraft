@@ -45,6 +45,10 @@ because 179 issues were closed with regression tests between 5 and 10 October.
 | AI-assisted tools | ≈ 35% | 40–80 | Roto Brush 2.0 / 3.0 with MobileSAM (M13.35) scores IoU 0.989 on the base frame of our synthetic moving-disc test and ≥ 0.980 over 20 propagated frames (classic: 0.973). Face tracking with MediaPipe Face Landmarker (M13.36) matches Google's own pipeline to 0.85 px on a test portrait. Neither is compared with After Effects; Object Matte (26.2) is missing |
 | Maturity | early | — | First commit 1 October 2026. ≈ 361,000 lines of almost entirely agent-written Rust (`git ls-files '*.rs'`, 12 October), 2,704 tests (10 October), 544 GitHub issues (216 open). After Effects has around 30 years of edge cases behind it |
 
+Flat property discovery (#3644 item 2, 2026-11-14): MCP/CLI JSON flat listings include leaf
+names and readable parent-group name paths. Canonical editing paths are preserved; name paths
+are display text and need not be unique. The other requests in #3644 are separate work.
+
 ## Every known gap, ranked
 
 **Alpha blockers: none.** Every core workflow passes the [alpha gate](roadmap.md#alpha-gate); the
