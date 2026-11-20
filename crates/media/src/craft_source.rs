@@ -210,15 +210,19 @@ where
     Some((audio_tracks, audio_infos))
 }
 
-/// When a codec signals its own visible picture, the aperture is relative to that picture,
-/// not the coded dimensions some writers store in the sample entry.
-fn nal_visible_size(config: &isobmff::CodecConfig) -> Option<(u32, u32)> {
+/// A probe hint only: a single configured SPS can signal a visible size different from the
+/// sample entry. Multiple or in-band parameter sets leave the initial hint to the container.
+fn nal_visible_size_hint(config: &isobmff::CodecConfig) -> Option<(u32, u32)> {
     let (_, _, width, height) = match config {
         isobmff::CodecConfig::Avc(avc) => {
             if avc.pps.is_empty() {
                 return None;
             }
-            let sps = avc.sps.iter().find(|n| n.first().is_some_and(|h| h & 0x1f == 7))?;
+            let mut sets = avc.sps.iter().filter(|n| n.first().is_some_and(|h| h & 0x1f == 7));
+            let sps = sets.next()?;
+            if sets.next().is_some() {
+                return None;
+            }
             craft_video::h264::decode::params::Sps::parse(&unescape_rbsp(sps.get(1..)?)).ok()?.crop_rect()
         }
         isobmff::CodecConfig::Hevc(hevc) => {
@@ -226,7 +230,8 @@ fn nal_visible_size(config: &isobmff::CodecConfig) -> Option<(u32, u32)> {
             for nal in hevc.arrays.iter().filter(|a| (32..=34).contains(&a.nal_type)).flat_map(|a| &a.nalus) {
                 match nal.first().map(|h| (h >> 1) & 0x3f) {
                     Some(32) => vps = true,
-                    Some(33) if sps.is_none() => sps = Some(nal),
+                    Some(33) if sps.is_some() => return None,
+                    Some(33) => sps = Some(nal),
                     Some(34) => pps = true,
                     _ => {}
                 }
@@ -279,12 +284,14 @@ fn open_isobmff(name: &str, source: SharedBytes) -> Option<Result<SharedSource>>
         .map(|v| (u32::from(v.width), u32::from(v.height)))
         .filter(|&(w, h)| w > 0 && h > 0)
         .unwrap_or((video_track.width, video_track.height));
-    let aperture = video_track.video().and_then(|v| v.clean_aperture).and_then(|clap| {
-        (width, height) = nal_visible_size(&video_track.entries[0].codec).unwrap_or((width, height));
-        clean_aperture_region(clap, (width, height))
-    });
-    if let Some(region) = aperture {
-        (width, height) = (region.w as u32, region.h as u32);
+    // Probe needs dimensions before decoding. Retain the original rational aperture separately
+    // so frame conversion can use the actual visible size, even with in-band parameter sets.
+    let aperture = video_track.video().and_then(|v| v.clean_aperture);
+    if let Some(clap) = aperture {
+        (width, height) = nal_visible_size_hint(&video_track.entries[0].codec).unwrap_or((width, height));
+        if let Some(region) = clean_aperture_region(clap, (width, height)) {
+            (width, height) = (region.w as u32, region.h as u32);
+        }
     }
     let mut par = video_track.video().and_then(|v| v.pixel_aspect).filter(|&(n, d)| n > 0 && d > 0).unwrap_or((1, 1));
     let rotation = video_track.display_rotation().unwrap_or(0) % 4;
@@ -460,7 +467,7 @@ struct FramePresentation {
     container_color: Option<ColorInfo>,
     par: (u32, u32),
     rotation: u8,
-    aperture: Option<Region>,
+    aperture: Option<isobmff::CleanAperture>,
 }
 
 struct CraftMediaSource {
@@ -710,7 +717,10 @@ fn to_craft_frame(vf: DecodedVideoFrame, presentation: FramePresentation, pts: T
             let (Some(y), Some(cb), Some(cr)) = (iter.next(), iter.next(), iter.next()) else {
                 return Err(MediaError::Decode("missing YUV planes".into()));
             };
-            let (luma, chroma_region) = aperture.and_then(|r| aligned_aperture(r, width as usize, height as usize, chroma)).unzip();
+            let (luma, chroma_region) = aperture
+                .and_then(|clap| clean_aperture_region(clap, (width, height)))
+                .and_then(|r| aligned_aperture(r, width as usize, height as usize, chroma))
+                .unzip();
             if let Some(r) = luma {
                 (width, height) = (r.w as u32, r.h as u32);
             }
@@ -1200,7 +1210,7 @@ mod tests {
         let chroma = Plane::packed(3, 3, 8, Samples::U8((0..9).collect())).unwrap();
         let alpha = Plane::packed(6, 6, 8, Samples::U8((64..100).collect())).unwrap();
         let frame = DecodedVideoFrame::new(6, 6, ColorFamily::YCbCr, Subsampling::S420, vec![luma, chroma.clone(), chroma], Some(alpha)).unwrap();
-        let aperture = Some(Region { x: 3, y: 3, w: 3, h: 3 });
+        let aperture = Some(isobmff::CleanAperture { width: (3, 1), height: (3, 1), horiz_offset: (3, 2), vert_offset: (3, 2) });
         let presentation = FramePresentation { container_color: None, par: (3, 2), rotation: 0, aperture };
         let cropped = to_craft_frame(frame, presentation, Tick::ZERO).unwrap();
         assert_eq!((cropped.width, cropped.height, cropped.par), (3, 3, (3, 2)));
@@ -1211,6 +1221,25 @@ mod tests {
         assert_eq!(cb.as_slice(), &[4, 5, 7, 8]);
         assert_eq!(cr.as_slice(), cb.as_slice());
         assert_eq!(a.as_slice(), &[78, 79, 80, 84, 85, 86, 90, 91, 92]);
+    }
+
+    #[test]
+    fn clean_aperture_uses_the_decoded_picture_not_a_coded_size_hint() {
+        let luma = Plane::packed(8, 6, 8, Samples::U8((0..48).collect())).unwrap();
+        let chroma = Plane::packed(8, 6, 8, Samples::U8(vec![128; 48])).unwrap();
+        let frame = DecodedVideoFrame::new(8, 6, ColorFamily::YCbCr, Subsampling::S444, vec![luma, chroma.clone(), chroma], None).unwrap();
+        let aperture = isobmff::CleanAperture { width: (4, 1), height: (4, 1), horiz_offset: (0, 1), vert_offset: (0, 1) };
+        // A coded/sample-entry size of 8×8 would put the crop one row too low on the decoded
+        // 8×6 picture. The aperture remains in rational form until this picture is available.
+        assert_eq!(clean_aperture_region(aperture, (8, 8)).unwrap().y, 2);
+        let presentation = FramePresentation { container_color: None, par: (1, 1), rotation: 0, aperture: Some(aperture) };
+        let cropped = to_craft_frame(frame, presentation, Tick::ZERO).unwrap();
+        assert_eq!((cropped.width, cropped.height), (4, 4));
+        let y = match &cropped.data {
+            PixelData::Yuv8 { planes, .. } => &planes[0],
+            _ => panic!("expected cropped luma"),
+        };
+        assert_eq!(y.as_slice(), &[10, 11, 12, 13, 18, 19, 20, 21, 26, 27, 28, 29, 34, 35, 36, 37]);
     }
 
     #[test]

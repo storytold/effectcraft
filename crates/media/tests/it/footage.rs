@@ -542,7 +542,7 @@ fn mov_renders_clean_aperture_before_display_rotation() {
         // Rotate 90° after cropping the source box (6, 1, 8, 12).
         let source = (6 + y, 12 - x);
         let expected = (source.0 + 16 * source.1) as f32 / 255.0;
-        assert!((image.data[y * 12 + x][3] - expected).abs() < 0.01, "pixel {x},{y} must come from {source:?}");
+        assert!((image.data[y * 12 + x][3] - expected).abs() < 0.002, "pixel {x},{y} must come from {source:?}");
     }
 }
 
