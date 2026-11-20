@@ -95,13 +95,13 @@ same-file = "1.0"
 tempfile = "3.27"
 
 # codecs + containers shared by the Craft apps (crates/media, crates/export); keep all in sync.
-craft-media = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "ce9ff474b763408f1c0dbbe1aef9a2f6b8360031", default-features = false, features = ["isobmff", "matroska"] }
-craft-media-source = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "ce9ff474b763408f1c0dbbe1aef9a2f6b8360031" }
+craft-media = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "3dff4793f1a5bd1f99a4fe3280d48f515158dff3", default-features = false, features = ["isobmff", "matroska"] }
+craft-media-source = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "3dff4793f1a5bd1f99a4fe3280d48f515158dff3" }
 craft-frame = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "ce9ff474b763408f1c0dbbe1aef9a2f6b8360031" }
 craft-color = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "ce9ff474b763408f1c0dbbe1aef9a2f6b8360031" }
 craft-time = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "ce9ff474b763408f1c0dbbe1aef9a2f6b8360031" }
 craft-audio = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "ce9ff474b763408f1c0dbbe1aef9a2f6b8360031", default-features = false, features = ["aac-decode", "aac-encode", "alac-decode", "opus-decode", "opus-encode", "ac3-decode", "mp3-decode", "mpa-decode"] }
-craft-video = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "ce9ff474b763408f1c0dbbe1aef9a2f6b8360031", features = ["h264-decode", "h264-encode", "prores", "hevc-encode", "vp9-encode", "av1", "threads"] }
+craft-video = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "3dff4793f1a5bd1f99a4fe3280d48f515158dff3", features = ["h264-decode", "h264-encode", "prores", "hevc-encode", "vp9-encode", "av1", "threads"] }
 
 # footage decoding: FilmCraft's pure-Rust crates, pinned to a revision (plan/adr/0001).
 # Only `crates/media`, `crates/export` and `crates/interchange` may depend on these.
