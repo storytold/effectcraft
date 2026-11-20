@@ -768,7 +768,14 @@ fn plane_u8(p: Plane) -> Result<Vec<u8>> {
             }
             Ok(out)
         }
-        Samples::U16(_) => Err(MediaError::Decode("expected 8-bit plane".into())),
+        Samples::U16(v) => {
+            let mut out = Vec::with_capacity(w * h);
+            for y in 0..h {
+                let row = y * stride;
+                out.extend(v[row..row + w].iter().map(|&s| s.min(255) as u8));
+            }
+            Ok(out)
+        }
     }
 }
 
@@ -787,7 +794,14 @@ fn plane_u16(p: Plane) -> Result<Vec<u16>> {
             }
             Ok(out)
         }
-        Samples::U8(_) => Err(MediaError::Decode("expected 16-bit plane".into())),
+        Samples::U8(v) => {
+            let mut out = Vec::with_capacity(w * h);
+            for y in 0..h {
+                let row = y * stride;
+                out.extend(v[row..row + w].iter().map(|&s| u16::from(s)));
+            }
+            Ok(out)
+        }
     }
 }
 
@@ -1005,5 +1019,16 @@ mod tests {
         if let PixelData::Yuv8 { planes: [y, ..], .. } = &rot360.data {
             assert_eq!(&**y, &[1, 2, 3, 4, 5, 6, 7, 8]);
         }
+    }
+
+    #[test]
+    fn plane_u8_handles_8bit_u16_storage_as_av1_produces() {
+        let p = Plane::packed(2, 2, 8, Samples::U16(vec![10, 20, 30, 255])).ok();
+        let Some(p) = p else {
+            assert!(false, "valid 8-bit U16 plane");
+            return;
+        };
+        let out = plane_u8(p).ok();
+        assert_eq!(out.as_deref(), Some(&[10, 20, 30, 255][..]));
     }
 }
