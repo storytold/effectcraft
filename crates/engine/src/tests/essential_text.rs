@@ -36,7 +36,7 @@ fn rendered_text(s: &Session, comp: ItemId, inst: u64, src: ItemId, text: u64) -
         if let Some(c) = essential::control_of(&p.match_id)
             && over_uids.contains(&p.uid)
         {
-            over.push(essential::Override { control: c, value: p.value.clone() });
+            over.push(essential::Override { control: c, value: p.value.clone(), keys: vec![] });
         }
     });
     // (No override: the nested comp renders as it is.)

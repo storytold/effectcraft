@@ -1290,3 +1290,74 @@ fn the_h264_fixture_options_fit_the_picked_encoder() {
         assert!(options.contains(&"-b:v"), "{enc} gets a bitrate: {options:?}");
     }
 }
+
+/// #781: software MP4/H.264 route on a B-frame fixture: backward seek across GOPs, cooperative
+/// cancellation, VUI/container color resolution, and draft mode for reduced-resolution playback.
+#[test]
+fn h264_bframe_route_backward_seek_cancel_color_and_draft() {
+    use std::sync::atomic::AtomicBool;
+    if h264_encoder() != Some("libx264") {
+        return;
+    }
+    let Some(p) = try_ffmpeg_fixture(
+        "h264_bframes_bt709.mp4",
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=320x180:rate=24:duration=1",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "fast",
+            "-bf",
+            "2",
+            "-g",
+            "12",
+            "-pix_fmt",
+            "yuv420p",
+            "-colorspace",
+            "bt709",
+            "-color_primaries",
+            "bt709",
+            "-color_trc",
+            "bt709",
+            "-color_range",
+            "tv",
+        ],
+    ) else {
+        return;
+    };
+    let f = probe(&p).expect("probe");
+    assert_eq!((f.width, f.height), (320, 180));
+    assert_eq!(f.color_profile, Some(effectcraft_project::ColorSpace::Rec709));
+
+    let pool = MediaPool::new();
+    // Forward decode into second GOP, then backward seek across GOP boundary and within GOP.
+    let f18 = pool.frame(ItemId(1), &f, t_of(f.frame_rate, 18)).expect("frame 18");
+    let f13 = pool.frame(ItemId(1), &f, t_of(f.frame_rate, 13)).expect("frame 13");
+    let f7 = pool.frame(ItemId(1), &f, t_of(f.frame_rate, 7)).expect("frame 7");
+    let f0 = pool.frame(ItemId(1), &f, t_of(f.frame_rate, 0)).expect("frame 0");
+    for img in [&f18, &f13, &f7, &f0] {
+        assert_eq!((img.width, img.height), (320, 180));
+    }
+    // Verify backward-seeked frame 7 matches a fresh pool decode of frame 7.
+    let fresh_f7 = MediaPool::new().frame(ItemId(1), &f, t_of(f.frame_rate, 7)).expect("fresh frame 7");
+    assert!(psnr(&f7, &fresh_f7) > 55.0, "backward seek frame 7 must match fresh decode");
+
+    // Draft mode at reduced resolution.
+    let draft = pool.frame_at_size(ItemId(1), &f, t_of(f.frame_rate, 5), 160, 90).expect("draft frame");
+    let full = pool.frame(ItemId(1), &f, t_of(f.frame_rate, 5)).expect("full frame");
+    assert_eq!((draft.width, draft.height), (160, 90));
+    assert!(psnr(&draft, &effectcraft_raster::resample(&full, 160, 90)) > 40.0, "draft frame matches resampled full frame");
+
+    // Cooperative cancellation.
+    let off = Arc::new(AtomicBool::new(true));
+    let mut cancelled = Some(Arc::clone(&f0));
+    pool.cancellable(&off, &mut || cancelled = pool.frame(ItemId(1), &f, t_of(f.frame_rate, 20)));
+    assert!(cancelled.is_none(), "cancelled read must not decode");
+    let on = Arc::new(AtomicBool::new(false));
+    let mut resumed = None;
+    pool.cancellable(&on, &mut || resumed = pool.frame(ItemId(1), &f, t_of(f.frame_rate, 20)));
+    assert_eq!(resumed.map(|i| (i.width, i.height)), Some((320, 180)));
+}
