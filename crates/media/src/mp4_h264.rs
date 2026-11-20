@@ -563,3 +563,35 @@ fn estimate_frame_rate(track: &Track) -> FrameRate {
         .map(|(r, _)| r)
         .unwrap_or_else(|| FrameRate::new(i64::from(track.timescale), i64::from(median)))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn worker_cap_is_bounded() {
+        let cap = worker_cap();
+        assert!((1..=MAX_WORKERS).contains(&cap), "cap={cap}");
+    }
+
+    #[test]
+    fn vui_overrides_container_color_and_falls_back_when_unspecified() {
+        let container = color_from_isobmff(&isobmff::ColorInfo::Nclx { primaries: 9, transfer: 16, matrix: 9, full_range: false });
+        assert_eq!(container.primaries, Primaries::Bt2020);
+        assert_eq!(container.transfer, Transfer::Pq);
+        assert_eq!(container.matrix, Matrix::Bt2020Ncl);
+        assert_eq!(container.range, Range::Limited);
+
+        // Unspecified VUI (2) falls back to container color.
+        let resolved = resolve_color(ColorTags::UNSPECIFIED, Some(container));
+        assert_eq!(resolved, container);
+
+        // Explicit VUI overrides container color.
+        let vui = ColorTags { primaries: 1, transfer: 1, matrix: 1, full_range: true };
+        let resolved = resolve_color(vui, Some(container));
+        assert_eq!(resolved.primaries, Primaries::Bt709);
+        assert_eq!(resolved.transfer, Transfer::Bt709);
+        assert_eq!(resolved.matrix, Matrix::Bt709);
+        assert_eq!(resolved.range, Range::Full);
+    }
+}
