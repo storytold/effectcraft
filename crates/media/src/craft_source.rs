@@ -384,7 +384,7 @@ fn open_matroska(name: &str, source: SharedBytes) -> Option<Result<SharedSource>
         let v_state = Mutex::new(VideoState { decoder: video_decoder, next_decode_idx: 0, gop_start_idx: 0, flushed: false, decoded: Vec::new() });
         (Some(v_info), Some(v_state), container_color, par, rotation, duration)
     } else {
-        let duration = matroska_duration(&file, &file.tracks[audio_candidates[0].0]);
+        let duration = audio_candidates.iter().map(|&(idx, _, _, _)| matroska_duration(&file, &file.tracks[idx])).max().unwrap_or(Tick::ZERO);
         (None, None, None, (1, 1), 0, duration)
     };
 
