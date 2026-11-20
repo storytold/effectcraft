@@ -535,6 +535,23 @@ fn delay_offsets_across_blocks() {
 }
 
 #[test]
+fn delay_preroll_does_not_exhaust_the_remap_page_quota() {
+    let vals = [("delayTime", Value::Scalar(1000.0)), ("feedback", Value::Scalar(50.0))];
+    let (mut p, cid) = comp_with(Some("ec.audio.delay"), &vals, false);
+    let comp = p.comp_mut(cid).unwrap();
+    comp.duration = Tick::from_seconds_f64(14.0);
+    comp.layers[0].out_point = comp.duration;
+    let start = Tick::from_seconds_f64(11.2);
+    // Start the pre-roll before the end of the fixture's two seconds of source audio. Only
+    // the feedback tail reaches the current block.
+    let source = Signal(|t| if t < 1.5 { (0.5, -0.5) } else { (0.0, 0.0) });
+    let expected = mix_comp(&p, &source, None, cid, start, 1024, 48000).unwrap();
+    assert!(expected.iter().any(|&sample| sample != 0.0));
+    remap(&mut p, cid, &[(0.0, 0.0), (14.0, 14.0)]);
+    assert_eq!(mix_comp(&p, &source, None, cid, start, 1024, 48000).unwrap(), expected);
+}
+
+#[test]
 fn stereo_mixer_pans() {
     fn left(_: f64) -> (f32, f32) {
         (0.5, 0.0)

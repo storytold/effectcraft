@@ -3905,10 +3905,12 @@ fn waveform_row(app: &mut EffectcraftApp, g: &Rw, rc: &RowCtx<'_>) {
     let RowKind::Waveform { item, .. } = &rc.row.kind else { return };
     lp.rect_filled(left, 0.0, if ri.is_multiple_of(2) { t.row } else { t.row_alt });
     let indent = cw.name + 6.0 + 14.0 * row.depth as f32;
-    lp.text(pos2(indent + 10.0, cy), Align2::LEFT_CENTER, crate::i18n::tr("Waveform"), Tokens::ui(12.0), t.text);
+    // Peak summaries are in source time even when the mix follows Time Remap.
+    let label = if layer.props.get("timeRemap").is_some() { "Source Waveform" } else { "Waveform" };
+    lp.text(pos2(indent + 10.0, cy), Align2::LEFT_CENTER, crate::i18n::tr(label), Tokens::ui(12.0), t.text);
     let wr = Rect::from_min_max(pos2(graph_x0, r.min.y), r.max);
     gp.rect_filled(wr, 0.0, t.tl_bg);
-    app.auto.add(&format!("timeline.layer.{}.waveform", layer.id.0), wr, "Waveform");
+    app.auto.add(&format!("timeline.layer.{}.waveform", layer.id.0), wr, label);
     match super::waveform::summary(app, &ctx, ItemId(*item)) {
         Some(s) => super::waveform::draw(&gp, wr.shrink2(vec2(0.0, 2.0)), &tm, layer, &s, Color32::from_rgb(0x5f, 0xc8, 0x8a)),
         None => {

@@ -126,7 +126,8 @@ fn level_gains(layer: &Layer, levels: Option<&Property>, t: Tick) -> [f32; 2] {
 
 /// Draw `layer`'s waveform in `rect` (left channel above right), columns mapped through the
 /// timeline's time map and the layer's time mapping, limited to its [in, out) span and drawn as
-/// the layer plays (see [`played`]).
+/// the layer plays without Time Remap (see [`played`]). Remapped layers show a labelled source
+/// waveform so it can still be used to locate positions in the underlying footage.
 pub(crate) fn draw(p: &Painter, rect: Rect, tm: &TMap, layer: &Layer, s: &Summary, color: Color32) {
     let mid = [rect.min.y + rect.height() * 0.25, rect.min.y + rect.height() * 0.75];
     let half = rect.height() * 0.25 - 1.0;

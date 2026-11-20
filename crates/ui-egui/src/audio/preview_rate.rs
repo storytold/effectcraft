@@ -162,9 +162,10 @@ mod tests {
 
     #[test]
     fn speed_mix_keeps_fractional_phase_across_uneven_blocks() {
-        for speed in [0.5, 2.0, 0.73, 29.97 / FrameRate::FPS_59_94.as_f64()] {
+        for speed in [1.0, 0.5, 2.0, 0.73, 29.97 / FrameRate::FPS_59_94.as_f64()] {
             let start = FrameRate::FPS_29_97.tick_of(17);
             let rate = PreviewRate::new(48_000, speed, start).unwrap();
+            let origin = if speed == 1.0 { 0.0 } else { start.seconds() };
             for mix in [44_100, 48_000, 96_000] {
                 let whole = rate.mix::<()>(0, 2048, mix, |t, n| Ok(ramp(t, n, mix))).unwrap();
                 let split: Vec<_> = [(0, 321), (321, 107), (428, 1620)]
@@ -173,7 +174,7 @@ mod tests {
                     .collect();
                 assert_eq!(whole, split, "speed {speed}, source rate {mix}");
                 for (i, frame) in whole.as_chunks::<2>().0.iter().enumerate() {
-                    let expected = (start.seconds() + i as f64 * speed / 48_000.0) * mix as f64 / 100_000.0;
+                    let expected = (origin + i as f64 * speed / 48_000.0) * mix as f64 / 100_000.0;
                     assert!((f64::from(frame[0]) - expected).abs() < 1e-6);
                     assert_eq!(frame[1], -frame[0]);
                 }

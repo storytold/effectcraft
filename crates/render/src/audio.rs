@@ -73,12 +73,14 @@ pub fn mix_comp(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AudioError {
     Cancelled,
+    DeadlineExceeded,
     WorkLimit,
 }
 impl std::fmt::Display for AudioError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::Cancelled => "audio mixing cancelled",
+            Self::DeadlineExceeded => "audio mixing exceeded the browser preview time budget",
             Self::WorkLimit => "audio mixing exceeded its work limit; simplify time stretching, remapping, or nested compositions",
         })
     }
@@ -90,6 +92,9 @@ impl std::error::Error for AudioError {}
 pub struct MixControl {
     /// Stop an in-flight mix, including expression evaluation when the host supports it.
     pub cancel: Option<Arc<AtomicBool>>,
+    /// An absolute deadline shared across mixer calls made during one UI frame.
+    /// Synchronous source reads and effects are checked at their call boundaries.
+    pub deadline: Option<web_time::Instant>,
     /// Override the default allowance of [`WORK_PER_FRAME`] source or sample operations per
     /// output frame plus [`WORK_SLACK`]. One buffer is also capped at [`MAX_ALLOC_FRAMES`].
     pub max_work: Option<usize>,
@@ -119,6 +124,8 @@ const FRAMES_PER_PAGE: usize = 64;
 const PAGE_SLACK: usize = 64;
 /// Fade at each edge of a Time Remap hold, in milliseconds.
 const HOLD_FADE_MS: usize = 2;
+/// Poll long sample loops in batches instead of reading the browser clock for every sample.
+const CHECK_INTERVAL: usize = 256;
 
 /// Shared interruption state for every expression in one mix, including nested evaluations.
 /// Clones share the sticky resource failure, the time spent and the yield allowance, so a new
@@ -126,6 +133,7 @@ const HOLD_FADE_MS: usize = 2;
 #[derive(Clone)]
 pub struct AudioEvalControl {
     cancel: Option<Arc<AtomicBool>>,
+    deadline: Option<web_time::Instant>,
     remaining: Rc<Cell<usize>>,
     failed: Rc<Cell<bool>>,
     spent: Rc<Cell<Duration>>,
@@ -138,6 +146,7 @@ impl AudioEvalControl {
     fn new(control: &MixControl) -> Self {
         Self {
             cancel: control.cancel.clone(),
+            deadline: control.deadline,
             remaining: Rc::new(Cell::new(control.max_expression_yields.unwrap_or(1024))),
             failed: Rc::new(Cell::new(false)),
             spent: Rc::new(Cell::new(Duration::ZERO)),
@@ -167,7 +176,10 @@ impl AudioEvalControl {
     }
     /// Check cancellation and resource limits without charging another instruction chunk.
     pub fn interrupted(&self) -> bool {
-        self.cancel.as_ref().is_some_and(|c| c.load(Ordering::Relaxed)) || self.exhausted()
+        self.cancel.as_ref().is_some_and(|c| c.load(Ordering::Relaxed)) || self.deadline_exceeded() || self.exhausted()
+    }
+    fn deadline_exceeded(&self) -> bool {
+        self.deadline.is_some_and(|deadline| web_time::Instant::now() >= deadline)
     }
     /// Charge one budgeted JavaScript yield; this also bounds scripts on clockless WASM builds.
     pub fn yielded(&self) -> bool {
@@ -219,6 +231,10 @@ impl Budget<'_> {
         }
         if footage.called_off() || self.control.cancel.as_ref().is_some_and(|c| c.load(Ordering::Relaxed)) {
             self.fail(AudioError::Cancelled);
+            return false;
+        }
+        if self.expressions.deadline_exceeded() {
+            self.fail(AudioError::DeadlineExceeded);
             return false;
         }
         if self.expressions.exhausted() {
@@ -425,7 +441,7 @@ impl MixEnv<'_> {
     /// The layer's own (pre-effect) audio for comp sample indices `i0 .. i0 + n`, silent
     /// outside its [in, out) span. Comp sample index `k` maps to `in + out − 1 − k` when
     /// `reversed` (the Backwards effect).
-    fn layer_raw(&self, l: &Layer, i0: i64, n: usize, reversed: bool) -> Vec<f32> {
+    fn layer_raw(&self, l: &Layer, i0: i64, n: usize, reversed: bool, pre_roll: usize) -> Vec<f32> {
         let rate = self.rate;
         // Nothing is allocated, read or evaluated once the mix has failed or the buffer is too big.
         if !self.budget.ok(self.footage) || !self.budget.alloc(n) {
@@ -441,7 +457,7 @@ impl MixEnv<'_> {
                 return out;
             }
             let (ma, mb) = (in_i + out_i - b, in_i + out_i - a);
-            let fwd = self.layer_raw(l, ma, (mb - ma) as usize, false);
+            let fwd = self.layer_raw(l, ma, (mb - ma) as usize, false, pre_roll);
             if fwd.len() != (mb - ma) as usize * 2 {
                 return out;
             }
@@ -461,7 +477,7 @@ impl MixEnv<'_> {
         // Time Remap replaces the stretch's source time: its value at each comp sample is the
         // source time to play.
         if l.props.get("timeRemap").is_some() {
-            self.remapped_raw(l, i0, a, b, &mut out);
+            self.remapped_raw(l, i0, a, b, &mut out, pre_roll);
             return out;
         }
         // Within ±1 % to ±9900 % (#3247): a stretch of 1e-300 % set in memory read about
@@ -538,8 +554,14 @@ impl MixEnv<'_> {
             }
             _ => return None,
         };
+        if !self.budget.ok(self.footage) {
+            return None;
+        }
         let mut out = vec![0.0f32; m * 2];
         for i in 0..m {
+            if i.is_multiple_of(CHECK_INTERVAL) && !self.budget.ok(self.footage) {
+                return None;
+            }
             // The source sample at fractional index `x`, blended linearly with the next one unless the
             // layer plays at its own speed (then the samples are copied as they are).
             let x = frac + i as f64 * speed;
@@ -604,9 +626,6 @@ impl MixEnv<'_> {
     /// it costs does not depend on the block that asked for it; the number of pages is bounded.
     fn remap_page(&self, l: &Layer, page: i64) -> Option<Vec<f32>> {
         let frames = REMAP_PAGE as usize + 1;
-        if !self.budget.take_page() {
-            return None;
-        }
         self.budget.grant(frames);
         if !self.budget.charge(frames, self.footage) {
             return None;
@@ -636,7 +655,7 @@ impl MixEnv<'_> {
     /// multiples of `REMAP_PAGE`, so the samples do not depend on where the block starts. Where
     /// the remap holds one source time, no sound plays; 2 ms fades at each edge of a hold take
     /// away the click of stopping and starting.
-    fn remapped_raw(&self, l: &Layer, i0: i64, a: usize, b: usize, out: &mut [f32]) {
+    fn remapped_raw(&self, l: &Layer, i0: i64, a: usize, b: usize, out: &mut [f32], pre_roll: usize) {
         let Some(prop) = l.props.get("timeRemap") else { return };
         let prepared = prop.expr.as_ref().filter(|_| prop.has_expression()).and_then(|e| self.expr.and_then(|h| h.prepare_audio(&e.text)));
         let fade = (self.rate as usize * HOLD_FADE_MS / 1000).max(1);
@@ -646,9 +665,12 @@ impl MixEnv<'_> {
         let Some(first) = i0.checked_add(a as i64).and_then(|v| v.checked_sub(fade as i64 + 1)).filter(|v| v.checked_add(count as i64).is_some()) else {
             return;
         };
+        if !self.budget.charge(count, self.footage) {
+            return;
+        }
         let mut times = Vec::with_capacity(count);
         for k in 0..count {
-            if !self.budget.charge(1, self.footage) {
+            if k.is_multiple_of(CHECK_INTERVAL) && !self.budget.ok(self.footage) {
                 return;
             }
             times.push(self.remap_source(l, prop, prepared.as_deref(), first + k as i64));
@@ -661,6 +683,9 @@ impl MixEnv<'_> {
         let (mut since, mut until) = (vec![usize::MAX; count], vec![usize::MAX; count]);
         let mut last = None;
         for (k, d) in since.iter_mut().enumerate() {
+            if k.is_multiple_of(CHECK_INTERVAL) && !self.budget.ok(self.footage) {
+                return;
+            }
             if hold(k) {
                 last = Some(k);
             }
@@ -668,6 +693,9 @@ impl MixEnv<'_> {
         }
         let mut next = None;
         for (k, d) in until.iter_mut().enumerate().rev() {
+            if k.is_multiple_of(CHECK_INTERVAL) && !self.budget.ok(self.footage) {
+                return;
+            }
             if hold(k) {
                 next = Some(k);
             }
@@ -675,8 +703,15 @@ impl MixEnv<'_> {
         }
         let mut pages: Vec<(i64, Vec<f32>)> = Vec::new();
         let mut evict = 0;
+        // A long effect history can walk more sequential pages than the output block's quota.
+        // This allowance belongs to this layer only. Large jumps still use the shared quota.
+        let mut history_pages = pre_roll.div_ceil(REMAP_PAGE as usize);
+        let mut previous_page: Option<i64> = None;
+        if !self.budget.charge(b - a, self.footage) {
+            return;
+        }
         for o in a..b {
-            if !self.budget.charge(1, self.footage) {
+            if (o - a).is_multiple_of(CHECK_INTERVAL) && !self.budget.ok(self.footage) {
                 return;
             }
             let k = o - a + fade + 1;
@@ -689,9 +724,15 @@ impl MixEnv<'_> {
             let denominator = i128::from(TICKS_PER_SECOND);
             let Ok(sample) = i64::try_from(numerator.div_euclid(denominator)) else { continue };
             let Some(page) = sample.div_euclid(REMAP_PAGE).checked_mul(REMAP_PAGE) else { continue };
+            let adjacent = previous_page.replace(page).is_some_and(|previous| page.abs_diff(previous) == REMAP_PAGE as u64);
             let slot = match pages.iter().position(|(p, _)| *p == page) {
                 Some(slot) => slot,
                 None => {
+                    if adjacent && history_pages > 0 && self.budget.control.max_work.is_none() {
+                        history_pages -= 1;
+                    } else if !self.budget.take_page() {
+                        return;
+                    }
                     let Some(buf) = self.remap_page(l, page) else { return };
                     // Four pages (about 128 KiB) keep repeated jumps cheap.
                     if pages.len() < 4 {
@@ -730,7 +771,7 @@ impl MixEnv<'_> {
             fx.push((id, g, params));
         }
         if fx.is_empty() {
-            return self.layer_raw(l, i0, n, false);
+            return self.layer_raw(l, i0, n, false, 0);
         }
         let reversed = plays_backwards(l);
         let pre_s: f64 = fx.iter().map(|(id, _, p)| audio_fx::preroll(id, p)).sum::<f64>().clamp(0.0, MAX_PREROLL_SECONDS);
@@ -745,12 +786,15 @@ impl MixEnv<'_> {
             return Vec::new();
         };
         let b0 = i0 - pre as i64;
-        let mut buf = self.layer_raw(l, b0, total, reversed);
-        if buf.len() < pre * 2 {
+        let mut buf = self.layer_raw(l, b0, total, reversed, pre);
+        if buf.len() < pre * 2 || !self.budget.ok(self.footage) {
             return Vec::new();
         }
         let start = fx_clock(l, sample_tick(b0, self.rate));
         for (id, g, p) in &fx {
+            if !self.budget.ok(self.footage) {
+                return Vec::new();
+            }
             if audio_fx::per_sample(id) && animated(g) {
                 self.process_stepped(l, id, g, &mut buf, b0);
             } else {
@@ -797,6 +841,9 @@ impl MixEnv<'_> {
         let mut k = i0.div_euclid(step).saturating_mul(step);
         let mut lo = db(k);
         while k < end {
+            if !self.budget.ok(self.footage) {
+                return Vec::new();
+            }
             let hi = db(k.saturating_add(step));
             for i in k.max(i0)..k.saturating_add(step).min(end) {
                 let f = (i - k) as f64 / step as f64;
@@ -850,6 +897,9 @@ fn mix_into(sources: &AudioSources<'_>, comp_id: ItemId, start: Tick, out: &mut 
         }
         let buf = env.layer_audio(l, s0 + a as i64, b - a);
         for (i, (f, g)) in buf.as_chunks::<2>().0.iter().zip(&gains).enumerate() {
+            if i.is_multiple_of(CHECK_INTERVAL) && !budget.ok(footage) {
+                return;
+            }
             out[(a + i) * 2] += f[0] * g[0];
             out[(a + i) * 2 + 1] += f[1] * g[1];
         }
