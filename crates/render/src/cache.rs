@@ -942,6 +942,12 @@ fn hash_comp_scene(h: &mut KeyHasher, ctx: &EvalCtx, layer: &Layer) {
     hash_debug(h, &crate::three_d::light::lights_at(ctx));
     for l in ctx.comp.layers.iter().filter(|l| l.is_camera() || l.is_light()) {
         hash_debug(h, l);
+        // Their world transforms follow their parents (the same bounded walk as `world_matrix`).
+        let (mut cur, mut guard) = (l.parent, 0);
+        while let Some(p) = cur.and_then(|id| ctx.comp.layer(id)).filter(|_| guard < 64) {
+            hash_debug(h, p);
+            (cur, guard) = (p.parent, guard + 1);
+        }
     }
 }
 

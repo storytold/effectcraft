@@ -175,7 +175,9 @@ impl EffectHost for FxHost<'_, '_, '_> {
                     effectcraft_project::LightKind::Parallel => 0,
                     effectcraft_project::LightKind::Spot => 1,
                     effectcraft_project::LightKind::Point => 2,
-                    _ => 3,
+                    effectcraft_project::LightKind::Ambient => 3,
+                    // Image-based light has no kind in the protocol yet: left out.
+                    effectcraft_project::LightKind::Environment => return None,
                 };
                 Some(effectcraft_effects::plugin::CompLightInfo {
                     name: l.name.clone(),

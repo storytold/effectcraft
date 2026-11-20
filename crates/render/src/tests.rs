@@ -377,6 +377,27 @@ fn particle_world_follows_the_comp_camera() {
     assert!(b < a - 20.0, "panning the camera right moves the particles left: {a} -> {b}");
 }
 
+/// A scene reader's key covers the camera's parents: a plug-in may read the camera at other
+/// times, so editing the parent's keyframe away from the rendered time changes the key too.
+#[test]
+fn the_scene_key_covers_the_cameras_parents() {
+    let (mut p, cid) = particle_world_scene(0.0);
+    let comp = p.comp(cid).unwrap().clone();
+    let mut null = build::layer(&mut p, &comp, "Null", LayerSource::Null, (200, 100), None);
+    let at = |x: f64| Value::Vec3([x, 50.0, 0.0]);
+    null.props.prop_mut("transform/position").unwrap().keys = vec![Keyframe::new(Tick::ZERO, at(100.0)), Keyframe::new(Tick::from_seconds_f64(1.0), at(100.0))];
+    let c = p.comp_mut(cid).unwrap();
+    c.layers[0].parent = Some(null.id);
+    c.layers.push(null);
+    let key = |p: &Project| {
+        let c = p.comp(cid).unwrap();
+        crate::cache::layer_key(&crate::EvalCtx::new(p, cid, c, Tick::ZERO), &c.layers[1], 1.0, false, false).unwrap()
+    };
+    let mut q = p.clone();
+    q.comp_mut(cid).unwrap().layers[2].props.prop_mut("transform/position").unwrap().keys[1].value = at(160.0);
+    assert_ne!(key(&p), key(&q), "the parent's later keyframe changes the key at time 0");
+}
+
 /// A black solid with Particle Emitter 3D whose Birth Rate is 3 until layer time `cut`, then 0 a
 /// frame later (`None`: 3 throughout); the layer starts at comp time `start`, stretched `stretch` %.
 fn burst_scene(cut: Option<f64>, start: f64, stretch: f64) -> (Project, ItemId) {
