@@ -127,6 +127,33 @@ const READS: &[(&str, &[&str])] = &[
 /// Commands that read some parameters (listed in [`READS`]) and write others.
 const MIXED_WRITES: &[(&str, &[&str])] = &[("templates.create", &["projectPath", "footageDir"])];
 
+/// Parameters that are typed text, not files: copy, names, comments and expressions are never
+/// opened as files and may well start with `/` ("/ 500 g", "// a note"), so the scan for other
+/// absolute paths in a command's parameters skips them.
+const TEXT: &[(&str, &[&str])] = &[
+    ("layer.newText", &["text", "name"]),
+    ("layer.setText", &["text"]),
+    ("text.insert", &["text"]),
+    ("layer.rename", &["name"]),
+    ("layer.setComment", &["comment"]),
+    ("layer.addMarker", &["comment"]),
+    ("comp.addMarker", &["comment"]),
+    ("markers.set", &["comment", "chapter"]),
+    ("project.setComment", &["comment"]),
+    ("project.setProjectComment", &["comment"]),
+    ("essential.addComment", &["text"]),
+    ("prop.setExpression", &["expression"]),
+];
+
+/// The parameters of `id` that hold typed text ([`TEXT`]), and the value given to a text layer's
+/// Source Text.
+fn text_keys(id: &str, params: &Value) -> &'static [&'static str] {
+    if matches!(id, "prop.set" | "prop.addKey") && params.get("path").and_then(Value::as_str) == Some("text/sourceText") {
+        return &["value"];
+    }
+    keys_of(TEXT, id).unwrap_or(&[])
+}
+
 /// Commands that write files named by these parameters.
 const WRITES: &[(&str, &[&str])] = &[
     ("camera.exportBlender", &["path"]),
@@ -362,7 +389,7 @@ impl Confinement {
             }
         }
         // Any other absolute path the command is given.
-        let named: Vec<&str> = named.iter().chain(mixed).copied().collect();
+        let named: Vec<&str> = named.iter().chain(mixed).chain(text_keys(id, params)).copied().collect();
         let mut other = vec![];
         absolute_strings(params, &named, &mut other);
         for s in other {
@@ -767,7 +794,7 @@ mod tests {
         }
         assert!(missing.is_empty(), "add these to READS / WRITES / REFUSED or NOT_FILES:\n{}", missing.join("\n"));
         // And every listed command exists.
-        for id in READS.iter().chain(WRITES).chain(MIXED_WRITES).map(|(c, _)| *c).chain(NOT_FILES.iter().copied()) {
+        for id in READS.iter().chain(WRITES).chain(MIXED_WRITES).chain(TEXT).map(|(c, _)| *c).chain(NOT_FILES.iter().copied()) {
             assert!(effectcraft_engine::command_specs().iter().any(|s| s.id == id), "{id} is not a command");
         }
     }
@@ -999,6 +1026,34 @@ mod tests {
         std::fs::remove_file(write.join("shot_002")).unwrap();
         std::os::unix::fs::symlink(&outside, write.join("shot_notes")).unwrap();
         assert!(c.check_command("renderQueue.add", &add).is_ok());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Typed text is not a file even when it starts like one (`/ 500 g`, `// a note`), while an
+    /// absolute path in any other parameter of the same command is still checked.
+    #[test]
+    fn text_that_starts_with_a_slash_is_not_a_path() {
+        let base = std::env::temp_dir().join(format!("ec-confine-text-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let c = Confinement::new(std::slice::from_ref(&base), std::slice::from_ref(&base)).unwrap();
+        let text = [
+            ("layer.setText", serde_json::json!({"text": "/ 500 g"})),
+            ("layer.newText", serde_json::json!({"text": "/ 500 g", "name": "/ price"})),
+            ("text.insert", serde_json::json!({"text": "/"})),
+            ("prop.setExpression", serde_json::json!({"path": "transform/opacity", "expression": "// fade in\nlinear(time, 0, 1, 0, 100)"})),
+            ("markers.set", serde_json::json!({"comment": "/cut here"})),
+            ("prop.set", serde_json::json!({"path": "text/sourceText", "value": "/ 500 g"})),
+            ("prop.addKey", serde_json::json!({"path": "text/sourceText", "time": 1, "value": "/ 500 g"})),
+        ];
+        for (id, params) in &text {
+            assert!(c.check_command(id, params).is_ok(), "{id} {params}");
+        }
+        let steps = serde_json::json!({"steps": text.iter().map(|(id, params)| serde_json::json!({"command": id, "params": params})).collect::<Vec<_>>()});
+        assert!(c.check_command("engine.batch", &steps).is_ok(), "the same steps in a batch");
+        assert!(c.check_command("layer.setText", &serde_json::json!({"text": "/ 500 g", "font": "/etc/hosts"})).is_err(), "another parameter");
+        assert!(c.check_command("prop.set", &serde_json::json!({"path": "transform/opacity", "value": "/etc/hosts"})).is_err(), "not source text");
+        assert!(c.check_command("layer.setComment", &serde_json::json!({"comment": "/ note", "layers": ["/etc/hosts"]})).is_err(), "nested elsewhere");
         let _ = std::fs::remove_dir_all(&base);
     }
 }
