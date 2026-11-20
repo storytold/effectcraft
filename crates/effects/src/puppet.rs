@@ -406,6 +406,14 @@ fn bary(a: [f64; 2], b: [f64; 2], c: [f64; 2], p: [f64; 2]) -> Option<[f64; 3]> 
     Some([l0, l1, 1.0 - l0 - l1])
 }
 
+/// Whether two samples at one subsample come from the same surface. Adjacent triangles of a mesh
+/// map a shared edge to the same rest position, so their samples agree; distinct overlapping
+/// parts normally do not.
+#[inline]
+fn same_surface(a: [f32; 4], b: [f32; 4]) -> bool {
+    a.iter().zip(b).all(|(x, y)| (x - y).abs() <= 1e-6)
+}
+
 fn render(ctx: &EffectCtx, buf: Buf) -> Buf {
     let meshes = parse(ctx.params);
     if meshes.is_empty() {
@@ -470,6 +478,18 @@ fn rasterize(buf: &Buf, tris: &[([[f64; 2]; 3], [[f64; 2]; 3], f64)]) -> Buf {
             )
         })
         .collect();
+    // Per-row candidates in ascending depth, so the fallback walks only triangles whose y-range
+    // can cover the row, front to back.
+    let mut row_tris: Vec<Vec<usize>> = vec![Vec::new(); h as usize];
+    for (k, (_, d, _)) in tris.iter().enumerate() {
+        let ya = d[0][1].min(d[1][1]).min(d[2][1]);
+        let yb = d[0][1].max(d[1][1]).max(d[2][1]);
+        let first = (ya.floor() as i64 - oy).max(0) as u32;
+        let last = ((yb.ceil() as i64 - oy + 1).max(0) as u32).min(h);
+        for row in first..last {
+            row_tris[row as usize].push(k);
+        }
+    }
     const SUB: [[f64; 2]; 4] = [[0.25, 0.25], [0.75, 0.25], [0.25, 0.75], [0.75, 0.75]];
     /// A sample at or above this alpha is opaque and keeps the pixel to itself.
     const OPAQUE: f32 = 1.0 - 1e-6;
@@ -522,14 +542,15 @@ fn rasterize(buf: &Buf, tris: &[([[f64; 2]; 3], [[f64; 2]; 3], f64)]) -> Buf {
                 continue;
             }
             // The front-most triangle samples transparency here (an Expansion margin past the
-            // layer's content), so the parts behind it would be hidden. Each subsample takes the
-            // front-most covering triangle that has content: a shared mesh edge is counted once,
-            // and the opaque part behind a transparent one shows through (#3705).
+            // layer's content), so the parts behind it would be hidden. Each subsample composites
+            // the row's candidates front to back: transparency lets the rear show, a shared mesh
+            // edge samples the same surface once, and distinct overlapping parts blend (#3705).
             let x = (ox + i as i64) as f64;
             let mut sum = [0.0f32; 4];
             for o in SUB {
                 let q = [x + o[0], y + o[1]];
-                for k in (0..tris.len()).rev() {
+                let mut acc: Option<[f32; 4]> = None;
+                for &k in row_tris[row].iter().rev() {
                     let (bx0, bx1, by0, by1) = boxes[k];
                     if q[0] < bx0 || q[0] > bx1 || q[1] < by0 || q[1] > by1 {
                         continue;
@@ -541,10 +562,22 @@ fn rasterize(buf: &Buf, tris: &[([[f64; 2]; 3], [[f64; 2]; 3], f64)]) -> Buf {
                     }
                     let src = [l[0] * r[0][0] + l[1] * r[1][0] + l[2] * r[2][0], l[0] * r[0][1] + l[1] * r[1][1] + l[2] * r[2][1]];
                     let t = buf.img.sample_bilinear(src[0], src[1]);
-                    if t[3] > TRANSPARENT {
-                        sum = [sum[0] + t[0], sum[1] + t[1], sum[2] + t[2], sum[3] + t[3]];
-                        break;
+                    if t[3] <= TRANSPARENT {
+                        continue;
                     }
+                    acc = Some(match acc {
+                        None => t,
+                        // Adjacent triangles of one mesh map a shared edge to the same rest
+                        // position, so equal samples are one surface: keep the front one.
+                        Some(a) if same_surface(a, t) => a,
+                        Some(a) => {
+                            let over = 1.0 - a[3];
+                            [a[0] + t[0] * over, a[1] + t[1] * over, a[2] + t[2] * over, a[3] + t[3] * over]
+                        }
+                    });
+                }
+                if let Some(a) = acc {
+                    sum = [sum[0] + a[0], sum[1] + a[1], sum[2] + a[2], sum[3] + a[3]];
                 }
             }
             *px = [sum[0] * 0.25, sum[1] * 0.25, sum[2] * 0.25, sum[3] * 0.25];

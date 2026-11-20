@@ -394,5 +394,30 @@ fn a_partial_opaque_front_keeps_the_pixel_opaque() {
     let rear = ([[2.0, 2.0], [8.0, 2.0], [2.0, 8.0]], [[2.0, 2.0], [8.0, 2.0], [2.0, 8.0]], 0.0);
     let front = ([[4.1, 4.1], [4.4, 4.1], [4.1, 4.4]], [[4.1, 4.1], [4.4, 4.1], [4.1, 4.4]], 1.0);
     let out = rasterize(&buf, &[rear, front]);
-    assert_eq!(out.img.get(2, 2), [1.0, 1.0, 1.0, 1.0]);
+    assert_eq!(out.img.get(3, 3), [1.0, 1.0, 1.0, 1.0]);
+}
+
+/// A partly transparent front blends over the opaque part behind it instead of replacing it
+/// (#3705): premultiplied red at 50% over opaque blue gives [0.5, 0, 0.5, 1].
+#[test]
+fn a_partly_transparent_front_blends_over_the_rear() {
+    let mut img = Image::new(8, 8);
+    for y in 0..8u32 {
+        for x in 0..8u32 {
+            if (4..8).contains(&x) && (4..8).contains(&y) {
+                img.set(x, y, [0.0, 0.0, 1.0, 1.0]);
+            } else if (0..4).contains(&x) && (0..4).contains(&y) {
+                img.set(x, y, [0.5, 0.0, 0.0, 0.5]);
+            }
+        }
+    }
+    let buf = Buf { img, offset: [0.0, 0.0], scale: 1.0 };
+    // Both triangles cover layer pixel (5, 5); the rear maps it to the opaque blue block, the
+    // front to the translucent red one.
+    let shape = [[2.0, 2.0], [8.0, 2.0], [5.0, 8.0]];
+    let rear = (shape, shape, 0.0);
+    let front = ([[-2.0, -2.0], [4.0, -2.0], [1.0, 4.0]], shape, 1.0);
+    let out = rasterize(&buf, &[rear, front]);
+    let got = out.img.get(4, 4);
+    assert!((0..4).all(|c| (got[c] - [0.5, 0.0, 0.5, 1.0][c]).abs() < 1e-5), "{got:?}");
 }
