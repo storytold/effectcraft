@@ -222,6 +222,74 @@ fn exr_compression_and_bit_depth_options() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn exr_channel_selection_uses_the_target_comp_and_rejects_invalid_updates() {
+    let mut s = Session::default();
+    let comp = s.execute("comp.new", json!({"name": "EXR"})).unwrap()["comp"].clone();
+    let layer = s.execute("layer.newSolid", json!({"name": "Plate"})).unwrap()["layer"].clone();
+    let camera = s.execute("layer.newCamera", json!({"name": "Camera"})).unwrap()["layer"].clone();
+    s.execute("comp.new", json!({"name": "Other"})).unwrap();
+    let other = s.execute("layer.newSolid", json!({"name": "Other plate"})).unwrap()["layer"].clone();
+    let selection = json!({"composite": false, "layers": [layer], "depth": true, "multipart": true});
+    let queued = s.execute_checked("renderQueue.add", json!({"comp": comp, "output": "plate.exr", "exrBitDepth": "half", "exrSelection": selection})).unwrap();
+    let id = queued["item"].clone();
+    assert_eq!(queued["output"]["exr_selection"], selection);
+    let before = s.project.render_queue[0].output.clone();
+    for bad in [
+        json!(false),
+        json!([true, [], false]),
+        json!({"layers": [camera]}),
+        json!({"layers": [other]}),
+        json!({"layers": [layer, layer]}),
+        json!({"layers": [layer.to_string()]}),
+        json!({"composite": false}),
+        json!({"composit": true}),
+        json!({"multipart": "true"}),
+        json!({"allLayers": "true"}),
+        json!({"allLayers": true, "layers": [layer]}),
+    ] {
+        assert!(s.execute_checked("renderQueue.setOutputModule", json!({"item": id, "exrSelection": bad})).is_err(), "{bad}");
+    }
+    let error = s.execute_checked("renderQueue.setOutputModule", json!({"item": id, "exrCompression": "pxr24"})).unwrap_err().to_string();
+    assert!(error.contains("lossless"), "{error}");
+    assert_eq!(s.project.render_queue[0].output, before);
+
+    let extra = s.execute_checked("render.addOutputModule", json!({"item": id, "exrSelection": {"layers": [layer]}})).unwrap();
+    assert_eq!(extra["module"], 2);
+    let selection = s.project.render_queue[0].extra_outputs[0].exr_selection.as_ref().unwrap();
+    assert!(selection.composite);
+    assert!(!selection.depth);
+    assert!(!selection.multipart);
+    assert_eq!(json!(selection), json!({"composite": true, "layers": [layer], "depth": false}), "the single-part default is omitted");
+    let pre = s.execute_checked("render.preRender", json!({"comp": comp, "format": "exr", "exrSelection": {"depth": true, "multipart": true}})).unwrap();
+    assert_eq!(pre["output"]["exr_selection"]["depth"], true);
+    assert_eq!(pre["output"]["exr_selection"]["multipart"], true);
+
+    s.execute_checked("renderQueue.saveTemplate", json!({"kind": "outputModule", "name": "EXR passes", "item": id})).unwrap();
+    s.execute_checked("renderQueue.setTemplateDefault", json!({"kind": "outputModule", "slot": "movie", "name": "EXR passes"})).unwrap();
+    let on_other_comp = s.execute_checked("renderQueue.add", json!({})).unwrap();
+    assert_ne!(on_other_comp["comp"], comp);
+    assert_eq!(on_other_comp["output"]["exr_selection"], json!({"composite": false, "layers": [], "depth": true, "multipart": true}));
+    for format in ["png", "exr"] {
+        s.execute_checked("renderQueue.setOutputModule", json!({"item": id, "format": format})).unwrap();
+        assert_eq!(s.project.render_queue[0].output.exr_selection, before.exr_selection);
+    }
+    s.execute_checked("renderQueue.setOutputModule", json!({"item": id, "exrSelection": {"composite": false, "layers": [layer], "multipart": true}})).unwrap();
+    s.execute_checked("renderQueue.saveTemplate", json!({"kind": "outputModule", "name": "Multipart layers", "item": id})).unwrap();
+    let template = s.project.render_templates.output_module("Multipart layers").unwrap().exr_selection.unwrap();
+    assert!(template.composite && template.multipart && template.layers.is_empty());
+
+    let all = json!({"composite": false, "layers": [], "depth": false, "multipart": true, "allLayers": true});
+    s.execute_checked("renderQueue.setOutputModule", json!({"item": id, "exrSelection": all})).unwrap();
+    s.execute_checked("renderQueue.saveTemplate", json!({"kind": "outputModule", "name": "All EXR layers", "item": id})).unwrap();
+    s.execute_checked("renderQueue.setTemplateDefault", json!({"kind": "outputModule", "slot": "movie", "name": "All EXR layers"})).unwrap();
+    let on_other_comp = s.execute_checked("renderQueue.add", json!({})).unwrap();
+    assert_ne!(on_other_comp["comp"], comp);
+    assert_eq!(on_other_comp["output"]["exr_selection"], all);
+    s.execute_checked("renderQueue.setOutputModule", json!({"item": id, "exrSelection": null})).unwrap();
+    assert!(s.project.render_queue[0].output.exr_selection.is_none());
+}
+
 /// Settings ▸ Export ▸ Append Bit Depth to File Name names a half-float OpenEXR module's frames
 /// `_16bpc` and a 32-bit one's `_32bpc` (#2911).
 #[test]

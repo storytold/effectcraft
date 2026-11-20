@@ -380,6 +380,106 @@ fn exr_sequence_writes_scan_lines() {
     assert_eq!(meta.headers[0].compression, exr::compression::Compression::ZIP16);
 }
 
+#[test]
+fn exr_sequence_reimports_selected_layer_and_float_depth() {
+    check_selected_exr_sequence(false);
+}
+
+#[test]
+fn multipart_exr_sequence_reimports_beauty_layer_and_float_depth() {
+    check_selected_exr_sequence(true);
+}
+
+fn check_selected_exr_sequence(multipart: bool) {
+    use effectcraft_export::render_queue::{ExrBitDepth, ExrSelection};
+    use effectcraft_project::Value;
+    use effectcraft_raster::channels3d::{AuxLookup, AuxNeed, BACKGROUND_DEPTH};
+    use exr::prelude::SampleType;
+
+    let (mut project, cid) = project(None);
+    let comp = project.comp_mut(cid).unwrap();
+    comp.duration = comp.frame_rate.tick_of(3);
+    let first_visible = comp.frame_rate.tick_of(1);
+    let red = comp.layers.first_mut().unwrap();
+    red.in_point = first_visible;
+    red.switches.three_d = true;
+    red.props.prop_mut("transform/position").unwrap().value = Value::Vec3([W as f64 / 2.0, H as f64 / 2.0, 120.0]);
+    let om = OutputModule {
+        channels: Channels::Rgba,
+        exr_bit_depth: ExrBitDepth::Half,
+        exr_selection: Some(ExrSelection {
+            all_layers: multipart,
+            layers: if multipart { Vec::new() } else { vec![red.id] },
+            depth: true,
+            multipart,
+            ..ExrSelection::default()
+        }),
+        ..OutputModule::for_format(OutputFormat::ExrSequence)
+    };
+    if multipart {
+        let comp = project.comp(cid).unwrap().clone();
+        let source = comp.layers.first().unwrap().source.clone();
+        let mut added = build::layer(&mut project, &comp, "Added later", source, (32, H), None);
+        added.in_point = comp.duration;
+        project.comp_mut(cid).unwrap().layers.push(added);
+    }
+    let dir = out_dir(if multipart { "seq-exr-multipart" } else { "seq-exr-selected-channels" });
+    run_frames(&project, cid, &NoFootage, &om, &dir.join("f_[#####].exr"), 3);
+
+    let media = MediaPool::new();
+    let depth = if multipart { "Depth.Z" } else { "Z" };
+    for i in 0..3 {
+        let path = dir.join(format!("f_{i:05}.exr"));
+        let file = std::io::BufReader::new(std::fs::File::open(&path).unwrap());
+        let meta = exr::meta::MetaData::read_from_buffered(file, false).unwrap();
+        assert_eq!(meta.headers.len(), if multipart { 4 } else { 1 });
+        assert!(meta.headers.iter().all(|h| h.blocks == exr::meta::BlockDescription::ScanLines));
+        if multipart {
+            let names: Vec<_> = meta.headers.iter().map(|h| h.own_attributes.layer_name.as_ref().unwrap().to_string()).collect();
+            assert_eq!(names, ["Beauty", "Red", "Added later", "Depth"]);
+        }
+        let channels: Vec<_> = meta
+            .headers
+            .iter()
+            .flat_map(|h| {
+                let prefix = h.own_attributes.layer_name.as_ref().filter(|n| n.to_string() != "Beauty");
+                h.channels.list.iter().map(move |c| {
+                    let name = prefix.map_or_else(|| c.name.to_string(), |p| format!("{p}.{}", c.name));
+                    (name, c.sample_type)
+                })
+            })
+            .collect();
+        assert_eq!(channels.len(), if multipart { 13 } else { 9 });
+        for name in ["A", "B", "G", "R", "Red.A", "Red.B", "Red.G", "Red.R"] {
+            assert!(channels.contains(&(name.to_string(), SampleType::F16)), "{channels:?}");
+        }
+        assert!(channels.contains(&(depth.into(), SampleType::F32)));
+
+        let footage = effectcraft_media::probe(&path).unwrap();
+        let img = media.frame_at(&footage, Tick::ZERO).unwrap();
+        let mut lookups = vec![AuxLookup::Name(depth.into()), AuxLookup::Name("Red.A".into())];
+        if multipart {
+            lookups.push(AuxLookup::Name("Added later.A".into()));
+        }
+        let need = AuxNeed::Lookups(lookups);
+        let aux = media.aux_for(ItemId(0), &footage, Tick::ZERO, &need).unwrap();
+        let center = (H as usize / 2) * W as usize + W as usize / 2;
+        let z = aux.get(depth).unwrap();
+        assert_eq!(z[0], BACKGROUND_DEPTH);
+        let expected_z = if i == 0 { BACKGROUND_DEPTH } else { (W as f64 * 50.0 / 36.0 + 120.0) as f32 };
+        assert!((z[center] - expected_z).abs() < 0.01, "frame {i}: {} vs {expected_z}", z[center]);
+        let expected_alpha = if i == 0 { 0.0 } else { 1.0 };
+        assert_eq!(aux.get("Red.A").unwrap()[center], expected_alpha);
+        if multipart {
+            assert_eq!(aux.get("Added later.A").unwrap()[center], 0.0);
+        }
+        let [r, g, b, a] = px(&img, W / 2, H / 2);
+        assert_eq!(a, expected_alpha);
+        // The footage importer applies the sRGB curve to the linear EXR picture.
+        assert!(near([r, g, b], [expected_alpha, 0.0, 0.0], f32::EPSILON));
+    }
+}
+
 /// The RGBA samples of an EXR file, as stored (f16 widened to f32), and their sample types.
 fn exr_samples(path: &Path) -> (Vec<f32>, Vec<exr::prelude::SampleType>) {
     use exr::prelude::{ReadChannels, ReadLayers};

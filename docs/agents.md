@@ -362,6 +362,16 @@ build real projects through these interfaces; they are worked examples of everyt
   lists them.
   PXR24 on float, B44 / B44A on half and DWAA / DWAB are lossy (in the tests every linear sample
   stays within 0.03 + 6 % of its value); B44 / B44A store 32-bit float uncompressed. Half rounds each sample to the nearest half float and holds it to ±65 504.
+  Use `exrSelection: {"composite": true, "layers": [42], "depth": true}` in `renderQueue.add` or
+  `renderQueue.setOutputModule` to include the composite, selected layer IDs and camera-space
+  `Z`. Set `allLayers: true` with an empty or omitted `layers` list to export every eligible
+  layer, including layers added after queuing. The Output Module's **EXR Channels…** menu
+  offers **No Layers**, **All Layers**, and **Selected Layers**. Each layer has its own named
+  RGBA channel group. `Z` stays 32-bit float at either colour
+  depth and requires compression that is lossless for float channels. The render queue defaults to
+  the composite. Set `multipart: true` inside `exrSelection` to write separate scan-line parts
+  for `Beauty`, each selected layer, and `Depth` with `Z`. `comp.saveFrameAsExr` accepts the
+  same selection and defaults to the composite and visible layers.
   **A render never writes one file twice either:** when two outputs of the job (two items, a
   `renderQueue.duplicate` copy, output modules, segments) name the same file, the whole render is
   refused before anything is written, naming both items. Sequences clash only on frames both

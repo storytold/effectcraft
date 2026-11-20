@@ -1,5 +1,4 @@
-//! OpenEXR sequence frames: one single-part scan-line file per frame, RGBA, with the Output
-//! Module's compression and sample type (#2911).
+//! Single-part and multipart OpenEXR scan-line frames.
 //!
 //! Scan lines, not tiles: `image`'s encoder wrote 64×64 RLE tiles, which FilmCraft and other
 //! scan-line readers refuse (#2805). Each compression keeps its own block height (1 line for
@@ -10,10 +9,246 @@
 //! tests below. Half float holds at most ±65 504: larger samples are written as that limit, not
 //! as infinity.
 
+use std::collections::{HashMap, HashSet};
 use std::io::{Seek, Write};
 
-use craft_exr::decode::{Compression, Result, SampleDepth};
+use craft_exr::decode::{Compression, Error, Limits, Result, SampleDepth, SampleType, Window, f16};
+use craft_exr::write::{Channel, Metadata, Part, RowSamples, write_scanlines_with_metadata};
+use effectcraft_color::BlendMode;
 use effectcraft_project::render_queue::{ExrBitDepth, ExrCompression};
+use effectcraft_project::{ItemId, Layer, LayerId, Project};
+use effectcraft_time::Tick;
+
+/// Full channel names allow 255 bytes, including the two-byte component suffix.
+const MAX_GROUP_NAME: usize = 253;
+const BEAUTY_PART: &str = "Beauty";
+const DEPTH_PART: &str = "Depth";
+
+/// Interleaved rendered pixels shared by the single-part and multipart scan-line path.
+pub struct Channels {
+    size: (u32, u32),
+    multipart: bool,
+    groups: Vec<Group>,
+    names: Vec<String>,
+}
+
+struct Group {
+    part: Option<String>,
+    pixels: Pixels,
+}
+
+enum Pixels {
+    Rgba(Vec<[f32; 4]>, ExrBitDepth),
+    Depth(Vec<f32>),
+}
+
+impl Pixels {
+    fn channels(&self) -> (&'static [&'static str], SampleType) {
+        match self {
+            Self::Rgba(_, ExrBitDepth::Half) => (&["R", "G", "B", "A"], SampleType::F16),
+            Self::Rgba(_, ExrBitDepth::Float) => (&["R", "G", "B", "A"], SampleType::F32),
+            Self::Depth(_) => (&["Z"], SampleType::F32),
+        }
+    }
+
+    fn fill_row(&self, start: usize, component: usize, samples: RowSamples<'_>) -> Result<usize> {
+        let width = samples.len();
+        let range = start..start.saturating_add(width);
+        match (self, samples) {
+            (Self::Rgba(pixels, _), RowSamples::F32(out)) => {
+                let row = pixels.get(range).ok_or_else(invalid_row)?;
+                for (dst, px) in out.iter_mut().zip(row) {
+                    *dst = *px.get(component).ok_or_else(invalid_row)?;
+                }
+            }
+            (Self::Rgba(pixels, _), RowSamples::F16(out)) => {
+                let row = pixels.get(range).ok_or_else(invalid_row)?;
+                for (dst, px) in out.iter_mut().zip(row) {
+                    *dst = f16::from_f32(px.get(component).ok_or_else(invalid_row)?.clamp(-65_504.0, 65_504.0));
+                }
+            }
+            (Self::Depth(pixels), RowSamples::F32(out)) => out.copy_from_slice(pixels.get(range).ok_or_else(invalid_row)?),
+            _ => return Err(invalid_row()),
+        }
+        Ok(width)
+    }
+}
+
+fn invalid_row() -> Error {
+    Error::Encode("invalid OpenEXR channel row".into())
+}
+
+impl Channels {
+    pub fn new(size: (u32, u32)) -> Self {
+        Self { size, multipart: false, groups: Vec::new(), names: Vec::new() }
+    }
+
+    pub fn new_multipart(size: (u32, u32)) -> Self {
+        Self { multipart: true, ..Self::new(size) }
+    }
+
+    /// Validate total output channels before rendering or allocating any planes.
+    pub fn check_channel_count(&self, count: u64) -> Result<()> {
+        let (w, h) = self.size;
+        let pixels = u64::from(w) * u64::from(h);
+        if w == 0 || h == 0 || count == 0 {
+            return Err(Error::Encode("empty picture".into()));
+        }
+        let limits = Limits::default();
+        let bytes = pixels.saturating_mul(count).saturating_mul(4);
+        if w > limits.max_width || h > limits.max_height || pixels > limits.max_pixels || bytes > limits.max_bytes || usize::try_from(bytes).is_err() {
+            return Err(Error::LimitExceeded("the selected channels exceed the OpenEXR frame size limit".into()));
+        }
+        Ok(())
+    }
+
+    fn check_samples(&self, len: usize, count: u64) -> Result<()> {
+        let (w, h) = self.size;
+        if usize::try_from(u64::from(w) * u64::from(h)).ok() != Some(len) {
+            return Err(Error::Encode("a channel has the wrong number of samples".into()));
+        }
+        self.check_channel_count((self.names.len() as u64).saturating_add(count))
+    }
+
+    /// Add linear, premultiplied RGBA. An empty prefix denotes the composite.
+    pub fn push_rgba(&mut self, prefix: &str, pixels: Vec<[f32; 4]>, depth: ExrBitDepth) -> Result<()> {
+        self.check_samples(pixels.len(), 4)?;
+        if !prefix.is_ascii() || prefix.len() > MAX_GROUP_NAME || prefix.bytes().any(|c| c.is_ascii_control()) {
+            return Err(Error::Encode("invalid OpenEXR channel group name".into()));
+        }
+        if self.multipart && matches!(prefix, BEAUTY_PART | DEPTH_PART) {
+            return Err(Error::Encode("a layer uses a reserved OpenEXR part name".into()));
+        }
+        let part = self.multipart.then(|| if prefix.is_empty() { BEAUTY_PART } else { prefix }.to_owned());
+        self.push_group(prefix, part, Pixels::Rgba(pixels, depth));
+        Ok(())
+    }
+
+    /// Add camera-space Z as FLOAT at every colour sample depth.
+    pub fn push_depth(&mut self, samples: Vec<f32>) -> Result<()> {
+        self.check_samples(samples.len(), 1)?;
+        self.push_group("", self.multipart.then(|| DEPTH_PART.into()), Pixels::Depth(samples));
+        Ok(())
+    }
+
+    fn push_group(&mut self, prefix: &str, part: Option<String>, pixels: Pixels) {
+        let qualifier = part.as_deref().unwrap_or(prefix);
+        self.names.extend(pixels.channels().0.iter().map(
+            |component| {
+                if qualifier.is_empty() { (*component).into() } else { format!("{qualifier}.{component}") }
+            },
+        ));
+        self.groups.push(Group { part, pixels });
+    }
+
+    /// Names in group insertion order. The file stores its channel list in EXR sort order.
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.names.iter().map(String::as_str)
+    }
+
+    pub fn write<W: Write + Seek>(&self, file: &mut W, c: ExrCompression, chroma: Option<[[f32; 2]; 4]>) -> Result<()> {
+        let window = Window { x: 0, y: 0, width: self.size.0, height: self.size.1 };
+        let c = compression(c);
+        let metadata = Metadata { chromaticities: chroma, ..Metadata::default() };
+        let row_start = |row: usize| row.checked_mul(self.size.0 as usize).ok_or_else(invalid_row);
+        if self.multipart {
+            let channels: Vec<Vec<_>> = self
+                .groups
+                .iter()
+                .map(|g| {
+                    let (components, sample) = g.pixels.channels();
+                    components.iter().map(|&name| Channel { name, sample }).collect()
+                })
+                .collect();
+            let parts: Vec<_> = self
+                .groups
+                .iter()
+                .zip(&channels)
+                .map(|(g, channels)| Part { name: g.part.as_deref(), data_window: window, channels, compression: c })
+                .collect();
+            write_scanlines_with_metadata(file, window, &parts, &metadata, |part, row, channel, samples| {
+                self.groups.get(part).ok_or_else(invalid_row)?.pixels.fill_row(row_start(row)?, channel, samples)
+            })
+        } else {
+            let slots: Vec<_> = self
+                .groups
+                .iter()
+                .flat_map(|g| {
+                    let (components, sample) = g.pixels.channels();
+                    (0..components.len()).map(move |component| (&g.pixels, component, sample))
+                })
+                .collect();
+            let channels: Vec<_> = self.names().zip(&slots).map(|(name, &(_, _, sample))| Channel { name, sample }).collect();
+            let part = Part { name: None, data_window: window, channels: &channels, compression: c };
+            write_scanlines_with_metadata(file, window, &[part], &metadata, |_, row, channel, samples| {
+                let &(pixels, component, _) = slots.get(channel).ok_or_else(invalid_row)?;
+                pixels.fill_row(row_start(row)?, component, samples)
+            })
+        }
+    }
+}
+
+/// Allocate unique group names in layer stack order. Dots delimit channels and OpenEXR text
+/// requires storeable characters, so replace dots and non-printable/non-ASCII characters.
+pub fn layer_names<'a>(layers: impl IntoIterator<Item = &'a Layer>, multipart: bool) -> HashMap<LayerId, String> {
+    let (mut used, mut next) = (HashSet::new(), HashMap::new());
+    if multipart {
+        used.extend([BEAUTY_PART.to_owned(), DEPTH_PART.to_owned()]);
+    }
+    layers.into_iter().map(|l| (l.id, exr_name(&l.name, &mut used, &mut next))).collect()
+}
+
+fn exr_name(name: &str, used: &mut HashSet<String>, next: &mut HashMap<String, usize>) -> String {
+    let base: String = name.chars().take(MAX_GROUP_NAME).map(|c| if c == '.' || !(c == ' ' || c.is_ascii_graphic()) { '_' } else { c }).collect();
+    let base = if base.trim().is_empty() { "Layer".to_string() } else { base };
+    if used.insert(base.clone()) {
+        return base;
+    }
+    // Remember where each base's search resumes so repeated names don't make this quadratic.
+    let k = next.entry(base.clone()).or_insert(2);
+    loop {
+        let suffix = format!(" {k}");
+        let mut n: String = base.chars().take(MAX_GROUP_NAME.saturating_sub(suffix.len())).collect();
+        n.push_str(&suffix);
+        *k = k.saturating_add(1);
+        if used.insert(n.clone()) {
+            return n;
+        }
+    }
+}
+
+/// A project snapshot for rendering one isolated layer, with its original layer metadata.
+pub struct IsolatedLayer {
+    pub project: Project,
+    pub name: String,
+    pub blend: BlendMode,
+    pub opacity: f64,
+}
+
+/// Prepare one layer to render solo at Normal and full opacity, retaining the comp's camera,
+/// lights and matte sources.
+pub fn isolate_layer(project: &Project, cid: ItemId, id: LayerId, t: Tick) -> Option<IsolatedLayer> {
+    let mut project = project.clone();
+    let comp = project.comp_mut(cid)?;
+    for l in &mut comp.layers {
+        l.switches.solo = l.id == id;
+    }
+    let layer = comp.layer_mut(id)?;
+    let name = layer.name.clone();
+    let blend = layer.blend_mode;
+    let lt = layer.layer_time(t);
+    let opacity = if let Some(prop) = layer.props.prop_mut("transform/opacity") {
+        let opacity = prop.value_at(lt).as_f64() / 100.0;
+        prop.keys.clear();
+        prop.expr = None;
+        prop.value = effectcraft_project::Value::Scalar(100.0);
+        opacity.clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
+    layer.blend_mode = BlendMode::Normal;
+    Some(IsolatedLayer { project, name, blend, opacity })
+}
 
 /// The `craft-exr` compression for an Output Module setting.
 pub fn compression(c: ExrCompression) -> Compression {
@@ -58,6 +293,19 @@ mod tests {
         Encoding, Image, Layer, LayerAttributes, LineOrder, ReadChannels, ReadLayers, SampleType, SpecificChannels, Vec2, WritableImage, f16, read,
     };
     use std::io::Cursor;
+
+    #[test]
+    fn many_layers_of_one_name_take_a_name_each_in_order() {
+        let (mut used, mut next) = (HashSet::new(), HashMap::new());
+        // `A 3` is taken by a layer of its own before the repeats reach it.
+        let names: Vec<String> = ["A", "A", "A 3", "A", "A.b"].iter().map(|n| exr_name(n, &mut used, &mut next)).collect();
+        assert_eq!(names, ["A", "A 2", "A 3", "A 4", "A_b"]);
+        // 20 000 layers of one name: each found without retrying the suffixes before it.
+        for _ in 0..20_000 {
+            exr_name("Same", &mut used, &mut next);
+        }
+        assert_eq!(next["Same"], 20_001);
+    }
 
     fn exr_compression(c: ExrCompression) -> exr::compression::Compression {
         use exr::compression::Compression as C;

@@ -5,17 +5,20 @@
 //!   layer, each rendered in isolation (solo, Normal mode, 100% opacity) and cropped to its
 //!   pixels, carrying the layer's blend mode and opacity, plus the flattened frame as the merged
 //!   image. Photoshop (and EffectCraft's PSD import) rebuild the frame from the layers.
-//! - **ProEXR** writes one multi-layer OpenEXR (half-float-free, 32-bit float, linear light,
-//!   premultiplied): the composite as `R`, `G`, `B`, `A` plus one `<layer name>.R/G/B/A` channel
-//!   set per layer (the layer-prefixed channel convention multi-layer EXR readers use).
+//! - **ProEXR** writes one multi-layer OpenEXR with 32-bit float channels. By default it
+//!   includes the composite and every visible layer as linear, premultiplied RGBA. A caller can
+//!   select channel groups, include camera-space depth (`Z`), and write each group as a named part.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use effectcraft_color::BlendMode;
-use effectcraft_project::{ItemId, LayerId, Project};
+use effectcraft_export::exr_out::{Channels, isolate_layer, layer_names};
+use effectcraft_project::render_queue::{ExrBitDepth, ExrCompression, ExrSelection};
+use effectcraft_project::{Comp, ItemId, Layer, Project};
 use effectcraft_raster::Image;
-use effectcraft_render::{Backend, RenderOpts, Renderer};
+use effectcraft_render::{Backend, RenderOpts, Renderer, frame_size};
 use effectcraft_time::Tick;
+use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::{CommandSpec, bad, comp_id, f_p, has_comp, str_p};
@@ -30,7 +33,7 @@ struct Isolated {
 }
 
 /// `skip_hdr_step`: no HDR step, for a float output (ProEXR; [`RenderOpts::skip_hdr_step`]).
-fn render_with(s: &Session, project: &Project, comp: ItemId, t: Tick, scale: f64, skip_hdr_step: bool) -> Image {
+fn renderer<'a>(s: &'a Session, project: &'a Project, scale: f64, skip_hdr_step: bool) -> Renderer<'a> {
     let opts = RenderOpts {
         scale,
         backend: Backend::Auto,
@@ -42,45 +45,26 @@ fn render_with(s: &Session, project: &Project, comp: ItemId, t: Tick, scale: f64
     let mut r = Renderer::new(project, s.footage.as_ref(), opts);
     r.expr = s.expr.as_deref();
     r.accel = s.accel.as_deref();
-    r.comp_frame(comp, t)
+    r
 }
 
-/// The comp frame and each visible layer rendered alone (top layer first). `skip_hdr_step`: as
-/// [`render_with`].
-fn isolate(s: &Session, cid: ItemId, t: Tick, scale: f64, skip_hdr_step: bool) -> Result<(Image, Vec<Isolated>)> {
-    let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
-    let full = render_with(s, &s.project, cid, t, scale, skip_hdr_step);
+fn visible_layers(comp: &Comp, t: Tick) -> impl Iterator<Item = &Layer> {
     let any_solo = comp.layers.iter().any(|l| l.switches.solo && l.has_video());
-    let ids: Vec<LayerId> = comp
-        .layers
-        .iter()
-        .filter(|l| l.has_video() && l.is_active_at(t) && !l.switches.adjustment && !l.switches.guide && !l.environment && (!any_solo || l.switches.solo))
-        .map(|l| l.id)
+    comp.layers.iter().filter(move |l| ExrSelection::can_export_layer(l) && l.is_active_at(t) && (!any_solo || l.switches.solo))
+}
+
+/// The comp frame and each visible layer rendered alone (top layer first).
+fn isolate(s: &Session, cid: ItemId, t: Tick, scale: f64) -> Result<(Image, Vec<Isolated>)> {
+    let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
+    let full = renderer(s, &s.project, scale, false).comp_frame(cid, t);
+    let layers = visible_layers(comp, t)
+        .filter_map(|l| isolate_layer(&s.project, cid, l.id, t))
+        .map(|l| {
+            let image = renderer(s, &l.project, scale, false).comp_frame(cid, t);
+            Isolated { name: l.name, blend: l.blend, opacity: l.opacity, image }
+        })
         .collect();
-    let mut out = vec![];
-    for id in ids {
-        let mut p: Project = (*s.project).clone();
-        let Some(c) = p.comp_mut(cid) else { continue };
-        let mut info = None;
-        for l in c.layers.iter_mut() {
-            l.switches.solo = l.id == id;
-            if l.id == id {
-                let lt = l.layer_time(t);
-                let opacity = l.props.prop("transform/opacity").map(|o| o.value_at(lt).as_f64() / 100.0).unwrap_or(1.0);
-                info = Some((l.name.clone(), l.blend_mode, opacity.clamp(0.0, 1.0)));
-                l.blend_mode = BlendMode::Normal;
-                if let Some(o) = l.props.prop_mut("transform/opacity") {
-                    o.keys.clear();
-                    o.expr = None;
-                    o.value = effectcraft_keyframe::Value::Scalar(100.0);
-                }
-            }
-        }
-        let Some((name, blend, opacity)) = info else { continue };
-        let image = render_with(s, &p, cid, t, scale, skip_hdr_step);
-        out.push(Isolated { name, blend, opacity, image });
-    }
-    Ok((full, out))
+    Ok((full, layers))
 }
 
 fn straight(p: [f32; 4]) -> [f32; 4] {
@@ -116,7 +100,7 @@ fn alpha_bounds(img: &Image) -> Option<(u32, u32, u32, u32)> {
 pub fn layered_psd(s: &Session, cid: ItemId, t: Tick, scale: f64) -> Result<(Vec<u8>, usize, u32, u32)> {
     use effectcraft_psd::Rect;
     use effectcraft_psd::write::{WDoc, WLayer, write};
-    let (full, layers) = isolate(s, cid, t, scale, false)?;
+    let (full, layers) = isolate(s, cid, t, scale)?;
     let mut doc = WDoc::new(full.width, full.height);
     let n = layers.len();
     // File order is bottom first.
@@ -141,71 +125,73 @@ pub fn layered_psd(s: &Session, cid: ItemId, t: Tick, scale: f64) -> Result<(Vec
     Ok((write(&doc), n, full.width, full.height))
 }
 
-/// A unique EXR layer name (no dots: they separate the layer from the channel). Printable ASCII only:
-/// the `exr` crate panics on characters it cannot store in a channel name (#1702).
-/// `used` holds the names given so far, `next` the suffix each base's search resumes at: many
-/// layers of one name take a name each without retrying every suffix before theirs.
-fn exr_name(name: &str, used: &mut HashSet<String>, next: &mut HashMap<String, usize>) -> String {
-    let base: String = name.chars().map(|c| if c == '.' || !(c == ' ' || c.is_ascii_graphic()) { '_' } else { c }).collect();
-    let base = if base.trim().is_empty() { "Layer".to_string() } else { base };
-    if used.insert(base.clone()) {
-        return base;
-    }
-    let k = next.entry(base.clone()).or_insert(2);
-    loop {
-        let n = format!("{base} {k}");
-        *k += 1;
-        if used.insert(n.clone()) {
-            return n;
-        }
-    }
-}
+const SAVE_EXR: &str = "comp.saveFrameAsExr";
 
 /// The multi-layer EXR bytes of a frame and the channel names.
-pub fn layered_exr(s: &Session, cid: ItemId, t: Tick, scale: f64) -> Result<(Vec<u8>, Vec<String>, u32, u32)> {
-    use exr::prelude::*;
-    // The composite and every layer without the HDR step, decoded with the output space's
-    // curve (linear light in the output space's primaries).
-    let (full, layers) = isolate(s, cid, t, scale, true)?;
+fn layered_exr(s: &Session, cid: ItemId, t: Tick, scale: f64, selection: Option<&ExrSelection>) -> Result<(Vec<u8>, Vec<String>, u32, u32)> {
+    let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
+    if let Some(sel) = selection {
+        sel.validate(comp).map_err(|e| bad(SAVE_EXR, e))?;
+    }
+    let r = renderer(s, &s.project, scale, true);
     let pipe = effectcraft_render::color::Pipe::of(&s.project.settings);
     let dec = pipe.output_linear();
-    let (w, h) = (full.width as usize, full.height as usize);
-    let planes = |img: &effectcraft_raster::Image| -> [Vec<f32>; 4] {
-        let mut out: [Vec<f32>; 4] = Default::default();
-        for p in &img.data {
+    let (w, h) = frame_size(comp.width, comp.height, scale);
+    let multipart = selection.is_some_and(|sel| sel.multipart);
+    let mut channels = if multipart { Channels::new_multipart((w, h)) } else { Channels::new((w, h)) };
+    let composite = selection.is_none_or(|sel| sel.composite);
+    let depth = selection.is_some_and(|sel| sel.depth);
+    let selected = selection.map(|sel| sel.layer_ids(comp).into_iter().collect::<HashSet<_>>());
+    let layer_count = selected.as_ref().map_or_else(|| visible_layers(comp, t).count(), HashSet::len) as u64;
+    let channel_count = layer_count.saturating_add(u64::from(composite)).saturating_mul(4).saturating_add(u64::from(depth));
+    channels.check_channel_count(channel_count).map_err(|e| EngineError::Other(e.to_string()))?;
+    let mut push_color = |prefix: &str, mut img: Image| -> Result<()> {
+        if (img.width, img.height) != (w, h) {
+            return Err(bad(SAVE_EXR, "rendered color dimensions differ from the OpenEXR frame"));
+        }
+        // The render skipped the HDR step. Decode the output curve in straight color before
+        // premultiplying again, leaving values above 1 intact.
+        for p in &mut img.data {
             let sp = straight(*p);
             let a = sp[3];
-            let lin = dec.apply([sp[0].max(0.0), sp[1].max(0.0), sp[2].max(0.0)]);
-            for c in 0..3 {
-                out[c].push(lin[c] * a);
-            }
-            out[3].push(a);
+            let [r, g, b] = dec.apply([sp[0].max(0.0), sp[1].max(0.0), sp[2].max(0.0)]);
+            *p = [r * a, g * a, b * a, a];
         }
-        out
+        channels.push_rgba(prefix, img.data, ExrBitDepth::Float).map_err(|e| EngineError::Other(e.to_string()))
     };
-    let mut channels = vec![];
-    let mut names = vec![];
-    let mut push = |prefix: &str, img: &effectcraft_raster::Image| {
-        for (c, data) in ["R", "G", "B", "A"].iter().zip(planes(img)) {
-            let n = if prefix.is_empty() { c.to_string() } else { format!("{prefix}.{c}") };
-            names.push(n.clone());
-            channels.push(AnyChannel::new(n.as_str(), FlatSamples::F32(data)));
-        }
-    };
-    push("", &full);
-    let (mut used, mut next) = (HashSet::new(), HashMap::new());
-    for l in &layers {
-        let n = exr_name(&l.name, &mut used, &mut next);
-        push(&n, &l.image);
+    if composite {
+        push_color("", r.comp_frame(cid, t))?;
     }
-    let layer = Layer::new((w, h), LayerAttributes::default(), Encoding::SMALL_LOSSLESS, AnyChannels::sort(channels.into()));
+    // Explicit selection gets stable names from the eligible stack, including layers that
+    // sit outside this frame's time or selection. Preserve legacy names for the old command.
+    let names = match selection {
+        Some(_) => layer_names(comp.layers.iter().filter(|l| ExrSelection::can_export_layer(l)), multipart),
+        None => layer_names(visible_layers(comp, t), multipart),
+    };
+    for l in &comp.layers {
+        if selected.as_ref().is_none_or(|ids| ids.contains(&l.id))
+            && let Some(prefix) = names.get(&l.id)
+        {
+            let isolated = isolate_layer(&s.project, cid, l.id, t).ok_or_else(|| bad(SAVE_EXR, "missing OpenEXR layer"))?;
+            push_color(prefix, renderer(s, &isolated.project, scale, true).comp_frame(cid, t))?;
+        }
+    }
+    if depth {
+        let aux = r.comp_aux(cid, t).ok_or_else(|| bad(SAVE_EXR, "composition depth is unavailable"))?;
+        if (aux.width, aux.height) != (w, h) {
+            return Err(bad(SAVE_EXR, "rendered depth dimensions differ from the OpenEXR frame"));
+        }
+        let depth = aux
+            .channels
+            .into_iter()
+            .find_map(|(name, values)| (name == "Z").then_some(values))
+            .ok_or_else(|| bad(SAVE_EXR, "composition depth is unavailable"))?;
+        channels.push_depth(depth).map_err(|e| EngineError::Other(e.to_string()))?;
+    }
     let mut buf = std::io::Cursor::new(Vec::new());
-    let mut image = Image::from_layer(layer);
-    // The primaries and white the values are in (the output space's), for Nuke, AE and Blender.
-    let [red, green, blue, white] = pipe.output_linear_space().exr_chromaticities().map(|[x, y]| Vec2(x, y));
-    image.attributes.chromaticities = Some(exr::meta::attribute::Chromaticities { red, green, blue, white });
-    image.write().to_buffered(&mut buf).map_err(|e| EngineError::Other(format!("EXR encoding failed: {e}")))?;
-    Ok((buf.into_inner(), names, full.width, full.height))
+    let chroma = Some(pipe.output_linear_space().exr_chromaticities());
+    channels.write(&mut buf, ExrCompression::Zip, chroma).map_err(|e| EngineError::Other(e.to_string()))?;
+    Ok((buf.into_inner(), channels.names().map(str::to_owned).collect(), w, h))
 }
 
 fn frame_args(s: &Session, p: &Value, cmd: &str, ext: &str) -> Result<(String, ItemId, Tick, f64)> {
@@ -226,8 +212,15 @@ fn save_psd(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 fn save_exr(s: &mut Session, p: &Value) -> Result<Value> {
-    let (path, cid, t, scale) = frame_args(s, p, "comp.saveFrameAsExr", "exr")?;
-    let (bytes, channels, w, h) = layered_exr(s, cid, t, scale)?;
+    let (path, cid, t, scale) = frame_args(s, p, SAVE_EXR, "exr")?;
+    let selection = p
+        .get("exrSelection")
+        .map(|value| {
+            let object = value.as_object().ok_or_else(|| bad(SAVE_EXR, "exrSelection must be an object"))?;
+            ExrSelection::deserialize(object).map_err(|e| bad(SAVE_EXR, format!("invalid exrSelection: {e}")))
+        })
+        .transpose()?;
+    let (bytes, channels, w, h) = layered_exr(s, cid, t, scale, selection.as_ref())?;
     s.write_output(&path, &bytes)?;
     s.toast(format!("Saved a multi-layer EXR to {path}"));
     Ok(json!({"path": path, "channels": channels, "width": w, "height": h, "time": t.seconds()}))
@@ -249,29 +242,9 @@ pub fn specs() -> Vec<CommandSpec> {
             "ProEXR...",
             ["Composition", "Save Frame As"],
             None,
-            "{path (.exr), comp?, time?, scale?} → a multi-layer OpenEXR: composite R,G,B,A + `<layer>.R/G/B/A` per layer (linear, premultiplied)",
+            "{path (.exr), comp?, time?, scale?, exrSelection?: {composite?, allLayers?: bool, layers?: [layer IDs], depth?, multipart?}} → OpenEXR (linear premultiplied RGBA, camera-space Z). Multipart writes named parts. Omit selection for composite and all visible layers.",
             has_comp,
             save_exr
         ),
     ]
-}
-
-#[cfg(test)]
-mod tests {
-    use std::collections::{HashMap, HashSet};
-
-    use super::exr_name;
-
-    #[test]
-    fn many_layers_of_one_name_take_a_name_each_in_order() {
-        let (mut used, mut next) = (HashSet::new(), HashMap::new());
-        // `A 3` is taken by a layer of its own before the repeats reach it.
-        let names: Vec<String> = ["A", "A", "A 3", "A", "A.b"].iter().map(|n| exr_name(n, &mut used, &mut next)).collect();
-        assert_eq!(names, ["A", "A 2", "A 3", "A 4", "A_b"]);
-        // 20 000 layers of one name: each found without retrying the suffixes before it.
-        for _ in 0..20_000 {
-            exr_name("Same", &mut used, &mut next);
-        }
-        assert_eq!(next["Same"], 20_001);
-    }
 }

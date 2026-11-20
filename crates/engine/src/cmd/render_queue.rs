@@ -5,13 +5,15 @@
 //! Items are addressed by `item` (the stable id from `renderQueue.add` / `renderQueue.list`) or
 //! `index` (1-based, the # column).
 
+use effectcraft_project::Comp;
 use effectcraft_project::render_queue::{
     AlphaMode, AudioFormat, AudioOutput, Channels, ColorDepth, CurrentOrOff, DEFAULT_SEQUENCE_TEMPLATE, DEFAULT_TEMPLATE, EffectsMode, ExrBitDepth,
-    ExrCompression, FieldRender, OutputFormat, OutputModule, PostRenderAction, ProResProfile, Pulldown, RESIZE_PRESETS, RenderLog, RenderQuality,
+    ExrCompression, ExrSelection, FieldRender, OutputFormat, OutputModule, PostRenderAction, ProResProfile, Pulldown, RESIZE_PRESETS, RenderLog, RenderQuality,
     RenderQueueItem, RenderSettings, RenderStatus, ResizeQuality, SwitchOverride, TimeSpan, post_render_parse, without_project_extension,
 };
 use effectcraft_project::render_templates::{RenderTemplates, TemplateKind, TemplateSlot};
 use effectcraft_time::{FrameRate, Tick};
+use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::{CommandSpec, always, b_p, bad, comp_id, f_p, has_comp, str_p};
@@ -314,7 +316,7 @@ fn apply_resize(om: &mut OutputModule, p: &Value, cmd: &str) -> Result<()> {
     Ok(())
 }
 
-/// OpenEXR `exrCompression` and `exrBitDepth`.
+/// OpenEXR `exrCompression`, `exrBitDepth` and `exrSelection`.
 fn apply_exr(om: &mut OutputModule, p: &Value, cmd: &str) -> Result<()> {
     if let Some(c) = enum_p(p, "exrCompression", cmd, ExrCompression::from_name, EXR_COMPRESSIONS)? {
         om.exr_compression = c;
@@ -322,12 +324,33 @@ fn apply_exr(om: &mut OutputModule, p: &Value, cmd: &str) -> Result<()> {
     if let Some(d) = enum_p(p, "exrBitDepth", cmd, ExrBitDepth::from_name, "half|float")? {
         om.exr_bit_depth = d;
     }
+    if let Some(value) = p.get("exrSelection") {
+        if !value.is_object() && !value.is_null() {
+            return Err(bad(cmd, "exrSelection must be an object or null"));
+        }
+        om.exr_selection = Option::<ExrSelection>::deserialize(value).map_err(|e| bad(cmd, format!("exrSelection: {e}")))?;
+    }
+    Ok(())
+}
+
+fn validate_exr(om: &OutputModule, comp: Option<&Comp>, cmd: &str) -> Result<()> {
+    if om.format != OutputFormat::ExrSequence {
+        return Ok(());
+    }
+    if let Some(selection) = &om.exr_selection {
+        if let Some(comp) = comp {
+            selection.validate(comp).map_err(|e| bad(cmd, e))?;
+        }
+        if selection.depth && om.exr_compression.is_lossy(ExrBitDepth::Float) {
+            return Err(bad(cmd, "The OpenEXR Z channel requires lossless 32-bit float compression"));
+        }
+    }
     Ok(())
 }
 
 /// Apply Output Module parameters (`template` first). `roi`: the viewer's region of interest
 /// (captured by `crop.useRoi`).
-fn apply_output(om: &mut OutputModule, templates: &RenderTemplates, roi: Option<[f64; 4]>, p: &Value, cmd: &str) -> Result<bool> {
+fn apply_output(om: &mut OutputModule, comp: Option<&Comp>, templates: &RenderTemplates, roi: Option<[f64; 4]>, p: &Value, cmd: &str) -> Result<bool> {
     let mut any = false;
     if let Some(t) = str_p(p, "template") {
         let t = templates.output_module(t).ok_or_else(|| bad(cmd, format!("no Output Module template “{t}”")))?;
@@ -416,6 +439,7 @@ fn apply_output(om: &mut OutputModule, templates: &RenderTemplates, roi: Option<
         // The format's extension exactly once (`Comp 2.mov.mov` → `Comp 2.mov`).
         om.output = om.format.with_extension(&om.output);
     }
+    validate_exr(om, comp, cmd)?;
     if *om != before {
         // Output To alone doesn't make the module custom.
         let mut o = om.clone();
@@ -564,7 +588,7 @@ fn add(s: &mut Session, p: &Value) -> Result<Value> {
     if let Some(object) = output_params.as_object_mut() {
         object.remove("template");
     }
-    apply_output(&mut it.output, &templates, s.state.region_of_interest, &output_params, "renderQueue.add")?;
+    apply_output(&mut it.output, s.project.comp(cid), &templates, s.state.region_of_interest, &output_params, "renderQueue.add")?;
     if str_p(p, "output").or(str_p(p, "path")).is_none() {
         s.avoid_sources(&mut it);
     }
@@ -620,10 +644,13 @@ fn set_render_settings(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 fn set_output_module(s: &mut Session, p: &Value) -> Result<Value> {
-    let i = item_index(s, p, "renderQueue.setOutputModule")?;
-    let m = module_p(s, i, p, "renderQueue.setOutputModule")?;
-    let mut om = module_ref(&s.project.render_queue[i], m).clone();
-    let changed = apply_output(&mut om, &s.project.render_templates, s.state.region_of_interest, p, "renderQueue.setOutputModule")?;
+    const C: &str = "renderQueue.setOutputModule";
+    let i = item_index(s, p, C)?;
+    let m = module_p(s, i, p, C)?;
+    let item = &s.project.render_queue[i];
+    let comp = s.project.comp(item.comp);
+    let mut om = module_ref(item, m).clone();
+    let changed = apply_output(&mut om, comp, &s.project.render_templates, s.state.region_of_interest, p, C)?;
 
     // When aspect is locked, an explicit height-only edit must drive the size.
     // frame_size() derives height from width; calculate the matching width from the
@@ -632,8 +659,7 @@ fn set_output_module(s: &mut Session, p: &Value) -> Result<Value> {
         p.get("resizeWidth").is_some() || p.get("resize").and_then(Value::as_object).is_some_and(|r| r.contains_key("width") || r.contains_key("preset"));
     let height_given = p.get("resizeHeight").is_some() || p.get("resize").and_then(Value::as_object).is_some_and(|r| r.contains_key("height"));
     if om.resize.enabled && om.resize.lock_aspect && height_given && !width_given {
-        let item = &s.project.render_queue[i];
-        let comp = s.project.comp(item.comp).ok_or(EngineError::NoComp)?;
+        let comp = comp.ok_or(EngineError::NoComp)?;
         let (w, h) = item.settings.output_size(comp);
         let mut crop_only = om.clone();
         crop_only.resize.enabled = false;
@@ -641,11 +667,11 @@ fn set_output_module(s: &mut Session, p: &Value) -> Result<Value> {
         om.resize.width = ((om.resize.height as f64 * cw as f64 / ch as f64).round() as u32).clamp(1, 30_000);
     }
     let post = match str_p(p, "postRenderAction") {
-        Some(a) => Some(post_render_parse(a).ok_or_else(|| bad("renderQueue.setOutputModule", "postRenderAction: none|import|importAndReplace|setProxy"))?),
+        Some(a) => Some(post_render_parse(a).ok_or_else(|| bad(C, "postRenderAction: none|import|importAndReplace|setProxy"))?),
         None => None,
     };
     if !changed && post.is_none() {
-        return Err(bad("renderQueue.setOutputModule", "nothing to change"));
+        return Err(bad(C, "nothing to change"));
     }
     s.edit("Output Module Settings", None, |proj, _| {
         let it = &mut proj.render_queue[i];
@@ -663,8 +689,9 @@ fn set_output(s: &mut Session, p: &Value) -> Result<Value> {
     let i = item_index(s, p, "renderQueue.setOutput")?;
     let path = str_p(p, "path").or(str_p(p, "output")).ok_or_else(|| bad("renderQueue.setOutput", "pass `path` (file path or template)"))?;
     let m = module_p(s, i, p, "renderQueue.setOutput")?;
-    let mut om = module_ref(&s.project.render_queue[i], m).clone();
-    apply_output(&mut om, &s.project.render_templates, None, &json!({"output": path}), "renderQueue.setOutput")?;
+    let item = &s.project.render_queue[i];
+    let mut om = module_ref(item, m).clone();
+    apply_output(&mut om, s.project.comp(item.comp), &s.project.render_templates, None, &json!({"output": path}), "renderQueue.setOutput")?;
     s.edit("Output To", None, |proj, _| {
         let it = &mut proj.render_queue[i];
         *module_mut(it, m) = om;
@@ -800,7 +827,7 @@ fn add_output_module(s: &mut Session, p: &Value) -> Result<Value> {
             None => format!("{}_{n}", om.output),
         };
     }
-    apply_output(&mut om, &s.project.render_templates, s.state.region_of_interest, p, "render.addOutputModule")?;
+    apply_output(&mut om, s.project.comp(it.comp), &s.project.render_templates, s.state.region_of_interest, p, "render.addOutputModule")?;
     s.edit("Add Output Module", None, |proj, _| {
         let it = &mut proj.render_queue[i];
         it.extra_outputs.push(om);
@@ -821,7 +848,7 @@ fn pre_render(s: &mut Session, p: &Value) -> Result<Value> {
     it.settings = templates.default_render_settings(TemplateSlot::PreRender);
     it.output = templates.default_output_module(TemplateSlot::PreRender);
     it.output.output = "[compName]_prerender.[fileExtension]".into();
-    apply_output(&mut it.output, &templates, s.state.region_of_interest, p, "render.preRender")?;
+    apply_output(&mut it.output, s.project.comp(cid), &templates, s.state.region_of_interest, p, "render.preRender")?;
     if str_p(p, "output").or(str_p(p, "path")).is_none() {
         s.avoid_sources(&mut it);
     }
@@ -944,7 +971,15 @@ fn save_template(s: &mut Session, p: &Value) -> Result<Value> {
                 (None, None) => t.default_output_module(TemplateSlot::Movie),
             };
             if params.is_object() {
-                apply_output(&mut om, &t, s.state.region_of_interest, &params, C)?;
+                let comp = item.and_then(|i| s.project.render_queue.get(i)).and_then(|it| s.project.comp(it.comp));
+                apply_output(&mut om, comp, &t, s.state.region_of_interest, &params, C)?;
+            }
+            // Layer IDs belong to one composition. A template can select all layers dynamically.
+            if let Some(selection) = &mut om.exr_selection {
+                selection.layers.clear();
+                if !selection.composite && !selection.depth && !selection.all_layers {
+                    om.exr_selection = selection.multipart.then_some(ExrSelection { multipart: true, ..ExrSelection::default() });
+                }
             }
             // Templates name files after the composition, not a particular path.
             om.output = if om.format.is_sequence() { DEFAULT_SEQUENCE_TEMPLATE } else { DEFAULT_TEMPLATE }.into();
@@ -1000,6 +1035,7 @@ fn apply_template(s: &mut Session, p: &Value) -> Result<Value> {
             let tpl = t.output_module(n).ok_or_else(|| bad(C, format!("no Output Module template “{n}”")))?;
             let mut om = module_ref(&s.project.render_queue[i], m).clone();
             apply_om_template(&mut om, &tpl);
+            validate_exr(&om, s.project.comp(s.project.render_queue[i].comp), C)?;
             Some(om)
         }
         None => None,
@@ -1062,7 +1098,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Add to Render Queue",
             ["Composition"],
             ["Cmd+M", "Cmd+Shift+/"],
-            "{comp?: id|name, template?: Render Settings template, format?: h264|hevc|av1|prores|uncompressed|webm|png|jpeg|tiff|exr|tga|gif|wav|aiff, output?: path|template, log?: errorsOnly|plusSettings|plusPerFrameInfo, quality?: best|draft|1-100 (jpeg, webm), resolution?: full|half|third|quarter|scale, proxyUse?, effects?, solo?, guideLayers?, colorDepth?, frameBlending?, fieldRender?, pulldown?, motionBlur?, timeSpan?: workArea|comp|custom, start?: s, end?: s, duration?: s, frameRate?: fps|null, skipExisting?: bool, storageOverflow?: bool, channels?: rgb|rgba|alpha, color?, bitrate?: kbps, webmBitrate?, keyframeInterval?, proresProfile?, exrCompression?, exrBitDepth?, profile?, level?, rateControl?, webmCodec?, audioBitrate?, opusApplication?, crop?, resize?, includeProjectLink?, audio?: auto|on|off, sampleRate?, audioChannels?, audioFormat?, loop?: bool (values as in setRenderSettings / setOutputModule)}",
+            "{comp?: id|name, template?: Render Settings template, format?: h264|hevc|av1|prores|uncompressed|webm|png|jpeg|tiff|exr|tga|gif|wav|aiff, output?: path|template, log?: errorsOnly|plusSettings|plusPerFrameInfo, quality?: best|draft|1-100 (jpeg, webm), resolution?: full|half|third|quarter|scale, proxyUse?, effects?, solo?, guideLayers?, colorDepth?, frameBlending?, fieldRender?, pulldown?, motionBlur?, timeSpan?: workArea|comp|custom, start?: s, end?: s, duration?: s, frameRate?: fps|null, skipExisting?: bool, storageOverflow?: bool, channels?: rgb|rgba|alpha, color?, bitrate?: kbps, webmBitrate?, keyframeInterval?, proresProfile?, exrCompression?, exrBitDepth?, exrSelection?: {composite?: bool, layers?: [LayerId], allLayers?: bool, depth?: bool, multipart?: bool}|null, profile?, level?, rateControl?, webmCodec?, audioBitrate?, opusApplication?, crop?, resize?, includeProjectLink?, audio?: auto|on|off, sampleRate?, audioChannels?, audioFormat?, loop?: bool (values as in setRenderSettings / setOutputModule)}",
             can_add,
             add
         ),
@@ -1082,7 +1118,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Output Module Settings...",
             [],
             None,
-            "{item?|index?, module?: n (1 = first), template?: name, format?: h264|hevc|av1|prores|uncompressed|webm|png|jpeg|tiff|exr|tga|gif|wav|aiff, channels?: rgb|rgba|alpha, color?: straight|premultiplied, quality?: 1-100, bitrate?: kbps, webmBitrate?: bool, keyframeInterval?: frames (0 = auto), proresProfile?: proxy|lt|standard|hq|4444|4444xq, exrCompression?: none|rle|zips|zip|piz|pxr24|b44|b44a|dwaa|dwab (OpenEXR, scan lines; default zip; lossy: pxr24 on float, b44/b44a on half, dwaa/dwab), exrBitDepth?: half|float (OpenEXR; default float), profile?: main|main10 (HEVC/AV1), level?: auto|4.1, rateControl?: bitrate|quality, webmCodec?: vp9|av1, audioBitrate?: Opus kbps, opusApplication?: audio|voice, crop?: bool|{useRoi?, roi?, top?, left?, bottom?, right?}, cropTop?, cropLeft?, cropBottom?, cropRight?, resize?: bool|{preset?, width?, height?, lockAspect?, quality?: low|high}, resizeWidth?, resizeHeight?, postRenderAction?: none|import|importAndReplace|setProxy, includeProjectLink?: bool, audio?: auto|on|off, sampleRate?, audioChannels?: mono|stereo, audioFormat?: 16|24|32, loop?: bool, output?}",
+            "{item?|index?, module?: n (1 = first), template?: name, format?: h264|hevc|av1|prores|uncompressed|webm|png|jpeg|tiff|exr|tga|gif|wav|aiff, channels?: rgb|rgba|alpha, color?: straight|premultiplied, quality?: 1-100, bitrate?: kbps, webmBitrate?: bool, keyframeInterval?: frames (0 = auto), proresProfile?: proxy|lt|standard|hq|4444|4444xq, exrCompression?: none|rle|zips|zip|piz|pxr24|b44|b44a|dwaa|dwab (OpenEXR, scan lines; default zip; lossy: pxr24 on float, b44/b44a on half, dwaa/dwab), exrBitDepth?: half|float (OpenEXR; default float), exrSelection?: {composite?: bool, layers?: [LayerId], allLayers?: bool, depth?: bool, multipart?: bool}|null (defaults to a single-part composite, allLayers selects eligible layers at render time and excludes explicit layers, multipart uses separate parts, Z requires lossless float compression), profile?: main|main10 (HEVC/AV1), level?: auto|4.1, rateControl?: bitrate|quality, webmCodec?: vp9|av1, audioBitrate?: Opus kbps, opusApplication?: audio|voice, crop?: bool|{useRoi?, roi?, top?, left?, bottom?, right?}, cropTop?, cropLeft?, cropBottom?, cropRight?, resize?: bool|{preset?, width?, height?, lockAspect?, quality?: low|high}, resizeWidth?, resizeHeight?, postRenderAction?: none|import|importAndReplace|setProxy, includeProjectLink?: bool, audio?: auto|on|off, sampleRate?, audioChannels?: mono|stereo, audioFormat?: 16|24|32, loop?: bool, output?}",
             has_items,
             set_output_module
         ),
@@ -1100,11 +1136,19 @@ pub fn specs() -> Vec<CommandSpec> {
             "Add Output Module",
             ["Composition"],
             None,
-            "{item?|index? (default: the last item), format?, output?, channels?, quality?, bitrate?, proresProfile?, exrCompression?, exrBitDepth?, audio?}",
+            "{item?|index? (default: the last item), format?, output?, channels?, quality?, bitrate?, proresProfile?, exrCompression?, exrBitDepth?, exrSelection?: {composite?: bool, layers?: [LayerId], allLayers?: bool, depth?: bool, multipart?: bool}|null, audio?}",
             has_items,
             add_output_module
         ),
-        cmd!("render.preRender", "Pre-render...", ["Composition"], None, "{comp?, output?: path|template, format?}", can_add, pre_render),
+        cmd!(
+            "render.preRender",
+            "Pre-render...",
+            ["Composition"],
+            None,
+            "{comp?, output?: path|template, format?, exrCompression?, exrBitDepth?, exrSelection?: {composite?: bool, layers?: [LayerId], allLayers?: bool, depth?: bool, multipart?: bool}|null}",
+            can_add,
+            pre_render
+        ),
         cmd!("render.saveCurrentPreview", "Save Current Preview...", ["Composition"], None, "{comp?, path}", has_comp, save_current_preview),
         cmd!("renderQueue.move", "Move in Render Queue", [], None, "{item?|index?, to: n (1-based)}", has_items, move_item),
         cmd!("renderQueue.duplicate", "Duplicate Render Item", [], None, "{item?|index?}", has_items, duplicate),
@@ -1117,7 +1161,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Save Template...",
             [],
             None,
-            "{kind: renderSettings|outputModule, name, item?|index? (save from this item), from?: template to copy, module?, params?: {setRenderSettings / setOutputModule keys}}",
+            "{kind: renderSettings|outputModule, name, item?|index? (save from this item), from?: template to copy, module?, params?: {setRenderSettings / setOutputModule keys} (OpenEXR layers are item-specific)}",
             always,
             save_template
         ),

@@ -100,10 +100,12 @@ trips and renders, checked by tests, not against After Effects), **partial** (na
 
 H.264 MP4, HEVC MP4, AV1 MP4, ProRes MOV, uncompressed 8-bit RGB / RGB + Alpha MOV (`raw `, + PCM;
 #372), WebM (VP9 or AV1 + Opus), PNG / JPEG / TIFF / OpenEXR / Targa sequences, animated GIF, WAV, AIFF.
-OpenEXR sequences are scan-line RGBA files in half or 32-bit float (default) with None, RLE, ZIPS,
-ZIP (default), PIZ, PXR24, B44, B44A, DWAA or DWAB compression; PXR24 on float, B44 / B44A on half
-and DWAA / DWAB are lossy (#2911). No tiled or multi-part output, no HTJ2K (the `exr` crate can't
-write it).
+OpenEXR sequences store scan lines. They can include the composite, named RGBA
+groups for selected composition layers, and camera-space `Z` as 32-bit float. Colour channels
+use half or 32-bit float (default) with None, RLE, ZIPS, ZIP (default), PIZ, PXR24, B44, B44A,
+DWAA or DWAB compression. PXR24 on float, B44 / B44A on half and DWAA / DWAB are lossy (#2911).
+`Z` requires lossless float compression. The Multipart option writes the composite as `Beauty`,
+each selected layer as its own RGBA part, and `Z` in `Depth`. The default layout is single-part.
 Missing against After Effects + Media Encoder: 16-bpc uncompressed, AVI and lossless-compressed
 single-file video (Animation / PNG codecs), DPX / Photoshop sequences, MXF, DNxHR, hardware
 encoders ([hardware-parity.md](hardware-parity.md)), and rendering safely over an existing file
