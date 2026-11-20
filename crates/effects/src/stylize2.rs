@@ -384,7 +384,12 @@ fn repetile(ctx: &EffectCtx, b: Buf) -> Buf {
         ctx.params.f("expandDown").max(0.0) * s,
         ctx.params.f("expandUp").max(0.0) * s,
     );
-    if ctx.adjustment || r + l + d + u < 0.5 {
+    // On an adjustment layer the buffer is the comp below (origin forced to 0 by the
+    // renderer): tile it like any layer rectangle so a following effect can sample the
+    // tiles, and keep the origin shift so the stack's frame lines up with the canvas again
+    // (#3923). A buffer can also sit at a non-zero offset (ROI rendering, a preceding pad),
+    // so grow from where the content actually is rather than resetting to [left, up].
+    if r + l + d + u < 0.5 {
         return b;
     }
     let mode = ctx.params.e("tiling");
@@ -416,7 +421,7 @@ fn repetile(ctx: &EffectCtx, b: Buf) -> Buf {
             *px = src.sample_bilinear(x0 + fx, y0 + fy);
         }
     });
-    Buf { img: out, offset: [l, u], scale: s }
+    Buf { img: out, offset: [b.offset[0] + l, b.offset[1] + u], scale: s }
 }
 
 // ---- Motion Tile ----
@@ -792,6 +797,39 @@ mod tests {
         for c in 0..4 {
             assert!((a[c] - b[c]).abs() < 1e-5);
         }
+    }
+
+    /// An adjustment layer's buffer is the comp below: RepeTile must tile it, on the whole
+    /// layer rectangle at its buffer offset, so a following effect (Wave Warp) can pull the
+    /// tiles into view instead of sampling transparent edges (#3923).
+    #[test]
+    fn repetile_grows_on_an_adjustment_layer() {
+        let img = ramp(10, 8);
+        let s = crate::find("ec.stylize.ccrepetile").unwrap();
+        let mut params = Params { values: s.params.iter().map(|p| (p.id.to_string(), p.default.clone())).collect() };
+        for (k, v) in [("expandRight", num(10.0)), ("expandUp", num(4.0))] {
+            params.values.insert(k.to_string(), v);
+        }
+        let ctx = |adjustment| EffectCtx { params: &params, time: 0.0, layer_size: [10.0, 8.0], seed: 1, adjustment, env: Default::default() };
+        let out = crate::apply(s, &ctx(true), Buf { img, offset: [0.0, 0.0], scale: 1.0 });
+        assert_eq!((out.img.width, out.img.height), (20, 12));
+        assert_eq!(out.offset, [0.0, 4.0]);
+        // Same Repeat tiling as the non-adjustment path.
+        let b = ramp(10, 8).get(3, 2);
+        let a = out.img.get(13, 6);
+        for c in 0..4 {
+            assert!((a[c] - b[c]).abs() < 1e-5);
+        }
+        // The comp origin shifts by the expansion, so the stack's frame still lines up with
+        // the canvas when the stack ends (ROI rendering keeps a non-zero offset).
+        let small = ramp(10, 8);
+        let mut large = Image::new(13, 10);
+        small.data.iter().enumerate().for_each(|(i, px)| {
+            large.set((i % 10) as u32 + 3, (i / 10) as u32 + 2, *px);
+        });
+        let out = crate::apply(s, &ctx(true), Buf { img: large, offset: [3.0, 2.0], scale: 1.0 });
+        assert_eq!((out.img.width, out.img.height), (20, 12));
+        assert_eq!(out.offset, [3.0, 6.0]);
     }
 
     #[test]

@@ -350,6 +350,31 @@ fn adjustment_motion_tile_output_then_transform() {
     }
 }
 
+/// RepeTile on an adjustment layer then a Transform scaling the tiled margin into view: the
+/// grown frame goes back onto the canvas as on the CPU (#3923).
+#[test]
+fn adjustment_repetile_then_transform() {
+    for (expand, scale) in [(100.0, 40.0), (60.0, 70.0)] {
+        for depth in [BitDepth::Bpc8, BitDepth::Bpc32] {
+            let mut s = Scene::new(depth);
+            let bg = s.footage(97, 61);
+            s.push(bg);
+            let mut adj = s.solid([1.0, 1.0, 1.0], 97, 61);
+            adj.switches.adjustment = true;
+            s.effect(
+                &mut adj,
+                "ec.stylize.ccrepetile",
+                &[("expandRight", n(expand)), ("expandLeft", n(expand)), ("expandDown", n(expand)), ("expandUp", n(expand))],
+            );
+            s.effect(&mut adj, "ec.distort.transform", &[("scaleHeight", n(scale)), ("scaleWidth", n(scale))]);
+            s.push(adj);
+            let label = format!("adjustment RepeTile expand {expand} then Scale {scale} % {depth:?}");
+            check(&label, compare_at(&s, opts(), Tick::ZERO), 0.0);
+            check(&format!("{label} half"), compare_at(&s, RenderOpts { scale: 0.5, ..opts() }, Tick::ZERO), 0.0);
+        }
+    }
+}
+
 /// The same on a full-frame footage layer (#1991).
 #[test]
 fn layer_motion_tile_output_then_transform() {

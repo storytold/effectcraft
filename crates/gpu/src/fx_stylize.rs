@@ -661,7 +661,10 @@ fn repetile(e: &mut Enc, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
         ctx.params.f("expandDown").max(0.0) * s,
         ctx.params.f("expandUp").max(0.0) * s,
     );
-    if ctx.adjustment || r + l + d + u < 0.5 {
+    // On an adjustment layer the buffer is the comp below: tile it like any layer rectangle
+    // so a following effect can sample the tiles, and keep the origin shift so the stack's
+    // frame lines up with the canvas again (#3923).
+    if r + l + d + u < 0.5 {
         return Some(b);
     }
     let (x0, y0, w, h) = layer_rect(ctx, &b);
@@ -684,7 +687,7 @@ fn repetile(e: &mut Enc, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
     let buf = e.data(&data);
     let out = e.scratch(nw, nh);
     e.pixels("fxs_repetile", &p, &b.img, None, &out, Some(&buf));
-    Some(GBuf { img: out, offset: [l, u], scale: s })
+    Some(GBuf { img: out, offset: [b.offset[0] + l, b.offset[1] + u], scale: s })
 }
 
 fn magnify(e: &mut Enc, ctx: &EffectCtx, mut b: GBuf) -> Option<GBuf> {
