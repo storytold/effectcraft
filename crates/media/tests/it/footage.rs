@@ -385,7 +385,10 @@ fn resampled_audio_read_in_frame_pieces_matches_ffmpeg() {
 /// The H.264 fixture with the rotation part of its video track header's matrix (`[a b; c d]`,
 /// 16.16 fixed point) replaced: what a phone writes for a movie shot with the camera turned.
 fn turned_mp4(p: &Path, abcd: [i32; 4]) -> Arc<[u8]> {
-    let mut bytes = std::fs::read(p).expect("read");
+    turn_mp4_bytes(std::fs::read(p).expect("read"), abcd)
+}
+
+fn turn_mp4_bytes(mut bytes: Vec<u8>, abcd: [i32; 4]) -> Arc<[u8]> {
     // (The video track comes first; a version 0 `tkhd` has its matrix 44 bytes after the type.)
     let at = bytes.windows(4).position(|w| w == b"tkhd").expect("tkhd");
     assert_eq!(bytes[at + 4], 0, "a version 0 tkhd");
@@ -499,6 +502,47 @@ fn prores_alpha_uses_coded_frame_not_mov_depth() {
         let left_alpha = if mode == AlphaMode::Straight { 0.0 } else { 1.0 };
         assert!((image.data[0][3] - left_alpha).abs() < 0.02);
         assert!(image.data[15][3] > 0.97);
+    }
+}
+
+/// A synthetic asymmetrical aperture and rotation must determine what the shared importer shows.
+#[test]
+fn mov_renders_clean_aperture_before_display_rotation() {
+    use craft_media::isobmff::{self, Brand, CleanAperture, FourCc, Mp4Writer, SampleEntry, TrackConfig, WriteSample, WriterOptions};
+    use craft_video::prores::{ChromaFormat, Encoder, Frame, Profile};
+
+    let profile = Profile::P4444;
+    let mut frame = Frame::new(16, 16, ChromaFormat::Yuv444, 16, true).unwrap();
+    // Our generated alpha value uniquely labels each source coordinate.
+    for (i, p) in frame.alpha.as_mut().unwrap().iter_mut().enumerate() {
+        *p = i as u16 * 257;
+    }
+    let packet = Encoder::new(profile, 16, 16).encode(&frame).unwrap();
+    let mut entry = SampleEntry::prores(FourCc(profile.fourcc()), 16, 16);
+    let clean_aperture = CleanAperture { width: (8, 1), height: (12, 1), horiz_offset: (2, 1), vert_offset: (-1, 1) };
+    entry.video.as_mut().unwrap().clean_aperture = Some(clean_aperture);
+    let mut writer = Mp4Writer::new(std::io::Cursor::new(Vec::new()), WriterOptions::new(Brand::Mov)).unwrap();
+    let track = writer.add_track(TrackConfig::new(entry, 24)).unwrap();
+    writer.write_sample(track, WriteSample { data: &packet, duration: 1, composition_offset: 0, is_sync: true }).unwrap();
+    let bytes = turn_mp4_bytes(writer.finish().unwrap().into_inner(), [0, 0x1_0000, -0x1_0000, 0]);
+
+    let mov = isobmff::open(bytes.as_ref()).unwrap();
+    assert_eq!(mov.tracks[0].video().unwrap().clean_aperture, Some(clean_aperture));
+    assert_eq!(mov.tracks[0].display_rotation(), Some(1));
+    let name = "turned_clean_aperture.mov";
+    let footage = probe_bytes(name, bytes.clone()).expect("probe the cropped MOV");
+    assert_eq!(footage.codec, "ProRes", "must exercise the shared reader, not legacy fallback");
+    assert_eq!((footage.width, footage.height), (12, 8));
+
+    let pool = MediaPool::new();
+    pool.add_bytes(name, bytes);
+    let image = pool.frame_at(&footage, Tick::ZERO).expect("render the cropped MOV");
+    assert_eq!((image.width, image.height), (12, 8));
+    for (x, y) in [(0, 0), (11, 0), (0, 7), (11, 7), (4, 3)] {
+        // Rotate 90° after cropping the source box (6, 1, 8, 12).
+        let source = (6 + y, 12 - x);
+        let expected = (source.0 + 16 * source.1) as f32 / 255.0;
+        assert!((image.data[y * 12 + x][3] - expected).abs() < 0.01, "pixel {x},{y} must come from {source:?}");
     }
 }
 
