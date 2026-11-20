@@ -5501,15 +5501,10 @@ fn text_anim_popups(
         widgets::open_popup(ui, pop);
     }
     let per_char = layer.props.prop("text/perChar3d").is_some_and(|q| q.value.as_bool());
-    // The layer font's variable axes, offered by both menus: Animate Text makes a new animator for
-    // the axis, the animator's Add menu puts it on that animator (#3964).
-    let axes = match layer.props.prop("text/sourceText").map(|p| p.value.clone()) {
-        Some(effectcraft_engine::keyframe::Value::Text(doc)) => {
-            let face = effectcraft_engine::text::resolve(&doc.font, &doc.style).face;
-            effectcraft_engine::text::variable::font_axes(face)
-        }
-        _ => Vec::new(),
-    };
+    // The layer font's variable axes at the current time, offered by both menus: Animate Text makes a
+    // new animator for the axis, the animator's Add menu puts it on that animator (#3964). This is
+    // the same helper `text.animatorFontAxes` validates the chosen axis against.
+    let axes = effectcraft_engine::commands::text_anim::font_axes_now(&app.session, layer);
     let mut opts: Vec<String> = Vec::new();
     let mut acts: Vec<(String, serde_json::Value)> = Vec::new();
     if key == "animate" {
