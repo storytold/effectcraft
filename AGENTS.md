@@ -76,8 +76,8 @@ EffectCraft is an open-source, Rust-native motion-graphics and compositing app (
 For the crates you changed: `cargo fmt`, `cargo clippy -p <crate> --all-targets`, `cargo test -p <crate>`, or `cargo xtask ci --affected` (the gates scoped to the crates a change can affect). Full `cargo xtask ci`: fmt, clippy, tests, pdf-deps, lock-patches, layers, assets, wasm.
 
 ### Paths and conventions
-- `unsafe`: none; the workspace sets `unsafe_code = "forbid"`.
-- Attribution: each asset `X` has a sidecar `X.attribution` (asset, title, author, source, license, license-file, added, notes), and a line in [`ATTRIBUTION.md`](ATTRIBUTION.md); `cargo xtask assets` checks both. Code-drawn assets (`crates/ui-egui/src/icons.rs`, `crates/engine/src/demo.rs`, `crates/effects`) are listed there too. The ArtCraft marks in `docs/brand/` use `LicenseRef-ArtCraft-Trademark` under `docs/brand/LICENSE-brand.txt`.
+- `unsafe`: none in the workspace, which sets `unsafe_code = "forbid"`. The example plug-in in `examples/plugins/` is outside the workspace and uses `unsafe` for the WebAssembly host calls.
+- Attribution: each asset `X` has a sidecar `X.attribution` (asset, title, author, source, license, license-file, added, notes), and a line in [`ATTRIBUTION.md`](ATTRIBUTION.md); `cargo xtask assets` checks both. Code-drawn assets (`crates/ui-egui/src/icons.rs`, `crates/engine/src/home/demo.rs`, `crates/effects`) are listed there too. The ArtCraft marks in `docs/brand/` use `LicenseRef-ArtCraft-Trademark` under `docs/brand/LICENSE-brand.txt`.
 - Large real-file corpora: [storytold/photocraft-corpus](https://github.com/storytold/photocraft-corpus), fetched pinned and sha256-verified.
 - Run: `cargo run -p effectcraft -- --control 9877` (JSON lines, `docs/control-protocol.md`); the headless `snapshot` example renders a frame.
 - Community links (Help menu, About, header Discord button): https://discord.gg/artcraft, https://getartcraft.com, https://getartcraft.com/apps/effectcraft, https://github.com/storytold/effectcraft.
