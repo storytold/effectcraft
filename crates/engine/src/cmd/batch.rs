@@ -11,7 +11,10 @@ use crate::{EngineError, Result, Session};
 
 /// Commands that can't run inside a batch (they nest batches or discard the history the batch
 /// folds onto), besides the commands that run scripts ([`super::scripts::RUNS_SCRIPTS`]).
-const NOT_IN_BATCH: &[&str] = &["engine.batch", "edit.purgeUndo"];
+///
+/// The `file.*` commands replace the whole project, which resets history
+/// ([`crate::Session::replace_project`]) and with it the anchor the batch folds its steps onto.
+const NOT_IN_BATCH: &[&str] = &["engine.batch", "edit.purgeUndo", "file.newProject", "file.open", "file.openDemoProject", "file.closeProject"];
 
 /// Resolve a `$N` / `$N.key.0.key` reference against the results so far.
 fn reference(s: &str, results: &[Value]) -> Option<Result<Value>> {
@@ -254,5 +257,23 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(e.contains("edit.purgeUndo") && e.contains("can't run inside a batch"), "{e}");
+    }
+
+    /// A project-replacing command resets history, discarding the fold anchor the batch's single
+    /// undo step rests on, so it is refused like a nested batch or a purge.
+    #[test]
+    fn a_batch_refuses_commands_that_replace_the_project() {
+        let mut s = Session::default();
+        s.execute("comp.new", json!({"name": "B", "width": 100, "height": 100})).unwrap();
+        s.execute("layer.newSolid", json!({"name": "Box", "color": "#ff0000"})).unwrap();
+        let before_batch = s.project.clone();
+        for id in ["file.newProject", "file.open", "file.openDemoProject", "file.closeProject"] {
+            let e = s.execute_checked("engine.batch", json!({"label": "switch", "steps": [{"command": id, "params": {}}]})).unwrap_err().to_string();
+            assert!(e.contains(id) && e.contains("can't run inside a batch"), "{id}: {e}");
+        }
+        // Every attempt was refused, so nothing replaced the project and the anchor survives.
+        assert!(std::sync::Arc::ptr_eq(&s.project, &before_batch));
+        assert_eq!(s.history.batch_depth, 0);
+        assert!(s.undo(), "the pre-batch state stays reachable");
     }
 }
