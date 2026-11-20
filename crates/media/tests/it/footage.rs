@@ -470,7 +470,7 @@ fn prores_alpha_uses_coded_frame_not_mov_depth() {
     let profile = Profile::P4444;
     let mut encoder = Encoder::new(profile, 16, 16);
     let mut frame = Frame::new(16, 16, ChromaFormat::Yuv444, 16, true).unwrap();
-    for row in frame.alpha.as_mut().unwrap().chunks_exact_mut(16) {
+    for row in frame.alpha.as_mut().unwrap().as_chunks_mut::<16>().0 {
         row[..8].fill(0);
     }
     for (depth, mode) in [(24, AlphaMode::Straight), (32, AlphaMode::Ignore)] {
