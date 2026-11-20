@@ -143,7 +143,8 @@ fn dst_wave_pin(pin: u32, x: f32, y: f32, r: vec4<f32>) -> f32 {
     }
 }
 
-// u[0] = (wave type, pinning, seed, buffer width); f[0] = (dx, dy, height); f[2] = layer rect
+// u[0] = (wave type, pinning, seed, buffer width); f[0] = (dx, dy, amplitude = half the wave
+// height); f[2] = layer rect
 // (x, y, w, h). data: the phase in cycles (along / width + phase / 2π) as per-column and per-row
 // (fraction, whole cycles) pairs: fx (w), ix (w), fy (h), iy (h).
 @compute @workgroup_size(16, 16)
