@@ -298,7 +298,7 @@ fn open_isobmff(name: &str, source: SharedBytes) -> Option<Result<SharedSource>>
         return None;
     }
 
-    let kind = if video_info.is_some() { MediaKind::Movie } else { MediaKind::Audio };
+    let kind = if video_info.is_some() { MediaKind::Movie } else { MediaKind::AudioOnly };
     let info = MediaInfo {
         name: name.to_string(),
         kind,
@@ -394,7 +394,7 @@ fn open_matroska(name: &str, source: SharedBytes) -> Option<Result<SharedSource>
         return None;
     }
 
-    let kind = if video_info.is_some() { MediaKind::Movie } else { MediaKind::Audio };
+    let kind = if video_info.is_some() { MediaKind::Movie } else { MediaKind::AudioOnly };
     let info = MediaInfo {
         name: name.to_string(),
         kind,
