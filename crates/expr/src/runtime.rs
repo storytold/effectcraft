@@ -5,6 +5,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::mem::ManuallyDrop;
 
+use boa_engine::error::{EngineError, RuntimeLimitError};
 use boa_engine::object::builtins::JsArray;
 use boa_engine::{Context, JsNativeError, JsObject, JsResult, JsString, JsValue, NativeFunction, Script, Source, js_string};
 use effectcraft_keyframe::Value;
@@ -21,8 +22,8 @@ const MAX_SCRIPTS: usize = 4096;
 pub const LOOP_LIMIT: u64 = 1_000_000;
 /// The error of an evaluation that ran out of time.
 pub const TIMED_OUT: &str = "Error: expression takes too long to evaluate";
-/// The part of boa's stack-size limit error the runtime recovers from (see [`run`]).
-const STACK_LIMIT: &str = "maximum stack size";
+/// A VM stack limit can come from pending host reads left on a reused context.
+struct StackFull;
 
 /// Memoized host answers and pending misses of one expression evaluation.
 #[derive(Default)]
@@ -86,6 +87,36 @@ pub fn fail_audio() {
             c.fail();
         }
     });
+}
+
+pub fn audio_cache_scope() -> Option<u64> {
+    AUDIO_CONTROL.with(|c| c.borrow().as_ref().map(|control| control.cache_scope()))
+}
+
+pub fn audio_interrupted() -> bool {
+    audio_cache_scope().is_some() && out_of_time()
+}
+
+pub fn with_footage_read(read: &mut dyn FnMut()) {
+    let control = AUDIO_CONTROL.with(|c| c.borrow().clone());
+    let Some(control) = control else { return read() };
+    if out_of_time() {
+        return;
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    let _pause = {
+        use std::time::Instant;
+        struct Pause(Option<(Instant, Instant)>);
+        impl Drop for Pause {
+            fn drop(&mut self) {
+                if let Some((start, pause)) = self.0 {
+                    STARTED.with(|clock| clock.set(start.checked_add(pause.elapsed())));
+                }
+            }
+        }
+        Pause(STARTED.with(|clock| clock.take()).map(|start| (start, Instant::now())))
+    };
+    control.without_footage_time(read);
 }
 
 struct Runtime {
@@ -366,10 +397,10 @@ impl Runtime {
         s
     }
 
-    fn run(&mut self, text: &str, b: &Begin) -> Run {
+    fn run(&mut self, text: &str, b: &Begin) -> Result<Run, StackFull> {
         let script = match self.script(text) {
             Ok(s) => s,
-            Err(e) => return Run::Done(Err(e)),
+            Err(e) => return Ok(Run::Done(Err(e))),
         };
         let ctx = &mut self.ctx;
         let args = [
@@ -388,43 +419,50 @@ impl Runtime {
         let audio = AUDIO_CONTROL.with(|c| c.borrow().is_some());
         let begun = if audio {
             let inputs = JsArray::from_iter(args, ctx).into();
-            let Some(result) = evaluate_audio_phase(&self.audio_begin, ctx, inputs) else { return Run::Done(Err(TIMED_OUT.into())) };
+            let Some(result) = evaluate_audio_phase(&self.audio_begin, ctx, inputs) else { return Ok(Run::Done(Err(TIMED_OUT.into()))) };
             result
         } else {
             self.begin.call(&JsValue::undefined(), &args, ctx)
         };
         if let Err(e) = begun {
-            mark_runtime_limit(&e);
-            return Run::Done(Err(format_error(&e.to_string(), line_count(text))));
+            runtime_limit(&e)?;
+            return Ok(Run::Done(Err(format_error(&e.to_string(), line_count(text)))));
         }
         let result = match evaluate_in_time(&script, ctx) {
             Some(Ok(v)) if audio && v.is_object() => {
-                let Some(result) = evaluate_audio_phase(&self.audio_finish, ctx, v) else { return Run::Done(Err(TIMED_OUT.into())) };
+                let Some(result) = evaluate_audio_phase(&self.audio_finish, ctx, v) else { return Ok(Run::Done(Err(TIMED_OUT.into()))) };
                 result
             }
             Some(Ok(v)) if audio => Ok(v),
             Some(r) => r.and_then(|v| self.finish.call(&JsValue::undefined(), &[v], ctx)),
             // Abandoned mid-run: the context is unusable now (see `run`).
-            None => return Run::Done(Err(TIMED_OUT.into())),
+            None => return Ok(Run::Done(Err(TIMED_OUT.into()))),
         };
-        if let Err(e) = &result {
-            mark_runtime_limit(e);
+        if let Err(e) = &result
+            && runtime_limit(e)?
+        {
+            return Ok(Run::Done(Err(format_error(&e.to_string(), line_count(text)))));
         }
         let pending = FRAMES.with(|f| f.borrow().last().is_some_and(|fr| !fr.misses.is_empty()));
         if pending {
-            return Run::Pending;
+            return Ok(Run::Pending);
         }
-        Run::Done(match result {
+        Ok(Run::Done(match result {
             Ok(v) if audio => read_audio_result(&v, 0, &mut (1 << 16)),
             Ok(v) => detach(&v, ctx, 0),
             Err(e) => Err(format_error(&e.to_string(), line_count(text))),
-        })
+        }))
     }
 }
 
-fn mark_runtime_limit(error: &boa_engine::JsError) {
-    if matches!(error.as_engine(), Some(boa_engine::error::EngineError::RuntimeLimit(_))) {
-        fail_audio();
+fn runtime_limit(error: &boa_engine::JsError) -> Result<bool, StackFull> {
+    match error.as_engine() {
+        Some(EngineError::RuntimeLimit(RuntimeLimitError::StackSize)) => Err(StackFull),
+        Some(EngineError::RuntimeLimit(_)) => {
+            fail_audio();
+            Ok(true)
+        }
+        _ => Ok(false),
     }
 }
 
@@ -676,29 +714,30 @@ pub fn run(text: &str, b: &Begin) -> Run {
     STACK_BASE.with(|s| s.set(stack_here()));
     RUNTIME.with(|r| {
         let mut r = r.borrow_mut();
-        for fresh in [false, true] {
+        for _ in 0..2 {
             let out = match &mut **r.get_or_insert_with(|| ManuallyDrop::new(Runtime::new())) {
                 Ok(rt) => rt.run(text, b),
                 Err(e) => return Run::Done(Err(e.clone())),
             };
             match out {
-                Run::Done(Err(e)) if e == TIMED_OUT => {
+                Ok(Run::Done(Err(e))) if e == TIMED_OUT => {
                     // Abandoned mid-run: start the next evaluation on a fresh context.
                     if let Some(old) = r.take() {
                         drop(ManuallyDrop::into_inner(old));
                     }
                     return Run::Done(Err(e));
                 }
-                Run::Done(Err(e)) if !fresh && e.contains(STACK_LIMIT) => {
+                Err(StackFull) => {
                     // Dropped here, mid-thread, where boa's heap is alive (unlike at thread exit).
                     if let Some(old) = r.take() {
                         drop(ManuallyDrop::into_inner(old));
                     }
                 }
-                out => return out,
+                Ok(out) => return out,
             }
         }
-        Run::Done(Err(format!("Error: {STACK_LIMIT}")))
+        fail_audio();
+        Run::Done(Err(format!("Error: {}", RuntimeLimitError::StackSize)))
     })
 }
 

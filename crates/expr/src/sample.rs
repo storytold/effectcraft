@@ -26,7 +26,7 @@ struct Sampled {
     scale: f64,
 }
 
-type Key = (usize, u64, u64, u64, bool, u64);
+type Key = (usize, u64, u64, u64, bool, u64, Option<u64>);
 
 thread_local! {
     /// The sampled buffers and the source files each was made of.
@@ -50,10 +50,10 @@ fn fingerprint(layer: &Layer) -> u64 {
 /// Returns `None` once the nesting depth limit is reached.
 fn render(ctx: EvalCtx, comp: ItemId, layer: &Layer, post: bool, t: f64) -> Option<Sampled> {
     let depth = DEPTH.with(|d| *d.borrow());
-    if depth >= MAX_DEPTH {
+    if depth >= MAX_DEPTH || crate::runtime::audio_interrupted() {
         return None;
     }
-    let key: Key = (ctx.project as *const _ as usize, comp.0, layer.id.0, t.to_bits(), post, fingerprint(layer));
+    let key: Key = (ctx.project as *const _ as usize, comp.0, layer.id.0, t.to_bits(), post, fingerprint(layer), crate::runtime::audio_cache_scope());
     let note = |files: &ReadFiles| {
         if let Some(log) = ctx.reads {
             log.note_all(files);
@@ -82,6 +82,9 @@ fn render(ctx: EvalCtx, comp: ItemId, layer: &Layer, post: bool, t: f64) -> Opti
     } else {
         r.layer_source(&ectx, layer).map(|b| Sampled { img: Arc::new(b.img), offset: b.offset, scale: b.scale })
     };
+    if footage.called_off() || crate::runtime::audio_interrupted() {
+        return None;
+    }
     let files = Arc::new(log.into_files());
     note(&files);
     CACHE.with(|c| {
@@ -116,6 +119,9 @@ pub fn sample_image(ctx: EvalCtx, comp: ItemId, layer: &Layer, point: [f64; 2], 
     let mut acc = [0.0f64; 4];
     let mut n = 0.0;
     for y in y0..=y1.min(y0.saturating_add(4096)) {
+        if crate::runtime::audio_interrupted() {
+            return None;
+        }
         for x in x0..=x1.min(x0.saturating_add(4096)) {
             let p = b.img.get(x, y);
             for k in 0..4 {

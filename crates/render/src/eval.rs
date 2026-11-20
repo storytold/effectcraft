@@ -21,6 +21,11 @@ pub trait ExprHost: Send + Sync {
     fn eval_audio(&self, ctx: &EvalCtx, layer: &Layer, prop: &Property, value: &Value, _control: &crate::audio::AudioEvalControl) -> Result<Value, String> {
         self.eval(ctx, layer, prop, value)
     }
+    /// Run a renderer's footage read. Audio expression hosts can exclude this blocking work
+    /// from their expression clocks while keeping cancellation and deadlines in force.
+    fn with_footage_read(&self, read: &mut dyn FnMut()) {
+        read();
+    }
     /// Evaluate a text Expression Selector's Amount expression (on `prop`) for one unit:
     /// `textIndex` (1-based), `textTotal` and `selectorValue` (percent, per dimension) are
     /// defined. Returns the amount in percent per dimension.

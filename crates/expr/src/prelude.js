@@ -60,11 +60,16 @@ const __copyAudioResult = (function (take, data, host, isArray, define, min) {
       c = data(x, '__c'); l = data(x, '__l');
       return typeof c === 'number' && typeof l === 'number' ? data(host(3, c, l), 1) : undefined;
     }
-    if (data(x, '__isProp') !== true) return x;
-    c = data(x, '__c'); l = data(x, '__l');
-    var path = data(x, '__p');
+    var ref = __audioPropRef(x);
+    if (ref === undefined) return x;
+    c = ref[0]; l = ref[1];
+    var path = ref[2];
     if (typeof c !== 'number' || typeof l !== 'number' || typeof path !== 'string' || typeof time !== 'number') return undefined;
-    return data(x, '__self') === true ? value : host(6, c, l, path, time, false);
+    var v = ref[3] === true ? value : host(6, c, l, path, time, false);
+    var kind = data(host(5, c, l, path), 2);
+    if (kind === 'path' && v !== null) return new __Path(data(v, 0), data(v, 1), data(v, 2), data(v, 3));
+    if (kind === 'layer' && (v === null || typeof v === 'number')) return data(host(3, c, v === null ? l : v), 1);
+    return v;
   }
   return function () {
     var remaining = 65536;
@@ -1027,11 +1032,23 @@ var __propHandler = {
   },
 };
 
-var __mkProp = (function (P) {
-  return function (c, l, path) {
-    return new P(new Prop(c, l, path), __propHandler);
-  };
-})(Proxy);
+// Only the factory records proxies. Audio result extraction can read their target's
+// stored data without running a proxy trap or exposing the target to the expression.
+const [__mkProp, __audioPropRef] = (function (P, targets, data) {
+  var get = targets.get.bind(targets), set = targets.set.bind(targets);
+  return [
+    function (c, l, path) {
+      var target = new Prop(c, l, path);
+      var proxy = new P(target, __propHandler);
+      set(proxy, target);
+      return proxy;
+    },
+    function (proxy) {
+      var target = get(proxy);
+      if (target !== undefined) return [data(target, '__c'), data(target, '__l'), data(target, '__p'), data(target, '__self')];
+    },
+  ];
+})(Proxy, new WeakMap(), __audioData);
 
 // Text styles (the Source Text style API) ------------------------------------------------------
 // A TextStyle is the source document (as JSON from the host), the character index it reads its

@@ -101,6 +101,10 @@ impl ExprHost for Expressions {
         audio::prepare(text)
     }
 
+    fn with_footage_read(&self, read: &mut dyn FnMut()) {
+        runtime::with_footage_read(read);
+    }
+
     fn eval(&self, ctx: &EvalCtx, layer: &Layer, prop: &Property, value: &Value) -> Result<Value, String> {
         match &prop.expr {
             Some(e) => evaluate(self, ctx, layer, prop, value, &e.text),

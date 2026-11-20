@@ -132,6 +132,7 @@ const CHECK_INTERVAL: usize = 256;
 /// sample cannot reset them.
 #[derive(Clone)]
 pub struct AudioEvalControl {
+    cache_scope: u64,
     cancel: Option<Arc<AtomicBool>>,
     deadline: Option<web_time::Instant>,
     remaining: Rc<Cell<usize>>,
@@ -144,7 +145,9 @@ pub struct AudioEvalControl {
 }
 impl AudioEvalControl {
     fn new(control: &MixControl) -> Self {
+        static NEXT_SCOPE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         Self {
+            cache_scope: NEXT_SCOPE.fetch_add(1, Ordering::Relaxed),
             cancel: control.cancel.clone(),
             deadline: control.deadline,
             remaining: Rc::new(Cell::new(control.max_expression_yields.unwrap_or(1024))),
@@ -154,6 +157,10 @@ impl AudioEvalControl {
             running: Rc::new(Cell::new(None)),
             limit: control.max_expression_time,
         }
+    }
+    /// Scope sampled expression frames to this mix and its footage and cancellation state.
+    pub fn cache_scope(&self) -> u64 {
+        self.cache_scope
     }
     /// Mark a runtime resource limit; ordinary expression errors still use keyframed fallback.
     pub fn fail(&self) {
@@ -200,12 +207,41 @@ impl AudioEvalControl {
             let start = web_time::Instant::now();
             self.running.set(Some(start));
             let out = run();
-            self.running.set(None);
-            self.spent.set(self.spent.get().saturating_add(start.elapsed()));
+            self.finish_timed_interval();
             out
         }
         #[cfg(target_arch = "wasm32")]
         run()
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn finish_timed_interval(&self) -> bool {
+        if let Some(start) = self.running.take() {
+            self.spent.set(self.spent.get().saturating_add(start.elapsed()));
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Exclude one synchronous footage read from the expression clock. Its absolute deadline
+    /// and cancellation flag remain active, including during nested reads.
+    pub fn without_footage_time(&self, read: impl FnOnce()) {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            struct Resume<'a>(Option<&'a AudioEvalControl>);
+            impl Drop for Resume<'_> {
+                fn drop(&mut self) {
+                    if let Some(control) = self.0 {
+                        control.running.set(Some(web_time::Instant::now()));
+                    }
+                }
+            }
+            let _resume = Resume(self.finish_timed_interval().then_some(self));
+            read();
+        }
+        #[cfg(target_arch = "wasm32")]
+        read();
     }
 }
 

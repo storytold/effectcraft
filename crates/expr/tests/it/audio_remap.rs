@@ -329,3 +329,97 @@ fn audio_finalization_does_not_invoke_returned_accessors() {
     let actual = mix_comp(&p, &source, Some(&Expressions), cid, Tick::ZERO, 32, 48000).unwrap();
     assert_eq!(actual, expected, "an accessor result uses the keyframed value");
 }
+
+#[test]
+fn returned_property_proxies_match_explicit_values_in_audio() {
+    use effectcraft_keyframe::Keyframe;
+    for (property, output, first, last) in
+        [("rotation", "timeRemap", Value::Scalar(0.5), Value::Scalar(1.5)), ("position", "audio/levels", Value::Vec2([-6.0, -12.0]), Value::Vec2([-3.0, -6.0]))]
+    {
+        let (mut p, cid) = workload::project(1, 0, None);
+        let layer = &mut p.comp_mut(cid).unwrap().layers[0];
+        layer.props.prop_mut(&format!("transform/{property}")).unwrap().keys =
+            vec![Keyframe::new(Tick::ZERO, first), Keyframe::new(Tick::from_seconds_f64(1.0), last)];
+        let baseline = mix_comp(&p, &workload::Source::default(), None, cid, Tick::ZERO, 128, 48000).unwrap();
+        let mut mix = |suffix: &str| {
+            p.comp_mut(cid).unwrap().layers[0].props.prop_mut(output).unwrap().expr =
+                Some(effectcraft_project::Expression { text: format!("thisLayer.transform.{property}{suffix}"), enabled: true });
+            mix_comp(&p, &workload::Source::default(), Some(&Expressions), cid, Tick::ZERO, 128, 48000)
+                .unwrap_or_else(|error| panic!("{property}{suffix}: {error}"))
+        };
+        let expected = mix(".value");
+        assert!(expected.iter().any(|&v| v != 0.0));
+        assert_ne!(expected, baseline, "the expression changes the mix: {property}");
+        assert_eq!(mix(""), expected, "{property}");
+    }
+}
+
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn sampled_footage_pauses_expression_time_but_preserves_deadline_and_cancellation() {
+    use effectcraft_project::{Footage, ItemId, ItemKind, LayerSource, build};
+    use effectcraft_render::{FootageSource, Image};
+    use std::sync::atomic::AtomicUsize;
+    use std::time::Duration;
+
+    struct Clip {
+        audio: workload::Source,
+        reads: AtomicUsize,
+        delay: Duration,
+        cancel: Option<Arc<AtomicBool>>,
+        gray: f32,
+    }
+    impl FootageSource for Clip {
+        fn frame(&self, _: ItemId, f: &Footage, _: Tick) -> Option<Arc<Image>> {
+            self.reads.fetch_add(1, Ordering::Relaxed);
+            std::thread::sleep(self.delay);
+            if let Some(cancel) = &self.cancel {
+                cancel.store(true, Ordering::Relaxed);
+            }
+            let mut img = Image::new(f.width, f.height);
+            img.data.fill([self.gray, self.gray, self.gray, 1.0]);
+            Some(Arc::new(img))
+        }
+        fn audio(&self, item: ItemId, f: &Footage, t: Tick, n: usize, rate: u32) -> Option<Vec<f32>> {
+            self.audio.audio(item, f, t, n, rate)
+        }
+    }
+
+    let (mut p, cid) = workload::project(1, 0, Some("thisComp.layer('Clip').sampleImage([4,4], [0.5,0.5], false, 0)[0] + time"));
+    let item = p.add_item(
+        "Clip",
+        effectcraft_color::Label::Aqua,
+        None,
+        ItemKind::Footage(Footage { width: 8, height: 8, has_video: true, kind: effectcraft_project::FootageKind::Still, ..Default::default() }),
+    );
+    let comp = p.comp(cid).unwrap().clone();
+    let layer = build::layer(&mut p, &comp, "Clip", LayerSource::Footage { item }, (8, 8), None);
+    p.comp_mut(cid).unwrap().layers.push(layer);
+    let source = |gray, delay, cancel| Clip { audio: workload::Source::default(), reads: AtomicUsize::new(0), delay, cancel, gray };
+    let mix = |clip: &Clip, control: &MixControl| {
+        let sources = MixSources { project: &p, footage: clip, expr: Some(&Expressions) };
+        mix_comp_with_control(&sources, cid, Tick::ZERO, 16, 48000, control)
+    };
+
+    let reference = source(0.5, Duration::ZERO, None);
+    let expected = mix(&reference, &MixControl::default()).unwrap();
+    assert_eq!(reference.reads.load(Ordering::Relaxed), 1, "one sampled frame per mix");
+    let slow = source(0.5, Duration::from_millis(400), None);
+    let control = MixControl { max_expression_time: Some(Duration::from_millis(200)), ..Default::default() };
+    assert_eq!(mix(&slow, &control).unwrap(), expected);
+    assert_eq!(slow.reads.load(Ordering::Relaxed), 1);
+    let dark = source(0.0, Duration::ZERO, None);
+    assert_ne!(mix(&dark, &control).unwrap(), expected, "sampling follows the current mix's footage");
+
+    let deadline = std::time::Instant::now() + Duration::from_millis(250);
+    let control = MixControl { deadline: Some(deadline), ..control };
+    assert_eq!(mix(&slow, &control), Err(AudioError::DeadlineExceeded));
+    assert_eq!(slow.reads.load(Ordering::Relaxed), 2, "the read began before the deadline");
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    let cancelled = source(0.5, Duration::ZERO, Some(cancel.clone()));
+    let control = MixControl { cancel: Some(cancel), deadline: None, ..control };
+    assert_eq!(mix(&cancelled, &control), Err(AudioError::Cancelled));
+    assert_eq!(cancelled.audio.reads.load(Ordering::Relaxed), 0);
+    assert_eq!(mix(&reference, &MixControl::default()).unwrap(), expected);
+}
