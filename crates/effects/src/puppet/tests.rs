@@ -359,3 +359,18 @@ fn single_pin_on_a_traced_solid_does_not_rotate_it() {
         }
     }
 }
+
+/// A part dragged over itself: the front part's transparent Expansion margin must not hide the
+/// opaque part behind it (#3705). Triangles are back to front, as `render` sorts them.
+#[test]
+fn a_transparent_front_triangle_does_not_hide_the_part_behind() {
+    let buf = Buf { img: Image::filled(8, 8, [1.0, 1.0, 1.0, 1.0]), offset: [0.0, 0.0], scale: 1.0 };
+    // Behind: covers pixel (4, 4) and maps it to opaque source.
+    let back = ([[3.0, 3.0], [7.0, 3.0], [3.0, 7.0]], [[3.0, 3.0], [7.0, 3.0], [3.0, 7.0]], 0.0);
+    // Front: covers the same pixel, but its rest position is outside the image, so it samples
+    // transparency (the margin past the layer's opaque pixels).
+    let front = ([[100.0, 100.0], [104.0, 100.0], [100.0, 104.0]], [[3.5, 3.5], [6.5, 3.5], [3.5, 6.5]], 1.0);
+    let out = rasterize(&buf, &[back, front]);
+    // The buffer starts at layer (2, 2), so layer pixel (4, 4) is buffer pixel (2, 2).
+    assert_eq!(out.img.get(2, 2), [1.0, 1.0, 1.0, 1.0], "the transparent margin hid the part behind");
+}
