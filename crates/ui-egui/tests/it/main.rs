@@ -94,6 +94,7 @@ mod ui_settings_keyboard;
 mod ui_shortcut_scopes;
 mod ui_tabs;
 mod ui_tail;
+mod ui_text_animator_axes;
 mod ui_text_edit;
 mod ui_text_range_handles;
 mod ui_theme_favorites;

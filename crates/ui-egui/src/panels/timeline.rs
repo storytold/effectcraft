@@ -5501,6 +5501,15 @@ fn text_anim_popups(
         widgets::open_popup(ui, pop);
     }
     let per_char = layer.props.prop("text/perChar3d").is_some_and(|q| q.value.as_bool());
+    // The layer font's variable axes, offered by both menus: Animate Text makes a new animator for
+    // the axis, the animator's Add menu puts it on that animator (#3964).
+    let axes = match layer.props.prop("text/sourceText").map(|p| p.value.clone()) {
+        Some(effectcraft_engine::keyframe::Value::Text(doc)) => {
+            let face = effectcraft_engine::text::resolve(&doc.font, &doc.style).face;
+            effectcraft_engine::text::variable::font_axes(face)
+        }
+        _ => Vec::new(),
+    };
     let mut opts: Vec<String> = Vec::new();
     let mut acts: Vec<(String, serde_json::Value)> = Vec::new();
     if key == "animate" {
@@ -5517,17 +5526,13 @@ fn text_anim_popups(
             acts.push(if *k == "-" { (String::new(), json!(null)) } else { ("layer.addTextAnimator".into(), json!({"layer": layer.id.0, "property": k})) });
         }
         // Variable Font Axes of the layer's font.
-        if let Some(effectcraft_engine::keyframe::Value::Text(doc)) = layer.props.prop("text/sourceText").map(|p| p.value.clone()) {
-            let face = effectcraft_engine::text::resolve(&doc.font, &doc.style).face;
-            let axes = effectcraft_engine::text::variable::font_axes(face);
-            if !axes.is_empty() {
-                opts.push("-".into());
-                acts.push((String::new(), json!(null)));
-            }
-            for a in axes {
-                opts.push(tr_args("Variable Font Axes: {}", &[&a.name]));
-                acts.push(("text.animatorFontAxes".into(), json!({"layer": layer.id.0, "axis": a.tag})));
-            }
+        if !axes.is_empty() {
+            opts.push("-".into());
+            acts.push((String::new(), json!(null)));
+        }
+        for a in &axes {
+            opts.push(tr_args("Variable Font Axes: {}", &[&a.name]));
+            acts.push(("text.animatorFontAxes".into(), json!({"layer": layer.id.0, "axis": a.tag})));
         }
     } else {
         for (kind, l) in [("range", "Selector: Range"), ("wiggly", "Selector: Wiggly"), ("expression", "Selector: Expression")] {
@@ -5543,6 +5548,15 @@ fn text_anim_popups(
             } else {
                 ("layer.addTextAnimatorProperty".into(), json!({"layer": layer.id.0, "animator": uid, "property": k}))
             });
+        }
+        // The font's variable axes go on this animator, as After Effects' Add menu lists them.
+        if !axes.is_empty() {
+            opts.push("-".into());
+            acts.push((String::new(), json!(null)));
+        }
+        for a in &axes {
+            opts.push(tr_args("Variable Font Axes: {}", &[&a.name]));
+            acts.push(("text.animatorFontAxes".into(), json!({"layer": layer.id.0, "animator": uid, "axis": a.tag})));
         }
     }
     if let Some(i) = widgets::popup_menu(ui, pop, br.left_bottom(), &opts, None)
