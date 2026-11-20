@@ -194,6 +194,22 @@ fn functions_and_let_are_reusable_across_evaluations() {
 }
 
 #[test]
+fn a_function_declaration_ends_at_its_brace_so_a_leading_minus_starts_a_new_statement() {
+    // #3212: the array-math rewrite took `function … {…}\n-50 + 100` for one expression,
+    // `(function … {…}) - 50 + 100`, which is NaN (and left the function undeclared).
+    let f = fx();
+    assert_close!(f.num("function same3212(x){ return x; }\n-50 + 100", 0.0), 50.0);
+    // The declaration really declared the function (globals do not outlive one evaluation).
+    assert_close!(f.num("function same3212(x){ return x; }\n-50 + 100;\nsame3212(7)", 0.0), 7.0);
+    assert_close!(f.num("function twice3212(x){ return x * 2; }\n-twice3212(10) + 100", 0.0), 80.0);
+    assert_close!(f.num("function seven3212(){ return 7; }\n+seven3212()", 0.0), 7.0);
+    assert_close!(f.num("function one3212(){ return 1; } -one3212() * 3", 0.0), -3.0);
+    assert_close!(f.num("if (time >= 0) { function neg3212(x){ return -x; }\n-neg3212(4) }", 0.0), 4.0);
+    // A function expression stays an operand: `function - 1` is NaN in JavaScript too.
+    assert_close!(f.num("var g3212 = function(){ return 1; }\n- 1;\ntypeof g3212 == 'number' ? 5 : 6", 0.0), 5.0);
+}
+
+#[test]
 fn an_expression_cannot_rebind_a_prelude_name_for_the_next_one() {
     let f = fx();
     // #2133: one runtime serves every expression on a thread and user code runs at global scope, so
@@ -1913,6 +1929,52 @@ fn layer_control_property_stands_for_its_layer() {
 }
 
 #[test]
+fn an_empty_layer_control_stands_for_its_own_layer() {
+    // In After Effects a Layer Control set to None gives the layer the effect is on: truthy, named
+    // and callable as that layer. Rigs test it with `L ? … : …` and then read `L.sourceRectAtTime`.
+    let mut f = fx();
+    let spec = effectcraft_effects::find("ec.control.layer").unwrap();
+    let mut map = group_push(&mut f.p, |ids| effectcraft_effects::instantiate(spec, ids, "Map", [20.0, 20.0]));
+    map.prop_mut("layer").unwrap().value = Value::Layer(None);
+    f.p.comp_mut(f.cid).unwrap().layers[0].props.sub_mut("effects").unwrap().children.push(map.into());
+    assert_close!(f.num("effect('Map')(1) ? 1 : 0", 0.0), 1.0);
+    assert_close!(f.num("effect('Map')(1).name == thisLayer.name ? 1 : 0", 0.0), 1.0);
+    assert_close!(f.num("effect('Map')(1).index", 0.0), 1.0);
+    assert_close!(f.num("var L = effect('Map')(1); L ? L.transform.position[0] : -1", 0.0), 50.0);
+    assert_close!(f.num("effect('Map')(1).sourceRectAtTime(time).width == thisLayer.sourceRectAtTime(time).width ? 1 : 0", 0.0), 1.0);
+}
+
+#[test]
+fn a_layer_parameters_own_expression_reads_its_layer() {
+    // An expression on the layer parameter itself: `thisProperty.value` and
+    // `thisProperty.valueAtTime(time)` give the layer, as reads from other properties do.
+    let mut f = fx();
+    let spec = effectcraft_effects::find("ec.control.layer").unwrap();
+    let mut empty = group_push(&mut f.p, |ids| effectcraft_effects::instantiate(spec, ids, "Empty", [20.0, 20.0]));
+    empty.prop_mut("layer").unwrap().value = Value::Layer(None);
+    let mut set = group_push(&mut f.p, |ids| effectcraft_effects::instantiate(spec, ids, "Set", [20.0, 20.0]));
+    set.prop_mut("layer").unwrap().value = Value::Layer(Some(f.b.0));
+    let fx_group = f.p.comp_mut(f.cid).unwrap().layers[0].props.sub_mut("effects").unwrap();
+    fx_group.children.push(empty.into());
+    fx_group.children.push(set.into());
+    let n = f.p.comp(f.cid).unwrap().layers[0].props.sub("effects").unwrap().children.len();
+    let (empty_path, set_path) = (format!("effects/#{}/layer", n - 1), format!("effects/#{n}/layer"));
+    // Each expression throws unless it reads the right layer's name.
+    for (path, read, want) in [
+        (&empty_path, "thisProperty.value", "A"),
+        (&empty_path, "thisProperty.valueAtTime(time)", "A"),
+        (&set_path, "thisProperty.value", "B"),
+        (&set_path, "thisProperty.valueAtTime(time)", "B"),
+    ] {
+        let e = format!("if ({read}.name !== '{want}') throw new Error('read ' + {read}); value");
+        f.ev(f.a, path, &e, 0.0).unwrap_or_else(|err| panic!("{path} {read}: {err}"));
+        // After posterizeTime moves the sample time, `value` already holds the layer.
+        let e = format!("posterizeTime(1); if ({read}.name !== '{want}') throw new Error('read ' + {read}); value");
+        f.ev(f.a, path, &e, 0.5).unwrap_or_else(|err| panic!("posterized {path} {read}: {err}"));
+    }
+}
+
+#[test]
 fn time_to_frames_rounds_durations_away_from_zero() {
     let f = fx();
     // Adobe's public expression reference distinguishes durations from absolute times.
@@ -2127,6 +2189,89 @@ fn bench_evaluation() {
         }
         println!("BENCH {best:>9} ns/eval  {label} (min of 3 x {iters})");
     }
+}
+
+/// Layer A with an old-format CC Ball Action: Scatter Motion saved as `instabilityState`
+/// ("Instability State"), opened through the migration (#3197). Scatter Motion is 37 and keyed
+/// 10 at 0 s, 50 at 2 s.
+fn old_ball_action() -> Fx {
+    let mut f = fx();
+    let spec = effectcraft_effects::find("ec.sim.ccballaction").unwrap();
+    let mut g = group_push(&mut f.p, |ids| effectcraft_effects::instantiate(spec, ids, "CC Ball Action", [20.0, 20.0]));
+    let sm = g.prop_mut("scatterMotion").unwrap();
+    sm.value = Value::Scalar(37.0);
+    sm.keys = vec![Keyframe::new(Tick::ZERO, Value::Scalar(10.0)), Keyframe::new(secs(2.0), Value::Scalar(50.0))];
+    sm.match_id = "instabilityState".into();
+    sm.name = "Instability State".into();
+    let mut next = f.p.next_id;
+    assert!(effectcraft_effects::migrate::upgrade_instance(spec, &mut g, &mut Ids(&mut next), [20.0, 20.0]));
+    f.p.next_id = next;
+    assert!(g.prop("scatterMotion").is_some(), "the migration renamed the parameter");
+    f.p.comp_mut(f.cid).unwrap().layers[0].props.sub_mut("effects").unwrap().children.push(g.into());
+    f
+}
+
+#[test]
+fn old_parameter_names_still_resolve_in_expressions() {
+    let f = old_ball_action();
+    for name in ["Instability State", "instabilityState", "instability state", "InstabilityState"] {
+        // Keyframes still apply: the keyed value at 0 s, not the stored 37.
+        assert_close!(f.num(&format!("effect('CC Ball Action')('{name}')"), 0.0), 10.0);
+        assert_close!(f.num(&format!("effect('CC Ball Action')('{name}')"), 2.0), 50.0);
+        assert_close!(f.num(&format!("effect('CC Ball Action')('{name}').valueAtTime(2)"), 0.0), 50.0);
+    }
+    // Current names read the same property, unchanged.
+    for name in ["Scatter Motion", "scatterMotion"] {
+        assert_close!(f.num(&format!("effect('CC Ball Action')('{name}')"), 0.0), 10.0);
+    }
+}
+
+#[test]
+fn old_parameter_name_follows_the_parameter_expression() {
+    let mut f = old_ball_action();
+    let p = f.p.comp_mut(f.cid).unwrap().layers[0].props.prop_mut("effects/#2/scatterMotion");
+    let p = match p {
+        Some(p) => p,
+        None => panic!("scatterMotion at effects/#2"),
+    };
+    p.expr = Some(Expression { text: "123".into(), enabled: true });
+    assert_close!(f.num("effect('CC Ball Action')('Instability State')", 0.0), 123.0);
+}
+
+#[test]
+fn unknown_parameter_names_still_fail() {
+    let f = old_ball_action();
+    assert!(f.ev(f.a, ROT, "effect('CC Ball Action')('No Such Thing')", 0.0).is_err());
+    // Old names only exist on the effect they were renamed on.
+    assert!(f.ev(f.a, ROT, "effect('Slider Control')('Instability State')", 0.0).is_err());
+}
+
+/// Every in-group rename in the alias table keeps resolving by its old id and display name.
+#[test]
+fn every_in_group_alias_resolves_by_its_old_name() {
+    let mut n = 0;
+    for (effect, old, new) in effectcraft_effects::migrate::PARAM_ID_ALIASES {
+        if old.contains('/') || new.contains('/') {
+            continue;
+        }
+        let Some(spec) = effectcraft_effects::find(effect) else { continue };
+        let mut f = fx();
+        let g = group_push(&mut f.p, |ids| effectcraft_effects::instantiate(spec, ids, "Probe", [20.0, 20.0]));
+        f.p.comp_mut(f.cid).unwrap().layers[0].props.sub_mut("effects").unwrap().children.push(g.into());
+        let (new_name, kind) = {
+            let l = &f.p.comp(f.cid).unwrap().layers[0];
+            let p = l.props.prop(&format!("effects/#2/{new}")).unwrap();
+            (p.name.clone(), p.value.clone())
+        };
+        if !matches!(kind, Value::Scalar(_)) {
+            continue;
+        }
+        let a = f.ev(f.a, ROT, &format!("effect('Probe')('{old}')"), 0.0).unwrap();
+        let b = f.ev(f.a, ROT, &format!("effect('Probe')('{new_name}')"), 0.0).unwrap();
+        assert_eq!(a, b, "{effect}: {old}");
+        n += 1;
+    }
+    assert!(n >= 1);
 }
 
 /// Viewport clipping must never affect layer-space expression reads (#1388).

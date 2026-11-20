@@ -172,6 +172,15 @@ impl FrameImage {
     fn is_gpu(&self) -> bool {
         matches!(self, FrameImage::Gpu(_))
     }
+    /// Held outside the cache too (a viewer showing it): dropping the cache's entry frees
+    /// nothing yet.
+    fn held_elsewhere(&self) -> bool {
+        match self {
+            FrameImage::Cpu(i) => Arc::strong_count(i) > 1,
+            FrameImage::CpuF16(i) => Arc::strong_count(i) > 1,
+            FrameImage::Gpu(i) => Arc::strong_count(i) > 1,
+        }
+    }
 }
 
 /// A viewer frame: its comp's content, the frame, scale, view and render options. `revision` is
@@ -263,6 +272,10 @@ struct Cached {
     /// (`None`: rendered without a disk cache, or elsewhere; never written from here).
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     since: Option<DiskSince>,
+    /// When it was last shown or stored, for the memory accountant (`memory::tick`).
+    used: u64,
+    /// What rendering it took, in microseconds (a typical cost when not timed).
+    cost_us: u64,
 }
 
 /// A disk cache and its drop generation ([`DiskCache::drop_generation`]) when a render started.
@@ -308,9 +321,20 @@ impl Cache {
     }
     /// [`Cache::insert`] with the source files the frame was made of and the disk cache's drop
     /// generation when its render started.
+    #[cfg(test)]
     fn insert_with(&mut self, k: FrameKey, img: FrameImage, files: Option<Arc<ReadFiles>>, since: Option<DiskSince>) {
+        self.insert_took(k, img, files, since, None);
+    }
+    /// Keep a frame with the source files it was made of, the disk cache drop generation when its
+    /// render started, and what rendering it took (`None`: not timed).
+    fn insert_took(&mut self, k: FrameKey, img: FrameImage, files: Option<Arc<ReadFiles>>, since: Option<DiskSince>, took: Option<std::time::Duration>) {
         let (sz, gpu) = (img.bytes(), img.is_gpu());
-        if let Some(old) = self.map.insert(k, Cached { img, files, since }) {
+        let cost_us = took.map_or_else(
+            || effectcraft_engine::render::memory::default_cost(sz, effectcraft_engine::render::memory::DEFAULT_PREVIEW_US_PER_MB),
+            |t| u64::try_from(t.as_micros()).unwrap_or(u64::MAX).max(1),
+        );
+        let used = effectcraft_engine::render::memory::tick();
+        if let Some(old) = self.map.insert(k, Cached { img, files, since, used, cost_us }) {
             self.forget(&old.img);
         } else {
             self.order.push_back(k);
@@ -329,14 +353,18 @@ impl Cache {
     /// prefetch kept refilling while it evicted the next frames (#595). Frames of another scale
     /// than the one on screen go first (a zoom or resolution change).
     fn victim(&self) -> Option<usize> {
+        self.victim_of(|_| true)
+    }
+    /// [`Cache::victim`] among the frames `eligible` accepts (in the same order).
+    fn victim_of(&self, eligible: impl Fn(&FrameKey) -> bool) -> Option<usize> {
         if let Some(s) = self.scale
-            && let Some(i) = self.order.iter().position(|k| k.scale != s)
+            && let Some(i) = self.order.iter().position(|k| k.scale != s && eligible(k))
         {
             return Some(i);
         }
-        let Some(p) = &self.playhead else { return (!self.order.is_empty()).then_some(0) };
+        let Some(p) = &self.playhead else { return self.order.iter().position(&eligible) };
         let mut farthest: Option<(i64, usize)> = None;
-        for (i, k) in self.order.iter().enumerate() {
+        for (i, k) in self.order.iter().enumerate().filter(|(_, k)| eligible(k)) {
             match p.ahead(k) {
                 None => return Some(i),
                 Some(d) if farthest.is_none_or(|(f, _)| d > f) => farthest = Some((d, i)),
@@ -344,6 +372,11 @@ impl Cache {
             }
         }
         farthest.map(|(_, i)| i)
+    }
+    /// [`Cache::victim`] among the frames in RAM (a GPU frame's bytes are video memory) nobody
+    /// else holds: what the memory accountant may drop to free RAM now.
+    fn free_victim(&self) -> Option<usize> {
+        self.victim_of(|k| self.map.get(k).is_some_and(|c| !c.img.is_gpu() && !c.img.held_elsewhere()))
     }
     /// Video memory: drop the oldest GPU frames past their own budget, frames of another scale
     /// than the one on screen first (a zoom or resolution change).
@@ -393,6 +426,9 @@ impl Cache {
     }
     /// Shown again: last in line for eviction.
     fn touch(&mut self, k: &FrameKey) {
+        if let Some(c) = self.map.get_mut(k) {
+            c.used = effectcraft_engine::render::memory::tick();
+        }
         if let Some(i) = self.order.iter().rposition(|o| o == k)
             && let Some(k) = self.order.remove(i)
         {
@@ -425,6 +461,45 @@ impl Cache {
             let Some(old) = self.victim().and_then(|i| self.order.remove(i)) else { break };
             self.remove(&old);
         }
+    }
+}
+
+/// The preview frames (in RAM; GPU frames have their own budget) in the common memory budget
+/// (#3271, #3298): each frame is worth what rendering it took, per byte. The frame offered is
+/// the one the cache would evict next ([`Cache::free_victim`]: it spares the frames a playing
+/// preview shows next).
+struct PreviewMemory(Arc<Mutex<Cache>>);
+
+impl effectcraft_engine::render::memory::MemoryHolder for PreviewMemory {
+    fn name(&self) -> &'static str {
+        "preview frames"
+    }
+    fn bytes(&self) -> usize {
+        self.0.lock().map(|c| c.bytes.saturating_sub(c.gpu_bytes)).unwrap_or(0)
+    }
+    // (only frames in RAM: dropping a GPU frame frees no RAM, and loses a viewer frame)
+    /// A frame a playing preview shows next is protected: the accountant lets it keep the caches
+    /// over the budget by a bounded amount while other items can go instead (#3301: one rendered
+    /// from cached layers costs little, and older footage outlived it, so the preview played into
+    /// live renders). A frame costs at least a typical render
+    /// ([`effectcraft_engine::render::memory::DEFAULT_PREVIEW_US_PER_MB`]): a quick one still
+    /// stands for a whole comp.
+    fn oldest(&self) -> Option<effectcraft_engine::render::memory::Candidate> {
+        use effectcraft_engine::render::memory::{Candidate, DEFAULT_PREVIEW_US_PER_MB, default_cost};
+        let c = self.0.lock().ok()?;
+        let k = c.order.get(c.free_victim()?)?;
+        let f = c.map.get(k)?;
+        let bytes = f.img.bytes();
+        let protected = c.playhead.as_ref().is_some_and(|p| p.ahead(k).is_some());
+        let cost_us = f.cost_us.max(default_cost(bytes, DEFAULT_PREVIEW_US_PER_MB));
+        Some(Candidate { used: f.used, bytes, cost_us, protected })
+    }
+    fn drop_oldest(&self) -> usize {
+        let Ok(mut c) = self.0.lock() else { return 0 };
+        let Some(old) = c.free_victim().and_then(|i| c.order.remove(i)) else { return 0 };
+        let bytes = c.map.get(&old).map_or(0, |f| f.img.bytes());
+        c.remove(&old);
+        bytes
     }
 }
 
@@ -660,6 +735,8 @@ pub fn comp_has_effects(project: &Project, comp: ItemId) -> bool {
 
 pub struct Frames {
     cache: Arc<Mutex<Cache>>,
+    /// The preview frames in the common memory budget (#3271), held here (registered weakly).
+    _memory: Arc<dyn effectcraft_engine::render::memory::MemoryHolder>,
     /// Keys queued or rendering.
     inflight: Arc<Mutex<HashSet<FrameKey>>>,
     /// Pending jobs, picked by priority when a pool thread frees up (the viewer's frame first).
@@ -668,8 +745,14 @@ pub struct Frames {
     /// None if the OS refused the threads: jobs then go to rayon's global pool.
     pool: Option<rayon::ThreadPool>,
     #[cfg(not(target_arch = "wasm32"))]
-    /// One thread each, for a playing preview's frames and idle caching (see [`Queue::idle_lanes`]). Empty if
-    /// the OS refused the threads: those frames then render on `pool` too.
+    /// Independent pools for foreground frames that may call external helpers.
+    foreground: Vec<rayon::ThreadPool>,
+    #[cfg(not(target_arch = "wasm32"))]
+    /// Cached isolation classification for the most recent immutable project snapshot.
+    isolated_project: Mutex<Option<(std::sync::Weak<Project>, bool)>>,
+    #[cfg(not(target_arch = "wasm32"))]
+    /// Independent pools for prefetch and idle caching (see [`Queue::idle_lanes`]).
+    /// Empty if the OS refused the threads: those frames then render on `pool` too.
     lanes: Vec<rayon::ThreadPool>,
     ctx: Option<egui::Context>,
     /// Render time of the last viewer (urgent) frame in ms, for the Info panel / perf readout.
@@ -764,11 +847,44 @@ impl Frames {
             })
             .collect();
         #[cfg(not(target_arch = "wasm32"))]
-        let queue = Queue { idle_lanes: (0..lanes.len()).collect(), lanes: lanes.len(), gpu_limit: 1, ..Default::default() };
+        let foreground: Vec<rayon::ThreadPool> = (0..(threads / width).min(8))
+            .map_while(|i| {
+                rayon::ThreadPoolBuilder::new()
+                    .num_threads(width.max(2))
+                    .thread_name(move |worker| format!("ec-viewer-{i}-{worker}"))
+                    .panic_handler(|_| log::error!("a viewer frame render panicked; that frame was skipped"))
+                    .build()
+                    .ok()
+            })
+            .collect();
+        #[cfg(not(target_arch = "wasm32"))]
+        let queue = Queue {
+            idle_foreground: (0..foreground.len().max(1)).collect(),
+            isolate_shared: foreground.is_empty(),
+            idle_lanes: (0..lanes.len()).collect(),
+            lanes: lanes.len(),
+            gpu_limit: 1,
+            ..Default::default()
+        };
         #[cfg(target_arch = "wasm32")]
         let queue = Queue::default();
+        let cache = Arc::new(Mutex::new(Cache {
+            map: HashMap::new(),
+            order: VecDeque::new(),
+            bytes: 0,
+            gpu_bytes: 0,
+            budget: 3 << 30,
+            gpu_budget: GPU_BUDGET,
+            gpu_pressure: None,
+            gpu_adjusted: None,
+            playhead: None,
+            scale: None,
+        }));
+        let memory: Arc<dyn effectcraft_engine::render::memory::MemoryHolder> = Arc::new(PreviewMemory(cache.clone()));
+        effectcraft_engine::render::memory::Accountant::global().register(&memory);
         Frames {
-            cache: Arc::new(Mutex::new(Cache { map: HashMap::new(), order: VecDeque::new(), bytes: 0, gpu_bytes: 0, budget: 3 << 30, gpu_budget: GPU_BUDGET, gpu_pressure: None, gpu_adjusted: None, playhead: None, scale: None })),
+            cache,
+            _memory: memory,
             inflight: Arc::new(Mutex::new(HashSet::new())),
             queue: Arc::new(Mutex::new(queue)),
             #[cfg(not(target_arch = "wasm32"))]
@@ -782,6 +898,10 @@ impl Frames {
                 .ok(),
             #[cfg(not(target_arch = "wasm32"))]
             lanes,
+            #[cfg(not(target_arch = "wasm32"))]
+            foreground,
+            #[cfg(not(target_arch = "wasm32"))]
+            isolated_project: Mutex::new(None),
             ctx: None,
             last_ms: Arc::new(Mutex::new(0.0)),
             content_keys: Arc::default(),
@@ -1225,6 +1345,10 @@ impl Frames {
                     // (only with the generation its render started at, for this cache: a frame
                     // made of a file Reload Footage dropped since holds the pixels from before)
                     let since = c.since.as_ref().and_then(|s| s.for_cache(&dc)).filter(|s| !dc.dropped_since(files, *s))?;
+                    // (only a frame that costs more to render again than to read back, #3301)
+                    if !dc.pays_off(c.img.bytes(), c.cost_us) {
+                        return None;
+                    }
                     let dk = disk_cache::frame_key(content, k.frame, k.scale, k.view ^ oh);
                     let tries = written.1.get(&dk).copied().unwrap_or(0);
                     (tries < 2 && !dc.contains(disk_cache::Kind::Frame, dk) && !dc.frame_pending(dk) && queued.insert(dk))
@@ -1411,8 +1535,7 @@ impl Frames {
             c.playhead = playhead;
         }
         let Ok(mut q) = self.queue.lock() else { return };
-        // A preview starting or stopping moves the queued prefetch frames between the lanes and
-        // the pool (see [`Queue::idle_lanes`]).
+        // A preview starting or stopping changes prefetch priority and GPU admission.
         #[cfg(not(target_arch = "wasm32"))]
         let moved = q.playhead.is_some() != playhead.is_some();
         q.playhead = playhead;
@@ -1450,7 +1573,7 @@ impl Frames {
     /// Start up to `n` idle lanes on the queued jobs (see [`Queue::idle_lanes`]).
     #[cfg(not(target_arch = "wasm32"))]
     fn start_lanes(&self, q: &mut Queue, n: usize) {
-        if self.remote.is_some() {
+        if self.remote.is_some() || q.idle_lanes.is_empty() {
             return;
         }
         let jobs = q.jobs.iter().filter(|j| q.on_lane(j)).count();
@@ -1458,22 +1581,73 @@ impl Frames {
             let Some(lane) = q.idle_lanes.pop() else { break };
             let Some(pool) = self.lanes.get(lane) else { break };
             let w = self.worker();
-            pool.spawn(move || w.drain(Some(lane)));
+            pool.spawn(move || w.drain(RenderLane::Preview(lane)));
         }
     }
 
-    /// Have a pool thread render the queued jobs that are the pool's.
+    /// Keep ordinary frames on the shared pool. A helper frame gets its own pool, so
+    /// its parallel work cannot steal a competing frame that waits for the helper.
     #[cfg(not(target_arch = "wasm32"))]
     fn start_pool(&self) {
         if self.remote.is_some() {
             return;
         }
+        let Ok(mut q) = self.queue.lock() else { return };
+        let mut shared = false;
+        let mut isolated = false;
+        for job in q.jobs.iter().filter(|j| !q.on_lane(j)) {
+            if q.isolated(job) {
+                isolated = true;
+            } else {
+                shared = true;
+            }
+        }
+        let lane = if isolated { q.idle_foreground.pop() } else { None };
+        drop(q);
+        if shared {
+            self.spawn_drain(RenderLane::Shared, self.pool.as_ref());
+        }
+        if let Some(lane) = lane {
+            let pool = self.foreground.get(lane).or(self.pool.as_ref());
+            self.spawn_drain(RenderLane::Foreground(lane), pool);
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn spawn_drain(&self, lane: RenderLane, pool: Option<&rayon::ThreadPool>) {
         let w = self.worker();
-        let job = move || w.drain(None);
-        match &self.pool {
+        let job = move || w.drain(lane);
+        match pool {
             Some(pool) => pool.spawn(job),
             None => rayon::spawn(job),
         }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn project_needs_isolated_frames(&self, project: &Arc<Project>) -> bool {
+        let weak = Arc::downgrade(project);
+        let mut cached = self.isolated_project.lock().ok();
+        if let Some((_, isolated)) = cached.as_deref().and_then(Option::as_ref).filter(|(p, _)| p.ptr_eq(&weak)) {
+            return *isolated;
+        }
+        // Expressions may sample layers outside the viewer's precomp tree. Look at the
+        // entire immutable snapshot so no reachable helper runs in the shared pool.
+        let isolated = project.comps().any(|(_, comp)| {
+            comp.layers.iter().any(|layer| {
+                layer.switches.effects
+                    && layer.effects().is_some_and(|fx| {
+                        fx.groups().any(|g| {
+                            g.enabled
+                                && matches!(&g.kind, effectcraft_project::GroupKind::Effect { effect }
+                                    if effectcraft_engine::effects::plugin::needs_isolated_frame(effect))
+                        })
+                    })
+            })
+        });
+        if let Some(cached) = cached.as_deref_mut() {
+            *cached = Some((weak, isolated));
+        }
+        isolated
     }
 
     /// Queue a prefetch frame (no-op if cached or already queued/rendering).
@@ -1481,9 +1655,8 @@ impl Frames {
         self.request_with(src, key, comp, t, opts, Want::Prefetch);
     }
 
-    /// Queue a frame nobody waits for (Cache Frames When Idle): as [`Frames::request`], but it
-    /// renders on a lane, one thread, and leaves the pool to the viewer's frame (see
-    /// [`Queue::idle_lanes`]).
+    /// Queue a frame nobody waits for (Cache Frames When Idle), with lower priority than
+    /// viewer prefetch within the same playhead priority.
     pub fn request_background(&self, src: &RenderSource, key: FrameKey, comp: ItemId, t: Tick, opts: RenderOpts) {
         self.request_with(src, key, comp, t, opts, Want::Background);
     }
@@ -1515,6 +1688,10 @@ impl Frames {
         if cached {
             return;
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        let isolate = self.remote.is_none() && self.project_needs_isolated_frames(&src.project);
+        #[cfg(target_arch = "wasm32")]
+        let isolate = false;
         let Ok(mut q) = self.queue.lock() else { return };
         let Ok(mut inf) = self.inflight.lock() else { return };
         // Jobs for an older project revision can never be shown: drop them.
@@ -1551,6 +1728,11 @@ impl Frames {
             }
         }
         if !inf.insert(key) {
+            // A queued viewer frame from another comp may have become prefetch.
+            #[cfg(not(target_arch = "wasm32"))]
+            if urgent {
+                self.start_lanes(&mut q, 1);
+            }
             drop(inf);
             drop(q);
             // Queued for a lane and now the viewer's frame: it is the pool's.
@@ -1562,18 +1744,16 @@ impl Frames {
         }
         q.seq += 1;
         let seq = q.seq;
-        let job = Job { key, src: src.clone(), comp, t, opts, urgent, background: want == Want::Background, seq, cancel: Arc::default() };
+        let job = Job { key, src: src.clone(), comp, t, opts, urgent, background: want == Want::Background, isolate, seq, cancel: Arc::default() };
         // A lane's frame: a busy lane takes the next job when it is done, an idle one starts now.
         #[cfg(not(target_arch = "wasm32"))]
         let on_lane = q.on_lane(&job);
         q.jobs.push(job);
         #[cfg(not(target_arch = "wasm32"))]
-        if on_lane {
-            self.start_lanes(&mut q, 1);
-        }
+        self.start_lanes(&mut q, 1);
         drop(inf);
         drop(q);
-        // One spawn per job; each spawn renders whichever queued jobs matter most right now.
+        // Wake the viewer's drain only if this job belongs to the pool.
         #[cfg(not(target_arch = "wasm32"))]
         if !on_lane {
             self.start_pool();
@@ -1736,6 +1916,27 @@ struct Worker {
     gpu_retired: Arc<AtomicBool>,
 }
 
+#[derive(Clone, Copy)]
+enum RenderLane {
+    #[cfg(not(target_arch = "wasm32"))]
+    Shared,
+    #[cfg(not(target_arch = "wasm32"))]
+    Foreground(usize),
+    #[cfg(not(target_arch = "wasm32"))]
+    Preview(usize),
+}
+
+impl RenderLane {
+    fn preview(self) -> bool {
+        match self {
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::Preview(_) => true,
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::Foreground(_) | Self::Shared => false,
+        }
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 thread_local! {
     /// This pool thread is inside [`Worker::drain`] (rendering a frame).
@@ -1750,11 +1951,11 @@ struct Draining;
 
 #[cfg(not(target_arch = "wasm32"))]
 impl Draining {
-    fn enter(lane: Option<usize>) -> Option<Self> {
+    fn enter(preview: bool) -> Option<Self> {
         if DRAINING.replace(true) {
             return None;
         }
-        DRAINING_LANE.set(lane.is_some());
+        DRAINING_LANE.set(preview);
         Some(Self)
     }
 }
@@ -1781,31 +1982,42 @@ impl Drop for GpuSlot<'_> {
 impl Worker {
     /// Render queued jobs, most important first, until the queue is empty.
     ///
-    /// A pool thread waiting inside a render (on a parallel loop's join) runs other pool work
-    /// meanwhile, including the spawns of newer requests: each would start a whole frame render
-    /// on top of the one waiting, with all of its buffers. Dragging a layer asks for a new frame
-    /// every UI frame, so renders piled up on every thread until memory ran out (#647). A spawn
-    /// that lands inside a render returns at once instead; the render below it takes the queued
-    /// jobs when it is done, so each thread renders one frame at a time.
-    ///
-    /// `lane`: the lane this runs on (see [`Queue::idle_lanes`]), `None` on the pool.
+    /// Helper and preview drains own separate pools. On the shared pool, the thread
+    /// guard prevents renders from stacking up while they wait in parallel loops (#647).
     #[cfg(not(target_arch = "wasm32"))]
-    fn drain(&self, lane: Option<usize>) {
-        let Some(_reset) = Draining::enter(lane) else { return };
-        while self.run_next(lane) {}
+    fn drain(&self, lane: RenderLane) {
+        let drain = || {
+            let Some(_reset) = Draining::enter(lane.preview()) else { return false };
+            while self.run_next(Some(lane)) {}
+            true
+        };
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(drain)) {
+            Ok(true) => {}
+            result => {
+                if let Ok(mut q) = self.queue.lock() {
+                    q.release_lane(lane);
+                }
+                if result.is_err() {
+                    log::error!("a frame queue worker panicked");
+                }
+            }
+        }
     }
 
-    /// Render the queued job that matters most right now, on lane `lane` (`None`: on
-    /// the pool, or the UI thread). `false` when the queue had no job for it; the lane is then
-    /// idle again.
-    fn run_next(&self, lane: Option<usize>) -> bool {
+    /// Render the highest priority job for this lane (`None` on the web UI thread).
+    /// Return the lane to the idle list if it has no more work.
+    fn run_next(&self, lane: Option<RenderLane>) -> bool {
         let Worker { queue, content_keys, .. } = self;
         // (asked before the queue's lock: it takes the cache's)
-        let gpu = lane.is_some() && self.gpu_ready();
+        let preview = lane.is_some_and(RenderLane::preview);
+        let gpu = preview && self.gpu_ready();
         let (job, mut slot) = {
             let Ok(mut q) = queue.lock() else { return false };
-            let Some(i) = q.next(lane.is_some(), gpu) else {
-                q.idle_lanes.extend(lane);
+            let Some(i) = q.next(lane, gpu) else {
+                #[cfg(not(target_arch = "wasm32"))]
+                if let Some(lane) = lane {
+                    q.release_lane(lane);
+                }
                 return false;
             };
             let job = q.jobs.swap_remove(i);
@@ -1857,10 +2069,13 @@ impl Worker {
         // and compression. Persistence still runs on this worker, using the same snapshot.
         let since = disk.as_ref().map(|(dc, _, since)| DiskSince::of(dc, *since));
         self.finish(&job, ci.clone(), Some(files.clone()), since, t0);
+        let took_us = u64::try_from(t0.elapsed().as_micros()).unwrap_or(u64::MAX);
         // The GPU's part is done; storing it on disk is the CPU's.
         drop(slot);
         if !disk_hit
             && let Some((dc, k, since)) = &disk
+            // (only a frame that costs more to render again than to read back, #3301)
+            && dc.pays_off(ci.bytes(), took_us)
             && put_disk_frame(dc, *k, &ci, &files, self.virtual_id.as_deref(), *since)
             && let Some(ctx) = &self.ctx
         {
@@ -1897,11 +2112,14 @@ impl Worker {
         if urgent && let Ok(mut l) = self.last.lock() {
             *l = t0.elapsed().as_secs_f64() * 1000.0;
         }
+        let ram = if img.is_gpu() { 0 } else { img.bytes() };
         if let Ok(mut c) = self.cache.lock()
             && (!img.is_gpu() || !self.gpu_retired.load(Ordering::Acquire))
         {
-            c.insert_with(key, img, files, since);
+            c.insert_took(key, img, files, since, Some(t0.elapsed()));
         }
+        // (with the lock released: the accountant asks every cache for its bytes)
+        effectcraft_engine::render::memory::Accountant::global().note_growth(ram);
         self.release(key, urgent);
     }
 
@@ -2128,6 +2346,8 @@ struct Job {
     urgent: bool,
     /// Nobody waits for it (see [`Frames::request_background`]).
     background: bool,
+    /// The snapshot can invoke an external helper while rendering this frame.
+    isolate: bool,
     seq: u64,
     /// Set when the viewer no longer waits for this frame (see [`Frames::request_urgent`]).
     cancel: Arc<AtomicBool>,
@@ -2150,16 +2370,17 @@ struct Queue {
     seq: u64,
     /// The playing preview, if any: its prefetch renders nearest first.
     playhead: Option<Playhead>,
-    /// How many lanes there are, and the ones not rendering. A lane is one thread that renders
-    /// one frame at a time. The frames of a playing preview and the frames nobody waits for
-    /// (Cache Frames When Idle) render on the lanes; the pool keeps the viewer's frame and the
-    /// few frames prefetched around it while paused. On the pool a frame's parallel work is
-    /// shared: a thread that took a piece of one frame and waited inside it started rendering
-    /// the queued frames on top, and went back to its piece only once the queue was empty. The
-    /// frames a preview started first, the ones right ahead of the playhead, were done last:
-    /// the preview stood still on a gap while the frames further ahead turned green. Idle
-    /// caching left the same gaps, and held up the viewer's frame when it shared a piece.
+    /// Idle viewer pools, returned under the queue lock when there is no more work.
+    #[cfg(not(target_arch = "wasm32"))]
+    idle_foreground: Vec<usize>,
+    /// If no dedicated pool could start, isolate all foreground work in the fallback pool.
+    #[cfg(not(target_arch = "wasm32"))]
+    isolate_shared: bool,
+    /// How many lanes there are, and the ones not rendering. Each lane has its own pool and
+    /// takes one frame at a time. Helper prefetch always uses these pools so it cannot
+    /// occupy a foreground helper pool while the viewer is paused.
     lanes: usize,
+    #[cfg(not(target_arch = "wasm32"))]
     idle_lanes: Vec<usize>,
     /// Lanes compositing a frame on the GPU, at most [`Queue::gpu_limit`]. The GPU is the
     /// viewer's device: each lane records, submits and reads back a whole frame on it, and the
@@ -2182,17 +2403,39 @@ struct Queue {
 }
 
 impl Queue {
+    #[cfg(not(target_arch = "wasm32"))]
+    fn release_lane(&mut self, lane: RenderLane) {
+        match lane {
+            RenderLane::Shared => {}
+            RenderLane::Foreground(i) => self.idle_foreground.push(i),
+            RenderLane::Preview(i) => self.idle_lanes.push(i),
+        }
+    }
     /// Whether `j` renders on a lane (else on the pool).
     fn on_lane(&self, j: &Job) -> bool {
-        self.lanes > 0 && !j.urgent && (j.background || self.playhead.is_some())
+        self.lanes > 0 && !j.urgent && (j.background || self.playhead.is_some() || j.isolate)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn isolated(&self, j: &Job) -> bool {
+        j.isolate || self.isolate_shared
     }
 
     /// The job a lane (`lane`) or the pool renders next: the [`Queue::best`] of its own. `gpu`:
     /// the GPU composites (a lane's frames), so a lane takes no GPU frame while
-    /// [`Queue::gpu_limit`] lanes are compositing.
-    fn next(&self, lane: bool, gpu: bool) -> Option<usize> {
+    /// [`Queue::gpu_limit`] lanes are compositing. While paused, lanes prefer viewer prefetch
+    /// to idle caching.
+    fn next(&self, lane: Option<RenderLane>, gpu: bool) -> Option<usize> {
         let gpu_full = gpu && self.gpu_lanes >= self.gpu_limit.max(1);
-        self.best_of(|j| self.on_lane(j) == lane && !(gpu_full && self.gpu_job(j)))
+        self.best_of(lane.is_some_and(RenderLane::preview) && self.playhead.is_none(), |j| match lane {
+            #[cfg(not(target_arch = "wasm32"))]
+            Some(RenderLane::Preview(_)) => self.on_lane(j) && !(gpu_full && self.gpu_job(j)),
+            #[cfg(not(target_arch = "wasm32"))]
+            Some(RenderLane::Shared) => !self.on_lane(j) && !self.isolated(j),
+            #[cfg(not(target_arch = "wasm32"))]
+            Some(RenderLane::Foreground(_)) => !self.on_lane(j) && self.isolated(j),
+            None => !self.on_lane(j) && !(gpu_full && self.gpu_job(j)),
+        })
     }
 
     /// The window drew a frame at `now` (`None`: no preview plays). A window that stalls with
@@ -2251,11 +2494,11 @@ impl Queue {
     /// frames asked for again after an eviction (the ones right ahead of the playhead) waited
     /// behind every frame further ahead (#595).
     fn best(&self) -> Option<usize> {
-        self.best_of(|_| true)
+        self.best_of(false, |_| true)
     }
 
     /// [`Queue::best`] among the jobs `of` accepts.
-    fn best_of(&self, of: impl Fn(&Job) -> bool) -> Option<usize> {
+    fn best_of(&self, prefer_viewer_prefetch: bool, of: impl Fn(&Job) -> bool) -> Option<usize> {
         let p = self.playhead.as_ref();
         self.jobs
             .iter()
@@ -2263,7 +2506,8 @@ impl Queue {
             .filter(|(_, j)| of(j))
             .max_by_key(|(_, j)| {
                 let near = if j.urgent { None } else { p.and_then(|p| p.ahead(&j.key)) };
-                (j.urgent, near.is_some(), near.map_or(0, |d| -d), if j.urgent { j.seq as i64 } else { -(j.seq as i64) })
+                let viewer_prefetch = prefer_viewer_prefetch && !j.background;
+                (j.urgent, near.is_some(), near.map_or(0, |d| -d), viewer_prefetch, if j.urgent { j.seq as i64 } else { -(j.seq as i64) })
             })
             .map(|(i, _)| i)
     }
