@@ -1434,3 +1434,108 @@ fn vp9_webm_route_backward_seek_cancel_and_draft() {
     let Some(p) = vp9_webm() else { return };
     assert_seek_draft_cancel_parity(&p, (640, 360), None);
 }
+
+#[test]
+fn draft_and_full_quality_cache_do_not_bleed() {
+    if h264_encoder() != Some("libx264") {
+        return;
+    }
+    let Some(p) = try_ffmpeg_fixture(
+        "h264_draft_full_cache.mp4",
+        &["-f", "lavfi", "-i", "testsrc2=size=320x180:rate=24:duration=1", "-c:v", "libx264", "-preset", "fast", "-bf", "2", "-g", "12", "-pix_fmt", "yuv420p"],
+    ) else {
+        return;
+    };
+    let f = probe(&p).expect("probe");
+    let pool = MediaPool::new();
+    let t = t_of(f.frame_rate, 7);
+    // Request draft at `t` first, then full quality at the exact same `t` and a neighbour in the same GOP.
+    let draft = pool.frame_at_size(ItemId(1), &f, t, 160, 90).expect("draft frame");
+    assert_eq!((draft.width, draft.height), (160, 90));
+    let full = pool.frame_at(&f, t).expect("full frame after draft");
+    let full_next = pool.frame_at(&f, t_of(f.frame_rate, 8)).expect("full neighbour after draft");
+    let fresh = MediaPool::new().frame_at(&f, t).expect("fresh full frame");
+    let fresh_next = MediaPool::new().frame_at(&f, t_of(f.frame_rate, 8)).expect("fresh full neighbour");
+    assert!(psnr(&full, &fresh) > 55.0, "full frame after draft must match fresh full decode");
+    assert!(psnr(&full_next, &fresh_next) > 55.0, "full GOP neighbour after draft must not reuse draft references");
+}
+
+#[test]
+fn rotated_mp4_matches_reference_orientation() {
+    if h264_encoder() != Some("libx264") {
+        return;
+    }
+    let Some(p) = try_ffmpeg_fixture(
+        "h264_rotate_90.mp4",
+        &["-f", "lavfi", "-i", "testsrc2=size=320x180:rate=24:duration=0.5", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-metadata:s:v:0", "rotate=90"],
+    ) else {
+        return;
+    };
+    let f = probe(&p).expect("probe rotated mp4");
+    assert_eq!((f.width, f.height), (180, 320), "90-degree rotated mp4 swaps width and height");
+    let pool = MediaPool::new();
+    let img = pool.frame_at(&f, Tick::ZERO).expect("rotated frame");
+    assert_eq!((img.width, img.height), (180, 320));
+    assert!(psnr(&img, &reference_frame(&p, 0)) > 35.0, "rotated frame pixels match ffmpeg auto-rotated reference");
+}
+
+#[test]
+fn webm_alpha_falls_back_to_filmcraft_preserving_alpha() {
+    let Some(p) = try_ffmpeg_fixture(
+        "vp9_alpha_fallback.webm",
+        &["-f", "lavfi", "-i", "format=rgba,geq=r='255':g='0':b='0':a='255*X/W':s=128x64:r=24", "-t", "0.25", "-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p"],
+    ) else {
+        return;
+    };
+    let f = probe(&p).expect("probe webm alpha");
+    assert_eq!(f.alpha, AlphaMode::Straight, "WebM alpha_mode=1 must preserve Straight alpha");
+    let pool = MediaPool::new();
+    let img = pool.frame_at(&f, Tick::ZERO).expect("webm alpha frame");
+    assert!(img.data[0][3] < 0.05 && img.data[127][3] > 0.95, "alpha ramp preserved via fallback");
+}
+
+#[test]
+fn filmcraft_fallback_handles_mjpeg_mov() {
+    let Some(p) = try_ffmpeg_fixture("mjpeg_fallback.mov", &["-f", "lavfi", "-i", "testsrc2=size=160x120:rate=24:duration=0.25", "-c:v", "mjpeg", "-q:v", "3"])
+    else {
+        return;
+    };
+    let f = probe(&p).expect("probe mjpeg fallback");
+    assert_eq!((f.width, f.height), (160, 120));
+    let pool = MediaPool::new();
+    let img = pool.frame_at(&f, Tick::ZERO).expect("mjpeg fallback frame");
+    assert_eq!((img.width, img.height), (160, 120));
+}
+
+#[test]
+fn matroska_opus_audio_timing_and_seek() {
+    let Some(p) = try_ffmpeg_fixture(
+        "vp9_opus_timing.webm",
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=160x120:rate=24:duration=1",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=48000:duration=1",
+            "-c:v",
+            "libvpx-vp9",
+            "-c:a",
+            "libopus",
+        ],
+    ) else {
+        return;
+    };
+    let f = probe(&p).expect("probe webm with opus");
+    assert!(f.has_audio, "opus audio stream detected");
+    let pool = MediaPool::new();
+    let start_audio = pool.audio(&f, 0, 4800, 48000);
+    assert_eq!(start_audio.len(), 1);
+    let peak_start = start_audio[0].iter().map(|s| s.abs()).fold(0.0f32, f32::max);
+    assert!(peak_start > 0.1, "opus audio at t=0 should be non-silent (peak={peak_start})");
+    let seek_audio = pool.audio(&f, 24000, 4800, 48000);
+    let peak_seek = seek_audio[0].iter().map(|s| s.abs()).fold(0.0f32, f32::max);
+    assert!(peak_seek > 0.1, "opus audio after seek should be non-silent (peak={peak_seek})");
+}

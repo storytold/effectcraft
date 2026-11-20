@@ -153,26 +153,42 @@ impl ContainerFile {
             }
             ContainerFile::Matroska(f) => {
                 let track = &f.tracks[track_idx];
-                let ns = (i128::from(start.max(0)) * 1_000_000_000) / i128::from(native_rate);
-                let t_track = track.ns_to_ticks(i64::try_from(ns).unwrap_or(0));
+                let delay_ns = i128::from(track.codec_delay_ns);
+                let preroll_ns = i128::from(track.seek_pre_roll_ns.max(80_000_000));
+                let target_ns = (i128::from(start.max(0)) * 1_000_000_000) / i128::from(native_rate) + delay_ns;
+                let seek_ns = (target_ns - preroll_ns).max(0);
+                let t_track = track.ns_to_ticks(i64::try_from(seek_ns).unwrap_or(0));
                 let sample_idx = track.sample_at_pts(t_track).unwrap_or(0);
                 let seek_idx = sample_idx.saturating_sub(2);
                 let sample_pts = track.samples.get(seek_idx).map_or(0, |s| s.pts);
-                let sample_ns = track.ticks_to_ns(sample_pts);
-                let decoded_pos = i64::try_from((i128::from(sample_ns) * i128::from(native_rate)) / 1_000_000_000).unwrap_or(0);
+                let sample_ns = i128::from(track.ticks_to_ns(sample_pts)) - delay_ns;
+                let decoded_pos = i64::try_from((sample_ns * i128::from(native_rate)) / 1_000_000_000).unwrap_or(0);
                 (seek_idx, decoded_pos)
             }
+        }
+    }
+
+    fn audio_discard_padding_samples(&self, track_idx: usize, sample_idx: usize, native_rate: u32) -> usize {
+        match self {
+            ContainerFile::Isobmff(_) => 0,
+            ContainerFile::Matroska(f) => f
+                .tracks
+                .get(track_idx)
+                .and_then(|t| t.samples.get(sample_idx))
+                .and_then(|s| s.discard_padding_ns)
+                .filter(|&ns| ns > 0)
+                .map_or(0, |ns| ((i128::from(ns) * i128::from(native_rate)) / 1_000_000_000) as usize),
         }
     }
 }
 
 fn open_audio_tracks<'a, I>(container: &ContainerFile, source: &dyn ByteSource, candidates: I) -> Option<(Vec<AudioTrackEntry>, Vec<AudioStreamInfo>)>
 where
-    I: IntoIterator<Item = (usize, usize, CodecParams)>,
+    I: IntoIterator<Item = (usize, usize, CodecParams, u64)>,
 {
     let mut audio_tracks = Vec::new();
     let mut audio_infos = Vec::new();
-    for (idx, sample_count, params) in candidates {
+    for (idx, sample_count, params, codec_delay_ns) in candidates {
         if audio_tracks.len() >= MAX_AUDIO_STREAMS {
             break;
         }
@@ -186,6 +202,7 @@ where
         let dec = AudioTrackDecoder::new(&params, &refs).ok()?;
         let native_rate = dec.sample_rate().max(1);
         let channels = u32::from(dec.layout().channels()).max(1);
+        let delay_samples = i64::try_from((i128::from(codec_delay_ns) * i128::from(native_rate)) / 1_000_000_000).unwrap_or(0);
         audio_infos.push(AudioStreamInfo {
             sample_rate: native_rate,
             channels,
@@ -195,7 +212,7 @@ where
         audio_tracks.push(AudioTrackEntry {
             track_idx: idx,
             native_rate,
-            state: Mutex::new(AudioTrackState { decoder: dec, next_sample: 0, decoded_pos: 0, buf: Vec::new() }),
+            state: Mutex::new(AudioTrackState { decoder: dec, next_sample: 0, decoded_pos: -delay_samples, buf: Vec::new() }),
         });
     }
     Some((audio_tracks, audio_infos))
@@ -213,24 +230,29 @@ fn open_isobmff(name: &str, source: SharedBytes) -> Option<Result<SharedSource>>
 
     let container_color = video_track.video().and_then(|v| v.color.as_ref()).map(color_from_isobmff);
     let color = container_color.unwrap_or(ColorInfo::REC709);
-    let (width, height) = video_track
+    let (mut width, mut height) = video_track
         .video()
         .map(|v| (u32::from(v.width), u32::from(v.height)))
         .filter(|&(w, h)| w > 0 && h > 0)
         .unwrap_or((video_track.width, video_track.height));
-    let par = video_track.video().and_then(|v| v.pixel_aspect).filter(|&(n, d)| n > 0 && d > 0).unwrap_or((1, 1));
+    let mut par = video_track.video().and_then(|v| v.pixel_aspect).filter(|&(n, d)| n > 0 && d > 0).unwrap_or((1, 1));
+    let rotation = video_track.display_rotation().unwrap_or(0) % 4;
+    if rotation % 2 == 1 {
+        std::mem::swap(&mut width, &mut height);
+        par = (par.1, par.0);
+    }
     let has_alpha = video_track.video().is_some_and(|v| v.depth == 32);
     let frame_rate = estimate_isobmff_frame_rate(video_track);
     let duration = Tick::from_units(i64::try_from(video_track.duration).unwrap_or(i64::MAX), i64::from(video_track.timescale));
     let bitrate = video_track.entries.first().and_then(|e| e.bitrate).map(|b| u64::from(b.avg_bitrate)).filter(|&b| b > 0);
     let codec_name = video_params.codec.name().to_string();
 
-    let audio_candidates: Vec<(usize, usize, CodecParams)> = file
+    let audio_candidates: Vec<(usize, usize, CodecParams, u64)> = file
         .tracks
         .iter()
         .enumerate()
         .filter(|(_, t)| t.kind == isobmff::TrackKind::Audio && !t.samples.is_empty() && !t.entries.is_empty() && t.timescale > 0)
-        .map(|(idx, t)| (idx, t.samples.len(), t.codec_params()))
+        .map(|(idx, t)| (idx, t.samples.len(), t.codec_params(), 0))
         .collect();
 
     let container = ContainerFile::Isobmff(file);
@@ -259,6 +281,7 @@ fn open_isobmff(name: &str, source: SharedBytes) -> Option<Result<SharedSource>>
         video_track_idx: video_idx,
         container_color,
         par,
+        rotation,
         video: Mutex::new(VideoState { decoder: video_decoder, next_decode_idx: 0, gop_start_idx: 0, flushed: false, decoded: Vec::new() }),
         audio_tracks,
     })))
@@ -268,28 +291,39 @@ fn open_matroska(name: &str, source: SharedBytes) -> Option<Result<SharedSource>
     let file = matroska::open(source.clone()).ok()?;
     let video_idx = file.tracks.iter().position(|t| t.kind == matroska::TrackKind::Video && !t.samples.is_empty() && t.timebase.0 > 0 && t.timebase.1 > 0)?;
     let video_track = &file.tracks[video_idx];
+    if !video_track.frames_readable() {
+        return None;
+    }
     let video_params = video_track.codec_params();
     if !supports_video_codec(video_params.codec) {
         return None;
     }
 
     let video_info = video_track.video.as_ref();
+    // WebM/Matroska alpha_mode == 1 stores alpha in BlockAdditional; fall back to FilmCraft.
+    if video_info.is_some_and(|v| v.alpha_mode == 1) {
+        return None;
+    }
     let container_color = video_info.and_then(|v| v.color.as_ref()).map(color_from_matroska);
     let color = container_color.unwrap_or(ColorInfo::REC709);
-    let (width, height) = video_info.map_or((0, 0), |v| (v.pixel_width, v.pixel_height));
-    let par = matroska_par(video_info, width, height);
-    let has_alpha = video_info.is_some_and(|v| v.alpha_mode == 1);
+    let (mut width, mut height) = video_info.map_or((0, 0), |v| (v.pixel_width, v.pixel_height));
+    let mut par = matroska_par(video_info, width, height);
+    let rotation = video_info.and_then(|v| v.display_rotation()).unwrap_or(0) % 4;
+    if rotation % 2 == 1 {
+        std::mem::swap(&mut width, &mut height);
+        par = (par.1, par.0);
+    }
     let frame_rate = estimate_matroska_frame_rate(video_track);
     let duration = matroska_duration(&file, video_track);
     let codec_name = video_params.codec.name().to_string();
     let container_name = if file.doc_type == "webm" { "webm" } else { "mkv" }.to_string();
 
-    let audio_candidates: Vec<(usize, usize, CodecParams)> = file
+    let audio_candidates: Vec<(usize, usize, CodecParams, u64)> = file
         .tracks
         .iter()
         .enumerate()
-        .filter(|(_, t)| t.kind == matroska::TrackKind::Audio && !t.samples.is_empty() && t.timebase.0 > 0 && t.timebase.1 > 0)
-        .map(|(idx, t)| (idx, t.samples.len(), t.codec_params()))
+        .filter(|(_, t)| t.kind == matroska::TrackKind::Audio && !t.samples.is_empty() && t.timebase.0 > 0 && t.timebase.1 > 0 && t.frames_readable())
+        .map(|(idx, t)| (idx, t.samples.len(), t.codec_params(), t.codec_delay_ns))
         .collect();
 
     let container = ContainerFile::Matroska(file);
@@ -312,7 +346,7 @@ fn open_matroska(name: &str, source: SharedBytes) -> Option<Result<SharedSource>
             codec: codec_name,
             pixel_format: String::new(),
             color,
-            has_alpha,
+            has_alpha: false,
             bitrate: None,
             hdr: None,
         }),
@@ -329,6 +363,7 @@ fn open_matroska(name: &str, source: SharedBytes) -> Option<Result<SharedSource>
         video_track_idx: video_idx,
         container_color,
         par,
+        rotation,
         video: Mutex::new(VideoState { decoder: video_decoder, next_decode_idx: 0, gop_start_idx: 0, flushed: false, decoded: Vec::new() }),
         audio_tracks,
     })))
@@ -336,6 +371,7 @@ fn open_matroska(name: &str, source: SharedBytes) -> Option<Result<SharedSource>
 
 struct CachedFrame {
     pts: i64,
+    draft: bool,
     frame: Arc<VideoFrame>,
 }
 
@@ -369,6 +405,7 @@ struct CraftMediaSource {
     video_track_idx: usize,
     container_color: Option<ColorInfo>,
     par: (u32, u32),
+    rotation: u8,
     video: Mutex<VideoState>,
     audio_tracks: Vec<AudioTrackEntry>,
 }
@@ -380,15 +417,21 @@ impl MediaSource for CraftMediaSource {
 
     fn video_frame(&self, req: FrameRequest) -> Result<Arc<VideoFrame>> {
         let (target_idx, target_pts) = self.file.target_sample(self.video_track_idx, req.time).ok_or_else(|| MediaError::Decode("no video samples".into()))?;
+        let want_draft = req.scale < 0.99;
 
         let mut state = self.video.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(hit) = state.decoded.iter().find(|c| c.pts == target_pts) {
+        if let Some(hit) = state.decoded.iter().find(|c| c.pts == target_pts && c.draft == want_draft) {
             return Ok(hit.frame.clone());
         }
 
         let sync_idx = self.file.sync_sample_before(self.video_track_idx, target_idx);
-        // Backward seek or jump to a later GOP: reset the decoder to the target sync sample.
-        if target_idx < state.next_decode_idx || sync_idx > state.gop_start_idx {
+        let draft_changed = state.decoder.draft() != want_draft;
+        if draft_changed {
+            state.decoder.set_draft(want_draft);
+        }
+        // Backward seek, jump to a later GOP, or draft/full-quality mode switch: reset decoder to
+        // the target sync sample so full-quality frames never reuse draft-decoded references.
+        if draft_changed || target_idx < state.next_decode_idx || sync_idx > state.gop_start_idx {
             state.decoder.reset().map_err(|e| MediaError::Decode(e.to_string()))?;
             state.decoded.clear();
             state.next_decode_idx = sync_idx;
@@ -396,13 +439,8 @@ impl MediaSource for CraftMediaSource {
             state.flushed = false;
         }
 
-        let want_draft = req.scale < 0.99;
-        if state.decoder.draft() != want_draft {
-            state.decoder.set_draft(want_draft);
-        }
-
         let sample_count = self.file.sample_count(self.video_track_idx);
-        while !state.decoded.iter().any(|c| c.pts >= target_pts) {
+        while !state.decoded.iter().any(|c| c.pts >= target_pts && c.draft == want_draft) {
             if filmcraft_media::cancel::cancelled() {
                 return Err(MediaError::Cancelled);
             }
@@ -412,27 +450,27 @@ impl MediaSource for CraftMediaSource {
                 let pkt = self.file.read_sample(&*self.source, self.video_track_idx, idx)?;
                 let frames = state.decoder.decode(&pkt, pts).map_err(|e| MediaError::Decode(e.to_string()))?;
                 state.next_decode_idx = idx + 1;
-                push_decoded(&mut state.decoded, frames, self.container_color, self.par, &self.file, self.video_track_idx)?;
+                push_decoded(&mut state.decoded, frames, want_draft, self.container_color, self.par, self.rotation, &self.file, self.video_track_idx)?;
             } else if !state.flushed {
                 let frames = state.decoder.flush().map_err(|e| MediaError::Decode(e.to_string()))?;
                 state.flushed = true;
-                push_decoded(&mut state.decoded, frames, self.container_color, self.par, &self.file, self.video_track_idx)?;
+                push_decoded(&mut state.decoded, frames, want_draft, self.container_color, self.par, self.rotation, &self.file, self.video_track_idx)?;
                 break;
             } else {
                 break;
             }
         }
 
-        if let Some(exact) = state.decoded.iter().find(|c| c.pts == target_pts) {
+        if let Some(exact) = state.decoded.iter().find(|c| c.pts == target_pts && c.draft == want_draft) {
             return Ok(exact.frame.clone());
         }
         // Fallback: latest decoded frame at or before target_pts, or earliest available.
         let best = state
             .decoded
             .iter()
-            .filter(|c| c.pts <= target_pts)
+            .filter(|c| c.draft == want_draft && c.pts <= target_pts)
             .max_by_key(|c| c.pts)
-            .or_else(|| state.decoded.first())
+            .or_else(|| state.decoded.iter().find(|c| c.draft == want_draft))
             .ok_or_else(|| MediaError::Decode("video decoder produced no frame".into()))?;
         Ok(best.frame.clone())
     }
@@ -529,9 +567,11 @@ fn decode_audio_range(
         let pkt = file.read_sample(source, track_idx, idx)?;
         state.next_sample = idx + 1;
         let block = state.decoder.decode(&pkt).map_err(|e| MediaError::Decode(e.to_string()))?;
+        let discard = file.audio_discard_padding_samples(track_idx, idx, native_rate);
         for (c, ch) in state.buf.iter_mut().enumerate() {
             if let Some(src_ch) = block.channels.get(c) {
-                ch.extend_from_slice(src_ch);
+                let keep = src_ch.len().saturating_sub(discard);
+                ch.extend_from_slice(&src_ch[..keep]);
             }
         }
     }
@@ -561,19 +601,22 @@ fn decode_audio_range(
     Ok(out)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn push_decoded(
     cache: &mut Vec<CachedFrame>,
     frames: Vec<DecodedVideoFrame>,
+    draft: bool,
     container_color: Option<ColorInfo>,
     par: (u32, u32),
+    rotation: u8,
     file: &ContainerFile,
     track_idx: usize,
 ) -> Result<()> {
     for vf in frames {
         let pts = vf.pts.unwrap_or(0);
         let pts_tick = file.pts_to_tick(track_idx, pts);
-        let frame = Arc::new(to_craft_frame(vf, container_color, par, pts_tick)?);
-        cache.push(CachedFrame { pts, frame });
+        let frame = Arc::new(to_craft_frame(vf, container_color, par, rotation, pts_tick)?);
+        cache.push(CachedFrame { pts, draft, frame });
     }
     if cache.len() > MAX_CACHED_FRAMES {
         let excess = cache.len() - MAX_CACHED_FRAMES;
@@ -582,13 +625,14 @@ fn push_decoded(
     Ok(())
 }
 
-fn to_craft_frame(vf: DecodedVideoFrame, container_color: Option<ColorInfo>, default_par: (u32, u32), pts: Tick) -> Result<VideoFrame> {
+fn to_craft_frame(vf: DecodedVideoFrame, container_color: Option<ColorInfo>, default_par: (u32, u32), rotation: u8, pts: Tick) -> Result<VideoFrame> {
     let width = vf.width();
     let height = vf.height();
     let subsampling = vf.subsampling();
     let family = vf.family();
     let tags = vf.color;
-    let par = vf.sar.filter(|&(n, d)| n > 0 && d > 0).unwrap_or(default_par);
+    let raw_par = vf.sar.filter(|&(n, d)| n > 0 && d > 0).unwrap_or(default_par);
+    let par = if rotation % 2 == 1 { (raw_par.1, raw_par.0) } else { raw_par };
     let color = resolve_color(tags, container_color);
     let bit_depth = vf.bit_depth();
     let (planes, alpha) = vf.into_planes();
@@ -622,7 +666,106 @@ fn to_craft_frame(vf: DecodedVideoFrame, container_color: Option<ColorInfo>, def
         ColorFamily::Rgb | ColorFamily::Gray => return Err(MediaError::Unsupported("non-YCbCr pixel format".into())),
     };
 
-    Ok(VideoFrame { width, height, data, color, par, pts })
+    let frame = VideoFrame { width, height, data, color, par, pts };
+    Ok(rotate_frame(frame, rotation))
+}
+
+fn rotate_plane<T: Copy + Default>(src: &[T], w: usize, h: usize, turns: u8) -> Vec<T> {
+    if w == 0 || h == 0 || src.len() < w * h {
+        return src.to_vec();
+    }
+    let mut dst = vec![T::default(); w * h];
+    match turns % 4 {
+        1 => {
+            for y in 0..h {
+                for x in 0..w {
+                    dst[x * h + (h - 1 - y)] = src[y * w + x];
+                }
+            }
+        }
+        2 => {
+            for y in 0..h {
+                for x in 0..w {
+                    dst[(h - 1 - y) * w + (w - 1 - x)] = src[y * w + x];
+                }
+            }
+        }
+        3 => {
+            for y in 0..h {
+                for x in 0..w {
+                    dst[(w - 1 - x) * h + y] = src[y * w + x];
+                }
+            }
+        }
+        _ => return src.to_vec(),
+    }
+    dst
+}
+
+fn upsample_horiz<T: Copy>(src: &[T], cw: usize, ch: usize, full_w: usize) -> Vec<T> {
+    let mut out = Vec::with_capacity(full_w * ch);
+    for y in 0..ch {
+        let row = &src[y * cw..(y + 1) * cw];
+        for x in 0..full_w {
+            out.push(row[(x / 2).min(cw.saturating_sub(1))]);
+        }
+    }
+    out
+}
+
+fn rotate_frame(mut frame: VideoFrame, turns: u8) -> VideoFrame {
+    let turns = turns % 4;
+    if turns == 0 {
+        return frame;
+    }
+    let (w, h) = (frame.width as usize, frame.height as usize);
+    let (nw, nh) = if turns % 2 == 1 { (frame.height, frame.width) } else { (frame.width, frame.height) };
+    let data = match frame.data {
+        PixelData::Yuv8 { planes: [y, cb, cr], chroma, alpha } => {
+            let (cw, ch, out_chroma) = match chroma {
+                Chroma::C420 => (w.div_ceil(2), h.div_ceil(2), Chroma::C420),
+                Chroma::C422 if turns % 2 == 1 => (w, h, Chroma::C444),
+                Chroma::C422 => (w.div_ceil(2), h, Chroma::C422),
+                Chroma::C444 => (w, h, Chroma::C444),
+            };
+            let (cb_r, cr_r) = if chroma == Chroma::C422 && turns % 2 == 1 {
+                let src_cw = w.div_ceil(2);
+                (rotate_plane(&upsample_horiz(&cb, src_cw, h, w), w, h, turns), rotate_plane(&upsample_horiz(&cr, src_cw, h, w), w, h, turns))
+            } else {
+                (rotate_plane(&cb, cw, ch, turns), rotate_plane(&cr, cw, ch, turns))
+            };
+            PixelData::Yuv8 {
+                planes: [Arc::new(rotate_plane(&y, w, h, turns)), Arc::new(cb_r), Arc::new(cr_r)],
+                chroma: out_chroma,
+                alpha: alpha.map(|a| Arc::new(rotate_plane(&a, w, h, turns))),
+            }
+        }
+        PixelData::Yuv16 { planes: [y, cb, cr], chroma, bits, alpha } => {
+            let (cw, ch, out_chroma) = match chroma {
+                Chroma::C420 => (w.div_ceil(2), h.div_ceil(2), Chroma::C420),
+                Chroma::C422 if turns % 2 == 1 => (w, h, Chroma::C444),
+                Chroma::C422 => (w.div_ceil(2), h, Chroma::C422),
+                Chroma::C444 => (w, h, Chroma::C444),
+            };
+            let (cb_r, cr_r) = if chroma == Chroma::C422 && turns % 2 == 1 {
+                let src_cw = w.div_ceil(2);
+                (rotate_plane(&upsample_horiz(&cb, src_cw, h, w), w, h, turns), rotate_plane(&upsample_horiz(&cr, src_cw, h, w), w, h, turns))
+            } else {
+                (rotate_plane(&cb, cw, ch, turns), rotate_plane(&cr, cw, ch, turns))
+            };
+            PixelData::Yuv16 {
+                planes: [Arc::new(rotate_plane(&y, w, h, turns)), Arc::new(cb_r), Arc::new(cr_r)],
+                chroma: out_chroma,
+                bits,
+                alpha: alpha.map(|a| Arc::new(rotate_plane(&a, w, h, turns))),
+            }
+        }
+        other => other,
+    };
+    frame.width = nw;
+    frame.height = nh;
+    frame.data = data;
+    frame
 }
 
 fn plane_u8(p: Plane) -> Result<Vec<u8>> {
@@ -848,5 +991,34 @@ mod tests {
         assert_eq!(c.transfer, Transfer::Pq);
         assert_eq!(c.matrix, Matrix::Bt2020Ncl);
         assert_eq!(c.range, Range::Limited);
+    }
+
+    #[test]
+    fn rotate_frame_swaps_dimensions_and_orients_planes() {
+        let frame = VideoFrame {
+            width: 4,
+            height: 2,
+            data: PixelData::Yuv8 {
+                planes: [Arc::new(vec![1, 2, 3, 4, 5, 6, 7, 8]), Arc::new(vec![10, 20]), Arc::new(vec![30, 40])],
+                chroma: Chroma::C420,
+                alpha: Some(Arc::new(vec![11, 12, 13, 14, 15, 16, 17, 18])),
+            },
+            color: ColorInfo::REC709,
+            par: (1, 1),
+            pts: Tick::ZERO,
+        };
+        let rot90 = rotate_frame(frame.clone(), 1);
+        assert_eq!((rot90.width, rot90.height), (2, 4));
+        if let PixelData::Yuv8 { planes: [y, ..], alpha: Some(a), .. } = &rot90.data {
+            assert_eq!(&**y, &[5, 1, 6, 2, 7, 3, 8, 4]);
+            assert_eq!(&**a, &[15, 11, 16, 12, 17, 13, 18, 14]);
+        } else {
+            assert!(false, "expected Yuv8 with alpha");
+        }
+        let rot360 = rotate_frame(rot90, 3);
+        assert_eq!((rot360.width, rot360.height), (4, 2));
+        if let PixelData::Yuv8 { planes: [y, ..], .. } = &rot360.data {
+            assert_eq!(&**y, &[1, 2, 3, 4, 5, 6, 7, 8]);
+        }
     }
 }
