@@ -370,7 +370,7 @@ fn a_transparent_front_triangle_does_not_hide_the_part_behind() {
     // Front: covers the same pixel, but its rest position is outside the image, so it samples
     // transparency (the margin past the layer's opaque pixels).
     let front = ([[100.0, 100.0], [104.0, 100.0], [100.0, 104.0]], [[3.5, 3.5], [6.5, 3.5], [3.5, 6.5]], 1.0);
-    let out = rasterize(&buf, &[back, front]);
+    let out = rasterize(&buf, &[back, front], &[vec![], vec![]]);
     // The buffer starts at layer (2, 2), so layer pixel (4, 4) is buffer pixel (2, 2).
     assert_eq!(out.img.get(2, 2), [1.0, 1.0, 1.0, 1.0], "the transparent margin hid the part behind");
 }
@@ -382,7 +382,7 @@ fn a_shared_mesh_edge_keeps_the_uniform_alpha_once() {
     let buf = Buf { img: Image::filled(8, 8, [0.5, 0.5, 0.5, 0.5]), offset: [0.0, 0.0], scale: 1.0 };
     let lower = ([[3.0, 3.0], [6.0, 3.0], [3.0, 6.0]], [[3.0, 3.0], [6.0, 3.0], [3.0, 6.0]], 0.0);
     let upper = ([[6.0, 3.0], [6.0, 6.0], [3.0, 6.0]], [[6.0, 3.0], [6.0, 6.0], [3.0, 6.0]], 1.0);
-    let out = rasterize(&buf, &[lower, upper]);
+    let out = rasterize(&buf, &[lower, upper], &[vec![1], vec![0]]);
     assert_eq!(out.img.get(2, 2), [0.5, 0.5, 0.5, 0.5]);
 }
 
@@ -393,7 +393,7 @@ fn a_partial_opaque_front_keeps_the_pixel_opaque() {
     let buf = Buf { img: Image::filled(8, 8, [1.0, 1.0, 1.0, 1.0]), offset: [0.0, 0.0], scale: 1.0 };
     let rear = ([[2.0, 2.0], [8.0, 2.0], [2.0, 8.0]], [[2.0, 2.0], [8.0, 2.0], [2.0, 8.0]], 0.0);
     let front = ([[4.1, 4.1], [4.4, 4.1], [4.1, 4.4]], [[4.1, 4.1], [4.4, 4.1], [4.1, 4.4]], 1.0);
-    let out = rasterize(&buf, &[rear, front]);
+    let out = rasterize(&buf, &[rear, front], &[vec![], vec![]]);
     assert_eq!(out.img.get(3, 3), [1.0, 1.0, 1.0, 1.0]);
 }
 
@@ -417,7 +417,21 @@ fn a_partly_transparent_front_blends_over_the_rear() {
     let shape = [[2.0, 2.0], [8.0, 2.0], [5.0, 8.0]];
     let rear = (shape, shape, 0.0);
     let front = ([[-2.0, -2.0], [4.0, -2.0], [1.0, 4.0]], shape, 1.0);
-    let out = rasterize(&buf, &[rear, front]);
+    let out = rasterize(&buf, &[rear, front], &[vec![], vec![]]);
     let got = out.img.get(4, 4);
     assert!((0..4).all(|c| (got[c] - [0.5, 0.0, 0.5, 1.0][c]).abs() < 1e-5), "{got:?}");
+}
+
+/// Two distinct overlapping parts with identical samples still blend: surface identity comes from
+/// shared mesh edges, not from equal colours (#3705). Two half-transparent layers give alpha 0.75.
+#[test]
+fn two_distinct_parts_with_equal_samples_still_blend() {
+    let buf = Buf { img: Image::filled(8, 8, [0.5, 0.0, 0.0, 0.5]), offset: [0.0, 0.0], scale: 1.0 };
+    let shape = [[2.0, 2.0], [8.0, 2.0], [5.0, 8.0]];
+    let rear = (shape, shape, 0.0);
+    let front = ([[-2.0, -2.0], [4.0, -2.0], [1.0, 4.0]], shape, 1.0);
+    // The triangles share no edge, so they are two surfaces even though every sample is equal.
+    let out = rasterize(&buf, &[rear, front], &[vec![], vec![]]);
+    let got = out.img.get(4, 4);
+    assert!((0..4).all(|c| (got[c] - [0.75, 0.0, 0.0, 0.75][c]).abs() < 1e-5), "{got:?}");
 }

@@ -406,14 +406,6 @@ fn bary(a: [f64; 2], b: [f64; 2], c: [f64; 2], p: [f64; 2]) -> Option<[f64; 3]> 
     Some([l0, l1, 1.0 - l0 - l1])
 }
 
-/// Whether two samples at one subsample come from the same surface. Adjacent triangles of a mesh
-/// map a shared edge to the same rest position, so their samples agree; distinct overlapping
-/// parts normally do not.
-#[inline]
-fn same_surface(a: [f32; 4], b: [f32; 4]) -> bool {
-    a.iter().zip(b).all(|(x, y)| (x - y).abs() <= 1e-6)
-}
-
 fn render(ctx: &EffectCtx, buf: Buf) -> Buf {
     let meshes = parse(ctx.params);
     if meshes.is_empty() {
@@ -422,6 +414,9 @@ fn render(ctx: &EffectCtx, buf: Buf) -> Buf {
     let refine = (ctx.params.get("refinement").map(Value::as_f64).unwrap_or(20.0) / 10.0).round().clamp(0.0, 10.0) as usize;
     // Triangles of every mesh in pixel space: (rest px, deformed px, depth).
     let mut tris: Vec<([[f64; 2]; 3], [[f64; 2]; 3], f64)> = vec![];
+    // Per-triangle rest-space edge neighbours, so the rasterizer can tell two adjacent triangles
+    // of one surface from two distinct overlapping parts.
+    let mut local_neighbors: Vec<Vec<usize>> = vec![];
     let px = |q: [f64; 2]| [q[0] * buf.scale + buf.offset[0], q[1] * buf.scale + buf.offset[1]];
     for m in &meshes {
         let mesh = mesh_for(&buf, m);
@@ -430,24 +425,51 @@ fn render(ctx: &EffectCtx, buf: Buf) -> Buf {
         }
         let def = solve(&mesh, &m.pins, refine);
         let dep = depths(&mesh, &m.pins);
+        let base = tris.len();
         for (k, t) in mesh.tris.iter().enumerate() {
             let r = [px(mesh.verts[t[0]]), px(mesh.verts[t[1]]), px(mesh.verts[t[2]])];
             let d = [px(def[t[0]]), px(def[t[1]]), px(def[t[2]])];
             tris.push((r, d, dep[k]));
         }
+        while local_neighbors.len() < tris.len() {
+            local_neighbors.push(Vec::new());
+        }
+        let mut edges: std::collections::HashMap<(usize, usize), Vec<usize>> = std::collections::HashMap::new();
+        for (k, t) in mesh.tris.iter().enumerate() {
+            for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+                let key = if a < b { (a, b) } else { (b, a) };
+                edges.entry(key).or_default().push(base + k);
+            }
+        }
+        for list in edges.values() {
+            if let [a, b] = list[..] {
+                local_neighbors[a].push(b);
+                local_neighbors[b].push(a);
+            }
+        }
     }
     if tris.is_empty() {
         return buf;
     }
-    // Stable sort: back to front.
-    tris.sort_by(|a, b| a.2.total_cmp(&b.2));
-    rasterize(&buf, &tris)
+    // Stable sort back to front, carrying the neighbours through the same permutation.
+    let mut order: Vec<usize> = (0..tris.len()).collect();
+    order.sort_by(|a, b| tris[*a].2.total_cmp(&tris[*b].2));
+    let mut position = vec![0usize; order.len()];
+    let mut sorted = Vec::with_capacity(order.len());
+    for (new, &old) in order.iter().enumerate() {
+        position[old] = new;
+        sorted.push(tris[old]);
+    }
+    let neighbors: Vec<Vec<usize>> = order.iter().map(|&old| local_neighbors[old].iter().map(|&j| position[j]).collect()).collect();
+    rasterize(&buf, &sorted, &neighbors)
 }
 
 /// Texture-map `buf` through triangles (rest px → deformed px), back to front. A triangle that
 /// samples transparency leaves what is behind it alone, so a part's Expansion margin cannot hide
-/// an opaque part underneath (#3705); a partly transparent one blends over it.
-fn rasterize(buf: &Buf, tris: &[([[f64; 2]; 3], [[f64; 2]; 3], f64)]) -> Buf {
+/// an opaque part underneath (#3705); a partly transparent one blends over it. `neighbors` lists
+/// the triangles that share a rest-space edge with each triangle, so two adjacent triangles of one
+/// surface are not counted twice while distinct overlapping parts still blend.
+fn rasterize(buf: &Buf, tris: &[([[f64; 2]; 3], [[f64; 2]; 3], f64)], neighbors: &[Vec<usize>]) -> Buf {
     let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
     for (_, d, _) in tris {
         for p in d {
@@ -549,7 +571,7 @@ fn rasterize(buf: &Buf, tris: &[([[f64; 2]; 3], [[f64; 2]; 3], f64)]) -> Buf {
             let mut sum = [0.0f32; 4];
             for o in SUB {
                 let q = [x + o[0], y + o[1]];
-                let mut acc: Option<[f32; 4]> = None;
+                let mut acc: Option<([f32; 4], usize)> = None;
                 for &k in row_tris[row].iter().rev() {
                     let (bx0, bx1, by0, by1) = boxes[k];
                     if q[0] < bx0 || q[0] > bx1 || q[1] < by0 || q[1] > by1 {
@@ -566,17 +588,17 @@ fn rasterize(buf: &Buf, tris: &[([[f64; 2]; 3], [[f64; 2]; 3], f64)]) -> Buf {
                         continue;
                     }
                     acc = Some(match acc {
-                        None => t,
-                        // Adjacent triangles of one mesh map a shared edge to the same rest
-                        // position, so equal samples are one surface: keep the front one.
-                        Some(a) if same_surface(a, t) => a,
-                        Some(a) => {
+                        None => (t, k),
+                        // Sharing a rest-space edge makes two triangles one continuous surface:
+                        // keep the front sample instead of counting it twice.
+                        Some((a, owner)) if neighbors[owner].contains(&k) => (a, owner),
+                        Some((a, _)) => {
                             let over = 1.0 - a[3];
-                            [a[0] + t[0] * over, a[1] + t[1] * over, a[2] + t[2] * over, a[3] + t[3] * over]
+                            ([a[0] + t[0] * over, a[1] + t[1] * over, a[2] + t[2] * over, a[3] + t[3] * over], k)
                         }
                     });
                 }
-                if let Some(a) = acc {
+                if let Some((a, _)) = acc {
                     sum = [sum[0] + a[0], sum[1] + a[1], sum[2] + a[2], sum[3] + a[3]];
                 }
             }
