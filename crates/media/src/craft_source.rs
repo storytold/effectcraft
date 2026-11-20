@@ -1075,7 +1075,7 @@ mod tests {
 
         let nclc = color_from_isobmff(&isobmff::ColorInfo::Nclc { primaries: 1, transfer: 1, matrix: 1 });
         assert_eq!(nclc, ColorInfo::REC709);
-        let icc = color_from_isobmff(&isobmff::ColorInfo::Icc { profile: Vec::new() });
+        let icc = color_from_isobmff(&isobmff::ColorInfo::Icc { kind: isobmff::FourCc(*b"prof"), profile: Vec::new() });
         assert_eq!(icc, ColorInfo::REC709);
 
         let v = matroska::VideoInfo { display_width: Some(1280), display_height: Some(720), display_unit: 0, ..Default::default() };
