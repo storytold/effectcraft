@@ -1362,7 +1362,7 @@ fn css_cascade_specificity_display_visibility_and_group_opacity_parity() {
         <g class="gone"><rect x="50" y="0" width="10" height="10" fill="#ff00ff"/></g>
         <g visibility="hidden">
             <rect x="0" y="10" width="10" height="10" fill="#ff0000"/>
-            <rect x="10" y="10" width="10" height="10" fill="#00ff00" visibility="visible"/>
+            <rect x="10" y="10" width="10" height="10" style="fill: #00ff00" visibility="visible"/>
         </g>
         <g opacity="0.5">
             <rect x="20" y="10" width="10" height="10" fill="#ff0000"/>
@@ -1441,8 +1441,9 @@ fn inherited_attributes_current_color_and_use_inheritance_parity() {
 
     let img = rasterize(&doc, 50, 20, 1.0);
     assert!(near(px(&img, 15, 5), [0.0, 1.0, 0.0, 1.0], 1e-3));
-    assert!(near(px(&img, 25, 5), [1.0, 1.0, 0.0, 1.0], 1e-3));
-    assert!(near(px(&img, 35, 5), [0.0, 1.0, 0.0, 1.0], 1e-3));
+    // Both <use> elements inherit fill-opacity="0.5" from the enclosing <g>.
+    assert!(near(px(&img, 25, 5), [0.5, 0.5, 0.0, 0.5], 1e-3));
+    assert!(near(px(&img, 35, 5), [0.0, 0.5, 0.0, 0.5], 1e-3));
 }
 
 #[test]
@@ -1549,7 +1550,7 @@ fn paint_references_gradients_fallbacks_and_stroke_styles_parity() {
                 <stop offset="100%" stop-color="#0000ff"/>
             </linearGradient>
             <linearGradient id="inherited-grad" xlink:href="#base-stops" x1="0" y1="0" x2="10" y2="0" gradientUnits="userSpaceOnUse" spreadMethod="reflect"/>
-            <radialGradient id="rad" cx="50" cy="10" r="10" fx="50" fy="10" gradientUnits="userSpaceOnUse">
+            <radialGradient id="rad" cx="50.5" cy="10.5" r="10" fx="50.5" fy="10.5" gradientUnits="userSpaceOnUse">
                 <stop offset="0" stop-color="#ffffff"/>
                 <stop offset="1" stop-color="#00ff00"/>
             </radialGradient>
