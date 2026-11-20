@@ -1296,7 +1296,7 @@ fn the_h264_fixture_options_fit_the_picked_encoder() {
 #[test]
 fn h264_bframe_route_backward_seek_cancel_color_and_draft() {
     use std::sync::atomic::AtomicBool;
-    if !has_encoder("libx264") {
+    if h264_encoder() != Some("libx264") {
         return;
     }
     let Some(p) = try_ffmpeg_fixture(
