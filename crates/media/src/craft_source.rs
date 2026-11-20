@@ -151,9 +151,7 @@ impl ContainerFile {
                 let sample_idx = track.sample_at_presentation_time(i64::try_from(t_track).unwrap_or(0)).unwrap_or(0);
                 // Back up a few packets for AAC/Opus overlap/preroll.
                 let seek_idx = sample_idx.saturating_sub(2);
-                let sample_pts = track.presentation_pts(seek_idx).unwrap_or(0);
-                let decoded_pos = i64::try_from((i128::from(sample_pts) * i128::from(native_rate)) / i128::from(track.timescale.max(1))).unwrap_or(0);
-                (seek_idx, decoded_pos)
+                (seek_idx, isobmff_audio_position(track, seek_idx, native_rate))
             }
             ContainerFile::Matroska(f) => {
                 let track = &f.tracks[track_idx];
@@ -171,6 +169,13 @@ impl ContainerFile {
             }
         }
     }
+}
+
+/// The decoded buffer starts on the presentation timeline, including negative trimmed samples.
+/// Using the same signed position on open and seek preserves edit-list trim and leading silence.
+fn isobmff_audio_position(track: &isobmff::Track, sample_idx: usize, native_rate: u32) -> i64 {
+    let pts = track.presentation_pts(sample_idx).unwrap_or(0);
+    i64::try_from((i128::from(pts) * i128::from(native_rate)) / i128::from(track.timescale.max(1))).unwrap_or(0)
 }
 
 fn open_audio_tracks<I>(container: &ContainerFile, source: &dyn ByteSource, candidates: I) -> Option<(Vec<AudioTrackEntry>, Vec<AudioStreamInfo>)>
@@ -194,6 +199,10 @@ where
         let native_rate = dec.sample_rate().max(1);
         let channels = u32::from(dec.layout().channels()).max(1);
         let delay_samples = i64::try_from((i128::from(codec_delay_ns) * i128::from(native_rate)) / 1_000_000_000).unwrap_or(0);
+        let decoded_pos = match container {
+            ContainerFile::Isobmff(f) => f.tracks.get(idx).map_or(0, |track| isobmff_audio_position(track, 0, native_rate)),
+            ContainerFile::Matroska(_) => -delay_samples,
+        };
         audio_infos.push(AudioStreamInfo {
             sample_rate: native_rate,
             channels,
@@ -203,7 +212,7 @@ where
         audio_tracks.push(AudioTrackEntry {
             track_idx: idx,
             native_rate,
-            state: Mutex::new(AudioTrackState { decoder: dec, next_sample: 0, decoded_pos: -delay_samples, buf: Vec::new() }),
+            state: Mutex::new(AudioTrackState { decoder: dec, next_sample: 0, decoded_pos, buf: Vec::new() }),
         });
     }
     Some((audio_tracks, audio_infos))
@@ -545,7 +554,7 @@ fn decode_audio_range(
 
     let buf_len = state.buf.first().map_or(0, Vec::len) as i64;
     let buf_end = state.decoded_pos.saturating_add(buf_len);
-    if start < state.decoded_pos || start > buf_end + i64::from(native_rate) * 2 {
+    if start < state.decoded_pos || start > buf_end.saturating_add(i64::from(native_rate) * 2) {
         let (seek_idx, decoded_pos) = file.audio_seek_info(track_idx, start, native_rate);
         state.decoder.reset();
         state.next_sample = seek_idx;
@@ -560,7 +569,8 @@ fn decode_audio_range(
     }
 
     let sample_count = file.sample_count(track_idx);
-    while state.decoded_pos + state.buf.first().map_or(0, Vec::len) as i64 <= end && state.next_sample < sample_count {
+    // A hostile edit can place the buffer near either signed limit before the first read.
+    while state.decoded_pos.saturating_add(state.buf.first().map_or(0, Vec::len) as i64) <= end && state.next_sample < sample_count {
         if filmcraft_media::cancel::cancelled() {
             return Err(MediaError::Cancelled);
         }
@@ -579,7 +589,7 @@ fn decode_audio_range(
     for i in 0..frames {
         let pos = start.saturating_add(i as i64);
         if pos >= state.decoded_pos {
-            let off = (pos - state.decoded_pos) as usize;
+            let off = usize::try_from(pos.saturating_sub(state.decoded_pos)).unwrap_or(usize::MAX);
             if off < avail {
                 for (c, out_ch) in out.iter_mut().enumerate() {
                     out_ch[i] = state.buf[c][off];
@@ -588,7 +598,7 @@ fn decode_audio_range(
         }
     }
 
-    let drop_to = (end - state.decoded_pos).max(0) as usize;
+    let drop_to = usize::try_from(end.saturating_sub(state.decoded_pos).max(0)).unwrap_or(usize::MAX);
     let trim = drop_to.min(avail);
     if trim > 0 {
         for ch in &mut state.buf {
