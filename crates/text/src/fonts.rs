@@ -431,21 +431,38 @@ pub fn add_font_data(data: Vec<u8>) -> Vec<FaceId> {
 /// face) and the text laid out with them (text in the new family, or that fell back, lays out
 /// again).
 fn faces_added() {
-    // First, so a lookup that started without the new faces finds out and doesn't store its result.
-    FACES_ADDED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    family_faces_cache().write().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
-    fallback_cache().write().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
-    crate::layout::clear_cache();
+    invalidate(|| {
+        family_faces_cache().write().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
+        fallback_cache().write().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
+        crate::layout::clear_cache();
+    });
 }
 
-/// Advanced by [`faces_added`] before it clears the caches. A lookup reads it before it starts and
-/// stores its result only while it is unchanged, so a lookup that was already running when a face
-/// arrived cannot put back what was just cleared.
+/// Run `clear` (dropping cached lookups) between two steps of [`FACES_ADDED`], like a seqlock: the
+/// count is odd while the caches are being cleared. A lookup reads the count before it starts and
+/// stores its result only if [`may_cache`] says so, so neither a lookup that was running when the
+/// faces arrived nor one that started while the caches were half cleared (and may have read an
+/// entry about to be dropped) can put back a result made without the new faces.
+fn invalidate(clear: impl FnOnce()) {
+    static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    FACES_ADDED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    clear();
+    FACES_ADDED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Advanced twice by every [`invalidate`]: odd while the caches are being cleared.
 static FACES_ADDED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// The current [`FACES_ADDED`] count.
+/// The current [`FACES_ADDED`] count, read by a lookup before it starts.
 pub(crate) fn faces_generation() -> u64 {
     FACES_ADDED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Whether a lookup that read `generation` when it started may store its result: no cache was
+/// being cleared then, and none has been since. Call it under the lock of the cache it stores in.
+pub(crate) fn may_cache(generation: u64) -> bool {
+    generation.is_multiple_of(2) && faces_generation() == generation
 }
 
 /// Held for a whole system scan: a concurrent caller waits for the complete list instead of
@@ -1165,7 +1182,7 @@ fn fallback_with_locale(c: char, prefer: FaceId, locale: impl FnOnce() -> CjkLoc
     }
     let found = system_fallback(c, &p.info.style);
     let mut cache = fallback_cache().write().unwrap_or_else(std::sync::PoisonError::into_inner);
-    if faces_generation() == generation {
+    if may_cache(generation) {
         cache.insert(key, found);
     }
     found.unwrap_or(prefer)
@@ -1193,7 +1210,7 @@ fn family_faces(script: FallbackScript, prefer: &Face, locale: CjkLocale) -> Arc
     let faces: Arc<Vec<FaceId>> =
         Arc::new(order.into_iter().flat_map(|s| families_for(s, locale)).filter_map(|fam| resolve_in(fam, style)).map(|r| r.face).collect());
     let mut cache = family_faces_cache().write().unwrap_or_else(std::sync::PoisonError::into_inner);
-    if faces_generation() == generation {
+    if may_cache(generation) {
         cache.insert((script, prefer.id, locale), faces.clone());
     }
     faces

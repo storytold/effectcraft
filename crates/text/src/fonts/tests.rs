@@ -690,3 +690,27 @@ fn a_font_added_later_replaces_cached_layouts_and_fallbacks() {
     let named = layout("\u{e001}", &st("Late Font Test"), &para);
     assert!(!named.glyphs.is_empty() && named.glyphs.iter().all(|g| g.face == id && g.id != 0), "its family now draws with it");
 }
+
+/// The interleaving from the #3998 review: a lookup that starts after the count advances but
+/// before the caches are cleared may read an entry that is about to be dropped, so it must not
+/// store its result, and neither may one that started before the faces arrived.
+#[test]
+fn a_lookup_during_or_before_an_invalidation_does_not_cache() {
+    let before = faces_generation();
+    let mut seen = None;
+    // Inside the clear, as a lookup that read the count mid-way would check it before storing.
+    invalidate(|| {
+        let during = faces_generation();
+        seen = Some((during, may_cache(during), may_cache(before)));
+    });
+    let (during, during_ok, before_ok_mid) = seen.unwrap();
+    assert!(!during.is_multiple_of(2), "the count is odd while the caches are being cleared");
+    assert!(!during_ok, "a lookup that started while the caches were being cleared");
+    assert!(!before_ok_mid && !may_cache(before), "a lookup that started before the faces arrived");
+    // Other tests in this process may add fonts at the same time, so a later count is only
+    // checked when nothing else moved it.
+    let after = faces_generation();
+    if after.is_multiple_of(2) {
+        assert!(may_cache(after) || faces_generation() != after, "a lookup that starts afterwards may cache");
+    }
+}

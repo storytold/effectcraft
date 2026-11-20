@@ -1333,8 +1333,9 @@ pub fn layout_rich(text: &str, runs: &[(Range<usize>, TextStyle)], paras: &[Para
     }
     let l = Arc::new(layout_rich_uncached(text, runs, paras));
     let mut c = cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    // A font arrived while this was laid out: the result may miss it, so it isn't kept.
-    if crate::fonts::faces_generation() != generation {
+    // A font arrived while this was laid out, or the caches were being cleared when it started:
+    // the result may miss the new font, so it isn't kept.
+    if !crate::fonts::may_cache(generation) {
         return l;
     }
     if c.len() >= 512 {
