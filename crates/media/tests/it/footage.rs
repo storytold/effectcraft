@@ -1361,3 +1361,76 @@ fn h264_bframe_route_backward_seek_cancel_color_and_draft() {
     pool.cancellable(&on, &mut || resumed = pool.frame(ItemId(1), &f, t_of(f.frame_rate, 20)));
     assert_eq!(resumed.map(|i| (i.width, i.height)), Some((320, 180)));
 }
+
+fn assert_seek_draft_cancel_parity(p: &Path, expected_size: (u32, u32), expected_color: Option<effectcraft_project::ColorSpace>) {
+    use std::sync::atomic::AtomicBool;
+    let f = probe(p).expect("probe");
+    assert_eq!((f.width, f.height), expected_size);
+    if let Some(c) = expected_color {
+        assert_eq!(f.color_profile, Some(c));
+    }
+
+    let pool = MediaPool::new();
+    let f18 = pool.frame(ItemId(1), &f, t_of(f.frame_rate, 18)).expect("frame 18");
+    let f13 = pool.frame(ItemId(1), &f, t_of(f.frame_rate, 13)).expect("frame 13");
+    let f7 = pool.frame(ItemId(1), &f, t_of(f.frame_rate, 7)).expect("frame 7");
+    let f0 = pool.frame(ItemId(1), &f, t_of(f.frame_rate, 0)).expect("frame 0");
+    for img in [&f18, &f13, &f7, &f0] {
+        assert_eq!((img.width, img.height), expected_size);
+    }
+    let fresh_f7 = MediaPool::new().frame(ItemId(1), &f, t_of(f.frame_rate, 7)).expect("fresh frame 7");
+    assert!(psnr(&f7, &fresh_f7) > 55.0, "backward seek frame 7 must match fresh decode");
+
+    let (dw, dh) = (expected_size.0 / 2, expected_size.1 / 2);
+    let draft = pool.frame_at_size(ItemId(1), &f, t_of(f.frame_rate, 5), dw, dh).expect("draft frame");
+    let full = pool.frame(ItemId(1), &f, t_of(f.frame_rate, 5)).expect("full frame");
+    assert_eq!((draft.width, draft.height), (dw, dh));
+    assert!(psnr(&draft, &effectcraft_raster::resample(&full, dw, dh)) > 40.0, "draft frame matches resampled full frame");
+
+    let off = Arc::new(AtomicBool::new(true));
+    let mut cancelled = Some(Arc::clone(&f0));
+    pool.cancellable(&off, &mut || cancelled = pool.frame(ItemId(1), &f, t_of(f.frame_rate, 20)));
+    assert!(cancelled.is_none(), "cancelled read must not decode");
+    let on = Arc::new(AtomicBool::new(false));
+    let mut resumed = None;
+    pool.cancellable(&on, &mut || resumed = pool.frame(ItemId(1), &f, t_of(f.frame_rate, 20)));
+    assert_eq!(resumed.map(|i| (i.width, i.height)), Some(expected_size));
+}
+
+#[test]
+fn hevc_bframe_route_backward_seek_cancel_color_and_draft() {
+    let Some(p) = try_ffmpeg_fixture(
+        "hevc_bframes_bt709.mp4",
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=320x180:rate=24:duration=1",
+            "-c:v",
+            "libx265",
+            "-preset",
+            "fast",
+            "-x265-params",
+            "keyint=12:bframes=2:log-level=error",
+            "-pix_fmt",
+            "yuv420p",
+            "-colorspace",
+            "bt709",
+            "-color_primaries",
+            "bt709",
+            "-color_trc",
+            "bt709",
+            "-color_range",
+            "tv",
+        ],
+    ) else {
+        return;
+    };
+    assert_seek_draft_cancel_parity(&p, (320, 180), Some(effectcraft_project::ColorSpace::Rec709));
+}
+
+#[test]
+fn vp9_webm_route_backward_seek_cancel_and_draft() {
+    let Some(p) = vp9_webm() else { return };
+    assert_seek_draft_cancel_parity(&p, (640, 360), None);
+}
