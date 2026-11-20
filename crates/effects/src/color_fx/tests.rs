@@ -489,9 +489,28 @@ fn colorama_ramp_presets_keep_their_brightest_input() {
     // Fire climbs to white without a step at the top.
     let (a, b) = (preset(2, [0.99, 0.99, 0.99, 1.0]), preset(2, white));
     assert!(close(a, b, 0.07) && b[2] >= a[2], "{a:?} {b:?}");
-    // Two cycles: white ends the second one (0.998 of the way round it).
-    let two = px("ec.color.colorama", &[("outputCycle/usePresetPalette", Value::Enum(1)), ("outputCycle/cycles", num(2.0))], white);
-    assert!(close(two, white, 2e-3), "{two:?}");
+    // More than one cycle: white ends the last one, on the last stop, posterized or not. A grey
+    // on the boundary between two cycles starts the next one.
+    for cycles in [2.0, 3.0, 7.0] {
+        for smooth in [true, false] {
+            let o = px(
+                "ec.color.colorama",
+                &[
+                    ("outputCycle/usePresetPalette", Value::Enum(1)),
+                    ("outputCycle/cycles", num(cycles)),
+                    ("outputCycle/interpolatePalette", Value::Bool(smooth)),
+                ],
+                white,
+            );
+            assert!(close(o, white, 1e-3), "{cycles} cycles, interpolate {smooth}: {o:?}");
+        }
+    }
+    let two = |v: f32| px("ec.color.colorama", &[("outputCycle/usePresetPalette", Value::Enum(1)), ("outputCycle/cycles", num(2.0))], [v, v, v, 1.0]);
+    assert!(close(two(0.5), [0.0, 0.0, 0.0, 1.0], 1e-3), "{:?}", two(0.5));
+    assert!(close(two(0.25), [0.5, 0.5, 0.5, 1.0], 1e-3) && close(two(0.75), [0.5, 0.5, 0.5, 1.0], 1e-3), "{:?} {:?}", two(0.25), two(0.75));
+    // A part cycle stops part of the way round.
+    let part = px("ec.color.colorama", &[("outputCycle/usePresetPalette", Value::Enum(1)), ("outputCycle/cycles", num(1.5))], white);
+    assert!(close(part, [0.5, 0.5, 0.5, 1.0], 1e-3), "{part:?}");
     // Hue Cycle still comes back round to red.
     assert!(close(preset(0, white), [1.0, 0.0, 0.0, 1.0], 0.01), "{:?}", preset(0, white));
 }

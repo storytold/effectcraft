@@ -722,11 +722,22 @@ fn colorama_phase(c: [f32; 3], a: f32, mode: u32) -> f32 {
 
 /// Colorama's Output Cycle presets (our own palettes; Custom uses the Palette parameter).
 pub const COLORAMA_PRESETS: [&str; 9] = ["Hue Cycle", "Ramp Grayscale", "Fire", "Ice", "Ramp Red", "Ramp Green", "Ramp Blue", "Pastel Cycle", "Custom"];
-/// Where an input phase of 1 falls on the Output Cycle with one cycle and no shift. The wheel is
-/// cyclic, so position 1 is position 0 again: a ramp preset has its last stop here, just before
-/// the wrap, and the input range 0..1 ends on it. Scaling by 1 would wrap the brightest input
-/// round to the first stop, turning white black under every ramp (#3925).
+/// Where one repetition of the Output Cycle ends. The wheel is cyclic, so position 1 is position
+/// 0 again: a ramp preset has its last stop here, just before the wrap, and each repetition of
+/// the input range ends on it. Ending at 1 would wrap the brightest input round to the first
+/// stop, turning white black under every ramp (#3925).
 pub const COLORAMA_CYCLE_END: f32 = 0.999;
+
+/// The Output Cycle position (before Phase Shift) of input phase `p` (0..1) under `cycles`
+/// Cycle Repetitions. Each repetition runs from the cycle's start to [`COLORAMA_CYCLE_END`], and
+/// the top of the input range ends the last repetition instead of starting one more, so the
+/// brightest input reaches the last stop for any whole number of cycles. The GPU shader
+/// (`fx_color.wgsl`, case 5) does the same sum.
+fn colorama_cycle_phase(p: f32, cycles: f32) -> f32 {
+    let t = p * cycles;
+    let rep = t.floor().min((cycles.ceil() - 1.0).max(0.0));
+    (t - rep) * COLORAMA_CYCLE_END
+}
 /// Colorama's Modify options: which channels of the pixel take the palette colour.
 const COLORAMA_MODIFY: [&str; 12] =
     ["All", "Red", "Green", "Blue", "Hue", "Lightness", "Saturation", "Value", "Red & Green", "Green & Blue", "Blue & Red", "None"];
@@ -832,7 +843,7 @@ fn colorama(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let pr = ctx.params;
     let shift = pr.f("inputPhase/phaseShift") as f32 / 360.0;
     let mode = pr.e("inputPhase/mode");
-    let cycles = pr.f("outputCycle/cycles").max(0.0) as f32 * COLORAMA_CYCLE_END;
+    let cycles = pr.f("outputCycle/cycles").max(0.0) as f32;
     let smooth = pr.get("outputCycle/interpolatePalette").is_none_or(|v| v.as_bool());
     let preset = pr.e("outputCycle/usePresetPalette");
     let palette = if preset as usize == COLORAMA_PRESETS.len() - 1 { ColoramaPalette::parse(pr.s("outputCycle/palette")) } else { None }
@@ -873,7 +884,7 @@ fn colorama(ctx: &EffectCtx, mut b: Buf) -> Buf {
                 _ => (p + q).rem_euclid(1.0),
             };
         }
-        let ph = (p * cycles + shift).rem_euclid(1.0);
+        let ph = (colorama_cycle_phase(p, cycles) + shift).rem_euclid(1.0);
         let pc = palette.eval(ph, smooth);
         let (h, s, l) = rgb_to_hsl(c[0], c[1], c[2]);
         let (ph_, ps, pl) = rgb_to_hsl(pc[0], pc[1], pc[2]);

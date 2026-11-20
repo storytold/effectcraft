@@ -208,7 +208,11 @@ fn fxc_point(@builtin(global_invocation_id) gid: vec3<u32>) {
         case 5u: {
             if (a > 0.0) {
                 let c = px.xyz / a;
-                var ph = fract_euclid(fxc_colorama_phase(c, a, P.u[0].y) * P.f[0].x + P.f[0].y);
+                // color_fx::colorama_cycle_phase: the top of the input range ends the last
+                // repetition, at the cycle's end (P.f[0].w), instead of starting one more.
+                let t = fxc_colorama_phase(c, a, P.u[0].y) * P.f[0].x;
+                let rep = min(floor(t), max(ceil(P.f[0].x) - 1.0, 0.0));
+                var ph = fract_euclid((t - rep) * P.f[0].w + P.f[0].y);
                 if (P.u[0].z == 0u) {
                     ph = floor(ph * 6.0) / 6.0;
                 }
