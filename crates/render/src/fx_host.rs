@@ -1,5 +1,6 @@
 use super::frames::frame_blend_mode;
-use super::{Arc, Buf, EffectHost, EvalCtx, FrameBlend, ItemKind, Layer, LayerPixels, LayerSource, Params, Renderer, Tick, three_d};
+use super::styles;
+use super::{Arc, Buf, EffectHost, EvalCtx, FrameBlend, Image, ItemKind, Layer, LayerPixels, LayerSource, Params, Renderer, Tick, frame_size, three_d};
 
 /// Layer parameters and audio for effects (see [`effectcraft_effects::EffectHost`]). What it
 /// hands out is in effect space (see [`effect_bounds`]): the other layer's for its pixels, the
@@ -17,6 +18,59 @@ pub(crate) struct FxHost<'r, 'a, 'c> {
 }
 
 impl FxHost<'_, '_, '_> {
+    /// Render the composite below an adjustment layer at comp time `t` (the whole frame), as After
+    /// Effects feeds a time effect there: an adjustment layer's effects run on the comp below, so
+    /// Posterize Time (and Echo and the rest) hold *that* composite.
+    ///
+    /// `None` when this cannot be answered safely — a region of interest, a nested render past the
+    /// effect-depth limit, an effect earlier in the same stack (the composite below is not what
+    /// reaches the time effect then), or a layer below that needs more than its own content (a
+    /// mask, an effect, a layer style, 3D, a track matte). The caller then passes its input
+    /// through, which is what happened before.
+    fn below_at(&self, t: f64) -> Option<Buf> {
+        if self.r.opts.roi.is_some() || self.r.depth > MAX_FX_DEPTH {
+            return None;
+        }
+        // A time effect holds what reaches it: on an ordinary layer that is its own source with the
+        // effects before it. Here only the composite below is available, so with an effect earlier in
+        // the same stack the input would differ — leave those stacks as they were.
+        let earlier = self.layer.effects().is_some_and(|fx| fx.groups().take(self.index).any(|g| g.enabled));
+        if earlier {
+            return None;
+        }
+        let ctx = self.ctx.at(Tick::from_seconds_f64(t));
+        let (w, h) = frame_size(ctx.comp.width, ctx.comp.height, self.r.opts.scale);
+        // Only layers whose processed buffer is exactly their own content are composited here; the
+        // rest would need the full compositor (masks, effects, styles, 3D, mattes).
+        let mut plain = Vec::new();
+        for other in ctx.comp.layers.iter().rev() {
+            if other.id == self.layer.id {
+                break;
+            }
+            if !other.has_video() || !other.is_active_at(ctx.time) || other.switches.guide {
+                continue;
+            }
+            if other.masks().is_some_and(|m| m.groups().next().is_some())
+                || styles::active(&ctx, other)
+                || other.is_3d()
+                || other.track_matte.is_some()
+                || other.preserve_transparency
+                || (other.switches.effects && other.effects().is_some_and(|fx| fx.groups().any(|g| g.enabled)))
+            {
+                return None;
+            }
+            plain.push(other);
+        }
+        let sub = self.r.nested();
+        let mut img = Image::new(w, h);
+        for other in plain {
+            let buf = (*sub.content_buf(&ctx, other)?).clone();
+            let opacity = ctx.opacity(other) as f32 * self.r.opacity_mul;
+            self.r.place(&ctx, other, &buf, &mut img, other.blend_mode, opacity);
+        }
+        Some(Buf { img, offset: [0.0; 2], scale: self.r.opts.scale })
+    }
+
     /// Another layer's pixels for a layer parameter, in its effect space; `layer_space`: `buf`
     /// is still in layer space (its source or its content).
     fn pixels(&self, other: &Layer, mut buf: Buf, layer_space: bool) -> LayerPixels {
@@ -110,8 +164,13 @@ impl EffectHost for FxHost<'_, '_, '_> {
     }
 
     fn self_at(&self, layer_time: f64, effects: usize) -> Option<Buf> {
-        if self.r.depth > MAX_FX_DEPTH || self.layer.switches.adjustment {
+        if self.r.depth > MAX_FX_DEPTH || !layer_time.is_finite() {
             return None;
+        }
+        if self.layer.switches.adjustment {
+            // An adjustment layer's stack runs on the comp below, so a time effect there holds that
+            // composite; a stack too complex for [`Self::below_at`] passes its input through.
+            return self.below_at(layer_time);
         }
         let n = effects.min(self.index);
         let t = self.layer.comp_time(Tick::from_seconds_f64(layer_time));

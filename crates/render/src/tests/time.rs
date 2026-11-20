@@ -7,8 +7,10 @@ use effectcraft_color::Label;
 use effectcraft_effects::plugin::{EffectPlugin, PluginFrame, PluginManifest, PluginParams, register_plugin};
 use effectcraft_keyframe::{Keyframe, ShapePath, Value};
 use effectcraft_project::build::{self, Ids};
-use effectcraft_project::{Comp, ItemId, ItemKind, LayerSource, MaskMode, Project, Solid};
+use effectcraft_project::{Comp, Footage, FootageKind, ItemId, ItemKind, LayerSource, MaskMode, Project, Solid};
 use effectcraft_time::{FrameRate, Tick};
+
+use crate::{FootageSource, Image};
 
 fn render(p: &Project, cid: ItemId, t: f64, cache: Option<&crate::LayerCache>) -> crate::Image {
     let mut r = crate::Renderer::new(p, &crate::NoFootage, crate::RenderOpts::default());
@@ -245,4 +247,60 @@ fn abi2_plugin_layers_key_on_layer_time() {
     assert_eq!(key(&plain, c1, 0.25), key(&plain, c1, 0.5), "a plain plug-in keeps the old key");
     let (reader, c2) = plugin_scene(Arc::new(NeighbourReader { m: manifest("org.test.render.time-key.reader") }));
     assert_ne!(key(&reader, c2, 0.25), key(&reader, c2, 0.5), "an ABI 2 plug-in keys on the layer time");
+}
+
+/// Footage whose frame `i` is a flat grey of `i / 100`, so a held frame shows as its level.
+struct GreyFrames;
+impl FootageSource for GreyFrames {
+    fn frame(&self, _: ItemId, f: &Footage, t: Tick) -> Option<Arc<Image>> {
+        let g = f.frame_rate.frame_at(t) as f32 / 100.0;
+        Some(Arc::new(Image::filled(f.width, f.height, [g, g, g, 1.0])))
+    }
+}
+
+/// #4001: Posterize Time on an adjustment layer posterizes the comp below. The adjustment's
+/// effects run on the composite, so the time effect must read that composite at the held time,
+/// not pass its own (solid white) source through.
+#[test]
+fn posterize_time_on_an_adjustment_layer_holds_the_comp_below() {
+    let mut p = Project::default();
+    p.settings.bit_depth = effectcraft_project::BitDepth::Bpc32;
+    let comp = Comp::new(96, 54, FrameRate::FPS_30, Tick::from_seconds_f64(2.0));
+    let cid = p.add_item("Comp", Label::Sandstone, None, ItemKind::Comp(comp.clone().into()));
+    // 30 fps footage in a 30 fps comp: the grey level names the source frame.
+    let f = Footage {
+        path: "clip.mp4".into(),
+        kind: FootageKind::Video,
+        width: 96,
+        height: 54,
+        pixel_aspect: 1.0,
+        frame_rate: FrameRate::FPS_30,
+        duration: Tick::from_seconds_f64(2.0),
+        has_video: true,
+        alpha: effectcraft_project::AlphaMode::Ignore,
+        loop_count: 1,
+        ..Default::default()
+    };
+    let fid = p.add_item("clip", Label::Aqua, None, ItemKind::Footage(f));
+    let footage = build::layer(&mut p, &comp, "clip", LayerSource::Footage { item: fid }, (96, 54), None);
+    let sid = p.add_item("Solid", Label::Red, None, ItemKind::Solid(Solid { color: [1.0, 1.0, 1.0], width: 96, height: 54, pixel_aspect: 1.0 }));
+    let mut adj = build::layer(&mut p, &comp, "Adj", LayerSource::Solid { item: sid }, (96, 54), None);
+    adj.switches.adjustment = true;
+    let spec = effectcraft_effects::find("ec.time.posterizetime").unwrap();
+    let mut next = p.next_id;
+    let mut g = effectcraft_effects::instantiate(spec, &mut Ids(&mut next), spec.name, [96.0, 54.0]);
+    g.prop_mut("frameRate").unwrap().value = Value::Scalar(4.0);
+    p.next_id = next;
+    adj.props.sub_mut("effects").unwrap().children.push(g.into());
+    p.comp_mut(cid).unwrap().layers = vec![adj, footage].into();
+    let img = |t: f64| {
+        let r = crate::Renderer::new(&p, &GreyFrames, crate::RenderOpts::default());
+        r.comp_frame(cid, Tick::from_seconds_f64(t))
+    };
+    // At 4 fps the layer holds t rounded down to 1/4 s: 0.3 s holds frame 7, 0.55 s frame 15,
+    // 0.8 s frame 22 (frame i is grey i / 100).
+    for (t, want) in [(0.05, 0.0), (0.3, 0.07), (0.55, 0.15), (0.8, 0.22)] {
+        let got = img(t).get(48, 27)[0];
+        assert!((got - want).abs() < 1e-6, "t={t}: {got}, want {want}");
+    }
 }
