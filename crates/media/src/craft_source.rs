@@ -29,6 +29,9 @@ const MAX_CACHED_FRAMES: usize = 32;
 /// Maximum audio lookahead packets inspected when initializing `craft_audio::TrackDecoder`.
 const AUDIO_LOOKAHEAD: usize = 8;
 
+/// Complete first-sample read cap for the ProRes alpha probe; larger samples use the legacy route.
+const MAX_PRORES_ALPHA_SAMPLE_BYTES: u32 = 32 * 1024 * 1024;
+
 fn worker_cap() -> usize {
     std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(1, MAX_WORKERS)
 }
@@ -229,7 +232,17 @@ fn open_isobmff(name: &str, source: SharedBytes) -> Option<Result<SharedSource>>
         std::mem::swap(&mut width, &mut height);
         par = (par.1, par.0);
     }
-    let has_alpha = video_track.video().is_some_and(|v| v.depth == 32);
+    let has_alpha = if video_params.codec == CodecId::ProRes {
+        // The coded alpha plane is authoritative for ProRes, not the MOV sample-entry depth.
+        let sample = video_track.samples.first()?;
+        if sample.size > MAX_PRORES_ALPHA_SAMPLE_BYTES {
+            return None;
+        }
+        let packet = file.read_sample(&*source, video_idx, 0).ok()?;
+        craft_video::prores::probe(&packet).ok()?.alpha != craft_video::prores::AlphaType::None
+    } else {
+        video_track.video().is_some_and(|v| v.depth == 32)
+    };
     let frame_rate = estimate_isobmff_frame_rate(video_track);
     let duration = Tick::from_units(i64::try_from(video_track.duration).unwrap_or(i64::MAX), i64::from(video_track.timescale));
     let bitrate = video_track.entries.first().and_then(|e| e.bitrate).map(|b| u64::from(b.avg_bitrate)).filter(|&b| b > 0);

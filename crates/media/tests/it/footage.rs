@@ -1,7 +1,7 @@
 //! Footage import against ffmpeg as an external oracle.
 //!
-//! Fixtures are generated with ffmpeg into `target/fixtures/media` (never committed); every test
-//! skips (passes with a note) when ffmpeg is not installed. Decoded frames are compared with
+//! Oracle fixtures are generated with ffmpeg into `target/fixtures/media` (never committed);
+//! tests using them skip when ffmpeg is not installed. Decoded frames are compared with
 //! frames ffmpeg extracts to PNG (PSNR, premultiplied RGBA).
 
 use std::path::{Path, PathBuf};
@@ -459,6 +459,47 @@ fn prores_4444_with_alpha() {
     let mut g = f.clone();
     g.alpha = AlphaMode::Ignore;
     assert!(pool.frame_at(&g, Tick::ZERO).expect("frame").data.iter().all(|p| p[3] == 1.0));
+}
+
+/// The alpha mode follows the coded frame, even when a MOV writer signals an inconsistent depth.
+#[test]
+fn prores_alpha_uses_coded_frame_not_mov_depth() {
+    use craft_media::isobmff::{self, Brand, FourCc, Mp4Writer, SampleEntry, TrackConfig, WriteSample, WriterOptions};
+    use craft_video::prores::{ChromaFormat, Encoder, Frame, Profile};
+
+    let profile = Profile::P4444;
+    let mut encoder = Encoder::new(profile, 16, 16);
+    let mut frame = Frame::new(16, 16, ChromaFormat::Yuv444, 16, true).unwrap();
+    for row in frame.alpha.as_mut().unwrap().as_chunks_mut::<16>().0 {
+        row[..8].fill(0);
+    }
+    for (depth, mode) in [(24, AlphaMode::Straight), (32, AlphaMode::Ignore)] {
+        if mode == AlphaMode::Ignore {
+            frame.alpha = None;
+        }
+        let packet = encoder.encode(&frame).unwrap();
+        let mut entry = SampleEntry::prores(FourCc(profile.fourcc()), 16, 16);
+        entry.video.as_mut().unwrap().depth = depth;
+        let mut writer = Mp4Writer::new(std::io::Cursor::new(Vec::new()), WriterOptions::new(Brand::Mov)).unwrap();
+        let output_track = writer.add_track(TrackConfig::new(entry, 24)).unwrap();
+        writer.write_sample(output_track, WriteSample { data: &packet, duration: 1, composition_offset: 0, is_sync: true }).unwrap();
+        let bytes: Arc<[u8]> = writer.finish().unwrap().into_inner().into();
+
+        let mov = isobmff::open(bytes.as_ref()).unwrap();
+        assert_eq!(mov.tracks[0].video().unwrap().depth, depth);
+        let name = format!("prores4444_depth{depth}.mov");
+        let footage = probe_bytes(&name, bytes.clone()).expect("probe ProRes 4444");
+        assert_eq!(footage.codec, "ProRes", "must exercise the shared reader, not legacy fallback");
+        assert_eq!(footage.alpha, mode, "MOV depth {depth}");
+
+        let pool = MediaPool::new();
+        pool.add_bytes(&name, bytes);
+        let image = pool.frame_at(&footage, Tick::ZERO).expect("decode ProRes 4444");
+        assert_eq!((image.width, image.height), (16, 16));
+        let left_alpha = if mode == AlphaMode::Straight { 0.0 } else { 1.0 };
+        assert!((image.data[0][3] - left_alpha).abs() < 0.02);
+        assert!(image.data[15][3] > 0.97);
+    }
 }
 
 #[test]
