@@ -17,6 +17,7 @@
 
 mod aac;
 mod convert;
+mod craft_source;
 pub mod downmix;
 mod dpx;
 pub mod exr_channels;
@@ -26,7 +27,6 @@ mod exr_read;
 mod gif_anim;
 mod layered;
 mod localize;
-mod mp4_h264;
 pub use layered::vector_doc;
 mod pool;
 mod probe;
