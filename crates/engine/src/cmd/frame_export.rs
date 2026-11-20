@@ -12,7 +12,7 @@
 use std::collections::HashSet;
 
 use effectcraft_color::BlendMode;
-use effectcraft_export::exr_out::{Channels, isolate_layer, layer_names};
+use effectcraft_export::exr_out::{Channels, isolate_exr_layer, isolate_layer, layer_names};
 use effectcraft_project::render_queue::{ExrBitDepth, ExrCompression, ExrSelection};
 use effectcraft_project::{Comp, ItemId, Layer, Project};
 use effectcraft_raster::Image;
@@ -168,11 +168,12 @@ fn layered_exr(s: &Session, cid: ItemId, t: Tick, scale: f64, selection: Option<
         Some(_) => layer_names(comp.layers.iter().filter(|l| ExrSelection::can_export_layer(l)), multipart),
         None => layer_names(visible_layers(comp, t), multipart),
     };
+    let isolate = if selection.is_some() { isolate_exr_layer } else { isolate_layer };
     for l in &comp.layers {
         if selected.as_ref().is_none_or(|ids| ids.contains(&l.id))
             && let Some(prefix) = names.get(&l.id)
         {
-            let isolated = isolate_layer(&s.project, cid, l.id, t).ok_or_else(|| bad(SAVE_EXR, "missing OpenEXR layer"))?;
+            let isolated = isolate(&s.project, cid, l.id, t).ok_or_else(|| bad(SAVE_EXR, "missing OpenEXR layer"))?;
             push_color(prefix, renderer(s, &isolated.project, scale, true).comp_frame(cid, t))?;
         }
     }

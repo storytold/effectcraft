@@ -367,11 +367,15 @@ build real projects through these interfaces; they are worked examples of everyt
   `Z`. Set `allLayers: true` with an empty or omitted `layers` list to export every eligible
   layer, including layers added after queuing. The Output Module's **EXR Channels…** menu
   offers **No Layers**, **All Layers**, and **Selected Layers**. Each layer has its own named
-  RGBA channel group. `Z` stays 32-bit float at either colour
+  RGBA channel group. Explicit layer passes render at Normal and full opacity, with their own
+  alpha even when Preserve Transparency clips the layer in the composite. Masks and track mattes
+  still apply. `Z` stays 32-bit float at either colour
   depth and requires compression that is lossless for float channels. The render queue defaults to
   the composite. Set `multipart: true` inside `exrSelection` to write separate scan-line parts
   for `Beauty`, each selected layer, and `Depth` with `Z`. `comp.saveFrameAsExr` accepts the
-  same selection and defaults to the composite and visible layers.
+  same selection and defaults to the composite and visible layers. Pre-render and Set Proxy
+  require the composite in the first output module. A saved queue with a pass-only first
+  module can still export its passes, and skips any saved post-render replacement or proxy action.
   **A render never writes one file twice either:** when two outputs of the job (two items, a
   `renderQueue.duplicate` copy, output modules, segments) name the same file, the whole render is
   refused before anything is written, naming both items. Sequences clash only on frames both

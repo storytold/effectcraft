@@ -290,6 +290,42 @@ fn exr_channel_selection_uses_the_target_comp_and_rejects_invalid_updates() {
     assert!(s.project.render_queue[0].output.exr_selection.is_none());
 }
 
+#[test]
+fn exr_composition_replacement_requires_the_first_output_modules_composite() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "EXR"})).unwrap();
+    let passes = json!({"composite": false, "depth": true, "multipart": true});
+    let error = s.execute_checked("render.preRender", json!({"output": "passes.exr", "exrSelection": passes})).unwrap_err().to_string();
+    assert!(error.contains("Include Composite"), "{error}");
+    assert!(s.project.render_queue.is_empty());
+
+    let queued = s.execute_checked("renderQueue.add", json!({"output": "passes.exr", "exrSelection": passes})).unwrap();
+    let id = queued["item"].clone();
+    s.execute_checked("render.addOutputModule", json!({"item": id, "format": "png"})).unwrap();
+    for action in ["importAndReplace", "setProxy"] {
+        for module in [1, 2] {
+            let error =
+                s.execute_checked("renderQueue.setOutputModule", json!({"item": id, "module": module, "postRenderAction": action})).unwrap_err().to_string();
+            assert!(error.contains("Include Composite"), "{error}");
+        }
+    }
+    assert!(s.project.render_queue[0].post_render.is_none());
+
+    s.execute_checked("renderQueue.saveTemplate", json!({"kind": "outputModule", "name": "Depth only", "item": id})).unwrap();
+    s.execute_checked("renderQueue.setTemplateDefault", json!({"kind": "outputModule", "slot": "stillProxy", "name": "Depth only"})).unwrap();
+    let error = s.execute_checked("file.createProxy", json!({"kind": "still"})).unwrap_err().to_string();
+    assert!(error.contains("Include Composite"), "{error}");
+    assert_eq!(s.project.render_queue.len(), 1);
+
+    s.execute_checked("renderQueue.setOutputModule", json!({"item": id, "format": "png", "postRenderAction": "setProxy"})).unwrap();
+    s.execute_checked("renderQueue.setOutputModule", json!({"item": id, "module": 2, "format": "exr", "exrSelection": passes})).unwrap();
+    let error = s.execute_checked("renderQueue.applyTemplate", json!({"item": id, "outputModule": "Depth only"})).unwrap_err().to_string();
+    assert!(error.contains("Include Composite"), "{error}");
+    let error = s.execute_checked("renderQueue.setOutput", json!({"item": id, "path": "switched.exr"})).unwrap_err().to_string();
+    assert!(error.contains("Include Composite"), "{error}");
+    assert_eq!(s.project.render_queue[0].output.format, OutputFormat::PngSequence);
+}
+
 /// Settings ▸ Export ▸ Append Bit Depth to File Name names a half-float OpenEXR module's frames
 /// `_16bpc` and a 32-bit one's `_32bpc` (#2911).
 #[test]

@@ -116,7 +116,7 @@ impl Channels {
         if !prefix.is_ascii() || prefix.len() > MAX_GROUP_NAME || prefix.bytes().any(|c| c.is_ascii_control()) {
             return Err(Error::Encode("invalid OpenEXR channel group name".into()));
         }
-        if self.multipart && matches!(prefix, BEAUTY_PART | DEPTH_PART) {
+        if self.multipart && [BEAUTY_PART, DEPTH_PART].iter().any(|name| name.eq_ignore_ascii_case(prefix)) {
             return Err(Error::Encode("a layer uses a reserved OpenEXR part name".into()));
         }
         let part = self.multipart.then(|| if prefix.is_empty() { BEAUTY_PART } else { prefix }.to_owned());
@@ -188,12 +188,13 @@ impl Channels {
     }
 }
 
-/// Allocate unique group names in layer stack order. Dots delimit channels and OpenEXR text
-/// requires storeable characters, so replace dots and non-printable/non-ASCII characters.
+/// Allocate case-insensitively unique group names in layer stack order. Dots delimit channels
+/// and OpenEXR text requires storable characters, so replace dots and non-printable/non-ASCII
+/// characters.
 pub fn layer_names<'a>(layers: impl IntoIterator<Item = &'a Layer>, multipart: bool) -> HashMap<LayerId, String> {
     let (mut used, mut next) = (HashSet::new(), HashMap::new());
     if multipart {
-        used.extend([BEAUTY_PART.to_owned(), DEPTH_PART.to_owned()]);
+        used.extend([BEAUTY_PART.to_ascii_lowercase(), DEPTH_PART.to_ascii_lowercase()]);
     }
     layers.into_iter().map(|l| (l.id, exr_name(&l.name, &mut used, &mut next))).collect()
 }
@@ -201,17 +202,18 @@ pub fn layer_names<'a>(layers: impl IntoIterator<Item = &'a Layer>, multipart: b
 fn exr_name(name: &str, used: &mut HashSet<String>, next: &mut HashMap<String, usize>) -> String {
     let base: String = name.chars().take(MAX_GROUP_NAME).map(|c| if c == '.' || !(c == ' ' || c.is_ascii_graphic()) { '_' } else { c }).collect();
     let base = if base.trim().is_empty() { "Layer".to_string() } else { base };
-    if used.insert(base.clone()) {
+    let key = base.to_ascii_lowercase();
+    if used.insert(key.clone()) {
         return base;
     }
     // Remember where each base's search resumes so repeated names don't make this quadratic.
-    let k = next.entry(base.clone()).or_insert(2);
+    let k = next.entry(key).or_insert(2);
     loop {
         let suffix = format!(" {k}");
         let mut n: String = base.chars().take(MAX_GROUP_NAME.saturating_sub(suffix.len())).collect();
         n.push_str(&suffix);
         *k = k.saturating_add(1);
-        if used.insert(n.clone()) {
+        if used.insert(n.to_ascii_lowercase()) {
             return n;
         }
     }
@@ -228,6 +230,16 @@ pub struct IsolatedLayer {
 /// Prepare one layer to render solo at Normal and full opacity, retaining the comp's camera,
 /// lights and matte sources.
 pub fn isolate_layer(project: &Project, cid: ItemId, id: LayerId, t: Tick) -> Option<IsolatedLayer> {
+    isolate(project, cid, id, t, false)
+}
+
+/// Prepare an explicit EXR layer pass. In addition to rendering solo at Normal and full opacity,
+/// use the layer's own alpha instead of clipping it to the accumulated alpha of layers below it.
+pub fn isolate_exr_layer(project: &Project, cid: ItemId, id: LayerId, t: Tick) -> Option<IsolatedLayer> {
+    isolate(project, cid, id, t, true)
+}
+
+fn isolate(project: &Project, cid: ItemId, id: LayerId, t: Tick, independent_alpha: bool) -> Option<IsolatedLayer> {
     let mut project = project.clone();
     let comp = project.comp_mut(cid)?;
     for l in &mut comp.layers {
@@ -247,6 +259,9 @@ pub fn isolate_layer(project: &Project, cid: ItemId, id: LayerId, t: Tick) -> Op
         1.0
     };
     layer.blend_mode = BlendMode::Normal;
+    if independent_alpha {
+        layer.preserve_transparency = false;
+    }
     Some(IsolatedLayer { project, name, blend, opacity })
 }
 
@@ -304,7 +319,7 @@ mod tests {
         for _ in 0..20_000 {
             exr_name("Same", &mut used, &mut next);
         }
-        assert_eq!(next["Same"], 20_001);
+        assert_eq!(next["same"], 20_001);
     }
 
     fn exr_compression(c: ExrCompression) -> exr::compression::Compression {

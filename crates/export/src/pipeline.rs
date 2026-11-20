@@ -768,7 +768,7 @@ impl<'a> Cx<'a> {
             FrameSample::Progressive(t) | FrameSample::Fields { first: t, .. } => t,
         };
         let id = self.job.comp;
-        let isolated = crate::exr_out::isolate_layer(&self.project, id, layer, first)
+        let isolated = crate::exr_out::isolate_exr_layer(&self.project, id, layer, first)
             .ok_or_else(|| crate::ExportError::Encode(format!("Cannot isolate composition layer {}", layer.0)))?;
         let base = self.renderer_on(self.backend());
         // Solo and opacity change the render context. Keep isolated buffers out of the job's shared cache.

@@ -158,6 +158,52 @@ fn proexr_multipart_round_trips_beauty_layer_and_float_depth() {
 }
 
 #[test]
+fn selected_exr_pass_names_distinguish_case_variants_and_reserved_parts() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Frame", "width": 8, "height": 8})).unwrap();
+    for name in ["Plate", "plate", "beautY", "DEPTH"] {
+        s.execute("layer.newSolid", json!({"name": name})).unwrap();
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("parts.exr");
+    let r = s.execute("comp.saveFrameAsExr", json!({"path": path, "exrSelection": {"allLayers": true, "depth": true, "multipart": true}})).unwrap();
+    let channels = r["channels"].as_array().unwrap();
+    let groups: std::collections::HashSet<_> =
+        channels.iter().filter_map(|c| c.as_str().unwrap().split_once('.')).map(|(group, _)| group.to_ascii_lowercase()).collect();
+    assert_eq!(groups.len(), 6, "{groups:?}");
+    for name in ["beauty", "depth", "beauty 2", "depth 2", "plate", "plate 2"] {
+        assert!(groups.contains(name), "{groups:?}");
+    }
+}
+
+#[test]
+fn explicit_exr_layer_pass_uses_its_own_alpha_and_composite_preserves_transparency() {
+    use exr::prelude::*;
+
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Frame", "width": 8, "height": 8})).unwrap();
+    let layer = s.execute("layer.newSolid", json!({"name": "Plate", "color": "#ff0000", "width": 4, "height": 4})).unwrap()["layer"].clone();
+    s.execute("layer.setSwitch", json!({"layers": [layer], "switch": "preserveTransparency", "value": true})).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let explicit = dir.path().join("explicit.exr");
+    let legacy = dir.path().join("legacy.exr");
+    s.execute("comp.saveFrameAsExr", json!({"path": explicit, "exrSelection": {"layers": [layer]}})).unwrap();
+    s.execute("comp.saveFrameAsExr", json!({"path": legacy})).unwrap();
+
+    let alpha = |path: &std::path::Path, name: &str| {
+        let img = read().no_deep_data().largest_resolution_level().all_channels().all_layers().all_attributes().from_file(path).unwrap();
+        let c = img.layer_data[0].channel_data.list.iter().find(|c| c.name.eq(name)).unwrap();
+        match &c.sample_data {
+            FlatSamples::F32(values) => (values[0], values[4 * 8 + 4]),
+            other => panic!("expected FLOAT alpha, got {other:?}"),
+        }
+    };
+    assert_eq!(alpha(&explicit, "Plate.A"), (0.0, 1.0));
+    assert_eq!(alpha(&explicit, "A"), (0.0, 0.0));
+    assert_eq!(alpha(&legacy, "Plate.A"), (0.0, 0.0));
+}
+
+#[test]
 fn proexr_rejects_bad_selections_before_writing() {
     let mut s = frame();
     let dir = out_dir("frame-exr-invalid-selection");

@@ -390,6 +390,36 @@ fn multipart_exr_sequence_reimports_beauty_layer_and_float_depth() {
     check_selected_exr_sequence(true);
 }
 
+#[test]
+fn exr_sequence_layer_pass_retains_alpha_without_the_lower_stack() {
+    use effectcraft_export::render_queue::ExrSelection;
+    use effectcraft_raster::channels3d::{AuxLookup, AuxNeed};
+
+    let (mut project, cid) = project(None);
+    let comp = project.comp_mut(cid).unwrap();
+    comp.duration = comp.frame_rate.tick_of(1);
+    let red = comp.layers.first_mut().unwrap();
+    red.in_point = Tick::ZERO;
+    red.preserve_transparency = true;
+    let om = OutputModule {
+        channels: Channels::Rgba,
+        exr_selection: Some(ExrSelection { layers: vec![red.id], ..ExrSelection::default() }),
+        ..OutputModule::for_format(OutputFormat::ExrSequence)
+    };
+    let dir = tempfile::tempdir().unwrap();
+    run_frames(&project, cid, &NoFootage, &om, &dir.path().join("f_[#####].exr"), 1);
+
+    let media = MediaPool::new();
+    let footage = effectcraft_media::probe(&dir.path().join("f_00000.exr")).unwrap();
+    let picture = media.frame_at(&footage, Tick::ZERO).unwrap();
+    assert_eq!(px(&picture, W / 2, H / 2)[3], 0.0);
+    let need = AuxNeed::Lookups(vec![AuxLookup::Name("Red.A".into())]);
+    let aux = media.aux_for(ItemId(0), &footage, Tick::ZERO, &need).unwrap();
+    let alpha = aux.get("Red.A").unwrap();
+    assert_eq!(alpha[0], 0.0);
+    assert_eq!(alpha[(H as usize / 2) * W as usize + W as usize / 2], 1.0);
+}
+
 fn check_selected_exr_sequence(multipart: bool) {
     use effectcraft_export::render_queue::{ExrBitDepth, ExrSelection};
     use effectcraft_project::Value;

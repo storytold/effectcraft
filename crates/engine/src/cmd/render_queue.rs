@@ -673,6 +673,10 @@ fn set_output_module(s: &mut Session, p: &Value) -> Result<Value> {
     if !changed && post.is_none() {
         return Err(bad(C, "nothing to change"));
     }
+    if m == 0 || post.is_some() {
+        let primary = if m == 0 { &om } else { &item.output };
+        crate::render_queue::validate_post_render_output(primary, post.unwrap_or(item.post_render)).map_err(|e| bad(C, e))?;
+    }
     s.edit("Output Module Settings", None, |proj, _| {
         let it = &mut proj.render_queue[i];
         *module_mut(it, m) = om;
@@ -692,6 +696,9 @@ fn set_output(s: &mut Session, p: &Value) -> Result<Value> {
     let item = &s.project.render_queue[i];
     let mut om = module_ref(item, m).clone();
     apply_output(&mut om, s.project.comp(item.comp), &s.project.render_templates, None, &json!({"output": path}), "renderQueue.setOutput")?;
+    if m == 0 {
+        crate::render_queue::validate_post_render_output(&om, item.post_render).map_err(|e| bad("renderQueue.setOutput", e))?;
+    }
     s.edit("Output To", None, |proj, _| {
         let it = &mut proj.render_queue[i];
         *module_mut(it, m) = om;
@@ -842,17 +849,19 @@ fn add_output_module(s: &mut Session, p: &Value) -> Result<Value> {
 /// Composition ▸ Pre-render…: queue the comp with a lossless-with-alpha module whose post-render
 /// action imports the result and replaces the comp's uses.
 fn pre_render(s: &mut Session, p: &Value) -> Result<Value> {
+    const C: &str = "render.preRender";
     let cid = s.comp_for_queue(p)?;
     let mut it = RenderQueueItem::new(0, cid);
     let templates = s.project.render_templates.clone();
     it.settings = templates.default_render_settings(TemplateSlot::PreRender);
     it.output = templates.default_output_module(TemplateSlot::PreRender);
     it.output.output = "[compName]_prerender.[fileExtension]".into();
-    apply_output(&mut it.output, s.project.comp(cid), &templates, s.state.region_of_interest, p, "render.preRender")?;
+    apply_output(&mut it.output, s.project.comp(cid), &templates, s.state.region_of_interest, p, C)?;
+    it.post_render = PostRenderAction::ImportAndReplace;
+    crate::render_queue::validate_post_render_output(&it.output, it.post_render).map_err(|e| bad(C, e))?;
     if str_p(p, "output").or(str_p(p, "path")).is_none() {
         s.avoid_sources(&mut it);
     }
-    it.post_render = PostRenderAction::ImportAndReplace;
     let id = s.edit("Pre-render", None, |proj, _| {
         it.id = proj.render_queue.iter().map(|i| i.id).max().unwrap_or(0) + 1;
         let id = it.id;
@@ -1025,6 +1034,7 @@ fn apply_template(s: &mut Session, p: &Value) -> Result<Value> {
     const C: &str = "renderQueue.applyTemplate";
     let i = item_index(s, p, C)?;
     let m = module_p(s, i, p, C)?;
+    let item = &s.project.render_queue[i];
     let t = s.project.render_templates.clone();
     let rs = match str_p(p, "renderSettings") {
         Some(n) => Some(t.render_settings(n).ok_or_else(|| bad(C, format!("no Render Settings template “{n}”")))?),
@@ -1033,9 +1043,12 @@ fn apply_template(s: &mut Session, p: &Value) -> Result<Value> {
     let om = match str_p(p, "outputModule") {
         Some(n) => {
             let tpl = t.output_module(n).ok_or_else(|| bad(C, format!("no Output Module template “{n}”")))?;
-            let mut om = module_ref(&s.project.render_queue[i], m).clone();
+            let mut om = module_ref(item, m).clone();
             apply_om_template(&mut om, &tpl);
-            validate_exr(&om, s.project.comp(s.project.render_queue[i].comp), C)?;
+            validate_exr(&om, s.project.comp(item.comp), C)?;
+            if m == 0 {
+                crate::render_queue::validate_post_render_output(&om, item.post_render).map_err(|e| bad(C, e))?;
+            }
             Some(om)
         }
         None => None,
@@ -1145,7 +1158,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Pre-render...",
             ["Composition"],
             None,
-            "{comp?, output?: path|template, format?, exrCompression?, exrBitDepth?, exrSelection?: {composite?: bool, layers?: [LayerId], allLayers?: bool, depth?: bool, multipart?: bool}|null}",
+            "{comp?, output?: path|template, format?, exrCompression?, exrBitDepth?, exrSelection?: {composite?: true, layers?: [LayerId], allLayers?: bool, depth?: bool, multipart?: bool}|null}",
             can_add,
             pre_render
         ),
