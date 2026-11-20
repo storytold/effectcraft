@@ -115,6 +115,9 @@ impl EffectcraftApp {
         let mix = self.session.prefs.audio.preview_sample_rate;
         if let Some(s) = &mut self.scrub {
             s.play(&src, comp, t, mix, now);
+            if let Some(error) = s.feed.error() {
+                self.ui.status = error;
+            }
         }
     }
 

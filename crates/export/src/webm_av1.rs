@@ -117,7 +117,7 @@ pub(crate) async fn webm_av1(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut
         if end > cursor {
             let n = (end - cursor) as usize;
             let start = Tick(((cursor as i128 * TICKS_PER_SECOND as i128) / OPUS_RATE as i128) as i64);
-            pcm_left.extend(mix(job, start, n, OPUS_RATE));
+            pcm_left.extend(mix(job, start, n, OPUS_RATE)?);
             cursor = end;
         }
         let fs = craft_audio::opus::Encoder::FRAME_SIZE * opus_channels;

@@ -241,7 +241,7 @@ pub(crate) async fn webm(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut Sta
         if end > cursor {
             let n = (end - cursor) as usize;
             let start = Tick(((cursor as i128 * TICKS_PER_SECOND as i128) / OPUS_RATE as i128) as i64);
-            pcm_left.extend(mix(job, start, n, OPUS_RATE));
+            pcm_left.extend(mix(job, start, n, OPUS_RATE)?);
             cursor = end;
         }
         let fs = craft_audio::opus::Encoder::FRAME_SIZE * opus_channels;
@@ -356,7 +356,7 @@ pub(crate) fn audio_file(job: &Cx, comp: &Comp, aiff: bool, st: &mut State) -> R
         let sample = start + done as i64;
         let t = Tick::from_units(sample, i64::from(sr));
         let t = if t.to_units_floor(i64::from(sr)) < sample { Tick(t.0.saturating_add(1)) } else { t };
-        pcm.extend(pcm_bytes(&mix(job, t, k, sr), fmt, aiff));
+        pcm.extend(pcm_bytes(&mix(job, t, k, sr)?, fmt, aiff));
         done += k;
         let now = (done as u64 * total_frames / n.max(1) as u64).min(total_frames);
         if now > reported && st.total > 0 {

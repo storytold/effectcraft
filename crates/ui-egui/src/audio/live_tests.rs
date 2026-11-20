@@ -68,7 +68,7 @@ fn playback(footage: Arc<dyn FootageSource>) -> AudioPlayback {
 
 /// Run exactly one production feeder block, without a background refill racing assertions.
 fn mix(p: &AudioPlayback) {
-    feed_block(&p.state, p.comp, &p.feed, &p.span, p.timeline, p.mix);
+    feed_block(&p.state, p.comp, &p.feed, &p.span, p.timeline, p.mix, &p.stop);
 }
 
 /// Copy the active project and apply a layer edit through the same snapshot boundary as the UI.
@@ -133,8 +133,8 @@ fn a_block_in_flight_cannot_publish_after_a_mute() {
     let (entered, waiting) = mpsc::channel();
     let (resume, gate) = mpsc::channel();
     let mut p = playback(Arc::new(Gated { entered, resume: Mutex::new(gate) }));
-    let (state, feed, span, comp, rate) = (p.state.clone(), p.feed.clone(), p.span, p.comp, p.rate);
-    let worker = std::thread::spawn(move || feed_block(&state, comp, &feed, &span, PreviewRate::new(rate, 1.0, Tick::ZERO).unwrap(), rate));
+    let (state, feed, span, comp, rate, stop) = (p.state.clone(), p.feed.clone(), p.span, p.comp, p.rate, p.stop.clone());
+    let worker = std::thread::spawn(move || feed_block(&state, comp, &feed, &span, PreviewRate::new(rate, 1.0, Tick::ZERO).unwrap(), rate, &stop));
     waiting.recv_timeout(Duration::from_secs(10)).unwrap();
     // The edit completes while the mixer is blocked, without waiting on its work.
     p.follow_project(edit(&p, |l| l.switches.audio = false));

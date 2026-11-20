@@ -40,10 +40,12 @@ fn project(rate: FrameRate, extra: impl FnOnce(&mut Project, &mut Comp)) -> (Pro
 
 type Files = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
 
+/// Select an exact export span without changing the project's timing.
 fn custom(start: f64, end: f64) -> RenderSettings {
     RenderSettings { time_span: TimeSpan::Custom { start: Tick::from_seconds_f64(start), end: Tick::from_seconds_f64(end) }, ..Default::default() }
 }
 
+/// Collect finished in-memory outputs alongside the export result.
 fn run_with(p: &Project, cid: ItemId, s: &RenderSettings, om: &OutputModule, path: &str, options: JobOptions, cancel: bool) -> (Result<Report, String>, Files) {
     run_on(p, cid, s, om, path, options, (None, cancel))
 }
@@ -386,6 +388,7 @@ fn wav_and_aiff_channels_and_formats() {
     assert_eq!(u16::from_be_bytes([d[26], d[27]]), 24, "sample size");
 }
 
+/// Cancellation preserves unrelated and skipped files, including overflow destinations.
 #[test]
 fn cancelled_export_removes_only_files_it_opened() {
     use effectcraft_export::ExportError;
@@ -695,4 +698,72 @@ fn renderer_choice_follows_the_measurement() {
     assert_eq!(pick_renderer(None, None), JobRenderer::Gpu);
     assert_eq!(pick_renderer(Some(f64::NAN), Some(1.0)), JobRenderer::Gpu);
     assert_eq!(pick_renderer(None, Some(50.0)), JobRenderer::Cpu);
+}
+
+/// Footage whose audio is silence: unlike [`NoFootage`] it has sound to read, so mixing it costs work.
+struct SilentAudio;
+impl effectcraft_render::FootageSource for SilentAudio {
+    fn frame(&self, _: ItemId, _: &effectcraft_project::Footage, _: Tick) -> Option<Arc<Image>> {
+        None
+    }
+    fn audio(&self, _: ItemId, _: &effectcraft_project::Footage, _: Tick, frames: usize, _: u32) -> Option<Vec<f32>> {
+        Some(vec![0.0; frames * 2])
+    }
+}
+
+/// Cancellation and excessive audio work propagate through the encoder instead of producing a report.
+#[test]
+fn audio_mix_failures_abort_export() {
+    let (p, cid) = project(FrameRate::new(25, 1), |_, _| {});
+    let om = OutputModule::for_format(OutputFormat::Wav);
+    let options = JobOptions { cancel: Some(Arc::new(std::sync::atomic::AtomicBool::new(true))), ..Default::default() };
+    let (result, _) = run_with(&p, cid, &custom(0.0, 0.5), &om, "/cancel.wav", options, false);
+    assert_eq!(result.unwrap_err(), "cancelled");
+    // A footage layer whose Time Remap cycles through eight distant source times, one per output sample: each
+    // jump is a fresh source page, far more than any mix may fetch, so the export fails instead of hanging.
+    let (p, cid) = project(FrameRate::new(25, 1), |p, c| {
+        let f = effectcraft_project::Footage { has_audio: true, duration: Tick::from_seconds_f64(1.0e6), ..Default::default() };
+        let footage = p.add_item("audio", Label::SeaFoam, None, ItemKind::Footage(f));
+        let mut layer = build::layer(p, c, "audio", LayerSource::Footage { item: footage }, (0, 0), None);
+        let mut remap = build::Ids(&mut p.next_id).prop("timeRemap", "Time Remap", Value::Scalar(0.0));
+        remap.keys = (0..4000i64).map(|k| Keyframe::new(Tick::from_units(k, 8000), Value::Scalar((k % 8) as f64 * 100.0))).collect();
+        layer.props.children.push(remap.into());
+        c.layers.push(layer);
+    });
+    let mut om = om;
+    om.audio_sample_rate = 8000;
+    let settings = custom(0.0, 0.5);
+    let job = Job {
+        project: &p,
+        footage: &SilentAudio,
+        expr: None,
+        accel: None,
+        comp: cid,
+        settings: &settings,
+        output: &om,
+        path: "/limited.wav",
+        sink: Some(&|_: &str, _: Vec<u8>| {}),
+        options: JobOptions::default(),
+        nested_switches: true,
+    };
+    let result = export(&job, &mut |_| true).map_err(|e| e.to_string());
+    assert!(result.unwrap_err().contains("audio mixing exceeded its work limit"));
+}
+
+/// Valid low-frame-rate movie exports must split large audio requests into bounded mixes.
+#[test]
+fn low_frame_rate_audio_exports_are_not_rejected_by_the_mix_limit() {
+    let (mut p, cid) = project(FrameRate::new(1, 30), |_, _| {});
+    p.comp_mut(cid).unwrap().duration = Tick::from_seconds_f64(30.0);
+    for (format, codec) in
+        [(OutputFormat::Uncompressed, WebmVideoCodec::Vp9), (OutputFormat::WebM, WebmVideoCodec::Vp9), (OutputFormat::WebM, WebmVideoCodec::Av1)]
+    {
+        let mut om = OutputModule::for_format(format);
+        om.webm_codec = codec;
+        om.audio = AudioOutput::On;
+        om.audio_sample_rate = 48000;
+        let (result, files) = run_with(&p, cid, &custom(0.0, 30.0), &om, "/slow.mov", JobOptions::default(), false);
+        assert!(result.is_ok(), "{format:?}/{codec:?}: {result:?}");
+        assert_eq!(files.lock().unwrap().len(), 1);
+    }
 }

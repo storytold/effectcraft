@@ -138,6 +138,7 @@ fn prerender(
     item.output.audio = AudioOutput::Off;
     item.output.output = path.to_string();
     let job = crate::ExportJob {
+        cancel: None,
         project: &q,
         footage: cx.footage.as_ref(),
         expr: cx.expr.as_deref(),

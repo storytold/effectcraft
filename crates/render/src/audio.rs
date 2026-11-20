@@ -12,18 +12,27 @@
 //! pre-roll of earlier audio and only the block's tail is kept — so preview playback and export
 //! produce identical samples.
 //!
-//! Time-stretched layers are resampled linearly, so pitch follows the speed. A reversed layer
+//! Time-stretched layers are resampled linearly, so pitch follows the speed. Time Remap uses the
+//! same source-time evaluation as video, at audio sample resolution (keyframes and expressions),
+//! and is resampled the same way; where the remap holds one source time the layer is silent, with
+//! 2 ms fades at the edges so a hold does not click. A reversed layer
 //! (negative stretch, Layer > Time > Time-Reverse Layer) plays its audio backwards at the same
 //! speed: comp sample `k` plays the source just before layer time `layer_time(k)`, so at -100 %
 //! with the start at the out point (After Effects' layout) it is the exact mirror of the
 //! layer's span. Backwards on a reversed layer plays it forwards again.
+
+use std::cell::Cell;
+use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use effectcraft_effects::Params;
 use effectcraft_effects::audio_fx;
 use effectcraft_project::{Comp, GroupKind, ItemId, ItemKind, Layer, LayerSource, Node, Project};
 use effectcraft_time::{TICKS_PER_SECOND, Tick};
 
-use crate::{EvalCtx, ExprHost, FootageSource};
+use crate::{AudioExpression, EvalCtx, ExprHost, FootageSource};
 
 const MAX_DEPTH: usize = 16;
 
@@ -46,11 +55,258 @@ const MAX_PREROLL_SECONDS: f64 = 30.0;
 const MAX_PEAK_SECONDS: i64 = 24 * 3600;
 
 /// `frames` stereo sample frames of `comp`'s mix from comp time `start` at `rate` Hz,
-/// interleaved (L R L R …).
-pub fn mix_comp(project: &Project, footage: &dyn FootageSource, expr: Option<&dyn ExprHost>, comp: ItemId, start: Tick, frames: usize, rate: u32) -> Vec<f32> {
+/// interleaved (L R L R …). Returns an error rather than partial audio when the work is excessive.
+pub fn mix_comp(
+    project: &Project,
+    footage: &dyn FootageSource,
+    expr: Option<&dyn ExprHost>,
+    comp: ItemId,
+    start: Tick,
+    frames: usize,
+    rate: u32,
+) -> Result<Vec<f32>, AudioError> {
+    mix_comp_with_control(&MixSources { project, footage, expr }, comp, start, frames, rate, &MixControl::default())
+}
+
+/// Why a mix produced no audio. A failure aborts the whole block: callers must not play or export
+/// a partial mix.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AudioError {
+    Cancelled,
+    WorkLimit,
+}
+impl std::fmt::Display for AudioError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Cancelled => "audio mixing cancelled",
+            Self::WorkLimit => "audio mixing exceeded its work limit; simplify time stretching, remapping, or nested compositions",
+        })
+    }
+}
+impl std::error::Error for AudioError {}
+
+/// Controls shared by every layer, source read and nested composition in one mix call.
+#[derive(Default)]
+pub struct MixControl {
+    /// Stop an in-flight mix, including expression evaluation when the host supports it.
+    pub cancel: Option<Arc<AtomicBool>>,
+    /// Override the default allowance of [`WORK_PER_FRAME`] source or sample operations per
+    /// output frame plus [`WORK_SLACK`]. One buffer is also capped at [`MAX_ALLOC_FRAMES`].
+    pub max_work: Option<usize>,
+    /// How long the mix's expressions may run in all (none by default). Only time spent
+    /// evaluating expressions counts, not reading or decoding footage, so a slow first read
+    /// of a long file cannot trip it.
+    pub max_expression_time: Option<Duration>,
+    /// Shared JavaScript yield allowance (1024 yields of up to 20,000 instructions by default).
+    pub max_expression_yields: Option<usize>,
+}
+
+/// Source or sample operations one output frame may cost (all layers, nested mixes included).
+/// A layer at the 1 % stretch limit reads 100 source frames per output frame, so two of them
+/// nested (a 1 % layer in a 1 % precomp: 10⁴) fit; a third level, or a remap that jumps every few
+/// samples, does not and fails instead of hanging.
+const WORK_PER_FRAME: usize = 1 << 14;
+/// Extra work every mix may do, so a one-frame call can still read a page.
+const WORK_SLACK: usize = 65_536;
+/// The most stereo frames one buffer holds: a block plus 30 s of effect pre-roll at 192 kHz.
+const MAX_ALLOC_FRAMES: usize = 1 << 23;
+/// Source frames a Time Remap read fetches at a time, aligned on absolute multiples of it so the
+/// result does not depend on where a block starts.
+const REMAP_PAGE: i64 = 4096;
+/// Page fetches a mix may make per output frame (one per 64 frames, so a remap that jumps more
+/// often than that fails) plus [`PAGE_SLACK`] for nested remaps and small blocks.
+const FRAMES_PER_PAGE: usize = 64;
+const PAGE_SLACK: usize = 64;
+/// Fade at each edge of a Time Remap hold, in milliseconds.
+const HOLD_FADE_MS: usize = 2;
+
+/// Shared interruption state for every expression in one mix, including nested evaluations.
+/// Clones share the sticky resource failure, the time spent and the yield allowance, so a new
+/// sample cannot reset them.
+#[derive(Clone)]
+pub struct AudioEvalControl {
+    cancel: Option<Arc<AtomicBool>>,
+    remaining: Rc<Cell<usize>>,
+    failed: Rc<Cell<bool>>,
+    spent: Rc<Cell<Duration>>,
+    /// When the evaluation now running began (it counts towards the limit before it ends).
+    #[cfg(not(target_arch = "wasm32"))]
+    running: Rc<Cell<Option<web_time::Instant>>>,
+    limit: Option<Duration>,
+}
+impl AudioEvalControl {
+    fn new(control: &MixControl) -> Self {
+        Self {
+            cancel: control.cancel.clone(),
+            remaining: Rc::new(Cell::new(control.max_expression_yields.unwrap_or(1024))),
+            failed: Rc::new(Cell::new(false)),
+            spent: Rc::new(Cell::new(Duration::ZERO)),
+            #[cfg(not(target_arch = "wasm32"))]
+            running: Rc::new(Cell::new(None)),
+            limit: control.max_expression_time,
+        }
+    }
+    /// Mark a runtime resource limit; ordinary expression errors still use keyframed fallback.
+    pub fn fail(&self) {
+        self.failed.set(true);
+    }
+    /// Whether the shared allowance (yields, expression time) has run out.
+    pub fn exhausted(&self) -> bool {
+        if self.limit.is_some_and(|limit| self.time_used() >= limit) {
+            self.fail();
+        }
+        self.failed.get()
+    }
+    /// Time spent in expressions so far, including the evaluation now running.
+    fn time_used(&self) -> Duration {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(start) = self.running.get() {
+            return self.spent.get().saturating_add(start.elapsed());
+        }
+        self.spent.get()
+    }
+    /// Check cancellation and resource limits without charging another instruction chunk.
+    pub fn interrupted(&self) -> bool {
+        self.cancel.as_ref().is_some_and(|c| c.load(Ordering::Relaxed)) || self.exhausted()
+    }
+    /// Charge one budgeted JavaScript yield; this also bounds scripts on clockless WASM builds.
+    pub fn yielded(&self) -> bool {
+        if let Some(left) = self.remaining.get().checked_sub(1) {
+            self.remaining.set(left);
+        } else {
+            self.fail();
+        }
+        self.interrupted()
+    }
+    /// Run one expression evaluation, counting its time (where there is a clock).
+    fn timed<R>(&self, run: impl FnOnce() -> R) -> R {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if self.running.get().is_some() {
+                return run();
+            }
+            let start = web_time::Instant::now();
+            self.running.set(Some(start));
+            let out = run();
+            self.running.set(None);
+            self.spent.set(self.spent.get().saturating_add(start.elapsed()));
+            out
+        }
+        #[cfg(target_arch = "wasm32")]
+        run()
+    }
+}
+
+/// What a mix may still do: cancellation, source and sample operations, page fetches and the
+/// expressions' own allowance. A failure is sticky for the whole mix.
+struct Budget<'a> {
+    control: &'a MixControl,
+    expressions: AudioEvalControl,
+    remaining: Cell<usize>,
+    pages: Cell<usize>,
+    error: Cell<Option<AudioError>>,
+}
+impl Budget<'_> {
+    fn fail(&self, error: AudioError) {
+        if self.error.get().is_none() {
+            self.error.set(Some(error));
+        }
+    }
+    /// Whether the mix can go on (not cancelled, expressions within their allowance). Charges nothing.
+    fn ok(&self, footage: &dyn FootageSource) -> bool {
+        if self.error.get().is_some() {
+            return false;
+        }
+        if footage.called_off() || self.control.cancel.as_ref().is_some_and(|c| c.load(Ordering::Relaxed)) {
+            self.fail(AudioError::Cancelled);
+            return false;
+        }
+        if self.expressions.exhausted() {
+            self.fail(AudioError::WorkLimit);
+            return false;
+        }
+        true
+    }
+    /// Charge `frames` source or sample operations before doing them.
+    fn charge(&self, frames: usize, footage: &dyn FootageSource) -> bool {
+        if !self.ok(footage) {
+            return false;
+        }
+        if frames > self.remaining.get() {
+            self.fail(AudioError::WorkLimit);
+            return false;
+        }
+        self.remaining.set(self.remaining.get() - frames);
+        true
+    }
+    /// Allow one buffer of `frames` stereo frames.
+    fn alloc(&self, frames: usize) -> bool {
+        if frames > MAX_ALLOC_FRAMES {
+            self.fail(AudioError::WorkLimit);
+            return false;
+        }
+        true
+    }
+    /// Add `frames` operations to the allowance: work that is paid for elsewhere (effect pre-roll,
+    /// a source page), so it does not eat into what the output block itself may cost.
+    fn grant(&self, frames: usize) {
+        // An explicit allowance is a hard cap: nothing is added to it.
+        if self.control.max_work.is_none() {
+            self.remaining.set(self.remaining.get().saturating_add(frames));
+        }
+    }
+    /// One Time Remap page fetch.
+    fn take_page(&self) -> bool {
+        match self.pages.get().checked_sub(1) {
+            Some(left) => {
+                self.pages.set(left);
+                true
+            }
+            None => {
+                self.fail(AudioError::WorkLimit);
+                false
+            }
+        }
+    }
+}
+
+/// What a mix reads: the project, its footage and, optionally, the expression host.
+#[derive(Clone, Copy)]
+pub struct MixSources<'a> {
+    pub project: &'a Project,
+    pub footage: &'a dyn FootageSource,
+    pub expr: Option<&'a dyn ExprHost>,
+}
+
+/// Mix with cancellation and a work budget; failures discard the entire output block.
+pub fn mix_comp_with_control(
+    sources: &MixSources<'_>,
+    comp: ItemId,
+    start: Tick,
+    frames: usize,
+    rate: u32,
+    control: &MixControl,
+) -> Result<Vec<f32>, AudioError> {
+    let MixSources { project, footage, expr } = *sources;
+    let cancellable = control.cancel.as_ref().map(|cancel| crate::CancellableFootage { inner: footage, cancel: cancel.clone() });
+    let footage: &dyn FootageSource = cancellable.as_ref().map_or(footage, |source| source);
+    let budget = Budget {
+        control,
+        expressions: AudioEvalControl::new(control),
+        remaining: Cell::new(control.max_work.unwrap_or_else(|| frames.saturating_mul(WORK_PER_FRAME).saturating_add(WORK_SLACK))),
+        pages: Cell::new(frames / FRAMES_PER_PAGE + PAGE_SLACK),
+        error: Cell::new(None),
+    };
+    if !budget.alloc(frames) || !budget.ok(footage) {
+        return Err(budget.error.get().unwrap_or(AudioError::WorkLimit));
+    }
     let mut out = vec![0.0f32; frames * 2];
-    mix_into(&AudioSources { project, footage, expr, rate }, comp, start, &mut out, 0);
-    out
+    mix_into(&AudioSources { project, footage, expr, rate, budget: &budget }, comp, start, &mut out, 0);
+    budget.ok(footage);
+    match budget.error.get() {
+        Some(e) => Err(e),
+        None => Ok(out),
+    }
 }
 
 /// Whether the comp has anything audible (footage with audio, a sound generator, or a precomp
@@ -156,6 +412,7 @@ struct MixEnv<'a> {
     comp: &'a Comp,
     rate: u32,
     depth: usize,
+    budget: &'a Budget<'a>,
 }
 
 impl MixEnv<'_> {
@@ -170,6 +427,10 @@ impl MixEnv<'_> {
     /// `reversed` (the Backwards effect).
     fn layer_raw(&self, l: &Layer, i0: i64, n: usize, reversed: bool) -> Vec<f32> {
         let rate = self.rate;
+        // Nothing is allocated, read or evaluated once the mix has failed or the buffer is too big.
+        if !self.budget.ok(self.footage) || !self.budget.alloc(n) {
+            return Vec::new();
+        }
         let mut out = vec![0.0f32; n * 2];
         let (in_i, out_i) = (units_ceil(l.in_point, rate), units_ceil(l.out_point, rate));
         if reversed {
@@ -181,6 +442,9 @@ impl MixEnv<'_> {
             }
             let (ma, mb) = (in_i + out_i - b, in_i + out_i - a);
             let fwd = self.layer_raw(l, ma, (mb - ma) as usize, false);
+            if fwd.len() != (mb - ma) as usize * 2 {
+                return out;
+            }
             for k in a..b {
                 let j = (in_i + out_i - 1 - k - ma) as usize;
                 let o = (k - i0) as usize;
@@ -192,6 +456,12 @@ impl MixEnv<'_> {
         let a = (in_i - i0).clamp(0, n as i64) as usize;
         let b = (out_i - i0).clamp(0, n as i64) as usize;
         if a >= b {
+            return out;
+        }
+        // Time Remap replaces the stretch's source time: its value at each comp sample is the
+        // source time to play.
+        if l.props.get("timeRemap").is_some() {
+            self.remapped_raw(l, i0, a, b, &mut out);
             return out;
         }
         // Within ±1 % to ±9900 % (#3247): a stretch of 1e-300 % set in memory read about
@@ -244,6 +514,9 @@ impl MixEnv<'_> {
         let frac = if same { 0.0 } else { (i128::from(lt.0) * i128::from(rate)).rem_euclid(tps) as f64 / tps as f64 };
         // Resampled, one more source sample than the run covers: the last sample blends with it.
         let src_n = ((frac + m as f64 * speed).ceil() as usize).saturating_add(usize::from(!same)).max(1);
+        if !self.budget.charge(src_n, self.footage) {
+            return None;
+        }
         let buf = match &l.source {
             LayerSource::Footage { item } => match self.project.item(*item).map(|i| &i.kind) {
                 Some(ItemKind::Footage(f)) if f.has_audio => self.footage.audio(*item, f, from, src_n, rate).unwrap_or_else(|| vec![0.0; src_n * 2]),
@@ -254,7 +527,13 @@ impl MixEnv<'_> {
                     return None;
                 }
                 let mut sub = vec![0.0f32; src_n * 2];
-                mix_into(&AudioSources { project: self.project, footage: self.footage, expr: self.expr, rate }, *item, from, &mut sub, self.depth + 1);
+                mix_into(
+                    &AudioSources { project: self.project, footage: self.footage, expr: self.expr, rate, budget: self.budget },
+                    *item,
+                    from,
+                    &mut sub,
+                    self.depth + 1,
+                );
                 sub
             }
             _ => return None,
@@ -276,31 +555,200 @@ impl MixEnv<'_> {
         Some(out)
     }
 
-    /// Effect parameters at comp time `t`.
-    fn params(&self, l: &Layer, g: &effectcraft_project::PropGroup, t: Tick) -> Params {
+    /// A property's value at comp time `t` under the mix's shared controls: expressions run through
+    /// the host's audio entry point (cancellable, bounded in yields and time), and a resource
+    /// failure ends the mix rather than falling back to keyframes for every later sample.
+    fn value(&self, l: &Layer, prop: &effectcraft_project::Property, t: Tick) -> effectcraft_keyframe::Value {
+        let base = prop.value_at(l.layer_time(t));
+        if !prop.has_expression() {
+            return base;
+        }
+        let Some(host) = self.expr else { return base };
+        if !self.budget.charge(1, self.footage) {
+            return base;
+        }
         let ctx = self.ctx(t);
+        let value = self.budget.expressions.timed(|| host.eval_audio(&ctx, l, prop, &base, &self.budget.expressions)).unwrap_or_else(|_| base.clone());
+        // A resource failure inside the script surfaces here.
+        self.budget.ok(self.footage);
+        value
+    }
+
+    /// Effect parameters at comp time `t`, stopping as soon as the shared controls expire.
+    fn params(&self, l: &Layer, g: &effectcraft_project::PropGroup, t: Tick) -> Params {
         let mut p = Params::default();
         for c in &g.children {
             if let Node::Prop(pr) = c {
-                p.values.insert(pr.match_id.clone(), ctx.value(l, pr));
+                if !self.budget.ok(self.footage) {
+                    break;
+                }
+                p.values.insert(pr.match_id.clone(), self.value(l, pr, t));
             }
         }
         p
+    }
+
+    /// The Time Remap's source time at comp sample `index`: its keyframes, then its expression
+    /// (an exact scalar one is prepared once and run per sample, anything else through the host).
+    fn remap_source(&self, l: &Layer, prop: &effectcraft_project::Property, prepared: Option<&dyn AudioExpression>, index: i64) -> Tick {
+        let time = sample_tick(index, self.rate);
+        let value = match (prepared, prop.value_at(l.layer_time(time))) {
+            (Some(prepared), effectcraft_keyframe::Value::Scalar(v)) => effectcraft_keyframe::Value::Scalar(prepared.evaluate(time.seconds(), v).unwrap_or(v)),
+            _ => self.value(l, prop, time),
+        };
+        Tick::from_seconds_f64(value.as_f64())
+    }
+
+    /// One page of source audio for Time Remap: `REMAP_PAGE` frames and the sample after them (for
+    /// interpolation) from source sample `page`. A page is paid for by its own allowance, so what
+    /// it costs does not depend on the block that asked for it; the number of pages is bounded.
+    fn remap_page(&self, l: &Layer, page: i64) -> Option<Vec<f32>> {
+        let frames = REMAP_PAGE as usize + 1;
+        if !self.budget.take_page() {
+            return None;
+        }
+        self.budget.grant(frames);
+        if !self.budget.charge(frames, self.footage) {
+            return None;
+        }
+        let start = sample_tick(page, self.rate);
+        match &l.source {
+            LayerSource::Footage { item } => match self.project.item(*item).map(|i| &i.kind) {
+                Some(ItemKind::Footage(f)) if f.has_audio => Some(self.footage.audio(*item, f, start, frames, self.rate).unwrap_or_default()),
+                _ => None,
+            },
+            LayerSource::Comp { item } => {
+                if self.project.comp_contains(*item, self.comp_id) {
+                    return None;
+                }
+                let mut sub = vec![0.0f32; frames * 2];
+                let sources = AudioSources { project: self.project, footage: self.footage, expr: self.expr, rate: self.rate, budget: self.budget };
+                mix_into(&sources, *item, start, &mut sub, self.depth + 1);
+                Some(sub)
+            }
+            _ => None,
+        }
+    }
+
+    /// Comp samples `a .. b` of a layer with Time Remap (comp sample `i0 + k` is output `k`): each
+    /// plays the source at its remapped time, interpolated linearly, so the pitch follows the
+    /// remap's speed (no pitch correction). Source audio is read in pages aligned on absolute
+    /// multiples of `REMAP_PAGE`, so the samples do not depend on where the block starts. Where
+    /// the remap holds one source time, no sound plays; 2 ms fades at each edge of a hold take
+    /// away the click of stopping and starting.
+    fn remapped_raw(&self, l: &Layer, i0: i64, a: usize, b: usize, out: &mut [f32]) {
+        let Some(prop) = l.props.get("timeRemap") else { return };
+        let prepared = prop.expr.as_ref().filter(|_| prop.has_expression()).and_then(|e| self.expr.and_then(|h| h.prepare_audio(&e.text)));
+        let fade = (self.rate as usize * HOLD_FADE_MS / 1000).max(1);
+        // Source times from one sample before the first output sample (to tell a hold from motion)
+        // to a fade past the last (so the fade out of a hold that starts there is known).
+        let count = b - a + 2 * fade + 1;
+        let Some(first) = i0.checked_add(a as i64).and_then(|v| v.checked_sub(fade as i64 + 1)).filter(|v| v.checked_add(count as i64).is_some()) else {
+            return;
+        };
+        let mut times = Vec::with_capacity(count);
+        for k in 0..count {
+            if !self.budget.charge(1, self.footage) {
+                return;
+            }
+            times.push(self.remap_source(l, prop, prepared.as_deref(), first + k as i64));
+        }
+        // A hold is two successive samples inside the layer's [in, out) at one source time: before the
+        // first key or past the last the remap is flat too, but there the layer plays no sound anyway.
+        let (in_i, out_i) = (units_ceil(l.in_point, self.rate), units_ceil(l.out_point, self.rate));
+        let hold = |k: usize| k > 0 && first + k as i64 > in_i && first + (k as i64) < out_i && times.get(k) == times.get(k - 1);
+        // How many samples back / ahead the nearest held sample is (usize::MAX: none in range).
+        let (mut since, mut until) = (vec![usize::MAX; count], vec![usize::MAX; count]);
+        let mut last = None;
+        for (k, d) in since.iter_mut().enumerate() {
+            if hold(k) {
+                last = Some(k);
+            }
+            *d = last.map_or(usize::MAX, |h| k - h);
+        }
+        let mut next = None;
+        for (k, d) in until.iter_mut().enumerate().rev() {
+            if hold(k) {
+                next = Some(k);
+            }
+            *d = next.map_or(usize::MAX, |h| h - k);
+        }
+        let mut pages: Vec<(i64, Vec<f32>)> = Vec::new();
+        let mut evict = 0;
+        for o in a..b {
+            if !self.budget.charge(1, self.footage) {
+                return;
+            }
+            let k = o - a + fade + 1;
+            let gain = (since[k].min(until[k]) as f32 / fade as f32).min(1.0);
+            if gain <= 0.0 {
+                continue;
+            }
+            let Some(source) = times.get(k) else { continue };
+            let numerator = i128::from(source.0) * i128::from(self.rate);
+            let denominator = i128::from(TICKS_PER_SECOND);
+            let Ok(sample) = i64::try_from(numerator.div_euclid(denominator)) else { continue };
+            let Some(page) = sample.div_euclid(REMAP_PAGE).checked_mul(REMAP_PAGE) else { continue };
+            let slot = match pages.iter().position(|(p, _)| *p == page) {
+                Some(slot) => slot,
+                None => {
+                    let Some(buf) = self.remap_page(l, page) else { return };
+                    // Four pages (about 128 KiB) keep repeated jumps cheap.
+                    if pages.len() < 4 {
+                        pages.push((page, buf));
+                        pages.len() - 1
+                    } else {
+                        pages[evict] = (page, buf);
+                        let slot = evict;
+                        evict = (evict + 1) % 4;
+                        slot
+                    }
+                }
+            };
+            let Some((_, buf)) = pages.get(slot) else { return };
+            let j = sample.rem_euclid(REMAP_PAGE) as usize * 2;
+            let fraction = (numerator.rem_euclid(denominator) as f64 / denominator as f64) as f32;
+            let Some(pair) = out.get_mut(o * 2..o * 2 + 2) else { return };
+            for (c, v) in pair.iter_mut().enumerate() {
+                let x = buf.get(j + c).copied().unwrap_or(0.0);
+                let y = buf.get(j + 2 + c).copied().unwrap_or(0.0);
+                *v = (x + (y - x) * fraction) * gain;
+            }
+        }
     }
 
     /// The layer's processed audio (effects applied, levels not) for comp sample indices
     /// `i0 .. i0 + n`.
     fn layer_audio(&self, l: &Layer, i0: i64, n: usize) -> Vec<f32> {
         let t = sample_tick(i0, self.rate);
-        let fx: Vec<(&str, &effectcraft_project::PropGroup, Params)> = audio_effect_groups(l).map(|(id, g)| (id, g, self.params(l, g, t))).collect();
+        let mut fx: Vec<(&str, &effectcraft_project::PropGroup, Params)> = Vec::new();
+        for (id, g) in audio_effect_groups(l) {
+            let params = self.params(l, g, t);
+            if !self.budget.ok(self.footage) {
+                return Vec::new();
+            }
+            fx.push((id, g, params));
+        }
         if fx.is_empty() {
             return self.layer_raw(l, i0, n, false);
         }
         let reversed = plays_backwards(l);
         let pre_s: f64 = fx.iter().map(|(id, _, p)| audio_fx::preroll(id, p)).sum::<f64>().clamp(0.0, MAX_PREROLL_SECONDS);
         let pre = (pre_s * self.rate as f64).ceil() as usize;
+        // The pre-roll's own source reads are not the block's cost: they are allowed on top of
+        // what the block may use, at the speed the layer plays (never above MAX_SPEED).
+        let speed = (100.0 / l.effective_stretch()).abs();
+        let speed = if speed.is_finite() { speed.min(MAX_SPEED).ceil() as usize } else { 1 };
+        self.budget.grant(pre.saturating_mul(speed.max(1)));
+        let Some(total) = n.checked_add(pre) else {
+            self.budget.fail(AudioError::WorkLimit);
+            return Vec::new();
+        };
         let b0 = i0 - pre as i64;
-        let mut buf = self.layer_raw(l, b0, n + pre, reversed);
+        let mut buf = self.layer_raw(l, b0, total, reversed);
+        if buf.len() < pre * 2 {
+            return Vec::new();
+        }
         let start = fx_clock(l, sample_tick(b0, self.rate));
         for (id, g, p) in &fx {
             if audio_fx::per_sample(id) && animated(g) {
@@ -320,6 +768,9 @@ impl MixEnv<'_> {
         let frames = buf.len() / 2;
         let mut k = 0usize;
         while k < frames {
+            if !self.budget.ok(self.footage) {
+                return;
+            }
             let i = b0.saturating_add(k as i64);
             let next = i.div_euclid(step).saturating_add(1).saturating_mul(step);
             let end = usize::try_from(next.saturating_sub(b0)).unwrap_or(frames).clamp(k + 1, frames);
@@ -335,7 +786,7 @@ impl MixEnv<'_> {
     /// Animated levels are evaluated on the parameter grid and interpolated in dB in between.
     fn level_gains(&self, l: &Layer, i0: i64, n: usize) -> Vec<[f32; 2]> {
         let Some(pr) = l.props.sub("audio").and_then(|g| g.get("levels")) else { return vec![[1.0, 1.0]; n] };
-        let db = |i: i64| self.ctx(sample_tick(i, self.rate)).value(l, pr).as_vec2();
+        let db = |i: i64| self.value(l, pr, sample_tick(i, self.rate)).as_vec2();
         let gain = |[a, b]: [f64; 2]| [db_to_gain(a), db_to_gain(b)];
         if !pr.is_animated() && !pr.has_expression() {
             return vec![gain(db(i0)); n];
@@ -364,19 +815,24 @@ struct AudioSources<'a> {
     footage: &'a dyn FootageSource,
     expr: Option<&'a dyn ExprHost>,
     rate: u32,
+    /// Shared by the mix's layers and every nested composition it reads.
+    budget: &'a Budget<'a>,
 }
 
 fn mix_into(sources: &AudioSources<'_>, comp_id: ItemId, start: Tick, out: &mut [f32], depth: usize) {
-    let AudioSources { project, footage, expr, rate } = *sources;
+    let AudioSources { project, footage, expr, rate, budget } = *sources;
     let Some(comp) = project.comp(comp_id) else { return };
     if depth >= MAX_DEPTH || rate == 0 {
         return;
     }
-    let env = MixEnv { project, footage, expr, comp_id, comp, rate, depth };
+    let env = MixEnv { project, footage, expr, comp_id, comp, rate, depth, budget };
     let frames = out.len() / 2;
     let any_solo = comp.layers.iter().any(|l| l.switches.solo && audible(project, l));
     let s0 = start.to_units_floor(rate as i64);
     for l in &comp.layers {
+        if !budget.ok(footage) {
+            return;
+        }
         // The stretch the layer's time uses (#3247): 0 and NaN play at 100 %, as `layer_time`;
         // a negative one plays backwards (#3239).
         if !audible(project, l) || (any_solo && !l.switches.solo) {
@@ -549,7 +1005,7 @@ mod tests {
         let cid = p.add_item("C", effectcraft_color::Label::Sandstone, None, ItemKind::Comp(comp.into()));
         assert!(comp_has_audio(&p, cid));
         let rate = 1000;
-        let m = mix_comp(&p, &Dc, None, cid, Tick::from_seconds_f64(0.5), 1000, rate);
+        let m = mix_comp(&p, &Dc, None, cid, Tick::from_seconds_f64(0.5), 1000, rate).unwrap();
         // first half: only layer b (half gain left, muted right)
         assert!((m[0] - 0.125).abs() < 1e-3 && m[1].abs() < 1e-6, "{} {}", m[0], m[1]);
         // second half (≥ 1 s): a + b
@@ -599,8 +1055,8 @@ mod tests {
         let outer_id = p.add_item("Outer", effectcraft_color::Label::Sandstone, None, ItemKind::Comp(outer.into()));
         let rate = 8000;
         let t = Tick::from_seconds_f64(0.5);
-        let direct = mix_comp(&p, &Tone, None, inner_id, t, 4000, rate);
-        let nested = mix_comp(&p, &Tone, None, outer_id, t, 4000, rate);
+        let direct = mix_comp(&p, &Tone, None, inner_id, t, 4000, rate).unwrap();
+        let nested = mix_comp(&p, &Tone, None, outer_id, t, 4000, rate).unwrap();
         assert_eq!(direct.len(), nested.len());
         let worst = direct.iter().zip(&nested).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
         assert!(worst < 1e-6, "a plain precomp changes its audio by {worst}");
@@ -631,7 +1087,7 @@ mod tests {
         let cid = p.add_item("C", effectcraft_color::Label::Sandstone, None, ItemKind::Comp(comp.into()));
         let n = 2000usize;
         let t = Tick::from_seconds_f64(0.5);
-        let m = mix_comp(&p, &Tone, None, cid, t, n, rate);
+        let m = mix_comp(&p, &Tone, None, cid, t, n, rate).unwrap();
         let speed = 100.0 / stretch;
         let (mut worst, mut sq) = (0.0f64, 0.0f64);
         for i in 0..n {

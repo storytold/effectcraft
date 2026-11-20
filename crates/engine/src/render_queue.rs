@@ -20,6 +20,8 @@ use crate::{Event, Session};
 
 /// One export handed to the [`Exporter`].
 pub struct ExportJob<'a> {
+    /// Shared cancellation token, including work inside an audio block.
+    pub cancel: Option<Arc<AtomicBool>>,
     pub project: &'a Project,
     pub footage: &'a dyn FootageSource,
     pub expr: Option<&'a dyn ExprHost>,
@@ -158,7 +160,7 @@ pub enum ItemUpdate {
 
 #[derive(Default)]
 pub struct JobShared {
-    pub cancel: AtomicBool,
+    pub cancel: Arc<AtomicBool>,
     pub state: Mutex<JobState>,
     pub updates: Mutex<Vec<ItemUpdate>>,
     /// A waiting control request retains its own items across requeue/removal/project edits.
@@ -397,6 +399,7 @@ async fn run_work(w: Work, shared: &JobShared, notify: &mut dyn FnMut(&JobShared
             let name = w.project.item(mitem.comp).map(|i| i.name.clone()).unwrap_or_default();
             let index = w.project.render_queue.iter().position(|i| i.id == mitem.id).map_or(0, |i| i + 1);
             let job = ExportJob {
+                cancel: Some(shared.cancel.clone()),
                 project: &w.project,
                 footage: w.footage.as_ref(),
                 expr: w.expr.as_deref(),
