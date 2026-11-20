@@ -1009,11 +1009,10 @@ mod tests {
         };
         let rot90 = rotate_frame(frame.clone(), 1);
         assert_eq!((rot90.width, rot90.height), (2, 4));
+        assert!(matches!(rot90.data, PixelData::Yuv8 { alpha: Some(_), .. }));
         if let PixelData::Yuv8 { planes: [y, ..], alpha: Some(a), .. } = &rot90.data {
             assert_eq!(&**y, &[5, 1, 6, 2, 7, 3, 8, 4]);
             assert_eq!(&**a, &[15, 11, 16, 12, 17, 13, 18, 14]);
-        } else {
-            assert!(false, "expected Yuv8 with alpha");
         }
         let rot360 = rotate_frame(rot90, 3);
         assert_eq!((rot360.width, rot360.height), (4, 2));
@@ -1024,12 +1023,7 @@ mod tests {
 
     #[test]
     fn plane_u8_handles_8bit_u16_storage_as_av1_produces() {
-        let p = Plane::packed(2, 2, 8, Samples::U16(vec![10, 20, 30, 255])).ok();
-        let Some(p) = p else {
-            assert!(false, "valid 8-bit U16 plane");
-            return;
-        };
-        let out = plane_u8(p).ok();
+        let out = Plane::packed(2, 2, 8, Samples::U16(vec![10, 20, 30, 255])).ok().and_then(|p| plane_u8(p).ok());
         assert_eq!(out.as_deref(), Some(&[10, 20, 30, 255][..]));
     }
 
