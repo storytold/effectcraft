@@ -15,6 +15,11 @@ pub(crate) struct FxHost<'r, 'a, 'c> {
     /// Index of the effect being rendered (bounds `self_at` to effects before it).
     pub(crate) index: usize,
     pub(crate) original: Option<&'c Buf>,
+    /// Set when a [`self_at`](EffectHost::self_at) call had to decline: the composite below could
+    /// not be reproduced, so a time effect must pass its input through instead of reading a frame.
+    /// Shared with the effect instances this host serves (atomically, as effects may run on any
+    /// worker); owned by the render that created it.
+    pub(crate) unsafe_sample: &'c std::sync::atomic::AtomicBool,
 }
 
 impl FxHost<'_, '_, '_> {
@@ -28,26 +33,43 @@ impl FxHost<'_, '_, '_> {
     /// mask, an effect, a layer style, 3D, a track matte). The caller then passes its input
     /// through, which is what happened before.
     fn below_at(&self, t: f64) -> Option<Buf> {
+        let decline = || {
+            self.unsafe_sample.store(true, std::sync::atomic::Ordering::Relaxed);
+            None
+        };
         if self.r.opts.roi.is_some() || self.r.depth > MAX_FX_DEPTH {
-            return None;
+            return decline();
         }
         // A time effect holds what reaches it: on an ordinary layer that is its own source with the
         // effects before it. Here only the composite below is available, so with an effect earlier in
         // the same stack the input would differ — leave those stacks as they were.
         let earlier = self.layer.effects().is_some_and(|fx| fx.groups().take(self.index).any(|g| g.enabled));
         if earlier {
-            return None;
+            return decline();
+        }
+        // Colour-managed projects blend in linear light; reproducing those conversions here would
+        // need the compositor's blending pipeline, so they keep the previous pass-through.
+        if self.r.pipe.to_blend().is_some() {
+            return decline();
         }
         let ctx = self.ctx.at(Tick::from_seconds_f64(t));
         let (w, h) = frame_size(ctx.comp.width, ctx.comp.height, self.r.opts.scale);
         // Only layers whose processed buffer is exactly their own content are composited here; the
-        // rest would need the full compositor (masks, effects, styles, 3D, mattes).
+        // rest would need the full compositor (masks, effects, styles, 3D, mattes, another
+        // adjustment or a collapsed precomp).
+        let any_solo = ctx.comp.any_solo();
         let mut plain = Vec::new();
         for other in ctx.comp.layers.iter().rev() {
             if other.id == self.layer.id {
                 break;
             }
-            if !other.has_video() || !other.is_active_at(ctx.time) || other.switches.guide {
+            // The same visibility rules the compositor uses ([`Renderer::visible_layers`]).
+            if !other.has_video()
+                || !other.is_active_at(ctx.time)
+                || other.environment
+                || (!self.r.opts.guides && other.switches.guide)
+                || (any_solo && !other.switches.solo)
+            {
                 continue;
             }
             if other.masks().is_some_and(|m| m.groups().next().is_some())
@@ -55,18 +77,24 @@ impl FxHost<'_, '_, '_> {
                 || other.is_3d()
                 || other.track_matte.is_some()
                 || other.preserve_transparency
+                || other.switches.adjustment
+                || other.switches.collapse
                 || (other.switches.effects && other.effects().is_some_and(|fx| fx.groups().any(|g| g.enabled)))
             {
-                return None;
+                return decline();
             }
             plain.push(other);
         }
         let sub = self.r.nested();
         let mut img = Image::new(w, h);
         for other in plain {
-            let buf = (*sub.content_buf(&ctx, other)?).clone();
+            let Some(buf) = sub.content_buf(&ctx, other) else {
+                return decline();
+            };
+            let buf = (*buf).clone();
             let opacity = ctx.opacity(other) as f32 * self.r.opacity_mul;
             self.r.place(&ctx, other, &buf, &mut img, other.blend_mode, opacity);
+            self.r.pipe.quantize(&mut img);
         }
         Some(Buf { img, offset: [0.0; 2], scale: self.r.opts.scale })
     }
@@ -165,17 +193,24 @@ impl EffectHost for FxHost<'_, '_, '_> {
 
     fn self_at(&self, layer_time: f64, effects: usize) -> Option<Buf> {
         if self.r.depth > MAX_FX_DEPTH || !layer_time.is_finite() {
+            self.unsafe_sample.store(true, std::sync::atomic::Ordering::Relaxed);
             return None;
         }
         if self.layer.switches.adjustment {
             // An adjustment layer's stack runs on the comp below, so a time effect there holds that
-            // composite; a stack too complex for [`Self::below_at`] passes its input through.
-            return self.below_at(layer_time);
+            // composite. `layer_time` is the adjustment's own layer time; the composite below plays
+            // at the matching comp time.
+            let t = self.layer.comp_time(Tick::from_seconds_f64(layer_time));
+            return self.below_at(t.seconds());
         }
         let n = effects.min(self.index);
         let t = self.layer.comp_time(Tick::from_seconds_f64(layer_time));
         let sub = self.r.nested();
         sub.layer_input(&self.ctx.at(t), self.layer, n).map(|b| (*b).clone())
+    }
+
+    fn unsafe_time_sample(&self) -> bool {
+        self.unsafe_sample.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     fn aux(&self) -> Option<Arc<effectcraft_raster::AuxChannels>> {

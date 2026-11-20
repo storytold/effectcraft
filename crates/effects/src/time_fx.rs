@@ -174,6 +174,11 @@ fn fetch(ctx: &EffectCtx, times: &[f64]) -> Option<Frames> {
 /// [`fetch`] with the first `effects` effects of the stack only (0: source and masks).
 fn fetch_with(ctx: &EffectCtx, times: &[f64], effects: usize) -> Option<Frames> {
     let host = ctx.env.host?;
+    // A sample the host could not answer safely must decline the whole effect (it cannot tell a
+    // frame that is genuinely transparent from one it refused to render).
+    if host.unsafe_time_sample() {
+        return None;
+    }
     // Dedupe times (sub-microsecond differences are the same frame).
     let mut uniq: Vec<i64> = times.iter().map(|t| (t * 1e6).round() as i64).collect();
     uniq.sort_unstable();

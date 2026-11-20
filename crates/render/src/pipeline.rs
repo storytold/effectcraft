@@ -849,7 +849,8 @@ impl<'a> Renderer<'a> {
                 buf
             });
         }
-        let host = FxHost { r: self, ctx, layer, origin, index: 0, original: original.as_ref() };
+        let unsafe_sample = std::sync::atomic::AtomicBool::new(false);
+        let host = FxHost { r: self, ctx, layer, origin, index: 0, original: original.as_ref(), unsafe_sample: &unsafe_sample };
         let env = EffectEnv {
             masks: &mask_shapes,
             host: Some(&host),

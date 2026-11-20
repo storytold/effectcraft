@@ -249,27 +249,26 @@ fn abi2_plugin_layers_key_on_layer_time() {
     assert_ne!(key(&reader, c2, 0.25), key(&reader, c2, 0.5), "an ABI 2 plug-in keys on the layer time");
 }
 
-/// Footage whose frame `i` is a flat grey of `i / 100`, so a held frame shows as its level.
+/// Footage whose frame `i` is a flat grey of `i / 100`; `bright` starts from 0.5 instead, so two
+/// clips can be told apart. The path picks the level.
 struct GreyFrames;
 impl FootageSource for GreyFrames {
     fn frame(&self, _: ItemId, f: &Footage, t: Tick) -> Option<Arc<Image>> {
-        let g = f.frame_rate.frame_at(t) as f32 / 100.0;
+        let i = f.frame_rate.frame_at(t) as f32;
+        let g = if f.path.contains("b.mp4") { 0.5 - i / 100.0 } else { i / 100.0 };
         Some(Arc::new(Image::filled(f.width, f.height, [g, g, g, 1.0])))
     }
 }
 
-/// #4001: Posterize Time on an adjustment layer posterizes the comp below. The adjustment's
-/// effects run on the composite, so the time effect must read that composite at the held time,
-/// not pass its own (solid white) source through.
-#[test]
-fn posterize_time_on_an_adjustment_layer_holds_the_comp_below() {
+/// A 96×54 comp at 30 fps with footage `path` as its only content layer, and an adjustment layer
+/// carrying Posterize Time at `rate` fps. Returns the project, the comp and the clip item.
+fn posterize_scene(path: &str, rate: f64) -> (Project, ItemId) {
     let mut p = Project::default();
     p.settings.bit_depth = effectcraft_project::BitDepth::Bpc32;
     let comp = Comp::new(96, 54, FrameRate::FPS_30, Tick::from_seconds_f64(2.0));
     let cid = p.add_item("Comp", Label::Sandstone, None, ItemKind::Comp(comp.clone().into()));
-    // 30 fps footage in a 30 fps comp: the grey level names the source frame.
     let f = Footage {
-        path: "clip.mp4".into(),
+        path: path.into(),
         kind: FootageKind::Video,
         width: 96,
         height: 54,
@@ -289,10 +288,19 @@ fn posterize_time_on_an_adjustment_layer_holds_the_comp_below() {
     let spec = effectcraft_effects::find("ec.time.posterizetime").unwrap();
     let mut next = p.next_id;
     let mut g = effectcraft_effects::instantiate(spec, &mut Ids(&mut next), spec.name, [96.0, 54.0]);
-    g.prop_mut("frameRate").unwrap().value = Value::Scalar(4.0);
+    g.prop_mut("frameRate").unwrap().value = Value::Scalar(rate);
     p.next_id = next;
     adj.props.sub_mut("effects").unwrap().children.push(g.into());
     p.comp_mut(cid).unwrap().layers = vec![adj, footage].into();
+    (p, cid)
+}
+
+/// #4001: Posterize Time on an adjustment layer posterizes the comp below. The adjustment's
+/// effects run on the composite, so the time effect must read that composite at the held time,
+/// not pass its own (solid white) source through.
+#[test]
+fn posterize_time_on_an_adjustment_layer_holds_the_comp_below() {
+    let (p, cid) = posterize_scene("clip.mp4", 4.0);
     let img = |t: f64| {
         let r = crate::Renderer::new(&p, &GreyFrames, crate::RenderOpts::default());
         r.comp_frame(cid, Tick::from_seconds_f64(t))
@@ -303,4 +311,69 @@ fn posterize_time_on_an_adjustment_layer_holds_the_comp_below() {
         let got = img(t).get(48, 27)[0];
         assert!((got - want).abs() < 1e-6, "t={t}: {got}, want {want}");
     }
+}
+
+/// The held time is a *comp* time: an adjustment layer starting at 0.5 s maps its own layer time to
+/// comp time before reading the composite below (at comp time 1.3 s it holds 1.25 s, not 0.75 s).
+#[test]
+fn posterize_time_on_an_adjustment_layer_maps_layer_time_to_comp_time() {
+    let (mut p, cid) = posterize_scene("clip.mp4", 4.0);
+    p.comp_mut(cid).unwrap().layers[0].start_time = Tick::from_seconds_f64(0.5);
+    let r = crate::Renderer::new(&p, &GreyFrames, crate::RenderOpts::default());
+    let got = r.comp_frame(cid, Tick::from_seconds_f64(1.3)).get(48, 27)[0];
+    // Layer time 0.8 s → held 0.75 s → comp time 1.25 s → frame 37.
+    assert!((got - 0.37).abs() < 1e-6, "{got}");
+}
+
+/// The composite below follows the compositor's visibility rules: with the middle clip soloed, the
+/// non-solo clip under it is not part of the held frame (the solo clip is a small bright square, so
+/// a rule that ignored Solo would show the other clip around it).
+#[test]
+fn posterize_time_on_an_adjustment_layer_respects_solo() {
+    let mut p = Project::default();
+    p.settings.bit_depth = effectcraft_project::BitDepth::Bpc32;
+    let comp = Comp::new(96, 54, FrameRate::FPS_30, Tick::from_seconds_f64(2.0));
+    let cid = p.add_item("Comp", Label::Sandstone, None, ItemKind::Comp(comp.clone().into()));
+    let clip = |p: &mut Project, path: &str| {
+        let f = Footage {
+            path: path.into(),
+            kind: FootageKind::Video,
+            width: 96,
+            height: 54,
+            pixel_aspect: 1.0,
+            frame_rate: FrameRate::FPS_30,
+            duration: Tick::from_seconds_f64(2.0),
+            has_video: true,
+            alpha: effectcraft_project::AlphaMode::Ignore,
+            loop_count: 1,
+            ..Default::default()
+        };
+        let fid = p.add_item("clip", Label::Aqua, None, ItemKind::Footage(f));
+        build::layer(p, &comp, "clip", LayerSource::Footage { item: fid }, (96, 54), None)
+    };
+    let under = clip(&mut p, "a.mp4");
+    let mut solo = clip(&mut p, "b.mp4");
+    solo.switches.solo = true;
+    solo.props.prop_mut("transform/position").unwrap().value = Value::Vec3([48.0, 27.0, 0.0]);
+    // A 20×20 window onto the solo clip's level: scaled down so only its centre reaches the comp.
+    solo.props.prop_mut("transform/scale").unwrap().value = Value::Vec3([20.0, 20.0, 100.0]);
+    let sid = p.add_item("Solid", Label::Red, None, ItemKind::Solid(Solid { color: [1.0, 1.0, 1.0], width: 96, height: 54, pixel_aspect: 1.0 }));
+    let mut adj = build::layer(&mut p, &comp, "Adj", LayerSource::Solid { item: sid }, (96, 54), None);
+    adj.switches.adjustment = true;
+    adj.switches.solo = true;
+    let spec = effectcraft_effects::find("ec.time.posterizetime").unwrap();
+    let mut next = p.next_id;
+    let mut g = effectcraft_effects::instantiate(spec, &mut Ids(&mut next), spec.name, [96.0, 54.0]);
+    g.prop_mut("frameRate").unwrap().value = Value::Scalar(4.0);
+    p.next_id = next;
+    adj.props.sub_mut("effects").unwrap().children.push(g.into());
+    p.comp_mut(cid).unwrap().layers = vec![adj, solo, under].into();
+    let r = crate::Renderer::new(&p, &GreyFrames, crate::RenderOpts::default());
+    let img = r.comp_frame(cid, Tick::from_seconds_f64(0.3));
+    // Only the solo clip draws: inside its square it holds frame 7 of `b` (0.5 − 0.07), outside it
+    // is transparent (the non-solo clip must not be composited).
+    let inside = img.get(48, 27)[0];
+    let outside = img.get(5, 5);
+    assert!((inside - (0.5 - 0.07)).abs() < 1e-6, "inside: {inside}");
+    assert!(outside[3] == 0.0, "outside: {outside:?}");
 }
