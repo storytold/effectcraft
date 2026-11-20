@@ -354,12 +354,12 @@ fn adjustment_motion_tile_output_then_transform() {
 /// grown frame goes back onto the canvas as on the CPU (#3923).
 #[test]
 fn adjustment_repetile_then_transform() {
-    for (expand, scale) in [(100.0, 40.0), (60.0, 70.0)] {
+    for (expand, scale, sw, sh) in [(100.0, 40.0, 97, 61), (60.0, 70.0, 97, 61), (40.0, 70.0, 40, 25)] {
         for depth in [BitDepth::Bpc8, BitDepth::Bpc32] {
             let mut s = Scene::new(depth);
             let bg = s.footage(97, 61);
             s.push(bg);
-            let mut adj = s.solid([1.0, 1.0, 1.0], 97, 61);
+            let mut adj = s.solid([1.0, 1.0, 1.0], sw, sh);
             adj.switches.adjustment = true;
             s.effect(
                 &mut adj,
@@ -368,7 +368,7 @@ fn adjustment_repetile_then_transform() {
             );
             s.effect(&mut adj, "ec.distort.transform", &[("scaleHeight", n(scale)), ("scaleWidth", n(scale))]);
             s.push(adj);
-            let label = format!("adjustment RepeTile expand {expand} then Scale {scale} % {depth:?}");
+            let label = format!("adjustment RepeTile {sw}×{sh} expand {expand} then Scale {scale} % {depth:?}");
             check(&label, compare_at(&s, opts(), Tick::ZERO), 0.0);
             check(&format!("{label} half"), compare_at(&s, RenderOpts { scale: 0.5, ..opts() }, Tick::ZERO), 0.0);
         }

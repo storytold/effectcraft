@@ -384,16 +384,14 @@ fn repetile(ctx: &EffectCtx, b: Buf) -> Buf {
         ctx.params.f("expandDown").max(0.0) * s,
         ctx.params.f("expandUp").max(0.0) * s,
     );
-    // On an adjustment layer the buffer is the comp below (origin forced to 0 by the
-    // renderer): tile it like any layer rectangle so a following effect can sample the
-    // tiles, and keep the origin shift so the stack's frame lines up with the canvas again
-    // (#3923). A buffer can also sit at a non-zero offset (ROI rendering, a preceding pad),
-    // so grow from where the content actually is rather than resetting to [left, up].
+    // On an adjustment layer the buffer is the composite below (the renderer forces the effect
+    // origin to 0 there), so tile that whole rectangle; elsewhere tile the layer rectangle
+    // inside the buffer. Without this the effect returned early and did nothing (#3923).
     if r + l + d + u < 0.5 {
         return b;
     }
     let mode = ctx.params.e("tiling");
-    let (x0, y0, w, h) = layer_rect(ctx, &b);
+    let (x0, y0, w, h) = if ctx.adjustment { (b.offset[0], b.offset[1], f64::from(b.img.width), f64::from(b.img.height)) } else { layer_rect(ctx, &b) };
     if w < 1.0 || h < 1.0 {
         return b;
     }
@@ -421,7 +419,7 @@ fn repetile(ctx: &EffectCtx, b: Buf) -> Buf {
             *px = src.sample_bilinear(x0 + fx, y0 + fy);
         }
     });
-    Buf { img: out, offset: [b.offset[0] + l, b.offset[1] + u], scale: s }
+    Buf { img: out, offset: [l, u], scale: s }
 }
 
 // ---- Motion Tile ----
@@ -799,9 +797,9 @@ mod tests {
         }
     }
 
-    /// An adjustment layer's buffer is the comp below: RepeTile must tile it, on the whole
-    /// layer rectangle at its buffer offset, so a following effect (Wave Warp) can pull the
-    /// tiles into view instead of sampling transparent edges (#3923).
+    /// An adjustment layer's buffer is the composite below: RepeTile must tile that whole
+    /// rectangle, not the adjustment solid's (smaller) `layer_size`, so a following effect
+    /// (Wave Warp) can pull the tiles into view instead of sampling transparent edges (#3923).
     #[test]
     fn repetile_grows_on_an_adjustment_layer() {
         let img = ramp(10, 8);
@@ -810,7 +808,8 @@ mod tests {
         for (k, v) in [("expandRight", num(10.0)), ("expandUp", num(4.0))] {
             params.values.insert(k.to_string(), v);
         }
-        let ctx = |adjustment| EffectCtx { params: &params, time: 0.0, layer_size: [10.0, 8.0], seed: 1, adjustment, env: Default::default() };
+        // The buffer is the comp (10×8 here); the adjustment solid behind it is smaller.
+        let ctx = |adjustment| EffectCtx { params: &params, time: 0.0, layer_size: [4.0, 4.0], seed: 1, adjustment, env: Default::default() };
         let out = crate::apply(s, &ctx(true), Buf { img, offset: [0.0, 0.0], scale: 1.0 });
         assert_eq!((out.img.width, out.img.height), (20, 12));
         assert_eq!(out.offset, [0.0, 4.0]);
@@ -820,16 +819,35 @@ mod tests {
         for c in 0..4 {
             assert!((a[c] - b[c]).abs() < 1e-5);
         }
-        // The comp origin shifts by the expansion, so the stack's frame still lines up with
-        // the canvas when the stack ends (ROI rendering keeps a non-zero offset).
+    }
+
+    /// The grown buffer declares `(left, up)` as its offset — the output pixel holding the
+    /// layer origin — whatever the input buffer's offset was (`Buf::to_px` maps through it).
+    #[test]
+    fn repetile_keeps_the_layer_origin_with_a_nonzero_buffer_offset() {
         let small = ramp(10, 8);
         let mut large = Image::new(13, 10);
         small.data.iter().enumerate().for_each(|(i, px)| {
             large.set((i % 10) as u32 + 3, (i / 10) as u32 + 2, *px);
         });
-        let out = crate::apply(s, &ctx(true), Buf { img: large, offset: [3.0, 2.0], scale: 1.0 });
+        let s = crate::find("ec.stylize.ccrepetile").unwrap();
+        let mut params = Params { values: s.params.iter().map(|p| (p.id.to_string(), p.default.clone())).collect() };
+        for (k, v) in [("expandRight", num(10.0)), ("expandUp", num(4.0))] {
+            params.values.insert(k.to_string(), v);
+        }
+        let ctx = EffectCtx { params: &params, time: 0.0, layer_size: [10.0, 8.0], seed: 1, adjustment: false, env: Default::default() };
+        let out = crate::apply(s, &ctx, Buf { img: large, offset: [3.0, 2.0], scale: 1.0 });
         assert_eq!((out.img.width, out.img.height), (20, 12));
-        assert_eq!(out.offset, [3.0, 6.0]);
+        assert_eq!(out.offset, [0.0, 4.0]);
+        // Output pixel (0, 4) is the layer origin: it samples source pixel (3, 2), the ramp's
+        // own (0, 0); (3, 6) is the ramp's (3, 2).
+        for (out_at, ramp_at) in [((0, 4), (0, 0)), ((3, 6), (3, 2))] {
+            let a = out.img.get(out_at.0, out_at.1);
+            let b = small.get(ramp_at.0, ramp_at.1);
+            for c in 0..4 {
+                assert!((a[c] - b[c]).abs() < 1e-5, "{out_at:?} should show the ramp's {ramp_at:?}");
+            }
+        }
     }
 
     #[test]
