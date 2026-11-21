@@ -346,7 +346,7 @@ impl Runtime {
             return Run::Pending;
         }
         Run::Done(match result {
-            Ok(v) => detach(&v, ctx, 0),
+            Ok(v) => detach(&v, ctx, 0, &mut MAX_DETACH_VALUES.clone()),
             Err(e) => Err(format_error(&e.to_string(), line_count(text))),
         })
     }
@@ -402,9 +402,18 @@ pub fn out_of_time() -> bool {
 
 /// Levels of nested arrays a script result keeps.
 const MAX_DETACH: usize = 4;
+/// Values a script result may hold in all: one array can be referenced many times over, so
+/// [`MAX_DETACH`] levels of 65 536 elements each would otherwise copy 2⁶⁴ of them.
+const MAX_DETACH_VALUES: usize = 1 << 20;
 
-/// Copy a JS value out of the heap.
-fn detach(v: &JsValue, ctx: &mut Context, depth: usize) -> Result<Out, String> {
+/// Copy a JS value out of the heap, counting each value against `left` (shared by the whole
+/// result). Reading a result can run script (getters, conversions), so the time budget is
+/// checked for each value too.
+fn detach(v: &JsValue, ctx: &mut Context, depth: usize, left: &mut usize) -> Result<Out, String> {
+    *left = left.checked_sub(1).ok_or("Error: the expression's result holds too many values")?;
+    if out_of_time() {
+        return Err(TIMED_OUT.into());
+    }
     if v.is_undefined() {
         return Ok(Out::Undefined);
     }
@@ -427,25 +436,27 @@ fn detach(v: &JsValue, ctx: &mut Context, depth: usize) -> Result<Out, String> {
             let n = arr.length(ctx).map_err(err)?.min(1 << 16);
             let mut out = Vec::with_capacity(n as usize);
             for i in 0..n {
-                out.push(detach(&arr.get(i, ctx).map_err(err)?, ctx, depth + 1)?);
+                out.push(detach(&arr.get(i, ctx).map_err(err)?, ctx, depth + 1, left)?);
             }
             return Ok(Out::Arr(out));
         }
-        if o.get(js_string!("__style"), ctx).map_err(err)?.to_boolean() {
+        // A style or path tag is only read within the levels detached: a tagged object whose
+        // fields lead back to itself would otherwise recurse until the stack overflows.
+        if depth < MAX_DETACH && o.get(js_string!("__style"), ctx).map_err(err)?.to_boolean() {
             let j = o.get(js_string!("__json"), ctx).map_err(err)?;
             return Ok(Out::Style(j.as_string().map(|s| s.to_std_string_escaped()).unwrap_or_default()));
         }
-        if o.get(js_string!("__path"), ctx).map_err(err)?.to_boolean() {
-            let pts = |name: JsString, ctx: &mut Context| -> Result<Vec<[f64; 2]>, String> {
+        if depth < MAX_DETACH && o.get(js_string!("__path"), ctx).map_err(err)?.to_boolean() {
+            let pts = |name: JsString, ctx: &mut Context, left: &mut usize| -> Result<Vec<[f64; 2]>, String> {
                 let v = o.get(name, ctx).map_err(err)?;
-                Ok(match detach(&v, ctx, depth + 1)? {
+                Ok(match detach(&v, ctx, depth + 1, left)? {
                     Out::Arr(items) => items.iter().map(|p| out_vec(p, 2)).map(|c| [c[0], c[1]]).collect(),
                     _ => vec![],
                 })
             };
-            let points = pts(js_string!("__pts"), ctx)?;
-            let ins = pts(js_string!("__in"), ctx)?;
-            let outs = pts(js_string!("__out"), ctx)?;
+            let points = pts(js_string!("__pts"), ctx, left)?;
+            let ins = pts(js_string!("__in"), ctx, left)?;
+            let outs = pts(js_string!("__out"), ctx, left)?;
             let closed = o.get(js_string!("__closed"), ctx).map_err(err)?.to_boolean();
             return Ok(Out::Path { points, ins, outs, closed });
         }
