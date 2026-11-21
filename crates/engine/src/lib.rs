@@ -93,7 +93,7 @@ mod fonts;
 mod services;
 mod session;
 
-pub use cmd::{animation_presets, text_presets};
+pub use cmd::{animation_presets, repair_old_time_reverse, text_presets};
 pub use doc_state::{CompSelection, EditorState, KeyClip, KeyMove, KeyRef, LinkClip, VertexRef};
 pub use error::{EngineError, Result};
 pub use event::Event;

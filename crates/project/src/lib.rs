@@ -50,8 +50,8 @@ pub use layer::{
 pub use layers::Layers;
 pub use reach::{ExprReach, PixelReach, expression_reach};
 pub use settings::{
-    APP_VERSION, BitDepth, ColorEngine, CuePoint, HdrMode, Marker, ProjectError, ProjectSettings, SCHEMA_EFFECT_SPACE, SCHEMA_VERSION, SavedView,
-    TimeDisplayStyle, is_newer_version, saved_by, saved_view,
+    APP_VERSION, BitDepth, ColorEngine, CuePoint, HdrMode, Marker, ProjectError, ProjectSettings, REVERSE_LAYOUT_AE, SCHEMA_EFFECT_SPACE, SCHEMA_VERSION,
+    SavedView, TimeDisplayStyle, is_newer_version, saved_by, saved_view,
 };
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
