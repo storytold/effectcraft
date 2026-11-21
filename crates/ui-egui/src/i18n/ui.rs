@@ -43,6 +43,7 @@ type Index = HashMap<&'static str, &'static str>;
 /// Every language with panel rows, for the tests and the missing-strings report.
 #[cfg(test)]
 const ROWS: &[(&str, &[(&str, &str)])] = &[
+    ("he", HEBREW),
     ("ja", JAPANESE),
     ("zh-hans", SIMPLIFIED_CHINESE),
     ("zh-hant", TRADITIONAL_CHINESE),
@@ -60,6 +61,7 @@ const ROWS: &[(&str, &[(&str, &str)])] = &[
 /// The catalog for `language`, indexed by English source (built on first use: panels translate
 /// hundreds of strings a frame); `None` for English and any language that has no rows yet.
 fn catalog(language: &str) -> Option<&'static Index> {
+    static HE: OnceLock<Index> = OnceLock::new();
     static JA: OnceLock<Index> = OnceLock::new();
     static HANS: OnceLock<Index> = OnceLock::new();
     static HANT: OnceLock<Index> = OnceLock::new();
@@ -72,6 +74,7 @@ fn catalog(language: &str) -> Option<&'static Index> {
     static SV: OnceLock<Index> = OnceLock::new();
     static FR: OnceLock<Index> = OnceLock::new();
     let (index, rows) = match language {
+        "he" => (&HE, HEBREW),
         "ja" => (&JA, JAPANESE),
         "zh-hans" => (&HANS, SIMPLIFIED_CHINESE),
         "zh-hant" => (&HANT, TRADITIONAL_CHINESE),
@@ -2461,6 +2464,599 @@ const SIMPLIFIED_CHINESE: &[(&str, &str)] = &[
     ("Show mesh", "显示网格"),
     ("Record Options...", "记录选项..."),
     ("GPU Acceleration (no GPU: software)", "GPU 加速（无 GPU：软件）"),
+];
+
+/// Partial Hebrew UI catalog, authored against English source strings.
+const HEBREW: &[(&str, &str)] = &[
+    // Night L04: native UI controls from live English tr()/tr_args() callsites.
+    ("OK", "אישור"),
+    ("Dark", "כהה"),
+    ("Light", "בהיר"),
+    ("Sync with System", "התאם להגדרות המערכת"),
+    ("Snapping", "הצמדה"),
+    ("Snapping options", "אפשרויות הצמדה"),
+    ("Diameter:", "קוטר:"),
+    ("Opacity:", "אטימות:"),
+    ("Maximize Panel", "הגדל חלונית"),
+    ("Move Panel to Main Window", "העבר חלונית לחלון הראשי"),
+    ("Move Panel to New Window", "העבר חלונית לחלון חדש"),
+    ("Undock Panel", "נתק חלונית"),
+    ("You can undo this.", "ניתן לבטל פעולה זו."),
+    ("Color", "צבע"),
+    ("Cone Angle", "זווית האלומה"),
+    ("Cone Feather", "ריכוך שולי האלומה"),
+    ("Depth of Field", "עומק שדה"),
+    ("Enable Depth of Field", "הפעל עומק שדה"),
+    ("Falloff", "דעיכה"),
+    ("Falloff Distance", "מרחק דעיכה"),
+    ("Focus Distance", "מרחק מיקוד"),
+    ("Intensity", "עוצמה"),
+    ("Light Type", "סוג תאורה"),
+    ("Name", "שם"),
+    ("Preset", "קביעה מוגדרת מראש"),
+    ("Radius", "רדיוס"),
+    ("Shadow Darkness", "כהות הצל"),
+    ("Shadow Diffusion", "ריכוך הצל"),
+    ("Shadows", "צללים"),
+    ("One-Node Camera", "מצלמה בעלת צומת יחיד"),
+    ("Two-Node Camera", "מצלמה בעלת שני צמתים"),
+    ("Zoom", "זום"),
+    ("Red", "אדום"),
+    ("Green", "ירוק"),
+    ("Blue", "כחול"),
+    ("Histogram", "היסטוגרמה"),
+    ("No effects. Drag one from Effects & Presets.", "אין אפקטים. גרור אפקט מהחלונית אפקטים וקביעות מוגדרות מראש."),
+    ("Select a layer to see its effects", "בחר שכבה כדי להציג את האפקטים שלה"),
+    ("Swap Colors", "החלף בין הצבעים"),
+    ("GPU Acceleration ({})", "האצה באמצעות GPU ({})"),
+    ("GPU Acceleration (no GPU: software)", "האצת GPU (אין מעבד גרפי זמין: עיבוד בתוכנה)"),
+    ("Grid", "רשת"),
+    ("Guides", "קווי עזר"),
+    ("Layer controls", "פקדי שכבה"),
+    ("Masks", "מסכות"),
+    ("Rulers", "סרגלים"),
+    ("Title/action safe", "האזור הבטוח לכותרות ולפעולות"),
+    ("Transparency grid", "רשת שקיפות"),
+    ("Gradient Editor", "עורך מעברי צבע"),
+    ("Location:", "מיקום:"),
+    ("Edit Gradient…", "ערוך מעבר צבע…"),
+    ("Select animated properties to show them in the Graph Editor", "בחר מאפיינים מונפשים להצגתם בעורך הגרפים"),
+    ("No layer selected", "לא נבחרה שכבה"),
+    ("Selected layers: {}", "שכבות שנבחרו: {}"),
+    ("Add Animator", "הוסף מנגנון הנפשה"),
+    ("Presets", "קביעות מוגדרות מראש"),
+    ("Select a layer to see its properties", "בחר שכבה כדי להציג את המאפיינים שלה"),
+    ("Motion Sketch: drag to record", "שרטוט תנועה: גרור כדי להקליט"),
+    ("Show:", "הצג:"),
+    ("Start: {}   Duration: {}", "התחלה: {}   משך: {}"),
+    ("Run", "הפעל"),
+    ("Script Console output", "פלט מסוף הסקריפטים"),
+    ("Close font search", "סגור את חיפוש הגופנים"),
+    ("Delete this template", "מחק תבנית זו"),
+    ("No background jobs running", "אין פעולות רקע פעילות"),
+    ("Empty folder", "תיקייה ריקה"),
+    ("Add to Favorites", "הוסף למועדפים"),
+    ("Copy Source Path", "העתק נתיב מקור"),
+    ("Import and Add to Composition", "ייבא והוסף לקומפוזיציה"),
+    ("Select an item in the Project panel", "בחר פריט בחלונית הפרויקט"),
+    ("Home", "בית"),
+    ("Learn", "למידה"),
+    ("LEARN", "למידה"),
+    (
+        "Hands-on tutorials that run inside EffectCraft. Do each step yourself, or press Show me.",
+        "מדריכים מעשיים בתוך EffectCraft. בצעו כל שלב בעצמכם, או לחצו על ״הצג לי״.",
+    ),
+    ("Show me", "הצג לי"),
+    ("More tutorials", "מדריכים נוספים"),
+    ("Tutorial complete", "המדריך הושלם"),
+    ("Close tutorial", "סגירת המדריך"),
+    ("steps", "שלבים"),
+    ("Nice work. Pick another tutorial on the Home screen's Learn tab.", "כל הכבוד! בחרו מדריך נוסף בכרטיסיית ״למידה״ שבמסך הבית."),
+    ("Pre-compose", "יצירת קומפוזיציית ביניים"),
+    ("Leave all attributes in \"{}\"", "השארת כל המאפיינים ב־\u{2068}\"{}\"\u{2069}"),
+    (
+        "Use this option to create a new intermediate composition with only \"{}\" in it. The new composition will become the source to the current layer.",
+        "אפשרות זו יוצרת קומפוזיציית ביניים חדשה הכוללת רק את \u{2068}\"{}\"\u{2069}. הקומפוזיציה החדשה תהיה מקור השכבה הנוכחית.",
+    ),
+    ("Move all attributes into the new composition", "העברת כל המאפיינים לקומפוזיציה החדשה"),
+    (
+        "Use this option to place the currently selected layers together into a new intermediate composition.",
+        "אפשרות זו מקבצת את השכבות שנבחרו לקומפוזיציית ביניים חדשה.",
+    ),
+    ("Adjust composition duration to the time span of the selected layers", "התאמת משך הקומפוזיציה לטווח הזמן של השכבות שנבחרו"),
+    ("New Composition From Footage", "קומפוזיציה חדשה מקובץ מדיה"),
+    ("Search project", "חיפוש בפרויקט"),
+    ("Select an item to see its details", "בחרו פריט להצגת פרטיו"),
+    ("Just now", "הרגע"),
+    ("Yesterday", "אתמול"),
+    ("{} minute ago", "לפני {} דקה"),
+    ("{} minutes ago", "לפני {} דקות"),
+    ("{} hour ago", "לפני {} שעה"),
+    ("{} hours ago", "לפני {} שעות"),
+    ("{} day ago", "לפני {} יום"),
+    ("{} days ago", "לפני {} ימים"),
+    ("Community", "קהילה"),
+    ("More ArtCraft apps", "יישומי ArtCraft נוספים"),
+    ("Welcome to EffectCraft", "ברוכים הבאים ל־EffectCraft"),
+    ("Motion graphics and visual effects · version {}", "גרפיקה בתנועה ואפקטים חזותיים · גרסה {}"),
+    ("Filter recent files", "סינון קבצים אחרונים"),
+    ("Clear list", "ניקוי הרשימה"),
+    ("(missing)", "(חסר)"),
+    ("EffectCraft project", "פרויקט EffectCraft"),
+    ("After Effects project", "פרויקט After Effects"),
+    ("Lottie animation", "אנימציית Lottie"),
+    ("Proxy Use: {}", "שימוש בקובץ תחליפי: {}"),
+    ("Effects: {}", "אפקטים: {}"),
+    ("Solo Switches: {}", "מתגי סולו: {}"),
+    ("Guide Layers: {}", "שכבות עזר: {}"),
+    ("Color Depth: {}", "עומק צבע: {}"),
+    ("Frame Blending: {}", "מיזוג מסגרות: {}"),
+    ("Motion Blur: {}", "טשטוש תנועה: {}"),
+    ("Field Render: {}", "רינדור שדות: {}"),
+    ("3:2 Pulldown: {}", "המרת 3:2: {}"),
+    ("Format: {}", "פורמט: {}"),
+    ("Video Codec: {}", "מקודד וידאו: {}"),
+    ("Opus Bitrate: {} kbps", "קצב סיביות Opus: {} kbps"),
+    ("Opus Tuning: {}", "כוונון Opus: {}"),
+    ("Post-Render Action: {}", "פעולה לאחר הרינדור: {}"),
+    ("Sample Format: {}", "פורמט דגימה: {}"),
+    ("EXR Bit Depth: {}", "עומק סיביות EXR: {}"),
+    ("Profile: {}", "פרופיל: {}"),
+    ("Rate Control: {}", "בקרת קצב: {}"),
+    ("Current Render", "רינדור נוכחי"),
+    ("Render", "רינדור"),
+    ("Notify", "התראה"),
+    ("Stop", "עצור"),
+    ("Duplicate", "שכפול"),
+    ("Remove", "הסרה"),
+    ("Move Up", "העברה למעלה"),
+    ("Move Down", "העברה למטה"),
+    ("Log:", "יומן:"),
+    ("Output To:", "פלט אל:"),
+    ("Output file name template", "תבנית שם קובץ הפלט"),
+    ("Output file: {}", "קובץ פלט: {}"),
+    ("Template: {}\n{}", "תבנית: {}\n{}"),
+    ("The render queue is empty.", "תור הרינדור ריק."),
+    ("Import Adobe After Effects Project", "ייבוא פרויקט Adobe After Effects"),
+    ("Export Adobe After Effects Project", "ייצוא פרויקט Adobe After Effects"),
+    ("Some parts of this project cannot be imported exactly (left out or changed):", "חלקים מהפרויקט אינם ניתנים לייבוא מדויק (יושמטו או ישתנו):"),
+    ("Some parts of this project cannot be exported exactly (left out or changed):", "חלקים מהפרויקט אינם ניתנים לייצוא מדויק (יושמטו או ישתנו):"),
+    ("Import Anyway", "ייבוא בכל זאת"),
+    ("Export Anyway", "ייצוא בכל זאת"),
+    ("Revert Project", "חזרה לגרסה השמורה"),
+    ("Unsaved Changes", "שינויים שלא נשמרו"),
+    (
+        "Revert “{}” to the last saved version? Changes made since then will be lost.",
+        "להחזיר את \u{2068}“{}”\u{2069} לגרסה השמורה האחרונה? כל השינויים שבוצעו מאז יאבדו.",
+    ),
+    ("Save changes to “{}” before closing?", "לשמור את השינויים בקובץ \u{2068}“{}”\u{2069} לפני הסגירה?"),
+    ("Your changes will be lost if you don't save them.", "השינויים יאבדו אם לא יישמרו."),
+    ("  Revert  ", "  שחזור  "),
+    ("   Save   ", "   שמירה   "),
+    ("Don't Save", "לא לשמור"),
+    ("A built-in preset has this name", "קיימת תבנית מובנית בשם זה"),
+    ("Replaces your preset with this name", "מחליף את התבנית שלך בשם זה"),
+    ("   OK   ", "   אישור   "),
+    ("Preset:", "תבנית:"),
+    ("Save Preset…", "שמירת תבנית…"),
+    ("Delete Preset", "מחיקת תבנית"),
+    ("Width:", "רוחב:"),
+    ("Lock Aspect Ratio to {}", "נעילת יחס ממדים ל־{}"),
+    ("Height:", "גובה:"),
+    ("Pixel Aspect Ratio:", "יחס ממדי פיקסל:"),
+    ("Frame Aspect Ratio: {}", "יחס ממדי מסגרת: {}"),
+    ("Frame Rate:", "קצב מסגרות:"),
+    ("frames per second", "מסגרות לשנייה"),
+    ("Resolution:", "רזולוציה:"),
+    ("Custom", "מותאם אישית"),
+    ("{} x {}, {}MB per 8bpc frame", "{} × {}, ‏{} MB למסגרת ב־8 סיביות לערוץ"),
+    ("Start Timecode:", "קוד זמן התחלה:"),
+    ("Duration:", "משך:"),
+    ("Background Color:", "צבע רקע:"),
+    ("Anchor:", "נקודת עיגון:"),
+    ("Preserve frame rate when nested or in render queue", "שמירת קצב המסגרות בקינון או בתור הרינדור"),
+    ("Preserve resolution when nested", "שמירת הרזולוציה בקינון"),
+    ("Motion Blur", "טשטוש תנועה"),
+    ("Shutter Angle:", "זווית תריס:"),
+    ("Shutter Phase:", "מופע התריס:"),
+    ("Samples Per Frame:", "דגימות למסגרת:"),
+    ("Adaptive Sample Limit:", "מגבלת דגימות מותאמת:"),
+    ("Renderer:", "מנוע רינדור:"),
+    ("Advanced 3D", "תלת־ממד מתקדם"),
+    ("Classic 3D", "תלת־ממד קלאסי"),
+    ("Composition Name:", "שם הקומפוזיציה:"),
+    ("Default Output:", "פלט ברירת מחדל:"),
+    ("System Default", "ברירת המחדל של המערכת"),
+    ("No device list from this host; the system default output is used.", "לא התקבלה רשימת התקני פלט ממחשב זה; ייעשה שימוש בפלט ברירת המחדל של המערכת."),
+    ("Stored, but not used by EffectCraft yet", "ההגדרה נשמרת, אך EffectCraft עדיין אינו משתמש בה"),
+    ("Darker", "כהה יותר"),
+    ("Lighter", "בהיר יותר"),
+    ("Default", "ברירת מחדל"),
+    ("Choose...", "בחירה..."),
+    ("Disk cache limit in effect: {} MB", "מגבלת מטמון הדיסק בפועל: {} MB"),
+    ("Limited by free disk space: EffectCraft keeps {} GB of this disk free.", "מוגבל לפי המקום הפנוי: EffectCraft משאיר {} GB פנויים בדיסק זה."),
+    ("No room left: nothing is written to the disk cache until disk space is freed.", "אין מקום פנוי: לא ייכתבו נתונים למטמון הדיסק עד שיתפנה מקום."),
+    ("Appearance Mode", "מצב תצוגה"),
+    ("Light Theme", "ערכת נושא בהירה"),
+    ("Dark Theme", "ערכת נושא כהה"),
+    ("Search plug-ins and effects", "חיפוש תוספים ואפקטים"),
+    ("Refresh", "רענון"),
+    ("Fetch Catalog", "טעינת קטלוג"),
+    ("Restart EffectCraft to finish", "יש להפעיל מחדש את EffectCraft להשלמת הפעולה"),
+    ("Label Colors and Names:", "צבעים ושמות של תוויות:"),
+    ("Reset Labels", "איפוס תוויות"),
+    ("Previous", "הקודם"),
+    ("Next", "הבא"),
+    ("EffectCraft didn't quit normally last time.", "EffectCraft לא נסגר כראוי בפעם הקודמת."),
+    ("Latest auto-save: {}", "השמירה האוטומטית האחרונה: {}"),
+    ("Don't Recover", "לא לשחזר"),
+    ("Request Persistent Storage", "בקשת אחסון קבוע"),
+    ("No plug-ins match the search.", "לא נמצאו תוספים המתאימים לחיפוש."),
+    ("Nothing is downloaded until you fetch the catalog.", "לא יורד דבר עד לטעינת הקטלוג."),
+    ("Before", "לפני"),
+    ("After", "אחרי"),
+    ("Auto-saves", "שמירות אוטומטיות"),
+    ("Back", "חזרה"),
+    ("About EffectCraft", "אודות EffectCraft"),
+    ("Add to favorites", "הוסף למועדפים"),
+    ("Remove from favorites", "הסר מהמועדפים"),
+    ("Add to Composition", "הוסף לקומפוזיציה"),
+    ("Active", "פעיל"),
+    ("Project", "פרויקט"),
+    ("Composition", "קומפוזיציה"),
+    ("Cancel", "ביטול"),
+    ("Close", "סגור"),
+    ("Open", "פתח"),
+    ("Import", "ייבוא"),
+    ("Export", "ייצוא"),
+    ("Appearance Settings…", "הגדרות מראה…"),
+    ("Settings", "הגדרות"),
+    ("New", "חדש"),
+    ("Delete", "מחיקה"),
+    ("Layer", "שכבה"),
+    ("File", "קובץ"),
+    ("New Project", "פרויקט חדש"),
+    ("Open Project…", "פתיחת פרויקט…"),
+    ("New Composition", "קומפוזיציה חדשה"),
+    ("Open Demo Project", "פתיחת פרויקט הדגמה"),
+    ("Create a new project, or open the demo project to look around.", "אפשר ליצור פרויקט חדש או לפתוח את פרויקט ההדגמה כדי להכיר את הממשק."),
+    ("Open Last Saved Project", "פתיחת הפרויקט האחרון שנשמר"),
+    ("Recent Projects Shown", "מספר הפרויקטים האחרונים המוצגים"),
+    ("Recent", "אחרונים"),
+    ("Projects", "פרויקטים"),
+    ("Project: {}", "פרויקט: {}"),
+    ("Auto-Save", "שמירה אוטומטית"),
+    ("Save Every", "שמירה כל"),
+    ("Auto-Save Location", "מיקום השמירה האוטומטית"),
+    ("Save When Starting Render Queue", "שמירה בעת התחלת תור הרינדור"),
+    ("Save Now", "שמור עכשיו"),
+    ("New Project Loads Template", "טעינת תבנית בפרויקט חדש"),
+    ("Open Composition", "פתיחת קומפוזיציה"),
+    ("Open New Composition", "פתיחת קומפוזיציה חדשה"),
+    ("Save from #{}", "שמירה מתוך #{}"),
+    ("Saved {}", "נשמר: {}"),
+    (" Open Auto-Save ", " פתיחת שמירה אוטומטית "),
+    ("Browse…", "עיון…"),
+    ("Browser Storage", "אחסון דפדפן"),
+    ("Open Output", "פתיחת הפלט"),
+    ("Export...", "ייצוא..."),
+    ("Import...", "ייבוא..."),
+    ("Imported media", "מדיה שיובאה"),
+    ("Close Panel", "סגירת חלונית"),
+    ("Restore Panel Size", "שחזור גודל החלונית"),
+    ("New from Template", "חדש מתבנית"),
+    ("Create a new Folder", "יצירת תיקייה חדשה"),
+    ("File Path", "נתיב הקובץ"),
+    ("Rename", "שינוי שם"),
+    ("Delete selected project items", "מחיקת הפריטים שנבחרו בפרויקט"),
+    ("Save Current as Template…", "שמירת הנוכחי כתבנית…"),
+    ("New composition name:", "שם הקומפוזיציה החדשה:"),
+    ("New Duration:", "משך חדש:"),
+    ("Open a composition to see its scopes", "פתיחת קומפוזיציה כדי להציג את טווחי המדידה"),
+    ("Open a composition to track motion.", "פתח קומפוזיציה כדי לעקוב אחר תנועה."),
+    ("Start", "התחלה"),
+    ("Resume", "המשך"),
+    ("{} min", "{} דק׳"),
+    ("Step {} of {}: {}", "שלב {} מתוך {}: {}"),
+    ("Animate a title", "הנפשת כותרת"),
+    (
+        "Make a composition, type a title and fly it in with two position keyframes and an easy ease.",
+        "יוצרים קומפוזיציה, מוסיפים כותרת ומנפישים את כניסתה באמצעות שתי נקודות מפתח וריכוך תנועה.",
+    ),
+    ("Track and attach", "מעקב והצמדה"),
+    (
+        "Follow a moving element with the point tracker, then hang a null on the track and parent a layer to it.",
+        "עוקבים אחר רכיב בתנועה, מחברים אובייקט ריק למסלול המעקב ומשייכים אליו שכבה.",
+    ),
+    ("Make a 3D scene", "יצירת סצנה בתלת־ממד"),
+    (
+        "Turn flat layers into 3D, light them, add a camera and look at the scene from outside the frame.",
+        "הופכים שכבות דו־ממדיות לתלת־ממד, מוסיפים תאורה ומצלמה ובוחנים את הסצנה מחוץ למסגרת.",
+    ),
+    ("Make a composition", "יצירת קומפוזיציה"),
+    ("Type a title", "הקלדת כותרת"),
+    ("Start the animation", "התחלת ההנפשה"),
+    ("Move in time", "מעבר לנקודת זמן"),
+    ("Set the end position", "קביעת מיקום הסיום"),
+    ("Smooth it out", "ריכוך התנועה"),
+    ("Watch it", "צפייה בתוצאה"),
+    ("Open the demo", "פתיחת פרויקט הדגמה"),
+    ("Pick what to track", "בחירת הרכיב למעקב"),
+    ("Add a track point", "הוספת נקודת מעקב"),
+    ("Analyze", "ניתוח התנועה"),
+    ("Make a null to carry the motion", "יצירת אובייקט ריק לנשיאת התנועה"),
+    ("Point the track at the null", "קישור מסלול המעקב לאובייקט הריק"),
+    ("Apply", "החלת המעקב"),
+    ("Attach a layer", "הצמדת שכבה"),
+    ("Add a floor", "הוספת רצפה"),
+    ("Make it 3D", "המרה לתלת־ממד"),
+    ("Lay it down", "השכבת הרצפה"),
+    ("Light it", "הוספת תאורה"),
+    ("Add a camera", "הוספת מצלמה"),
+    ("Step outside the camera", "יציאה מתצוגת המצלמה"),
+    ("See past the frame", "צפייה מעבר למסגרת"),
+    (
+        "Everything you animate lives in a composition. Choose Composition ▸ New Composition (Cmd+N) and keep the HD 1920×1080 settings.",
+        "כל ההנפשות נמצאות בקומפוזיציה. בחרו קומפוזיציה ▸ קומפוזיציה חדשה (Cmd+N) והשאירו רזולוציית HD של 1920×1080.",
+    ),
+    (
+        "We'll track the moving lower third in the demo project. Open it from Home ▸ Open Demo Project (or File ▸ Open Demo Project).",
+        "נעקוב אחר רצועת הכותרת התחתונה הנעה בפרויקט ההדגמה. פתחו דרך בית ▸ פתיחת פרויקט הדגמה (או קובץ ▸ פתיחת פרויקט הדגמה).",
+    ),
+    (
+        "Choose Composition ▸ New Composition. Any size works; 1920×1080 is a good start.",
+        "בחרו קומפוזיציה ▸ קומפוזיציה חדשה. אפשר להשתמש בכל גודל; 1920×1080 היא נקודת פתיחה טובה.",
+    ),
+    // Additional source-checked Hebrew EffectCraft panel controls.
+    ("Click to sample color", "לחץ לדגימת צבע"),
+    ("360 View Orientation", "כיוון תצוגת 360°"),
+    ("Active Camera", "מצלמה פעילה"),
+    ("Active Camera ({})", "מצלמה פעילה ({})"),
+    ("Add Comment", "הוסף הערה"),
+    ("Add Formatting", "הוסף עיצוב"),
+    ("Add Group", "הוסף קבוצה"),
+    ("Aperture", "צמצם"),
+    ("Appearance Mode: {}", "מצב תצוגה: {}"),
+    ("Arrange", "סדר"),
+    ("Blend Mode:", "מצב שילוב:"),
+    ("Blending Mode", "מצב שילוב"),
+    ("Blur Level", "רמת טשטוש"),
+    ("Brush Dynamics", "דינמיקת מברשת"),
+    ("Caching frames", "פריימים נשמרים במטמון"),
+    ("Constrain Proportions", "שמור על יחס ממדים"),
+    ("About...", "אודות..."),
+    ("Alpha", "אלפא"),
+    ("Advanced", "מתקדם"),
+    ("Assign", "הקצה"),
+    ("Auto", "אוטומטי"),
+    ("Blur", "טשטוש"),
+    ("Boundary", "גבול"),
+    ("Casts Shadows", "מטיל צללים"),
+    ("Change Renderer…", "שנה מנוע רינדור…"),
+    ("Channel", "ערוץ"),
+    ("Channel:", "ערוץ:"),
+    ("Chapter:", "פרק:"),
+    ("Clear", "נקה"),
+    ("Clone Options", "אפשרויות שכפול"),
+    // Additional source-checked Hebrew panel labels (DAY-04).
+    ("Double-click a layer to open it in the Layer panel", "לחצו פעמיים על שכבה כדי לפתוח אותה בחלונית השכבות"),
+    ("Drop Frame", "דילוג על מספרי פריימים"),
+    ("Effects & Presets options", "אפשרויות אפקטים והגדרות קבועות מראש"),
+    // Source-checked Hebrew Settings models and plug-in library controls (NIGHT-06).
+    ("Source", "מקור"),
+    ("Download", "הורדה"),
+    ("Install from File…", "התקנה מקובץ…"),
+    ("Models folder: {}", "תיקיית המודלים: \u{2068}{}\u{2069}"),
+    ("Plug-ins folder: {}", "תיקיית התוספים: \u{2068}{}\u{2069}"),
+    ("Update All ({})", "עדכון הכול ({})"),
+    ("Installed {}: update available", "גרסה {} מותקנת: עדכון זמין"),
+    ("Installed {}", "גרסה {} מותקנת"),
+    ("Needs a newer EffectCraft", "נדרשת גרסה חדשה יותר של EffectCraft"),
+    ("Open on GitHub", "פתיחה ב־GitHub"),
+    ("Watch video", "צפייה בסרטון"),
+    ("Hide Preview", "הסתרת תצוגה מקדימה"),
+    ("Preview", "תצוגה מקדימה"),
+    ("Install", "התקנה"),
+    ("Update", "עדכון"),
+    // Additional source-checked Hebrew shortcuts, viewer tips and paint controls (NIGHT-02).
+    ("Click a key to see its commands.", "לחצו על מקש כדי להציג את הפקודות המשויכות אליו."),
+    (
+        "Changing a shortcut creates a custom preset; the default stays as it is.",
+        "שינוי קיצור מקשים יוצר ערכת קיצורים מותאמת אישית; ברירת המחדל נשארת ללא שינוי.",
+    ),
+    ("Click to make this viewer active", "לחצו כדי להפעיל את המציג הזה"),
+    ("Click to show the active composition here", "לחצו כדי להציג כאן את הקומפוזיציה הפעילה"),
+    ("Click to reveal the expression in the timeline", "לחצו כדי להציג את הביטוי בציר הזמן"),
+    ("Clone Source Overlay:", "שכבת־על של מקור השכפול:"),
+
+    // Original Hebrew Settings and plug-in catalog feedback from English source (NIGHT-02).
+    ("Limited by free disk space: EffectCraft keeps 5% of the disk free (at least {} GB, at most {} GB).", "המגבלה תלויה במקום הפנוי בדיסק: EffectCraft משאירה 5% מנפח הדיסק פנויים (לפחות {} GB ולכל היותר {} GB)."),
+    ("The Plug-in Library is available in the desktop app.", "ספריית התוספים זמינה ביישום למחשב."),
+    ("Catalog fetched {} (UTC)", "הקטלוג אוחזר ב־\u{2068}{}\u{2069} (UTC)"),
+    ("Test catalog: {} (Refresh returns to the community catalog)", "קטלוג בדיקה: \u{2068}{}\u{2069} (רענון מחזיר לקטלוג הקהילה)"),
+    ("The catalog lists no plug-ins yet.", "עדיין אין תוספים בקטלוג."),
+    ("By {}", "מאת \u{2068}{}\u{2069}"),
+    ("Rendering a preview in the sandbox…", "מתבצע רינדור של תצוגה מקדימה בסביבת הבידוד…"),
+    ("{} ({}) at default settings, on a sample frame", "{} ({}) בהגדרות ברירת המחדל, בפריים לדוגמה"),
+    ("Parameters: {}", "פרמטרים: {}"),
+    ("At its default settings this effect leaves the sample frame unchanged.", "בהגדרות ברירת המחדל, אפקט זה אינו משנה את הפריים לדוגמה."),
+
+    // Original English UI call sites: shortcut editor and paint panels (Hebrew draft).
+    ("Reset Preset", "איפוס ערכת קיצורים"),
+    ("Modifiers:", "מקשי שינוי:"),
+    ("Key: {}", "מקש: \u{2068}{}\u{2069}"),
+    ("Not assigned", "לא משויך"),
+    ("Search commands or shortcuts", "חיפוש פקודות או קיצורי מקשים"),
+    ("Select a command to change its shortcut.", "בחרו פקודה כדי לשנות את קיצור המקשים שלה."),
+    ("No shortcut", "אין קיצור מקשים"),
+    ("⚠ {} is used by:", "⚠ קיצור המקשים \u{2068}{}\u{2069} משמש את:"),
+    ("Reset to Default", "איפוס לברירת המחדל"),
+    ("Default: {}", "ברירת מחדל: \u{2068}{}\u{2069}"),
+    ("You can't undo this.", "לא ניתן לבטל פעולה זו."),
+    ("  Delete  ", "  מחיקה  "),
+    ("Swap Paint Colors (X)", "החלפת צבעי הציור (X)"),
+    ("Set Paint Colors to Black and White (D)", "איפוס צבעי הציור לשחור ולבן (D)"),
+    ("Offset:", "היסט:"),
+    ("Spacing:", "מרווח:"),
+
+    // Original English callsites: Essential Graphics, Effects & Presets, and keyframe dialogs (Hebrew draft).
+    ("Open a composition to build Essential Graphics", "פתחו קומפוזיציה כדי ליצור גרפיקה חיונית"),
+    ("Primary:", "קומפוזיציה ראשית:"),
+    ("Solo Supported Properties", "בידוד מאפיינים נתמכים"),
+    ("Template name", "שם התבנית"),
+    ("Drag properties here from the timeline,\nor use Animation > Add Property to Essential Graphics.", "גררו לכאן מאפיינים מציר הזמן,\nאו בחרו אנימציה > הוספת מאפיין לגרפיקה חיונית."),
+    ("Add Selected As", "הוספת הבחירה בתור"),
+    ("Media Replacement", "החלפת מדיה"),
+    ("Export Template…", "ייצוא תבנית…"),
+    ("Add Mirror", "הוספת שיקוף"),
+    ("Link Selected Property", "קישור המאפיין שנבחר"),
+    ("Unlink {}", "ביטול הקישור ל־\u{2068}{}\u{2069}"),
+    ("Essential Properties — {}", "מאפיינים חיוניים — \u{2068}{}\u{2069}"),
+    ("Push All to Comp", "החלת כל המאפיינים על הקומפוזיציה"),
+    ("Revert All", "ביטול כל השינויים"),
+    ("Copy Presets Folder Path", "העתקת הנתיב לתיקיית הקביעות המוגדרות מראש"),
+    ("Search effects and presets", "חיפוש אפקטים וקביעות מוגדרות מראש"),
+    ("No matching effects or presets", "לא נמצאו אפקטים או קביעות מוגדרות מראש התואמים לחיפוש"),
+    ("Speed:", "מהירות:"),
+    ("Influence:", "השפעה:"),
+    ("Continuous (Lock Outgoing to Incoming)", "רציף (נעילת הערך היוצא לערך הנכנס)"),
+    ("Temporal Interpolation:", "אינטרפולציה בזמן:"),
+    ("Spatial Interpolation:", "אינטרפולציה במרחב:"),
+    ("Roving:", "נדידה:"),
+    ("Stretch", "מתיחה"),
+    ("Original Duration:", "משך מקורי:"),
+    ("Stretch Factor:", "מקדם מתיחה:"),
+    ("Hold In Place", "קיבוע במקום"),
+
+    // Original English callsites: Preview and Project panels (Hebrew UI, 16 November 2026).
+    ("{} — coming soon", "{} — בקרוב"),
+    ("Shortcut", "קיצור דרך"),
+    ("Range", "טווח"),
+    ("Play From", "הפעלה החל מ־"),
+    ("Frame Rate", "קצב מסגרות"),
+    ("Skip", "דילוג"),
+    ("Resolution", "רזולוציה"),
+    ("Full Screen", "מסך מלא"),
+    ("On ({}) stop:", "בעת עצירה ({}):"),
+    ("If caching, play cached frames", "הפעלת מסגרות מהמטמון, אם הן זמינות"),
+    ("No audio layer selected", "לא נבחרה שכבת שמע"),
+    ("No composition markers", "אין סמנים בקומפוזיציה"),
+    ("used once", "בשימוש פעם אחת"),
+    ("used {} times", "בשימוש {} פעמים"),
+    ("Compositions that use this item", "קומפוזיציות המשתמשות בפריט זה"),
+    ("Sort by {}, {}", "מיון לפי {}, {}"),
+    ("Sort by {}", "מיון לפי {}"),
+    ("Resize the Name column", "שינוי רוחב העמודה ״שם״"),
+    ("Composition Settings…", "הגדרות קומפוזיציה…"),
+    ("Move to Project Root", "העברה לתיקיית השורש של הפרויקט"),
+    ("New Comp from Selection", "קומפוזיציה חדשה מהבחירה"),
+    ("Replace with Precomposition", "החלפה בקומפוזיציית ביניים"),
+    ("Label", "תווית"),
+    ("Project color depth: {}", "עומק הצבע בפרויקט: {}"),
+    (
+        "Project color depth: click to cycle 8/16/32 bpc, Alt-click for Project Settings",
+        "עומק הצבע בפרויקט: לחיצה למעבר בין 8/16/32 סיביות לערוץ; Alt+לחיצה לפתיחת הגדרות הפרויקט",
+    ),
+    ("Filter by footage status", "סינון לפי מצב קובצי המדיה"),
+    ("Columns", "עמודות"),
+    // DAY-05: clean-room Hebrew from live English tracker, camera, roto, footage,
+    // dialog and VR UI callsites; AI-assisted, native-speaker/Native QA pending.
+    ("Track Name:", "שם המעקב:"),
+    ("Process Before Match", "עיבוד לפני התאמה"),
+    ("Enhance", "שיפור"),
+    ("Subpixel Positioning", "מיקום תת־פיקסלי"),
+    ("Adapt Feature On Every Frame", "התאמת המאפיין בכל פריים"),
+    ("Follow Feature Rotation and Scale", "מעקב אחר סיבוב המאפיין וקנה המידה שלו"),
+    ("If Confidence is Below", "אם רמת הביטחון נמוכה מ־"),
+    ("Apply Motion To:", "החלת התנועה על:"),
+    ("Layer:", "שכבה:"),
+    ("None", "ללא"),
+    ("Apply Dimensions:", "החלה בצירים:"),
+    ("X and Y", "צירי X ו־Y"),
+    ("X only", "ציר X בלבד"),
+    ("Y only", "ציר Y בלבד"),
+    ("Set Ground Plane and Origin", "הגדרת מישור הקרקע ונקודת הראשית"),
+    ("Delete Selected Points", "מחיקת הנקודות שנבחרו"),
+    ("Create Camera", "יצירת מצלמה"),
+    ("Export Scene to Blender...", "ייצוא הסצנה ל־Blender..."),
+    ("Method Used: {}    Average Error: {} pixels", "השיטה שנבחרה: {}    שגיאה ממוצעת: {} פיקסלים"),
+    ("Partial solve: {} of {} frames solved", "פתרון חלקי: עובדו {} מתוך {} פריימים"),
+    ("Overlay", "שכבת־על"),
+    ("Unfreeze", "ביטול הקפאה"),
+    ("Freeze", "הקפאה"),
+    ("Object {}", "אובייקט {}"),
+    ("Object {} ({})", "אובייקט {} ({})"),
+    ("Remove this object's strokes", "הסרת משיכות המכחול של אובייקט זה"),
+    ("Double-click footage in the Project panel to open it here", "לחצו פעמיים על קובץ מדיה בחלונית הפרויקט כדי לפתוח אותו כאן"),
+    ("Footage: {}", "קובץ מדיה: {}"),
+    ("No video", "אין וידאו"),
+    ("Edit Target: {}", "יעד עריכה: {}"),
+    ("Name:", "שם:"),
+    ("Size", "גודל"),
+    ("Make Comp Size", "התאמה לגודל הקומפוזיציה"),
+    ("Color:", "צבע:"),
+    ("Affect all layers that use this solid", "השפעה על כל השכבות שמשתמשות בצבע אחיד זה"),
+    ("Only this layer uses this solid.", "רק השכבה הזאת משתמשת בצבע אחיד זה."),
+    ("This change will create a new solid for this layer.", "השינוי ייצור צבע אחיד חדש עבור השכבה הזאת."),
+    ("Type a command or effect…", "הקלידו פקודה או אפקט…"),
+    ("Select a layer with a mask or shape path (or the path property), or Puppet pins.", "בחרו שכבה עם נתיב מסכה, נתיב צורה או מאפיין נתיב, או נקודות של כלי הבובה."),
+    ("Loop (Trace Path)", "לולאה (מעקב אחר נתיב)"),
+    ("No VR environments yet. Create one with Composition ▸ VR ▸ Create VR Environment…", "אין עדיין סביבות VR. צרו סביבה דרך קומפוזיציה ▸ VR ▸ יצירת סביבת VR…"),
+    ("VR Environments", "סביבות VR"),
+    ("Reset", "איפוס"),
+    ("All six face cameras turn together; the scene is not changed.", "כל שש מצלמות הפאות מסתובבות יחד; הסצנה אינה משתנה."),
+
+    // Night L04: real Native timeline, text/typography, marker and composition controls.
+    ("(no composition)", "(אין קומפוזיציה)"),
+    ("Add a shape, fill, stroke or path operation", "הוסף פעולה של צורה, מילוי, קו מתאר או נתיב"),
+    ("Add:", "הוסף:"),
+    ("Double-click to edit the comment", "לחץ פעמיים לעריכת ההערה"),
+    ("Drag to change", "גרור לשינוי"),
+    ("Drag to slip the source", "גרור להזזת המקור בציר הזמן"),
+    ("Effects", "אפקטים"),
+    ("Enable Expression", "הפעל ביטוי"),
+    ("Expression Language Menu", "תפריט שפת הביטויים"),
+    ("Expression pick whip: drag onto a property", "קישור ביטוי: גרור אל מאפיין"),
+    ("Expression:", "ביטוי:"),
+    ("Hide This", "הסתר פריט זה"),
+    ("Inverted", "הפוך"),
+    ("Layer Styles", "סגנונות שכבה"),
+    ("Markers", "סמנים"),
+    ("Open in Essential Graphics", "פתח בגרפיקה חיונית"),
+    ("Parent pick whip: drag onto a layer", "קישור שכבת אב: גרור אל שכבה"),
+    ("Per Layer", "לכל שכבה"),
+    ("Property pick whip: drag onto a property", "קישור מאפיין: גרור אל מאפיין"),
+    ("Property: {}", "מאפיין: {}"),
+    ("Search", "חיפוש"),
+    ("Show Layer Name", "הצג שם שכבה"),
+    ("Show Source Name", "הצג שם מקור"),
+    ("Time", "זמן"),
+    ("Toggle Switches / Modes", "החלף בין מתגים למצבים"),
+    ("Total Offset", "היסט כולל"),
+    ("Transform", "שינוי צורה"),
+    ("Variable Font Axes: {}", "צירי גופן משתנה: {}"),
+    ("Align Layers to:", "יישור שכבות אל:"),
+    ("Distribute Layers:", "פיזור שכבות:"),
+    ("Ligatures", "ליגטורות"),
+    ("No matching fonts", "לא נמצאו גופנים תואמים"),
+    ("Rescan Fonts", "סרוק גופנים מחדש"),
+    ("Select a text layer", "בחר שכבת טקסט"),
+    ("Stylistic Sets", "ערכות סגנוניות"),
+    ("Variable Font Axes", "צירי גופן משתנה"),
+    ("Variable fonts only", "גופנים משתנים בלבד"),
+    ("Comment:", "הערה:"),
+    ("Cue Point", "נקודת ציון"),
+    ("Event", "אירוע"),
+    ("Frame Target:", "מסגרת יעד:"),
+    ("Label:", "תווית:"),
+    ("Navigation", "ניווט"),
+    ("Parameter Name:", "שם פרמטר:"),
+    ("Protected Region", "אזור מוגן"),
+    ("Time:", "זמן:"),
+    ("Value:", "ערך:"),
+    ("Composition Mini-Flowchart", "תרשים זרימה מוקטן של הקומפוזיציה"),
+    ("No nested compositions", "אין קומפוזיציות מקוננות"),
+
 ];
 
 /// Swedish (`sv`), written from the English source.
@@ -10405,6 +11001,395 @@ const FRENCH: &[(&str, &str)] = &[
 mod tests {
     use super::*;
 
+    /// Source-checked Hebrew panel increment: label lookup, interpolation and English fallback.
+    #[test]
+    fn hebrew_effect_panel_increment_resolves_in_catalog() {
+        set_current("he");
+        for (english, translated) in [
+            ("Active Camera", "מצלמה פעילה"),
+            ("Blend Mode:", "מצב שילוב:"),
+            ("Change Renderer…", "שנה מנוע רינדור…"),
+        ] {
+            assert_eq!(tr(english), translated, "Hebrew panel label: {english}");
+        }
+        assert_eq!(tr_args("Active Camera ({})", &[&2]), "מצלמה פעילה (2)");
+        assert_eq!(tr_args("Appearance Mode: {}", &[&"Dark"]), "מצב תצוגה: Dark");
+        set_current("en");
+        assert_eq!(tr("Active Camera"), "Active Camera");
+    }
+
+
+    /// Screenshot-backed Hebrew empty-viewer and project-panel controls.
+    #[test]
+    fn hebrew_empty_viewer_and_project_details_are_localized() {
+        let viewer = include_str!("../panels/viewer/frame.rs");
+        let project = include_str!("../panels/project.rs");
+        set_current("he");
+        for (english, hebrew, source) in [
+            ("New Composition From Footage", "קומפוזיציה חדשה מקובץ מדיה", viewer),
+            ("Search project", "חיפוש בפרויקט", project),
+            ("Select an item to see its details", "בחרו פריט להצגת פרטיו", project),
+        ] {
+            assert!(source.contains(&format!("{english:?}")), "Missing Native callsite: {english}");
+            assert_eq!(tr(english), hebrew, "Untranslated Native control: {english}");
+        }
+        set_current("en");
+        assert_eq!(tr("New Composition From Footage"), "New Composition From Footage");
+    }
+
+    /// The Native Home and Learn tutorial journey remains navigable in Hebrew.
+    #[test]
+    fn hebrew_native_home_and_learn_tutorial_journey_is_localized() {
+        let learn = include_str!("../panels/learn.rs");
+        let home_header = include_str!("../header.rs");
+        set_current("he");
+        for (english, hebrew) in [
+            ("Home", "בית"),
+            ("Learn", "למידה"),
+            ("LEARN", "למידה"),
+            (
+                "Hands-on tutorials that run inside EffectCraft. Do each step yourself, or press Show me.",
+                "מדריכים מעשיים בתוך EffectCraft. בצעו כל שלב בעצמכם, או לחצו על ״הצג לי״.",
+            ),
+            ("Show me", "הצג לי"),
+            ("More tutorials", "מדריכים נוספים"),
+            ("Tutorial complete", "המדריך הושלם"),
+            ("Close tutorial", "סגירת המדריך"),
+            ("steps", "שלבים"),
+            ("Nice work. Pick another tutorial on the Home screen's Learn tab.", "כל הכבוד! בחרו מדריך נוסף בכרטיסיית ״למידה״ שבמסך הבית."),
+        ] {
+            let native_source = if english == "Home" { home_header } else { learn };
+            assert!(native_source.contains(&format!("{english:?}")), "No Native callsite for {english}");
+            assert_eq!(tr(english), hebrew, "Learn workflow: {english}");
+        }
+        assert_eq!(tr("Next"), "הבא");
+        set_current("en");
+        assert_eq!(tr("Learn"), "Learn");
+        assert_eq!(tr("Show me"), "Show me");
+    }
+
+    /// The Native Home welcome, community rail, recent-file filter, relative dates and
+    /// file kinds must be readable in Hebrew without translating file paths.
+    #[test]
+    fn hebrew_native_home_recent_files_and_relative_dates_are_localized() {
+        let source = include_str!("../panels/home.rs");
+        set_current("he");
+        for (english, hebrew) in [
+            ("Just now", "הרגע"),
+            ("Yesterday", "אתמול"),
+            ("{} minute ago", "לפני {} דקה"),
+            ("{} minutes ago", "לפני {} דקות"),
+            ("{} hour ago", "לפני {} שעה"),
+            ("{} hours ago", "לפני {} שעות"),
+            ("{} day ago", "לפני {} יום"),
+            ("{} days ago", "לפני {} ימים"),
+            ("Community", "קהילה"),
+            ("More ArtCraft apps", "יישומי ArtCraft נוספים"),
+            ("Welcome to EffectCraft", "ברוכים הבאים ל־EffectCraft"),
+            ("Motion graphics and visual effects · version {}", "גרפיקה בתנועה ואפקטים חזותיים · גרסה {}"),
+            ("Filter recent files", "סינון קבצים אחרונים"),
+            ("Clear list", "ניקוי הרשימה"),
+            ("(missing)", "(חסר)"),
+            ("EffectCraft project", "פרויקט EffectCraft"),
+            ("After Effects project", "פרויקט After Effects"),
+            ("Lottie animation", "אנימציית Lottie"),
+        ] {
+            assert_eq!(tr(english), hebrew, "Home: {english}");
+            assert!(source.contains(&format!("{english:?}")), "No Native Home source for {english}");
+            assert_eq!(english.matches("{}").count(), hebrew.matches("{}").count());
+        }
+        assert_eq!(tr_args("{} hours ago", &[&3]), "לפני 3 שעות");
+        assert_eq!(tr_args("Motion graphics and visual effects · version {}", &[&"1.2.3"]), "גרפיקה בתנועה ואפקטים חזותיים · גרסה 1.2.3");
+        set_current("en");
+        assert_eq!(tr("Welcome to EffectCraft"), "Welcome to EffectCraft");
+        assert_eq!(tr_args("{} days ago", &[&2]), "2 days ago");
+    }
+
+    /// The Native AEP loss-warning must translate the title and risky continue actions.
+    /// Command IDs and format brand names remain unchanged.
+    #[test]
+    fn hebrew_aep_import_export_loss_warning_is_explicit() {
+        set_current("he");
+        for (english, translated) in [
+            ("Import Adobe After Effects Project", "ייבוא פרויקט Adobe After Effects"),
+            ("Export Adobe After Effects Project", "ייצוא פרויקט Adobe After Effects"),
+            ("Some parts of this project cannot be imported exactly (left out or changed):", "חלקים מהפרויקט אינם ניתנים לייבוא מדויק (יושמטו או ישתנו):"),
+            ("Some parts of this project cannot be exported exactly (left out or changed):", "חלקים מהפרויקט אינם ניתנים לייצוא מדויק (יושמטו או ישתנו):"),
+            ("Import Anyway", "ייבוא בכל זאת"),
+            ("Export Anyway", "ייצוא בכל זאת"),
+        ] {
+            assert_eq!(tr(english), translated, "AEP loss warning: {english}");
+        }
+        set_current("en");
+        assert_eq!(tr("Export Anyway"), "Export Anyway");
+        assert_eq!(tr("Import Adobe After Effects Project"), "Import Adobe After Effects Project");
+    }
+
+    /// Unsaved changes and revert must stay clear in Hebrew without altering file names or actions.
+    #[test]
+    fn hebrew_unsaved_project_prompts_preserve_filename() {
+        set_current("he");
+        for (english, hebrew) in [
+            ("Revert Project", "חזרה לגרסה השמורה"),
+            ("Unsaved Changes", "שינויים שלא נשמרו"),
+            ("   Save   ", "   שמירה   "),
+            ("  Revert  ", "  שחזור  "),
+            ("Don't Save", "לא לשמור"),
+            ("Your changes will be lost if you don't save them.", "השינויים יאבדו אם לא יישמרו."),
+        ] {
+            assert_eq!(tr(english), hebrew, "unsaved prompt: {english}");
+        }
+        let name = "draft 01.ecproj";
+        assert_eq!(tr_args("Save changes to “{}” before closing?", &[&name]), "לשמור את השינויים בקובץ \u{2068}“draft 01.ecproj”\u{2069} לפני הסגירה?");
+        assert_eq!(
+            tr_args("Revert “{}” to the last saved version? Changes made since then will be lost.", &[&name]),
+            "להחזיר את \u{2068}“draft 01.ecproj”\u{2069} לגרסה השמורה האחרונה? כל השינויים שבוצעו מאז יאבדו."
+        );
+        set_current("en");
+        assert_eq!(tr("Don't Save"), "Don't Save");
+        assert_eq!(tr_args("Save changes to “{}” before closing?", &[&name]), "Save changes to “draft 01.ecproj” before closing?");
+    }
+
+    /// Hebrew composition dialog labels must resolve without changing aspect/timecode values.
+    #[test]
+    fn hebrew_native_composition_settings_are_localized() {
+        set_current("he");
+        for (english, hebrew) in [
+            ("Composition Name:", "שם הקומפוזיציה:"),
+            ("Preset:", "תבנית:"),
+            ("Save Preset…", "שמירת תבנית…"),
+            ("Width:", "רוחב:"),
+            ("Height:", "גובה:"),
+            ("Pixel Aspect Ratio:", "יחס ממדי פיקסל:"),
+            ("Frame Rate:", "קצב מסגרות:"),
+            ("Resolution:", "רזולוציה:"),
+            ("Start Timecode:", "קוד זמן התחלה:"),
+            ("Duration:", "משך:"),
+            ("Background Color:", "צבע רקע:"),
+            ("Preserve resolution when nested", "שמירת הרזולוציה בקינון"),
+            ("Renderer:", "מנוע רינדור:"),
+            ("Advanced 3D", "תלת־ממד מתקדם"),
+            ("Classic 3D", "תלת־ממד קלאסי"),
+        ] {
+            assert_eq!(tr(english), hebrew, "composition label: {english}");
+        }
+        let ratio = "16:9";
+        assert_eq!(tr_args("Frame Aspect Ratio: {}", &[&ratio]), "יחס ממדי מסגרת: 16:9");
+        let width = 1920;
+        let height = 1080;
+        let megabytes = "8.3";
+        assert_eq!(tr_args("{} x {}, {}MB per 8bpc frame", &[&width, &height, &megabytes]), "1920 × 1080, ‏8.3 MB למסגרת ב־8 סיביות לערוץ");
+        set_current("en");
+        assert_eq!(tr("Composition Name:"), "Composition Name:");
+        assert_eq!(tr("Width:"), "Width:");
+    }
+
+    /// The Native Settings models and plug-in library action labels must resolve in Hebrew
+    /// without changing the automation IDs or the LTR model-folder paths.
+    #[test]
+    fn hebrew_native_models_and_plugin_library_controls_are_localized() {
+        let settings = include_str!("../panels/settings.rs");
+        set_current("he");
+        for (english, translated) in [
+            ("Source", "מקור"),
+            ("Download", "הורדה"),
+            ("Install from File…", "התקנה מקובץ…"),
+            ("Models folder: {}", "תיקיית המודלים: \u{2068}{}\u{2069}"),
+            ("Plug-ins folder: {}", "תיקיית התוספים: \u{2068}{}\u{2069}"),
+            ("Update All ({})", "עדכון הכול ({})"),
+            ("Installed {}: update available", "גרסה {} מותקנת: עדכון זמין"),
+            ("Installed {}", "גרסה {} מותקנת"),
+            ("Needs a newer EffectCraft", "נדרשת גרסה חדשה יותר של EffectCraft"),
+            ("Open on GitHub", "פתיחה ב־GitHub"),
+            ("Watch video", "צפייה בסרטון"),
+            ("Hide Preview", "הסתרת תצוגה מקדימה"),
+            ("Preview", "תצוגה מקדימה"),
+            ("Install", "התקנה"),
+            ("Update", "עדכון"),
+        ] {
+            assert!(
+                settings.contains(&format!("tr(\"{english}\"")) || settings.contains(&format!("tr_args(\"{english}\"")),
+                "Missing Native Settings callsite: {english}"
+            );
+            assert_eq!(tr(english), translated, "Settings localization: {english}");
+        }
+        let folder = "C:/sample-models";
+        assert_eq!(tr_args("Models folder: {}", &[&folder]), "תיקיית המודלים: \u{2068}C:/sample-models\u{2069}");
+        assert_eq!(tr_args("Plug-ins folder: {}", &[&folder]), "תיקיית התוספים: \u{2068}C:/sample-models\u{2069}");
+        assert_eq!(tr_args("Update All ({})", &[&3]), "עדכון הכול (3)");
+        set_current("en");
+        assert_eq!(tr("Download"), "Download");
+        assert_eq!(tr_args("Models folder: {}", &[&folder]), "Models folder: C:/sample-models");
+    }
+
+    /// Native Settings plug-in catalog status, preview and disk-space feedback in Hebrew.
+    #[test]
+    fn hebrew_plugin_catalog_feedback_resolves_and_preserves_dynamic_values() {
+        let settings = include_str!("../panels/settings.rs");
+        set_current("he");
+        for (english, hebrew) in [
+            ("Limited by free disk space: EffectCraft keeps 5% of the disk free (at least {} GB, at most {} GB).", "המגבלה תלויה במקום הפנוי בדיסק: EffectCraft משאירה 5% מנפח הדיסק פנויים (לפחות {} GB ולכל היותר {} GB)."),
+            ("The Plug-in Library is available in the desktop app.", "ספריית התוספים זמינה ביישום למחשב."),
+            ("Catalog fetched {} (UTC)", "הקטלוג אוחזר ב־\u{2068}{}\u{2069} (UTC)"),
+            ("Test catalog: {} (Refresh returns to the community catalog)", "קטלוג בדיקה: \u{2068}{}\u{2069} (רענון מחזיר לקטלוג הקהילה)"),
+            ("The catalog lists no plug-ins yet.", "עדיין אין תוספים בקטלוג."),
+            ("By {}", "מאת \u{2068}{}\u{2069}"),
+            ("Rendering a preview in the sandbox…", "מתבצע רינדור של תצוגה מקדימה בסביבת הבידוד…"),
+            ("{} ({}) at default settings, on a sample frame", "{} ({}) בהגדרות ברירת המחדל, בפריים לדוגמה"),
+            ("Parameters: {}", "פרמטרים: {}"),
+            ("At its default settings this effect leaves the sample frame unchanged.", "בהגדרות ברירת המחדל, אפקט זה אינו משנה את הפריים לדוגמה."),
+        ] {
+            assert!(settings.contains(english), "Native Settings source key absent: {english}");
+            assert_eq!(tr(english), hebrew, "Hebrew catalog missing source key: {english}");
+        }
+        assert_eq!(
+            tr_args("Catalog fetched {} (UTC)", &[&"2026-11-16"]),
+            "הקטלוג אוחזר ב־\u{2068}2026-11-16\u{2069} (UTC)"
+        );
+        assert_eq!(tr_args("Parameters: {}", &[&3]), "פרמטרים: 3");
+        set_current("en");
+        assert_eq!(tr("The Plug-in Library is available in the desktop app."), "The Plug-in Library is available in the desktop app.");
+    }
+
+    /// Hebrew preferences and crash recovery must be understandable without changing settings IDs.
+    #[test]
+    fn hebrew_preferences_and_recovery_controls_are_localized() {
+        set_current("he");
+        for (english, translated) in [
+            ("Default Output:", "פלט ברירת מחדל:"),
+            ("System Default", "ברירת המחדל של המערכת"),
+            ("Darker", "כהה יותר"),
+            ("Lighter", "בהיר יותר"),
+            ("Appearance Mode", "מצב תצוגה"),
+            ("Light Theme", "ערכת נושא בהירה"),
+            ("Dark Theme", "ערכת נושא כהה"),
+            ("Refresh", "רענון"),
+            ("Fetch Catalog", "טעינת קטלוג"),
+            ("Reset Labels", "איפוס תוויות"),
+            ("Previous", "הקודם"),
+            ("Next", "הבא"),
+            ("Don't Recover", "לא לשחזר"),
+        ] {
+            assert_eq!(tr(english), translated, "Hebrew missing for {english}");
+        }
+        let value = "example.ecproj";
+        assert_eq!(tr_args("Latest auto-save: {}", &[&value]), "השמירה האוטומטית האחרונה: example.ecproj");
+        let capacity = 512;
+        assert_eq!(tr_args("Disk cache limit in effect: {} MB", &[&capacity]), "מגבלת מטמון הדיסק בפועל: 512 MB");
+        set_current("en");
+        assert_eq!(tr("Don't Recover"), "Don't Recover");
+        assert_eq!(tr("Light Theme"), "Light Theme");
+    }
+
+    /// The native Pre-compose dialog must translate all options and safely embed mixed-direction layer names.
+    #[test]
+    fn hebrew_precompose_dialog_has_translated_controls_and_bidi_safe_layer_name() {
+        let source = include_str!("../panels/precomp.rs");
+        assert!(source.contains("modal(ctx, tr(\"Pre-compose\")"));
+        assert!(source.contains("radio_value(&mut d.leave, false, tr(\"Move all attributes into the new composition\"))"));
+        assert!(source.contains("egui::RichText::new(tr_args("));
+        set_current("he");
+        for (english, expected) in [
+            ("Pre-compose", "יצירת קומפוזיציית ביניים"),
+            ("Move all attributes into the new composition", "העברת כל המאפיינים לקומפוזיציה החדשה"),
+            (
+                "Use this option to place the currently selected layers together into a new intermediate composition.",
+                "אפשרות זו מקבצת את השכבות שנבחרו לקומפוזיציית ביניים חדשה.",
+            ),
+            ("Adjust composition duration to the time span of the selected layers", "התאמת משך הקומפוזיציה לטווח הזמן של השכבות שנבחרו"),
+        ] {
+            assert_eq!(tr(english), expected, "Pre-compose: {english}");
+        }
+        let file = "clip_01.mov";
+        assert_eq!(tr_args("Leave all attributes in \"{}\"", &[&file]), "השארת כל המאפיינים ב־\u{2068}\"clip_01.mov\"\u{2069}");
+        assert_eq!(
+            tr_args(
+                "Use this option to create a new intermediate composition with only \"{}\" in it. The new composition will become the source to the current layer.",
+                &[&file]
+            ),
+            "אפשרות זו יוצרת קומפוזיציית ביניים חדשה הכוללת רק את \u{2068}\"clip_01.mov\"\u{2069}. הקומפוזיציה החדשה תהיה מקור השכבה הנוכחית."
+        );
+        set_current("en");
+        assert_eq!(tr("Pre-compose"), "Pre-compose");
+        assert_eq!(tr_args("Leave all attributes in \"{}\"", &[&file]), "Leave all attributes in \"clip_01.mov\"");
+    }
+
+    /// Native render-queue controls must translate the displayed labels, not change settings IDs.
+    #[test]
+    fn hebrew_render_queue_controls_are_localized() {
+        let source = include_str!("../panels/render_queue.rs");
+        set_current("he");
+        for (english, translated) in [
+            ("Proxy Use: {}", "שימוש בקובץ תחליפי: {}"),
+            ("Effects: {}", "אפקטים: {}"),
+            ("Solo Switches: {}", "מתגי סולו: {}"),
+            ("Guide Layers: {}", "שכבות עזר: {}"),
+            ("Color Depth: {}", "עומק צבע: {}"),
+            ("Frame Blending: {}", "מיזוג מסגרות: {}"),
+            ("Motion Blur: {}", "טשטוש תנועה: {}"),
+            ("Field Render: {}", "רינדור שדות: {}"),
+            ("3:2 Pulldown: {}", "המרת 3:2: {}"),
+            ("Format: {}", "פורמט: {}"),
+            ("Video Codec: {}", "מקודד וידאו: {}"),
+            ("Opus Bitrate: {} kbps", "קצב סיביות Opus: {} kbps"),
+            ("Opus Tuning: {}", "כוונון Opus: {}"),
+            ("Post-Render Action: {}", "פעולה לאחר הרינדור: {}"),
+            ("Sample Format: {}", "פורמט דגימה: {}"),
+            ("EXR Bit Depth: {}", "עומק סיביות EXR: {}"),
+            ("Profile: {}", "פרופיל: {}"),
+            ("Rate Control: {}", "בקרת קצב: {}"),
+            ("Current Render", "רינדור נוכחי"),
+            ("Render", "רינדור"),
+            ("Notify", "התראה"),
+            ("Stop", "עצור"),
+            ("Duplicate", "שכפול"),
+            ("Remove", "הסרה"),
+            ("Move Up", "העברה למעלה"),
+            ("Move Down", "העברה למטה"),
+            ("Log:", "יומן:"),
+            ("Output To:", "פלט אל:"),
+            ("Output file name template", "תבנית שם קובץ הפלט"),
+            ("Output file: {}", "קובץ פלט: {}"),
+            ("Template: {}\n{}", "תבנית: {}\n{}"),
+            ("The render queue is empty.", "תור הרינדור ריק."),
+        ] {
+            assert_eq!(tr(english), translated, "Render Queue: {english}");
+            assert!(
+                source.contains(&format!("tr({english:?}")) || source.contains(&format!("tr_args({english:?}")),
+                "No render queue source usage for {english}"
+            );
+            assert_eq!(english.matches("{}").count(), translated.matches("{}").count());
+        }
+        assert_eq!(tr_args("Output file: {}", &[&"גרסה_02.mov"]), "קובץ פלט: גרסה_02.mov");
+        assert_eq!(tr_args("Opus Bitrate: {} kbps", &[&128]), "קצב סיביות Opus: 128 kbps");
+        set_current("en");
+        assert_eq!(tr("The render queue is empty."), "The render queue is empty.");
+        assert_eq!(tr_args("Output file: {}", &[&"test.mov"]), "Output file: test.mov");
+    }
+
+    /// Opening, saving and restoring a project must be understandable in Hebrew Native UI.
+    #[test]
+    fn hebrew_project_entry_and_autosave_panels_are_localized() {
+        set_current("he");
+        for (english, translated) in [
+            ("Open Project…", "פתיחת פרויקט…"),
+            ("Open Demo Project", "פתיחת פרויקט הדגמה"),
+            ("Recent Projects Shown", "מספר הפרויקטים האחרונים המוצגים"),
+            ("Project: {}", "פרויקט: {}"),
+            ("Auto-Save", "שמירה אוטומטית"),
+            ("Save Now", "שמור עכשיו"),
+            ("Saved {}", "נשמר: {}"),
+            (" Open Auto-Save ", " פתיחת שמירה אוטומטית "),
+        ] {
+            assert_eq!(tr(english), translated, "Hebrew missing for {english}");
+        }
+        let name = "demo.ecproj";
+        assert_eq!(tr_args("Project: {}", &[&name]), "פרויקט: demo.ecproj");
+        assert_eq!(tr_args("Saved {}", &[&name]), "נשמר: demo.ecproj");
+        set_current("en");
+        assert_eq!(tr("Open Project…"), "Open Project…");
+    }
+
     /// Check rendered feature labels only. Format names, compatibility tokens and user text
     /// are not subject to this guard, and a missing translation keeps its English fallback.
     #[test]
@@ -10974,6 +11959,155 @@ mod tests {
         }
     }
 
+    /// The Preview and Project panels use these English literals through tr/tr_args.
+    /// Keep the Hebrew rows linked to the actual callsites and preserve positional arguments.
+    #[test]
+    fn hebrew_preview_and_project_controls_match_live_english_sources() {
+        let preview = include_str!("../panels/misc.rs");
+        let project = include_str!("../panels/project.rs");
+        for (english, source) in [
+            ("{} — coming soon", preview),
+            ("Shortcut", preview),
+            ("Range", preview),
+            ("Play From", preview),
+            ("Frame Rate", preview),
+            ("Skip", preview),
+            ("Resolution", preview),
+            ("Full Screen", preview),
+            ("On ({}) stop:", preview),
+            ("If caching, play cached frames", preview),
+            ("No audio layer selected", preview),
+            ("No composition markers", preview),
+            ("used once", project),
+            ("used {} times", project),
+            ("Compositions that use this item", project),
+            ("Sort by {}, {}", project),
+            ("Sort by {}", project),
+            ("Resize the Name column", project),
+            ("Composition Settings…", project),
+            ("Move to Project Root", project),
+            ("New Comp from Selection", project),
+            ("Replace with Precomposition", project),
+            ("Label", project),
+            ("Project color depth: {}", project),
+            (
+                "Project color depth: click to cycle 8/16/32 bpc, Alt-click for Project Settings",
+                project,
+            ),
+            ("Filter by footage status", project),
+            ("Columns", project),
+        ] {
+            let direct = format!("tr({english:?})");
+            let with_args = format!("tr_args({english:?},");
+            assert!(
+                source.contains(&direct) || source.contains(&with_args),
+                "{english:?} is no longer a translated Preview/Project callsite"
+            );
+            let value = HEBREW.iter().find(|(key, _)| *key == english).map(|(_, v)| *v);
+            assert!(
+                value.is_some_and(|text| text.chars().any(|c| ('א'..='ת').contains(&c))),
+                "missing Hebrew for {english:?}"
+            );
+            assert_eq!(
+                english.matches("{}").count(),
+                value.unwrap_or("").matches("{}").count(),
+                "placeholder mismatch for {english:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn hebrew_shortcut_and_paint_controls_match_live_english_sources() {
+        let shortcuts = include_str!("../panels/shortcut_editor.rs");
+        let paint = include_str!("../panels/paint_panels.rs");
+        for (english, source) in [
+            ("Reset Preset", shortcuts),
+            ("Modifiers:", shortcuts),
+            ("Key: {}", shortcuts),
+            ("Not assigned", shortcuts),
+            ("Search commands or shortcuts", shortcuts),
+            ("Select a command to change its shortcut.", shortcuts),
+            ("No shortcut", shortcuts),
+            ("⚠ {} is used by:", shortcuts),
+            ("Reset to Default", shortcuts),
+            ("Default: {}", shortcuts),
+            ("You can't undo this.", shortcuts),
+            ("  Delete  ", shortcuts),
+            ("Swap Paint Colors (X)", paint),
+            ("Set Paint Colors to Black and White (D)", paint),
+            ("Offset:", paint),
+            ("Spacing:", paint),
+        ] {
+            let direct = format!("tr({english:?})");
+            let formatted = format!("tr_args({english:?}");
+            assert!(
+                source.contains(&direct) || source.contains(&formatted),
+                "{english:?} is no longer used by its original panel"
+            );
+            let hebrew = HEBREW.iter().find(|(key, _)| *key == english).map(|(_, translated)| *translated);
+            assert!(
+                hebrew.is_some_and(|text| text.chars().any(|c| ('א'..='ת').contains(&c))),
+                "Missing Hebrew UI row for {english:?}"
+            );
+            let hebrew = hebrew.unwrap_or("");
+            assert_eq!(english.matches("{}").count(), hebrew.matches("{}").count(), "{english:?}: placeholder mismatch");
+        }
+    }
+
+    /// Guard the exact original English callsites and placeholder parity of the Hebrew increment.
+    #[test]
+    fn hebrew_essential_keyframe_and_presets_controls_match_live_english_sources() {
+        let essential = include_str!("../panels/essential.rs");
+        let keyframes = include_str!("../panels/key_dialogs.rs");
+        let presets = include_str!("../panels/effects_presets.rs");
+        for (english, source) in [
+            ("Open a composition to build Essential Graphics", essential),
+            ("Primary:", essential),
+            ("Solo Supported Properties", essential),
+            ("Template name", essential),
+            ("Drag properties here from the timeline,\nor use Animation > Add Property to Essential Graphics.", essential),
+            ("Add Selected As", essential),
+            ("Media Replacement", essential),
+            ("Export Template…", essential),
+            ("Add Mirror", essential),
+            ("Link Selected Property", essential),
+            ("Unlink {}", essential),
+            ("Essential Properties — {}", essential),
+            ("Push All to Comp", essential),
+            ("Revert All", essential),
+            ("Copy Presets Folder Path", presets),
+            ("Search effects and presets", presets),
+            ("No matching effects or presets", presets),
+            ("Speed:", keyframes),
+            ("Influence:", keyframes),
+            ("Continuous (Lock Outgoing to Incoming)", keyframes),
+            ("Temporal Interpolation:", keyframes),
+            ("Spatial Interpolation:", keyframes),
+            ("Roving:", keyframes),
+            ("Stretch", keyframes),
+            ("Original Duration:", keyframes),
+            ("Stretch Factor:", keyframes),
+            ("Hold In Place", keyframes),
+        ] {
+            let direct = format!("tr({english:?})");
+            let formatted = format!("tr_args({english:?},");
+            assert!(
+                source.contains(&direct) || source.contains(&formatted),
+                "{english:?} is no longer used by its original English UI panel"
+            );
+            let hebrew = HEBREW.iter().find(|(key, _)| *key == english).map(|(_, translated)| *translated);
+            assert!(
+                hebrew.is_some_and(|value| value.chars().any(|c| ('א'..='ת').contains(&c))),
+                "Missing Hebrew UI row: {english:?}"
+            );
+            assert_eq!(
+                english.matches("{}").count(),
+                hebrew.unwrap_or("").matches("{}").count(),
+                "{english:?}: placeholder count mismatch"
+            );
+        }
+    }
+
     #[test]
     fn every_row_is_used_by_a_converted_panel() {
         for (en, _) in catalogs() {
@@ -10984,6 +12118,239 @@ mod tests {
                 CONVERTED.iter().any(|(_, src)| src.contains(&plain) || src.contains(&formatted) || src.contains(&bare)),
                 "{en:?} is in the catalog but no converted panel asks for it"
             );
+        }
+    }
+    /// Hebrew coverage must stay attached to real English source calls, never command IDs.
+    #[test]
+    fn hebrew_tracking_camera_roto_footage_dialogs_and_vr_use_original_keys() {
+        let tracker = include_str!("../panels/tracker.rs");
+        let camera_tracker_ui = include_str!("../panels/camera_tracker_ui.rs");
+        let roto_tool = include_str!("../panels/roto_tool.rs");
+        let footage_panel = include_str!("../panels/footage_panel.rs");
+        let dialogs = include_str!("../panels/dialogs.rs");
+        let path_vr_panels = include_str!("../panels/path_vr_panels.rs");
+        for (english, source) in [
+            ("Track Name:", tracker),
+            ("Process Before Match", tracker),
+            ("Enhance", tracker),
+            ("Subpixel Positioning", tracker),
+            ("Adapt Feature On Every Frame", tracker),
+            ("Follow Feature Rotation and Scale", tracker),
+            ("If Confidence is Below", tracker),
+            ("Apply Motion To:", tracker),
+            ("Layer:", tracker),
+            ("None", tracker),
+            ("Apply Dimensions:", tracker),
+            ("X and Y", tracker),
+            ("X only", tracker),
+            ("Y only", tracker),
+            ("Set Ground Plane and Origin", camera_tracker_ui),
+            ("Delete Selected Points", camera_tracker_ui),
+            ("Create Camera", camera_tracker_ui),
+            ("Export Scene to Blender...", camera_tracker_ui),
+            ("Method Used: {}    Average Error: {} pixels", camera_tracker_ui),
+            ("Partial solve: {} of {} frames solved", camera_tracker_ui),
+            ("Overlay", roto_tool),
+            ("Unfreeze", roto_tool),
+            ("Freeze", roto_tool),
+            ("Object {}", roto_tool),
+            ("Object {} ({})", roto_tool),
+            ("Remove this object's strokes", roto_tool),
+            ("Double-click footage in the Project panel to open it here", footage_panel),
+            ("Footage: {}", footage_panel),
+            ("No video", footage_panel),
+            ("Edit Target: {}", footage_panel),
+            ("Name:", dialogs),
+            ("Size", dialogs),
+            ("Make Comp Size", dialogs),
+            ("Color:", dialogs),
+            ("Affect all layers that use this solid", dialogs),
+            ("Only this layer uses this solid.", dialogs),
+            ("This change will create a new solid for this layer.", dialogs),
+            ("Type a command or effect…", dialogs),
+            ("Select a layer with a mask or shape path (or the path property), or Puppet pins.", path_vr_panels),
+            ("Loop (Trace Path)", path_vr_panels),
+            ("No VR environments yet. Create one with Composition ▸ VR ▸ Create VR Environment…", path_vr_panels),
+            ("VR Environments", path_vr_panels),
+            ("Reset", path_vr_panels),
+            ("All six face cameras turn together; the scene is not changed.", path_vr_panels),
+        ] {
+            let plain = format!("tr({english:?})");
+            let formatted = format!("tr_args({english:?},");
+            assert!(
+                source.contains(&plain) || source.contains(&formatted),
+                "Original English source callsite missing: {english:?}"
+            );
+            let translated = HEBREW.iter().find(|(key, _)| *key == english).map(|(_, he)| *he);
+            assert!(
+                translated.is_some_and(|he| he.chars().any(|c| ('א'..='ת').contains(&c))),
+                "Hebrew label missing: {english:?}"
+            );
+            assert_eq!(
+                english.matches("{}").count(),
+                translated.unwrap_or("").matches("{}").count(),
+                "Value placeholders changed: {english:?}"
+            );
+        }
+    }
+
+}
+
+#[cfg(test)]
+mod hebrew_night04_live_effectcraft_controls_tests {
+    use super::HEBREW;
+
+    #[test]
+    fn english_source_keys_have_hebrew_values_and_stable_placeholders() {
+        for english in [
+            "OK",
+            "Dark",
+            "Light",
+            "Sync with System",
+            "Snapping",
+            "Snapping options",
+            "Diameter:",
+            "Opacity:",
+            "Maximize Panel",
+            "Move Panel to Main Window",
+            "Move Panel to New Window",
+            "Undock Panel",
+            "You can undo this.",
+            "Color",
+            "Cone Angle",
+            "Cone Feather",
+            "Depth of Field",
+            "Enable Depth of Field",
+            "Falloff",
+            "Falloff Distance",
+            "Focus Distance",
+            "Intensity",
+            "Light Type",
+            "Name",
+            "Preset",
+            "Radius",
+            "Shadow Darkness",
+            "Shadow Diffusion",
+            "Shadows",
+            "One-Node Camera",
+            "Two-Node Camera",
+            "Zoom",
+            "Red",
+            "Green",
+            "Blue",
+            "Histogram",
+            "No effects. Drag one from Effects & Presets.",
+            "Select a layer to see its effects",
+            "Swap Colors",
+            "GPU Acceleration ({})",
+            "GPU Acceleration (no GPU: software)",
+            "Grid",
+            "Guides",
+            "Layer controls",
+            "Masks",
+            "Rulers",
+            "Title/action safe",
+            "Transparency grid",
+            "Gradient Editor",
+            "Location:",
+            "Edit Gradient…",
+            "Select animated properties to show them in the Graph Editor",
+            "No layer selected",
+            "Selected layers: {}",
+            "Add Animator",
+            "Presets",
+            "Select a layer to see its properties",
+            "Motion Sketch: drag to record",
+            "Show:",
+            "Start: {}   Duration: {}",
+            "Run",
+            "Script Console output",
+            "Close font search",
+            "Delete this template",
+            "No background jobs running",
+            "Empty folder",
+            "Add to Favorites",
+            "Copy Source Path",
+            "Import and Add to Composition",
+            "Select an item in the Project panel",
+        ] {
+            let translations: Vec<&str> = HEBREW.iter().filter(|(key, _)| *key == english).map(|(_, value)| *value).collect();
+            assert_eq!(translations.len(), 1, "Missing or duplicate Hebrew translation for {english:?}");
+            let translated = translations[0];
+            assert!(translated.chars().any(|ch| ('א'..='ת').contains(&ch)), "No Hebrew glyph in {english:?}");
+            assert_eq!(english.matches("{}").count(), translated.matches("{}").count(), "Placeholder mismatch in {english:?}");
+            assert!(!translated.chars().any(|ch| matches!(ch, '\u{202a}' | '\u{202b}' | '\u{202c}' | '\u{202d}' | '\u{202e}' | '\u{2066}' | '\u{2067}' | '\u{2068}' | '\u{2069}')), "Directional control in {english:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod hebrew_night04_timeline_text_markers_tests {
+    use super::HEBREW;
+
+    #[test]
+    fn native_timeline_typography_markers_and_precomp_keep_hebrew_and_values() {
+        for english in [
+            "(no composition)",
+            "Add a shape, fill, stroke or path operation",
+            "Add:",
+            "Double-click to edit the comment",
+            "Drag to change",
+            "Drag to slip the source",
+            "Effects",
+            "Enable Expression",
+            "Expression Language Menu",
+            "Expression pick whip: drag onto a property",
+            "Expression:",
+            "Hide This",
+            "Inverted",
+            "Layer Styles",
+            "Markers",
+            "Open in Essential Graphics",
+            "Parent pick whip: drag onto a layer",
+            "Per Layer",
+            "Property pick whip: drag onto a property",
+            "Property: {}",
+            "Search",
+            "Show Layer Name",
+            "Show Source Name",
+            "Time",
+            "Toggle Switches / Modes",
+            "Total Offset",
+            "Transform",
+            "Variable Font Axes: {}",
+            "Align Layers to:",
+            "Distribute Layers:",
+            "Ligatures",
+            "No matching fonts",
+            "Rescan Fonts",
+            "Select a text layer",
+            "Stylistic Sets",
+            "Variable Font Axes",
+            "Variable fonts only",
+            "Comment:",
+            "Cue Point",
+            "Event",
+            "Frame Target:",
+            "Label:",
+            "Navigation",
+            "Parameter Name:",
+            "Protected Region",
+            "Time:",
+            "Value:",
+            "Composition Mini-Flowchart",
+            "No nested compositions",
+        ] {
+            let matches: Vec<&str> = HEBREW
+                .iter()
+                .filter(|(key, _)| *key == english)
+                .map(|(_, value)| *value)
+                .collect();
+            assert_eq!(matches.len(), 1, "Missing/duplicate Hebrew key: {english:?}");
+            let value = matches[0];
+            assert!(value.chars().any(|c| ('א'..='ת').contains(&c)), "Not Hebrew: {english:?}");
+            assert_eq!(english.matches("{}").count(), value.matches("{}").count(), "Placeholder mismatch: {english:?}");
+            assert!(!value.chars().any(|c| matches!(c, '\u{202a}' | '\u{202b}' | '\u{202c}' | '\u{202d}' | '\u{202e}' | '\u{2066}' | '\u{2067}' | '\u{2068}' | '\u{2069}')), "BiDi control in: {english:?}");
         }
     }
 }
