@@ -281,7 +281,14 @@ fn new_path(s: &mut Session, p: &Value) -> Result<Value> {
     let (lo, hi) =
         path.vertices.iter().fold(([f64::MAX; 2], [f64::MIN; 2]), |(lo, hi), v| ([lo[0].min(v[0]), lo[1].min(v[1])], [hi[0].max(v[0]), hi[1].max(v[1])]));
     let bounds = [lo[0], lo[1], hi[0] - lo[0], hi[1] - lo[1]];
-    let name = str_p(p, "name").map(str::to_string);
+    let name = match (str_p(p, "name"), str_p(p, "base").filter(|b| !b.is_empty())) {
+        (Some(n), _) => Some(n.to_string()),
+        (None, Some(base)) => {
+            let count = comp.layers.iter().filter(|l| matches!(l.source, effectcraft_project::LayerSource::Shape)).count();
+            Some(comp.unique_layer_name(&format!("{base} {}", count.saturating_add(1))))
+        }
+        (None, None) => None,
+    };
     let span = super::layer::new_layer_span(s, &comp);
     let (lid, group, path_uid) = s.edit("Pen Tool", None, |proj, st| {
         let lid = match target {
@@ -558,7 +565,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Pen Tool (Shape Path)",
             [],
             None,
-            "{layer?, vertices: [[x,y]…], inTangents?, outTangents?, closed?, space?: comp|layer, fill?: [r,g,b]|#hex|false, fillType?, fillBlend?, fillOpacity?, stroke?, strokeType?, strokeBlend?, strokeOpacity?, strokeWidth? (default the Tools bar's, shape.toolOptions), name?}",
+            "{layer?, vertices: [[x,y]…], inTangents?, outTangents?, closed?, space?: comp|layer, fill?: [r,g,b]|#hex|false, fillType?, fillBlend?, fillOpacity?, stroke?, strokeType?, strokeBlend?, strokeOpacity?, strokeWidth? (default the Tools bar's, shape.toolOptions), name?, base? (the interface's word for the layer type; the engine numbers it and the CLI omits it)}",
             shape_layer_or_none,
             new_path
         ),

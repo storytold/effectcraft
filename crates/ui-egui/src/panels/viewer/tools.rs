@@ -273,7 +273,7 @@ pub(super) fn pen_press(
         }
         None => {
             // A new shape layer at the comp centre (unrotated: comp → layer is a translation).
-            let r = app.session.execute("shape.newPath", json!({"vertices": [c], "space": "comp"}));
+            let r = app.session.execute("shape.newPath", json!({"vertices": [c], "space": "comp", "base": crate::i18n::names::noun("Shape Layer")}));
             let Some(v) = r.ok() else { return };
             let (Some(l), Some(path)) = (v["layer"].as_u64(), v["path"].as_u64()) else { return };
             let inv = Mat3::translate(gv2(-(ectx.comp.width as f64) / 2.0, -(ectx.comp.height as f64) / 2.0));

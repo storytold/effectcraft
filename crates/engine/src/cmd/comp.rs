@@ -99,7 +99,7 @@ fn apply_settings(c: &mut Comp, p: &Value) {
 
 fn new_comp(s: &mut Session, p: &Value) -> Result<Value> {
     check_rate(p, "comp.new")?;
-    let name = str_p(p, "name").unwrap_or("Comp 1").to_string();
+    let name = str_p(p, "name").map(str::to_string).unwrap_or_else(|| format!("{} 1", str_p(p, "base").filter(|s| !s.is_empty()).unwrap_or("Comp")));
     let rate = rate_p(p).unwrap_or(FrameRate::FPS_29_97);
     let mut c = Comp::new(1920, 1080, rate, rate.snap_nearest(Tick::from_seconds_f64(10.0)));
     // Settings ▸ 3D ▸ Default 3D Renderer.
@@ -293,7 +293,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "New Composition...",
             ["Composition"],
             Some("Cmd+N"),
-            "{name?, width?, height?, frameRate?, duration? (s), startTime? (s) | startTimecode?, background? [r,g,b]|#hex, pixelAspect?, shutterAngle?, shutterPhase?, motionBlurSamples?, adaptiveSampleLimit? (16–256), preserveFrameRate?: bool, preserveResolution?: bool, renderer?: classic3D|advanced3D, anchor?, open?}",
+            "{name?, width?, height?, frameRate?, duration? (s), startTime? (s) | startTimecode?, background? [r,g,b]|#hex, pixelAspect?, shutterAngle?, shutterPhase?, motionBlurSamples?, adaptiveSampleLimit? (16–256), preserveFrameRate?: bool, preserveResolution?: bool, renderer?: classic3D|advanced3D, anchor?, open?, base? (the interface's word for the composition type; the engine numbers it and the CLI omits it)}",
             always,
             new_comp
         ),

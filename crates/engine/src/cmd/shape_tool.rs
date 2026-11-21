@@ -349,12 +349,28 @@ fn new_shape(s: &mut Session, p: &Value) -> Result<Value> {
         "star" => "Star Tool",
         _ => "Rectangle Tool",
     };
-    let name = str_p(p, "name");
+    let name = if target.is_none() {
+        Some(match (str_p(p, "name"), str_p(p, "base").filter(|b| !b.is_empty())) {
+            (Some(name), _) => name.to_string(),
+            (None, Some(base)) => {
+                let count = comp.layers.iter().filter(|l| matches!(l.source, LayerSource::Shape)).count();
+                comp.unique_layer_name(&format!("{base} {}", count.saturating_add(1)))
+            }
+            // Headless keeps the count-based default it had before the interface localized it.
+            (None, None) => {
+                let count = comp.layers.iter().filter(|l| matches!(l.source, LayerSource::Shape)).count();
+                comp.unique_layer_name(&format!("Shape Layer {}", count.saturating_add(1)))
+            }
+        })
+    } else {
+        str_p(p, "name").map(str::to_string)
+    };
+    let name_ref = name.as_deref();
     let span = super::layer::new_layer_span(s, &comp);
     let (lid, group) = s.edit(label, None, |proj, st| {
         let lid = match target {
             Some(l) => l,
-            None => new_shape_layer(proj, st, &comp, cid, name, Some(pos), span)?,
+            None => new_shape_layer(proj, st, &comp, cid, name_ref, Some(pos), span)?,
         };
         let mut next = proj.next_id;
         let g = shape_group(&mut Ids(&mut next), kind, size, &paint).ok_or_else(|| bad(c, "unknown kind"))?;
@@ -389,7 +405,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Shape Tool",
             [],
             None,
-            "{layer?, kind?: rect|rounded|ellipse|polygon|star, size? [w,h], position? [x,y] (the centre), space?: comp|layer, name? (a new layer's), fill?, fillType?, fillBlend?, fillOpacity?, stroke?, strokeType?, strokeBlend?, strokeOpacity?, strokeWidth? (default the Tools bar's, shape.toolOptions)} → {layer, group}",
+            "{layer?, kind?: rect|rounded|ellipse|polygon|star, size? [w,h], position? [x,y] (the centre), space?: comp|layer, name? (a new layer's), base? (the interface's word for the layer type; the engine numbers it and the CLI omits it), fill?, fillType?, fillBlend?, fillOpacity?, stroke?, strokeType?, strokeBlend?, strokeOpacity?, strokeWidth? (default the Tools bar's, shape.toolOptions)} → {layer, group}",
             has_comp,
             new_shape
         ),
