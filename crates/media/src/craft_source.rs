@@ -1222,8 +1222,10 @@ fn open_avi(name: &str, source: SharedBytes) -> Option<Result<SharedSource>> {
         let (width, height) = video_stream.video.as_ref().map_or((0, 0), |v| (v.width.unsigned_abs(), v.height.unsigned_abs()));
         let fps = f64::from(video_stream.rate) / f64::from(video_stream.scale.max(1));
         let frame_rate = snap_common_fps(fps).unwrap_or_else(|| FrameRate::new(i64::from(video_stream.rate), i64::from(video_stream.scale)));
-        let total_units = i64::from(video_stream.length.max(video_stream.chunks.len() as u32));
-        let duration = Tick::from_units(total_units.saturating_mul(i64::from(video_stream.scale)), i64::from(video_stream.rate.max(1)));
+        // Seeking treats each indexed video chunk as one frame. A stale header
+        // length can describe pictures beyond the end of the index.
+        let frames = i64::try_from(video_stream.chunks.len()).unwrap_or(i64::MAX);
+        let duration = Tick::from_rational(frames, i64::from(video_stream.scale), i64::from(video_stream.rate));
         let video_decoder = match TrackDecoder::with_options(&video_params, TrackDecoderOptions { threads: Some(worker_cap()), draft: false }) {
             Ok(d) => d,
             Err(e) => return Some(Err(MediaError::Decode(e.to_string()))),
@@ -3360,6 +3362,56 @@ mod tests {
         assert_eq!(contiguous_starts(packets, i64::MIN).len(), 4);
         assert_eq!(contiguous_starts(packets, i64::MAX).len(), 4);
         assert!(contiguous_starts([], 512).is_empty());
+    }
+
+    #[test]
+    fn avi_video_duration_uses_indexed_frames() {
+        use craft_video::prores::{ChromaFormat, ColorInfo as ProResColor, Encoder, EncoderConfig, Frame as ProResFrame, Interlace, Profile};
+
+        let mut config = EncoderConfig::new(Profile::P4444, 16, 16);
+        config.encode_alpha = false;
+        config.threads = false;
+        let mut encoder = Encoder::with_config(config);
+        let stream = avi::StreamSpec::Video(avi::VideoSpec::new(*b"ap4h", 16, 16, 30_000, 1_001));
+        let mut writer = avi::AviWriter::new(std::io::Cursor::new(Vec::new()), vec![stream], avi::MuxOptions::default()).expect("AVI writer");
+        for luma in [256, 768] {
+            let frame = ProResFrame {
+                width: 16,
+                height: 16,
+                chroma: ChromaFormat::Yuv444,
+                bit_depth: 10,
+                y: vec![luma; 256],
+                cb: vec![512; 256],
+                cr: vec![512; 256],
+                alpha: None,
+                interlace: Interlace::Progressive,
+                color: ProResColor::default(),
+                aspect_ratio: 0,
+                frame_rate_code: 0,
+            };
+            writer.write_chunk(0, &encoder.encode(&frame).expect("encode ProRes"), true).expect("write picture");
+        }
+        let mut bytes = writer.finish().expect("finish AVI").into_inner();
+        // dwLength is 32 bytes into the strh payload, after the 8-byte chunk header.
+        let length_offset = bytes.windows(4).position(|tag| tag == b"strh").expect("stream header") + 8 + 32;
+        let frame_period = Tick::from_rational(1, 1_001, 30_000);
+        for declared_length in [1u32, 2, 100] {
+            bytes[length_offset..length_offset + 4].copy_from_slice(&declared_length.to_le_bytes());
+            let stream = &avi::open(bytes.as_slice()).expect("demux fixture").streams[0];
+            assert_eq!(stream.length, declared_length);
+            assert_eq!(stream.chunks.len(), 2);
+            let input: Arc<[u8]> = Arc::from(bytes.as_slice());
+            let footage = crate::probe::probe_bytes("indexed.avi", input.clone()).expect("public probe");
+            assert_eq!(footage.codec, "ProRes");
+            assert_eq!(footage.duration, effectcraft_time::Tick::from_rational(2, 1_001, 30_000), "declared length {declared_length}");
+
+            let source = open_bytes("indexed.avi", input).expect("recognized AVI").expect("shared AVI");
+            let last = source.video_frame(FrameRequest { time: frame_period, scale: 1.0 }).expect("seek to last picture");
+            let PixelData::Yuv16 { planes: [y, ..], .. } = &last.data else {
+                panic!("expected the decoded ProRes luma plane");
+            };
+            assert!(y[0] > 512, "expected the brighter second picture");
+        }
     }
 
     #[test]
