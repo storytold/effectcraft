@@ -336,3 +336,43 @@ fn hostile_footage_never_panics() {
     assert_eq!(effectcraft_aep::write(&file).expect("write"), r.bytes);
     let _ = reimport(&r.bytes);
 }
+
+/// Sets the native frame rate (`sspc@56`) of every footage item's `sspc` (in a `Pin` list) to `fps`;
+/// the number set.
+fn set_native_rate(chunks: &mut [effectcraft_aep::Chunk<'_>], fps: u32) -> usize {
+    let mut n = 0;
+    for c in chunks {
+        if c.is_list(b"Pin ") {
+            for s in c.children_mut().iter_mut().filter(|s| s.is(b"sspc")) {
+                if let effectcraft_aep::Body::Data(d) = &mut s.body {
+                    d.to_mut()[56..60].copy_from_slice(&fps.to_be_bytes());
+                    n += 1;
+                }
+            }
+        }
+        n += set_native_rate(c.children_mut(), fps);
+    }
+    n
+}
+
+/// A still whose item stores a frame rate (After Effects does so for some JPEG stills of real
+/// projects) is still a still: before, its extension was not in the list and the rate made it a
+/// clip, which the exporter then dropped ("Video footage of type '.jpg' is not exported").
+#[test]
+fn a_still_with_a_stored_frame_rate_stays_a_still() {
+    let mut p = Project::default();
+    let c = add_comp(&mut p, "C", 64, 48, FrameRate::new(25, 1), 2.0, None);
+    for name in ["photo.jpg", "scan.PNG", "plate.tif"] {
+        add_footage(&mut p, c, name, still(&format!(r"C:\media\{name}"), 64, 48));
+    }
+    let bytes = export_all(&p).bytes;
+    let mut file = parse(&bytes).expect("parse");
+    assert_eq!(set_native_rate(&mut file.chunks, 25), 3);
+    let patched = effectcraft_aep::write(&file).expect("write");
+    let q = reimport(&patched);
+    let kinds: Vec<FootageKind> = q.items.values().filter_map(|i| if let ItemKind::Footage(f) = &i.kind { Some(f.kind) } else { None }).collect();
+    assert_eq!(kinds, [FootageKind::Still; 3]);
+    let r = export_all(&q);
+    assert_eq!(r.report.count(LossCategory::FootageItems), 0, "{:?}", r.report.losses);
+    assert_eq!(r.report.exported.footage, 3);
+}

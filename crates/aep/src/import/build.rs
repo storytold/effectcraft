@@ -411,12 +411,14 @@ fn cx_ticks(num: i64, den: i64) -> Tick {
 /// The footage kind by file extension. An extension not listed is decided by what the project
 /// file stores for it: a native frame rate means moving footage (stills store 0), a sample rate
 /// without one means a sound file. Otherwise a clip with an unlisted extension (`.mts`, `.3gp`, ...)
-/// would arrive as a still, without its sound.
+/// would arrive as a still, without its sound. Image extensions are stills whatever rate is stored:
+/// After Effects keeps a frame rate on some JPEG stills of real projects.
 fn footage_kind(path: &str, native_frame_rate: u32, has_sample_rate: bool) -> FootageKind {
     let ext = path.rsplit('.').next().map(str::to_ascii_lowercase).unwrap_or_default();
     match ext.as_str() {
         "mov" | "mp4" | "m4v" | "avi" | "mxf" | "mkv" | "webm" | "mpg" | "mpeg" | "wmv" | "flv" | "r3d" => FootageKind::Video,
         "wav" | "mp3" | "aac" | "aif" | "aiff" | "flac" | "ogg" | "opus" | "m4a" => FootageKind::Audio,
+        "png" | "jpg" | "jpeg" | "tif" | "tiff" | "tga" | "exr" | "psd" | "bmp" | "ai" | "eps" | "pdf" => FootageKind::Still,
         _ if native_frame_rate > 0 => FootageKind::Video,
         _ if has_sample_rate => FootageKind::Audio,
         _ => FootageKind::Still,
@@ -1224,6 +1226,8 @@ mod tests {
         assert_eq!(footage_kind("/cam/0001.mts", 30, true), FootageKind::Video);
         assert_eq!(footage_kind("/cam/voice.wma", 0, true), FootageKind::Audio);
         assert_eq!(footage_kind("/s/scan.tif", 0, false), FootageKind::Still);
+        // An image with a stored frame rate is still a still.
+        assert_eq!(footage_kind("/s/photo.JPG", 25, false), FootageKind::Still);
     }
 
     #[test]
