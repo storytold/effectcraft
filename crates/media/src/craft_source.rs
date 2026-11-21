@@ -2717,12 +2717,9 @@ mod tests {
         assert_eq!(file.tracks[0].display_order, [0, 1]);
         let one_frame = Tick::from_units(40, 1_000);
         let beyond = Tick::from_units(80, 1_000);
-        for (origin, declared, expected_duration, expected_target) in [
-            (1, Some(2), one_frame, Some((1, 1))),
-            (1, None, one_frame, Some((1, 1))),
-            (1, Some(0), Tick::ZERO, None),
-            (2, Some(2), Tick::ZERO, None),
-        ] {
+        for (origin, declared, expected_duration, expected_target) in
+            [(1, Some(2), one_frame, Some((1, 1))), (1, None, one_frame, Some((1, 1))), (1, Some(0), Tick::ZERO, None), (2, Some(2), Tick::ZERO, None)]
+        {
             let mut edited = file.clone();
             edited.tracks[0].origin = origin;
             edited.tracks[0].duration = declared;
