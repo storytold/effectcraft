@@ -3273,14 +3273,14 @@ mod tests {
         use craft_video::prores::{ChromaFormat, ColorInfo as ProResColor, Encoder, EncoderConfig, Frame as ProResFrame, Interlace, Profile};
 
         let encode_prores_avi = |with_alpha: bool| -> Vec<u8> {
-            let mut cfg = EncoderConfig::new(Profile::ProRes4444, 16, 16);
+            let mut cfg = EncoderConfig::new(Profile::P4444, 16, 16);
             cfg.encode_alpha = with_alpha;
             cfg.threads = false;
-            let mut enc = Encoder::new(cfg).expect("prores encoder");
+            let mut enc = Encoder::with_config(cfg);
             let frame = ProResFrame {
                 width: 16,
                 height: 16,
-                chroma: ChromaFormat::C444,
+                chroma: ChromaFormat::Yuv444,
                 bit_depth: 10,
                 y: vec![512; 256],
                 cb: vec![512; 256],
