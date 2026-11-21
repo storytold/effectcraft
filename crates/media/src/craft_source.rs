@@ -2183,8 +2183,9 @@ fn matroska_duration(file: &MkvFile, track: &matroska::Track) -> Tick {
         let ns = (d * file.info.timestamp_scale as f64).round() as i64;
         return Tick::from_units(ns, 1_000_000_000);
     }
-    let last_end = track.samples.last().map_or(0, |s| s.pts.saturating_add(i64::try_from(s.duration).unwrap_or(0)));
-    Tick::from_units(track.ticks_to_ns(last_end), 1_000_000_000)
+    // Blocks are indexed in coding order, so a future reference can precede a B-picture.
+    let presentation_end = track.samples.iter().map(|s| s.pts.saturating_add(i64::try_from(s.duration).unwrap_or(0))).max().unwrap_or(0);
+    Tick::from_units(track.ticks_to_ns(presentation_end), 1_000_000_000)
 }
 
 fn tick_to_units(t: Tick, timescale: u32) -> i64 {
@@ -3210,6 +3211,73 @@ mod tests {
 
     fn pcm_s16le_bytes(sample: i16, count: usize) -> Vec<u8> {
         std::iter::repeat_n(sample.to_le_bytes(), count).flatten().collect()
+    }
+
+    #[test]
+    fn matroska_duration_follows_presentation_order() {
+        use craft_media::matroska::{MkvWriter, MuxOptions, TrackKind, TrackSpec, ebml, element_ids};
+        use craft_video::h264::{Encoder, EncoderConfig, PacketFormat, Profile, YuvFrame};
+        use std::io::Cursor;
+
+        fn child(data: &[u8], id: u32) -> ebml::Elem<'_> {
+            ebml::Children::new(data).find(|element| element.id == id).expect("Matroska element")
+        }
+
+        // Generate three distinct pictures, with the B-picture coded after its future reference.
+        const PERIOD_NS: i64 = 40_000_000;
+        let mut cfg = EncoderConfig::new(16, 16, 25, 1);
+        cfg.profile = Profile::High;
+        cfg.bframes = 1;
+        cfg.format = PacketFormat::LengthPrefixed;
+        let mut encoder = Encoder::new(cfg).expect("H.264 encoder");
+        let mut track = TrackSpec::new(TrackKind::Video, "V_MPEG4/ISO/AVC");
+        track.codec_private = encoder.avcc();
+        track.video_size = Some((16, 16));
+        track.default_duration_ns = Some(PERIOD_NS as u64);
+        let mut mux = MkvWriter::new(Cursor::new(Vec::new()), vec![track], MuxOptions::default()).expect("Matroska writer");
+        let mut packets = Vec::new();
+        for (pts, luma) in [32, 96, 160].into_iter().enumerate() {
+            let pic = YuvFrame { y: &[luma; 256], u: &[128; 64], v: &[128; 64], y_stride: 16, uv_stride: 8 };
+            packets.extend(encoder.encode(&pic, pts as i64).expect("encode picture"));
+        }
+        packets.extend(encoder.flush());
+        for packet in packets {
+            mux.write_frame(0, packet.pts * PERIOD_NS, packet.keyframe, &packet.data, None).expect("write picture");
+        }
+        let mut bytes = mux.finish().expect("finish Matroska").into_inner();
+
+        let (offset, header_len, payload_len) = {
+            let segment = child(&bytes, element_ids::SEGMENT);
+            let info = child(segment.data, element_ids::INFO);
+            let duration = child(info.data, element_ids::DURATION);
+            let offset = segment.offset + segment.header_len + info.offset + info.header_len + duration.offset;
+            (offset, duration.header_len, duration.data.len())
+        };
+        let end = offset + header_len + payload_len;
+        // Give the declaration a distinct value to check that it takes precedence.
+        bytes[offset + header_len..end].copy_from_slice(&160.0_f64.to_be_bytes());
+        let declared = crate::probe::probe_bytes("duration.mkv", Arc::from(bytes.clone())).expect("probe declared duration");
+        assert_eq!(declared.duration.0, Tick::from_units(160, 1_000).0);
+
+        // Replace Duration with equally sized padding to keep all indexed file offsets.
+        let mut padding = Vec::new();
+        ebml::write_id(&mut padding, element_ids::VOID);
+        let size_len = header_len - padding.len();
+        ebml::write_size(&mut padding, payload_len as u64, size_len);
+        padding.resize(end - offset, 0);
+        bytes[offset..end].copy_from_slice(&padding);
+        let file = matroska::open(bytes.as_slice()).expect("demux Matroska");
+        assert_eq!(file.info.duration, None);
+        assert_eq!(file.tracks[0].samples.iter().map(|sample| sample.pts).collect::<Vec<_>>(), [0, 80, 40]);
+
+        let bytes: Arc<[u8]> = bytes.into();
+        let footage = crate::probe::probe_bytes("duration.mkv", bytes.clone()).expect("probe inferred duration");
+        assert_eq!(footage.codec, "H.264", "must use the shared route");
+        assert_eq!(footage.duration.0, Tick::from_units(120, 1_000).0);
+        let source = open_bytes("duration.mkv", bytes).expect("recognized Matroska").expect("shared Matroska");
+        let time = Tick::from_units(80, 1_000);
+        let picture = source.video_frame(FrameRequest { time, scale: 1.0 }).expect("read final presented picture");
+        assert_eq!(picture.pts, time);
     }
 
     #[test]
