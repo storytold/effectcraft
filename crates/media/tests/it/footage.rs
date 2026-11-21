@@ -1799,6 +1799,33 @@ fn audio_only_isobmff_and_matroska_route_through_craft_audio() {
 }
 
 #[test]
+fn mxf_route_backward_seek_cancel_and_pcm_audio() {
+    use std::sync::atomic::AtomicBool;
+    let Some(p) = mpeg2_mxf() else { return };
+    let f = probe(&p).expect("probe mxf");
+    assert_eq!(f.codec, "MPEG-2", "MXF MPEG-2 must route through shared craft-media::mxf");
+    let pool = MediaPool::new();
+    let f20 = pool.frame(ItemId(1), &f, t_of(f.frame_rate, 20)).expect("frame 20");
+    let f5 = pool.frame(ItemId(1), &f, t_of(f.frame_rate, 5)).expect("backward seek frame 5");
+    assert_eq!((f20.width, f20.height), (1280, 720));
+    assert_eq!((f5.width, f5.height), (1280, 720));
+    let fresh_f5 = MediaPool::new().frame(ItemId(1), &f, t_of(f.frame_rate, 5)).expect("fresh frame 5");
+    assert!(psnr(&f5, &fresh_f5) > 55.0, "MXF backward seek frame 5 matches fresh decode");
+
+    let off = Arc::new(AtomicBool::new(true));
+    let mut cancelled = Some(Arc::clone(&f5));
+    pool.cancellable(&off, &mut || cancelled = pool.frame(ItemId(1), &f, t_of(f.frame_rate, 30)));
+    assert!(cancelled.is_none(), "cancelled MXF read must not decode");
+
+    let pcm_start = pool.audio_samples(&f, Tick::ZERO, 4800, 48_000);
+    let pcm_seek = pool.audio_samples(&f, Tick(TICKS_PER_SECOND / 2), 4800, 48_000);
+    assert_eq!(pcm_start.len(), 9600);
+    assert_eq!(pcm_seek.len(), 9600);
+    let rms_seek = (pcm_seek.iter().map(|v| v * v).sum::<f32>() / pcm_seek.len() as f32).sqrt();
+    assert!((rms_seek - 0.0625).abs() < 0.02, "MXF PCM seek rms {rms_seek}");
+}
+
+#[test]
 fn standalone_audio_formats_route_through_craft_audio() {
     for (file, args) in [
         ("standalone_tone.wav", &["-c:a", "pcm_s16le"][..]),
@@ -1853,17 +1880,51 @@ fn assert_samples_close(a: &[f32], b: &[f32], tol: f32, ctx: &str) {
     assert!(max_diff <= tol, "{ctx}: max_diff {max_diff} > {tol}");
 }
 
+fn pure_rust_aac_packets(duration_secs: usize) -> (Vec<u8>, Vec<Vec<u8>>) {
+    let mut enc = craft_audio::aac::Encoder::new(craft_audio::aac::EncoderConfig::cbr(48_000, 2, 128_000)).expect("aac encoder");
+    let asc = enc.audio_specific_config();
+    let samples: Vec<f32> = (0..48_000 * duration_secs).map(|i| (2.0 * std::f32::consts::PI * 440.0 * i as f32 / 48_000.0).sin() * 0.25).collect();
+    let mut pkts = enc.encode(&[&samples, &samples]);
+    pkts.extend(enc.flush());
+    (asc, pkts)
+}
+
 #[test]
 fn mkv_and_mp4_aac_play_continuously_without_crackle_and_seek_matches_sequential() {
-    let Some(mp4_path) =
-        try_ffmpeg_fixture("aac_1546_pair.mp4", &["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=2", "-c:a", "aac", "-b:a", "128k"])
-    else {
-        return;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mp4_path = dir.path().join("aac_1546_pair.mp4");
+    let mkv_path = dir.path().join("aac_1546_pair.mkv");
+    let (asc, pkts) = pure_rust_aac_packets(2);
+
+    let entry = craft_media::isobmff::SampleEntry {
+        format: craft_media::isobmff::FourCc(*b"mp4a"),
+        data_reference_index: 1,
+        codec: craft_media::isobmff::CodecConfig::Aac(craft_media::isobmff::AacConfig::from_asc(asc.clone())),
+        video: None,
+        audio: Some(craft_media::isobmff::AudioParams { channels: 2, sample_size: 16, sample_rate: 48_000.0, ..Default::default() }),
+        bitrate: None,
     };
-    let mp4_str = mp4_path.to_string_lossy().into_owned();
-    let Some(mkv_path) = try_ffmpeg_fixture("aac_1546_pair.mkv", &["-i", &mp4_str, "-c:a", "copy"]) else {
-        return;
-    };
+    let mut mp4_writer =
+        craft_media::isobmff::Mp4Writer::new(std::io::Cursor::new(Vec::new()), craft_media::isobmff::WriterOptions::new(craft_media::isobmff::Brand::Mp4))
+            .expect("mp4 writer");
+    mp4_writer.add_track(craft_media::isobmff::TrackConfig::new(entry, 48_000)).expect("add track");
+    for pkt in &pkts {
+        mp4_writer
+            .write_sample(0, craft_media::isobmff::WriteSample { data: pkt, duration: 1024, composition_offset: 0, is_sync: true })
+            .expect("write mp4 sample");
+    }
+    std::fs::write(&mp4_path, mp4_writer.finish().expect("finish mp4").into_inner()).expect("write mp4");
+
+    let mut spec = craft_media::matroska::TrackSpec::new(craft_media::matroska::TrackKind::Audio, "A_AAC");
+    spec.codec_private = asc;
+    spec.audio = Some((48_000.0, 2, None));
+    let mut mkv_writer =
+        craft_media::matroska::MkvWriter::new(std::io::Cursor::new(Vec::new()), vec![spec], craft_media::matroska::MuxOptions::default()).expect("mkv writer");
+    for (i, pkt) in pkts.iter().enumerate() {
+        let pts_ns = (i as i64 * 1024 * 1_000_000_000) / 48_000;
+        mkv_writer.write_frame(0, pts_ns, true, pkt, None).expect("write mkv frame");
+    }
+    std::fs::write(&mkv_path, mkv_writer.finish().expect("finish mkv").into_inner()).expect("write mkv");
 
     let mp4 = probe(&mp4_path).expect("probe mp4");
     let mkv = probe(&mkv_path).expect("probe mkv");
@@ -1892,33 +1953,21 @@ fn mkv_and_mp4_aac_play_continuously_without_crackle_and_seek_matches_sequential
     assert_samples_close(&backward, &mkv_seq[24_000 * 2..24_000 * 2 + 4800 * 2], 1e-4, "mkv backward seek vs sequential");
 }
 
-fn build_gapped_aac_mkv(out_path: &Path, gap_at_pkt: usize, gap_ns: i64, start_offset_ns: i64) -> Option<()> {
-    let mp4_path =
-        try_ffmpeg_fixture("aac_1546_pair.mp4", &["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=2", "-c:a", "aac", "-b:a", "128k"])?;
-    let bytes: std::sync::Arc<[u8]> = std::sync::Arc::from(std::fs::read(&mp4_path).ok()?);
-    let mp4 = craft_media::isobmff::open(bytes.clone()).ok()?;
-    let track_idx = mp4.tracks.iter().position(|t| t.kind == craft_media::isobmff::TrackKind::Audio)?;
-    let track = &mp4.tracks[track_idx];
-    let asc = match &track.entries.first()?.codec {
-        craft_media::isobmff::CodecConfig::Aac(a) => a.asc.clone(),
-        _ => return None,
-    };
-
+fn build_gapped_aac_mkv(out_path: &Path, gap_at_pkt: usize, gap_ns: i64, start_offset_ns: i64) {
+    let (asc, pkts) = pure_rust_aac_packets(2);
     let mut spec = craft_media::matroska::TrackSpec::new(craft_media::matroska::TrackKind::Audio, "A_AAC");
     spec.codec_private = asc;
-    spec.audio = Some((48_000.0, u64::from(track.audio().map_or(2, |a| a.channels)), None));
-    let mut writer = craft_media::matroska::MkvWriter::new(std::io::Cursor::new(Vec::new()), vec![spec], craft_media::matroska::MuxOptions::default()).ok()?;
+    spec.audio = Some((48_000.0, 2, None));
+    let mut writer =
+        craft_media::matroska::MkvWriter::new(std::io::Cursor::new(Vec::new()), vec![spec], craft_media::matroska::MuxOptions::default()).expect("mkv writer");
 
-    let pkt_count = track.samples.len().min(60);
-    for i in 0..pkt_count {
-        let pkt = mp4.read_sample(&*bytes, track_idx, i).ok()?;
+    for (i, pkt) in pkts.iter().take(60).enumerate() {
         let base_ns = (i as i64 * 1024 * 1_000_000_000) / 48_000;
         let extra = if i >= gap_at_pkt { gap_ns } else { 0 };
-        writer.write_frame(0, start_offset_ns + base_ns + extra, true, &pkt, None).ok()?;
+        writer.write_frame(0, start_offset_ns + base_ns + extra, true, pkt, None).expect("write mkv frame");
     }
-    let mkv_bytes = writer.finish().ok()?.into_inner();
-    std::fs::write(out_path, mkv_bytes).ok()?;
-    Some(())
+    let mkv_bytes = writer.finish().expect("finish mkv").into_inner();
+    std::fs::write(out_path, mkv_bytes).expect("write mkv");
 }
 
 #[test]
@@ -1926,9 +1975,7 @@ fn audio_real_silence_gap_honored_on_sequential_and_seek() {
     let dir = tempfile::tempdir().expect("tempdir");
     let mkv_path = dir.path().join("real_gap.mkv");
     // 24 packets (~0.512s) at 0, then a 500 ms silence gap before packet 24.
-    if build_gapped_aac_mkv(&mkv_path, 24, 500_000_000, 0).is_none() {
-        return;
-    }
+    build_gapped_aac_mkv(&mkv_path, 24, 500_000_000, 0);
 
     let f = probe(&mkv_path).expect("probe gapped mkv");
     let rate = 48_000u32;
@@ -1961,9 +2008,7 @@ fn audio_delayed_first_packet_honored_on_sequential_and_seek() {
     let dir = tempfile::tempdir().expect("tempdir");
     let mkv_path = dir.path().join("delayed_first.mkv");
     // First packet delayed by 500 ms.
-    if build_gapped_aac_mkv(&mkv_path, usize::MAX, 0, 500_000_000).is_none() {
-        return;
-    }
+    build_gapped_aac_mkv(&mkv_path, usize::MAX, 0, 500_000_000);
 
     let f = probe(&mkv_path).expect("probe delayed mkv");
     let rate = 48_000u32;
