@@ -2157,10 +2157,7 @@ fn color_from_mxf(picture: &mxf::PictureInfo) -> Option<ColorInfo> {
         return None;
     }
     // Use the existing H.273 defaults without changing MXF quantisation range policy.
-    Some(resolve_color(
-        ColorTags { primaries: primaries.unwrap_or(2), transfer: transfer.unwrap_or(2), matrix: matrix.unwrap_or(2), full_range: false },
-        None,
-    ))
+    Some(resolve_color(ColorTags { primaries: primaries.unwrap_or(2), transfer: transfer.unwrap_or(2), matrix: matrix.unwrap_or(2), full_range: false }, None))
 }
 
 fn color_from_isobmff(c: &isobmff::ColorInfo) -> ColorInfo {
