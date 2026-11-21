@@ -59,7 +59,7 @@ fn file_ops(x: &FileXform, interp: u32, inverse: bool, ccc_id: &str, ops: &mut V
             let cdl = list.iter().find(|(i, _)| !ccc_id.is_empty() && i == ccc_id).or(list.first()).map(|(_, c)| *c).unwrap_or_default();
             ops.push(ColorOp::Cdl { cdl, clamp: true, inverse });
         }
-        FileXform::Lut { lut, shaper } => {
+        FileXform::Lut { lut, shaper, .. } => {
             ops.push(ColorOp::Lut { lut: Arc::new(lut.clone()), shaper: shaper.clone().map(Arc::new), interp, inverse });
         }
         FileXform::Matrix { m, offset } => matrix_ops(m, offset, inverse, ops),
