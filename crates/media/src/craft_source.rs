@@ -2153,7 +2153,9 @@ fn primaries_from_code(c: u8) -> Option<Primaries> {
 
 fn matroska_par(video: Option<&matroska::VideoInfo>, width: u32, height: u32) -> (u32, u32) {
     let Some(v) = video else { return (1, 1) };
-    if v.display_unit == 0
+    // RFC 9559 §5.1.4.1.28.14 defines 0 as pixels and 3 as a display ratio.
+    // Use the coded raster because this reader presents frames without Matroska cropping.
+    if matches!(v.display_unit, 0 | 3)
         && let (Some(dw), Some(dh)) = (v.display_width, v.display_height)
         && dw > 0
         && dh > 0
@@ -2161,7 +2163,7 @@ fn matroska_par(video: Option<&matroska::VideoInfo>, width: u32, height: u32) ->
         && height > 0
         && (dw != width || dh != height)
     {
-        return (dw * height, dh * width);
+        return dw.checked_mul(height).zip(dh.checked_mul(width)).unwrap_or((1, 1));
     }
     (1, 1)
 }
@@ -2782,6 +2784,63 @@ mod tests {
         if let Some(vf_with_sar) = make_vf(Some((4, 3))) {
             let out = to_craft_frame(vf_with_sar, presentation, Tick::ZERO).ok();
             assert_eq!(out.map(|f| f.par), Some((3, 4)));
+        }
+    }
+
+    #[test]
+    fn matroska_display_aspect_reaches_shared_probe_and_frame() {
+        use craft_media::matroska::{ebml, element_ids::*};
+        use craft_video::prores::{ChromaFormat, Encoder, Frame, Profile};
+
+        let element = |id, payload: &[u8]| {
+            let mut bytes = Vec::new();
+            ebml::write_id(&mut bytes, id);
+            ebml::write_size(&mut bytes, payload.len() as u64, 1);
+            bytes.extend_from_slice(payload);
+            bytes
+        };
+
+        // Generate a single ProRes frame and wrap it using the public Matroska element IDs.
+        let profile = Profile::Hq;
+        let frame = Frame::new(16, 12, ChromaFormat::Yuv422, 10, false).expect("ProRes frame");
+        let packet = Encoder::new(profile, 16, 12).encode(&frame).expect("encode ProRes");
+        let mut block = vec![0x81, 0, 0, 0x80]; // Track 1, timestamp 0, keyframe.
+        // Matroska omits the eight-byte ProRes size and 'icpf' prefix.
+        block.extend_from_slice(&packet[8..]);
+        let cluster = element(CLUSTER, &[element(TIMESTAMP, &[0]), element(SIMPLE_BLOCK, &block)].concat());
+        let header = element(EBML, &element(DOC_TYPE, b"matroska"));
+
+        let cases = [(3, (16_u32, 9_u32), (4, 3)), (0, (32, 18), (4, 3)), (4, (16, 9), (1, 1)), (3, (u32::MAX, 1), (1, 1))];
+        for (unit, display_size, expected) in cases {
+            let video = [
+                element(PIXEL_WIDTH, &[16]),
+                element(PIXEL_HEIGHT, &[12]),
+                element(DISPLAY_UNIT, &[unit]),
+                element(DISPLAY_WIDTH, &display_size.0.to_be_bytes()),
+                element(DISPLAY_HEIGHT, &display_size.1.to_be_bytes()),
+            ]
+            .concat();
+            let track = [
+                element(TRACK_NUMBER, &[1]),
+                element(TRACK_UID, &[1]),
+                element(TRACK_TYPE, &[1]),
+                element(CODEC_ID, b"V_PRORES"),
+                element(CODEC_PRIVATE, &profile.fourcc()),
+                element(VIDEO, &video),
+            ]
+            .concat();
+            let tracks = element(TRACKS, &element(TRACK_ENTRY, &track));
+            let segment = element(SEGMENT, &[tracks, cluster.clone()].concat());
+            let bytes: Arc<[u8]> = [header.clone(), segment].concat().into();
+
+            let footage = crate::probe::probe_bytes("aspect.mkv", bytes.clone()).expect("public Matroska probe");
+            assert_eq!(footage.codec, "ProRes", "must use the shared Matroska route");
+            assert_eq!((footage.width, footage.height), (16, 12));
+            assert_eq!(footage.pixel_aspect, f64::from(expected.0) / f64::from(expected.1), "display unit {unit}");
+
+            let source = open_bytes("aspect.mkv", bytes).expect("recognized Matroska").expect("shared Matroska");
+            let decoded = source.video_frame(FrameRequest { time: Tick::ZERO, scale: 1.0 }).expect("decode frame");
+            assert_eq!(decoded.par.0 * expected.1, decoded.par.1 * expected.0, "display unit {unit}");
         }
     }
 
