@@ -5,6 +5,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::mem::ManuallyDrop;
 
+use boa_engine::error::{EngineError, RuntimeLimitError};
 use boa_engine::object::builtins::JsArray;
 use boa_engine::{Context, JsNativeError, JsObject, JsResult, JsString, JsValue, NativeFunction, Script, Source, js_string};
 use effectcraft_keyframe::Value;
@@ -21,8 +22,8 @@ const MAX_SCRIPTS: usize = 4096;
 pub const LOOP_LIMIT: u64 = 1_000_000;
 /// The error of an evaluation that ran out of time.
 pub const TIMED_OUT: &str = "Error: expression takes too long to evaluate";
-/// The part of boa's stack-size limit error the runtime recovers from (see [`run`]).
-const STACK_LIMIT: &str = "maximum stack size";
+/// A VM stack limit can come from pending host reads left on a reused context.
+struct StackFull;
 
 /// Memoized host answers and pending misses of one expression evaluation.
 #[derive(Default)]
@@ -44,6 +45,9 @@ pub struct Owner {
 }
 
 thread_local! {
+    // The value is handed to the finalization script exactly once and cleared on interruption.
+    static AUDIO_TRANSFER: RefCell<Option<JsValue>> = const { RefCell::new(None) };
+    static AUDIO_CONTROL: RefCell<Option<effectcraft_render::audio::AudioEvalControl>> = const { RefCell::new(None) };
     /// Never dropped: boa's own thread-local heap may be torn down first at thread exit, and
     /// dropping GC handles after that aborts the process. The OS reclaims it with the thread.
     static RUNTIME: RefCell<Option<ManuallyDrop<Result<Runtime, String>>>> = const { RefCell::new(None) };
@@ -61,11 +65,67 @@ thread_local! {
     pub static STARTED: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) };
 }
 
+/// Restores the previous mix context even when nested expression evaluation fails.
+pub struct AudioControl(Option<effectcraft_render::audio::AudioEvalControl>);
+impl AudioControl {
+    /// Install shared cancellation, deadline and instruction allowance for one evaluation.
+    pub fn enter(control: &effectcraft_render::audio::AudioEvalControl) -> Self {
+        Self(AUDIO_CONTROL.with(|c| c.replace(Some(control.clone()))))
+    }
+}
+impl Drop for AudioControl {
+    /// Leave no cancellation token or exhausted allowance on the next unrelated evaluation.
+    fn drop(&mut self) {
+        AUDIO_CONTROL.with(|c| c.replace(self.0.take()));
+    }
+}
+
+/// A runtime resource failure must abort audio, not retry keyframed fallback for every sample.
+pub fn fail_audio() {
+    AUDIO_CONTROL.with(|c| {
+        if let Some(c) = c.borrow().as_ref() {
+            c.fail();
+        }
+    });
+}
+
+pub fn audio_cache_scope() -> Option<u64> {
+    AUDIO_CONTROL.with(|c| c.borrow().as_ref().map(|control| control.cache_scope()))
+}
+
+pub fn audio_interrupted() -> bool {
+    audio_cache_scope().is_some() && out_of_time()
+}
+
+pub fn with_footage_read(read: &mut dyn FnMut()) {
+    let control = AUDIO_CONTROL.with(|c| c.borrow().clone());
+    let Some(control) = control else { return read() };
+    if out_of_time() {
+        return;
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    let _pause = {
+        use std::time::Instant;
+        struct Pause(Option<(Instant, Instant)>);
+        impl Drop for Pause {
+            fn drop(&mut self) {
+                if let Some((start, pause)) = self.0 {
+                    STARTED.with(|clock| clock.set(start.checked_add(pause.elapsed())));
+                }
+            }
+        }
+        Pause(STARTED.with(|clock| clock.take()).map(|start| (start, Instant::now())))
+    };
+    control.without_footage_time(read);
+}
+
 struct Runtime {
     ctx: Context,
     scripts: HashMap<String, Result<Script, String>>,
     begin: JsObject,
     finish: JsObject,
+    audio_begin: Script,
+    audio_finish: Script,
 }
 
 /// Per-evaluation inputs for `__begin`.
@@ -269,19 +329,40 @@ fn native_nesting(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<
     Ok(JsValue::undefined())
 }
 
+/// Look up a result field without dispatching getters or proxy traps. Audio finalization can
+/// read a property reference's stored IDs and resolve it through the regular host.
+fn audio_data(_: &JsValue, args: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
+    let key = match arg(args, 1) {
+        key if key.as_string().is_some() => key.as_string().map(Into::into),
+        key => key.as_number().map(|n| (n as u32).into()),
+    };
+    let Some(key) = key else { return Ok(JsValue::undefined()) };
+    let mut next = arg(args, 0).as_object();
+    for _ in 0..16 {
+        let Some(o) = next else { return Ok(JsValue::undefined()) };
+        if let Some(desc) = o.borrow().properties().get(&key) {
+            return desc.value().cloned().ok_or_else(|| JsNativeError::typ().with_message("audio expression result requires a data property").into());
+        }
+        next = o.prototype();
+    }
+    Err(JsNativeError::range().with_message("audio expression result has too many prototypes").into())
+}
+
 impl Runtime {
     fn new() -> Result<Runtime, String> {
         let mut ctx = Context::default();
         let limits = ctx.runtime_limits_mut();
         limits.set_loop_iteration_limit(LOOP_LIMIT);
         limits.set_recursion_limit(400);
-        let natives: [(JsString, usize, fn(&JsValue, &[JsValue], &mut Context) -> JsResult<JsValue>); 6] = [
+        let natives: [(JsString, usize, fn(&JsValue, &[JsValue], &mut Context) -> JsResult<JsValue>); 8] = [
             (js_string!("__stack"), 0, native_stack),
             (js_string!("__h"), 6, native_host),
             (js_string!("__wig"), 8, native_wiggle),
             (js_string!("__noise"), 3, native_noise),
             (js_string!("__rnd"), 6, native_random),
             (js_string!("__nest"), 1, native_nesting),
+            (js_string!("__audioData"), 2, audio_data),
+            (js_string!("__takeAudioInput"), 0, |_, _, _| Ok(AUDIO_TRANSFER.with(|slot| slot.take()).unwrap_or_default())),
         ];
         for (name, len, f) in natives {
             ctx.register_global_callable(name, len, NativeFunction::from_fn_ptr(f)).map_err(|e| e.to_string())?;
@@ -293,7 +374,9 @@ impl Runtime {
         };
         let begin = func(js_string!("__begin"), &mut ctx)?;
         let finish = func(js_string!("__finish"), &mut ctx)?;
-        Ok(Runtime { ctx, scripts: HashMap::new(), begin, finish })
+        let audio_begin = Script::parse(Source::from_bytes("__beginAudio()"), None, &mut ctx).map_err(|e| e.to_string())?;
+        let audio_finish = Script::parse(Source::from_bytes("__copyAudioResult()"), None, &mut ctx).map_err(|e| e.to_string())?;
+        Ok(Runtime { ctx, scripts: HashMap::new(), begin, finish, audio_begin, audio_finish })
     }
 
     fn script(&mut self, text: &str) -> Result<Script, String> {
@@ -314,10 +397,10 @@ impl Runtime {
         s
     }
 
-    fn run(&mut self, text: &str, b: &Begin) -> Run {
+    fn run(&mut self, text: &str, b: &Begin) -> Result<Run, StackFull> {
         let script = match self.script(text) {
             Ok(s) => s,
-            Err(e) => return Run::Done(Err(e)),
+            Err(e) => return Ok(Run::Done(Err(e))),
         };
         let ctx = &mut self.ctx;
         let args = [
@@ -333,23 +416,61 @@ impl Runtime {
             JsValue::from(b.text_sel[1]),
             to_js(&crate::host::Resp::List(b.selector.iter().map(|x| crate::host::Resp::Num(*x)).collect()), ctx),
         ];
-        if let Err(e) = self.begin.call(&JsValue::undefined(), &args, ctx) {
-            return Run::Done(Err(format_error(&e.to_string(), line_count(text))));
+        let audio = AUDIO_CONTROL.with(|c| c.borrow().is_some());
+        let begun = if audio {
+            let inputs = JsArray::from_iter(args, ctx).into();
+            let Some(result) = evaluate_audio_phase(&self.audio_begin, ctx, inputs) else { return Ok(Run::Done(Err(TIMED_OUT.into()))) };
+            result
+        } else {
+            self.begin.call(&JsValue::undefined(), &args, ctx)
+        };
+        if let Err(e) = begun {
+            runtime_limit(&e)?;
+            return Ok(Run::Done(Err(format_error(&e.to_string(), line_count(text)))));
         }
         let result = match evaluate_in_time(&script, ctx) {
+            Some(Ok(v)) if audio && v.is_object() => {
+                let Some(result) = evaluate_audio_phase(&self.audio_finish, ctx, v) else { return Ok(Run::Done(Err(TIMED_OUT.into()))) };
+                result
+            }
+            Some(Ok(v)) if audio => Ok(v),
             Some(r) => r.and_then(|v| self.finish.call(&JsValue::undefined(), &[v], ctx)),
             // Abandoned mid-run: the context is unusable now (see `run`).
-            None => return Run::Done(Err(TIMED_OUT.into())),
+            None => return Ok(Run::Done(Err(TIMED_OUT.into()))),
         };
+        if let Err(e) = &result
+            && runtime_limit(e)?
+        {
+            return Ok(Run::Done(Err(format_error(&e.to_string(), line_count(text)))));
+        }
         let pending = FRAMES.with(|f| f.borrow().last().is_some_and(|fr| !fr.misses.is_empty()));
         if pending {
-            return Run::Pending;
+            return Ok(Run::Pending);
         }
-        Run::Done(match result {
+        Ok(Run::Done(match result {
+            Ok(v) if audio => read_audio_result(&v, 0, &mut (1 << 16)),
             Ok(v) => detach(&v, ctx, 0),
             Err(e) => Err(format_error(&e.to_string(), line_count(text))),
-        })
+        }))
     }
+}
+
+fn runtime_limit(error: &boa_engine::JsError) -> Result<bool, StackFull> {
+    match error.as_engine() {
+        Some(EngineError::RuntimeLimit(RuntimeLimitError::StackSize)) => Err(StackFull),
+        Some(EngineError::RuntimeLimit(_)) => {
+            fail_audio();
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
+
+fn evaluate_audio_phase(script: &Script, ctx: &mut Context, input: JsValue) -> Option<JsResult<JsValue>> {
+    AUDIO_TRANSFER.with(|slot| slot.replace(Some(input)));
+    let result = evaluate_in_time(script, ctx);
+    AUDIO_TRANSFER.with(|slot| slot.take());
+    result
 }
 
 /// Run `script`, giving up (`None`) once the outermost evaluation is out of time
@@ -357,13 +478,16 @@ impl Runtime {
 /// the script and the functions it calls (not inside callbacks of native functions such as
 /// `Array.prototype.map`, which stay bounded by the loop limit per call).
 fn evaluate_in_time(script: &Script, ctx: &mut Context) -> Option<JsResult<JsValue>> {
+    if out_of_time() {
+        return None;
+    }
     let mut run = std::pin::pin!(script.evaluate_async_with_budget(ctx, 20_000));
     let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
     loop {
         if let std::task::Poll::Ready(r) = run.as_mut().poll(&mut cx) {
-            return Some(r);
+            return (!out_of_time()).then_some(r);
         }
-        if out_of_time() {
+        if AUDIO_CONTROL.with(|c| c.borrow().as_ref().is_some_and(|c| c.yielded())) || out_of_time() {
             return None;
         }
     }
@@ -390,9 +514,16 @@ fn max_time() -> std::time::Duration {
 
 /// Whether the outermost evaluation on this thread has used up [`crate::MAX_TIME`].
 pub fn out_of_time() -> bool {
+    if AUDIO_CONTROL.with(|c| c.borrow().as_ref().is_some_and(|c| c.interrupted())) {
+        return true;
+    }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        STARTED.with(|s| s.get()).is_some_and(|t| t.elapsed() > max_time())
+        let expired = STARTED.with(|s| s.get()).is_some_and(|t| t.elapsed() > max_time());
+        if expired {
+            fail_audio();
+        }
+        expired
     }
     #[cfg(target_arch = "wasm32")]
     {
@@ -456,6 +587,54 @@ fn detach(v: &JsValue, ctx: &mut Context, depth: usize) -> Result<Out, String> {
         return Ok(Out::Object("[object]".into()));
     }
     Ok(Out::Object(v.to_string(ctx).map(|s| s.to_std_string_escaped()).unwrap_or_default()))
+}
+
+/// Audio finalization returns tagged, dense data. Read the own descriptors directly so
+/// copying the result cannot invoke JavaScript, even if a script altered the prototypes.
+fn read_audio_result(v: &JsValue, depth: usize, remaining: &mut usize) -> Result<Out, String> {
+    const INVALID: &str = "Error: invalid audio expression result";
+    *remaining = remaining.checked_sub(1).ok_or(INVALID)?;
+    if v.is_undefined() {
+        return Ok(Out::Undefined);
+    }
+    if v.is_null() {
+        return Ok(Out::Null);
+    }
+    if let Some(b) = v.as_boolean() {
+        return Ok(Out::Bool(b));
+    }
+    if let Some(n) = v.as_number() {
+        return Ok(Out::Num(n));
+    }
+    if let Some(s) = v.as_string() {
+        return Ok(Out::Str(s.to_std_string_escaped()));
+    }
+    let o = v.as_object().filter(JsObject::is_array).ok_or(INVALID)?;
+    let data = |key: boa_engine::property::PropertyKey| o.borrow().properties().get(&key).and_then(|p| p.value().cloned()).unwrap_or_default();
+    let tag = data(0u32.into());
+    let text = |i: u32| data(i.into()).as_string().map(|s| s.to_std_string_escaped()).unwrap_or_default();
+    match tag.as_number() {
+        Some(0.0) if depth < MAX_DETACH => {
+            let len = data(js_string!("length").into()).as_number().unwrap_or(0.0) as u32;
+            Ok(Out::Arr(
+                (1..len.min((*remaining as u32).saturating_add(1)))
+                    .map(|i| read_audio_result(&data(i.into()), depth + 1, remaining))
+                    .collect::<Result<_, _>>()?,
+            ))
+        }
+        Some(1.0) => Ok(Out::Object(text(1))),
+        Some(2.0) => Ok(Out::Style(text(1))),
+        Some(3.0) if depth < MAX_DETACH => {
+            let mut points = |i: u32| -> Result<Vec<[f64; 2]>, String> {
+                Ok(match read_audio_result(&data(i.into()), depth + 1, remaining)? {
+                    Out::Arr(items) => items.iter().map(|p| out_vec(p, 2)).map(|c| [c[0], c[1]]).collect(),
+                    _ => vec![],
+                })
+            };
+            Ok(Out::Path { points: points(1)?, ins: points(2)?, outs: points(3)?, closed: data(4u32.into()).to_boolean() })
+        }
+        _ => Err(INVALID.into()),
+    }
 }
 
 fn out_vec(o: &Out, n: usize) -> Vec<f64> {
@@ -535,29 +714,30 @@ pub fn run(text: &str, b: &Begin) -> Run {
     STACK_BASE.with(|s| s.set(stack_here()));
     RUNTIME.with(|r| {
         let mut r = r.borrow_mut();
-        for fresh in [false, true] {
+        for _ in 0..2 {
             let out = match &mut **r.get_or_insert_with(|| ManuallyDrop::new(Runtime::new())) {
                 Ok(rt) => rt.run(text, b),
                 Err(e) => return Run::Done(Err(e.clone())),
             };
             match out {
-                Run::Done(Err(e)) if e == TIMED_OUT => {
+                Ok(Run::Done(Err(e))) if e == TIMED_OUT => {
                     // Abandoned mid-run: start the next evaluation on a fresh context.
                     if let Some(old) = r.take() {
                         drop(ManuallyDrop::into_inner(old));
                     }
                     return Run::Done(Err(e));
                 }
-                Run::Done(Err(e)) if !fresh && e.contains(STACK_LIMIT) => {
+                Err(StackFull) => {
                     // Dropped here, mid-thread, where boa's heap is alive (unlike at thread exit).
                     if let Some(old) = r.take() {
                         drop(ManuallyDrop::into_inner(old));
                     }
                 }
-                out => return out,
+                Ok(out) => return out,
             }
         }
-        Run::Done(Err(format!("Error: {STACK_LIMIT}")))
+        fail_audio();
+        Run::Done(Err(format!("Error: {}", RuntimeLimitError::StackSize)))
     })
 }
 

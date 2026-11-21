@@ -1,6 +1,6 @@
 //! #2104: exercise the real mixer and queue without relying on thread timing or an audio device.
 
-use super::{AudioDevice, AudioFeed, AudioPlayback, Feeder, PlaySpan, PreviewRate, feed_block};
+use super::{AudioDevice, AudioFeed, AudioPlayback, BLOCK, Feeder, MixControl, PlaySpan, PreviewRate, feed_block, playback_control};
 use crate::frames::RenderSource;
 use effectcraft_engine::color::Label;
 use effectcraft_engine::keyframe::Value;
@@ -63,12 +63,13 @@ fn playback(footage: Arc<dyn FootageSource>) -> AudioPlayback {
         rate: 48000,
         span: PlaySpan { start: 24, wa: 16, wb: 64, looping: false },
         timeline: PreviewRate::new(48000, 1.0, Tick::ZERO).unwrap(),
+        pump_block: BLOCK,
     }
 }
 
 /// Run exactly one production feeder block, without a background refill racing assertions.
 fn mix(p: &AudioPlayback) {
-    feed_block(&p.state, p.comp, &p.feed, &p.span, p.timeline, p.mix);
+    assert!(feed_block(&p.state, p.comp, &p.feed, &p.span, p.timeline, p.mix, BLOCK, &playback_control(&p.stop)));
 }
 
 /// Copy the active project and apply a layer edit through the same snapshot boundary as the UI.
@@ -112,6 +113,42 @@ fn project_replacement_resumes_at_the_first_unconsumed_sample() {
     }
 }
 
+#[test]
+fn time_remap_edits_discard_queued_audio() {
+    let mut p = playback(Arc::new(Ramp));
+    let mut after = p.project().unwrap();
+    let project = Arc::make_mut(&mut after);
+    let mut prop = build::Ids(&mut project.next_id).prop("timeRemap", "Time Remap", Value::Scalar(0.0));
+    prop.keys = [0.0, 1.0].map(|t| effectcraft_engine::project::Keyframe::new(Tick::from_seconds_f64(t), Value::Scalar(t))).into();
+    project.comp_mut(p.comp).unwrap().layers[0].props.children.push(prop.into());
+    p.follow_project(after);
+    mix(&p);
+    let mut out = [0.0; 2];
+    p.feed.pull(&mut out);
+    assert_eq!(out[0], 24.0 / 128.0);
+
+    let updated = edit(&p, |l| l.props.prop_mut("timeRemap").unwrap().keys[1].value = Value::Scalar(2.0));
+    p.follow_project(updated);
+    assert_eq!(p.feed.queued_frames(), 0);
+    mix(&p);
+    p.feed.pull(&mut out);
+    assert_eq!(out[0], 50.0 / 128.0);
+}
+
+#[test]
+fn a_deferred_preview_block_leaves_the_cursor_and_queue_unchanged() {
+    let p = playback(Arc::new(Ramp));
+    let control = MixControl { deadline: Some(web_time::Instant::now()), ..Default::default() };
+    assert!(!feed_block(&p.state, p.comp, &p.feed, &p.span, p.timeline, p.mix, BLOCK, &control));
+    assert_eq!(p.state.lock().unwrap().cursor, 24);
+    assert_eq!(p.feed.queued_frames(), 0);
+    assert_eq!(p.feed.error(), None);
+    mix(&p);
+    let mut out = [0.0; 2];
+    p.feed.pull(&mut out);
+    assert_eq!(out[0], 24.0 / 128.0);
+}
+
 struct Gated {
     entered: mpsc::Sender<()>,
     resume: Mutex<mpsc::Receiver<()>>,
@@ -133,8 +170,10 @@ fn a_block_in_flight_cannot_publish_after_a_mute() {
     let (entered, waiting) = mpsc::channel();
     let (resume, gate) = mpsc::channel();
     let mut p = playback(Arc::new(Gated { entered, resume: Mutex::new(gate) }));
-    let (state, feed, span, comp, rate) = (p.state.clone(), p.feed.clone(), p.span, p.comp, p.rate);
-    let worker = std::thread::spawn(move || feed_block(&state, comp, &feed, &span, PreviewRate::new(rate, 1.0, Tick::ZERO).unwrap(), rate));
+    let (state, feed, span, comp, rate, stop) = (p.state.clone(), p.feed.clone(), p.span, p.comp, p.rate, p.stop.clone());
+    let worker = std::thread::spawn(move || {
+        feed_block(&state, comp, &feed, &span, PreviewRate::new(rate, 1.0, Tick::ZERO).unwrap(), rate, BLOCK, &playback_control(&stop))
+    });
     waiting.recv_timeout(Duration::from_secs(10)).unwrap();
     // The edit completes while the mixer is blocked, without waiting on its work.
     p.follow_project(edit(&p, |l| l.switches.audio = false));

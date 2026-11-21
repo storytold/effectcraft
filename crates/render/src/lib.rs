@@ -36,7 +36,7 @@ use effectcraft_project::{Comp, Footage, FootageKind, FrameBlend, GroupKind, Ite
 pub use effectcraft_raster::Image;
 use effectcraft_raster::{WarpOpts, composite_warp_changed};
 use effectcraft_time::{FrameRate, TICKS_PER_SECOND, Tick};
-pub use eval::{EvalCtx, ExprHost, effect_bounds, source_size};
+pub use eval::{AudioExpression, EvalCtx, ExprHost, effect_bounds, source_size};
 use rayon::prelude::*;
 
 mod accel;

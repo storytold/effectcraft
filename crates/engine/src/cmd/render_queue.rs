@@ -854,6 +854,7 @@ fn save_current_preview(s: &mut Session, p: &Value) -> Result<Value> {
         return Err(EngineError::Other(refusal.reason.clone()));
     }
     let job = crate::ExportJob {
+        cancel: None,
         project: &s.project,
         footage: s.footage.as_ref(),
         expr: s.expr.as_deref(),

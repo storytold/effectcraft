@@ -371,7 +371,13 @@ impl EffectcraftApp {
         let PlaybackPass { ctx, now, series, video, frame_rate: fr, cur, .. } = *pass;
         let FrameWindow { first: wa, last: wb } = pass.window;
         let Some(a) = &self.audio else { return false };
-        if a.finished() {
+        let finished = a.finished();
+        if let Some(error) = a.feed.error() {
+            self.ui.status = error;
+            self.stop();
+            return true;
+        }
+        if finished {
             if video {
                 self.session.set_time(fr.tick_of(wb));
             } else {

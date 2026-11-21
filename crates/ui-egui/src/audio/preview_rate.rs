@@ -72,7 +72,7 @@ impl PreviewRate {
         (n.div_euclid(d) as i64, n.rem_euclid(d) as f32 / d as f32)
     }
 
-    pub(super) fn mix(self, cursor: i64, n: usize, mix: u32, mut render: impl FnMut(Tick, usize) -> Vec<f32>) -> Vec<f32> {
+    pub(super) fn mix<E>(self, cursor: i64, n: usize, mix: u32, mut render: impl FnMut(Tick, usize) -> Result<Vec<f32>, E>) -> Result<Vec<f32>, E> {
         let mut out = Vec::with_capacity(n.saturating_mul(2));
         let mut page = Vec::new();
         let mut first = 0;
@@ -97,7 +97,7 @@ impl PreviewRate {
                 if t.to_units_floor(i64::from(mix)) < first {
                     t.0 = t.0.saturating_add(1);
                 }
-                page = render(t, frames);
+                page = render(t, frames)?;
             }
             let index = usize::try_from(at.saturating_sub(first)).unwrap_or(usize::MAX).saturating_mul(2);
             for channel in 0..2 {
@@ -106,7 +106,7 @@ impl PreviewRate {
                 out.push(a + (b - a) * fraction);
             }
         }
-        out
+        Ok(out)
     }
 }
 
@@ -162,15 +162,19 @@ mod tests {
 
     #[test]
     fn speed_mix_keeps_fractional_phase_across_uneven_blocks() {
-        for speed in [0.5, 2.0, 0.73, 29.97 / FrameRate::FPS_59_94.as_f64()] {
+        for speed in [1.0, 0.5, 2.0, 0.73, 29.97 / FrameRate::FPS_59_94.as_f64()] {
             let start = FrameRate::FPS_29_97.tick_of(17);
             let rate = PreviewRate::new(48_000, speed, start).unwrap();
+            let origin = if speed == 1.0 { 0.0 } else { start.seconds() };
             for mix in [44_100, 48_000, 96_000] {
-                let whole = rate.mix(0, 2048, mix, |t, n| ramp(t, n, mix));
-                let split: Vec<_> = [(0, 321), (321, 107), (428, 1620)].into_iter().flat_map(|(at, n)| rate.mix(at, n, mix, |t, n| ramp(t, n, mix))).collect();
+                let whole = rate.mix::<()>(0, 2048, mix, |t, n| Ok(ramp(t, n, mix))).unwrap();
+                let split: Vec<_> = [(0, 321), (321, 107), (428, 1620)]
+                    .into_iter()
+                    .flat_map(|(at, n)| rate.mix::<()>(at, n, mix, |t, n| Ok(ramp(t, n, mix))).unwrap())
+                    .collect();
                 assert_eq!(whole, split, "speed {speed}, source rate {mix}");
                 for (i, frame) in whole.as_chunks::<2>().0.iter().enumerate() {
-                    let expected = (start.seconds() + i as f64 * speed / 48_000.0) * mix as f64 / 100_000.0;
+                    let expected = (origin + i as f64 * speed / 48_000.0) * mix as f64 / 100_000.0;
                     assert!((f64::from(frame[0]) - expected).abs() < 1e-6);
                     assert_eq!(frame[1], -frame[0]);
                 }
@@ -183,11 +187,13 @@ mod tests {
         for speed in [0.00001, 99_900.0] {
             let rate = PreviewRate::new(8_000, speed, Tick::ZERO).unwrap();
             let mut rendered = 0;
-            let out = rate.mix(0, 1024, 192_000, |_, n| {
-                assert!(n <= SOURCE_PAGE);
-                rendered += n;
-                vec![0.25; n * 2]
-            });
+            let out = rate
+                .mix::<()>(0, 1024, 192_000, |_, n| {
+                    assert!(n <= SOURCE_PAGE);
+                    rendered += n;
+                    Ok(vec![0.25; n * 2])
+                })
+                .unwrap();
             assert!(rendered <= SOURCE_PAGE, "unused source intervals were mixed: {rendered} samples");
             assert_eq!(out, vec![0.25; 2048]);
             assert!((rate.time(8000).seconds() - speed).abs() < 1e-9);
