@@ -1583,7 +1583,7 @@ mod tests {
     fn mxf_video_window_and_sound_trim_helpers() {
         let mut cfg =
             mxf::write::WriterConfig::new(mxf::write::Pattern::Op1a, mxf::Rational::new(25, 1), mxf::write::PackageIds::from_seed("eff-mxf-vid", "op1a"));
-        cfg.picture = Some(mxf::write::PictureDesc::new(mxf::write::PictureCoding::H264, 16, 16));
+        cfg.picture = Some(mxf::write::PictureDesc::new(mxf::write::PictureCoding::Avc { profile_idc: 66, intra: false }, 16, 16));
         cfg.sound = vec![mxf::write::SoundDesc { sample_rate: 48_000, channels: 1, bits: 16 }];
         let mut w = mxf::write::MxfWriter::new(std::io::Cursor::new(Vec::new()), cfg).expect("writer");
         let pcm = mxf::write::encode_pcm(&[vec![0.1f32; 1920]], 16);
@@ -1609,10 +1609,9 @@ mod tests {
         assert_eq!(container.sample_pts(0, 1), 1);
         assert_eq!(container.pts_to_tick(0, 1), Tick::ZERO);
 
-        // needs_reorder without temporal offsets falls back to FilmCraft.
-        let mut raw = mxf::open(&*mxf_bytes).expect("reopen");
-        raw.tracks[0].needs_reorder = true;
-        // Smoke-check open_mxf returns Some on valid Op1a H264+PCM (even if minimal NAL fails decode).
+        // Exercise open_mxf video+sound path on valid Op1a Avc+PCM.
+        let opened = open_bytes("op1a.mxf", Arc::from(mxf_bytes.as_ref().to_vec()));
+        assert!(opened.is_some());
         assert!(open_bytes("op1a.mxf", Arc::from(vec![0u8; 4])).is_none());
     }
 }
