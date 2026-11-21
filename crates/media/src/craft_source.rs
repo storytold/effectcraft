@@ -93,7 +93,7 @@ pub(crate) fn open_bytes(name: &str, bytes: Arc<[u8]>) -> Option<Result<SharedSo
     if looks_like_matroska(&bytes) {
         return open_matroska(name, Arc::new(bytes));
     }
-    let head_len = bytes.len().min(64);
+    let head_len = <[u8]>::len(&bytes).min(64);
     let head = bytes[..head_len].to_vec();
     open_standalone_audio(name, &head, Arc::new(bytes))
 }
@@ -803,7 +803,7 @@ fn open_standalone_audio(name: &str, head: &[u8], source: SharedBytes) -> Option
         craft_audio::SampleFormat::Int24 => Some(24),
         craft_audio::SampleFormat::Int32 | craft_audio::SampleFormat::Float32 => Some(32),
         craft_audio::SampleFormat::Float64 => Some(64),
-        craft_audio::SampleFormat::Compressed => None,
+        craft_audio::SampleFormat::Compressed | _ => None,
     };
     let info = MediaInfo {
         name: name.to_string(),
