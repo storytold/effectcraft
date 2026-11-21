@@ -832,6 +832,27 @@ impl<'a> Renderer<'a> {
                 target.cover(layer_size);
             }
         }
+        // Edge Tile Repeat repeats a shape or text layer's painted content, not its comp-sized
+        // layer rectangle (#3866). When it opens a stack whose effects all grow their own buffer
+        // (so the renderer left the buffer content-sized), measure that content once here; the
+        // effect reads it in effect space from `EffectEnv::content`.
+        let content = if !adjustment && video().next().is_some_and(|s| s.id == "ec.stylize.ccrepetile") && video().all(|s| s.skips_cover()) {
+            let mut measured = None;
+            target.cpu(&mut |b| {
+                let sized = f64::from(b.img.width) < layer_size[0] * b.scale || f64::from(b.img.height) < layer_size[1] * b.scale;
+                if sized {
+                    measured = effectcraft_effects::util::painted_bounds(&b.img).map(|(x, y, w, h)| {
+                        let x0 = (f64::from(x) - b.offset[0]) / b.scale;
+                        let y0 = (f64::from(y) - b.offset[1]) / b.scale;
+                        [x0, y0, x0 + f64::from(w) / b.scale, y0 + f64::from(h) / b.scale]
+                    });
+                }
+                b
+            });
+            measured
+        } else {
+            None
+        };
         let mut mask_shapes = masks::shapes(ctx, layer);
         if origin != [0.0; 2] {
             for q in mask_shapes.iter_mut().flat_map(|m| m.points.iter_mut()) {
@@ -861,6 +882,7 @@ impl<'a> Renderer<'a> {
             float_depth: self.pipe.levels.is_none(),
             shutter: self.mb_on(ctx, layer).then_some((ctx.comp.shutter_angle, ctx.comp.shutter_phase, ctx.comp.motion_blur_samples)),
             layer_span: crate::eval::layer_span(self.project, layer),
+            content,
         };
         // Video effects in stack order (index, group, spec); disabled and audio effects skipped.
         let stack: Vec<(usize, &effectcraft_project::PropGroup, &'static effectcraft_effects::EffectSpec)> = fx

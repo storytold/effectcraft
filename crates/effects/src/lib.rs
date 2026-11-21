@@ -455,7 +455,16 @@ pub fn adjustment_crop(offset: [f64; 2], canvas_offset: [f64; 2], size: (u32, u3
 /// skips the renderer's cover of the whole layer rectangle (#1205).
 /// Drop Shadow also pads by its distance and softness on both CPU and GPU: covering the
 /// layer rectangle first only inflates working images on highly scaled text and shapes (#3357).
-pub const SKIPS_COVER: &[&str] = &["ec.blur.gaussian", "ec.blur.fastbox", "ec.stylize.glow", "ec.distort.turbulentdisplace", "ec.perspective.dropshadow"];
+pub const SKIPS_COVER: &[&str] = &[
+    "ec.blur.gaussian",
+    "ec.blur.fastbox",
+    "ec.stylize.glow",
+    "ec.distort.turbulentdisplace",
+    "ec.perspective.dropshadow",
+    // Edge Tile Repeat writes its own expanded buffer and repeats the painted content, so it
+    // needs the content-sized buffer a shape or text layer keeps (#3866).
+    "ec.stylize.ccrepetile",
+];
 
 /// The grid phase [`Buf::align`] keeps and the step [`cover_pad`] grows in: covers the levels
 /// of the resampling pyramid used for downscaled layers.
@@ -612,6 +621,12 @@ pub struct EffectEnv<'a> {
     /// source has no duration (stills, solids, text, shapes) or the renderer does not know it.
     /// Retimers clamp their source requests to it.
     pub layer_span: Option<(f64, f64)>,
+    /// The painted content of the stack's input buffer in effect space (`x0, y0, x1, y1`), when
+    /// the renderer measured it. A shape or text layer's buffer surrounds only its rendered
+    /// content, and an effect that repeats that content (Edge Tile Repeat, #3866) tiles this
+    /// rectangle rather than the comp-sized layer bounds. `None` when unknown (a sized source,
+    /// or a stack whose effects do not all grow their own buffer).
+    pub content: Option<[f64; 4]>,
 }
 
 /// What an effect gets to render with.

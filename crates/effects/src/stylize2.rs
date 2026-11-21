@@ -388,7 +388,20 @@ fn repetile(ctx: &EffectCtx, b: Buf) -> Buf {
         return b;
     }
     let mode = ctx.params.e("tiling");
-    let (x0, y0, w, h) = layer_rect(ctx, &b);
+    let (lx0, ly0, lw, lh) = layer_rect(ctx, &b);
+    // The copies repeat the layer's painted content, not its comp-sized rectangle: a shape or
+    // text layer's buffer surrounds only that content (this effect grows its own buffer, so the
+    // renderer leaves it content-sized), while a sized source's buffer is its layer rectangle
+    // (#3866). The renderer measures the content in effect space (`EffectEnv::content`); without
+    // it (a unit test's context) measure this buffer directly.
+    let (tx0, ty0, w, h) = match ctx.env.content {
+        Some([cx0, cy0, cx1, cy1]) => (cx0 * s + b.offset[0], cy0 * s + b.offset[1], (cx1 - cx0) * s, (cy1 - cy0) * s),
+        None if f64::from(b.img.width) < lw || f64::from(b.img.height) < lh => match crate::util::painted_bounds(&b.img) {
+            Some((x, y, w, h)) => (f64::from(x), f64::from(y), f64::from(w), f64::from(h)),
+            None => return b,
+        },
+        None => (lx0, ly0, lw, lh),
+    };
     if w < 1.0 || h < 1.0 {
         return b;
     }
@@ -413,10 +426,12 @@ fn repetile(ctx: &EffectCtx, b: Buf) -> Buf {
             if flip_y {
                 fy = h - fy;
             }
-            *px = src.sample_bilinear(x0 + fx, y0 + fy);
+            *px = src.sample_bilinear(tx0 + fx, ty0 + fy);
         }
     });
-    Buf { img: out, offset: [l, u], scale: s }
+    // The output starts `l`/`u` before the tile origin, so place it there (the input's own
+    // offset is part of that: image coordinate `tx0` is effect point `(tx0 - b.offset) / s`).
+    Buf { img: out, offset: [l - tx0 + b.offset[0], u - ty0 + b.offset[1]], scale: s }
 }
 
 // ---- Motion Tile ----

@@ -457,6 +457,31 @@ pub fn remap(src: &Image, clamp: bool, f: impl Fn(f64, f64) -> Option<(f64, f64)
     out
 }
 
+/// The painted content of a buffer (`alpha > 0`) as `(x, y, width, height)` in buffer pixels,
+/// or `None` when nothing is painted. A shape or text layer's buffer carries a transparent
+/// anti-aliasing margin around its content; an effect that repeats the content (#3866) tiles
+/// exactly this rectangle.
+pub fn painted_bounds(img: &Image) -> Option<(u32, u32, u32, u32)> {
+    let (w, h) = (img.width, img.height);
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0, 0);
+    let mut any = false;
+    for (y, row) in img.data.chunks(w as usize).enumerate() {
+        for (x, px) in row.iter().enumerate() {
+            if px[3] > 0.0 {
+                any = true;
+                x0 = x0.min(x as u32);
+                y0 = y0.min(y as u32);
+                x1 = x1.max(x as u32 + 1);
+                y1 = y1.max(y as u32 + 1);
+            }
+        }
+    }
+    any.then_some((x0, y0, x1 - x0, y1 - y0))
+}
+
 /// Layer rectangle in buffer pixels: (x0, y0, width, height).
 pub fn layer_rect(ctx: &crate::EffectCtx, b: &crate::Buf) -> (f64, f64, f64, f64) {
     layer_rect_at(ctx, b.offset, b.scale)
