@@ -171,34 +171,164 @@ impl ContainerFile {
         }
     }
 
-    fn audio_seek_info(&self, track_idx: usize, start: i64, native_rate: u32) -> (usize, i64) {
-        match self {
-            ContainerFile::Isobmff(f) => {
-                let track = &f.tracks[track_idx];
-                let t_track = (i128::from(start.max(0)) * i128::from(track.timescale)) / i128::from(native_rate);
-                let sample_idx = track.sample_at_presentation_time(i64::try_from(t_track).unwrap_or(0)).unwrap_or(0);
-                // Back up a few packets for AAC/Opus overlap/preroll.
-                let seek_idx = sample_idx.saturating_sub(2);
-                let sample_pts = track.presentation_pts(seek_idx).unwrap_or(0);
-                let decoded_pos = i64::try_from((i128::from(sample_pts) * i128::from(native_rate)) / i128::from(track.timescale.max(1))).unwrap_or(0);
-                (seek_idx, decoded_pos)
+    fn audio_seek_info(audio_starts: &[i64], seek_preroll_samples: i64, start: i64) -> (usize, i64) {
+        let target = start.saturating_sub(seek_preroll_samples).max(0);
+        let sample_idx = audio_starts.partition_point(|&s| s <= target).saturating_sub(1);
+        let seek_idx = sample_idx.saturating_sub(2);
+        let decoded_pos = audio_starts.get(seek_idx).copied().unwrap_or(0);
+        (seek_idx, decoded_pos)
+    }
+}
+
+/// Where the container puts one audio packet, for [`contiguous_starts`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PacketTime {
+    /// Its timestamp, in output samples.
+    stamp: i64,
+    /// Whether `stamp` is the packet's own. A Matroska frame after the first in a laced block
+    /// without a duration repeats the block's timestamp.
+    stamped: bool,
+    /// Samples it decodes to, when known.
+    samples: Option<i64>,
+}
+
+/// Packet start positions in output samples: each packet starts where the previous one ends,
+/// unless its own timestamp is more than `tolerance` samples from there (a real gap or overlap in
+/// the recording) or the previous packet's length is unknown; then it starts at its timestamp.
+///
+/// Container timestamps are coarser than a sample. Matroska stores milliseconds, and a remux to MP4
+/// (OBS's) turns that rounding into uneven sample durations: a 1024-sample AAC frame at 48 kHz
+/// lasts 21.33 ms, so frames are stamped at 0, 1008, 2064, 3072… Placing each decoded packet at its
+/// stamp overwrote the end of one packet and left a hole of silence after another, a click every
+/// few packets: crackling throughout playback and export (`storytold/effectcraft#1546`,
+/// `storytold/filmcraft#359`).
+fn contiguous_starts(packets: impl IntoIterator<Item = PacketTime>, tolerance: i64) -> Vec<i64> {
+    let tolerance = tolerance.max(0).unsigned_abs();
+    let mut next: Option<i64> = None;
+    packets
+        .into_iter()
+        .map(|p| {
+            let start = match next {
+                Some(n) if !p.stamped || n.abs_diff(p.stamp) <= tolerance => n,
+                _ => p.stamp,
+            };
+            next = p.samples.and_then(|k| start.checked_add(k));
+            start
+        })
+        .collect()
+}
+
+fn fixed_packet_samples(dec: &mut AudioTrackDecoder, codec: CodecId, lookahead: &[Vec<u8>]) -> Option<i64> {
+    if !matches!(codec, CodecId::Aac | CodecId::HeAac | CodecId::Mp1 | CodecId::Mp2 | CodecId::Mp3 | CodecId::Ac3 | CodecId::Eac3) {
+        return None;
+    }
+    let mut frame_len: Option<usize> = None;
+    for pkt in lookahead {
+        let Ok(block) = dec.decode(pkt) else {
+            dec.reset();
+            return None;
+        };
+        let n = block.channels.first().map_or(0, Vec::len);
+        if n == 0 {
+            dec.reset();
+            return None;
+        }
+        match frame_len {
+            None => frame_len = Some(n),
+            Some(prev) if prev != n => {
+                dec.reset();
+                return None;
             }
-            ContainerFile::Matroska(f) => {
-                let track = &f.tracks[track_idx];
-                let delay_ns = i128::from(track.codec_delay_ns);
-                let preroll_ns = i128::from(track.seek_pre_roll_ns.max(80_000_000));
-                let target_ns = (i128::from(start.max(0)) * 1_000_000_000) / i128::from(native_rate) + delay_ns;
-                let seek_ns = (target_ns - preroll_ns).max(0);
-                let t_track = track.ns_to_ticks(i64::try_from(seek_ns).unwrap_or(0));
-                let sample_idx = track.sample_at_pts(t_track).unwrap_or(0);
-                let seek_idx = sample_idx.saturating_sub(2);
-                let sample_pts = track.samples.get(seek_idx).map_or(0, |s| s.pts);
-                let sample_ns = i128::from(track.ticks_to_ns(sample_pts)) - delay_ns;
-                let decoded_pos = i64::try_from((sample_ns * i128::from(native_rate)) / 1_000_000_000).unwrap_or(0);
-                (seek_idx, decoded_pos)
-            }
+            Some(_) => {}
         }
     }
+    dec.reset();
+    frame_len.and_then(|n| i64::try_from(n).ok())
+}
+
+/// Duration of an Opus packet in 48 kHz samples from its TOC (RFC 6716 §3.1); `None` if invalid.
+fn opus_packet_samples(pkt: &[u8]) -> Option<u32> {
+    let &toc = pkt.first()?;
+    let config = toc >> 3;
+    let frame = match config {
+        0..=11 => [480, 960, 1920, 2880][(config & 3) as usize],
+        12..=15 => [480, 960][(config & 1) as usize],
+        _ => [120, 240, 480, 960][(config & 3) as usize],
+    };
+    let frames = match toc & 3 {
+        0 => 1,
+        1 | 2 => 2,
+        _ => (*pkt.get(1)? & 0x3F) as u32,
+    };
+    let n = frame * frames;
+    (n > 0 && n <= 5760).then_some(n)
+}
+
+fn compute_audio_starts(
+    container: &ContainerFile,
+    source: &dyn ByteSource,
+    track_idx: usize,
+    codec: CodecId,
+    native_rate: u32,
+    fixed_samples: Option<i64>,
+) -> Vec<i64> {
+    let rate = i128::from(native_rate);
+    match container {
+        ContainerFile::Isobmff(f) => {
+            let Some(track) = f.tracks.get(track_idx) else { return Vec::new() };
+            let ts = i128::from(track.timescale.max(1));
+            let stamps: Vec<i64> = (0..track.samples.len())
+                .map(|i| {
+                    let pts = track.presentation_pts(i).unwrap_or(0);
+                    i64::try_from(i128::from(pts) * rate / ts).unwrap_or(0)
+                })
+                .collect();
+            let unit = i64::try_from((rate + ts - 1) / ts).unwrap_or(i64::MAX);
+            if codec == CodecId::Opus {
+                let packets = stamps.into_iter().enumerate().map(|(i, stamp)| {
+                    let samples = f.read_sample(source, track_idx, i).ok().and_then(|p| opus_packet_samples(&p)).map(i64::from);
+                    PacketTime { stamp, stamped: true, samples }
+                });
+                return contiguous_starts(packets, unit.saturating_mul(2).saturating_add(1));
+            }
+            let Some(frame) = fixed_samples else {
+                return stamps;
+            };
+            let tolerance = (frame / 2).max(unit.saturating_mul(2).saturating_add(1));
+            let packets = stamps.into_iter().map(|stamp| PacketTime { stamp, stamped: true, samples: Some(frame) });
+            contiguous_starts(packets, tolerance)
+        }
+        ContainerFile::Matroska(f) => {
+            let Some(track) = f.tracks.get(track_idx) else { return Vec::new() };
+            // Indexed PTS already subtracts CodecDelay rounded to the container clock.
+            // Translate between that clock and the warm path's whole-frame delay.
+            let tick_ns = i128::from(f.info.timestamp_scale.max(1));
+            let delay_ns = i128::from(track.codec_delay_ns);
+            let indexed_delay_ns = ((delay_ns + tick_ns / 2) / tick_ns) * tick_ns;
+            let delay_frames = audio_frames_from_ns(delay_ns, native_rate);
+            let stamp_for = |pts: i64| -> i64 {
+                let ns = i128::from(track.ticks_to_ns(pts)) + indexed_delay_ns;
+                i64::try_from(audio_frames_from_ns(ns, native_rate) - delay_frames).unwrap_or(0)
+            };
+            let tick_samples = i64::try_from(i128::from(track.ticks_to_ns(2)) * rate / 1_000_000_000).unwrap_or(i64::MAX).saturating_add(1);
+            if codec == CodecId::Opus {
+                let packets = track.samples.iter().enumerate().map(|(i, s)| {
+                    let samples = f.read_sample(source, track_idx, i).ok().and_then(|p| opus_packet_samples(&p)).map(i64::from);
+                    PacketTime { stamp: stamp_for(s.pts), stamped: s.lace == 0 || s.duration > 0, samples }
+                });
+                return contiguous_starts(packets, tick_samples);
+            }
+            let Some(frame) = fixed_samples else {
+                return track.samples.iter().map(|s| stamp_for(s.pts)).collect();
+            };
+            let packets = track.samples.iter().map(|s| PacketTime { stamp: stamp_for(s.pts), stamped: s.lace == 0 || s.duration > 0, samples: Some(frame) });
+            contiguous_starts(packets, (frame / 2).max(tick_samples))
+        }
+    }
+}
+
+fn audio_frames_from_ns(ns: i128, rate: u32) -> i128 {
+    (ns * i128::from(rate)) / 1_000_000_000
 }
 
 fn open_audio_tracks<I>(container: &ContainerFile, source: &dyn ByteSource, candidates: I) -> Option<(Vec<AudioTrackEntry>, Vec<AudioStreamInfo>)>
@@ -207,7 +337,7 @@ where
 {
     let mut audio_tracks = Vec::new();
     let mut audio_infos = Vec::new();
-    for (idx, sample_count, params, codec_delay_ns) in candidates {
+    for (idx, sample_count, params, _codec_delay_ns) in candidates {
         if audio_tracks.len() >= MAX_AUDIO_STREAMS {
             break;
         }
@@ -218,10 +348,20 @@ where
             lookahead.push(pkt);
         }
         let refs: Vec<&[u8]> = lookahead.iter().map(Vec::as_slice).collect();
-        let dec = AudioTrackDecoder::new(&params, &refs).ok()?;
+        let mut dec = AudioTrackDecoder::new(&params, &refs).ok()?;
         let native_rate = dec.sample_rate().max(1);
         let channels = u32::from(dec.layout().channels()).max(1);
-        let delay_samples = i64::try_from((i128::from(codec_delay_ns) * i128::from(native_rate)) / 1_000_000_000).unwrap_or(0);
+        let codec = dec.codec();
+        let fixed_samples = fixed_packet_samples(&mut dec, codec, &lookahead);
+        let audio_starts = compute_audio_starts(container, source, idx, codec, native_rate, fixed_samples);
+        let seek_preroll_samples = match container {
+            ContainerFile::Matroska(f) if codec == CodecId::Opus => {
+                let preroll_ns = i128::from(f.tracks[idx].seek_pre_roll_ns.max(80_000_000));
+                i64::try_from(preroll_ns * i128::from(native_rate) / 1_000_000_000).unwrap_or(0)
+            }
+            _ => 0,
+        };
+        let initial_pos = audio_starts.first().copied().unwrap_or(0);
         audio_infos.push(AudioStreamInfo {
             sample_rate: native_rate,
             channels,
@@ -231,7 +371,9 @@ where
         audio_tracks.push(AudioTrackEntry {
             track_idx: idx,
             native_rate,
-            state: Mutex::new(AudioTrackState { decoder: dec, next_sample: 0, decoded_pos: -delay_samples, buf: Vec::new() }),
+            audio_starts,
+            seek_preroll_samples,
+            state: Mutex::new(AudioTrackState { decoder: dec, next_sample: 0, decoded_pos: initial_pos, buf: Vec::new() }),
         });
     }
     Some((audio_tracks, audio_infos))
@@ -512,6 +654,8 @@ struct AudioTrackState {
 struct AudioTrackEntry {
     track_idx: usize,
     native_rate: u32,
+    audio_starts: Vec<i64>,
+    seek_preroll_samples: i64,
     state: Mutex<AudioTrackState>,
 }
 
@@ -625,7 +769,18 @@ impl MediaSource for CraftMediaSource {
         };
 
         let mut state = entry.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let decoded = decode_audio_range(&self.file, &*self.source, entry.track_idx, native_rate, channels_count, &mut state, native_start, native_frames)?;
+        let decoded = decode_audio_range(
+            &self.file,
+            &*self.source,
+            entry.track_idx,
+            native_rate,
+            channels_count,
+            &entry.audio_starts,
+            entry.seek_preroll_samples,
+            &mut state,
+            native_start,
+            native_frames,
+        )?;
 
         if sample_rate == native_rate {
             return Ok(AudioBuffer { sample_rate, channels: decoded });
@@ -837,6 +992,8 @@ fn decode_audio_range(
     track_idx: usize,
     native_rate: u32,
     channels_count: usize,
+    audio_starts: &[i64],
+    seek_preroll_samples: i64,
     state: &mut AudioTrackState,
     start: i64,
     frames: usize,
@@ -850,7 +1007,7 @@ fn decode_audio_range(
     let buf_len = state.buf.first().map_or(0, Vec::len) as i64;
     let buf_end = state.decoded_pos.saturating_add(buf_len);
     if start < state.decoded_pos || start > buf_end + i64::from(native_rate) * 2 {
-        let (seek_idx, decoded_pos) = file.audio_seek_info(track_idx, start, native_rate);
+        let (seek_idx, decoded_pos) = ContainerFile::audio_seek_info(audio_starts, seek_preroll_samples, start);
         state.decoder.reset();
         state.next_sample = seek_idx;
         state.decoded_pos = decoded_pos;
@@ -869,9 +1026,38 @@ fn decode_audio_range(
             return Err(MediaError::Cancelled);
         }
         let idx = state.next_sample;
+        let pk_start = audio_starts.get(idx).copied().unwrap_or_else(|| state.decoded_pos + state.buf.first().map_or(0, Vec::len) as i64);
+        if pk_start >= end {
+            break;
+        }
         let pkt = file.read_sample(source, track_idx, idx)?;
         state.next_sample = idx + 1;
         let block = state.decoder.decode(&pkt).map_err(|e| MediaError::Decode(e.to_string()))?;
+        let buf_len = state.buf.first().map_or(0, Vec::len) as i64;
+        if buf_len == 0 {
+            state.decoded_pos = pk_start;
+        } else {
+            let buf_end = state.decoded_pos.saturating_add(buf_len);
+            if pk_start > buf_end {
+                let gap = usize::try_from(pk_start - buf_end).unwrap_or(0);
+                for ch in &mut state.buf {
+                    ch.resize(ch.len() + gap, 0.0);
+                }
+            } else if pk_start < buf_end {
+                if pk_start <= state.decoded_pos {
+                    for ch in &mut state.buf {
+                        ch.clear();
+                    }
+                    state.decoded_pos = pk_start;
+                } else {
+                    let overlap = usize::try_from(buf_end - pk_start).unwrap_or(0);
+                    for ch in &mut state.buf {
+                        let keep = ch.len().saturating_sub(overlap);
+                        ch.truncate(keep);
+                    }
+                }
+            }
+        }
         for (c, ch) in state.buf.iter_mut().enumerate() {
             if let Some(src_ch) = block.channels.get(c) {
                 ch.extend_from_slice(src_ch);
@@ -1542,5 +1728,62 @@ mod tests {
         let resampled = src.audio(0, 256, 44_100).expect("resampled");
         assert_eq!(resampled.sample_rate, 44_100);
         assert_eq!(resampled.channels[0].len(), 256);
+    }
+
+    /// 1024-sample frames at 48 kHz stamped to the nearest millisecond, then back in samples.
+    fn ms_stamps(count: i64) -> Vec<i64> {
+        (0..count).map(|k| (k * 1024 * 1000 + 24_000) / 48_000 * 48).collect()
+    }
+
+    fn timed(stamps: &[i64], samples: Option<i64>) -> Vec<PacketTime> {
+        stamps.iter().map(|&stamp| PacketTime { stamp, stamped: true, samples }).collect()
+    }
+
+    #[test]
+    fn rounded_stamps_give_back_to_back_packets() {
+        let stamps = ms_stamps(200);
+        assert_eq!(&stamps[..4], [0, 1008, 2064, 3072]);
+        let starts = contiguous_starts(timed(&stamps, Some(1024)), 512);
+        assert_eq!(starts, (0..200).map(|k| k * 1024).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn real_gaps_and_overlaps_resynchronise() {
+        // A 100 ms gap after packet 3, then a packet stamped 600 samples early.
+        let mut stamps: Vec<i64> = (0..8).map(|k| k * 1024).collect();
+        for s in &mut stamps[4..] {
+            *s += 4800;
+        }
+        stamps[7] -= 600;
+        let starts = contiguous_starts(timed(&stamps, Some(1024)), 512);
+        assert_eq!(starts, [0, 1024, 2048, 3072, 8896, 9920, 10944, 11368]);
+        // Within the tolerance: runs on.
+        stamps[7] += 200;
+        assert_eq!(contiguous_starts(timed(&stamps, Some(1024)), 512)[7], 11968);
+    }
+
+    #[test]
+    fn unstamped_packets_follow_on_and_unknown_lengths_resynchronise() {
+        let packets = [0, 1024, 1024, 1024, 4096].map(|stamp| PacketTime { stamp, stamped: true, samples: Some(1024) });
+        let mut laced = packets;
+        laced[2].stamped = false;
+        laced[3].stamped = false;
+        assert_eq!(contiguous_starts(laced, 512), [0, 1024, 2048, 3072, 4096]);
+        let mut unknown = timed(&[0, 1024, 2100, 3124], Some(1024));
+        unknown[1].samples = None;
+        assert_eq!(contiguous_starts(unknown, 512), [0, 1024, 2100, 3124]);
+    }
+
+    #[test]
+    fn hostile_values_stay_finite() {
+        let packets = [
+            PacketTime { stamp: i64::MAX, stamped: true, samples: Some(i64::MAX) },
+            PacketTime { stamp: i64::MIN, stamped: false, samples: Some(-5) },
+            PacketTime { stamp: 0, stamped: true, samples: Some(i64::MIN) },
+            PacketTime { stamp: 7, stamped: true, samples: None },
+        ];
+        assert_eq!(contiguous_starts(packets, i64::MIN).len(), 4);
+        assert_eq!(contiguous_starts(packets, i64::MAX).len(), 4);
+        assert!(contiguous_starts([], 512).is_empty());
     }
 }
