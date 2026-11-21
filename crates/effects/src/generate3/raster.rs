@@ -59,6 +59,76 @@ pub(crate) fn raster_segs(w: usize, h: usize, segs: &[Seg], hardness: f64) -> Pl
     out
 }
 
+/// A square-ended piece of a tapering stroke from `a` (half-width `ra`) to `b` (half-width
+/// `rb`), its half-width changing linearly along it. Pieces that share an end join without a
+/// seam (unlike round caps, which reach back over a narrower neighbour), and a half-width of
+/// 0 comes to a point.
+#[derive(Clone, Copy, Debug)]
+pub struct Ribbon {
+    pub a: [f64; 2],
+    pub b: [f64; 2],
+    pub ra: f64,
+    pub rb: f64,
+}
+
+/// Slack on a ribbon's square ends (as a fraction of its length) so that a pixel centre on the
+/// shared end of two pieces is never missed by both through rounding.
+const RIBBON_END_SLACK: f64 = 1e-6;
+
+/// Max-combine ribbons into `out` with the brush falloff of [`raster_segs`]: the distance is
+/// measured across the ribbon, against its half-width where the pixel centre falls along it.
+pub(crate) fn raster_ribbons(out: &mut Plane, ribbons: &[Ribbon], hardness: f64) {
+    let (w, h) = (out.w, out.h);
+    if w == 0 || h == 0 || ribbons.is_empty() {
+        return;
+    }
+    let mut buckets: Vec<Vec<u32>> = vec![Vec::new(); h];
+    for (i, s) in ribbons.iter().enumerate() {
+        let pad = s.ra.max(s.rb) + 1.0;
+        let y0 = (s.a[1].min(s.b[1]) - pad).floor().max(0.0) as usize;
+        let y1 = (s.a[1].max(s.b[1]) + pad).ceil().min(h as f64);
+        if y1 <= 0.0 || y0 >= h {
+            continue;
+        }
+        for row in buckets.iter_mut().take(y1 as usize).skip(y0) {
+            row.push(i as u32);
+        }
+    }
+    let hard = hardness.clamp(0.0, 1.0);
+    out.data.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+        let py = y as f64 + 0.5;
+        for &i in &buckets[y] {
+            let s = ribbons[i as usize];
+            let (dx, dy) = (s.b[0] - s.a[0], s.b[1] - s.a[1]);
+            let l2 = dx * dx + dy * dy;
+            if l2 <= 1e-12 {
+                continue;
+            }
+            let l = l2.sqrt();
+            let pad = s.ra.max(s.rb) + 1.0;
+            let x0 = (s.a[0].min(s.b[0]) - pad).floor().max(0.0) as usize;
+            let x1 = ((s.a[0].max(s.b[0]) + pad).ceil().max(0.0) as usize).min(w);
+            for (x, o) in row.iter_mut().enumerate().take(x1).skip(x0) {
+                let px = x as f64 + 0.5;
+                let t = ((px - s.a[0]) * dx + (py - s.a[1]) * dy) / l2;
+                if !(-RIBBON_END_SLACK..=1.0 + RIBBON_END_SLACK).contains(&t) {
+                    continue;
+                }
+                let d = ((px - s.a[0]) * dy - (py - s.a[1]) * dx).abs() / l;
+                let r = s.ra + (s.rb - s.ra) * t.clamp(0.0, 1.0);
+                let (inner, outer) = (r * hard - 0.5, r + 0.5);
+                if d >= outer {
+                    continue;
+                }
+                let c = if d <= inner { 1.0 } else { 1.0 - smoothstep(inner as f32, outer as f32, d as f32) };
+                if c > *o {
+                    *o = c;
+                }
+            }
+        }
+    });
+}
+
 /// Segments along a polyline (buffer px).
 pub fn poly_segs(pts: &[[f64; 2]], closed: bool, r: f64, v: f32, out: &mut Vec<Seg>) {
     let n = pts.len();

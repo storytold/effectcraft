@@ -1,4 +1,6 @@
-use super::raster::{Seg, all_masks_px, chaikin, mask_px, over, poly_segs, raster_convex, raster_segs, scan_runs, stroke_outline, trim_poly};
+use super::raster::{
+    Ribbon, Seg, all_masks_px, chaikin, mask_px, over, poly_segs, raster_convex, raster_ribbons, raster_segs, scan_runs, stroke_outline, trim_poly,
+};
 use super::{
     Buf, EffectCtx, Image, IndexedParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator, Params, Plane, gauss_plane, hash1,
     layer_or_self, luminance, poly_length, smoothstep, unpremul,
@@ -18,18 +20,23 @@ pub(crate) fn paint(img: &mut Image, cov: &Plane, color: [f32; 4], opacity: f32,
     });
 }
 
-/// Coverage of a plan-drawn generator: round-capped segments rasterised by `raster_segs`
-/// with `hardness`, or the union of convex polygons (`raster_convex`).
+/// Coverage of a plan-drawn generator: round-capped segments and square-ended ribbons (the
+/// Stroke effect's tapers) rasterised by `raster_segs` / `raster_ribbons` with `hardness` and
+/// max-combined, or the union of convex polygons (`raster_convex`).
 #[derive(Clone, Debug)]
 pub enum Coverage {
-    Segs { segs: Vec<Seg>, hardness: f64 },
+    Segs { segs: Vec<Seg>, ribbons: Vec<Ribbon>, hardness: f64 },
     Convex(Vec<Vec<[f64; 2]>>),
 }
 
 impl Coverage {
     fn raster(&self, w: usize, h: usize) -> Plane {
         match self {
-            Coverage::Segs { segs, hardness } => raster_segs(w, h, segs, *hardness),
+            Coverage::Segs { segs, ribbons, hardness } => {
+                let mut cov = raster_segs(w, h, segs, *hardness);
+                raster_ribbons(&mut cov, ribbons, *hardness);
+                cov
+            }
             Coverage::Convex(polys) => raster_convex(w, h, polys),
         }
     }
@@ -235,7 +242,7 @@ fn scribble_plan(ctx: &EffectCtx, b: &Buf) -> Option<PaintPlan> {
         for part in &parts {
             poly_segs(part, false, r, 1.0, &mut segs);
         }
-        Coverage::Segs { segs, hardness: 0.9 }
+        Coverage::Segs { segs, ribbons: Vec::new(), hardness: 0.9 }
     } else {
         Coverage::Convex(stroke_outline(&parts, r, cap, join, pr.f("edgeOptions/miterLimit").max(1.0)))
     };
@@ -308,25 +315,35 @@ impl StrokeTaper {
     }
 }
 
-/// Segments along a polyline with the brush radius `r` narrowed by `taper`. Only the tapered
-/// ends are cut into short pieces whose radius follows the taper (so the width changes
-/// smoothly); the full-width body between them stays one segment per polyline edge.
-fn tapered_segs(pts: &[[f64; 2]], r: f64, taper: &StrokeTaper, out: &mut Vec<Seg>) {
+/// A polyline stroked with the brush radius `r` narrowed by `taper`, as square-ended ribbons
+/// with round dabs only where the brush keeps a round end: at the polyline's corners and at an
+/// end without a taper. (A round cap at the full-width body would reach back over a short
+/// taper and hide its point.) Only the tapered ends are cut into pieces; the body between them
+/// is one ribbon per polyline edge.
+fn tapered_segs(pts: &[[f64; 2]], r: f64, taper: &StrokeTaper, segs: &mut Vec<Seg>, ribbons: &mut Vec<Ribbon>) {
     let lens: Vec<f64> = pts.windows(2).map(|w| ((w[1][0] - w[0][0]).powi(2) + (w[1][1] - w[0][1]).powi(2)).sqrt()).collect();
     let len: f64 = lens.iter().sum();
     if len <= 0.0 {
-        poly_segs(pts, false, r, 1.0, out);
+        poly_segs(pts, false, r, 1.0, segs);
         return;
     }
     let (ls, le) = taper.lengths(len);
+    let radius = |s: f64| r * taper.factor(s, len);
     // Pieces about a pixel long, at least eight per taper (never more than 100 000 in all).
     let piece = |zone: f64| (r * 0.5).clamp(0.5, 2.0).min(zone / 8.0).max(len / 100_000.0).max(1e-3);
-    // (from, to, piece length or 0 for one full-width segment) along the drawn stroke.
+    // (from, to, piece length or 0 for one full-width ribbon) along the drawn stroke.
     let zones = [(0.0, ls, piece(ls)), (ls, len - le, 0.0), (len - le, len, piece(le))];
+    let dab = |q: [f64; 2], r: f64| Seg { a: q, b: q, r, v: 1.0 };
+    if ls <= 0.0 {
+        segs.push(dab(pts[0], r));
+    }
     let mut acc = 0.0;
     for (w, &l) in pts.windows(2).zip(&lens) {
         if l <= 0.0 {
             continue;
+        }
+        if acc > 0.0 {
+            segs.push(dab(w[0], radius(acc)));
         }
         let at = |s: f64| {
             let t = ((s - acc) / l).clamp(0.0, 1.0);
@@ -337,17 +354,16 @@ fn tapered_segs(pts: &[[f64; 2]], r: f64, taper: &StrokeTaper, out: &mut Vec<Seg
             if b - a <= 1e-9 {
                 continue;
             }
-            if step <= 0.0 {
-                out.push(Seg { a: at(a), b: at(b), r, v: 1.0 });
-                continue;
-            }
-            let n = ((b - a) / step).ceil().max(1.0) as usize;
+            let n = if step > 0.0 { ((b - a) / step).ceil().max(1.0) as usize } else { 1 };
             for i in 0..n {
                 let (s0, s1) = (a + (b - a) * i as f64 / n as f64, a + (b - a) * (i + 1) as f64 / n as f64);
-                out.push(Seg { a: at(s0), b: at(s1), r: r * taper.factor((s0 + s1) * 0.5, len), v: 1.0 });
+                ribbons.push(Ribbon { a: at(s0), b: at(s1), ra: radius(s0), rb: radius(s1) });
             }
         }
         acc += l;
+    }
+    if le <= 0.0 {
+        segs.push(dab(pts[pts.len() - 1], r));
     }
 }
 
@@ -372,6 +388,7 @@ fn stroke_plan(ctx: &EffectCtx, b: &Buf) -> PaintPlan {
     let lens: Vec<f64> = polys.iter().map(|(p, c, _)| poly_length(p, *c)).collect();
     let total: f64 = lens.iter().sum();
     let mut segs = Vec::new();
+    let mut ribbons = Vec::new();
     let mut acc = 0.0;
     for ((pts, closed, _), &len) in polys.iter().zip(&lens) {
         let (s0, s1) = if all && sequential {
@@ -387,7 +404,7 @@ fn stroke_plan(ctx: &EffectCtx, b: &Buf) -> PaintPlan {
         if spacing <= 0.5 {
             let part = trim_poly(pts, *closed, s0, s1);
             if taper.is_active() {
-                tapered_segs(&part, r, &taper, &mut segs);
+                tapered_segs(&part, r, &taper, &mut segs, &mut ribbons);
             } else {
                 poly_segs(&part, false, r, 1.0, &mut segs);
             }
@@ -401,7 +418,7 @@ fn stroke_plan(ctx: &EffectCtx, b: &Buf) -> PaintPlan {
             }
         }
     }
-    PaintPlan { cov: Coverage::Segs { segs, hardness: hard }, color: pr.color("color"), opacity: (pr.f("opacity") / 100.0) as f32, style }
+    PaintPlan { cov: Coverage::Segs { segs, ribbons, hardness: hard }, color: pr.color("color"), opacity: (pr.f("opacity") / 100.0) as f32, style }
 }
 
 // ---------------------------------------------------------------- Vegas
@@ -606,7 +623,7 @@ fn vegas_plan(ctx: &EffectCtx, b: &Buf) -> PaintPlan {
         3 => 2,
         _ => 1,
     };
-    PaintPlan { cov: Coverage::Segs { segs, hardness: hard }, color: pr.color("color"), opacity: 1.0, style }
+    PaintPlan { cov: Coverage::Segs { segs, ribbons: Vec::new(), hardness: hard }, color: pr.color("color"), opacity: 1.0, style }
 }
 
 // ---------------------------------------------------------------- Write-on / Glue Gun
@@ -668,7 +685,7 @@ fn write_on_plan(ctx: &EffectCtx, b: &Buf) -> PaintPlan {
         segs.push(Seg { a: q, b: q, r, v });
     }
     PaintPlan {
-        cov: Coverage::Segs { segs, hardness: pr.f("brushHardness") / 100.0 },
+        cov: Coverage::Segs { segs, ribbons: Vec::new(), hardness: pr.f("brushHardness") / 100.0 },
         color: pr.color("color"),
         opacity: if own_opacity { 1.0 } else { opacity(pr) },
         style: pr.e("paintStyle"),

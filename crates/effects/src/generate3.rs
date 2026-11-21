@@ -32,7 +32,7 @@ pub use fill::{eyedropper_color, paint_bucket_region};
 #[cfg(test)]
 use paths::contours;
 pub use paths::{Coverage, PaintPlan, paint_plan, plan_reads_pixels, scribble_style};
-pub use raster::{Seg, poly_segs};
+pub use raster::{Ribbon, Seg, poly_segs};
 pub(crate) use raster::{mask_px, raster_segs};
 #[cfg(test)]
 pub(crate) use raster::{raster_convex, stroke_outline};

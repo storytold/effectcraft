@@ -18,7 +18,7 @@
 //! math defeats double-f32 emulation); in f32, orbits near the set escape at other iterations
 //! on 0.3–1.5 % of the pixels even at low magnification.
 
-use effectcraft_effects::{Buf, Coverage, EffectCtx};
+use effectcraft_effects::{Buf, Coverage, EffectCtx, Ribbon};
 use effectcraft_raster::Image;
 
 use crate::context::{Enc, GpuImage, Params};
@@ -205,16 +205,34 @@ impl Variant {
 /// Rasterise segments (a, b, radius, value) into up to four coverages (x, y, z, w), one per
 /// variant, max-combined as raster_segs.
 fn raster_segs(e: &mut Enc, w: u32, h: u32, segs: impl Iterator<Item = ([f64; 2], [f64; 2], f64, f32)>, variants: &[Variant]) -> Option<GpuImage> {
-    let mut items = Items::new(10, w, h);
+    raster_items(e, w, h, segs, &[], variants)
+}
+
+/// Round-capped segments and square-ended ribbons (effectcraft_effects::Ribbon) in one item
+/// table, max-combined as the CPU's `raster_segs` + `raster_ribbons`.
+fn raster_items(
+    e: &mut Enc,
+    w: u32,
+    h: u32,
+    segs: impl Iterator<Item = ([f64; 2], [f64; 2], f64, f32)>,
+    ribbons: &[Ribbon],
+    variants: &[Variant],
+) -> Option<GpuImage> {
+    const STRIDE: usize = 8 + 4;
+    let mut items = Items::new(STRIDE, w, h);
+    let pad = |r: f64| variants.iter().map(|k| k.radius(r)).fold(f64::NEG_INFINITY, f64::max) + 1.0;
+    let bounds = |a: [f64; 2], z: [f64; 2], pad: f64| [a[0].min(z[0]) - pad, a[1].min(z[1]) - pad, a[0].max(z[0]) + pad, a[1].max(z[1]) + pad];
     for (a, z, r, v) in segs {
-        let pad = variants.iter().map(|k| k.radius(r)).fold(f64::NEG_INFINITY, f64::max) + 1.0;
-        let bb = [a[0].min(z[0]) - pad, a[1].min(z[1]) - pad, a[0].max(z[0]) + pad, a[1].max(z[1]) + pad];
-        items.push(bb, &[a[0] as f32, a[1] as f32, z[0] as f32, z[1] as f32, r as f32, v]);
+        items.push(bounds(a, z, pad(r)), &[a[0] as f32, a[1] as f32, z[0] as f32, z[1] as f32, r as f32, v, r as f32, 0.0]);
+    }
+    for s in ribbons {
+        let (a, z) = (s.a, s.b);
+        items.push(bounds(a, z, pad(s.ra.max(s.rb))), &[a[0] as f32, a[1] as f32, z[0] as f32, z[1] as f32, s.ra as f32, 1.0, s.rb as f32, 1.0]);
     }
     let (data, items_at, tx) = items.data()?;
     let buf = e.data(&data);
     let mut p = Params::default();
-    p.u[0] = [items_at, 10, tx, variants.len() as u32];
+    p.u[0] = [items_at, STRIDE as u32, tx, variants.len() as u32];
     for (k, v) in variants.iter().enumerate() {
         p.f[k] = [v.mul as f32, v.add as f32, v.min as f32, v.hard as f32];
         p.u[1][0] |= (v.linear as u32) << k;
@@ -228,7 +246,7 @@ fn raster_segs(e: &mut Enc, w: u32, h: u32, segs: impl Iterator<Item = ([f64; 2]
 /// A plan's coverage (x).
 fn coverage(e: &mut Enc, w: u32, h: u32, cov: &Coverage) -> Option<GpuImage> {
     match cov {
-        Coverage::Segs { segs, hardness } => raster_segs(e, w, h, segs.iter().map(|s| (s.a, s.b, s.r, s.v)), &[Variant::plain(*hardness)]),
+        Coverage::Segs { segs, ribbons, hardness } => raster_items(e, w, h, segs.iter().map(|s| (s.a, s.b, s.r, s.v)), ribbons, &[Variant::plain(*hardness)]),
         Coverage::Convex(polys) => {
             const STRIDE: usize = 1 + 32 + 4;
             let mut items = Items::new(STRIDE, w, h);

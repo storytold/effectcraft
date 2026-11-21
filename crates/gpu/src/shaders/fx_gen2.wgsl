@@ -43,7 +43,9 @@ fn fg2_in_bounds(p: vec2<i32>, at: u32, stride: u32) -> bool {
 }
 
 // ---------------------------------------------------------------- segments (generate3::raster_segs)
-// Items: (ax, ay, bx, by, radius, value, bounds). Up to four coverages per pixel (x, y, z, w),
+// Items: (ax, ay, bx, by, radius, value, radius at b, kind, bounds). Kind 0 is a round-capped
+// segment (radius at b unused); kind 1 a square-ended ribbon (generate3::raster_ribbons) whose
+// radius runs from `radius` at a to `radius at b`, the distance measured across it. Up to four coverages per pixel (x, y, z, w),
 // variant k with radius max(r · f[k].x + f[k].y, f[k].z) and hardness f[k].w, max-combined;
 // bit k of u[1].x selects Advanced Lightning's linear core (clamp(r − d + 0.5, 0, 1)) instead.
 // u[0] = (items at, stride, tiles x, variants).
@@ -69,16 +71,30 @@ fn fg2_segs(@builtin(global_invocation_id) gid: vec3<u32>) {
         let ay = data[at + 1u];
         let dx = data[at + 2u] - ax;
         let dy = data[at + 3u] - ay;
-        let r = data[at + 4u];
+        var r = data[at + 4u];
         let v = data[at + 5u];
         let l2 = dx * dx + dy * dy;
-        var t = 0.0;
-        if (l2 > 1e-12) {
-            t = clamp(((px - ax) * dx + (py - ay) * dy) / l2, 0.0, 1.0);
+        var d = 0.0;
+        if (data[at + 7u] > 0.5) {
+            // Ribbon: square ends (with slack against f32 rounding), linear half-width.
+            if (l2 <= 1e-12) {
+                continue;
+            }
+            let tr = ((px - ax) * dx + (py - ay) * dy) / l2;
+            if (tr < -1e-4 || tr > 1.0001) {
+                continue;
+            }
+            d = abs((px - ax) * dy - (py - ay) * dx) / sqrt(l2);
+            r = mix(r, data[at + 6u], clamp(tr, 0.0, 1.0));
+        } else {
+            var t = 0.0;
+            if (l2 > 1e-12) {
+                t = clamp(((px - ax) * dx + (py - ay) * dy) / l2, 0.0, 1.0);
+            }
+            let ex = px - ax - dx * t;
+            let ey = py - ay - dy * t;
+            d = sqrt(ex * ex + ey * ey);
         }
-        let ex = px - ax - dx * t;
-        let ey = py - ay - dy * t;
-        let d = sqrt(ex * ex + ey * ey);
         for (var j = 0u; j < nv; j++) {
             let vf = P.f[j];
             let rk = max(r * vf.x + vf.y, vf.z);
