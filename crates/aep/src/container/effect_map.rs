@@ -340,6 +340,8 @@ pub const GRID_BLEND: &[&str] = &[
     "Color",
     "Luminosity",
 ];
+/// Shift Channels' four menus (After Effects 2026 effect sweep `fx_all_Channel`).
+pub const SHIFT_CHANNELS: &[&str] = &["Alpha", "Red", "Green", "Blue", "Luminance", "Hue", "Lightness", "Saturation", "Full On", "Full Off"];
 /// 903.
 pub const FAST_ZOOM: &[&str] = &["Standard", "Brightest", "Darkest"];
 /// 903.
@@ -1142,6 +1144,49 @@ pub const EFFECTS: &[EffectMap] = &[
     fx("ADBE Checkbox Control", "ec.control.checkbox", &[pm(1, K::Checkbox, "checkbox", Conv::Checkbox)]),
     fx("ADBE Color Control", "ec.control.color", &[pm(1, K::Color, "color", Conv::Color)]),
     fx("ADBE Point Control", "ec.control.point", &[pm(1, K::Point, "point", Conv::Point)]),
+    // Motion Tile (After Effects 2026 effect sweep `fx_all_Stylize`): 1 Tile Center, 2 / 3 Tile
+    // Width / Height and 4 / 5 Output Width / Height fixed sliders in percent (valid 0..100 and
+    // 0..30 000), 6 Mirror Edges, 7 Phase, 8 Horizontal Phase Shift (checkboxes labelled in
+    // `pdnm`).
+    fx(
+        "ADBE Tile",
+        "ec.stylize.motiontile",
+        &[
+            pm(1, K::Point, "tileCenter", Conv::Point),
+            pm(2, K::FixedSlider, "tileWidth", Conv::Plain { valid_max: 100.0 }),
+            pm(3, K::FixedSlider, "tileHeight", Conv::Plain { valid_max: 100.0 }),
+            pm(4, K::FixedSlider, "outputWidth", Conv::Plain { valid_max: 30000.0 }),
+            pm(5, K::FixedSlider, "outputHeight", Conv::Plain { valid_max: 30000.0 }),
+            pm(6, K::Checkbox, "mirrorEdges", Conv::Checkbox),
+            pm(7, K::Angle, "phase", Conv::Angle),
+            pm(8, K::Checkbox, "horizontalPhaseShift", Conv::Checkbox),
+        ],
+    ),
+    // Shift Channels (sweep `fx_all_Channel`): four popups of ten items, defaults Alpha, Red,
+    // Green, Blue.
+    fx(
+        "ADBE Shift Channels",
+        "ec.channel.shiftchannels",
+        &[
+            pm(1, K::Popup, "takeAlphaFrom", Conv::Popup { default: 1, items: SHIFT_CHANNELS }),
+            pm(2, K::Popup, "takeRedFrom", Conv::Popup { default: 2, items: SHIFT_CHANNELS }),
+            pm(3, K::Popup, "takeGreenFrom", Conv::Popup { default: 3, items: SHIFT_CHANNELS }),
+            pm(4, K::Popup, "takeBlueFrom", Conv::Popup { default: 4, items: SHIFT_CHANNELS }),
+        ],
+    ),
+    // Emboss (sweep `fx_all_Stylize`): 1 Direction, 2 Relief a fixed slider (valid 0..1000,
+    // default 1), 3 Contrast an integer slider (valid max 32 767, default 100), 4 Blend With
+    // Original a fixed slider in percent (valid 0..100).
+    fx(
+        "ADBE Emboss",
+        "ec.stylize.emboss",
+        &[
+            pm(1, K::Angle, "direction", Conv::Angle),
+            pm(2, K::FixedSlider, "relief", Conv::Plain { valid_max: 1000.0 }),
+            pm(3, K::IntSlider, "contrast", Conv::Plain { valid_max: 32767.0 }),
+            pm(4, K::FixedSlider, "blend", Conv::Plain { valid_max: 100.0 }),
+        ],
+    ),
 ];
 
 /// Exposure's three sliders, by their valid maximum in the file (389).
