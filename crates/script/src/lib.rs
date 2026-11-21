@@ -55,7 +55,7 @@
 #![recursion_limit = "256"]
 
 mod include;
-pub mod matchnames;
+pub use effectcraft_project::matchnames;
 mod model;
 mod runtime;
 mod scriptfile;
