@@ -293,19 +293,23 @@ impl ContainerFile {
         (seek_idx, decoded_pos)
     }
 
-    fn audio_silent_prefix(&self, track_idx: usize, start: i64, frames: usize, sample_rate: u32) -> usize {
-        let Self::Isobmff(file) = self else { return 0 };
-        let Some((leading_duration, media_time)) = file.tracks.get(track_idx).and_then(|track| unit_rate_media_edit(&track.edits)) else {
-            return 0;
+    fn audio_edit_range(&self, track_idx: usize, start: i64, frames: usize, sample_rate: u32) -> std::ops::Range<usize> {
+        let Self::Isobmff(file) = self else { return 0..frames };
+        let Some((leading_duration, media)) = file.tracks.get(track_idx).and_then(|track| unit_rate_media_edit(&track.edits)) else {
+            return 0..frames;
         };
-        if leading_duration == 0 || media_time == 0 || file.timescale == 0 {
-            return 0;
+        if file.timescale == 0 {
+            return 0..frames;
         }
 
-        // The net packet offset includes the trim and can put decoder preroll inside
-        // the empty edit. Use the empty edit's duration on the output clock instead.
-        let first_presented = (u128::from(leading_duration) * u128::from(sample_rate)).div_ceil(u128::from(file.timescale)) as i128;
-        usize::try_from((first_presented - i128::from(start)).max(0)).unwrap_or(usize::MAX).min(frames)
+        // Packet positions include preroll. The edit's movie-clock boundaries
+        // determine which samples are presented, with the end excluded.
+        let offset = |ticks: u128| {
+            let frame = (ticks * u128::from(sample_rate)).div_ceil(u128::from(file.timescale)) as i128;
+            usize::try_from((frame - i128::from(start)).max(0)).unwrap_or(usize::MAX).min(frames)
+        };
+        let leading = u128::from(leading_duration);
+        offset(leading)..offset(leading + u128::from(media.segment_duration))
     }
 }
 
@@ -690,14 +694,14 @@ fn clean_aperture_region(aperture: isobmff::CleanAperture, (width, height): (u32
 }
 
 /// A single unit-rate media span, optionally preceded by one empty span.
-fn unit_rate_media_edit(edits: &[isobmff::Edit]) -> Option<(u64, i64)> {
+fn unit_rate_media_edit(edits: &[isobmff::Edit]) -> Option<(u64, &isobmff::Edit)> {
     const UNIT_RATE: i32 = 0x0001_0000;
     let (leading_duration, media) = match edits {
         [media] => (0, media),
         [empty, media] if empty.media_time == -1 && empty.segment_duration > 0 && empty.media_rate == UNIT_RATE => (empty.segment_duration, media),
         _ => return None,
     };
-    (media.media_time >= 0 && media.segment_duration != 0 && media.media_rate == UNIT_RATE).then_some((leading_duration, media.media_time))
+    (media.media_time >= 0 && media.segment_duration != 0 && media.media_rate == UNIT_RATE).then_some((leading_duration, media))
 }
 
 /// A scalar EDL origin cannot describe dwell, disjoint edits or respeeding.
@@ -705,7 +709,7 @@ fn continuous_edit_mapping(track: &isobmff::Track, movie_timescale: u32) -> Opti
     if track.edits.is_empty() {
         return (track.edit_offset == 0).then_some((0, 0));
     }
-    let (leading_duration, media_time) = unit_rate_media_edit(&track.edits)?;
+    let (leading_duration, media) = unit_rate_media_edit(&track.edits)?;
     if movie_timescale == 0 || track.timescale == 0 {
         return None;
     }
@@ -716,8 +720,8 @@ fn continuous_edit_mapping(track: &isobmff::Track, movie_timescale: u32) -> Opti
     if lead % movie_clock != 0 {
         return None;
     }
-    let offset = i64::try_from(lead / movie_clock - i128::from(media_time)).ok()?;
-    (offset == track.edit_offset).then_some((media_time, offset))
+    let offset = i64::try_from(lead / movie_clock - i128::from(media.media_time)).ok()?;
+    (offset == track.edit_offset).then_some((media.media_time, offset))
 }
 
 /// The EDL origin is the timecode at presentation time zero, not the raw
@@ -1446,15 +1450,20 @@ impl MediaSource for CraftMediaSource {
             return Err(MediaError::Decode("invalid audio sample rate 0".into()));
         }
         let channels_count = self.info.audio_streams.get(stream).map_or(2, |s| s.channels as usize);
-        let silent_frames = self.file.audio_silent_prefix(entry.track_idx, start, frames, sample_rate);
-        let audible_frames = frames - silent_frames;
+        let edit_range = self.file.audio_edit_range(entry.track_idx, start, frames, sample_rate);
+        let audible_frames = edit_range.len();
         if audible_frames == 0 {
             return Ok(AudioBuffer::new(sample_rate, channels_count as u16, frames));
         }
 
-        let audible_start = i64::try_from(i128::from(start) + silent_frames as i128).unwrap_or(i64::MAX);
+        let audible_start = i64::try_from(i128::from(start) + edit_range.start as i128).unwrap_or(i64::MAX);
         let native_rate = entry.native_rate;
-        let (native_start, native_frames) = native_audio_window(audible_start, audible_frames, native_rate, sample_rate);
+        let (native_start, mut native_frames) = native_audio_window(audible_start, audible_frames, native_rate, sample_rate);
+        if native_rate != sample_rate {
+            // The resampler asks for lookahead. Do not interpolate with samples
+            // that are stored in the track but lie beyond the edit.
+            native_frames = self.file.audio_edit_range(entry.track_idx, native_start, native_frames, native_rate).end;
+        }
 
         let decoded = match &entry.backend {
             AudioBackend::Decoder { seek_preroll_samples, state: state_mutex } => {
@@ -1503,10 +1512,10 @@ impl MediaSource for CraftMediaSource {
 
         let mut channels =
             if sample_rate == native_rate { decoded } else { resample_audio(&decoded, channels_count, native_rate, sample_rate, audible_frames) };
-        if silent_frames > 0 {
+        if audible_frames < frames {
             for channel in &mut channels {
                 channel.resize(frames, 0.0);
-                channel.rotate_right(silent_frames);
+                channel.rotate_right(edit_range.start);
             }
         }
         Ok(AudioBuffer { sample_rate, channels })
@@ -2550,29 +2559,37 @@ mod tests {
         }
     }
 
-    /// Original PCM generated in memory to exercise an empty edit followed by a trim.
+    /// Original PCM generated in memory at the MOV writer's default movie timescale.
+    fn edited_pcm_mov(rate: u32, samples: &[i16], edits: Vec<isobmff::Edit>) -> Vec<u8> {
+        use isobmff::{Brand, Mp4Writer, PcmConfig, SampleEntry, TrackConfig, WriteSample, WriterOptions};
+
+        let mut writer = Mp4Writer::new(std::io::Cursor::new(Vec::new()), WriterOptions::new(Brand::Mov)).unwrap();
+        let pcm = PcmConfig { bits: 16, float: false, big_endian: false, signed: true, channels: 1, sample_rate: f64::from(rate) };
+        let mut config = TrackConfig::new(SampleEntry::pcm(pcm), rate);
+        config.edits = edits;
+        let track = writer.add_track(config).unwrap();
+        for chunk in samples.chunks(256) {
+            let data: Vec<u8> = chunk.iter().flat_map(|sample| sample.to_le_bytes()).collect();
+            writer.write_sample(track, WriteSample { data: &data, duration: chunk.len() as u32, composition_offset: 0, is_sync: true }).unwrap();
+        }
+        writer.finish().unwrap().into_inner()
+    }
+
     #[test]
     fn mov_pcm_trim_after_empty_edit_preserves_leading_silence() {
-        use isobmff::{Brand, Edit, Mp4Writer, PcmConfig, SampleEntry, TrackConfig, WriteSample, WriterOptions};
-
         const RATE: u32 = 48_000;
         const DELAY_MS: u64 = 100;
         const DELAY: i64 = 4_800;
         let samples: Vec<i16> = (0..12_000).map(|i| 1_000 + (i % 257) as i16 * 32).collect();
         for trim in [2_400i64, 4_800, 9_600] {
-            let mut writer = Mp4Writer::new(std::io::Cursor::new(Vec::new()), WriterOptions::new(Brand::Mov)).unwrap();
-            let pcm = PcmConfig { bits: 16, float: false, big_endian: false, signed: true, channels: 1, sample_rate: f64::from(RATE) };
-            let mut config = TrackConfig::new(SampleEntry::pcm(pcm), RATE);
-            config.edits = vec![
-                Edit { segment_duration: DELAY_MS, media_time: -1, media_rate: 0x0001_0000 },
-                Edit { segment_duration: 40, media_time: trim, media_rate: 0x0001_0000 },
-            ];
-            let track = writer.add_track(config).unwrap();
-            for chunk in samples.chunks(256) {
-                let data: Vec<u8> = chunk.iter().flat_map(|sample| sample.to_le_bytes()).collect();
-                writer.write_sample(track, WriteSample { data: &data, duration: chunk.len() as u32, composition_offset: 0, is_sync: true }).unwrap();
-            }
-            let bytes = writer.finish().unwrap().into_inner();
+            let bytes = edited_pcm_mov(
+                RATE,
+                &samples,
+                vec![
+                    isobmff::Edit { segment_duration: DELAY_MS, media_time: -1, media_rate: 0x0001_0000 },
+                    isobmff::Edit { segment_duration: 40, media_time: trim, media_rate: 0x0001_0000 },
+                ],
+            );
             let file = isobmff::open(bytes.as_slice()).unwrap();
             assert_eq!(file.timescale, 1_000);
             assert_eq!(file.tracks[0].edit_offset, DELAY - trim);
@@ -2586,6 +2603,38 @@ mod tests {
             assert_eq!(read(DELAY, 2, RATE), expected[2..], "read from first presented sample, trim {trim}");
             assert_eq!(read(DELAY * 2 - 4, 5, RATE * 2), [0.0, 0.0, 0.0, 0.0, sample(trim)], "resampled read, trim {trim}");
             assert_eq!(read(4_408, 3, 44_100), [0.0, 0.0, sample(trim)], "nonintegral resampling ratio, trim {trim}");
+        }
+    }
+
+    #[test]
+    fn mov_pcm_audio_is_silent_after_the_edit_span() {
+        const RATE: u32 = 48_000;
+        const EDIT_MS: u64 = 41;
+        const TRIM: i64 = 9_600;
+        const EDIT_FRAMES: usize = 1_968;
+        let samples: Vec<i16> = (0..12_000).map(|i| 1_000 + (i % 257) as i16 * 32).collect();
+        let last = f32::from(samples[TRIM as usize + EDIT_FRAMES - 1]) / 32_768.0;
+        let previous = f32::from(samples[TRIM as usize + EDIT_FRAMES - 2]) / 32_768.0;
+        for delay_ms in [0, 100] {
+            let mut edits = Vec::new();
+            if delay_ms > 0 {
+                edits.push(isobmff::Edit { segment_duration: delay_ms, media_time: -1, media_rate: 0x0001_0000 });
+            }
+            edits.push(isobmff::Edit { segment_duration: EDIT_MS, media_time: TRIM, media_rate: 0x0001_0000 });
+            let bytes = edited_pcm_mov(RATE, &samples, edits);
+            let source = open_bytes("edited-pcm.mov", bytes.into()).expect("shared MOV route").unwrap();
+            let read = |start, frames, rate| source.audio(start, frames, rate).expect("direct shared PCM read").channels.remove(0);
+
+            let end = ((delay_ms + EDIT_MS) * 48) as i64;
+            assert_eq!(read(end - 2, 4, RATE), [previous, last, 0.0, 0.0], "crossing the boundary, delay {delay_ms}");
+            assert_eq!(read(end, 2, RATE), [0.0, 0.0], "read after the end");
+            assert_eq!(read(end - 2, 2, RATE), [previous, last], "backward seek");
+            assert_eq!(read(end * 2 - 4, 6, RATE * 2), [previous, (previous + last) / 2.0, last, last, 0.0, 0.0]);
+
+            let first_silent = ((delay_ms + EDIT_MS) * 44_100).div_ceil(1_000) as i64;
+            let boundary = read(first_silent - 1, 2, 44_100);
+            assert!(boundary[0] > 0.0, "sample before the fractional boundary");
+            assert_eq!(boundary[1], 0.0, "sample after the fractional boundary");
         }
     }
 
