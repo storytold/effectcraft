@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 
 use effectcraft_geom::{Mat4, Vec2, Vec3, vec2, vec3};
 use effectcraft_project::{AutoOrient, Layer};
+use effectcraft_time::Tick;
 use serde::{Deserialize, Serialize};
 
 use crate::EvalCtx;
@@ -417,7 +418,15 @@ pub fn layer_camera(ctx: &EvalCtx, cam: &Layer) -> CameraState {
 
 /// The comp's active camera at the context time (topmost active camera layer, else the default).
 pub fn active_camera(ctx: &EvalCtx) -> CameraState {
-    match ctx.comp.active_camera(ctx.time) {
+    frame_camera(ctx, ctx.time)
+}
+
+/// The camera that is active at time `frame`, evaluated at the context time. A motion-blur
+/// sub-sample picks its camera by the frame's time: the shutter opens before the frame, so at a
+/// camera layer's first frame some sub-samples precede its In point, and they must not fall back
+/// to the default camera (which would add a copy of the layer seen without the camera).
+pub(crate) fn frame_camera(ctx: &EvalCtx, frame: Tick) -> CameraState {
+    match ctx.comp.active_camera(frame) {
         Some(cam) => layer_camera(ctx, cam),
         None => default_camera(ctx.comp.width as f64, ctx.comp.height as f64),
     }

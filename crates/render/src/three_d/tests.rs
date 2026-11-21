@@ -411,6 +411,26 @@ fn two_node_camera_looks_at_poi() {
 }
 
 #[test]
+fn motion_blur_on_a_cameras_first_frame_stays_in_that_camera() {
+    let (mut p, cid, comp) = setup();
+    let mut cam = camera(&mut p, &comp);
+    // Looking at x = 200: the solid at x = 100 (the comp's centre) lands on the left edge.
+    set(&mut cam, "transform/poi", Value::Vec3([200.0, 50.0, 0.0]));
+    set(&mut cam, "transform/position", Value::Vec3([200.0, 50.0, -zoom()]));
+    let mut s = solid3(&mut p, &comp, [1.0, 0.0, 0.0], 40, 20, [100.0, 50.0, 0.0]);
+    s.switches.motion_blur = true;
+    push(&mut p, cid, cam);
+    push(&mut p, cid, s);
+    let c = p.comp_mut(cid).unwrap();
+    c.enable_motion_blur = true;
+    // The shutter opens a quarter frame before time 0, before the camera's In point.
+    assert_eq!(c.shutter_phase, -90.0);
+    let img = render(&p, cid);
+    assert!(close(img.get(10, 50)[3], 1.0, 1e-3), "every sub-sample is seen through the camera");
+    assert!(close(img.get(100, 50)[3], 0.0, 1e-3), "no copy of the layer seen by the default camera");
+}
+
+#[test]
 fn one_node_camera_uses_orientation() {
     let (mut p, cid, comp) = setup();
     let mut cam = camera(&mut p, &comp);
