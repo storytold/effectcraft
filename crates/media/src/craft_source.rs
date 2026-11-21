@@ -727,6 +727,58 @@ fn tick_to_rational_units(time: Tick, num: i64, den: i64) -> i64 {
     i64::try_from((i128::from(time.0) * i128::from(num)) / (i128::from(craft_time::TICKS_PER_SECOND) * i128::from(den))).unwrap_or(i64::MAX)
 }
 
+fn finish_container_source(
+    name: &str,
+    container_name: &str,
+    source: SharedBytes,
+    container: ContainerFile,
+    video_track_idx: Option<usize>,
+    video_info: Option<VideoStreamInfo>,
+    video_state: Option<Mutex<VideoState>>,
+    duration: Tick,
+    audio_candidates: Vec<(usize, usize, CodecParams, u64)>,
+) -> Option<Result<SharedSource>> {
+    let (audio_tracks, audio_infos) = open_audio_tracks(&container, &*source, audio_candidates)?;
+    if video_info.is_none() && audio_tracks.is_empty() {
+        return None;
+    }
+    let kind = if video_info.is_some() { MediaKind::Movie } else { MediaKind::AudioOnly };
+    let info = MediaInfo {
+        name: name.to_string(),
+        kind,
+        duration,
+        video: video_info,
+        audio_streams: audio_infos,
+        container: container_name.to_string(),
+        start_timecode: None,
+        file_size: Some(source.len()),
+    };
+    Some(Ok(Arc::new(CraftMediaSource {
+        info,
+        source,
+        file: container,
+        video_track_idx,
+        presentation: FramePresentation { container_color: None, par: (1, 1), rotation: 0, aperture: None },
+        video: video_state,
+        audio_tracks,
+    })))
+}
+
+fn default_video_info(width: u32, height: u32, frame_rate: FrameRate, codec: &CodecParams) -> VideoStreamInfo {
+    VideoStreamInfo {
+        width,
+        height,
+        frame_rate,
+        par: (1, 1),
+        codec: codec.codec.name().to_string(),
+        pixel_format: String::new(),
+        color: ColorInfo::REC709,
+        has_alpha: false,
+        bitrate: None,
+        hdr: None,
+    }
+}
+
 fn open_avi(name: &str, source: SharedBytes) -> Option<Result<SharedSource>> {
     let file = avi::open(&*source).ok()?;
     let video_idx = file.streams.iter().position(|s| s.kind == avi::StreamKind::Video && !s.chunks.is_empty() && s.rate > 0 && s.scale > 0);
@@ -757,18 +809,7 @@ fn open_avi(name: &str, source: SharedBytes) -> Option<Result<SharedSource>> {
             Ok(d) => d,
             Err(e) => return Some(Err(MediaError::Decode(e.to_string()))),
         };
-        let v_info = VideoStreamInfo {
-            width,
-            height,
-            frame_rate,
-            par: (1, 1),
-            codec: video_params.codec.name().to_string(),
-            pixel_format: String::new(),
-            color: ColorInfo::REC709,
-            has_alpha: false,
-            bitrate: None,
-            hdr: None,
-        };
+        let v_info = default_video_info(width, height, frame_rate, &video_params);
         let v_state = Mutex::new(VideoState { decoder: video_decoder, next_decode_idx: 0, gop_start_idx: 0, flushed: false, decoded: Vec::new() });
         (Some(v_info), Some(v_state), duration)
     } else {
@@ -783,33 +824,7 @@ fn open_avi(name: &str, source: SharedBytes) -> Option<Result<SharedSource>> {
         (None, None, duration)
     };
 
-    let container = ContainerFile::Avi(Box::new(file));
-    let (audio_tracks, audio_infos) = open_audio_tracks(&container, &*source, audio_candidates)?;
-    if video_info.is_none() && audio_tracks.is_empty() {
-        return None;
-    }
-
-    let kind = if video_info.is_some() { MediaKind::Movie } else { MediaKind::AudioOnly };
-    let info = MediaInfo {
-        name: name.to_string(),
-        kind,
-        duration,
-        video: video_info,
-        audio_streams: audio_infos,
-        container: "avi".to_string(),
-        start_timecode: None,
-        file_size: Some(source.len()),
-    };
-
-    Some(Ok(Arc::new(CraftMediaSource {
-        info,
-        source,
-        file: container,
-        video_track_idx: video_idx,
-        presentation: FramePresentation { container_color: None, par: (1, 1), rotation: 0, aperture: None },
-        video: video_state,
-        audio_tracks,
-    })))
+    finish_container_source(name, "avi", source, ContainerFile::Avi(Box::new(file)), video_idx, video_info, video_state, duration, audio_candidates)
 }
 
 fn estimate_mpeg_frame_rate(units: &[mpegts::Unit]) -> FrameRate {
@@ -866,18 +881,7 @@ fn open_mpeg(name: &str, fmt: mpegts::Format, source: SharedBytes) -> Option<Res
         }
         let frame_rate = estimate_mpeg_frame_rate(&video_stream.units);
         let duration = video_stream.pts_range().map_or(Tick::ZERO, |(_, hi)| Tick::from_units(hi.saturating_sub(origin_pts), 90_000));
-        let v_info = VideoStreamInfo {
-            width: decoded_dims.0,
-            height: decoded_dims.1,
-            frame_rate,
-            par: (1, 1),
-            codec: video_params.codec.name().to_string(),
-            pixel_format: String::new(),
-            color: ColorInfo::REC709,
-            has_alpha: false,
-            bitrate: None,
-            hdr: None,
-        };
+        let v_info = default_video_info(decoded_dims.0, decoded_dims.1, frame_rate, &video_params);
         let v_state = Mutex::new(VideoState { decoder: video_decoder, next_decode_idx: 0, gop_start_idx: 0, flushed: false, decoded: Vec::new() });
         (Some(v_info), Some(v_state), duration)
     } else {
@@ -889,33 +893,17 @@ fn open_mpeg(name: &str, fmt: mpegts::Format, source: SharedBytes) -> Option<Res
         (None, None, duration)
     };
 
-    let container = ContainerFile::Mpeg { file: Box::new(file), origin_pts };
-    let (audio_tracks, audio_infos) = open_audio_tracks(&container, &*source, audio_candidates)?;
-    if video_info.is_none() && audio_tracks.is_empty() {
-        return None;
-    }
-
-    let kind = if video_info.is_some() { MediaKind::Movie } else { MediaKind::AudioOnly };
-    let info = MediaInfo {
-        name: name.to_string(),
-        kind,
-        duration,
-        video: video_info,
-        audio_streams: audio_infos,
-        container: fmt.name().to_string(),
-        start_timecode: None,
-        file_size: Some(source.len()),
-    };
-
-    Some(Ok(Arc::new(CraftMediaSource {
-        info,
+    finish_container_source(
+        name,
+        fmt.name(),
         source,
-        file: container,
-        video_track_idx: video_idx,
-        presentation: FramePresentation { container_color: None, par: (1, 1), rotation: 0, aperture: None },
-        video: video_state,
-        audio_tracks,
-    })))
+        ContainerFile::Mpeg { file: Box::new(file), origin_pts },
+        video_idx,
+        video_info,
+        video_state,
+        duration,
+        audio_candidates,
+    )
 }
 
 struct CachedFrame {
@@ -1853,5 +1841,35 @@ mod tests {
         assert_eq!(contiguous_starts(packets, i64::MIN).len(), 4);
         assert_eq!(contiguous_starts(packets, i64::MAX).len(), 4);
         assert!(contiguous_starts([], 512).is_empty());
+    }
+
+    #[test]
+    fn avi_and_mpeg_helpers_and_in_memory_route() {
+        assert_eq!(tick_to_rational_units(Tick(craft_time::TICKS_PER_SECOND), 24, 1), 24);
+        assert_eq!(tick_to_rational_units(Tick(-1), 24, 1), 0);
+        let units = [
+            mpegts::Unit { pts: Some(0), dts: None, key: true, disposable: false, size: 1, pos: 0, offset: 0, picture: None },
+            mpegts::Unit { pts: Some(3000), dts: None, key: false, disposable: false, size: 1, pos: 0, offset: 0, picture: None },
+            mpegts::Unit { pts: Some(6000), dts: None, key: false, disposable: false, size: 1, pos: 0, offset: 0, picture: None },
+        ];
+        assert_eq!(estimate_mpeg_frame_rate(&units), FrameRate::FPS_30);
+        assert_eq!(estimate_mpeg_frame_rate(&[]), FrameRate::FPS_30);
+
+        let streams = vec![
+            avi::mux::StreamSpec::Video(avi::mux::VideoSpec::new(*b"H264", 16, 16, 24, 1)),
+            avi::mux::StreamSpec::Audio(avi::mux::AudioSpec::pcm(48_000, 2, 16)),
+        ];
+        let mut w = avi::mux::AviWriter::new(std::io::Cursor::new(Vec::new()), streams, avi::mux::MuxOptions::default()).expect("avi writer");
+        let pcm = vec![0x10u8; 2000 * 4];
+        w.write_chunk(0, &[0x00, 0x00, 0x00, 0x01, 0x65], true).expect("v0");
+        w.write_chunk(1, &pcm, true).expect("a0");
+        w.write_chunk(0, &[0x00, 0x00, 0x00, 0x01, 0x41], false).expect("v1");
+        w.write_chunk(1, &pcm, true).expect("a1");
+        let raw = w.finish().expect("finish").into_inner();
+        let src = open_bytes("test.avi", Arc::from(raw)).expect("recognized").expect("opened");
+        assert_eq!(src.info().container, "avi");
+        assert_eq!(src.info().audio_streams[0].sample_rate, 48_000);
+        let audio = src.audio(0, 512, 48_000).expect("avi audio");
+        assert_eq!(audio.channels[0].len(), 512);
     }
 }
