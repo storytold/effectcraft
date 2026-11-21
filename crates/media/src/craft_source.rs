@@ -424,6 +424,76 @@ fn clean_aperture_region(aperture: isobmff::CleanAperture, (width, height): (u32
     (!r.is_full(width as usize, height as usize)).then_some(r)
 }
 
+/// A single unit-rate media span, optionally preceded by one empty span. A
+/// scalar EDL origin cannot describe dwell, disjoint edits or respeeding.
+fn continuous_edit_mapping(track: &isobmff::Track, movie_timescale: u32) -> Option<(i64, i64)> {
+    const UNIT_RATE: i32 = 0x0001_0000;
+    let (leading_duration, media) = match track.edits.as_slice() {
+        [] => return (track.edit_offset == 0).then_some((0, 0)),
+        [media] => (0, media),
+        [empty, media] if empty.media_time == -1 && empty.segment_duration > 0 && empty.media_rate == UNIT_RATE => (empty.segment_duration, media),
+        _ => return None,
+    };
+    if media.media_time < 0 || media.segment_duration == 0 || media.media_rate != UNIT_RATE || movie_timescale == 0 || track.timescale == 0 {
+        return None;
+    }
+    // Check the raw movie-to-media conversion before the demuxer's rounded
+    // offset can make a fractional delay look like an integral frame.
+    let lead = i128::from(leading_duration) * i128::from(track.timescale);
+    let movie_clock = i128::from(movie_timescale);
+    if lead % movie_clock != 0 {
+        return None;
+    }
+    let offset = i64::try_from(lead / movie_clock - i128::from(media.media_time)).ok()?;
+    (offset == track.edit_offset).then_some((media.media_time, offset))
+}
+
+/// The EDL origin is the timecode at presentation time zero, not the raw
+/// counter at the start of the timecode sample. Its own track's edit and media
+/// clock determine that sample's position; the video may have a different edit.
+fn isobmff_timecode_origin(file: &Mp4File, video_idx: usize, video_rate: FrameRate) -> Option<i64> {
+    let video = file.tracks.get(video_idx)?;
+    continuous_edit_mapping(video, file.timescale)?;
+    let mut links = video.references.iter().filter(|(kind, _)| kind.0 == *b"tmcd").flat_map(|(_, ids)| ids);
+    let linked = links.next();
+    if links.next().is_some() {
+        return None;
+    }
+
+    let mut tracks =
+        file.tracks.iter().filter(|track| track.kind == isobmff::TrackKind::Timecode && linked.is_none_or(|id| track.id == *id));
+    let track = tracks.next()?;
+    if tracks.next().is_some() {
+        return None;
+    }
+    let [entry] = track.entries.as_slice() else { return None };
+    let isobmff::CodecConfig::Timecode(tc) = &entry.codec else { return None };
+    let [sample] = track.samples.as_slice() else { return None };
+    let (media_start, timecode_offset) = continuous_edit_mapping(track, file.timescale)?;
+    if track.timescale == 0 || tc.timescale == 0 || tc.frame_duration == 0 || video_rate.num <= 0 || video_rate.den <= 0 {
+        return None;
+    }
+    if !track.edits.is_empty() && !(sample.pts..sample.pts.checked_add(i64::from(sample.duration))?).contains(&media_start) {
+        return None;
+    }
+
+    // EDL subtracts the origin in native video frames; do not invent a
+    // rounding or clock-conversion policy for nonmatching or fractional origins.
+    let num = i128::from(tc.timescale);
+    let den = i128::from(tc.frame_duration);
+    if num * i128::from(video_rate.den) != den * i128::from(video_rate.num)
+        || video.samples.iter().any(|sample| i128::from(sample.duration) * num != i128::from(video.timescale) * den)
+    {
+        return None;
+    }
+    let delta = (i128::from(sample.pts) + i128::from(timecode_offset)) * num;
+    let divisor = i128::from(track.timescale) * den;
+    if delta % divisor != 0 {
+        return None;
+    }
+    i64::try_from(i128::from(tc.start_frame?) - delta / divisor).ok().filter(|&origin| origin >= 0)
+}
+
 fn open_isobmff(name: &str, source: SharedBytes) -> Option<Result<SharedSource>> {
     let file = isobmff::open(source.clone()).ok()?;
     let video_idx = file.tracks.iter().position(|t| t.kind == isobmff::TrackKind::Video && !t.samples.is_empty() && !t.entries.is_empty() && t.timescale > 0);
@@ -501,10 +571,7 @@ fn open_isobmff(name: &str, source: SharedBytes) -> Option<Result<SharedSource>>
         (None, None, FramePresentation { container_color: None, par: (1, 1), rotation: 0, aperture: None }, duration)
     };
 
-    let start_timecode = file.tracks.iter().find_map(|track| match track.codec() {
-        Some(isobmff::CodecConfig::Timecode(timecode)) => timecode.start_frame.map(i64::from),
-        _ => None,
-    });
+    let start_timecode = video_idx.zip(video_info.as_ref()).and_then(|(idx, info)| isobmff_timecode_origin(&file, idx, info.frame_rate));
     let container = ContainerFile::Isobmff(file);
     let (audio_tracks, audio_infos) = open_audio_tracks(&container, &*source, audio_candidates)?;
     if video_info.is_none() && audio_tracks.is_empty() {
