@@ -201,6 +201,31 @@ fn cut_removes_keys_and_paste_restores_them() {
 }
 
 #[test]
+fn visible_keyframe_label_group_rejects_malformed_property_filters() {
+    let (mut s, l) = setup();
+    for path in ["transform/opacity", "transform/rotation"] {
+        animate(&mut s, l, path, &[(0.0, json!(10))]);
+        select_prop_keys(&mut s, l, path);
+        s.execute("keys.setLabel", json!({"label": 1})).unwrap();
+    }
+    select_prop_keys(&mut s, l, "transform/opacity");
+    let selected = s.state.selected_keys.clone();
+    let rotation = prop(&s, l, "transform/rotation").uid;
+
+    for visible in [json!("not an array"), json!([rotation, "not a uid"])] {
+        let r = s.execute("keys.selectLabelGroup", json!({"scope": "visibleAll", "visible": visible}));
+        assert!(r.is_err(), "malformed filter succeeded: {r:?}");
+        assert_eq!(s.state.selected_keys, selected);
+    }
+    let r = s.execute("keys.selectLabelGroup", json!({"scope": "visibleAll", "visible": [rotation]})).unwrap();
+    assert_eq!(r["keys"], json!(1));
+    assert_eq!(s.state.selected_keys[0].prop, rotation);
+    for p in [json!({"scope": "visibleAll"}), json!({"scope": "visibleAll", "visible": null})] {
+        assert_eq!(s.execute("keys.selectLabelGroup", p).unwrap()["keys"], json!(2));
+    }
+}
+
+#[test]
 fn select_all_and_nudge_keys() {
     let (mut s, l) = setup();
     animate(&mut s, l, "transform/opacity", &[(0.0, json!(10)), (1.0, json!(20))]);
