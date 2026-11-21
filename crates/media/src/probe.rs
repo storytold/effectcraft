@@ -28,7 +28,7 @@ pub fn probe(path: impl AsRef<Path>) -> Result<Footage> {
     // A movie is read in place (its index), not loaded whole.
     if let Some(src) = crate::stream::probe_source(path) {
         let mut f = footage_from_source(&path.to_string_lossy(), &src?);
-        if f.container == "wav"
+        if ext_of(path) == "wav"
             && let Ok(bytes) = crate::read_regular_file(path)
         {
             f.markers = crate::wav_markers::read(&bytes);
