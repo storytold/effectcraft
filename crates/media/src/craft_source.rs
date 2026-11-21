@@ -2300,6 +2300,9 @@ fn push_decoded(
 #[cfg(test)]
 mod rgb8_tests;
 
+#[cfg(test)]
+mod wide_rgb_tests;
+
 fn to_craft_frame(vf: DecodedVideoFrame, presentation: FramePresentation, pts: Tick) -> Result<VideoFrame> {
     let FramePresentation { container_color, par: default_par, rotation, aperture } = presentation;
     let (mut width, mut height) = (vf.width(), vf.height());
@@ -2311,7 +2314,7 @@ fn to_craft_frame(vf: DecodedVideoFrame, presentation: FramePresentation, pts: T
         Some(sar) => sar,
         None => default_par,
     };
-    let color = resolve_color(tags, container_color);
+    let mut color = resolve_color(tags, container_color);
     let bit_depth = vf.bit_depth();
     let (planes, alpha) = vf.into_planes();
 
@@ -2337,6 +2340,38 @@ fn to_craft_frame(vf: DecodedVideoFrame, presentation: FramePresentation, pts: T
                 rgba.extend_from_slice(&[r, g, b, a]);
             }
             PixelData::Rgba8(Arc::new(rgba))
+        }
+        ColorFamily::Rgb if color.range == Range::Full && (9..=16).contains(&bit_depth) && planes.iter().all(|p| p.bit_depth() == bit_depth) => {
+            let luma = aperture.and_then(|clap| clean_aperture_region(clap, (width, height)));
+            if let Some(r) = luma {
+                (width, height) = (r.w as u32, r.h as u32);
+            }
+            let samples = (width as usize)
+                .checked_mul(height as usize)
+                .and_then(|n| n.checked_mul(4))
+                .filter(|&n| n <= craft_frame::DEFAULT_MAX_FRAME_BYTES / size_of::<f32>())
+                .ok_or_else(|| MediaError::Decode("RGB picture exceeds the frame buffer limit".into()))?;
+            let [r, g, b]: [Plane; 3] = planes.try_into().map_err(|_| MediaError::Decode("expected three RGB planes".into()))?;
+            let r = plane_u16(r, luma)?;
+            let g = plane_u16(g, luma)?;
+            let b = plane_u16(b, luma)?;
+            let alpha_max = alpha.as_ref().map_or(1, |a| ((1u32 << a.bit_depth()) - 1) as u16);
+            let alpha = alpha.map(|a| plane_u16(a, luma)).transpose()?.into_iter().flatten().chain(std::iter::repeat(alpha_max));
+            // One transfer lookup per code avoids evaluating the curve per pixel and keeps
+            // every decoded code distinct, including at 16 bits.
+            let max_code = (1usize << bit_depth) - 1;
+            let mut transfer = Vec::new();
+            transfer.try_reserve_exact(max_code + 1).map_err(|_| MediaError::Decode("could not allocate the RGB transfer table".into()))?;
+            transfer.extend((0..=max_code).map(|code| craft_color::to_linear(code as f32 / max_code as f32, color.transfer)));
+            let linear = |value: u16| transfer[usize::from(value).min(max_code)];
+            let mut rgba = Vec::new();
+            rgba.try_reserve_exact(samples).map_err(|_| MediaError::Decode("could not allocate the RGB picture".into()))?;
+            for (((r, g), b), a) in r.into_iter().zip(g).zip(b).zip(alpha) {
+                let a = (f32::from(a) / f32::from(alpha_max)).min(1.0);
+                rgba.extend_from_slice(&[linear(r) * a, linear(g) * a, linear(b) * a, a]);
+            }
+            color.transfer = Transfer::Linear;
+            PixelData::RgbaF32(Arc::new(rgba))
         }
         ColorFamily::YCbCr => {
             let chroma = match subsampling {
@@ -2474,6 +2509,10 @@ fn rotate_frame(mut frame: VideoFrame, turns: u8) -> VideoFrame {
             let rotated = rotate_plane(pixels.as_chunks::<4>().0, w, h, turns);
             PixelData::Rgba8(Arc::new(rotated.into_flattened()))
         }
+        PixelData::RgbaF32(pixels) => {
+            let rotated = rotate_plane(pixels.as_chunks::<4>().0, w, h, turns);
+            PixelData::RgbaF32(Arc::new(rotated.into_flattened()))
+        }
         PixelData::Yuv8 { planes: [y, cb, cr], chroma, alpha } => {
             let (cw, ch, out_chroma) = match chroma {
                 Chroma::C420 => (w.div_ceil(2), h.div_ceil(2), Chroma::C420),
@@ -2513,7 +2552,6 @@ fn rotate_frame(mut frame: VideoFrame, turns: u8) -> VideoFrame {
                 alpha: alpha.map(|a| Arc::new(rotate_plane(&a, w, h, turns))),
             }
         }
-        other => other,
     };
     frame.width = nw;
     frame.height = nh;
