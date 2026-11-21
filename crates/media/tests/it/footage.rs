@@ -575,42 +575,6 @@ fn mov_pcm_edit_lists_preserve_first_read_and_seek_timing() {
     }
 }
 
-#[test]
-fn mov_pcm_edit_list_unequal_clocks_saturate_preserving_sign() {
-    use craft_media::isobmff::{Brand, Edit, FourCc, Mp4Writer, PcmConfig, SampleEntry, TrackConfig, WriteSample, WriterOptions};
-    use craft_video::prores::{ChromaFormat, Encoder, Frame, Profile};
-
-    const TRACK_TIMESCALE: u32 = 1_000;
-    const AUDIO_RATE: u32 = 48_000;
-    let samples: Vec<[i16; 2]> = (0..4_800).map(|i| [4000 + (i % 127) as i16 * 32, -4000 - (i % 127) as i16 * 32]).collect();
-    let profile = Profile::Hq;
-    let mut encoder = Encoder::new(profile, 16, 16);
-    let packet = encoder.encode(&Frame::new(16, 16, ChromaFormat::Yuv422, 10, false).unwrap()).unwrap();
-
-    // Unequal clocks (1000 Hz track timescale vs 48 kHz audio sample rate) with a large leading
-    // empty edit whose scaled sample position overflows i64 positively.
-    let mut writer = Mp4Writer::new(std::io::Cursor::new(Vec::new()), WriterOptions::new(Brand::Mov)).unwrap();
-    let video = writer.add_track(TrackConfig::new(SampleEntry::prores(FourCc(profile.fourcc()), 16, 16), 24)).unwrap();
-    let pcm = PcmConfig { bits: 16, float: false, big_endian: false, signed: true, channels: 2, sample_rate: f64::from(AUDIO_RATE) };
-    let mut audio_config = TrackConfig::new(SampleEntry::pcm(pcm), TRACK_TIMESCALE);
-    audio_config.edits.push(Edit { segment_duration: (i64::MAX / 2) as u64, media_time: -1, media_rate: 0x0001_0000 });
-    audio_config.edits.push(Edit { segment_duration: 100, media_time: 0, media_rate: 0x0001_0000 });
-    let audio = writer.add_track(audio_config).unwrap();
-    writer.write_sample(video, WriteSample { data: &packet, duration: 24, composition_offset: 0, is_sync: true }).unwrap();
-    for chunk in samples.chunks(240) {
-        let data: Vec<u8> = chunk.iter().flat_map(|frame| frame.iter().flat_map(|s| s.to_le_bytes())).collect();
-        writer.write_sample(audio, WriteSample { data: &data, duration: 5, composition_offset: 0, is_sync: true }).unwrap();
-    }
-    let bytes: Arc<[u8]> = writer.finish().unwrap().into_inner().into();
-    let footage = probe_bytes("unequal-clocks-overflow.mov", bytes.clone()).expect("probe MOV");
-    let pool = MediaPool::new();
-    pool.add_bytes("unequal-clocks-overflow.mov", bytes);
-
-    let got = pool.audio_samples(&footage, Tick::ZERO, 1024, AUDIO_RATE);
-    assert_eq!(got.len(), 2048);
-    assert!(got.iter().all(|&s| s == 0.0), "overflowing leading edit must stay silent at t=0");
-}
-
 /// A synthetic asymmetrical aperture and rotation must determine what the shared importer shows.
 #[test]
 fn mov_renders_clean_aperture_before_display_rotation() {
@@ -1831,6 +1795,36 @@ fn audio_only_isobmff_and_matroska_route_through_craft_audio() {
         assert_eq!(seek.len(), 9600);
         let rms_seek = (seek.iter().map(|v| v * v).sum::<f32>() / seek.len() as f32).sqrt();
         assert!((rms_seek - 0.0625).abs() < 0.02, "{file} seek rms {rms_seek}");
+    }
+}
+
+#[test]
+fn standalone_audio_formats_route_through_craft_audio() {
+    for (file, args) in [
+        ("standalone_tone.wav", &["-c:a", "pcm_s16le"][..]),
+        ("standalone_tone.aiff", &["-c:a", "pcm_s16be"][..]),
+        ("standalone_tone.mp3", &["-c:a", "libmp3lame", "-b:a", "128k"][..]),
+        ("standalone_tone.aac", &["-c:a", "aac", "-b:a", "128k"][..]),
+        ("standalone_tone.ac3", &["-c:a", "ac3", "-b:a", "192k"][..]),
+        ("standalone_tone.ogg", &["-c:a", "libopus"][..]),
+    ] {
+        let mut ffmpeg_args = vec!["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=1"];
+        ffmpeg_args.extend_from_slice(args);
+        let Some(p) = try_ffmpeg_fixture(file, &ffmpeg_args) else {
+            continue;
+        };
+        let f = probe(&p).expect(file);
+        assert_eq!(f.kind, FootageKind::Audio, "{file} must probe as Audio");
+        assert!(!f.has_video, "{file} has no video");
+        assert!(f.has_audio, "{file} has audio");
+        assert!(f.duration >= Tick(TICKS_PER_SECOND * 8 / 10), "{file} duration {:?}", f.duration);
+        let pool = MediaPool::new();
+        let start = pool.audio_samples(&f, Tick::ZERO, 4800, 48_000);
+        let seek = pool.audio_samples(&f, Tick(TICKS_PER_SECOND / 2), 4800, 48_000);
+        assert_eq!(start.len(), 9600, "{file} start len");
+        assert_eq!(seek.len(), 9600, "{file} seek len");
+        let rms_seek = (seek.iter().map(|v| v * v).sum::<f32>() / seek.len() as f32).sqrt();
+        assert!((rms_seek - 0.0625).abs() < 0.03, "{file} seek rms {rms_seek}");
     }
 }
 

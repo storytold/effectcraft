@@ -17,8 +17,11 @@
 //!     `Mp3`/`Mp2`/`Mp1` (with `CodecDelay` + `SeekPreRoll` timing).
 //!   - Fallback (`filmcraft-codecs`): `alpha_mode == 1` (`BlockAdditional` alpha), unreadable/zlib
 //!     encodings, `Mjpeg`/`Ffv1`/`Theora`/`Apv`, or unsupported audio (`Vorbis`/`Flac`/`Pcm`).
-//! - **Other containers (`MXF`, `AVI`, `MPEG-TS`/`PS`, `Ogg`, standalone `WAV`/`AIFF`/`FLAC`/`MP3`)**:
-//!   - Currently routed via `filmcraft-codecs` in `stream.rs` (pending subsequent cutover PRs).
+//! - **Other containers & standalone audio**:
+//!   - Shared (`craft_audio::Decoder` with `decode-native`): standalone `WAV`, `AIFF`, `MP3`/`MP2`/`MP1`,
+//!     `AAC` (ADTS), `AC-3`, and `Ogg` (`Opus`).
+//!   - Fallback (`filmcraft-codecs`): `MXF`, `AVI`, `MPEG-TS`/`PS`, `Ogg Vorbis`, `FLAC`, `CAF`, or
+//!     unsupported WAV/AIFF encodings.
 
 use std::sync::{Arc, Mutex};
 
@@ -69,7 +72,7 @@ fn looks_like_matroska(head: &[u8]) -> bool {
     head.starts_with(&[0x1A, 0x45, 0xDF, 0xA3])
 }
 
-/// Open an in-place ISO-BMFF or Matroska/WebM source via `craft-media` / `craft-video`.
+/// Open an in-place ISO-BMFF, Matroska/WebM, or standalone audio source via `craft-media` / `craft-audio`.
 /// Returns `None` when the container/codec/audio combination should fall back to `filmcraft-codecs`.
 #[cfg(any(unix, windows))]
 pub(crate) fn open_reader(name: &str, head: &[u8], reader: &SharedBytes) -> Option<Result<SharedSource>> {
@@ -79,10 +82,10 @@ pub(crate) fn open_reader(name: &str, head: &[u8], reader: &SharedBytes) -> Opti
     if looks_like_matroska(head) {
         return open_matroska(name, reader.clone());
     }
-    None
+    open_standalone_audio(name, head, reader.clone())
 }
 
-/// Open an in-memory ISO-BMFF or Matroska/WebM source via `craft-media` / `craft-video`.
+/// Open an in-memory ISO-BMFF, Matroska/WebM, or standalone audio source via `craft-media` / `craft-audio`.
 pub(crate) fn open_bytes(name: &str, bytes: Arc<[u8]>) -> Option<Result<SharedSource>> {
     if looks_like_isobmff(&bytes) {
         return open_isobmff(name, Arc::new(bytes));
@@ -90,7 +93,16 @@ pub(crate) fn open_bytes(name: &str, bytes: Arc<[u8]>) -> Option<Result<SharedSo
     if looks_like_matroska(&bytes) {
         return open_matroska(name, Arc::new(bytes));
     }
-    None
+    #[cfg(any(unix, windows))]
+    {
+        let head_len = <[u8]>::len(&bytes).min(64);
+        let head = bytes[..head_len].to_vec();
+        open_standalone_audio(name, &head, Arc::new(bytes))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        None
+    }
 }
 
 enum ContainerFile {
@@ -159,10 +171,20 @@ impl ContainerFile {
         }
     }
 
-    fn audio_seek_info(audio_starts: &[i64], seek_preroll_samples: i64, start: i64) -> (usize, i64) {
+    fn audio_packet_is_stamped(&self, track_idx: usize, sample_idx: usize) -> bool {
+        match self {
+            Self::Isobmff(_) => true,
+            Self::Matroska(f) => f.tracks[track_idx].samples.get(sample_idx).is_some_and(|s| s.lace == 0 || s.duration > 0),
+        }
+    }
+
+    fn audio_seek_info(&self, track_idx: usize, audio_starts: &[i64], seek_preroll_samples: i64, start: i64) -> (usize, i64) {
         let target = start.saturating_sub(seek_preroll_samples).max(0);
         let sample_idx = audio_starts.partition_point(|&s| s <= target).saturating_sub(1);
-        let seek_idx = sample_idx.saturating_sub(2);
+        let mut seek_idx = sample_idx.saturating_sub(2);
+        while seek_idx > 0 && !self.audio_packet_is_stamped(track_idx, seek_idx) {
+            seek_idx -= 1;
+        }
         let decoded_pos = audio_starts.get(seek_idx).copied().unwrap_or(0);
         (seek_idx, decoded_pos)
     }
@@ -427,6 +449,75 @@ fn clean_aperture_region(aperture: isobmff::CleanAperture, (width, height): (u32
     (!r.is_full(width as usize, height as usize)).then_some(r)
 }
 
+/// A single unit-rate media span, optionally preceded by one empty span. A
+/// scalar EDL origin cannot describe dwell, disjoint edits or respeeding.
+fn continuous_edit_mapping(track: &isobmff::Track, movie_timescale: u32) -> Option<(i64, i64)> {
+    const UNIT_RATE: i32 = 0x0001_0000;
+    let (leading_duration, media) = match track.edits.as_slice() {
+        [] => return (track.edit_offset == 0).then_some((0, 0)),
+        [media] => (0, media),
+        [empty, media] if empty.media_time == -1 && empty.segment_duration > 0 && empty.media_rate == UNIT_RATE => (empty.segment_duration, media),
+        _ => return None,
+    };
+    if media.media_time < 0 || media.segment_duration == 0 || media.media_rate != UNIT_RATE || movie_timescale == 0 || track.timescale == 0 {
+        return None;
+    }
+    // Check the raw movie-to-media conversion before the demuxer's rounded
+    // offset can make a fractional delay look like an integral frame.
+    let lead = i128::from(leading_duration) * i128::from(track.timescale);
+    let movie_clock = i128::from(movie_timescale);
+    if lead % movie_clock != 0 {
+        return None;
+    }
+    let offset = i64::try_from(lead / movie_clock - i128::from(media.media_time)).ok()?;
+    (offset == track.edit_offset).then_some((media.media_time, offset))
+}
+
+/// The EDL origin is the timecode at presentation time zero, not the raw
+/// counter at the start of the timecode sample. Its own track's edit and media
+/// clock determine that sample's position; the video may have a different edit.
+fn isobmff_timecode_origin(file: &Mp4File, video_idx: usize, video_rate: FrameRate) -> Option<i64> {
+    let video = file.tracks.get(video_idx)?;
+    continuous_edit_mapping(video, file.timescale)?;
+    let mut links = video.references.iter().filter(|(kind, _)| kind.0 == *b"tmcd").flat_map(|(_, ids)| ids);
+    let linked = links.next();
+    if links.next().is_some() {
+        return None;
+    }
+
+    let mut tracks = file.tracks.iter().filter(|track| track.kind == isobmff::TrackKind::Timecode && linked.is_none_or(|id| track.id == *id));
+    let track = tracks.next()?;
+    if tracks.next().is_some() {
+        return None;
+    }
+    let [entry] = track.entries.as_slice() else { return None };
+    let isobmff::CodecConfig::Timecode(tc) = &entry.codec else { return None };
+    let [sample] = track.samples.as_slice() else { return None };
+    let (media_start, timecode_offset) = continuous_edit_mapping(track, file.timescale)?;
+    if track.timescale == 0 || tc.timescale == 0 || tc.frame_duration == 0 || video_rate.num <= 0 || video_rate.den <= 0 {
+        return None;
+    }
+    if !track.edits.is_empty() && !(sample.pts..sample.pts.checked_add(i64::from(sample.duration))?).contains(&media_start) {
+        return None;
+    }
+
+    // EDL subtracts the origin in native video frames; do not invent a
+    // rounding or clock-conversion policy for nonmatching or fractional origins.
+    let num = i128::from(tc.timescale);
+    let den = i128::from(tc.frame_duration);
+    if num * i128::from(video_rate.den) != den * i128::from(video_rate.num)
+        || video.samples.iter().any(|sample| i128::from(sample.duration) * num != i128::from(video.timescale) * den)
+    {
+        return None;
+    }
+    let delta = (i128::from(sample.pts) + i128::from(timecode_offset)) * num;
+    let divisor = i128::from(track.timescale) * den;
+    if delta % divisor != 0 {
+        return None;
+    }
+    i64::try_from(i128::from(tc.start_frame?) - delta / divisor).ok().filter(|&origin| origin >= 0)
+}
+
 fn open_isobmff(name: &str, source: SharedBytes) -> Option<Result<SharedSource>> {
     let file = isobmff::open(source.clone()).ok()?;
     let video_idx = file.tracks.iter().position(|t| t.kind == isobmff::TrackKind::Video && !t.samples.is_empty() && !t.entries.is_empty() && t.timescale > 0);
@@ -504,6 +595,7 @@ fn open_isobmff(name: &str, source: SharedBytes) -> Option<Result<SharedSource>>
         (None, None, FramePresentation { container_color: None, par: (1, 1), rotation: 0, aperture: None }, duration)
     };
 
+    let start_timecode = video_idx.zip(video_info.as_ref()).and_then(|(idx, info)| isobmff_timecode_origin(&file, idx, info.frame_rate));
     let container = ContainerFile::Isobmff(file);
     let (audio_tracks, audio_infos) = open_audio_tracks(&container, &*source, audio_candidates)?;
     if video_info.is_none() && audio_tracks.is_empty() {
@@ -518,7 +610,7 @@ fn open_isobmff(name: &str, source: SharedBytes) -> Option<Result<SharedSource>>
         video: video_info,
         audio_streams: audio_infos,
         container: "mp4".to_string(),
-        start_timecode: None,
+        start_timecode,
         file_size: Some(source.len()),
     };
 
@@ -751,13 +843,7 @@ impl MediaSource for CraftMediaSource {
         }
 
         let native_rate = entry.native_rate;
-        let (native_start, native_frames) = if sample_rate == native_rate {
-            (start, frames)
-        } else {
-            let s0 = (i128::from(start) * i128::from(native_rate)) / i128::from(sample_rate);
-            let len = ((frames as u128 * u128::from(native_rate)).div_ceil(u128::from(sample_rate)) + 2) as usize;
-            (i64::try_from(s0).unwrap_or(0), len)
-        };
+        let (native_start, native_frames) = native_audio_window(start, frames, native_rate, sample_rate);
 
         let mut state = entry.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let decoded = decode_audio_range(
@@ -777,24 +863,210 @@ impl MediaSource for CraftMediaSource {
             return Ok(AudioBuffer { sample_rate, channels: decoded });
         }
 
-        let mut resampled = vec![vec![0.0f32; frames]; channels_count];
-        let ratio = f64::from(native_rate) / f64::from(sample_rate);
-        for (c, out_ch) in resampled.iter_mut().enumerate() {
-            let in_ch = &decoded[c];
-            if in_ch.is_empty() {
-                continue;
-            }
-            for (i, dst) in out_ch.iter_mut().enumerate() {
-                let pos = i as f64 * ratio;
-                let idx = pos.floor() as usize;
-                let frac = (pos - idx as f64) as f32;
-                let s0 = in_ch.get(idx).copied().unwrap_or(0.0);
-                let s1 = in_ch.get(idx + 1).copied().unwrap_or(s0);
-                *dst = s0 + (s1 - s0) * frac;
+        Ok(AudioBuffer { sample_rate, channels: resample_audio(&decoded, channels_count, native_rate, sample_rate, frames) })
+    }
+}
+
+#[cfg(any(unix, windows))]
+struct SharedBytesSource(SharedBytes);
+
+#[cfg(any(unix, windows))]
+impl ByteSource for SharedBytesSource {
+    fn len(&self) -> u64 {
+        self.0.len()
+    }
+
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<()> {
+        self.0.read_at(offset, buf)
+    }
+}
+
+#[cfg(any(unix, windows))]
+struct StandaloneAudioState {
+    decoder: craft_audio::Decoder<'static>,
+    decoded_pos: i64,
+    buf: Vec<Vec<f32>>,
+}
+
+#[cfg(any(unix, windows))]
+struct StandaloneAudioSource {
+    info: MediaInfo,
+    native_rate: u32,
+    state: Mutex<StandaloneAudioState>,
+}
+
+#[cfg(any(unix, windows))]
+impl MediaSource for StandaloneAudioSource {
+    fn info(&self) -> &MediaInfo {
+        &self.info
+    }
+
+    fn video_frame(&self, _req: FrameRequest) -> Result<Arc<VideoFrame>> {
+        Err(MediaError::NoStream("video"))
+    }
+
+    fn audio(&self, start: i64, frames: usize, sample_rate: u32) -> Result<AudioBuffer> {
+        self.audio_stream(0, start, frames, sample_rate)
+    }
+
+    fn audio_stream(&self, stream: usize, start: i64, frames: usize, sample_rate: u32) -> Result<AudioBuffer> {
+        if stream != 0 {
+            return Err(MediaError::NoStream("audio"));
+        }
+        let channels_count = self.info.audio_streams.first().map_or(2, |s| s.channels as usize);
+        if frames == 0 || sample_rate == 0 {
+            return Ok(AudioBuffer::new(sample_rate, channels_count as u16, frames));
+        }
+        let native_rate = self.native_rate;
+        let (native_start, native_frames) = native_audio_window(start, frames, native_rate, sample_rate);
+
+        let mut state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let decoded = decode_standalone_range(native_rate, channels_count, &mut state, native_start, native_frames)?;
+        if sample_rate == native_rate {
+            return Ok(AudioBuffer { sample_rate, channels: decoded });
+        }
+        Ok(AudioBuffer { sample_rate, channels: resample_audio(&decoded, channels_count, native_rate, sample_rate, frames) })
+    }
+}
+
+#[cfg(any(unix, windows))]
+fn decode_standalone_range(native_rate: u32, channels_count: usize, state: &mut StandaloneAudioState, start: i64, frames: usize) -> Result<Vec<Vec<f32>>> {
+    let end = start.saturating_add(frames as i64);
+    if end <= 0 {
+        return Ok(vec![vec![0.0f32; frames]; channels_count]);
+    }
+
+    let buf_len = state.buf.first().map_or(0, Vec::len) as i64;
+    let buf_end = state.decoded_pos.saturating_add(buf_len);
+    if start < state.decoded_pos || start > buf_end + i64::from(native_rate) * 2 {
+        let target = u64::try_from(start.max(0)).unwrap_or(0);
+        let actual = state.decoder.seek(target).map_err(|e| MediaError::Decode(e.to_string()))?;
+        state.decoded_pos = i64::try_from(actual).unwrap_or(i64::MAX);
+        for ch in &mut state.buf {
+            ch.clear();
+        }
+    }
+
+    if state.buf.len() != channels_count {
+        state.buf = vec![Vec::new(); channels_count];
+    }
+
+    while state.decoded_pos + state.buf.first().map_or(0, Vec::len) as i64 <= end {
+        if filmcraft_media::cancel::cancelled() {
+            return Err(MediaError::Cancelled);
+        }
+        let Some(block) = state.decoder.next_block().map_err(|e| MediaError::Decode(e.to_string()))? else {
+            break;
+        };
+        for (c, ch) in state.buf.iter_mut().enumerate() {
+            if let Some(src_ch) = block.channels.get(c) {
+                ch.extend_from_slice(src_ch);
             }
         }
-        Ok(AudioBuffer { sample_rate, channels: resampled })
     }
+
+    Ok(drain_audio_window(&mut state.buf, &mut state.decoded_pos, channels_count, start, frames))
+}
+
+fn native_audio_window(start: i64, frames: usize, native_rate: u32, sample_rate: u32) -> (i64, usize) {
+    if sample_rate == native_rate {
+        return (start, frames);
+    }
+    let s0 = (i128::from(start) * i128::from(native_rate)) / i128::from(sample_rate);
+    let len = ((frames as u128 * u128::from(native_rate)).div_ceil(u128::from(sample_rate)) + 2) as usize;
+    (i64::try_from(s0).unwrap_or(0), len)
+}
+
+fn drain_audio_window(buf: &mut [Vec<f32>], decoded_pos: &mut i64, channels_count: usize, start: i64, frames: usize) -> Vec<Vec<f32>> {
+    let mut out = vec![vec![0.0f32; frames]; channels_count];
+    let avail = buf.first().map_or(0, Vec::len);
+    for i in 0..frames {
+        let pos = start.saturating_add(i as i64);
+        if pos >= *decoded_pos {
+            let off = usize::try_from(pos.saturating_sub(*decoded_pos)).unwrap_or(usize::MAX);
+            if off < avail {
+                for (c, out_ch) in out.iter_mut().enumerate() {
+                    out_ch[i] = buf[c][off];
+                }
+            }
+        }
+    }
+    let end = start.saturating_add(frames as i64);
+    let drop_to = usize::try_from(end.saturating_sub(*decoded_pos).max(0)).unwrap_or(usize::MAX);
+    let trim = drop_to.min(avail);
+    if trim > 0 {
+        for ch in buf {
+            ch.drain(..trim);
+        }
+        *decoded_pos = decoded_pos.saturating_add(trim as i64);
+    }
+    out
+}
+
+fn resample_audio(decoded: &[Vec<f32>], channels_count: usize, native_rate: u32, sample_rate: u32, frames: usize) -> Vec<Vec<f32>> {
+    let mut resampled = vec![vec![0.0f32; frames]; channels_count];
+    let ratio = f64::from(native_rate) / f64::from(sample_rate);
+    for (c, out_ch) in resampled.iter_mut().enumerate() {
+        let in_ch = &decoded[c];
+        if in_ch.is_empty() {
+            continue;
+        }
+        for (i, dst) in out_ch.iter_mut().enumerate() {
+            let pos = i as f64 * ratio;
+            let idx = pos.floor() as usize;
+            let frac = (pos - idx as f64) as f32;
+            let s0 = in_ch.get(idx).copied().unwrap_or(0.0);
+            let s1 = in_ch.get(idx + 1).copied().unwrap_or(s0);
+            *dst = s0 + (s1 - s0) * frac;
+        }
+    }
+    resampled
+}
+
+#[cfg(any(unix, windows))]
+fn open_standalone_audio(name: &str, head: &[u8], source: SharedBytes) -> Option<Result<SharedSource>> {
+    let ext = std::path::Path::new(name).extension().and_then(|e| e.to_str());
+    let container = craft_audio::detect_container(head, ext)?;
+    let container_name = match container {
+        craft_audio::Container::Wav => "wav",
+        craft_audio::Container::Aiff => "aiff",
+        craft_audio::Container::MpegAudio => "mp3",
+        craft_audio::Container::Adts => "aac",
+        craft_audio::Container::Ac3 => "ac3",
+        craft_audio::Container::Ogg => "ogg",
+        _ => return None,
+    };
+
+    let dec = craft_audio::Decoder::open(SharedBytesSource(source.clone()), ext, &craft_audio::DecodeOptions::default()).ok()?;
+    let audio_info = if dec.length_known() {
+        dec.info().clone()
+    } else {
+        craft_audio::Decoder::open(SharedBytesSource(source.clone()), ext, &craft_audio::DecodeOptions::default()).ok()?.probe().ok()?
+    };
+
+    let native_rate = audio_info.sample_rate.max(1);
+    let channels = u32::from(audio_info.channels).max(1);
+    let duration = Tick::from_units(i64::try_from(audio_info.frames).unwrap_or(i64::MAX), i64::from(native_rate));
+    let bits_per_sample = match audio_info.sample_format {
+        craft_audio::SampleFormat::Int8 => Some(8),
+        craft_audio::SampleFormat::Int16 => Some(16),
+        craft_audio::SampleFormat::Int24 => Some(24),
+        craft_audio::SampleFormat::Int32 | craft_audio::SampleFormat::Float32 => Some(32),
+        craft_audio::SampleFormat::Float64 => Some(64),
+        craft_audio::SampleFormat::Compressed | _ => None,
+    };
+    let info = MediaInfo {
+        name: name.to_string(),
+        kind: MediaKind::AudioOnly,
+        duration,
+        video: None,
+        audio_streams: vec![AudioStreamInfo { sample_rate: native_rate, channels, codec: audio_info.codec.name().to_string(), bits_per_sample }],
+        container: container_name.to_string(),
+        start_timecode: None,
+        file_size: Some(source.len()),
+    };
+
+    Some(Ok(Arc::new(StandaloneAudioSource { info, native_rate, state: Mutex::new(StandaloneAudioState { decoder: dec, decoded_pos: 0, buf: Vec::new() }) })))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -810,16 +1082,15 @@ fn decode_audio_range(
     start: i64,
     frames: usize,
 ) -> Result<Vec<Vec<f32>>> {
-    let mut out = vec![vec![0.0f32; frames]; channels_count];
     let end = start.saturating_add(frames as i64);
     if end <= 0 {
-        return Ok(out);
+        return Ok(vec![vec![0.0f32; frames]; channels_count]);
     }
 
     let buf_len = state.buf.first().map_or(0, Vec::len) as i64;
     let buf_end = state.decoded_pos.saturating_add(buf_len);
     if start < state.decoded_pos || start > buf_end.saturating_add(i64::from(native_rate) * 2) {
-        let (seek_idx, decoded_pos) = ContainerFile::audio_seek_info(audio_starts, seek_preroll_samples, start);
+        let (seek_idx, decoded_pos) = file.audio_seek_info(track_idx, audio_starts, seek_preroll_samples, start);
         state.decoder.reset();
         state.next_sample = seek_idx;
         state.decoded_pos = decoded_pos;
@@ -833,13 +1104,14 @@ fn decode_audio_range(
     }
 
     let sample_count = file.sample_count(track_idx);
-    // A hostile edit can place the buffer near either signed limit before the first read.
-    while state.decoded_pos.saturating_add(state.buf.first().map_or(0, Vec::len) as i64) <= end && state.next_sample < sample_count {
+    while state.next_sample < sample_count {
         if filmcraft_media::cancel::cancelled() {
             return Err(MediaError::Cancelled);
         }
         let idx = state.next_sample;
-        let pk_start = audio_starts.get(idx).copied().unwrap_or_else(|| state.decoded_pos + state.buf.first().map_or(0, Vec::len) as i64);
+        let buf_len = state.buf.first().map_or(0, Vec::len) as i64;
+        let buf_end = state.decoded_pos.saturating_add(buf_len);
+        let pk_start = if buf_len > 0 && !file.audio_packet_is_stamped(track_idx, idx) { buf_end } else { audio_starts.get(idx).copied().unwrap_or(buf_end) };
         if pk_start >= end {
             break;
         }
@@ -878,29 +1150,7 @@ fn decode_audio_range(
         }
     }
 
-    let avail = state.buf.first().map_or(0, Vec::len);
-    for i in 0..frames {
-        let pos = start.saturating_add(i as i64);
-        if pos >= state.decoded_pos {
-            let off = usize::try_from(pos.saturating_sub(state.decoded_pos)).unwrap_or(usize::MAX);
-            if off < avail {
-                for (c, out_ch) in out.iter_mut().enumerate() {
-                    out_ch[i] = state.buf[c][off];
-                }
-            }
-        }
-    }
-
-    let drop_to = usize::try_from(end.saturating_sub(state.decoded_pos).max(0)).unwrap_or(usize::MAX);
-    let trim = drop_to.min(avail);
-    if trim > 0 {
-        for ch in &mut state.buf {
-            ch.drain(..trim);
-        }
-        state.decoded_pos = state.decoded_pos.saturating_add(trim as i64);
-    }
-
-    Ok(out)
+    Ok(drain_audio_window(&mut state.buf, &mut state.decoded_pos, channels_count, start, frames))
 }
 
 fn push_decoded(
@@ -1304,6 +1554,54 @@ mod tests {
         assert!((1..=MAX_WORKERS).contains(&cap), "cap={cap}");
     }
 
+    /// Generated AAC permits unequal track/sample clocks, unlike the MOV writer's PCM tracks.
+    #[test]
+    fn mov_aac_edit_positions_saturate_with_unequal_clocks() {
+        use craft_audio::aac::{Encoder, EncoderConfig};
+        use isobmff::{Brand, Edit, Mp4Writer, SampleEntry, TrackConfig, WriteSample, WriterOptions};
+
+        const RATE: u32 = 48_000;
+        let mut encoder = Encoder::new(EncoderConfig::cbr(RATE, 1, 64_000)).unwrap();
+        let tone: Vec<f32> = (0..2048).map(|i| (i as f32 * 0.13).sin() * 0.25).collect();
+        let mut packets = encoder.encode(&[&tone]);
+        packets.extend(encoder.flush());
+        assert!(!packets.is_empty());
+        for (offset, expected) in [(10i64, 480i64), (-10, -480), (i64::MAX / 2, i64::MAX), (-i64::MAX / 2, i64::MIN)] {
+            let mut writer = Mp4Writer::new(std::io::Cursor::new(Vec::new()), WriterOptions::new(Brand::Mov)).unwrap();
+            let mut config = TrackConfig::new(SampleEntry::aac(encoder.audio_specific_config(), 1, RATE), 1_000);
+            if offset > 0 {
+                config.edits.push(Edit { segment_duration: offset as u64, media_time: -1, media_rate: 0x0001_0000 });
+            }
+            config.edits.push(Edit { segment_duration: 100, media_time: (-offset).max(0), media_rate: 0x0001_0000 });
+            let track_idx = writer.add_track(config).expect("AAC accepts unequal media and sample clocks");
+            for packet in &packets {
+                writer.write_sample(track_idx, WriteSample { data: packet, duration: 21, composition_offset: 0, is_sync: true }).unwrap();
+            }
+            let bytes = writer.finish().unwrap().into_inner();
+            let mov = isobmff::open(bytes.as_slice()).unwrap();
+            let track = &mov.tracks[0];
+            assert_eq!((track.timescale, track.edit_offset, track.presentation_pts(0)), (1_000, offset, Some(offset)));
+            let params = track.codec_params();
+            assert_eq!((params.codec, params.sample_rate), (CodecId::Aac, Some(RATE)));
+            // Check the conversion itself: a decode error substituted with silence cannot pass.
+            assert_eq!(isobmff_audio_position(track, 0, RATE), expected);
+            let file = ContainerFile::Isobmff(mov);
+            let (mut tracks, infos) = open_audio_tracks(&file, &bytes, [(0, packets.len(), params, 0)]).expect("shared AAC source");
+            assert_eq!(infos[0].sample_rate, RATE);
+            let entry = &mut tracks[0];
+            assert_eq!(entry.audio_starts[0], expected);
+            for start in [0, 6_000, 0] {
+                let decoded =
+                    decode_audio_range(&file, &bytes, 0, RATE, 1, &entry.audio_starts, entry.seek_preroll_samples, entry.state.get_mut().unwrap(), start, 64)
+                        .expect("the result-returning shared read must succeed");
+                assert_eq!(decoded[0].len(), 64);
+                if expected == i64::MAX || expected == i64::MIN {
+                    assert!(decoded[0].iter().all(|&v| v == 0.0), "out-of-range edits have no audible samples at {start}");
+                }
+            }
+        }
+    }
+
     #[test]
     fn vui_overrides_container_color_and_falls_back_when_unspecified() {
         let container = color_from_isobmff(&isobmff::ColorInfo::Nclx { primaries: 9, transfer: 16, matrix: 9, full_range: false });
@@ -1500,6 +1798,49 @@ mod tests {
         }
     }
 
+    #[test]
+    fn standalone_wav_opens_seeks_and_resamples_via_craft_audio() {
+        // Minimal 48 kHz stereo 16-bit PCM WAV with 4800 frames (0.1s).
+        let frames = 4800u32;
+        let data_bytes = frames * 4;
+        let mut wav = Vec::with_capacity(44 + data_bytes as usize);
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + data_bytes).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&48_000u32.to_le_bytes());
+        wav.extend_from_slice(&(48_000u32 * 4).to_le_bytes());
+        wav.extend_from_slice(&4u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&data_bytes.to_le_bytes());
+        for i in 0..frames * 2 {
+            let s = (((i as i32 * 257) % 16000) - 8000) as i16;
+            wav.extend_from_slice(&s.to_le_bytes());
+        }
+
+        let src = open_bytes("tone.wav", Arc::from(wav)).expect("recognized").expect("opened");
+        let info = src.info();
+        assert_eq!(info.container, "wav");
+        assert_eq!(info.kind, MediaKind::AudioOnly);
+        assert_eq!(info.audio_streams[0].sample_rate, 48_000);
+        assert_eq!(info.audio_streams[0].bits_per_sample, Some(16));
+
+        let head = src.audio(0, 512, 48_000).expect("head");
+        assert_eq!(head.channels[0].len(), 512);
+        let tail = src.audio(4000, 512, 48_000).expect("forward seek");
+        assert!(tail.channels[0].iter().any(|&v| v.abs() > 0.01));
+        let back = src.audio(0, 512, 48_000).expect("backward seek");
+        assert_eq!(head.channels[0], back.channels[0]);
+        let neg = src.audio(-50, 100, 48_000).expect("negative start");
+        assert!(neg.channels[0][..50].iter().all(|&v| v == 0.0));
+        let resampled = src.audio(0, 256, 44_100).expect("resampled");
+        assert_eq!(resampled.sample_rate, 44_100);
+        assert_eq!(resampled.channels[0].len(), 256);
+    }
+
     /// 1024-sample frames at 48 kHz stamped to the nearest millisecond, then back in samples.
     fn ms_stamps(count: i64) -> Vec<i64> {
         (0..count).map(|k| (k * 1024 * 1000 + 24_000) / 48_000 * 48).collect()
@@ -1555,5 +1896,105 @@ mod tests {
         assert_eq!(contiguous_starts(packets, i64::MIN).len(), 4);
         assert_eq!(contiguous_starts(packets, i64::MAX).len(), 4);
         assert!(contiguous_starts([], 512).is_empty());
+    }
+
+    fn pcm_s16le_bytes(sample: i16, count: usize) -> Vec<u8> {
+        std::iter::repeat_n(sample.to_le_bytes(), count).flatten().collect()
+    }
+
+    #[test]
+    fn matroska_durationless_lace_variable_pcm_preserves_all_blocks() {
+        use std::io::Cursor;
+
+        let mut track = matroska::TrackSpec::new(matroska::TrackKind::Audio, "A_PCM/INT/LIT");
+        track.audio = Some((48_000.0, 1, Some(16)));
+        let mut mux = matroska::MkvWriter::new(Cursor::new(Vec::new()), vec![track], matroska::MuxOptions::default()).unwrap();
+        let blocks = [(8_000i16, 120usize), (-16_000i16, 200usize), (24_000i16, 80usize), (4_000i16, 100usize)];
+        let pts_ns = [0i64, 2_000_000, 4_000_000, 8_333_333];
+        for ((val, len), pts) in blocks.iter().zip(pts_ns) {
+            mux.write_frame(0, pts, true, &pcm_s16le_bytes(*val, *len), None).unwrap();
+        }
+        let bytes = mux.finish().unwrap().into_inner();
+        let mut mkv = matroska::open(bytes.as_slice()).unwrap();
+        // Simulate a durationless lace for blocks 0..3 sharing block 0's timestamp.
+        let base_pts = mkv.tracks[0].samples[0].pts;
+        for (lace, s) in mkv.tracks[0].samples[..3].iter_mut().enumerate() {
+            s.pts = base_pts;
+            s.duration = 0;
+            s.lace = lace as u16;
+        }
+        let params = mkv.tracks[0].codec_params();
+        let file = ContainerFile::Matroska(Box::new(mkv));
+        let (mut tracks, _) = open_audio_tracks(&file, &bytes, [(0, 4, params.clone(), 0)]).unwrap();
+
+        let decode = |track: &mut AudioTrackEntry, start: i64, frames: usize| {
+            decode_audio_range(&file, &bytes, 0, 48_000, 1, &track.audio_starts, track.seek_preroll_samples, track.state.get_mut().unwrap(), start, frames)
+                .unwrap()
+        };
+
+        let full = decode(&mut tracks[0], 0, 500);
+        assert_eq!(full[0].len(), 500);
+        // Each block's samples remain intact at their cumulative offsets (0..120, 120..320, 320..400, 400..500).
+        assert!((full[0][0] - (8_000.0 / 32_768.0)).abs() < 1e-4);
+        assert!((full[0][120] - (-16_000.0 / 32_768.0)).abs() < 1e-4);
+        assert!((full[0][320] - (24_000.0 / 32_768.0)).abs() < 1e-4);
+        assert!((full[0][400] - (4_000.0 / 32_768.0)).abs() < 1e-4);
+
+        // Chunked sequential reads and a backward seek into the lace must match the full read.
+        let (mut chunked_tracks, _) = open_audio_tracks(&file, &bytes, [(0, 4, params, 0)]).unwrap();
+        let mut chunked = Vec::new();
+        for (start, frames) in [(0, 150), (150, 200), (350, 150)] {
+            chunked.extend_from_slice(&decode(&mut chunked_tracks[0], start, frames)[0]);
+        }
+        assert_eq!(chunked, full[0]);
+
+        let rewound = decode(&mut tracks[0], 200, 250);
+        assert_eq!(rewound[0], full[0][200..450]);
+    }
+
+    #[test]
+    fn narrow_read_includes_overlapping_packet_like_wider_read() {
+        use std::io::Cursor;
+
+        let mut track = matroska::TrackSpec::new(matroska::TrackKind::Audio, "A_PCM/INT/LIT");
+        track.audio = Some((48_000.0, 1, Some(16)));
+        let mut mux = matroska::MkvWriter::new(Cursor::new(Vec::new()), vec![track], matroska::MuxOptions::default()).unwrap();
+        mux.write_frame(0, 0, true, &pcm_s16le_bytes(8_000, 1024), None).unwrap();
+        mux.write_frame(0, 10_666_667, true, &pcm_s16le_bytes(-16_000, 1024), None).unwrap();
+        let bytes = mux.finish().unwrap().into_inner();
+        let mkv = matroska::open(bytes.as_slice()).unwrap();
+        let params = mkv.tracks[0].codec_params();
+        let file = ContainerFile::Matroska(Box::new(mkv));
+
+        let open_with_overlap = || {
+            let (mut tracks, _) = open_audio_tracks(&file, &bytes, [(0, 2, params.clone(), 0)]).unwrap();
+            tracks[0].audio_starts = vec![0, 512];
+            tracks
+        };
+        let decode = |track: &mut AudioTrackEntry, start: i64, frames: usize| {
+            decode_audio_range(&file, &bytes, 0, 48_000, 1, &track.audio_starts, track.seek_preroll_samples, track.state.get_mut().unwrap(), start, frames)
+                .unwrap()
+        };
+
+        let mut wide_tracks = open_with_overlap();
+        let wide = decode(&mut wide_tracks[0], 0, 1536);
+
+        // Narrow read [0, 600) ends before packet 0's 1024-sample tail, yet must include packet 1 at 512.
+        let mut narrow_tracks = open_with_overlap();
+        let narrow = decode(&mut narrow_tracks[0], 0, 600);
+        assert_eq!(narrow[0], wide[0][..600]);
+        assert!((narrow[0][0] - (8_000.0 / 32_768.0)).abs() < 1e-4);
+        assert!((narrow[0][512] - (-16_000.0 / 32_768.0)).abs() < 1e-4);
+
+        // Chunked reads and a backward seek over the same interval must also match.
+        let mut chunked_tracks = open_with_overlap();
+        let mut chunked = Vec::new();
+        for (start, frames) in [(0, 300), (300, 300)] {
+            chunked.extend_from_slice(&decode(&mut chunked_tracks[0], start, frames)[0]);
+        }
+        assert_eq!(chunked, wide[0][..600]);
+
+        let rewound = decode(&mut wide_tracks[0], 0, 600);
+        assert_eq!(rewound[0], wide[0][..600]);
     }
 }
