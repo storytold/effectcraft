@@ -428,3 +428,10 @@ pub(super) fn mr_mercury(ctx: &EffectCtx, mut b: Buf) -> Buf {
     b.img = out;
     b
 }
+
+/// Drop this module's simulation checkpoints (Edit ▸ Purge).
+pub(crate) fn purge() {
+    PW_CACHE.clear();
+    PS2_CACHE.clear();
+    MERCURY_CACHE.clear();
+}
