@@ -1855,11 +1855,8 @@ mod tests {
         assert_eq!(estimate_mpeg_frame_rate(&units), FrameRate::FPS_30);
         assert_eq!(estimate_mpeg_frame_rate(&[]), FrameRate::FPS_30);
 
-        let streams = vec![
-            avi::mux::StreamSpec::Video(avi::mux::VideoSpec::new(*b"H264", 16, 16, 24, 1)),
-            avi::mux::StreamSpec::Audio(avi::mux::AudioSpec::pcm(48_000, 2, 16)),
-        ];
-        let mut w = avi::mux::AviWriter::new(std::io::Cursor::new(Vec::new()), streams, avi::mux::MuxOptions::default()).expect("avi writer");
+        let streams = vec![avi::StreamSpec::Video(avi::VideoSpec::new(*b"H264", 16, 16, 24, 1)), avi::StreamSpec::Audio(avi::AudioSpec::pcm(48_000, 2, 16))];
+        let mut w = avi::AviWriter::new(std::io::Cursor::new(Vec::new()), streams, avi::MuxOptions::default()).expect("avi writer");
         let pcm = vec![0x10u8; 2000 * 4];
         w.write_chunk(0, &[0x00, 0x00, 0x00, 0x01, 0x65], true).expect("v0");
         w.write_chunk(1, &pcm, true).expect("a0");
