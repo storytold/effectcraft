@@ -1234,16 +1234,24 @@ fn pen_draws_on_a_layer_fitted_to_the_work_area_past_the_playhead() {
     assert!(sp.closed, "the click on the first vertex closes the path");
 }
 
-#[test]
-fn motion_path_key_drag_edits_that_key() {
+/// The harness with the Box layer selected and its Position keyed from (100, 100) at 0 s to `end`
+/// at 2 s, so its motion path shows, and the playhead at `at` s. Snapping is off so a keyframe drag
+/// ends where the pointer does, not on a nearby edge or centre.
+fn box_with_motion_path(end: [f64; 2], at: f64) -> (Harness<'static, EffectcraftApp>, LayerId) {
     let mut h = harness();
     let box_id: LayerId = h.state().session.active_comp().unwrap().layers[0].id;
     let s = &mut h.state_mut().session;
     s.execute("layer.select", json!({"layers": [box_id.0]})).unwrap();
     s.execute("prop.addKey", json!({"layer": box_id.0, "path": "transform/position", "time": 0.0, "value": [100, 100, 0]})).unwrap();
-    s.execute("prop.addKey", json!({"layer": box_id.0, "path": "transform/position", "time": 2.0, "value": [500, 100, 0]})).unwrap();
+    s.execute("prop.addKey", json!({"layer": box_id.0, "path": "transform/position", "time": 2.0, "value": [end[0], end[1], 0.0]})).unwrap();
     s.execute("view.snapping", json!({"value": false})).unwrap();
-    s.set_time(effectcraft_engine::time::Tick::from_seconds_f64(1.0));
+    s.set_time(effectcraft_engine::time::Tick::from_seconds_f64(at));
+    (h, box_id)
+}
+
+#[test]
+fn motion_path_key_drag_edits_that_key() {
+    let (mut h, box_id) = box_with_motion_path([500.0, 100.0], 1.0);
     h.run_steps(3);
     assert!(h.state().auto.find(&format!("viewer.motionPath.{}.1", box_id.0)).is_some());
     let from = screen(&h, [500.0, 100.0]);
@@ -1385,14 +1393,7 @@ fn clicking_off_a_mask_deselects_its_points() {
 /// path into a curve (#290).
 #[test]
 fn a_straight_motion_path_has_handles_to_curve_it() {
-    let mut h = harness();
-    let box_id: LayerId = h.state().session.active_comp().unwrap().layers[0].id;
-    let s = &mut h.state_mut().session;
-    s.execute("layer.select", json!({"layers": [box_id.0]})).unwrap();
-    s.execute("prop.addKey", json!({"layer": box_id.0, "path": "transform/position", "time": 0.0, "value": [100, 100, 0]})).unwrap();
-    s.execute("prop.addKey", json!({"layer": box_id.0, "path": "transform/position", "time": 2.0, "value": [400, 100, 0]})).unwrap();
-    s.execute("view.snapping", json!({"value": false})).unwrap();
-    s.set_time(effectcraft_engine::time::Tick::from_seconds_f64(1.0));
+    let (mut h, box_id) = box_with_motion_path([400.0, 100.0], 1.0);
     h.run_steps(3);
     let (out0, in1) = (format!("viewer.motionPath.{}.0.out", box_id.0), format!("viewer.motionPath.{}.1.in", box_id.0));
     assert!(h.state().auto.find(&in1).is_some(), "the second key has a handle");
@@ -3066,14 +3067,7 @@ fn roto_brush_ctrl_drag_resizes_the_brush() {
 /// Linear and Auto Bezier, Delete Vertex removes it; the pointer is the tool's pen.
 #[test]
 fn vertex_tools_edit_motion_path_keyframes() {
-    let mut h = harness();
-    let box_id: LayerId = h.state().session.active_comp().unwrap().layers[0].id;
-    let s = &mut h.state_mut().session;
-    s.execute("layer.select", json!({"layers": [box_id.0]})).unwrap();
-    s.execute("prop.addKey", json!({"layer": box_id.0, "path": "transform/position", "time": 0.0, "value": [100, 100, 0]})).unwrap();
-    s.execute("prop.addKey", json!({"layer": box_id.0, "path": "transform/position", "time": 2.0, "value": [500, 100, 0]})).unwrap();
-    s.execute("view.snapping", json!({"value": false})).unwrap();
-    s.set_time(effectcraft_engine::time::Tick::from_seconds_f64(3.0));
+    let (mut h, box_id) = box_with_motion_path([500.0, 100.0], 3.0);
     let keys = |h: &Harness<'_, EffectcraftApp>| {
         h.state().session.active_comp().unwrap().layer(box_id).unwrap().props.prop("transform/position").unwrap().keys.clone()
     };
@@ -3106,6 +3100,63 @@ fn vertex_tools_edit_motion_path_keyframes() {
     let quarter = screen(&h, [200.0, 100.0]);
     click(&mut h, quarter);
     assert_eq!(keys(&h).len(), 3);
+}
+
+/// With Separate Dimensions on, X and Y Position move the layer, while the combined Position keeps
+/// the keys it had before separating, so the motion path has to follow X and Y. Each gets a key the
+/// other lacks, and X's lies past the combined Position's last key: a square shows on the X/Y route
+/// at every key time of either axis only when the path spans and samples both. A frame dot between
+/// keys lies on that route too, and Add Vertex there keys both X and Y. A layer separated before it
+/// is animated has a path too.
+#[test]
+fn separated_motion_path_follows_x_and_y_position() {
+    use effectcraft_engine::time::Tick;
+    // The playhead past the last key keeps the layer itself away from the dot Add Vertex clicks.
+    let (mut h, box_id) = box_with_motion_path([500.0, 100.0], 3.0);
+    let s = &mut h.state_mut().session;
+    s.execute("prop.separateDimensions", json!({"layer": box_id.0, "value": true})).unwrap();
+    s.execute("prop.addKey", json!({"layer": box_id.0, "path": "transform/positionY", "time": 1.0, "value": 250})).unwrap();
+    s.execute("prop.addKey", json!({"layer": box_id.0, "path": "transform/positionX", "time": 2.5, "value": 450})).unwrap();
+    h.run_steps(3);
+    let comp = h.state().session.active_comp().unwrap().clone();
+    let props = &comp.layer(box_id).unwrap().props;
+    let prop = |path: &str| props.prop(path).unwrap_or_else(|| panic!("no {path}")).clone();
+    let (x, y, combined) = (prop("transform/positionX"), prop("transform/positionY"), prop("transform/position"));
+    let route = |t: Tick| [x.value_at(t).as_f64() as f32, y.value_at(t).as_f64() as f32];
+    // Keys land on the nearest frame (2 s is 2.002 s at 29.97 fps): compare at the keys' own times.
+    let key_times = [0.0, 1.0, 2.0, 2.5].map(|s| comp.frame_rate.snap_nearest(Tick::from_seconds_f64(s)));
+    for (i, t) in key_times.into_iter().enumerate() {
+        let at = rect(&h, &format!("viewer.motionPath.{}.{i}", box_id.0)).center();
+        assert!(at.distance(screen(&h, route(t))) < 1.0, "key square {i} at {at:?} is off the X/Y route at {}s", t.seconds());
+    }
+    assert!(h.state().auto.find(&format!("viewer.motionPath.{}.4", box_id.0)).is_none(), "one square per X or Y key time");
+    // The viewer puts a frame dot every comp frame from the first key; this one is 15 frames in.
+    // The combined Position runs straight along y 100 there, well away from the X/Y route.
+    let t = Tick(comp.frame_duration().0 * 15);
+    let on_route = route(t);
+    let stale = combined.value_at(t).as_vec3();
+    assert!((stale[1] - f64::from(on_route[1])).abs() > 50.0, "the routes must differ here: {stale:?} vs {on_route:?}");
+    h.state_mut().ui.tool = Tool::PenAdd;
+    h.run_steps(2);
+    let at = screen(&h, on_route);
+    click(&mut h, at);
+    let props = &h.state().session.active_comp().unwrap().layer(box_id).unwrap().props;
+    for path in ["transform/positionX", "transform/positionY"] {
+        let times: Vec<f64> = props.prop(path).unwrap().keys.iter().map(|k| k.time.seconds()).collect();
+        assert!(times.iter().any(|s| (s - t.seconds()).abs() < 1e-6), "Add Vertex on the X/Y route keys {path} at {}s: {times:?}", t.seconds());
+    }
+    assert_eq!(props.prop("transform/position").unwrap().keys.len(), 2, "the unused combined Position gets no key");
+    // Separated before it is animated, the Plate's combined Position has no keys at all: whether it
+    // has a motion path has to depend on X and Y Position's keys alone.
+    let plate = layer_id(&h, "Plate");
+    let s = &mut h.state_mut().session;
+    s.execute("layer.select", json!({"layers": [plate]})).unwrap();
+    s.execute("prop.separateDimensions", json!({"layer": plate, "value": true})).unwrap();
+    for (time, value) in [(0.0, 100), (2.0, 500)] {
+        s.execute("prop.addKey", json!({"layer": plate, "path": "transform/positionX", "time": time, "value": value})).unwrap();
+    }
+    h.run_steps(3);
+    assert!(h.state().auto.find(&format!("viewer.motionPath.{plate}.1")).is_some(), "X Position's second key has its square");
 }
 
 /// #882: at 100 % (and 200 %) on a scaled display the frame's corner sits on a physical pixel, so
