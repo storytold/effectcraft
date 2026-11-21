@@ -109,7 +109,13 @@ fn strokes() {
     env_case("ec.generate.stroke", &[("path", n(3.0)), ("paintStyle", e(2)), ("start", n(20.0)), ("brushHardness", n(10.0))]);
     env_case(
         "ec.generate.stroke",
-        &[("strokeTaper/startLength", n(30.0)), ("strokeTaper/endLength", n(2.0)), ("strokeTaper/endShape", e(2)), ("brushSize", n(14.0))],
+        &[
+            ("strokeTaper/startLength", n(30.0)),
+            ("strokeTaper/endLength", n(2.0)),
+            ("strokeTaper/endShape", e(2)),
+            ("brushSize", n(14.0)),
+            ("brushHardness", n(50.0)),
+        ],
     );
     env_case("ec.generate.scribble", &[]);
     env_case("ec.generate.scribble", &[("scribble", e(1)), ("fillType", e(2)), ("edgeOptions/endCap", e(2)), ("edgeOptions/join", e(1)), ("composite", e(0))]);

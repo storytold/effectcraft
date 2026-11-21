@@ -45,7 +45,9 @@ fn fg2_in_bounds(p: vec2<i32>, at: u32, stride: u32) -> bool {
 // ---------------------------------------------------------------- segments (generate3::raster_segs)
 // Items: (ax, ay, bx, by, radius, value, radius at b, kind, bounds). Kind 0 is a round-capped
 // segment (radius at b unused); kind 1 a square-ended ribbon (generate3::raster_ribbons) whose
-// radius runs from `radius` at a to `radius at b`, the distance measured across it. Up to four coverages per pixel (x, y, z, w),
+// radius runs from `radius` at a to `radius at b`, the distance measured across it (not from
+// the slanted edge, which would leave a seam in a soft brush where a steep taper meets the
+// body). Up to four coverages per pixel (x, y, z, w),
 // variant k with radius max(r · f[k].x + f[k].y, f[k].z) and hardness f[k].w, max-combined;
 // bit k of u[1].x selects Advanced Lightning's linear core (clamp(r − d + 0.5, 0, 1)) instead.
 // u[0] = (items at, stride, tiles x, variants).
@@ -87,10 +89,8 @@ fn fg2_segs(@builtin(global_invocation_id) gid: vec3<u32>) {
                 continue;
             }
             let tr = along / l;
-            let rb = data[at + 6u];
-            let slant = sqrt(1.0 + (rb - r) * (rb - r) / l2);
-            r = mix(r, rb, clamp(tr, 0.0, 1.0));
-            d = r + (abs((px - ax) * dy - (py - ay) * dx) / sqrt(l2) - r) / slant;
+            r = mix(r, data[at + 6u], clamp(tr, 0.0, 1.0));
+            d = abs((px - ax) * dy - (py - ay) * dx) / l;
         } else {
             var t = 0.0;
             if (l2 > 1e-12) {

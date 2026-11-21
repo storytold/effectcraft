@@ -194,6 +194,21 @@ fn stroke_tiny_taper_on_a_long_stroke_is_not_covered() {
     assert!(a < 0.5, "coverage {a} outside the taper's edge");
 }
 
+/// A soft brush keeps its falloff through a short, steep taper: near the axis, where the
+/// taper is almost full width, the coverage is the body's, without a dip where they meet.
+#[test]
+fn stroke_soft_taper_meets_the_body_without_a_seam() {
+    let masks = vec![MaskShape { name: "Mask 1".into(), points: vec![[8.1, 32.5], [56.1, 32.5]], closed: false, inverted: false }];
+    let env = EffectEnv { masks: &masks, ..Default::default() };
+    let set = [("brushSize", num(12.0)), ("brushHardness", num(50.0)), ("paintStyle", Value::Enum(1)), ("strokeTaper/startLength", num(1.0))];
+    let out = run_env("ec.generate.stroke", &set, Image::new(64, 64), 0.0, env);
+    // The taper runs x 8.1 – 8.58: pixel centre 8.5 is in it, where it is 5 of the body's 6 px.
+    for y in 31..34 {
+        let (taper, body) = (out.img.data[y * 64 + 8][3], out.img.data[y * 64 + 20][3]);
+        assert!(taper >= body - 0.02, "row {y}: {taper} in the taper, {body} on the body");
+    }
+}
+
 /// A short taper cuts only its own end of the stroke into pieces: the full-width body stays one
 /// piece, so tapering a long stroke does not multiply the rasterising work along all of it.
 #[test]

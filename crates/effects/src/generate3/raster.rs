@@ -78,6 +78,9 @@ const RIBBON_END_SLACK: f64 = 1e-3;
 
 /// Max-combine ribbons into `out` with the brush falloff of [`raster_segs`]: the distance is
 /// measured across the ribbon, against its half-width where the pixel centre falls along it.
+/// (Not from the slanted edge: that would squeeze a soft brush's falloff on a steep taper and
+/// leave a seam where it meets the full-width body, which has the same formula at the same
+/// half-width.)
 pub(crate) fn raster_ribbons(out: &mut Plane, ribbons: &[Ribbon], hardness: f64) {
     let (w, h) = (out.w, out.h);
     if w == 0 || h == 0 || ribbons.is_empty() {
@@ -106,10 +109,6 @@ pub(crate) fn raster_ribbons(out: &mut Plane, ribbons: &[Ribbon], hardness: f64)
                 continue;
             }
             let l = l2.sqrt();
-            // The ribbon's edges slant by the change in half-width: distances across the axis
-            // are scaled to distances from the slanted edge, so a blunt taper is antialiased
-            // as finely as the body.
-            let slant = (1.0 + ((s.rb - s.ra) / l).powi(2)).sqrt();
             let pad = s.ra.max(s.rb) + 1.0;
             let x0 = (s.a[0].min(s.b[0]) - pad).floor().max(0.0) as usize;
             let x1 = ((s.a[0].max(s.b[0]) + pad).ceil().max(0.0) as usize).min(w);
@@ -121,7 +120,7 @@ pub(crate) fn raster_ribbons(out: &mut Plane, ribbons: &[Ribbon], hardness: f64)
                 }
                 let t = along / l;
                 let r = s.ra + (s.rb - s.ra) * t.clamp(0.0, 1.0);
-                let d = r + (((px - s.a[0]) * dy - (py - s.a[1]) * dx).abs() / l - r) / slant;
+                let d = ((px - s.a[0]) * dy - (py - s.a[1]) * dx).abs() / l;
                 let (inner, outer) = (r * hard - 0.5, r + 0.5);
                 if d >= outer {
                     continue;
