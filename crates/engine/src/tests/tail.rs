@@ -59,6 +59,23 @@ fn stroke_taper_wave_commands_render_undo_and_serde() {
     assert!(s.execute("shape.stroke.wave", json!({"layer": lid, "units": "furlongs"})).is_err());
 }
 
+/// #3042: Taper's Start/End Length can't go below 0 (a typed −50 did nothing visible).
+#[test]
+fn stroke_taper_lengths_clamp_at_zero() {
+    let mut s = comp(200, 100);
+    let (lid, stroke) = line_layer(&mut s);
+    s.execute("shape.stroke.taper", json!({"layer": lid})).unwrap();
+    for m in ["startLength", "endLength"] {
+        let uid = {
+            let l = s.active_comp().unwrap().layer(LayerId(lid)).unwrap();
+            l.props.find_group(stroke).unwrap().sub("taper").unwrap().get(m).unwrap().uid
+        };
+        s.execute("prop.set", json!({"layer": lid, "prop": uid, "value": -50})).unwrap();
+        let l = s.active_comp().unwrap().layer(LayerId(lid)).unwrap();
+        assert_eq!(l.props.find_group(stroke).unwrap().prop(&format!("taper/{m}")).unwrap().value.as_f64(), 0.0, "{m}");
+    }
+}
+
 #[test]
 fn dashes_plus_minus_buttons() {
     let mut s = comp(200, 100);
