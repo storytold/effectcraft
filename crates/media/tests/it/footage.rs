@@ -1596,13 +1596,21 @@ fn filmcraft_fallback_handles_mjpeg_mov() {
 /// contiguous, so the test isolates reset positioning from separately handled timestamp gaps.
 #[test]
 fn matroska_cold_seek_applies_codec_delay_once() {
+    assert_matroska_cold_seek_codec_delay(8_250_000); // Exactly 396 samples, but 8 indexed ticks.
+}
+
+#[test]
+fn matroska_cold_seek_matches_fractional_codec_delay_rounding() {
+    assert_matroska_cold_seek_codec_delay(8_260_000); // 396.48 samples, also 8 indexed ticks.
+}
+
+fn assert_matroska_cold_seek_codec_delay(delay_ns: i64) {
     use craft_media::matroska::{self, MkvWriter, MuxOptions, TrackKind, TrackSpec};
     use craft_video::prores::{ChromaFormat, Encoder, Frame, Profile};
 
     const RATE: u32 = 48_000;
     const PACKET_FRAMES: usize = 4_800;
     const PACKET_NS: i64 = 100_000_000;
-    const DELAY_NS: i64 = 8_250_000; // 396 samples, but 8 rounded container ticks.
     const CHANGE_PACKET: i64 = 32;
     const HALF_WINDOW: usize = 192;
 
@@ -1616,7 +1624,7 @@ fn matroska_cold_seek_applies_codec_delay_once() {
 
     let mut audio = TrackSpec::new(TrackKind::Audio, "A_PCM/INT/LIT");
     audio.audio = Some((f64::from(RATE), 1, Some(16)));
-    audio.codec_delay_ns = DELAY_NS as u64;
+    audio.codec_delay_ns = delay_ns as u64;
     audio.default_duration_ns = Some(PACKET_NS as u64);
     let mut mux = MkvWriter::new(std::io::Cursor::new(Vec::new()), vec![video, audio], MuxOptions::default()).unwrap();
     mux.write_frame(0, 0, true, &picture, None).unwrap();
@@ -1624,7 +1632,7 @@ fn matroska_cold_seek_applies_codec_delay_once() {
     let signal = 16_384i16.to_le_bytes().repeat(PACKET_FRAMES);
     for n in 0..40 {
         let pcm = if n < CHANGE_PACKET { &silent } else { &signal };
-        mux.write_frame(1, n * PACKET_NS - DELAY_NS, true, pcm, None).unwrap();
+        mux.write_frame(1, n * PACKET_NS - delay_ns, true, pcm, None).unwrap();
     }
     let bytes = mux.finish().unwrap().into_inner();
     let mkv = matroska::open(bytes.as_slice()).unwrap();
@@ -1648,7 +1656,7 @@ fn matroska_cold_seek_applies_codec_delay_once() {
         let t = Tick::from_units(n * PACKET_FRAMES as i64, i64::from(RATE));
         let _ = warm_pool.audio_samples(&warm, t, PACKET_FRAMES, RATE);
     }
-    let boundary = CHANGE_PACKET * PACKET_FRAMES as i64 - DELAY_NS * i64::from(RATE) / 1_000_000_000;
+    let boundary = CHANGE_PACKET * PACKET_FRAMES as i64 - delay_ns * i64::from(RATE) / 1_000_000_000;
     let t = Tick::from_units(boundary - HALF_WINDOW as i64, i64::from(RATE));
     let sequential = warm_pool.audio_samples(&warm, t, 2 * HALF_WINDOW, RATE);
     assert_eq!(sequential.len(), 4 * HALF_WINDOW);
