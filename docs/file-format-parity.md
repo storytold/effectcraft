@@ -91,7 +91,7 @@ trips and renders, checked by tests, not against After Effects), **partial** (na
 | Lottie JSON / dotLottie | via third-party plug-ins | yes | yes | beyond After Effects; a warnings list names what Lottie can't express |
 | JSON / CSV / TSV data | R | yes (`footage()`, data layers) | — | good |
 | LUTs (`.cube`, `.3dl`, `.csp`, `.spi1d/3d`, CDL) | R | yes (Apply Color LUT, OCIO effects) | — | Apply Color LUT bug (#514) is closed |
-| OpenColorIO configs | R (OCIO 2.5.1, ACES 2.0 in 26.5) | yes (OCIO v2 subset, Blender configs) | — | partial: no ACES 2.0 output transforms |
+| OpenColorIO configs | R (OCIO 2.5.1, ACES 2.0 in 26.5) | yes (OCIO v2 subset, Blender configs; per project with a studio default and `$OCIO`, which sets the working space only) | — | partial: no ACES 2.0 output transforms; a project's config doesn't drive the viewer or renders yet |
 | Fonts (TTF, OTF, TTC, variable) | R | yes | — | good |
 | Mocha shapes | R (Mocha AE) | own documented JSON | — | Mocha's format is not public |
 | Vanishing Point `.vpe` | R | none | — | no public specification; the menu entry explains why |
