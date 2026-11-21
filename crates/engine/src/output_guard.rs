@@ -27,7 +27,7 @@ use std::path::Component;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use effectcraft_project::render_queue::{RenderQueueItem, log_path, numbered_template, sequence_frame, sequence_parts, sequence_path};
+use effectcraft_project::render_queue::{RenderQueueItem, frame_run, log_path, numbered_template, sequence_frame, sequence_parts, sequence_path};
 use effectcraft_project::{Footage, ItemKind};
 use serde_json::{Value, json};
 
@@ -280,7 +280,9 @@ fn frames_on_disk(path: &str, first: i64, count: u64) -> Result<Vec<PathBuf>, St
     let p = Path::new(path);
     let dir = p.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
     let name = p.file_name().map(|n| n.to_string_lossy().into_owned());
-    let Some(name) = name.filter(|_| !dir.to_string_lossy().contains('#')) else {
+    // Where the frame number goes, not any `#`: a bare `#` in a folder's name is part of the name.
+    let in_folder = frame_run(path).is_some_and(|(start, _, _)| path.get(start..).is_some_and(|rest| rest.contains(['/', '\\'])));
+    let Some(name) = name.filter(|_| !in_folder) else {
         // The frame number is in a folder's name: every frame has a folder of its own.
         if count > PROBE_LIMIT {
             return Err(format!(
@@ -1037,6 +1039,11 @@ mod tests {
         std::fs::write(dir.join("f02").join("x.png"), b"x").unwrap();
         let in_folder = dir.join("f[##]").join("x.png").to_string_lossy().into_owned();
         assert_eq!(names(frames_on_disk(&in_folder, 0, 4).unwrap()), ["x.png"]);
+        // A bare `#` in a folder's name is part of the name: the frames are in that one folder.
+        std::fs::create_dir_all(dir.join("#_shots")).unwrap();
+        std::fs::write(dir.join("#_shots").join("b_00003.png"), b"x").unwrap();
+        let hash_folder = dir.join("#_shots").join("b_[#####].png").to_string_lossy().into_owned();
+        assert_eq!(names(frames_on_disk(&hash_folder, 0, 5).unwrap()), ["b_00003.png"]);
         // A folder that is not there holds nothing.
         assert!(frames_on_disk(&dir.join("none").join("a_[#####].png").to_string_lossy(), 0, 5).unwrap().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
