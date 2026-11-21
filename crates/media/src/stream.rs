@@ -191,12 +191,12 @@ pub(crate) fn open_source(_path: &Path) -> Option<(Result<MediaSource>, FileStam
 
 /// `path` read in place (`None` when it can't be opened, or without a native file system).
 #[cfg(any(unix, windows))]
-pub(crate) fn file_reader(path: &Path) -> Option<Box<dyn filmcraft_media::ByteReader>> {
+pub(crate) fn file_reader(path: &Path) -> Option<Box<dyn craft_media::ByteSource>> {
     Some(Box::new(FileReader::open(path).ok()?))
 }
 
 #[cfg(not(any(unix, windows)))]
-pub(crate) fn file_reader(_path: &Path) -> Option<Box<dyn filmcraft_media::ByteReader>> {
+pub(crate) fn file_reader(_path: &Path) -> Option<Box<dyn craft_media::ByteSource>> {
     None
 }
 

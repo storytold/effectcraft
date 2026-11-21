@@ -10,14 +10,14 @@
 //!   - Shared (`craft-media::isobmff` + `craft-video` + `craft-audio`): `H264`, `Hevc`, `Av1`,
 //!     `Vp9`, `Vp8`, `ProRes` (coded alpha via `craft_video::prores::probe`, #3999), `Dnxhd`,
 //!     `Mpeg2Video`, and strictly admitted video-only `Apv` MP4;
-//!     audio `Aac`, `Alac`, `Opus`, `Ac3`, `Mp3`/`Mp2`/`Mp1`.
+//!     audio `Aac`, `Alac`, `Flac`, `Opus`, `Ac3`, `Mp3`/`Mp2`/`Mp1`.
 //!   - Fallback (`filmcraft-codecs`): `Mjpeg`, `Mpeg4Video`, `Ffv1`, other `Apv`, or unsupported audio.
 //! - **Matroska / WebM (`MKV`/`MKA`/`WebM`, video+audio & audio-only)**:
 //!   - Shared (`craft-media::matroska` + `craft-video` + `craft-audio`): `H264`, `Hevc`, `Av1`,
-//!     `Vp9`, `Vp8`, `ProRes`, `Dnxhd`, `Mpeg2Video`; audio `Aac`, `Alac`, `Opus`, `Ac3`,
+//!     `Vp9`, `Vp8`, `ProRes`, `Dnxhd`, `Mpeg2Video`; audio `Aac`, `Alac`, `Flac`, `Opus`, `Ac3`,
 //!     `Mp3`/`Mp2`/`Mp1` (with `CodecDelay` + `SeekPreRoll` timing).
 //!   - Fallback (`filmcraft-codecs`): `alpha_mode == 1` (`BlockAdditional` alpha), unreadable/zlib
-//!     encodings, `Mjpeg`/`Ffv1`/`Theora`/`Apv`, or unsupported audio (`Vorbis`/`Flac`/`Pcm`).
+//!     encodings, `Mjpeg`/`Ffv1`/`Theora`/`Apv`, or unsupported audio (`Vorbis`/`Pcm`).
 //! - **MXF (`MXF`, video+audio & audio-only OP1a/OP-Atom)**:
 //!   - Shared (`craft-media::mxf` + `craft-video` + `MxfFile::read_pcm`): `H264`, `Hevc`, `Av1`,
 //!     `Vp9`, `Vp8`, `ProRes`, `Dnxhd`, `Mpeg2Video`; sound `Pcm` and `Aes3` (D-10).
@@ -30,9 +30,10 @@
 //!     `Apv`, other raw AVI layouts) or unsupported audio.
 //! - **Other containers & standalone audio**:
 //!   - Shared (`craft_audio::Decoder` with `decode-native`): standalone `WAV`, `AIFF`, `MP3`/`MP2`/`MP1`,
-//!     `AAC` (ADTS), `AC-3`, and `Ogg` (`Opus`).
-//!   - Fallback (`filmcraft-codecs`): `Ogg Vorbis`, `FLAC`, `CAF`, or unsupported WAV/AIFF
-//!     encodings.
+//!     `AAC` (ADTS), `AC-3`, and `Ogg` (`Opus`). Bounded standalone FLAC uses the shared native
+//!     FLAC decoder and the same resampling policy.
+//!   - Fallback (`filmcraft-codecs`): `Ogg Vorbis`, `CAF`, or FLAC and WAV/AIFF input the shared
+//!     readers decline.
 
 use std::sync::{Arc, Mutex};
 
@@ -55,6 +56,8 @@ use craft_video::{TrackDecoder, TrackDecoderOptions, VideoError, prores};
 
 mod raw_avi;
 use raw_avi::RawAvi;
+
+mod standalone_flac;
 
 /// Maximum worker threads per `TrackDecoder` instance.
 const MAX_WORKERS: usize = 8;
@@ -134,6 +137,9 @@ pub(crate) fn open_reader(name: &str, head: &[u8], reader: &SharedBytes) -> Opti
     if let Some(fmt) = mpegts::sniff(usual_head) {
         return open_mpeg(name, fmt, reader.clone());
     }
+    if let Some(source) = standalone_flac::open_reader(name, usual_head, reader) {
+        return Some(Ok(source));
+    }
     open_standalone_audio(name, usual_head, reader.clone())
 }
 
@@ -153,6 +159,9 @@ pub(crate) fn open_bytes(name: &str, bytes: Arc<[u8]>) -> Option<Result<SharedSo
     }
     if let Some(fmt) = mpegts::sniff(&bytes) {
         return open_mpeg(name, fmt, Arc::new(bytes));
+    }
+    if let Some(source) = standalone_flac::open_bytes(name, &bytes) {
+        return Some(Ok(source));
     }
     #[cfg(any(unix, windows))]
     {
@@ -262,6 +271,11 @@ impl ContainerFile {
             }
             ContainerFile::Mxf(f) => f.tracks[track_idx].sync_before(target_idx),
         }
+    }
+
+    fn scanned_avi_has_picture(&self, track_idx: usize, sample_idx: usize) -> bool {
+        let Self::Avi(file) = self else { return false };
+        file.streams.get(track_idx).is_some_and(|s| !s.keyframes_known && s.chunks.get(sample_idx).is_some_and(|c| c.size != 0))
     }
 
     fn sample_pts(&self, track_idx: usize, sample_idx: usize) -> i64 {
@@ -406,7 +420,7 @@ fn place_packet(packet: PacketTime, next: &mut Option<i64>, tolerance: u64) -> i
     start
 }
 
-struct OpusPrefix {
+struct PacketTimingPrefix {
     len: usize,
     next: Option<i64>,
     tolerance: u64,
@@ -414,27 +428,28 @@ struct OpusPrefix {
 }
 
 struct AudioStarts {
-    // For Opus, unvisited entries still hold raw container stamps. Resolve in place
+    // Unvisited entries still hold raw container stamps. Resolve in place
     // as packets arrive, reusing this table for the finished timeline.
     positions: Vec<i64>,
-    opus: Option<OpusPrefix>,
+    pending: Option<PacketTimingPrefix>,
 }
 
 impl AudioStarts {
     fn complete(positions: Vec<i64>) -> Self {
-        Self { positions, opus: None }
+        Self { positions, pending: None }
     }
 
-    fn opus(positions: Vec<i64>, tolerance: i64) -> Self {
+    fn from_packet_timing(positions: Vec<i64>, tolerance: i64) -> Self {
         // Open resolves exactly the bounded lookahead before anyone can seek.
         let min_pending_stamp = positions.iter().skip(AUDIO_LOOKAHEAD).copied().min().unwrap_or(i64::MIN);
-        let opus = (!positions.is_empty()).then_some(OpusPrefix { len: 0, next: None, tolerance: tolerance.max(0).unsigned_abs(), min_pending_stamp });
-        Self { positions, opus }
+        let pending =
+            (!positions.is_empty()).then_some(PacketTimingPrefix { len: 0, next: None, tolerance: tolerance.max(0).unsigned_abs(), min_pending_stamp });
+        Self { positions, pending }
     }
 
     fn start(&self, file: &ContainerFile, track: usize, idx: usize) -> Option<i64> {
         let stamp = *self.positions.get(idx)?;
-        let Some(prefix) = &self.opus else { return Some(stamp) };
+        let Some(prefix) = &self.pending else { return Some(stamp) };
         if idx < prefix.len {
             return Some(stamp);
         }
@@ -445,22 +460,26 @@ impl AudioStarts {
         })
     }
 
-    fn observe(&mut self, file: &ContainerFile, track: usize, idx: usize, packet: &[u8]) {
-        let Some(prefix) = &mut self.opus else { return };
+    fn observe(&mut self, file: &ContainerFile, track: usize, idx: usize, packet: &[u8], decoder: &AudioTrackDecoder) {
+        let Some(prefix) = &mut self.pending else { return };
         if idx != prefix.len {
             return;
         }
-        let timing =
-            PacketTime { stamp: self.positions[idx], stamped: file.audio_packet_is_stamped(track, idx), samples: opus_packet_samples(packet).map(i64::from) };
+        let samples = match decoder.codec() {
+            CodecId::Opus => opus_packet_samples(packet).map(i64::from),
+            CodecId::Flac => decoder.flac_packet_frames(packet).and_then(|n| i64::try_from(n).ok()),
+            _ => None,
+        };
+        let timing = PacketTime { stamp: self.positions[idx], stamped: file.audio_packet_is_stamped(track, idx), samples };
         self.positions[idx] = place_packet(timing, &mut prefix.next, prefix.tolerance);
         prefix.len += 1;
         if prefix.len == self.positions.len() {
-            self.opus = None;
+            self.pending = None;
         }
     }
 
     fn seek_proves_first_packet(&self, target: i64) -> bool {
-        let Some(prefix) = &self.opus else { return false };
+        let Some(prefix) = &self.pending else { return false };
         // A normal read that starts before the very first packet looks like a
         // backward seek. It need not read the suffix if the ordinary seek
         // would back up to packet 0 anyway. Stamped starts can only move by the
@@ -471,18 +490,18 @@ impl AudioStarts {
             && self.positions.get(AUDIO_SEEK_BACKUP_PACKETS + 1..prefix.len).is_some_and(|p| p.iter().all(|&start| start > target))
     }
 
-    fn finish_for_seek(&mut self, file: &ContainerFile, source: &dyn ByteSource, track: usize) -> Result<()> {
+    fn finish_for_seek(&mut self, file: &ContainerFile, source: &dyn ByteSource, track: usize, decoder: &AudioTrackDecoder) -> Result<()> {
         // The exact recurrence can carry a timing phase across arbitrarily many
         // rounded or laced packets. A first discontinuous seek may still have to
         // index the unread suffix; normal open and sequential decode never do this.
-        while let Some(idx) = self.opus.as_ref().map(|prefix| prefix.len) {
+        while let Some(idx) = self.pending.as_ref().map(|prefix| prefix.len) {
             if filmcraft_media::cancel::cancelled() {
                 return Err(MediaError::Cancelled);
             }
             // Do not commit a guessed duration after an I/O error; the next
             // request can retry this packet without re-reading the valid prefix.
             let packet = file.read_sample(source, track, idx)?;
-            self.observe(file, track, idx, &packet);
+            self.observe(file, track, idx, &packet, decoder);
         }
         Ok(())
     }
@@ -542,8 +561,8 @@ fn compute_audio_starts(container: &ContainerFile, track_idx: usize, codec: Code
             let ts = i128::from(track.timescale.max(1));
             let stamps: Vec<i64> = (0..track.samples.len()).map(|i| isobmff_audio_position(track, i, native_rate)).collect();
             let unit = i64::try_from((rate + ts - 1) / ts).unwrap_or(i64::MAX);
-            if codec == CodecId::Opus {
-                return AudioStarts::opus(stamps, unit.saturating_mul(2).saturating_add(1));
+            if matches!(codec, CodecId::Opus | CodecId::Flac) {
+                return AudioStarts::from_packet_timing(stamps, unit.saturating_mul(2).saturating_add(1));
             }
             let Some(frame) = fixed_samples else {
                 return AudioStarts::complete(stamps);
@@ -565,8 +584,8 @@ fn compute_audio_starts(container: &ContainerFile, track_idx: usize, codec: Code
                 i64::try_from(audio_frames_from_ns(ns, native_rate) - delay_frames).unwrap_or(0)
             };
             let tick_samples = i64::try_from(i128::from(track.ticks_to_ns(2)) * rate / 1_000_000_000).unwrap_or(i64::MAX).saturating_add(1);
-            if codec == CodecId::Opus {
-                return AudioStarts::opus(track.samples.iter().map(|s| stamp_for(s.pts)).collect(), tick_samples);
+            if matches!(codec, CodecId::Opus | CodecId::Flac) {
+                return AudioStarts::from_packet_timing(track.samples.iter().map(|s| stamp_for(s.pts)).collect(), tick_samples);
             }
             let Some(frame) = fixed_samples else {
                 return AudioStarts::complete(track.samples.iter().map(|s| stamp_for(s.pts)).collect());
@@ -657,9 +676,9 @@ where
         let codec = dec.codec();
         let fixed_samples = fixed_packet_samples(&mut dec, codec, &lookahead);
         let mut audio_starts = compute_audio_starts(container, idx, codec, native_rate, fixed_samples);
-        if codec == CodecId::Opus {
+        if audio_starts.pending.is_some() {
             for (s_idx, pkt) in lookahead.iter().enumerate() {
-                audio_starts.observe(container, idx, s_idx, pkt);
+                audio_starts.observe(container, idx, s_idx, pkt, &dec);
             }
         }
         let seek_preroll_samples = match container {
@@ -674,7 +693,7 @@ where
             sample_rate: native_rate,
             channels,
             codec: params.codec.name().to_string(),
-            bits_per_sample: params.pcm.map(|p| u32::from(p.bits)),
+            bits_per_sample: dec.flac_stream_info().map(|info| u32::from(info.bits_per_sample)).or_else(|| params.pcm.map(|p| u32::from(p.bits))),
         });
         audio_tracks.push(AudioTrackEntry {
             track_idx: idx,
@@ -1051,6 +1070,17 @@ fn open_matroska(name: &str, source: SharedBytes) -> Option<Result<SharedSource>
         let frame_rate = estimate_matroska_frame_rate(video_track);
         let duration = matroska_duration(&file, video_track);
         let codec_name = video_params.codec.name().to_string();
+        let coded_alpha = if video_params.codec == CodecId::ProRes {
+            // Bound the reconstructed packet, including the prefix restored by Matroska.
+            // Unknown alpha must not disable the shared reader for later pictures.
+            video_track
+                .sample_size(0)
+                .and_then(|size| u32::try_from(size).ok())
+                .and_then(|size| prores_has_alpha(size, || file.read_sample(&*source, v_idx, 0).ok()))
+                .unwrap_or(false)
+        } else {
+            false
+        };
         let video_decoder = match TrackDecoder::with_options(&video_params, TrackDecoderOptions { threads: Some(worker_cap()), draft: false }) {
             Ok(d) => d,
             Err(e) => return Some(Err(MediaError::Decode(e.to_string()))),
@@ -1063,7 +1093,7 @@ fn open_matroska(name: &str, source: SharedBytes) -> Option<Result<SharedSource>
             codec: codec_name,
             pixel_format: String::new(),
             color,
-            has_alpha: false,
+            has_alpha: coded_alpha,
             bitrate: None,
             hdr: None,
         };
@@ -1422,9 +1452,15 @@ fn open_avi(name: &str, source: SharedBytes) -> Option<Result<SharedSource>> {
     } else {
         let duration = audio_candidates
             .iter()
-            .map(|&(idx, _, _, _)| {
-                let s = &file.streams[idx];
-                Tick::from_units(i64::from(s.length).saturating_mul(i64::from(s.scale.max(1))), i64::from(s.rate.max(1)))
+            .map(|(idx, _, params, _)| {
+                let s = &file.streams[*idx];
+                let units = if params.codec == CodecId::Pcm && s.sample_size > 0 {
+                    // Playback counts complete blocks within each indexed chunk.
+                    s.chunks.iter().fold(0i64, |units, chunk| units.saturating_add(i64::from(chunk.size / s.sample_size)))
+                } else {
+                    i64::from(s.length)
+                };
+                Tick::from_units(units.saturating_mul(i64::from(s.scale.max(1))), i64::from(s.rate.max(1)))
             })
             .max()
             .unwrap_or(Tick::ZERO);
@@ -1753,7 +1789,10 @@ impl MediaSource for CraftMediaSource {
             return Ok(hit.frame.clone());
         }
 
-        let sync_idx = self.file.sync_sample_before(video_idx, target_idx);
+        // A scan cannot identify AVI keyframes, but each nonempty ProRes chunk is
+        // an independent picture. Do not read an earlier, possibly damaged chunk.
+        let direct_avi_prores = state.decoder.codec() == CodecId::ProRes && self.file.scanned_avi_has_picture(video_idx, target_idx);
+        let sync_idx = if direct_avi_prores { target_idx } else { self.file.sync_sample_before(video_idx, target_idx) };
         let draft_changed = state.decoder.draft() != want_draft;
         if draft_changed {
             state.decoder.set_draft(want_draft);
@@ -1979,7 +2018,14 @@ impl MediaSource for StandaloneAudioSource {
 
 /// Step the fractional input position as an exact integer quotient and remainder;
 /// rounding happens only when interpolating a sample, independent of the window.
-fn resample_audio_with_phase(decoded: &[Vec<f32>], native_rate: u32, sample_rate: u32, frames: usize, phase: u64, first_output: usize) -> Vec<Vec<f32>> {
+fn resample_audio_with_phase(
+    decoded: &[impl AsRef<[f32]>],
+    native_rate: u32,
+    sample_rate: u32,
+    frames: usize,
+    phase: u64,
+    first_output: usize,
+) -> Vec<Vec<f32>> {
     let mut out = vec![vec![0.0; frames]; decoded.len()];
     let divisor = u64::from(sample_rate);
     let first = first_output as u128 * u128::from(native_rate) + u128::from(phase);
@@ -1989,6 +2035,7 @@ fn resample_audio_with_phase(decoded: &[Vec<f32>], native_rate: u32, sample_rate
     let remainder_step = u64::from(native_rate % sample_rate);
     let inverse_rate = f64::from(sample_rate).recip();
     for (samples, dst) in decoded.iter().zip(&mut out) {
+        let samples = samples.as_ref();
         let (mut index, mut remainder) = (first_index, first_remainder);
         for sample in dst.iter_mut().skip(first_output) {
             let Some(&a) = samples.get(index) else { break };
@@ -2050,11 +2097,16 @@ fn resampling_window(start: i64, frames: usize, native_rate: u32, sample_rate: u
     if sample_rate == native_rate {
         return Some((start, frames, 0));
     }
+    let (origin, phase) = resampling_origin(start, native_rate, sample_rate)?;
+    let len = ((frames as u128 * u128::from(native_rate)).div_ceil(u128::from(sample_rate)) + 2) as usize;
+    Some((origin, len, phase))
+}
+
+fn resampling_origin(start: i64, native_rate: u32, sample_rate: u32) -> Option<(i64, u64)> {
     let scaled = i128::from(start) * i128::from(native_rate);
     let divisor = i128::from(sample_rate);
     let origin = i64::try_from(scaled.div_euclid(divisor)).ok()?;
-    let len = ((frames as u128 * u128::from(native_rate)).div_ceil(u128::from(sample_rate)) + 2) as usize;
-    Some((origin, len, scaled.rem_euclid(divisor) as u64))
+    Some((origin, scaled.rem_euclid(divisor) as u64))
 }
 
 fn drain_audio_window(buf: &mut [Vec<f32>], decoded_pos: &mut i64, channels_count: usize, start: i64, frames: usize) -> Vec<Vec<f32>> {
@@ -2154,7 +2206,7 @@ fn decode_audio_range(
         let (seek_idx, decoded_pos) = if moves_backward && state.next_sample == 0 && state.audio_starts.seek_proves_first_packet(target) {
             (0, state.decoded_pos)
         } else {
-            state.audio_starts.finish_for_seek(file, source, track_idx)?;
+            state.audio_starts.finish_for_seek(file, source, track_idx, &state.decoder)?;
             file.audio_seek_info(track_idx, &state.audio_starts.positions, seek_preroll_samples, start)
         };
         state.decoder.reset();
@@ -2186,7 +2238,7 @@ fn decode_audio_range(
             break;
         }
         let pkt = file.read_sample(source, track_idx, idx)?;
-        state.audio_starts.observe(file, track_idx, idx, &pkt);
+        state.audio_starts.observe(file, track_idx, idx, &pkt, &state.decoder);
         state.next_sample = idx + 1;
         let block = state.decoder.decode(&pkt).map_err(|e| MediaError::Decode(e.to_string()))?;
         let buf_len = state.buf.first().map_or(0, Vec::len) as i64;
@@ -2724,6 +2776,8 @@ fn estimate_matroska_frame_rate(track: &matroska::Track) -> FrameRate {
 }
 
 #[cfg(all(test, any(unix, windows)))]
+mod flac_tracks_tests;
+#[cfg(all(test, any(unix, windows)))]
 mod raw_avi_tests;
 
 #[cfg(test)]
@@ -3107,7 +3161,7 @@ mod tests {
         assert_eq!(backward, decode(&mut reference[0], &source.bytes, backward_start, OPUS_FRAME));
         let (_, state) = tracks[0].decoder_parts();
         assert_eq!(state.audio_starts.positions.as_slice(), expected_positions);
-        assert!(state.audio_starts.opus.is_none());
+        assert!(state.audio_starts.pending.is_none());
         early
     }
 
@@ -3138,7 +3192,7 @@ mod tests {
             let (preroll, state) = fresh[0].decoder_parts();
             let error = decode_audio_range(file, source, 0, OPUS_RATE, 1, preroll, state, start, 3 * OPUS_FRAME).unwrap_err();
             assert!(matches!(error, MediaError::Io(_)));
-            assert_eq!(state.audio_starts.opus.as_ref().unwrap().len, transient_packet);
+            assert_eq!(state.audio_starts.pending.as_ref().unwrap().len, transient_packet);
             assert_eq!((state.next_sample, state.decoded_pos), (0, first));
         }
         let cold = decode(&mut fresh[0], source, start, 3 * OPUS_FRAME);
@@ -3146,7 +3200,7 @@ mod tests {
         assert!(cold[0].iter().any(|s| s.abs() > 1e-5));
         let (_, state) = fresh[0].decoder_parts();
         assert_eq!(state.audio_starts.positions.as_slice(), expected_positions);
-        assert!(state.audio_starts.opus.is_none());
+        assert!(state.audio_starts.pending.is_none());
     }
 
     #[test]
@@ -3609,6 +3663,62 @@ mod tests {
         assert_eq!(snap_common_fps(f64::NAN), None);
         assert_eq!(tick_to_matroska_units(Tick(craft_time::TICKS_PER_SECOND), (1, 1000)), 1000);
         assert_eq!(tick_to_units(Tick(craft_time::TICKS_PER_SECOND), 90000), 90000);
+    }
+
+    fn prores_matroska(packets: &[&[u8]]) -> Arc<[u8]> {
+        use craft_media::matroska::{MkvWriter, MuxOptions, TrackKind, TrackSpec};
+        use craft_video::prores::Profile;
+        use std::io::Cursor;
+
+        let mut track = TrackSpec::new(TrackKind::Video, "V_PRORES");
+        track.video_size = Some((16, 16));
+        track.codec_private = Profile::P4444.fourcc().to_vec();
+        track.default_duration_ns = Some(40_000_000);
+        let mut mux = MkvWriter::new(Cursor::new(Vec::new()), vec![track], MuxOptions::default()).expect("Matroska writer");
+        for (index, packet) in packets.iter().enumerate() {
+            mux.write_frame(0, index as i64 * 40_000_000, true, packet, None).expect("write ProRes");
+        }
+        mux.finish().expect("finish Matroska").into_inner().into()
+    }
+
+    #[test]
+    fn matroska_prores_coded_alpha_reaches_the_public_probe() {
+        use craft_video::prores::{ChromaFormat, Encoder, EncoderConfig, Frame, Profile};
+        use effectcraft_project::AlphaMode;
+
+        for with_alpha in [true, false] {
+            let mut config = EncoderConfig::new(Profile::P4444, 16, 16);
+            config.encode_alpha = with_alpha;
+            config.threads = false;
+            let mut picture = Frame::new(16, 16, ChromaFormat::Yuv444, 10, with_alpha).expect("allocate picture");
+            if let Some(alpha) = &mut picture.alpha {
+                alpha.fill(512);
+            }
+            let packet = Encoder::with_config(config).encode(&picture).expect("encode ProRes");
+            let bytes = prores_matroska(&[&packet]);
+
+            let source = open_bytes("alpha.mkv", bytes.clone()).expect("recognized Matroska").expect("shared Matroska");
+            let frame = source.video_frame(FrameRequest { time: Tick::ZERO, scale: 1.0 }).expect("decode ProRes");
+            assert_eq!(matches!(frame.data, PixelData::Yuv16 { alpha: Some(_), .. }), with_alpha);
+
+            let footage = crate::probe::probe_bytes("alpha.mkv", bytes).expect("public Matroska probe");
+            assert_eq!(footage.codec, "ProRes");
+            assert_eq!(footage.alpha, if with_alpha { AlphaMode::Straight } else { AlphaMode::Ignore });
+        }
+    }
+
+    #[test]
+    fn matroska_prores_unreadable_alpha_probe_keeps_the_shared_route() {
+        use craft_video::prores::{ChromaFormat, Encoder, Frame, Profile};
+
+        let picture = Frame::new(16, 16, ChromaFormat::Yuv444, 10, false).expect("allocate picture");
+        let packet = Encoder::new(Profile::P4444, 16, 16).encode(&picture).expect("encode ProRes");
+        let bytes = prores_matroska(&[&[0; 3], &packet]);
+        let source = open_bytes("later-frame.mkv", bytes).expect("recognized Matroska").expect("shared Matroska");
+        assert!(!source.info().video.as_ref().expect("video info").has_alpha);
+        let time = Tick::from_units(40, 1_000);
+        let later = source.video_frame(FrameRequest { time, scale: 1.0 }).expect("read intact second picture");
+        assert_eq!(later.pts, time);
     }
 
     #[test]
@@ -4556,6 +4666,33 @@ mod tests {
     }
 
     #[test]
+    fn audio_only_avi_counts_complete_indexed_pcm_blocks() {
+        let stream = avi::StreamSpec::Audio(avi::AudioSpec::pcm(48_000, 1, 16));
+        let mut writer = avi::AviWriter::new(std::io::Cursor::new(Vec::new()), vec![stream], avi::MuxOptions::default()).expect("AVI writer");
+        writer.write_chunk(0, &pcm_s16le_bytes(8_192, 7), true).expect("first chunk");
+        writer.write_chunk(0, &pcm_s16le_bytes(16_384, 13), true).expect("second chunk");
+        let mut bytes = writer.finish().expect("finish AVI").into_inner();
+        // dwLength follows the AVI stream header's first 32 payload bytes.
+        let length_offset = bytes.windows(4).position(|tag| tag == b"strh").expect("stream header") + 8 + 32;
+        let mut durations = Vec::new();
+        for declared_length in [1u32, 20, 200] {
+            bytes[length_offset..length_offset + 4].copy_from_slice(&declared_length.to_le_bytes());
+            let stream = &avi::open(bytes.as_slice()).expect("demux fixture").streams[0];
+            assert_eq!(stream.length, declared_length);
+            assert_eq!(stream.chunks.len(), 2);
+            let input: Arc<[u8]> = Arc::from(bytes.as_slice());
+            let footage = crate::probe::probe_bytes("indexed-pcm.avi", input.clone()).expect("public probe");
+            assert!(footage.has_audio && !footage.has_video);
+            durations.push(footage.duration);
+
+            let source = open_bytes("indexed-pcm.avi", input).expect("recognized AVI").expect("shared AVI");
+            let tail = source.audio(19, 2, 48_000).expect("read final sample and EOF");
+            assert_eq!(tail.channels[0], [0.5, 0.0]);
+        }
+        assert_eq!(durations, [effectcraft_time::Tick::from_units(20, 48_000); 3]);
+    }
+
+    #[test]
     fn matroska_duration_follows_presentation_order() {
         use craft_media::matroska::{MkvWriter, MuxOptions, TrackKind, TrackSpec, ebml, element_ids};
         use craft_video::h264::{Encoder, EncoderConfig, PacketFormat, Profile, YuvFrame};
@@ -4813,13 +4950,17 @@ mod tests {
     }
 
     fn generated_avi_prores(with_alpha: bool, invalid_first: bool) -> Vec<u8> {
+        generated_avi_prores_pictures(with_alpha, invalid_first, &[512])
+    }
+
+    fn generated_avi_prores_pictures(with_alpha: bool, invalid_first: bool, luma: &[u16]) -> Vec<u8> {
         use craft_video::prores::{ChromaFormat, ColorInfo as ProResColor, Encoder, EncoderConfig, Frame as ProResFrame, Interlace, Profile};
 
         let mut cfg = EncoderConfig::new(Profile::P4444, 16, 16);
         cfg.encode_alpha = with_alpha;
         cfg.threads = false;
         let mut enc = Encoder::with_config(cfg);
-        let frame = ProResFrame {
+        let mut frame = ProResFrame {
             width: 16,
             height: 16,
             chroma: ChromaFormat::Yuv444,
@@ -4833,7 +4974,6 @@ mod tests {
             aspect_ratio: 0,
             frame_rate_code: 0,
         };
-        let pkt = enc.encode(&frame).expect("encode prores");
         let mut w = avi::AviWriter::new(
             std::io::Cursor::new(Vec::new()),
             vec![avi::StreamSpec::Video(avi::VideoSpec::new(*b"ap4h", 16, 16, 24, 1))],
@@ -4843,7 +4983,11 @@ mod tests {
         if invalid_first {
             w.write_chunk(0, &[0], true).expect("write nonempty invalid first chunk");
         }
-        w.write_chunk(0, &pkt, true).expect("write prores chunk");
+        for &y in luma {
+            frame.y.fill(y);
+            let pkt = enc.encode(&frame).expect("encode prores");
+            w.write_chunk(0, &pkt, true).expect("write prores chunk");
+        }
         w.finish().expect("finish avi").into_inner()
     }
 
@@ -4886,6 +5030,64 @@ mod tests {
         };
         assert_eq!((frame.width, frame.height, frame.pts.0), (16, 16, later.0));
         assert!(matches!(frame.data, PixelData::Yuv16 { alpha: Some(_), .. }));
+    }
+
+    // The fixture is a tiny AVI generated by this test. Neutralize only RIFF index
+    // records (not coincidental FourCC strings inside compressed pictures).
+    fn make_generated_avi_indexless(mut bytes: &mut [u8]) {
+        while !bytes.is_empty() {
+            let size = u32::from_le_bytes(bytes[4..8].try_into().expect("generated RIFF length")) as usize;
+            let (chunk, rest) = bytes.split_at_mut(8 + size + size % 2);
+            match &chunk[..4] {
+                b"RIFF" | b"LIST" => make_generated_avi_indexless(&mut chunk[12..8 + size]),
+                b"indx" | b"idx1" | b"ix00" => chunk[..4].copy_from_slice(b"JUNK"),
+                b"avih" => chunk[20] &= !0x10, // Clear AVIF_HASINDEX in dwFlags.
+                _ => {}
+            }
+            bytes = rest;
+        }
+    }
+
+    fn avi_prores_test_picture(source: &crate::stream::MediaSource, time: effectcraft_time::Tick) -> Arc<VideoFrame> {
+        let crate::stream::DecodedFrame::Craft(frame) = source.video_frame(time, 1.0).expect("read shared ProRes picture") else {
+            panic!("expected the shared AVI reader");
+        };
+        assert_eq!(frame.pts.0, time.0);
+        frame
+    }
+
+    fn avi_prores_test_pixels(frame: &VideoFrame) -> (&[u16], &[u16]) {
+        let PixelData::Yuv16 { planes, alpha: Some(alpha), .. } = &frame.data else { panic!("expected a YUV picture with coded alpha") };
+        (&planes[0], alpha)
+    }
+
+    #[test]
+    fn indexless_avi_prores_seeks_independent_pictures_past_a_bad_first_chunk() {
+        const SLOT: i64 = craft_time::TICKS_PER_SECOND / 24;
+        let mut bytes = generated_avi_prores_pictures(true, true, &[512, 768]);
+        let indexed = crate::stream::open_bytes("indexed-prores.avi", Arc::from(bytes.clone())).expect("open indexed control");
+        let first = effectcraft_time::Tick(SLOT);
+        let second = effectcraft_time::Tick(2 * SLOT);
+        let expected_first = avi_prores_test_picture(&indexed, first);
+        let expected_second = avi_prores_test_picture(&indexed, second);
+        assert_ne!(avi_prores_test_pixels(&expected_first).0, avi_prores_test_pixels(&expected_second).0);
+
+        make_generated_avi_indexless(&mut bytes);
+        let demuxed = avi::open(bytes.as_slice()).expect("open scanned AVI");
+        assert_eq!(demuxed.index, avi::IndexSource::Scan);
+        let video = &demuxed.streams[0];
+        assert!(!video.keyframes_known);
+        assert_eq!((video.chunks.len(), video.chunks[0].size), (3, 1));
+
+        let opened = crate::stream::open_bytes("scanned-prores.avi", Arc::from(bytes)).expect("open indexless AVI");
+        let cold = avi_prores_test_picture(&opened, second);
+        assert_eq!(avi_prores_test_pixels(&cold), avi_prores_test_pixels(&expected_second));
+        assert!(opened.video_frame(effectcraft_time::Tick(0), 1.0).is_err(), "the requested corrupt picture remains an error");
+
+        let after_error = avi_prores_test_picture(&opened, second);
+        assert_eq!(avi_prores_test_pixels(&after_error), avi_prores_test_pixels(&expected_second));
+        let backward = avi_prores_test_picture(&opened, first);
+        assert_eq!(avi_prores_test_pixels(&backward), avi_prores_test_pixels(&expected_first));
     }
 
     #[test]

@@ -84,3 +84,29 @@ fn missing_empty_or_malformed_unicode_name_keeps_pascal_name() {
         assert_eq!(Psd::parse(file.to_bytes().unwrap()).unwrap().layers[0].name, "Pascal");
     }
 }
+
+#[test]
+fn pascal_layer_name_keeps_legacy_mac_roman_and_unicode_precedence() {
+    let mut doc = WDoc::new(1, 1);
+    doc.rle = false; // The raw pixels have the same layout in PSD and PSB.
+    doc.layers = vec![WLayer::empty("Fallback", vec![])];
+    let bytes = write(&doc);
+    for version in [craft_psd::Version::Psd, craft_psd::Version::Psb] {
+        let mut file = craft_psd::PsdFile::from_bytes(&bytes).unwrap();
+        file.header.version = version;
+        file.layer_info.as_mut().unwrap().layers[0].name = b"Caf\x8e\xca\xdb".to_vec();
+
+        for (unicode, expected) in
+            [(None, "Caf\u{e9} \u{20ac}"), (Some(vec![0, 0, 0, 1, 0]), "Caf\u{e9} \u{20ac}"), (Some(record(&[0x0041, 0x00a0, 0x0042])), "A\u{a0}B")]
+        {
+            let layer = &mut file.layer_info.as_mut().unwrap().layers[0];
+            layer.blocks.retain(|b| b.key != *b"luni");
+            if let Some(data) = unicode {
+                layer.blocks.push(craft_psd::tagged::TaggedBlock::new(*b"luni", data));
+            }
+            let parsed = Psd::parse(file.to_bytes().unwrap()).unwrap();
+            assert_eq!(parsed.psb, version.is_psb());
+            assert_eq!(parsed.layers[0].name, expected);
+        }
+    }
+}
