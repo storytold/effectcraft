@@ -760,13 +760,7 @@ impl MediaSource for CraftMediaSource {
         }
 
         let native_rate = entry.native_rate;
-        let (native_start, native_frames) = if sample_rate == native_rate {
-            (start, frames)
-        } else {
-            let s0 = (i128::from(start) * i128::from(native_rate)) / i128::from(sample_rate);
-            let len = ((frames as u128 * u128::from(native_rate)).div_ceil(u128::from(sample_rate)) + 2) as usize;
-            (i64::try_from(s0).unwrap_or(0), len)
-        };
+        let (native_start, native_frames) = native_audio_window(start, frames, native_rate, sample_rate);
 
         let mut state = entry.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let decoded = decode_audio_range(
@@ -841,13 +835,7 @@ impl MediaSource for StandaloneAudioSource {
             return Ok(AudioBuffer::new(sample_rate, channels_count as u16, frames));
         }
         let native_rate = self.native_rate;
-        let (native_start, native_frames) = if sample_rate == native_rate {
-            (start, frames)
-        } else {
-            let s0 = (i128::from(start) * i128::from(native_rate)) / i128::from(sample_rate);
-            let len = ((frames as u128 * u128::from(native_rate)).div_ceil(u128::from(sample_rate)) + 2) as usize;
-            (i64::try_from(s0).unwrap_or(0), len)
-        };
+        let (native_start, native_frames) = native_audio_window(start, frames, native_rate, sample_rate);
 
         let mut state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let decoded = decode_standalone_range(native_rate, channels_count, &mut state, native_start, native_frames)?;
@@ -860,10 +848,9 @@ impl MediaSource for StandaloneAudioSource {
 
 #[cfg(any(unix, windows))]
 fn decode_standalone_range(native_rate: u32, channels_count: usize, state: &mut StandaloneAudioState, start: i64, frames: usize) -> Result<Vec<Vec<f32>>> {
-    let mut out = vec![vec![0.0f32; frames]; channels_count];
     let end = start.saturating_add(frames as i64);
     if end <= 0 {
-        return Ok(out);
+        return Ok(vec![vec![0.0f32; frames]; channels_count]);
     }
 
     let buf_len = state.buf.first().map_or(0, Vec::len) as i64;
@@ -895,28 +882,42 @@ fn decode_standalone_range(native_rate: u32, channels_count: usize, state: &mut 
         }
     }
 
-    let avail = state.buf.first().map_or(0, Vec::len);
+    Ok(drain_audio_window(&mut state.buf, &mut state.decoded_pos, channels_count, start, frames))
+}
+
+fn native_audio_window(start: i64, frames: usize, native_rate: u32, sample_rate: u32) -> (i64, usize) {
+    if sample_rate == native_rate {
+        return (start, frames);
+    }
+    let s0 = (i128::from(start) * i128::from(native_rate)) / i128::from(sample_rate);
+    let len = ((frames as u128 * u128::from(native_rate)).div_ceil(u128::from(sample_rate)) + 2) as usize;
+    (i64::try_from(s0).unwrap_or(0), len)
+}
+
+fn drain_audio_window(buf: &mut [Vec<f32>], decoded_pos: &mut i64, channels_count: usize, start: i64, frames: usize) -> Vec<Vec<f32>> {
+    let mut out = vec![vec![0.0f32; frames]; channels_count];
+    let avail = buf.first().map_or(0, Vec::len);
     for i in 0..frames {
         let pos = start.saturating_add(i as i64);
-        if pos >= state.decoded_pos {
-            let off = (pos - state.decoded_pos) as usize;
+        if pos >= *decoded_pos {
+            let off = (pos - *decoded_pos) as usize;
             if off < avail {
                 for (c, out_ch) in out.iter_mut().enumerate() {
-                    out_ch[i] = state.buf[c][off];
+                    out_ch[i] = buf[c][off];
                 }
             }
         }
     }
-
-    let drop_to = (end - state.decoded_pos).max(0) as usize;
+    let end = start.saturating_add(frames as i64);
+    let drop_to = (end - *decoded_pos).max(0) as usize;
     let trim = drop_to.min(avail);
     if trim > 0 {
-        for ch in &mut state.buf {
+        for ch in buf {
             ch.drain(..trim);
         }
-        state.decoded_pos = state.decoded_pos.saturating_add(trim as i64);
+        *decoded_pos = decoded_pos.saturating_add(trim as i64);
     }
-    Ok(out)
+    out
 }
 
 fn resample_audio(decoded: &[Vec<f32>], channels_count: usize, native_rate: u32, sample_rate: u32, frames: usize) -> Vec<Vec<f32>> {
@@ -998,10 +999,9 @@ fn decode_audio_range(
     start: i64,
     frames: usize,
 ) -> Result<Vec<Vec<f32>>> {
-    let mut out = vec![vec![0.0f32; frames]; channels_count];
     let end = start.saturating_add(frames as i64);
     if end <= 0 {
-        return Ok(out);
+        return Ok(vec![vec![0.0f32; frames]; channels_count]);
     }
 
     let buf_len = state.buf.first().map_or(0, Vec::len) as i64;
@@ -1065,29 +1065,7 @@ fn decode_audio_range(
         }
     }
 
-    let avail = state.buf.first().map_or(0, Vec::len);
-    for i in 0..frames {
-        let pos = start.saturating_add(i as i64);
-        if pos >= state.decoded_pos {
-            let off = (pos - state.decoded_pos) as usize;
-            if off < avail {
-                for (c, out_ch) in out.iter_mut().enumerate() {
-                    out_ch[i] = state.buf[c][off];
-                }
-            }
-        }
-    }
-
-    let drop_to = (end - state.decoded_pos).max(0) as usize;
-    let trim = drop_to.min(avail);
-    if trim > 0 {
-        for ch in &mut state.buf {
-            ch.drain(..trim);
-        }
-        state.decoded_pos = state.decoded_pos.saturating_add(trim as i64);
-    }
-
-    Ok(out)
+    Ok(drain_audio_window(&mut state.buf, &mut state.decoded_pos, channels_count, start, frames))
 }
 
 fn push_decoded(
