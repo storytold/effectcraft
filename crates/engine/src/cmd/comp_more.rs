@@ -41,8 +41,12 @@ fn crop(s: &mut Session, cid: effectcraft_project::ItemId, r: [f64; 4], label: &
 }
 
 fn crop_to_roi(s: &mut Session, p: &Value) -> Result<Value> {
+    const C: &str = "comp.cropToRegionOfInterest";
     let cid = comp_id(s, p)?;
-    let r = s.state.region_of_interest.ok_or_else(|| bad("comp.cropToRegionOfInterest", "no region of interest"))?;
+    let r = s.state.region_of_interest.ok_or_else(|| bad(C, "no region of interest"))?;
+    if s.active_comp_id() != Some(cid) {
+        return Err(bad(C, "the crop target must be the active composition"));
+    }
     crop(s, cid, r, "Crop Comp to Region of Interest")
 }
 
@@ -393,7 +397,7 @@ fn list_presets(s: &mut Session, _: &Value) -> Result<Value> {
 
 pub fn specs() -> Vec<CommandSpec> {
     vec![
-        cmd!("comp.cropToRegionOfInterest", "Crop Comp to Region of Interest", ["Composition"], None, "{comp?}", has_roi, crop_to_roi),
+        cmd!("comp.cropToRegionOfInterest", "Crop Comp to Region of Interest", ["Composition"], None, "{comp?} (active only)", has_roi, crop_to_roi),
         cmd!("comp.cropToLayerBounds", "Crop Comp to Selected Layer(s) Bounds", ["Composition"], None, "{layers?}", has_layers, crop_to_layers),
         cmd!(
             "comp.scale",
