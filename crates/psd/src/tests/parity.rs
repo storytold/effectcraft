@@ -3,6 +3,7 @@
 
 use crate::write::*;
 use crate::*;
+use craft_psd::{Compression, ImageResource, Version};
 
 /// Convert an encoded PSD into a PSB (or vice versa) with the specified compression
 /// for both layers and the merged image, using `craft_psd::PsdFile`.
@@ -15,9 +16,8 @@ fn reencode_with(bytes: &[u8], version: Version, comp: Compression, merged_alpha
     if let Some(info) = file.layer_info.as_mut() {
         info.merged_alpha = merged_alpha;
         for rec in &mut info.layers {
-            let (lw, lh) = (rec.rect.width() as usize, rec.rect.height() as usize);
             for ch in &mut rec.channels {
-                let (w, h) = if ch.id == -2 { rec.mask.as_rect().map_or((lw, lh), |r| (r.width() as usize, r.height() as usize)) } else { (lw, lh) };
+                let (w, h) = rec.channel_rect(ch.id).size().expect("channel rect");
                 if w > 0 && h > 0 {
                     let decoded = ch.decode(w, h, depth, old_ver).expect("decode channel");
                     *ch = craft_psd::ChannelData::encode(ch.id, comp, &decoded, w, h, depth, version).expect("encode channel");
@@ -63,7 +63,7 @@ fn malformed_resources_recover_in_both_psd_and_psb() {
 
     for version in [Version::Psd, Version::Psb] {
         let mut file = craft_psd::PsdFile::from_bytes(&reencode_with(&base, version, Compression::Rle, true)).expect("parse");
-        file.resources.push(ImageResource::new(1005, String::new(), vec![0; 16]));
+        file.resources.push(ImageResource::new(1005, vec![0; 16]));
         let intact = file.to_bytes().expect("write");
         let want = Psd::parse(intact.clone()).expect("intact parse");
 
