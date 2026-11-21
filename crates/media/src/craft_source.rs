@@ -70,7 +70,19 @@ fn worker_cap() -> usize {
 }
 
 fn supports_video_codec(codec: CodecId) -> bool {
-    matches!(codec, CodecId::H264 | CodecId::Hevc | CodecId::Av1 | CodecId::Vp9 | CodecId::Vp8 | CodecId::ProRes | CodecId::Dnxhd | CodecId::Mpeg2Video)
+    matches!(
+        codec,
+        CodecId::H264
+            | CodecId::Hevc
+            | CodecId::Av1
+            | CodecId::Vp9
+            | CodecId::Vp8
+            | CodecId::ProRes
+            | CodecId::Dnxhd
+            | CodecId::Mpeg2Video
+            | CodecId::Ffv1
+            | CodecId::Apv
+    )
 }
 
 /// True when `head` begins with a plausible ISO-BMFF top-level box.
@@ -3257,5 +3269,17 @@ mod tests {
 
         let rewound = decode(&mut wide_tracks[0], 0, 600);
         assert_eq!(rewound[0], wide[0][..600]);
+    }
+
+    #[test]
+    fn ffv1_and_apv_video_codecs_route_through_craft_video() {
+        assert!(supports_video_codec(CodecId::Ffv1));
+        assert!(supports_video_codec(CodecId::Apv));
+        for codec in [CodecId::Ffv1, CodecId::Apv] {
+            let mut params = CodecParams::new(codec);
+            params.width = Some(16);
+            params.height = Some(16);
+            assert!(TrackDecoder::with_options(&params, TrackDecoderOptions { threads: Some(1), draft: false }).is_ok(), "{codec:?} decoder");
+        }
     }
 }
