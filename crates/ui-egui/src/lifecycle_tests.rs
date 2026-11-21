@@ -264,14 +264,37 @@ fn restart_to_update_with_nothing_unsaved_leaves_the_close_to_the_updater() {
 fn restart_to_update_with_the_startup_prompt_open_leaves_the_window_open() {
     let ctx = egui::Context::default();
     let mut app = app_with_comp();
-    app.updates_rt.updater.offer(craft_update::Release {
+    // Version choices come from a file that does not exist, so the launcher settings of the
+    // machine running the test do not hold the app off the offer.
+    let pins = tempfile::tempdir().unwrap();
+    app.updates_rt.updater =
+        craft_update::updater::Updater::new(&crate::UPDATE_APP, env!("CARGO_PKG_VERSION")).with_pins_path(pins.path().join("versions.json"));
+    // The updater reads the installed files for an offer on a thread of its own, which asks the
+    // context the updater keeps for a repaint after it answers; the next tick opens the prompt.
+    let offer_ctx = egui::Context::default();
+    let (answered, wait) = std::sync::mpsc::channel();
+    offer_ctx.set_repaint_observer(move |info| {
+        if info.delay.is_zero() {
+            let _ = answered.send(());
+        }
+    });
+    let updater = &mut app.updates_rt.updater;
+    // Keeps `offer_ctx` for the offer's thread.
+    updater.tick(&offer_ctx);
+    updater.offer(craft_update::Release {
         tag: "v99.0.0".into(),
         version: craft_update::parse_version("99.0.0"),
         name: "EffectCraft 99.0.0".into(),
         html_url: "https://github.com/storytold/effectcraft/releases/tag/v99.0.0".into(),
         ..Default::default()
     });
-    assert!(app.updates_rt.updater.prompt_open());
+    assert!(updater.managed().is_none(), "no launcher choice holds the app off stable releases");
+    // The offer's thread asks for one repaint after it answers, so one wait and one tick suffice.
+    if !updater.prompt_open() {
+        wait.recv().unwrap();
+        updater.tick(&offer_ctx);
+    }
+    assert!(updater.prompt_open(), "the offer opens the startup prompt");
     app.updates_rt.manual_window_open = true;
     assert!(!asks_to_close(&ctx, |ctx| updates_ui::restart_to_update(&mut app.updates_rt, ctx, false)), "the prompt carries the restart");
     assert!(!app.updates_rt.manual_window_open, "the result dialog closes");

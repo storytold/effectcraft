@@ -107,8 +107,12 @@ pub(crate) fn to_model(mut scene: cm::Scene, missing: MissingNormals, image: &dy
     for texture in &scene.texture_variants {
         ensure_texture(&scene, &decoded, *texture, &mut textures, &mut texture_of, &mut pixels_left, &mut warnings);
     }
+    // A texture's UV transform (glTF `KHR_texture_transform`) is not applied; the import says so.
+    let mut transform_left_out = false;
     let mut tref = |t: Option<cm::TextureRef>| -> Option<TexRef> {
         let t = t?;
+        // Compared by value, so a negative zero still counts as the identity.
+        transform_left_out |= t.transform.is_some_and(|x| x.offset != [0.0; 2] || x.rotation != 0.0 || x.scale != [1.0; 2]);
         let texture = ensure_texture(&scene, &decoded, t, &mut textures, &mut texture_of, &mut pixels_left, &mut warnings)?;
         Some(TexRef { texture, uv_set: t.uv_set })
     };
@@ -138,6 +142,11 @@ pub(crate) fn to_model(mut scene: cm::Scene, missing: MissingNormals, image: &dy
             unlit: m.unlit,
         })
         .collect();
+    if transform_left_out {
+        let warning = "texture transforms (KHR_texture_transform) were not applied".to_string();
+        log::warn!("model: {warning}");
+        warnings.push(warning);
+    }
     let mut adapter_bytes = 0u64;
     let meshes = scene.meshes.iter().map(|m| mesh(m, &materials, missing, &mut adapter_bytes)).collect::<Result<Vec<_>>>()?;
     let nodes = scene
@@ -440,7 +449,7 @@ mod tests {
         // The decoded image has already taken four pixels from this budget.
         let mut pixels_left = 4;
         let mut warnings = vec![];
-        let clamped = cm::TextureRef { image: 0, uv_set: 0, wrap: [cm::Wrap::Clamp; 2] };
+        let clamped = cm::TextureRef { image: 0, uv_set: 0, wrap: [cm::Wrap::Clamp; 2], transform: None };
 
         let first = ensure_texture(&scene, &decoded, clamped, &mut textures, &mut texture_of, &mut pixels_left, &mut warnings).unwrap();
         let shared = ensure_texture(&scene, &decoded, clamped, &mut textures, &mut texture_of, &mut pixels_left, &mut warnings).unwrap();
@@ -455,5 +464,21 @@ mod tests {
         assert!(ensure_texture(&scene, &decoded, mirrored, &mut textures, &mut texture_of, &mut pixels_left, &mut warnings).is_none());
         assert_eq!(textures.len(), 2);
         assert_eq!(warnings.len(), 1);
+    }
+
+    #[test]
+    fn a_texture_transform_that_is_not_applied_is_reported() {
+        let warned = |transform: Option<cm::UvTransform>| {
+            let texture = cm::TextureRef { transform, ..cm::TextureRef::default() };
+            let material = cm::Material { base_color_texture: Some(texture), ..cm::Material::default() };
+            let scene = cm::Scene { images: vec![cm::Image::default()], materials: vec![material], ..cm::Scene::default() };
+            let model = to_model(scene, MissingNormals::Flat, &|_| None).unwrap();
+            model.warnings.iter().any(|w| w.contains("KHR_texture_transform"))
+        };
+        assert!(warned(Some(cm::UvTransform { offset: [0.5, 0.0], ..cm::UvTransform::default() })));
+        assert!(!warned(Some(cm::UvTransform::default())));
+        // A negative zero offset or rotation is still the identity.
+        assert!(!warned(Some(cm::UvTransform { offset: [-0.0, 0.0], rotation: -0.0, ..cm::UvTransform::default() })));
+        assert!(!warned(None));
     }
 }

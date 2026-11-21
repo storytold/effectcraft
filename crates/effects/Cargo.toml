@@ -10,7 +10,7 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
-craft-cms = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "58964adec11197594d9b6b79a94ae6232221211a" }
+craft-cms = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "a0919f3cdb233368f2b2501861facf83d9acd9be" }
 effectcraft-geom = { workspace = true }
 effectcraft-color = { workspace = true }
 effectcraft-keyframe = { workspace = true }
