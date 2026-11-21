@@ -725,7 +725,7 @@ fn essential_properties_and_heard_audio_keep_the_whole_span() {
     let (a, b) = middle_key_edit(
         |ids, l| {
             let mut g = ids.group("essentialProperties", "Essential Properties").with(ids.prop("control1", "Size", Value::Scalar(0.0)));
-            g.kind = crate::GroupKind::Essential { overridden: vec![] };
+            g.kind = crate::GroupKind::Essential { overridden: vec![], bases: vec![] };
             l.props.children.push(g.into());
         },
         "essentialProperties/control1",

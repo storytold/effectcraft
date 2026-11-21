@@ -689,7 +689,7 @@ fn revert(s: &mut Session, p: &Value) -> Result<Value> {
     s.edit("Revert Essential Property", None, |proj, _| {
         let l = super::layer_mut(proj, cid, lid)?;
         let g = l.props.sub_mut(essential::GROUP).ok_or_else(|| bad(C, "no Essential Properties"))?;
-        if let GroupKind::Essential { overridden } = &mut g.kind {
+        if let GroupKind::Essential { overridden, .. } = &mut g.kind {
             overridden.retain(|u| !ts.iter().any(|(_, x)| x == u));
         }
         for (_, uid) in &ts {
@@ -763,7 +763,7 @@ fn push_to_comp(s: &mut Session, p: &Value) -> Result<Value> {
             }
         }
         let g = super::layer_mut(proj, cid, lid)?.props.sub_mut(essential::GROUP).ok_or_else(|| bad(C, "no Essential Properties"))?;
-        if let GroupKind::Essential { overridden } = &mut g.kind {
+        if let GroupKind::Essential { overridden, .. } = &mut g.kind {
             overridden.retain(|u| !ts.iter().any(|(_, x)| x == u));
         }
         for (_, uid) in &ts {
