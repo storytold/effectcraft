@@ -98,16 +98,23 @@ impl LightState {
             _ => 1.0,
         };
         if self.kind == LightKind::Spot {
-            let cos_a = (-l).dot(self.dir).clamp(-1.0, 1.0);
-            let a = cos_a.acos();
-            let outer = self.cone_half;
-            let inner = outer * (1.0 - self.feather);
-            k *= if a <= inner {
+            // Full inside the inner angle (the cone half-angle less the feather share), none
+            // outside the half-angle, and a smoothstep between them over the cosine of the angle
+            // (lab `c3d` l16-l18, After Effects 26.5: within 1/255 at feather 50 and 100). Written
+            // with 1 - cos, as the GPU does: half the squared distance between the unit vectors,
+            // and 2 sin²(angle / 2) for the cone, so a cone too narrow for distinct cosines still
+            // feathers.
+            let d = -l - self.dir;
+            let omc_a = 0.5 * d.dot(d);
+            let (so, si) = ((0.5 * self.cone_half).sin(), (0.5 * self.cone_half * (1.0 - self.feather)).sin());
+            let (outer, inner) = (2.0 * so * so, 2.0 * si * si);
+            k *= if omc_a <= inner {
                 1.0
-            } else if a >= outer {
+            } else if omc_a >= outer {
                 0.0
             } else {
-                let t = (a - inner) / (outer - inner).max(1e-9);
+                // Here inner < omc_a < outer, so the interval is not empty however narrow the cone.
+                let t = (omc_a - inner) / (outer - inner);
                 1.0 - t * t * (3.0 - 2.0 * t)
             };
         }
@@ -182,9 +189,11 @@ impl Material {
             metal: pct("metal", d.metal).clamp(0.0, 1.0),
         }
     }
-    /// Blinn-Phong exponent for Specular Shininess (0% → 1, 100% → 256).
+    /// Blinn-Phong exponent for Specular Shininess: the percentage itself (lab `c3d` l10 / l11,
+    /// After Effects 26.5: a half vector 30 degrees off the normal gives 0.866^5 at 5 % and
+    /// 0.866^40 at 40 %), at least 1.
     pub fn exponent(&self) -> f64 {
-        256f64.powf(self.shininess as f64).max(1.0)
+        (f64::from(self.shininess) * 100.0).max(1.0)
     }
 }
 
