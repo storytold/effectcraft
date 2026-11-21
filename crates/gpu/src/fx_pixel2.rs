@@ -96,8 +96,9 @@ fn run(e: &mut Enc, entry: &str, p: &Params, mut b: GBuf, aux: Option<&GpuImage>
     Some(b)
 }
 
-/// A one-value plane (x) of `img` (`fp2_plane` kind / property), softened by util::gauss_plane.
-fn plane(e: &mut Enc, img: &GpuImage, kind: u32, prop: u32, soft: f64) -> GpuImage {
+/// A one-value plane (x) of `img` (`fp2_plane` kind / property), softened by util::gauss_plane;
+/// `None` (the CPU renders it) when [`gauss_plane`] declines.
+fn plane(e: &mut Enc, img: &GpuImage, kind: u32, prop: u32, soft: f64) -> Option<GpuImage> {
     let mut p = Params::default();
     p.u[0] = [kind, prop, 0, 0];
     let pl = e.scratch(img.width, img.height);
@@ -105,9 +106,41 @@ fn plane(e: &mut Enc, img: &GpuImage, kind: u32, prop: u32, soft: f64) -> GpuIma
     gauss_plane(e, &pl, soft, soft)
 }
 
+/// Most texture reads [`gauss_plane`] dispatches; above it the effect renders on the CPU (#3816).
+/// A box pass reads, per pixel, the part of its window inside the line, so a sigma near
+/// [`effectcraft_raster::blur::box_radii`]'s cap reads every line in full for every pixel:
+/// about 1.5e11 reads at 3840 × 2160. The widest blur the controls allow, Advanced Lightning's
+/// Glow Radius 1000 (sigma 333), reads about 3.3e10 there and stays on the GPU.
+const PLANE_BLUR_MAX_READS: f64 = (1u64 << 36) as f64;
+
+/// Texture reads of [`gauss_plane`]'s box passes over a `width` × `height` plane: per pixel of a
+/// pass (zero radii aren't dispatched), the window's part inside the line plus the two edge
+/// pixels `fp2_box` reads to count the rest.
+fn plane_blur_reads(width: u32, height: u32, sx: f64, sy: f64) -> f64 {
+    let pixels = f64::from(width) * f64::from(height);
+    [(sx, width), (sy, height)]
+        .into_iter()
+        .filter(|&(sigma, _)| sigma > 0.05)
+        .flat_map(|(sigma, line)| {
+            crate::effects::box_radii(sigma, 3).into_iter().filter(|&r| r > 0).map(move |r| (2.0 * r as f64 + 1.0).min(f64::from(line) + 2.0))
+        })
+        .map(|window| pixels * window)
+        .sum()
+}
+
+/// Whether [`gauss_plane`] blurs a `width` × `height` plane on the GPU: within
+/// [`PLANE_BLUR_MAX_READS`].
+pub(crate) fn plane_blur_on_gpu(width: u32, height: u32, sx: f64, sy: f64) -> bool {
+    plane_blur_reads(width, height, sx, sy) <= PLANE_BLUR_MAX_READS
+}
+
 /// util::gauss_plane on every channel: 3 box passes per axis (edges repeated), each window
-/// summed directly (the CPU sums in f64; see `fp2_box`).
-pub(crate) fn gauss_plane(e: &mut Enc, img: &GpuImage, sx: f64, sy: f64) -> GpuImage {
+/// summed directly (the CPU sums in f64; see `fp2_box`). `None`, before any dispatch, when the
+/// passes would read more than [`PLANE_BLUR_MAX_READS`] texels: the effect renders on the CPU.
+pub(crate) fn gauss_plane(e: &mut Enc, img: &GpuImage, sx: f64, sy: f64) -> Option<GpuImage> {
+    if !plane_blur_on_gpu(img.width, img.height, sx, sy) {
+        return None;
+    }
     let mut cur = img.clone();
     for (vertical, sigma) in [(0, sx), (1, sy)] {
         if sigma <= 0.05 {
@@ -124,7 +157,7 @@ pub(crate) fn gauss_plane(e: &mut Enc, img: &GpuImage, sx: f64, sy: f64) -> GpuI
             cur = out;
         }
     }
-    cur
+    Some(cur)
 }
 
 // ---------------------------------------------------------------- blurs (blur2, blur3)
@@ -168,7 +201,7 @@ fn vector_blur(e: &mut Enc, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
         return Some(b);
     }
     let soft = ctx.params.f("mapSoftness").max(0.0) * 0.5 * b.scale;
-    let map = plane(e, &b.img, 0, 0, soft);
+    let map = plane(e, &b.img, 0, 0, soft)?;
     let mut p = Params::default();
     p.u[0][0] = ctx.params.e("type");
     p.f[0] = [amount as f32, ctx.params.f("angleOffset").to_radians() as f32, 0.0, 0.0];
@@ -347,7 +380,7 @@ fn bump(e: &mut Enc, id: &str, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
     // stylize3::height_field.
     let src = crate::fx_key::fitted(e, ctx, &b, effectcraft_effects::bump_layer_id(ctx), true, false)?.unwrap_or_else(|| b.img.clone());
     let soft = ctx.params.f("softness") * b.scale * 0.5;
-    let mut hf = plane(e, &src, 1, ctx.params.e("property"), soft);
+    let mut hf = plane(e, &src, 1, ctx.params.e("property"), soft)?;
     let height = ctx.params.f("height") as f32 / 100.0;
     let mut disp = 0.0;
     if glass {
@@ -411,7 +444,7 @@ fn hextile(e: &mut Enc, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
 fn smoothie(e: &mut Enc, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
     let flow = crate::fx_key::fitted(e, ctx, &b, "flowLayer", true, false)?.unwrap_or_else(|| b.img.clone());
     let sm = ctx.params.f("smoothness") * b.scale * 0.5;
-    let pl = plane(e, &flow, 2, ctx.params.e("property"), sm);
+    let pl = plane(e, &flow, 2, ctx.params.e("property"), sm)?;
     let a = b.to_px(ctx.params.v2("sampleA"));
     let bb = b.to_px(ctx.params.v2("sampleB"));
     let mut p = Params::default();
@@ -441,8 +474,8 @@ fn inner_outer(e: &mut Enc, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
             e.pixels("fp2_io_known", &p, &t, None, &k, None);
             gauss_plane(e, &k, plan.sigma, plan.sigma)
         };
-        let fg = known(e, 0);
-        let bg = known(e, 1);
+        let fg = known(e, 0)?;
+        let bg = known(e, 1)?;
         let (rows, stride) = e.image_rows(&t);
         let mut p = Params::default();
         p.u[0][0] = stride;
@@ -472,7 +505,7 @@ fn inner_outer(e: &mut Enc, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
         matte = crate::fx_color::morph_frac(e, &matte, plan.thin.abs(), modes);
     }
     if plan.feather > 0.05 {
-        matte = gauss_plane(e, &matte, plan.feather * 0.5, plan.feather * 0.5);
+        matte = gauss_plane(e, &matte, plan.feather * 0.5, plan.feather * 0.5)?;
     }
     let mut p = Params::default();
     p.u[0] = [0, from_w, plan.invert as u32, 0];
