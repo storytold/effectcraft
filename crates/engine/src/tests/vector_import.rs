@@ -218,6 +218,22 @@ fn import_rejects_unknown_kind() {
     assert!(s.execute_checked("file.import", json!({"paths": ["x.psd"], "importAs": "banana"})).is_err());
 }
 
+/// A drop that contains a project passes `openComps: false`: the layered file's composition is
+/// imported, but the open composition stays (#4000).
+#[test]
+fn import_keeps_the_open_composition_when_open_comps_is_false() {
+    let path = tmp("sheet.psd");
+    std::fs::write(&path, sample_psd()).unwrap();
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Open", "width": 64, "height": 36, "duration": 1})).unwrap();
+    let open = s.state.active_comp;
+    let r = s.execute_checked("file.import", json!({"paths": [path], "importAs": "composition", "openComps": false})).unwrap();
+    assert_eq!(r["errors"], json!([]), "{r}");
+    assert_eq!(s.state.active_comp, open, "the open composition stays");
+    let cid = effectcraft_project::ItemId(r["comps"][0].as_u64().unwrap());
+    assert_eq!(s.project.item(cid).unwrap().name, "sheet");
+}
+
 fn text_session() -> (Session, u64) {
     let mut s = Session::default();
     s.execute("comp.new", json!({"name": "T", "width": 320, "height": 120, "frameRate": 30, "duration": 2})).unwrap();

@@ -119,12 +119,15 @@ pub fn dropped_files(app: &mut EffectcraftApp, ui: &egui::Ui, bounds: Rect) {
         // A dropped Photoshop file asks how to import it (the Import Photoshop File dialog, its
         // Import Kind starting at Default Drag Import As), as File ▸ Import ▸ File… does (#678).
         let layered = rest.iter().any(|p| p.rsplit('.').next().is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "psd" | "psb")));
+        // With a project in the drop the other files go to the Project panel only: they do not
+        // open the compositions they become (#4000).
         let mut params = json!({
             "paths": rest,
             "drag": true,
             "addToComp": !has_project && (at.is_some() || over_timeline),
             "position": at,
-            "background": true
+            "background": true,
+            "openComps": !has_project
         });
         // While the losses prompt of a project dropped with it shows, a Photoshop file imports
         // with Default Drag Import As: one dialog at a time.
