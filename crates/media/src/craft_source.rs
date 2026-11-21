@@ -638,6 +638,7 @@ where
         audio_tracks.push(AudioTrackEntry {
             track_idx: idx,
             native_rate,
+            fixed_packet_samples: fixed_samples,
             backend: AudioBackend::Decoder {
                 seek_preroll_samples,
                 state: Mutex::new(AudioTrackState { decoder: dec, audio_starts, next_sample: 0, decoded_pos: initial_pos, buf: Vec::new() }),
@@ -984,10 +985,18 @@ fn finish_container_source(
     duration: Tick,
     audio_candidates: Vec<(usize, usize, CodecParams, u64)>,
 ) -> Option<Result<SharedSource>> {
-    let (audio_tracks, audio_infos) = open_audio_tracks(&container, &*source, audio_candidates)?;
+    let (mut audio_tracks, audio_infos) = open_audio_tracks(&container, &*source, audio_candidates)?;
     if video.is_none() && audio_tracks.is_empty() {
         return None;
     }
+    let duration = if video.is_none()
+        && let ContainerFile::Mpeg { file, .. } = &container
+        && matches!(file.format, mpegts::Format::Ts { .. })
+    {
+        audio_tracks.iter_mut().filter_map(|entry| adts_track_end(file, entry)).fold(duration, |end, track_end| end.max(track_end))
+    } else {
+        duration
+    };
     let kind = if video.is_some() { MediaKind::Movie } else { MediaKind::AudioOnly };
     let (video_track_idx, video_info, video_state) = match video {
         Some(v) => (Some(v.track_idx), Some(v.info), Some(v.state)),
@@ -1012,6 +1021,17 @@ fn finish_container_source(
         video: video_state,
         audio_tracks,
     })))
+}
+
+/// Use the same packet starts and sample count as playback to include the final ADTS packet.
+fn adts_track_end(file: &mpegts::File, entry: &mut AudioTrackEntry) -> Option<Tick> {
+    if file.streams.get(entry.track_idx)?.codec != mpegts::Codec::AacAdts {
+        return None;
+    }
+    let samples = entry.fixed_packet_samples?;
+    let AudioBackend::Decoder { state, .. } = &mut entry.backend else { return None };
+    let last_start = *state.get_mut().ok()?.audio_starts.positions.iter().max()?;
+    Some(Tick::from_units(last_start.saturating_add(samples), i64::from(entry.native_rate)))
 }
 
 fn mxf_sound_window(track: &mxf::EssenceTrack) -> (u64, u64) {
@@ -1107,7 +1127,12 @@ fn open_parsed_mxf(name: &str, source: SharedBytes, file: mxf::MxfFile) -> Optio
         let channels = sound.channels.max(1);
         let (presented_start, presented_len) = mxf_sound_window(t);
         audio_infos.push(AudioStreamInfo { sample_rate: rate, channels, codec: t.codec.codec_id().name().to_string(), bits_per_sample: Some(sound.bits) });
-        audio_tracks.push(AudioTrackEntry { track_idx: idx, native_rate: rate, backend: AudioBackend::MxfPcm { presented_start, presented_len } });
+        audio_tracks.push(AudioTrackEntry {
+            track_idx: idx,
+            native_rate: rate,
+            fixed_packet_samples: None,
+            backend: AudioBackend::MxfPcm { presented_start, presented_len },
+        });
     }
 
     let (video_info, video_state, presentation, duration) = if let Some(v_idx) = video_idx {
@@ -1355,6 +1380,7 @@ enum AudioBackend {
 struct AudioTrackEntry {
     track_idx: usize,
     native_rate: u32,
+    fixed_packet_samples: Option<i64>,
     backend: AudioBackend,
 }
 
@@ -2789,6 +2815,40 @@ mod tests {
         assert_eq!((r270.width, r270.height), (2, 4));
         if let PixelData::Yuv16 { chroma, .. } = &r270.data {
             assert_eq!(*chroma, Chroma::C444);
+        }
+    }
+
+    #[test]
+    fn adts_transport_duration_includes_the_final_packet() {
+        use craft_audio::aac::{Encoder, EncoderConfig};
+        use mpegts::mux::{Codec, Config, Frame, Muxer, Stream};
+
+        const RATE: u32 = 48_000;
+        const SAMPLES: i64 = 1024;
+        const PTS_PER_PACKET: i64 = 1_920;
+        const ORIGIN_PTS: i64 = 90_000;
+        let mut encoder = Encoder::new(EncoderConfig::cbr(RATE, 1, 96_000).with_adts(true)).expect("ADTS encoder");
+        let samples: Vec<f32> = (0..8192).map(|i| (f64::from(i) * 0.13).sin() as f32 * 0.4).collect();
+        let mut packets = encoder.encode(&[&samples]);
+        packets.extend(encoder.flush());
+        let three_packets = packets.get(..3).expect("three encoded packets");
+
+        for last_slot in [2, 3] {
+            let mut mux = Muxer::new(Vec::new(), Config::default(), &[Stream::new(0x100, Codec::AacAdts)]).expect("TS muxer");
+            for (data, slot) in three_packets.iter().zip([0, 1, last_slot]) {
+                let pts = ORIGIN_PTS + slot * PTS_PER_PACKET;
+                mux.write_frame(0, &Frame { data, pts, dts: None, key: true }).expect("write ADTS packet");
+            }
+            let bytes: Arc<[u8]> = mux.finish().expect("finish TS").into();
+            let source = open_bytes("audio.ts", bytes.clone()).expect("recognized TS").expect("shared TS audio");
+            let final_packet = source.audio(last_slot * SAMPLES, SAMPLES as usize, RATE).expect("read final packet");
+            assert!(final_packet.channels[0].iter().any(|sample| sample.abs() > 0.02), "the final packet carries audible samples");
+
+            let footage = crate::probe::probe_bytes("audio.ts", bytes).expect("public TS probe");
+            assert!(footage.has_audio && !footage.has_video);
+            assert_eq!(footage.codec, "AAC");
+            let end = Tick::from_units((last_slot + 1) * SAMPLES, i64::from(RATE));
+            assert_eq!(footage.duration.0, end.0, "final packet at slot {last_slot}");
         }
     }
 
