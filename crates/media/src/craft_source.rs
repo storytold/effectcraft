@@ -47,6 +47,7 @@ use craft_media::matroska::{self, MkvFile};
 use craft_media::mpegts;
 use craft_media::mxf::{self, MxfFile, SoundFormat};
 use craft_media::{ByteSource, CodecId, CodecParams};
+use craft_media_source::cancel::cancelled;
 use craft_media_source::{
     AudioStreamInfo, FrameRequest, MAX_AUDIO_STREAMS, MediaError, MediaInfo, MediaKind, MediaSource, Result, SharedBytes, SharedSource, VideoStreamInfo,
 };
@@ -495,7 +496,7 @@ impl AudioStarts {
         // rounded or laced packets. A first discontinuous seek may still have to
         // index the unread suffix; normal open and sequential decode never do this.
         while let Some(idx) = self.pending.as_ref().map(|prefix| prefix.len) {
-            if filmcraft_media::cancel::cancelled() {
+            if cancelled() {
                 return Err(MediaError::Cancelled);
             }
             // Do not commit a guessed duration after an I/O error; the next
@@ -1810,7 +1811,7 @@ impl MediaSource for CraftMediaSource {
         let sample_count = self.file.sample_count(video_idx);
         let is_isobmff = matches!(&self.file, ContainerFile::Isobmff(_));
         while !state.decoded.iter().any(|c| c.pts >= target_pts && c.draft == want_draft) {
-            if filmcraft_media::cancel::cancelled() {
+            if cancelled() {
                 return Err(MediaError::Cancelled);
             }
             if state.next_decode_idx < sample_count {
@@ -1904,7 +1905,7 @@ impl MediaSource for CraftMediaSource {
                 channels
             }
             AudioBackend::MxfPcm { presented_start, presented_len } => {
-                if filmcraft_media::cancel::cancelled() {
+                if cancelled() {
                     return Err(MediaError::Cancelled);
                 }
                 let ContainerFile::Mxf(mxf_file) = &self.file else {
@@ -2077,7 +2078,7 @@ fn decode_standalone_range(native_rate: u32, channels_count: usize, state: &mut 
     }
 
     while state.decoded_pos + state.buf.first().map_or(0, Vec::len) as i64 <= end {
-        if filmcraft_media::cancel::cancelled() {
+        if cancelled() {
             return Err(MediaError::Cancelled);
         }
         let Some(block) = state.decoder.next_block().map_err(|e| MediaError::Decode(e.to_string()))? else {
@@ -2223,7 +2224,7 @@ fn decode_audio_range(
 
     let sample_count = file.sample_count(track_idx);
     while state.next_sample < sample_count {
-        if filmcraft_media::cancel::cancelled() {
+        if cancelled() {
             return Err(MediaError::Cancelled);
         }
         let idx = state.next_sample;
@@ -4609,6 +4610,22 @@ mod tests {
             mux.write_frame(0, &Frame { data: &packet.data, pts: packet.pts, dts: Some(packet.dts), key: true }).unwrap();
         }
         mux.finish().unwrap()
+    }
+
+    #[test]
+    fn shared_video_read_observes_filmcraft_request_cancellation() {
+        use std::sync::atomic::AtomicBool;
+
+        let source = crate::stream::open_bytes("cancelled.ts", generated_two_frame_ts().into()).unwrap();
+        assert!(matches!(source, crate::stream::MediaSource::Craft(_)));
+        let cancel = Arc::new(AtomicBool::new(true));
+        let request = || source.video_frame(effectcraft_time::Tick::ZERO, 1.0);
+        let interrupted = filmcraft_media::cancel::with_cancel(&cancel, request);
+        assert!(matches!(interrupted, Err(crate::MediaError::Cancelled)));
+
+        let interrupted = craft_media_source::cancel::with_cancel(&cancel, request);
+        assert!(matches!(interrupted, Err(crate::MediaError::Cancelled)));
+        assert!(request().is_ok());
     }
 
     #[test]
