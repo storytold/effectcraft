@@ -3,7 +3,6 @@
 **Stage: alpha** · next: beta, ~30 points of "ready for real work" and ~350–620 h away
 
 > **Last reviewed:** 2026-11-15 · **Last updated:** 2026-11-15 · **Change:** minor (releases v0.22.0 through v0.24.1; .aep gained project export (#2594), drag-and-drop import (#3103), an audit of hostile inputs with every loss reported (#3299, #3300, #3319, #3365), placeholders for unmapped effects (#3087), Lumetri Color, Puppet, CC Color Neutralizer, EXtractoR/IDentifier, HDR Highlight Compression, Echo, Linear Wipe, Offset and Color Stabilizer mappings, text-animator and Source Text expressions (#3170) and twice the import speed (#3302); GPU rendering 2.6× faster with one upload per frame and single-copy readback (#3335), smooth preview lanes (#3345), bounded GPU memory (#3028), shared multi-layer EXR decode (#474), EXR output options (#2915, #2916) and a WebAssembly ABI 2 plug-in path (#3329); eighteen effect parameters now take After Effects' ranges (#3470–#3480, #3483–#3484, #3487–#3491), with Color Stabilizer sampling (#3125), masked Grid/Checkerboard/Circle (#3121), Cryptomatte selection and Matte Only (#2839, #3130), fast-conformed frame blending (#3180) and bounded Levels and time-stretch math; number-field arithmetic (#3195), expressionError (#3219), prop.get with footage (#3231), reversed-layer audio (#3239), keyframed audio waveforms (#1722), Effect Controls lock and rename selection (#3193, #3198), viewer snapping (#2681, #3229), Graph Editor theming (#3202), Convert To Bezier Path (#3237), stopwatch Add Expression (#3192), Shift-drag timeline snapping (#1828), anchored marquee (#2859), Go to Time (#3373), text layers whose names follow their text (#3233), mute-aware audio preview (#2104), ScriptUI panel bars (#2796), Closed-path and Effect Controls arrow fixes (#2817, #2869) and accessible Info, Flowchart, Script Console and 3D Camera Tracker blocks (#1341); a file-dialog crash fix (#3084), crash diagnostics and replayable repros (#3357, #1224), Flatpak updater and nightly release fixes (#3516, #3520), craft-libs format and update cutovers, and CI test stabilisation (#3650, #3689, #3704); readiness estimates unchanged) · **Target:** Adobe After Effects 2026 (26.5.0.89)
-> **Last reviewed:** 2026-10-22 · **Last updated:** 2026-11-05 · **Change:** minor (ProRes alpha final-run conformance; previously: features of 30 October in the progress log: text Line Join, Timeline drag-reorder and multi-select of effects, viewer edge pan, ScriptUI drag capture and dock size; previously: localization recount after #1774) · **Target:** Adobe After Effects 2026 (26.5.0.89)
 
 EffectCraft aims to do what After Effects does, with the same panels, menus and behaviour, written
 from scratch in Rust. This page is the one-page summary; the evidence is in
@@ -32,14 +31,16 @@ About 60–70% of these hours parallelise ([detail](docs/target-app-parity.md#re
 Hours are one Opus 5.5 agent working sequentially, calibrated on this repository's history
 ([how](docs/target-app-parity.md#calibration-of-the-hours)).
 
+The percentages and hours on this page are the 12 October estimates. The counts, issue and pull request statuses
+and lists were re-checked on 2026-11-11; a new estimate needs new evidence, not an edit.
+
 ### Stage
 
 **Alpha**, because all six core workflows of the [alpha gate](docs/roadmap.md#alpha-gate)
 (set up, animate, text and shapes, composite, preview, save and deliver) work end to end on macOS
-and the work saves and reopens, and ready for real work (≈ 45%) is above the ≈ 40% bar. But: After Effects projects (`.aep`) can't be opened, which
-alone rules out beta; fidelity against After Effects is measured for one narrow case (scalar ease,
-168 samples); 216 issues are open on 12 October, six of them crash reports (#580, #501, #426, #341, #234, #879). Beta needs ≈ 75% ready and `.aep`
-opening reliably: the `.aep` owner decision and importer (80–160 h), the fidelity harness and
+and the work saves and reopens, and ready for real work (≈ 45%) is above the ≈ 40% bar. But: After Effects projects (`.aep`) import only as far as the importer's coverage goes (the losses it detects are reported) and File ▸ Open doesn't take them yet, and that coverage isn't measured against real projects; fidelity against After Effects is measured for one narrow case (scalar ease,
+168 samples); 782 issues are open and 904 closed on 2026-11-11, 44 of them labelled critical, most of those crashes, aborts or out-of-memory kills (gap 3), and the security audit has 16 open findings (gap 26). Beta needs ≈ 75% ready and `.aep`
+opening reliably: `.aep` coverage and File ▸ Open, and the owner decision on clean-room scope (#190; the original 80–160 h was for the importer, which exists, and is not re-estimated), the fidelity harness and
 P0/P1 corpus (60–100 h), the crash and bug backlog (40–80 h), performance (40–70 h),
 Linux/Windows reliability (30–50 h) and depth in animation, masks, effects and text (100–160 h).
 
@@ -107,10 +108,10 @@ Ranked; detail in [docs/roadmap.md](docs/roadmap.md) and [docs/gaps.md](docs/gap
 
 | | Next | Hours |
 |---|---|---:|
-| 1 | Fix the open crash reports; run `cargo xtask ci` on every pull request (G3) | 15–30 |
+| 1 | Fix the open crash reports and the open security audit findings (G3, gaps 3 and 26); `cargo xtask ci` already runs on every pull request (#2204) | 15–30 (12 October) |
 | 2 | Fidelity harness against After Effects: rendered frames, a corpus case per P0/P1 feature (G1) | 60–100 |
 | 3 | Real-user reliability on Linux and Windows; the open mask, effect, text and 3D bugs (G2) | 100–190 |
-| 4 | `.aep` / `.aepx` import, after the owner's clean-room decision (G4) | 80–160 |
+| 4 | `.aep` / `.aepx` coverage and File ▸ Open (the importer exists); the owner's clean-room decision, #190 (G4) | not re-estimated (was 80–160) |
 | 5 | Performance: benchmarks at 1080p / 4K, real-time cached playback, hardware video (G5) | 50–100 |
 | 6 | Localization depth: effect names, all panels, Korean / Italian (G9) | 60–110 |
 
@@ -182,6 +183,7 @@ Come tell us what matters most to you on [Discord](https://discord.gg/artcraft).
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-11 | minor | Counts, issue and pull request statuses re-checked against `origin/main` 4ac6cdb2 (open issues 216 to 782, lines of Rust, tests, commits); the stage text and the next-steps list say `.aep` import and export exist, name the security audit and no longer ask for a CI gate; percentages and hours not re-estimated |
 | 2026-10-30 | minor | Progress log: text Line Join, Timeline drag-reorder and Shift multi-select of effects, viewer edge pan, effect padding budget, MP4 edit-list duration, Render Queue clock, ScriptUI drag capture and docked-panel size |
 | 2026-10-22 | minor | Localization: 300 more panel/dialog rows in Japanese and the Chinese catalogs, plus the review's three missing rows (Basic, Advanced, Play/Stop) — panel tabs, form and dialog labels, context menus, tracker/graph/text-panel controls, File-panel footers, credits; language shares recounted after #1774 (Japanese 27% → 46% with 297 effect names, Simplified Chinese 29% → 46% with 307 effect names, Traditional Chinese 29% → 38%, overall 18% → 24%) |
 | 2026-10-12 | minor | Open-issue count (134 to 216), crash list and localization share (12% to 18%) updated to match docs/gaps.md |
