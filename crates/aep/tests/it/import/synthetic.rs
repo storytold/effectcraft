@@ -1026,3 +1026,49 @@ fn french_levels_channel_aliases_cover_every_item() {
     // "Alpha" needs no alias: the same word in both languages.
     assert_eq!(popup_alias("alpha"), None);
 }
+
+#[test]
+fn preserve_transparency_is_imported_from_the_layer_header() {
+    // `ldta` byte 103 is 1 on a layer with Preserve Underlying Transparency on (After Effects
+    // 2026: solid, shape, text, precomp and 3D layers), 0 when it is off. It used to be dropped
+    // without a word: the layer drew over transparent areas below it.
+    let pt = |p: &Project| -> Vec<bool> { p.comps().flat_map(|(_, c)| c.layers.iter().map(|l| l.preserve_transparency)).collect() };
+    let (p, r) = run(SYNTHETIC, true);
+    r.unwrap();
+    let off = pt(&p);
+    assert!(!off.is_empty() && off.iter().all(|on| !on), "{off:?}");
+    let file = mutate(&mut |c| {
+        if c.id == *b"ldta" {
+            set_data(c, 103, &[1]);
+        }
+    });
+    let (p, r) = run(&file, true);
+    r.unwrap();
+    let on = pt(&p);
+    // The same layers, every one with the switch on.
+    assert_eq!(on.len(), off.len(), "{on:?}");
+    assert!(on.iter().all(|on| *on), "{on:?}");
+    // The byte holds flags: a Dancing Dissolve layer (bit 1) with the switch on stores 3
+    // (After Effects 2026 lab sample `pt_dissolve`), and the switch is still on.
+    let file = mutate(&mut |c| {
+        if c.id == *b"ldta" {
+            set_data(c, 103, &[3]);
+        }
+    });
+    let (p, r) = run(&file, true);
+    r.unwrap();
+    let flagged = pt(&p);
+    assert_eq!(flagged.len(), off.len(), "{flagged:?}");
+    assert!(flagged.iter().all(|on| *on), "{flagged:?}");
+    // Dancing Dissolve alone (2) leaves the switch off.
+    let file = mutate(&mut |c| {
+        if c.id == *b"ldta" {
+            set_data(c, 103, &[2]);
+        }
+    });
+    let (p, r) = run(&file, true);
+    r.unwrap();
+    let dancing = pt(&p);
+    assert_eq!(dancing.len(), off.len(), "{dancing:?}");
+    assert!(dancing.iter().all(|on| !on), "{dancing:?}");
+}

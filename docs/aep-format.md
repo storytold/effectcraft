@@ -198,6 +198,7 @@ the value from the corpus manifest (test file in parentheses at the end of each 
 | name is user-set | 37 bit `0x01` | flag | clear while the layer shows its source's name (000, 124, new solids, default-named camera and light), set when named | 000, 010, 022, 110, 113, 124, 211 | V |
 | guide layer | 37 bit `0x02` | flag | | 026 | V |
 | adjustment layer | 38 bit `0x02` | flag | | 025 | V |
+| Preserve Underlying Transparency | 103 bit `0x01` | flag | set when on, clear when off (bit `0x02` of the same byte marks Dancing Dissolve: a Dancing Dissolve layer with the switch on stores 3, lab file `pt_dissolve`). After Effects 2026 lab sample: on for a solid, shape, text, precomp and 3D layer, off for a solid and every other layer; the only `ldta` byte that differs between the layers with it on and off in the corpus file 10_blend_modes | lab file `preserve_transparency` (not in the corpus) | V |
 | 3D layer | 38 bit `0x04` | flag | always set on cameras and lights | 015, 251 | V |
 | solo | 38 bit `0x08` | flag | | 014 | V |
 | auto-orient | 38 bit `0x40` | flag | orients towards the point of interest: set on two-node cameras (byte 38 is `0x44`) and on all lights, clear on a one-node camera (`0x04`) | 256 (`0x44`), 251 (`0x04`), 252, 254 | V |
