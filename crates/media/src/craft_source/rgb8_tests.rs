@@ -73,9 +73,11 @@ fn packed_rgb_keeps_stride_aperture_rotation_and_straight_alpha() -> TestResult 
 }
 
 #[test]
-fn higher_depth_rgb_is_not_quantized_to_packed_bytes() -> TestResult {
+fn limited_range_high_depth_rgb_remains_unsupported() -> TestResult {
     let channel = Plane::packed(1, 1, 10, Samples::U16(vec![900]))?;
     let decoded = DecodedVideoFrame::new(1, 1, ColorFamily::Rgb, Subsampling::S444, vec![channel; 3], None)?;
-    assert!(matches!(to_craft_frame(decoded, presentation(), Tick::ZERO), Err(MediaError::Unsupported(_))));
+    let color = ColorInfo { range: Range::Limited, ..ColorInfo::SRGB_FULL };
+    let presentation = FramePresentation { container_color: Some(color), ..presentation() };
+    assert!(matches!(to_craft_frame(decoded, presentation, Tick::ZERO), Err(MediaError::Unsupported(_))));
     Ok(())
 }

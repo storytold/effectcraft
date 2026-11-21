@@ -113,34 +113,34 @@ fn looks_like_matroska(head: &[u8]) -> bool {
     head.starts_with(&[0x1A, 0x45, 0xDF, 0xA3])
 }
 
-/// True when `head` contains an MXF SMPTE KLV partition pack key.
-fn looks_like_mxf(head: &[u8]) -> bool {
-    head.windows(12).any(|w| w == [0x06, 0x0e, 0x2b, 0x34, 0x02, 0x05, 0x01, 0x01, 0x0d, 0x01, 0x02, 0x01])
-}
+/// The MXF sniffer needs the 16-byte partition key after the bounded 64 KiB run-in.
+#[cfg(any(unix, windows))]
+pub(crate) const NATIVE_SNIFF_HEAD_LEN: usize = 64 * 1024 + 16;
 
 /// Open an in-place ISO-BMFF, Matroska/WebM, MXF, AVI, MPEG-TS/PS, or standalone audio source via `craft-media` / `craft-video` / `craft-audio`.
 /// Returns `None` when the container/codec/audio combination should fall back to `filmcraft-codecs`.
 #[cfg(any(unix, windows))]
 pub(crate) fn open_reader(name: &str, head: &[u8], reader: &SharedBytes) -> Option<Result<SharedSource>> {
-    if looks_like_isobmff(head) {
+    let usual_head = &head[..head.len().min(craft_media_source::HEAD_LEN)];
+    if looks_like_isobmff(usual_head) {
         return open_isobmff(name, reader.clone());
     }
-    if looks_like_matroska(head) {
+    if looks_like_matroska(usual_head) {
         return open_matroska(name, reader.clone());
     }
-    if looks_like_mxf(head) {
+    if mxf::sniff(head) {
         return open_mxf(name, reader.clone());
     }
-    if avi::sniff(head) {
+    if avi::sniff(usual_head) {
         return open_avi(name, reader.clone());
     }
-    if let Some(fmt) = mpegts::sniff(head) {
+    if let Some(fmt) = mpegts::sniff(usual_head) {
         return open_mpeg(name, fmt, reader.clone());
     }
-    if let Some(source) = standalone_flac::open_reader(name, head, reader) {
+    if let Some(source) = standalone_flac::open_reader(name, usual_head, reader) {
         return Some(Ok(source));
     }
-    open_standalone_audio(name, head, reader.clone())
+    open_standalone_audio(name, usual_head, reader.clone())
 }
 
 /// Open an in-memory ISO-BMFF, Matroska/WebM, MXF, AVI, MPEG-TS/PS, or standalone audio source via `craft-media` / `craft-video` / `craft-audio`.
@@ -151,7 +151,7 @@ pub(crate) fn open_bytes(name: &str, bytes: Arc<[u8]>) -> Option<Result<SharedSo
     if looks_like_matroska(&bytes) {
         return open_matroska(name, Arc::new(bytes));
     }
-    if looks_like_mxf(&bytes) {
+    if mxf::sniff(&bytes) {
         return open_mxf(name, Arc::new(bytes));
     }
     if avi::sniff(&bytes) {
@@ -2300,6 +2300,9 @@ fn push_decoded(
 #[cfg(test)]
 mod rgb8_tests;
 
+#[cfg(test)]
+mod wide_rgb_tests;
+
 fn to_craft_frame(vf: DecodedVideoFrame, presentation: FramePresentation, pts: Tick) -> Result<VideoFrame> {
     let FramePresentation { container_color, par: default_par, rotation, aperture } = presentation;
     let (mut width, mut height) = (vf.width(), vf.height());
@@ -2311,7 +2314,7 @@ fn to_craft_frame(vf: DecodedVideoFrame, presentation: FramePresentation, pts: T
         Some(sar) => sar,
         None => default_par,
     };
-    let color = resolve_color(tags, container_color);
+    let mut color = resolve_color(tags, container_color);
     let bit_depth = vf.bit_depth();
     let (planes, alpha) = vf.into_planes();
 
@@ -2337,6 +2340,38 @@ fn to_craft_frame(vf: DecodedVideoFrame, presentation: FramePresentation, pts: T
                 rgba.extend_from_slice(&[r, g, b, a]);
             }
             PixelData::Rgba8(Arc::new(rgba))
+        }
+        ColorFamily::Rgb if color.range == Range::Full && (9..=16).contains(&bit_depth) && planes.iter().all(|p| p.bit_depth() == bit_depth) => {
+            let luma = aperture.and_then(|clap| clean_aperture_region(clap, (width, height)));
+            if let Some(r) = luma {
+                (width, height) = (r.w as u32, r.h as u32);
+            }
+            let samples = (width as usize)
+                .checked_mul(height as usize)
+                .and_then(|n| n.checked_mul(4))
+                .filter(|&n| n <= craft_frame::DEFAULT_MAX_FRAME_BYTES / size_of::<f32>())
+                .ok_or_else(|| MediaError::Decode("RGB picture exceeds the frame buffer limit".into()))?;
+            let [r, g, b]: [Plane; 3] = planes.try_into().map_err(|_| MediaError::Decode("expected three RGB planes".into()))?;
+            let r = plane_u16(r, luma)?;
+            let g = plane_u16(g, luma)?;
+            let b = plane_u16(b, luma)?;
+            let alpha_max = alpha.as_ref().map_or(1, |a| ((1u32 << a.bit_depth()) - 1) as u16);
+            let alpha = alpha.map(|a| plane_u16(a, luma)).transpose()?.into_iter().flatten().chain(std::iter::repeat(alpha_max));
+            // One transfer lookup per code avoids evaluating the curve per pixel and keeps
+            // every decoded code distinct, including at 16 bits.
+            let max_code = (1usize << bit_depth) - 1;
+            let mut transfer = Vec::new();
+            transfer.try_reserve_exact(max_code + 1).map_err(|_| MediaError::Decode("could not allocate the RGB transfer table".into()))?;
+            transfer.extend((0..=max_code).map(|code| craft_color::to_linear(code as f32 / max_code as f32, color.transfer)));
+            let linear = |value: u16| transfer[usize::from(value).min(max_code)];
+            let mut rgba = Vec::new();
+            rgba.try_reserve_exact(samples).map_err(|_| MediaError::Decode("could not allocate the RGB picture".into()))?;
+            for (((r, g), b), a) in r.into_iter().zip(g).zip(b).zip(alpha) {
+                let a = (f32::from(a) / f32::from(alpha_max)).min(1.0);
+                rgba.extend_from_slice(&[linear(r) * a, linear(g) * a, linear(b) * a, a]);
+            }
+            color.transfer = Transfer::Linear;
+            PixelData::RgbaF32(Arc::new(rgba))
         }
         ColorFamily::YCbCr => {
             let chroma = match subsampling {
@@ -2474,6 +2509,10 @@ fn rotate_frame(mut frame: VideoFrame, turns: u8) -> VideoFrame {
             let rotated = rotate_plane(pixels.as_chunks::<4>().0, w, h, turns);
             PixelData::Rgba8(Arc::new(rotated.into_flattened()))
         }
+        PixelData::RgbaF32(pixels) => {
+            let rotated = rotate_plane(pixels.as_chunks::<4>().0, w, h, turns);
+            PixelData::RgbaF32(Arc::new(rotated.into_flattened()))
+        }
         PixelData::Yuv8 { planes: [y, cb, cr], chroma, alpha } => {
             let (cw, ch, out_chroma) = match chroma {
                 Chroma::C420 => (w.div_ceil(2), h.div_ceil(2), Chroma::C420),
@@ -2513,7 +2552,6 @@ fn rotate_frame(mut frame: VideoFrame, turns: u8) -> VideoFrame {
                 alpha: alpha.map(|a| Arc::new(rotate_plane(&a, w, h, turns))),
             }
         }
-        other => other,
     };
     frame.width = nw;
     frame.height = nh;
@@ -4127,11 +4165,60 @@ mod tests {
     }
 
     #[test]
-    fn mxf_sniffer_and_rational_units() {
-        assert!(looks_like_mxf(&[0x06, 0x0e, 0x2b, 0x34, 0x02, 0x05, 0x01, 0x01, 0x0d, 0x01, 0x02, 0x01, 0x01, 0x02]));
-        assert!(!looks_like_mxf(&[0x00, 0x00, 0x00, 0x18, b'f', b't', b'y', b'p']));
+    fn mxf_rational_units() {
         assert_eq!(tick_to_rational_units(Tick(craft_time::TICKS_PER_SECOND), 25, 1), 25);
         assert_eq!(tick_to_rational_units(Tick(craft_time::TICKS_PER_SECOND), 30000, 1001), 29);
+    }
+
+    #[test]
+    fn mxf_routing_leaves_avi_payload_partition_markers_in_avi() {
+        // Partitions might occur as arbitrary sample bytes in another container.
+        let mut detected = Vec::new();
+        for (padding, kind) in [(0, 3), (66_000, 2)] {
+            let key = [0x06, 0x0e, 0x2b, 0x34, 0x02, 0x05, 0x01, 0x01, 0x0d, 0x01, 0x02, 0x01, 0x01, kind, 0x04, 0x00];
+            let mut pcm = vec![0; padding];
+            pcm.extend(key);
+            let mut writer = avi::AviWriter::new(
+                std::io::Cursor::new(Vec::new()),
+                vec![avi::StreamSpec::Audio(avi::AudioSpec::pcm(48_000, 1, 16))],
+                avi::MuxOptions::default(),
+            )
+            .expect("AVI writer");
+            writer.write_chunk(0, &pcm, true).expect("PCM chunk");
+            let bytes = writer.finish().expect("finish AVI").into_inner();
+            detected.push(open_bytes("audio.avi", bytes.into()).and_then(Result::ok).map(|src| src.info().container.clone()));
+        }
+        assert_eq!(detected, [Some("avi".to_string()), Some("avi".to_string())]);
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn mxf_routing_opens_a_header_at_the_native_run_in_boundary() {
+        use crate::stream::{MediaSource, open_source, probe_source};
+
+        let options = mxf::write::OpAtomPcm {
+            sample_rate: 48_000,
+            bits: 16,
+            channels: 1,
+            edit_rate: None,
+            ids: mxf::write::PackageIds::from_seed("mxf-run-in", "pcm"),
+            timecode: None,
+        };
+        let mut bytes = vec![0xab; 65_535];
+        bytes.extend(mxf::write::write_opatom_pcm(&options, &[8192; 480]).expect("write OpAtom PCM"));
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let path = dir.path().join("run-in.mxf");
+        std::fs::write(&path, &bytes).expect("write MXF fixture");
+
+        let memory = open_bytes("run-in.mxf", bytes.into()).expect("recognize in memory").expect("open in memory");
+        let expected = memory.audio(0, 16, 48_000).expect("read memory PCM").channels;
+        assert_eq!(expected[0], vec![0.25; 16]);
+
+        let (disk, _) = open_source(&path).expect("open file");
+        let MediaSource::Craft(disk) = disk.expect("open disk MXF") else { panic!("use shared MXF reader on disk") };
+        assert_eq!(disk.audio(0, 16, 48_000).expect("read disk PCM").channels, expected);
+        let probe = probe_source(&path).expect("recognize disk probe").expect("open disk probe");
+        assert!(matches!(probe, MediaSource::Craft(src) if src.info().container == "mxf"));
     }
 
     #[test]
