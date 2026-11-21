@@ -2127,7 +2127,7 @@ mod tests {
         assert_eq!(ts_container.sample_pts(0, 0), 90_000);
         assert_eq!(ts_container.pts_to_tick(0, 90_000), Tick::ZERO);
         let ts_src = open_bytes("test.ts", Arc::from(ts_bytes)).expect("recognized ts").expect("opened ts");
-        assert_eq!(ts_src.info().container, "mpeg-ts");
+        assert_eq!(ts_src.info().container, "MPEG-2 TS");
     }
 
     fn pcm_s16le_bytes(sample: i16, count: usize) -> Vec<u8> {
