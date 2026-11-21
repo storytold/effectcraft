@@ -230,7 +230,7 @@ pub fn random_order(n: usize, seed: u64) -> Vec<usize> {
     let mut s = splitmix(seed ^ 0x5EED);
     for i in (1..n).rev() {
         s = splitmix(s);
-        let j = (s % (i as u64 + 1)) as usize;
+        let j = (s % (i as u64).saturating_add(1)) as usize;
         p.swap(i, j);
     }
     p
@@ -274,12 +274,13 @@ impl Default for Wiggly {
 
 /// Wiggly selection of unit `i` at layer time `t` seconds for dimension `dim` (0..3).
 pub fn wiggly_value(w: &Wiggly, t: f64, i: usize, dim: usize) -> f64 {
-    let ch = if w.lock_dimensions { 0 } else { dim as u64 };
+    let ch = if w.lock_dimensions { 0 } else { dim as u64 & 0xFFFF };
     let tau = t * w.wiggles_per_second + w.temporal_phase / 360.0;
     let shared = noise1(tau, w.seed, ch * 2);
     // Each unit's own channel; Spatial Phase slides the pattern along the units.
     let along = i as f64 * 0.61 + w.spatial_phase / 360.0;
-    let own = 0.5 * noise1(tau + along, w.seed ^ 0xA5A5, ch * 2 + 1) + 0.5 * noise1(tau * 1.37 + along * 1.7, w.seed ^ (i as u64 + 1).wrapping_mul(0x9E37), ch);
+    let own = 0.5 * noise1(tau + along, w.seed ^ 0xA5A5, ch * 2 + 1)
+        + 0.5 * noise1(tau * 1.37 + along * 1.7, w.seed ^ (i as u64).wrapping_add(1).wrapping_mul(0x9E37), ch);
     let c = w.correlation.clamp(0.0, 1.0);
     let v = (c * shared + (1.0 - c) * own.clamp(-1.0, 1.0)).clamp(-1.0, 1.0);
     w.min + (v + 1.0) * 0.5 * (w.max - w.min)
@@ -404,5 +405,13 @@ mod tests {
         assert!((0..30).all(|i| wiggly_value(&pos, i as f64 * 0.3, i, 0) >= 0.0));
         // Changes over time.
         assert_ne!(wiggly_value(&w, 0.0, 1, 0), wiggly_value(&w, 0.8, 1, 0));
+    }
+
+    #[test]
+    fn wiggly_survives_extreme_unit_index_and_dimension() {
+        let w = Wiggly { seed: u64::MAX, ..Default::default() };
+        for (i, dim) in [(usize::MAX, 0), (0, usize::MAX), (usize::MAX, usize::MAX)] {
+            assert!(wiggly_value(&w, 1.0, i, dim).is_finite());
+        }
     }
 }
