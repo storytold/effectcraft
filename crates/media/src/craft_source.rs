@@ -808,11 +808,6 @@ struct AudioTrackState {
 }
 
 enum AudioBackend {
-    Decoder(Mutex<AudioTrackState>),
-    MxfPcm { presented_start: u64, presented_len: u64 },
-}
-
-enum AudioBackend {
     Decoder { audio_starts: Vec<i64>, seek_preroll_samples: i64, state: Mutex<AudioTrackState> },
     MxfPcm { presented_start: u64, presented_len: u64 },
 }
