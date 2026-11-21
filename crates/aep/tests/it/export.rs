@@ -1,7 +1,7 @@
 //! export tests of effectcraft-aep.
 
 #[macro_use]
-mod helpers;
+pub(crate) mod helpers;
 
 mod bounds;
 mod built;
