@@ -7,10 +7,24 @@ pub(crate) fn color_p(p: &Value, k: &str) -> Option<[f32; 3]> {
     match p.get(k)? {
         Value::String(s) => effectcraft_color::Rgba::from_hex(s).map(|c| [c.r, c.g, c.b]),
         Value::Array(a) => {
-            let g = |i: usize| a.get(i).and_then(Value::as_f64).unwrap_or(0.0) as f32;
-            Some([g(0), g(1), g(2)])
+            // Every given channel must be a number: NaN arrives as JSON null (#3756). A
+            // missing channel keeps 0.
+            let g = |i: usize| match a.get(i) {
+                None => Some(0.0),
+                Some(v) => v.as_f64(),
+            };
+            Some([g(0)? as f32, g(1)? as f32, g(2)? as f32])
         }
         _ => None,
+    }
+}
+
+/// A colour parameter: absent, null or `false` ("no fill/stroke") keeps the caller's default;
+/// a given colour must be `#rrggbb` or `[r, g, b]` with numeric channels (#3756).
+pub(crate) fn color_opt_p(p: &Value, k: &str, cmd: &str) -> Result<Option<[f32; 3]>> {
+    match p.get(k) {
+        None | Some(Value::Null | Value::Bool(false)) => Ok(None),
+        Some(_) => color_p(p, k).map(Some).ok_or_else(|| bad(cmd, format!("{k}: \"#rrggbb\" or [r, g, b]"))),
     }
 }
 
@@ -115,7 +129,8 @@ fn solids_folder(proj: &mut Project) -> ItemId {
 fn new_solid_like(s: &mut Session, p: &Value, adjustment: bool) -> Result<Value> {
     let cid = comp_id(s, p)?;
     let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?.clone();
-    let color = color_p(p, "color").unwrap_or(if adjustment { [1.0, 1.0, 1.0] } else { [0.85, 0.2, 0.2] });
+    let cmd = if adjustment { "layer.newAdjustment" } else { "layer.newSolid" };
+    let color = color_opt_p(p, "color", cmd)?.unwrap_or(if adjustment { [1.0, 1.0, 1.0] } else { [0.85, 0.2, 0.2] });
     // 1 to 30,000 px a side (#788): the layer is sized from the same numbers as its solid.
     let w = p.get("width").and_then(Value::as_u64).map(limits::size).unwrap_or(comp.width);
     let h = p.get("height").and_then(Value::as_u64).map(limits::size).unwrap_or(comp.height);

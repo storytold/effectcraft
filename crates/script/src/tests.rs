@@ -570,6 +570,38 @@ fn text_documents() {
     assert_eq!(d.style_at(0).size, 40.0);
 }
 
+/// #3756: a NaN colour channel reaches the engine as JSON null. addSolid, SolidSource.color and
+/// TextDocument.fillColor refuse it instead of silently building a wrong colour, as After Effects
+/// does; a valid SolidSource.color assignment sets the solid's colour.
+#[test]
+fn nan_colour_channels_are_refused() {
+    let mut s = session();
+    let o = ok(
+        &mut s,
+        r#"
+        var c = app.project.items.addComp("T", 64, 36, 1, 1, 24);
+        var out = [];
+        try { c.layers.addSolid([NaN, 0.5, 0.5], "S", 64, 36, 1); out.push("addSolid:accepted"); }
+        catch (e) { out.push("addSolid:refused"); }
+        out.push(c.numLayers);
+        var S = c.layers.addSolid([1, 0, 0], "S2", 64, 36, 1);
+        try { S.source.mainSource.color = [NaN, 0, 0]; out.push("mainSource:accepted"); }
+        catch (e) { out.push("mainSource:refused"); }
+        out.push(S.source.mainSource.color);
+        S.source.mainSource.color = [0, 1, 0];
+        out.push(S.source.mainSource.color);
+        var T = c.layers.addText("X");
+        var d = T.text.sourceText.value;
+        d.fillColor = [NaN, 0, 0];
+        try { T.text.sourceText.setValue(d); out.push("fillColor:accepted"); }
+        catch (e) { out.push("fillColor:refused"); }
+        out.push(T.text.sourceText.value.fillColor);
+        out
+        "#,
+    );
+    assert_eq!(o.result, json!(["addSolid:refused", 0, "mainSource:refused", [1, 0, 0], [0, 1, 0], "fillColor:refused", [1, 1, 1]]));
+}
+
 #[test]
 fn layers_items_and_markers() {
     let mut s = session();

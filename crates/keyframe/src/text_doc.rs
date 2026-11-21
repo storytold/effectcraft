@@ -1006,8 +1006,13 @@ fn color_json(v: &J) -> Option<[f32; 4]> {
             Some([h(0)?, h(2)?, h(4)?, if s.len() >= 8 { h(6)? } else { 1.0 }])
         }
         J::Array(a) if a.len() >= 3 => {
-            let g = |i: usize, d: f64| a.get(i).and_then(J::as_f64).unwrap_or(d) as f32;
-            Some([g(0, 0.0), g(1, 0.0), g(2, 0.0), g(3, 1.0)])
+            // Every given channel must be a number: NaN arrives as JSON null (#3756). A
+            // missing alpha keeps 1.
+            let g = |i: usize, d: f64| match a.get(i) {
+                None => Some(d),
+                Some(v) => v.as_f64(),
+            };
+            Some([g(0, 0.0)? as f32, g(1, 0.0)? as f32, g(2, 0.0)? as f32, g(3, 1.0)? as f32])
         }
         _ => None,
     }
@@ -1345,6 +1350,22 @@ pub fn word_at(text: &str, ci: usize) -> Range<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #3756: a NaN channel arrives as JSON null; fill and stroke refuse it instead of
+    /// defaulting the channel to 0, and a refused set leaves the style untouched.
+    #[test]
+    fn fill_and_stroke_refuse_non_numeric_channels() {
+        let mut doc = TextDoc::plain("ab");
+        assert!(doc.set_attr("fill", &serde_json::json!([null, 0.5, 0.5]), None).is_err());
+        assert!(doc.set_attr("stroke", &serde_json::json!([0, null, 0, 1]), None).is_err());
+        assert!(doc.set_attr("fill", &serde_json::json!([1, 0, 0, null]), None).is_err());
+        assert_eq!(doc.style_at(0).fill, [1.0, 1.0, 1.0, 1.0]);
+        assert_eq!(doc.style_at(0).stroke, [0.0, 0.0, 0.0, 1.0]);
+        assert!(doc.set_attr("fill", &serde_json::json!([1, 0, 0]), None).unwrap());
+        assert_eq!(doc.style_at(0).fill, [1.0, 0.0, 0.0, 1.0]);
+        assert!(doc.set_attr("stroke", &serde_json::json!("#00ff00"), None).unwrap());
+        assert_eq!(doc.style_at(0).stroke, [0.0, 1.0, 0.0, 1.0]);
+    }
 
     #[test]
     fn variations_merge_by_tag_and_reject_too_many_axes() {
