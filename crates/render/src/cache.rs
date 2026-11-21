@@ -1006,7 +1006,7 @@ fn key_any(ctx: &EvalCtx, layer: &Layer, scale: f64, draft: bool, blur: bool, fo
     }
     // Effects that see the comp camera or lights (#397) change when they or the layer move.
     if effects != EffectScope::Footprint && reads_comp_scene(layer) {
-        hash_debug(&mut h, &crate::comp_scene(ctx, layer));
+        hash_comp_scene(&mut h, ctx, layer);
     }
     Some(h.finish())
 }
@@ -1027,15 +1027,27 @@ pub(crate) fn reads_layers(ctx: &EvalCtx, layer: &Layer) -> bool {
 }
 
 /// Does the layer run an effect that reads the comp camera or lights (Card Dance, CC Particle
-/// World…)?
+/// World…, or a plug-in, which may ask for them through its host)?
 fn reads_comp_scene(layer: &Layer) -> bool {
     layer.switches.effects
         && layer.effects().is_some_and(|fx| {
             fx.groups().any(|g| {
                 g.enabled
-                    && matches!(&g.kind, effectcraft_project::GroupKind::Effect { effect } if effectcraft_effects::READS_COMP_SCENE.contains(&effect.as_str()))
+                    && matches!(&g.kind, effectcraft_project::GroupKind::Effect { effect }
+                        if effectcraft_effects::READS_COMP_SCENE.contains(&effect.as_str()) || effectcraft_effects::plugin::plugin(effect).is_some())
             })
         })
+}
+
+/// What scene-reading effects see: the comp scene as `layer` sees it, every light at this time
+/// (a plug-in's `comp_lights` lists them all) and the camera and light layers themselves, keyed
+/// as they are (a plug-in may read the camera or lights at other times).
+fn hash_comp_scene(h: &mut KeyHasher, ctx: &EvalCtx, layer: &Layer) {
+    hash_debug(h, &crate::comp_scene(ctx, layer));
+    hash_debug(h, &crate::three_d::light::lights_at(ctx));
+    for l in ctx.comp.layers.iter().filter(|l| l.is_camera() || l.is_light()) {
+        hash_debug(h, l);
+    }
 }
 
 /// Cache key for the styled layer (content key + the Layer Styles group: structure, eye

@@ -285,7 +285,7 @@ impl crate::EffectHost for Comp {
         None
     }
     fn comp_scene(&self) -> Option<crate::CompScene> {
-        Some(crate::CompScene { camera: Some(self.camera), camera_layer: self.layer, light: None })
+        Some(crate::CompScene { camera: Some(self.camera), camera_layer: self.layer, light: None, zoom: 0.0, dof: None })
     }
 }
 
