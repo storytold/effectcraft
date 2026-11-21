@@ -1000,11 +1000,9 @@ impl TextDoc {
 
 fn color_json(v: &J) -> Option<[f32; 4]> {
     match v {
-        J::String(s) => {
-            let s = s.trim_start_matches('#');
-            let h = |i: usize| u8::from_str_radix(s.get(i..i + 2)?, 16).ok().map(|x| x as f32 / 255.0);
-            Some([h(0)?, h(2)?, h(4)?, if s.len() >= 8 { h(6)? } else { 1.0 }])
-        }
+        // The shared parser keeps `#rgb`, `#rrggbb` and `#rrggbbaa` consistent with every
+        // other colour parameter (#3756).
+        J::String(s) => effectcraft_color::Rgba::from_hex(s).map(|c| [c.r, c.g, c.b, c.a]),
         J::Array(a) if a.len() >= 3 => {
             // Every given channel must be a number: NaN arrives as JSON null (#3756). A
             // missing alpha keeps 1.
@@ -1365,6 +1363,9 @@ mod tests {
         assert_eq!(doc.style_at(0).fill, [1.0, 0.0, 0.0, 1.0]);
         assert!(doc.set_attr("stroke", &serde_json::json!("#00ff00"), None).unwrap());
         assert_eq!(doc.style_at(0).stroke, [0.0, 1.0, 0.0, 1.0]);
+        // Three-digit shorthand parses through the shared parser, as elsewhere (#3756).
+        assert!(doc.set_attr("fill", &serde_json::json!("#abc"), None).unwrap());
+        assert_eq!(doc.style_at(0).fill, [0xAA as f32 / 255.0, 0xBB as f32 / 255.0, 0xCC as f32 / 255.0, 1.0]);
     }
 
     #[test]
