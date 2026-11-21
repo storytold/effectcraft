@@ -496,7 +496,7 @@ pub(crate) async fn movie(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut St
     let out = mux.finish().map_err(mux_err)?;
     out.flush().map_err(mux_err)?;
     let bytes = file.finish()?;
-    Ok(Report { path, frames: 0, width: w, height: h, seconds: 0.0, bytes, audio: with_audio, log: None, overflow: vec![] })
+    Ok(Report { path, frames: 0, width: w, height: h, seconds: 0.0, bytes, audio: with_audio, reused_frames: false, log: None, overflow: vec![] })
 }
 
 #[cfg(test)]

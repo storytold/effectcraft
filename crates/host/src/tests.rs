@@ -66,6 +66,85 @@ fn memory_sink_cannot_overwrite_a_previous_output_even_with_skip_existing() {
 }
 
 #[test]
+fn reopened_exr_queue_reuses_frames_without_replacing_composition_or_proxy() {
+    use effectcraft_engine::Event;
+    use effectcraft_project::LayerSource;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = super::session();
+    s.execute("comp.new", json!({"name": "Inner", "width": 8, "height": 8, "frameRate": 10, "duration": 0.2})).unwrap();
+    let inner = s.active_comp_id().unwrap();
+    let layer = s.execute("layer.newSolid", json!({"color": "#ff0000"})).unwrap()["layer"].clone();
+    s.execute("comp.new", json!({"name": "Outer"})).unwrap();
+    let outer = s.active_comp_id().unwrap();
+    s.execute("layer.addItem", json!({"item": inner.0})).unwrap();
+    let mut originals = Vec::new();
+    for (name, action, old_selection, new_selection) in [
+        ("depth", "importAndReplace", json!({"composite": false, "depth": true}), json!(null)),
+        ("layer", "setProxy", json!({"composite": false, "layers": [layer], "multipart": true}), json!({"composite": true, "multipart": true})),
+    ] {
+        let old = dir.path().join(format!("{name}_0.exr"));
+        s.execute("comp.saveFrameAsExr", json!({"comp": inner.0, "path": old, "exrSelection": old_selection})).unwrap();
+        originals.push((old.clone(), std::fs::read(old).unwrap()));
+        let output = dir.path().join(format!("{name}_[#].exr"));
+        let item = s.execute("renderQueue.add", json!({"comp": inner.0, "output": output, "skipExisting": true, "exrSelection": new_selection})).unwrap();
+        s.execute("renderQueue.setOutputModule", json!({"item": item["item"], "postRenderAction": action})).unwrap();
+    }
+    let path = dir.path().join("passes.ecproj");
+    s.execute("file.saveAs", json!({"path": path})).unwrap();
+    let mut reopened = super::session();
+    reopened.execute("file.open", json!({"path": path})).unwrap();
+    let result = reopened.execute("renderQueue.render", json!({})).unwrap();
+    assert!(result["items"].as_array().unwrap().iter().all(|item| item["status"] == "Done"));
+    for (old, bytes) in originals {
+        assert_eq!(std::fs::read(old).unwrap(), bytes);
+    }
+    assert!(dir.path().join("depth_1.exr").is_file());
+    assert!(dir.path().join("layer_1.exr").is_file());
+    assert!(matches!(reopened.project.comp(outer).unwrap().layers[0].source, LayerSource::Comp { item } if item == inner));
+    assert!(reopened.project.item(inner).unwrap().proxy.is_none());
+    assert_eq!(
+        reopened
+            .drain_events()
+            .into_iter()
+            .filter(|e| matches!(e, Event::Toast { message, error: true } if message.contains("Turn off Skip Existing Files")))
+            .count(),
+        2
+    );
+
+    // Skip Existing stays enabled. With a fresh path the newly rendered composite can serve as a proxy.
+    let fresh = dir.path().join("fresh_[#].exr");
+    let item = reopened.execute("renderQueue.add", json!({"comp": inner.0, "output": fresh, "skipExisting": true})).unwrap();
+    reopened.execute("renderQueue.setOutputModule", json!({"item": item["item"], "postRenderAction": "setProxy"})).unwrap();
+    reopened.execute("renderQueue.render", json!({})).unwrap();
+    assert!(reopened.project.item(inner).unwrap().proxy.is_some());
+}
+
+#[test]
+fn selected_exr_pass_names_distinguish_case_variants_and_reserved_parts() {
+    use effectcraft_media::exr_channels::read_exr_channels;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = super::session();
+    s.execute("comp.new", json!({"name": "Frame", "width": 8, "height": 8})).unwrap();
+    for (name, color) in [("Plate", "#ff0000"), ("plate", "#0000ff"), ("beautY", "#00ff00"), ("DEPTH", "#ffffff")] {
+        s.execute("layer.newSolid", json!({"name": name, "color": color})).unwrap();
+    }
+    let path = dir.path().join("parts.exr");
+    s.execute("comp.saveFrameAsExr", json!({"path": path, "exrSelection": {"allLayers": true, "depth": true, "multipart": true}})).unwrap();
+    let aux = read_exr_channels(&std::fs::read(path).unwrap()).unwrap();
+    let sample = |name: &str| *aux.get(name).unwrap().first().unwrap();
+    let mut reds = [sample("Plate.R"), sample("Plate 2.R")];
+    reds.sort_by(f32::total_cmp);
+    assert!(reds[0] < 0.01 && reds[1] > 0.99, "{reds:?}");
+    let mut blues = [sample("Plate.B"), sample("Plate 2.B")];
+    blues.sort_by(f32::total_cmp);
+    assert!(blues[0] < 0.01 && blues[1] > 0.99, "{blues:?}");
+    assert!(sample("Beauty 2.G") > 0.99 && sample("Depth 2.R") > 0.99);
+    assert!(aux.get("Beauty.A").is_some() && aux.get("Depth.Z").is_some());
+}
+
+#[test]
 fn host_runs_tasks_scheduled_by_panel_handlers() {
     let mut s = super::session();
     let result = s.execute("script.run", json!({"code": "var w=new Window('palette','Timer regression'); var b=w.add('button',undefined,'Import'); b.onClick=function(){app.scheduleTask(\"app.project.items.addComp('Scheduled',64,64,1,1,25)\",0,false);};w.show();"})).unwrap();

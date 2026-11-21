@@ -136,7 +136,9 @@ fn protocol_round_trips() {
     for r in [
         WorkerReply::Render { state: JobState { current: Some(3), done: 4, total: 10, items_total: 1, ..Default::default() } },
         WorkerReply::Item { update: ItemUpdate::Started { id: 3, unix: 1_700_000_000 } },
-        WorkerReply::Item { update: ItemUpdate::Finished { id: 3, status: RenderStatus::Failed("x".into()), seconds: 1.5, output: Some("/a.gif".into()) } },
+        WorkerReply::Item {
+            update: ItemUpdate::Finished { id: 3, status: RenderStatus::Done, seconds: 1.5, output: Some("/a.exr".into()), reused_exr_frames: true },
+        },
         WorkerReply::Progress { done: 1, total: 2 },
         WorkerReply::WarpPlan {
             key: [1, u64::MAX],
