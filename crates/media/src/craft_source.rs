@@ -989,15 +989,59 @@ impl MediaSource for StandaloneAudioSource {
             return Ok(AudioBuffer::new(sample_rate, channels_count as u16, frames));
         }
         let native_rate = self.native_rate;
-        let (native_start, native_frames) = native_audio_window(start, frames, native_rate, sample_rate);
+        let (native_start, native_frames, phase) = if sample_rate == native_rate {
+            (start, frames, 0)
+        } else {
+            let scaled = i128::from(start) * i128::from(native_rate);
+            let divisor = i128::from(sample_rate);
+            let Ok(origin) = i64::try_from(scaled.div_euclid(divisor)) else {
+                // An unrepresentable source position cannot address this stream.
+                return Ok(AudioBuffer::new(sample_rate, channels_count as u16, frames));
+            };
+            // Reuse the existing window size, but not its truncating start calculation.
+            (origin, native_audio_window(0, frames, native_rate, sample_rate).1, scaled.rem_euclid(divisor) as u64)
+        };
 
         let mut state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let decoded = decode_standalone_range(native_rate, channels_count, &mut state, native_start, native_frames)?;
         if sample_rate == native_rate {
             return Ok(AudioBuffer { sample_rate, channels: decoded });
         }
-        Ok(AudioBuffer { sample_rate, channels: resample_audio(&decoded, channels_count, native_rate, sample_rate, frames) })
+        // Negative output positions are silence, not interpolation into frame zero.
+        let first_output = if start < 0 { usize::try_from(start.unsigned_abs()).unwrap_or(frames).min(frames) } else { 0 };
+        Ok(AudioBuffer { sample_rate, channels: resample_standalone_audio(&decoded, native_rate, sample_rate, frames, phase, first_output) })
     }
+}
+
+/// Step the fractional input position as an exact integer quotient and remainder;
+/// rounding happens only when interpolating a sample, independent of the window.
+#[cfg(any(unix, windows))]
+fn resample_standalone_audio(decoded: &[Vec<f32>], native_rate: u32, sample_rate: u32, frames: usize, phase: u64, first_output: usize) -> Vec<Vec<f32>> {
+    let mut out = vec![vec![0.0; frames]; decoded.len()];
+    let divisor = u64::from(sample_rate);
+    let first = first_output as u128 * u128::from(native_rate) + u128::from(phase);
+    let Ok(first_index) = usize::try_from(first / u128::from(divisor)) else { return out };
+    let first_remainder = (first % u128::from(divisor)) as u64;
+    let whole_step = (native_rate / sample_rate) as usize;
+    let remainder_step = u64::from(native_rate % sample_rate);
+    let inverse_rate = f64::from(sample_rate).recip();
+    for (samples, dst) in decoded.iter().zip(&mut out) {
+        let (mut index, mut remainder) = (first_index, first_remainder);
+        for sample in dst.iter_mut().skip(first_output) {
+            let Some(&a) = samples.get(index) else { break };
+            let b = samples.get(index + 1).copied().unwrap_or(a);
+            let t = (remainder as f64 * inverse_rate) as f32;
+            *sample = a + (b - a) * t;
+            remainder += remainder_step;
+            let carry = remainder >= divisor;
+            if carry {
+                remainder -= divisor;
+            }
+            let Some(next) = index.checked_add(whole_step + carry as usize) else { break };
+            index = next;
+        }
+    }
+    out
 }
 
 #[cfg(any(unix, windows))]
@@ -2098,7 +2142,8 @@ mod tests {
             wav.extend_from_slice(&s.to_le_bytes());
         }
 
-        let src = open_bytes("tone.wav", Arc::from(wav)).expect("recognized").expect("opened");
+        let wav = Arc::<[u8]>::from(wav);
+        let src = open_bytes("tone.wav", wav.clone()).expect("recognized").expect("opened");
         let info = src.info();
         assert_eq!(info.container, "wav");
         assert_eq!(info.kind, MediaKind::AudioOnly);
@@ -2116,6 +2161,31 @@ mod tests {
         let resampled = src.audio(0, 256, 44_100).expect("resampled");
         assert_eq!(resampled.sample_rate, 44_100);
         assert_eq!(resampled.channels[0].len(), 256);
+
+        let cold = open_bytes("tone.wav", wav).expect("recognized").expect("opened");
+        let alone = cold.audio(1, 1, 44_100).expect("single output frame");
+        // Output frame 1 is at input frame 160/147. The left channel's
+        // input frames 1 and 2 contain -7486 and -6972 in signed 16-bit PCM.
+        let expected = (-7486.0 + (13.0 / 147.0) * 514.0) / 32768.0;
+        assert!((alone.channels[0][0] - expected).abs() < 1e-7, "absolute fractional phase");
+        for (single, block) in alone.channels.iter().zip(&resampled.channels) {
+            assert_eq!(single[0], block[1], "reading a frame alone must match a longer block");
+        }
+        let pre_roll = cold.audio(-1, 3, 44_100).expect("negative output window");
+        for (shifted, block) in pre_roll.channels.iter().zip(&resampled.channels) {
+            assert_eq!(shifted[0], 0.0, "silence before frame zero");
+            assert_eq!(&shifted[1..], &block[..2], "crossing frame zero must preserve phase");
+        }
+        // Frame 3675 is exactly native frame 4000, where the left ramp is zero.
+        let crossing = cold.audio(3670, 6, 44_100).expect("cross a zero sample");
+        let zero = cold.audio(3675, 1, 44_100).expect("read the zero sample alone");
+        assert_eq!(crossing.channels[0][5], 0.0, "a fractional start must not leak into an integral sample");
+        assert_eq!(crossing.channels[0][5], zero.channels[0][0]);
+
+        let after_end = cold.audio(4410, 2, 44_100).expect("after EOF");
+        assert!(after_end.channels.iter().flatten().all(|&sample| sample == 0.0));
+        let out_of_range = cold.audio(i64::MAX / 2, 1, 1).expect("unrepresentable source origin");
+        assert!(out_of_range.channels.iter().flatten().all(|&sample| sample == 0.0), "an unreachable origin must not replay frame zero");
     }
 
     /// 1024-sample frames at 48 kHz stamped to the nearest millisecond, then back in samples.
