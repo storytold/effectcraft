@@ -90,13 +90,15 @@ impl NativeBar {
         }
         self.items.clear();
         let menu = Menu::new();
+        // The native spec preserves the engine's top-level submenu order.
+        let mut canonical_names = effectcraft_engine::menus::top_level().into_iter();
         for node in &spec.menus {
             if let NativeNode::Submenu { label, children } = node {
                 let sub = Submenu::new(label, true);
                 self.fill(&sub, children);
-                match label.as_str() {
-                    "Window" | "ウィンドウ" => sub.set_as_windows_menu_for_nsapp(),
-                    "Help" | "ヘルプ" => sub.set_as_help_menu_for_nsapp(),
+                match canonical_names.next() {
+                    Some("Window") => sub.set_as_windows_menu_for_nsapp(),
+                    Some("Help") => sub.set_as_help_menu_for_nsapp(),
                     _ => {}
                 }
                 if let Err(e) = menu.append(&sub) {
