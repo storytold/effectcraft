@@ -2404,7 +2404,7 @@ name = "effectcraft-psd"
 version = "0.24.1"
 dependencies = [
  "craft-codepage",
- "craft-psd 0.1.0 (git+https://github.com/storytold/craft-libs?rev=08da5e1486ee640de1d2cccd8fe8dd32b1d3b62c)",
+ "craft-psd 0.1.0 (git+https://github.com/storytold/craft-libs?rev=53198114310dbc2b41e18e4eaf2fd83e69964189)",
  "miniz_oxide 0.9.1",
 ]
 
