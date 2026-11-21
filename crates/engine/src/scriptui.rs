@@ -14,6 +14,8 @@
 //! [`layout`] is ScriptUI's automatic layout (orientation, alignChildren / alignment, spacing,
 //! margins, preferredSize), so every frontend places widgets the same way.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -382,6 +384,20 @@ impl Widget {
             c.walk(out);
         }
     }
+    /// Replace display labels with exact-match translations. Editable text is script data, not a
+    /// label, so it keeps its value (and so do ids, names and event handlers).
+    fn translate_display(&mut self, translations: &BTreeMap<String, String>) {
+        if self.kind != WidgetKind::EditText {
+            self.text = translate_exact(translations, &self.text);
+        }
+        self.help_tip = translate_exact(translations, &self.help_tip);
+        for item in &mut self.items {
+            *item = translate_exact(translations, item);
+        }
+        for child in &mut self.children {
+            child.translate_display(translations);
+        }
+    }
     /// A control by id (number or `"#12"`), `properties.name` or text.
     pub fn lookup(&self, key: &Value) -> Option<&Widget> {
         let mut all = vec![];
@@ -417,6 +433,31 @@ pub struct ScriptWindow {
     pub modal: bool,
     /// The window and its controls (`root.bounds` is the content size).
     pub root: Widget,
+}
+
+impl ScriptWindow {
+    /// Replace display strings using an exact-match translation table.
+    ///
+    /// Frontends call this on the copy they draw, not on the live script state, so automation
+    /// ids, control names, values, handlers and `EditText` contents stay unchanged.
+    pub fn translate_display(&mut self, translations: &BTreeMap<String, String>) {
+        self.title = translate_exact(translations, &self.title);
+        self.root.translate_display(translations);
+    }
+
+    /// The title a frontend should show: the script's title, translated when the pack has it, or
+    /// the script's file name when it has no title.
+    pub fn display_title(&self, translations: &BTreeMap<String, String>) -> String {
+        if self.title.is_empty() { self.script.clone() } else { translate_exact(translations, &self.title) }
+    }
+}
+
+/// Translate a display string when the table has exactly this source string; otherwise keep it.
+fn translate_exact(translations: &BTreeMap<String, String>, source: &str) -> String {
+    if source.is_empty() {
+        return String::new();
+    }
+    translations.get(source).filter(|translated| !translated.is_empty()).cloned().unwrap_or_else(|| source.to_owned())
 }
 
 /// A user (or agent) action on a script window control.
@@ -1053,5 +1094,42 @@ mod tests {
         // Bands left out still count against the work budget (it ends the scan after the first).
         let t = PathSeg::fill_triangles_within(&bow, 48, false, [usize::MAX, 2, usize::MAX, 1]);
         assert!(area(&t) <= 50.0 + 1e-9, "{}", area(&t));
+    }
+
+    #[test]
+    fn translation_pack_replaces_display_text_only() {
+        let mut button = w(WidgetKind::Button, "OK");
+        button.id = 2;
+        button.help_tip = "Confirm".into();
+        let mut edit = w(WidgetKind::EditText, "Draft");
+        edit.id = 3;
+        let mut list = w(WidgetKind::DropDownList, "");
+        list.id = 4;
+        list.items = vec!["Alpha".into(), "Beta".into()];
+        let mut root = w(WidgetKind::Window, "Options");
+        root.id = 1;
+        root.children = vec![button, edit, list];
+        let mut window = ScriptWindow { id: 1, title: "Window Title".into(), script: "panel.jsx".into(), root, ..Default::default() };
+
+        window.translate_display(&BTreeMap::from([
+            ("Window Title".to_string(), "窗口标题".to_string()),
+            ("Options".to_string(), "选项".to_string()),
+            ("OK".to_string(), "确定".to_string()),
+            ("Confirm".to_string(), "确认".to_string()),
+            ("Draft".to_string(), "不应翻译".to_string()),
+            ("Alpha".to_string(), "甲".to_string()),
+            ("Beta".to_string(), "乙".to_string()),
+        ]));
+
+        assert_eq!(window.title, "窗口标题");
+        assert_eq!(window.root.text, "选项");
+        assert_eq!(window.root.find(2).unwrap().text, "确定");
+        assert_eq!(window.root.find(2).unwrap().help_tip, "确认");
+        assert_eq!(window.root.find(3).unwrap().text, "Draft", "edittext holds script data");
+        assert_eq!(window.root.find(4).unwrap().items, ["甲".to_string(), "乙".to_string()]);
+        // Identity, values and handlers are not display strings.
+        assert_eq!(window.script, "panel.jsx");
+        assert_eq!(window.root.find(2).unwrap().id, 2);
+        assert_eq!(translate_exact(&BTreeMap::new(), "Missing"), "Missing");
     }
 }
