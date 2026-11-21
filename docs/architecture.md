@@ -511,7 +511,9 @@ and for unmanaged projects, Rec. 2100 PQ and HLG as BT.2020, the ACES spaces wit
 
 <a id="project-ocio-config"></a>**Project OCIO config** (`crates/engine/src/settings/ocio_project.rs`). Project Settings ▸ Color ▸
 OCIO Config (`file.projectSettings {ocioConfig}`, saved as `ocio_config`, left out of files without
-one) names the `.ocio` file of an OCIO-managed project; none is the built-in ACES config. The active
+one) names the `.ocio` file of an OCIO-managed project; none is the built-in ACES config. The path is
+used as given: a relative one resolves against the working directory, not the project file, so
+use absolute paths (an agent confined to automation roots must). The active
 config is, in order: the `OCIO` environment variable (read once by the host into
 `Session::ocio_env`), the project's config, the built-in one. The variable overrides the project's
 choice without changing it, and the choice can't be changed while it is set, as Nuke's user guide

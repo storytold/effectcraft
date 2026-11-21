@@ -122,6 +122,8 @@ const READS: &[(&str, &[&str])] = &[
     ("file.checkOutput", &["path"]),
     // Reads the template at `path`; what it writes is in `MIXED_WRITES`.
     ("templates.create", &["path"]),
+    // Reads the OCIO config it is given (a relative path would resolve outside the roots).
+    ("file.projectSettings", &["ocioConfig"]),
 ];
 
 /// Commands that read some parameters (listed in [`READS`]) and write others.
@@ -851,6 +853,7 @@ mod tests {
             ("mediaBrowser.list", "path"),
             ("face.model.install", "path"),
             ("templates.create", "path"),
+            ("file.projectSettings", "ocioConfig"),
         ] {
             for bad in ["t.ectemplate".to_string(), "../elsewhere/t.ectemplate".to_string(), up.clone(), p(&outside, "t.ectemplate")] {
                 assert!(c.check_command(id, &serde_json::json!({key: bad})).is_err(), "{id} {key}={bad}");
