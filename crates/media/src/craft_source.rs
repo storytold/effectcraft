@@ -993,6 +993,11 @@ fn open_matroska(name: &str, source: SharedBytes) -> Option<Result<SharedSource>
         if !video_track.frames_readable() {
             return None;
         }
+        // Native FFV1 without CodecPrivate cannot initialize the shared v3 decoder.
+        // Keep FilmCraft's metadata at open; an unsupported read stays a playback error.
+        if video_track.codec_private.is_empty() && matches!(&video_track.codec, matroska::Codec::Other(id) if id == "V_FFV1") {
+            return None;
+        }
         let video_params = video_track.codec_params();
         if !supports_video_codec(video_params.codec) {
             return None;
@@ -3145,6 +3150,88 @@ mod tests {
         assert_eq!(c.transfer, Transfer::Pq);
         assert_eq!(c.matrix, Matrix::Bt2020Ncl);
         assert_eq!(c.range, Range::Limited);
+    }
+
+    #[test]
+    #[cfg(any(unix, windows))]
+    fn matroska_ffv1_missing_config_keeps_legacy_probe() {
+        use crate::stream::{DecodedFrame, MediaSource as Opened};
+        use craft_video::ffv1::{Colorspace, Encoder, EncoderConfig, Frame};
+
+        let mut frame = Frame {
+            width: 16,
+            height: 16,
+            colorspace: Colorspace::YCbCr,
+            bit_depth: 8,
+            chroma_shift: (1, 1),
+            planes: vec![vec![48; 256], vec![96; 64], vec![160; 64]],
+        };
+        let encoder = Encoder::new(&frame, EncoderConfig::default()).expect("FFV1 encoder");
+        let first = encoder.encode(&frame).expect("first FFV1 keyframe");
+        frame.planes[0].fill(192);
+        let second = encoder.encode(&frame).expect("second FFV1 keyframe");
+
+        // The control changes only the container configuration, not the two coded keyframes.
+        let mux = |configuration| -> Arc<[u8]> {
+            let mut track = matroska::TrackSpec::new(matroska::TrackKind::Video, "V_FFV1");
+            track.video_size = Some((16, 16));
+            track.default_duration_ns = Some(40_000_000);
+            track.codec_private = configuration;
+            let mut mux = matroska::MkvWriter::new(std::io::Cursor::new(Vec::new()), vec![track], matroska::MuxOptions::default()).expect("MKV writer");
+            mux.write_frame(0, 0, true, &first, None).expect("write first keyframe");
+            mux.write_frame(0, 40_000_000, true, &second, None).expect("write second keyframe");
+            mux.finish().expect("finish MKV").into_inner().into()
+        };
+        let configured = mux(encoder.config_record());
+        let missing = mux(Vec::new());
+        let directory = tempfile::tempdir().expect("FFV1 fixture directory");
+        let configured_path = directory.path().join("configured.mkv");
+        let missing_path = directory.path().join("no-config.mkv");
+        std::fs::write(&configured_path, &configured).expect("write configured fixture");
+        std::fs::write(&missing_path, &missing).expect("write no-config fixture");
+
+        let configured_probe = crate::probe(&configured_path).expect("public probe of configured FFV1");
+        assert!(configured_probe.has_video);
+        assert_eq!((configured_probe.width, configured_probe.height), (16, 16));
+        assert_eq!((configured_probe.frame_rate.num, configured_probe.frame_rate.den), (25, 1));
+        let opened = crate::stream::open_source(&configured_path).expect("open in place").0.expect("open configured FFV1");
+        assert!(matches!(&opened, Opened::Craft(_)));
+        let zero = effectcraft_time::Tick::ZERO;
+        let later = effectcraft_time::Tick(craft_time::TICKS_PER_SECOND / 25);
+        for (pts, luma) in [(zero, 48), (later, 192), (zero, 48)] {
+            let frame = match opened.video_frame(pts, 1.0).expect("decode configured FFV1") {
+                DecodedFrame::Craft(frame) => Some(frame),
+                DecodedFrame::Film(_) => None,
+            }
+            .expect("decoded through the shared FFV1 reader");
+            assert_eq!(frame.pts.0, pts.0);
+            assert!(matches!(&frame.data, PixelData::Yuv8 { planes, chroma: Chroma::C420, alpha: None }
+                if planes[0].as_slice() == [luma; 256] && planes[1].as_slice() == [96; 64] && planes[2].as_slice() == [160; 64]));
+        }
+
+        let name = "no-config.mkv";
+        let legacy = filmcraft_codecs::open_bytes(name, missing.clone()).expect("legacy FFV1 metadata opens without config");
+        let legacy_probe = crate::probe::footage_from_info(name, legacy.info());
+        let legacy_error = legacy
+            .video_frame(filmcraft_media::FrameRequest { time: filmcraft_time::Tick::ZERO, scale: 1.0 })
+            .err()
+            .map(crate::MediaError::from)
+            .expect("FilmCraft does not play FFV1");
+        assert!(matches!(&legacy_error, crate::MediaError::Unsupported(message) if message.contains("no decoder")));
+
+        let missing_probe = crate::probe(&missing_path).expect("public probe preserves metadata without config");
+        let memory_probe = crate::probe_bytes(name, missing).expect("public memory probe preserves metadata without config");
+        for probe in [missing_probe, memory_probe] {
+            assert!(probe.has_video);
+            assert_eq!((probe.width, probe.height), (legacy_probe.width, legacy_probe.height));
+            assert_eq!(probe.frame_rate, legacy_probe.frame_rate);
+            assert_eq!(probe.duration, legacy_probe.duration);
+            assert_eq!(probe.codec, legacy_probe.codec);
+        }
+        let opened = crate::stream::open_source(&missing_path).expect("open in place").0.expect("open FFV1 metadata without config");
+        assert!(matches!(&opened, Opened::Film(_)));
+        let err = opened.video_frame(zero, 1.0).err().expect("unsupported is deferred to playback");
+        assert_eq!(err.to_string(), legacy_error.to_string());
     }
 
     #[test]
