@@ -73,7 +73,11 @@ fn transform_records(keyed: bool) -> Vec<Chunk<'static>> {
                     RecSpec { dims: 3, template: KeyTemplate::Spatial(3), class: class::SPATIAL, limits: None, byte5: None }
                 }
                 PropKind::Scale => RecSpec { dims: 3, template: KeyTemplate::Plain, class: class::LAYER_SCALAR, limits: Some((0.0, 0.0)), byte5: None },
-                PropKind::Rotation => RecSpec { dims: 1, template: KeyTemplate::Plain, class: class::LAYER_SCALAR, limits: None, byte5: None },
+                // `ALL` holds the five only; X / Y Rotation share Rotation's record, and
+                // Orientation is built on its own (`emit::build_orientation`).
+                PropKind::Rotation | PropKind::RotationX | PropKind::RotationY | PropKind::Orientation => {
+                    RecSpec { dims: 1, template: KeyTemplate::Plain, class: class::LAYER_SCALAR, limits: None, byte5: None }
+                }
                 PropKind::Opacity => RecSpec { dims: 1, template: KeyTemplate::Plain, class: class::LAYER_SCALAR, limits: Some((0.0, 100.0)), byte5: None },
             };
             [crate::export::synth::tdmn(k.match_name()), crate::export::synth::tdbs(&spec, keyed, 25_600)]
