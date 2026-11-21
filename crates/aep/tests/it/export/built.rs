@@ -349,7 +349,7 @@ fn losses_are_reported_and_refused_unless_allowed() {
     add_layer(&mut p, t, "Par", LayerSource::Light { kind: effectcraft_project::LightKind::Parallel }, (100, 100));
     add_layer(&mut p, t, "Amb", LayerSource::Light { kind: effectcraft_project::LightKind::Ambient }, (100, 100));
     with_layer(&mut p, c, 0, |l| {
-        l.blend_mode = BlendMode::Dissolve;
+        l.blend_mode = BlendMode::AlphaAdd;
         l.switches.three_d = true;
         // A stretch that is not an exact small ratio is written unstretched.
         l.stretch = 100.0 * std::f64::consts::PI;
@@ -568,4 +568,38 @@ fn unwritten_layer_switches_and_off_frame_times_are_reported() {
     assert_eq!(r.report.count(LossCategory::LayerSwitches), 3, "{:?}", r.report.losses);
     assert_eq!(r.report.count(LossCategory::RoundedTimes), 1, "{:?}", r.report.losses);
     assert!(matches!(export(&p, &ExportOptions { allow_losses: false }), Err(AepExportError::Refused(_))));
+}
+
+/// Dissolve and Dancing Dissolve are both code 3; Dancing Dissolve also sets `ldta` byte 103 bit 1
+/// (`dissolve_pair`, After Effects 26.5: 0 on the Dissolve layer, 2 on the Dancing one).
+#[test]
+fn dissolve_and_dancing_dissolve_are_written_with_their_flag() {
+    let mut p = Project::default();
+    let c = add_comp(&mut p, "C", 100, 100, FrameRate::new(25, 1), 1.0, None);
+    let s = add_solid(&mut p, "Sol", 100, 100, [0.1, 0.2, 0.3], None);
+    add_layer(&mut p, c, "Dis", LayerSource::Solid { item: s }, (100, 100));
+    add_layer(&mut p, c, "Dancing", LayerSource::Solid { item: s }, (100, 100));
+    // Index 0 is the top layer, the one added last.
+    with_layer(&mut p, c, 0, |l| l.blend_mode = BlendMode::DancingDissolve);
+    with_layer(&mut p, c, 1, |l| l.blend_mode = BlendMode::Dissolve);
+    let r = export_all(&p);
+    assert!(r.report.is_lossless(), "{:?}", r.report.losses);
+    let file = parse(&r.bytes).expect("parse");
+    let view = effectcraft_aep::Project::new(&file).expect("project");
+    let comp = view.all_items().into_iter().find(|i| i.comp().is_some()).expect("comp");
+    let ldta = |name: &str| {
+        let l = comp.comp().expect("c").layers().find(|l| l.name().as_deref() == Some(name)).expect(name);
+        l.chunk().child(b"ldta").and_then(|c| c.bytes()).expect("ldta").to_vec()
+    };
+    let (dis, dancing) = (ldta("Dis"), ldta("Dancing"));
+    assert_eq!((dis[99], dis[103] & 0x02), (3, 0));
+    assert_eq!((dancing[99], dancing[103] & 0x02), (3, 0x02));
+    // The importer reads them back.
+    let mut q = Project::default();
+    let none = |_: &str| false;
+    let back = effectcraft_aep::import::import(&mut q, &r.bytes, &effectcraft_aep::import::ImportOptions::new(&none)).expect("imports");
+    assert!(back.report.is_lossless(), "{:?}", back.report.losses);
+    let modes: Vec<_> = q.items.values().filter_map(|i| i.as_comp()).flat_map(|c| c.layers.iter().map(|l| (l.name.clone(), l.blend_mode))).collect();
+    assert!(modes.contains(&("Dis".to_string(), BlendMode::Dissolve)), "{modes:?}");
+    assert!(modes.contains(&("Dancing".to_string(), BlendMode::DancingDissolve)), "{modes:?}");
 }

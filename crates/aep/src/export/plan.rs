@@ -152,6 +152,8 @@ pub(crate) struct LayerPlan {
     pub in_rel: i32,
     pub out_rel: i32,
     pub blend: u8,
+    /// Dancing Dissolve: `ldta` byte 103 bit 1 (`dissolve_pair`, After Effects 26.5).
+    pub dancing: bool,
     pub parent: Option<LayerId>,
     /// Track matte: the matte layer and the mode (`ldta@107`: 1 alpha, 2 alpha inverted, 3 luma,
     /// 4 luma inverted; 403-406).
@@ -286,6 +288,8 @@ pub(crate) fn label_index(l: Label) -> u8 {
 fn blend_code(mode: BlendMode) -> Option<u8> {
     Some(match mode {
         BlendMode::Normal => 2,
+        // Both are code 3; Dancing Dissolve also sets `ldta` byte 103 bit 1 (`LayerPlan::dancing`).
+        BlendMode::Dissolve | BlendMode::DancingDissolve => 3,
         BlendMode::Add => 4,
         BlendMode::Multiply => 5,
         BlendMode::Screen => 6,
@@ -1176,6 +1180,7 @@ fn plan_layer(cx: &PlanCx<'_>, at: CompAt<'_>, cp: &CompPlan, layer: &Layer, col
         stretch,
         time_scale,
         blend,
+        dancing: layer.blend_mode == BlendMode::DancingDissolve,
         parent,
         matte,
         markers,
