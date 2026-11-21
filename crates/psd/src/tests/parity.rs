@@ -32,7 +32,6 @@ fn reencode_with(bytes: &[u8], version: Version, comp: Compression, merged_alpha
 
 #[test]
 fn psd_and_psb_composite_alpha_flag_controls_alpha_channel() {
-    use craft_psd::{Compression, Version};
     let mut doc = WDoc::new(4, 3);
     doc.layers = vec![WLayer::solid("Semi", Rect::new(0, 0, 4, 3), [0.8, 0.4, 0.2, 0.5])];
     let base = write(&doc);
@@ -56,7 +55,6 @@ fn psd_and_psb_composite_alpha_flag_controls_alpha_channel() {
 
 #[test]
 fn malformed_resources_recover_in_both_psd_and_psb() {
-    use craft_psd::{Compression, ImageResource, Version};
     let mut doc = WDoc::new(6, 4);
     doc.layers = vec![WLayer::solid("L", Rect::new(1, 1, 3, 2), [0.2, 0.6, 0.9, 0.75])];
     let base = write(&doc);
@@ -86,7 +84,6 @@ fn malformed_resources_recover_in_both_psd_and_psb() {
 
 #[test]
 fn rle_and_zip_planes_decode_across_psd_and_psb() {
-    use craft_psd::{Compression, Version};
     let mut doc = WDoc::new(8, 6);
     doc.layers =
         vec![WLayer::solid("Base", Rect::new(0, 0, 8, 6), [0.25, 0.5, 0.75, 1.0]), WLayer::solid("Overlay", Rect::new(2, 1, 4, 4), [1.0, 0.25, 0.0, 0.6])];
@@ -110,7 +107,6 @@ fn rle_and_zip_planes_decode_across_psd_and_psb() {
 
 #[test]
 fn save_and_reopen_parity_preserves_psd_and_psb_documents() {
-    use craft_psd::{Compression, Version};
     let mut doc = WDoc::new(10, 8);
     doc.layers = vec![
         WLayer::group_end(),
