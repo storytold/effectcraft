@@ -68,6 +68,11 @@ fn the_codes_of_907_map_to_their_modes() {
         (32, BlendMode::VividLight),
         (33, BlendMode::PinLight),
         (34, BlendMode::HardMix),
+        // Set by name in corpus `10_blend_modes` (After Effects 2026).
+        (35, BlendMode::LighterColor),
+        (36, BlendMode::DarkerColor),
+        (37, BlendMode::Subtract),
+        (38, BlendMode::Divide),
     ] {
         let (p, r) = skip!(with_code(code));
         assert!(r.report.is_lossless(), "{code}: {:?}", r.report.losses);
@@ -78,7 +83,7 @@ fn the_codes_of_907_map_to_their_modes() {
 
 #[test]
 fn unsampled_and_ambiguous_codes_stay_reported() {
-    for code in [0u8, 1, 3, 21, 22, 35, 200, 255] {
+    for code in [0u8, 1, 3, 21, 22, 39, 200, 255] {
         let (p, r) = skip!(with_code(code));
         assert_eq!(r.report.count(LossCategory::BlendModes), 1, "{code}");
         let (_, c) = comp(&p, &r, "C");
