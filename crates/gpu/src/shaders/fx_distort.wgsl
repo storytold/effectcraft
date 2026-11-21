@@ -546,9 +546,9 @@ fn dst_emboss(@builtin(global_invocation_id) gid: vec3<u32>) {
     let d = P.f[0].xy;
     let a = sample_bilinear_clamped(src, q.x + d.x, q.y + d.y);
     let c = sample_bilinear_clamped(src, q.x - d.x, q.y - d.y);
-    let l = luminance(a.xyz) - luminance(c.xyz);
-    let v = clamp(0.5 + l * P.f[0].z, 0.0, 1.0);
+    // Each channel apart (stylize misc::emboss).
+    let v = clamp(vec3<f32>(0.5) + (a.xyz - c.xyz) * P.f[0].z, vec3<f32>(0.0), vec3<f32>(1.0));
     let px = textureLoad(src, p, 0);
     let al = px.w;
-    textureStore(out, p, dst_blend_with(px, vec4<f32>(v * al, v * al, v * al, al), P.f[0].w));
+    textureStore(out, p, dst_blend_with(px, vec4<f32>(v * al, al), P.f[0].w));
 }

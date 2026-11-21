@@ -42,6 +42,7 @@ mod matte;
 mod file_cache;
 pub mod migrate;
 mod misc;
+pub use misc::emboss_offset;
 pub mod mocha_shape;
 mod noise;
 mod noise2;
