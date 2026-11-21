@@ -501,6 +501,10 @@ fn open_isobmff(name: &str, source: SharedBytes) -> Option<Result<SharedSource>>
         (None, None, FramePresentation { container_color: None, par: (1, 1), rotation: 0, aperture: None }, duration)
     };
 
+    let start_timecode = file.tracks.iter().find_map(|track| match track.codec() {
+        Some(isobmff::CodecConfig::Timecode(timecode)) => timecode.start_frame.map(i64::from),
+        _ => None,
+    });
     let container = ContainerFile::Isobmff(file);
     let (audio_tracks, audio_infos) = open_audio_tracks(&container, &*source, audio_candidates)?;
     if video_info.is_none() && audio_tracks.is_empty() {
@@ -515,7 +519,7 @@ fn open_isobmff(name: &str, source: SharedBytes) -> Option<Result<SharedSource>>
         video: video_info,
         audio_streams: audio_infos,
         container: "mp4".to_string(),
-        start_timecode: None,
+        start_timecode,
         file_size: Some(source.len()),
     };
 
