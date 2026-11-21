@@ -313,3 +313,22 @@ fn edit(chunks: &mut [Chunk<'_>], in_efdg: bool, f: &mut dyn FnMut(&mut Chunk<'_
         edit(c.children_mut(), inside, f);
     }
 }
+
+/// A pseudo effect saved from a preset holds two defaults per float slider and colour; without a
+/// value record After Effects 26.5 shows the second.
+#[test]
+fn a_pseudo_effect_without_records_takes_the_second_default() {
+    let mut contrast = slider(K::FloatSlider, "Amount", 0.0, (0.0, 3000.0));
+    contrast.default = Default::TwoNumbers(40.0, 65.0);
+    let fx = Fx {
+        match_name: "Pseudo/chroma",
+        name: "Chroma",
+        defs: vec![contrast, other(K::Color, "Tint", Default::TwoColors([255, 0, 255, 0], [255, 0, 0, 255]))],
+        values: vec![],
+        data: vec![],
+        keys: vec![],
+    };
+    let (g, _) = placeholder_of(&fx);
+    assert_eq!(g.prop("param1").map(|p| p.value.clone()), Some(Value::Scalar(65.0)));
+    assert_eq!(g.prop("param2").map(|p| p.value.clone()), Some(Value::Color([0.0, 0.0, 1.0, 1.0])));
+}
