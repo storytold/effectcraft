@@ -10,7 +10,8 @@ PhotoCraft) confine what the agent can reach: files are read only under a read o
 written only under a write root; with no write root nothing is written. Every engine command
 (`execute_command`, `command_run`, each `batch` step) is checked before it runs: its file
 parameters must be absolute paths inside the roots (symbolic links resolved, no `..`), and so must
-any other absolute path in its parameters. Save, Increment and Save and rendering the Render
+any other absolute path in its parameters, except typed text (a text layer's copy, names, comments,
+expressions), which may start with `/` without being a file. Save, Increment and Save and rendering the Render
 Queue are checked against the files they write (the open project's, the queued outputs);
 `renderQueue.add`, `render.preRender` and `file.createProxy` without an output file need a saved
 project, since an unsaved one's default output would go to the home folder (#2479). In a headless
