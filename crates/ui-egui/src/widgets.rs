@@ -64,6 +64,7 @@ pub struct HotSpec<'a> {
 /// "Hot text": a blue number you drag horizontally to scrub, click to type. Tab / Shift+Tab
 /// while typing commits and types in the panel's next / previous one, as in After Effects.
 /// Typed text may be arithmetic, `960/2` or `*2` for twice the value ([`crate::num_math`]).
+/// Leaving the text unchanged, including after text Undo, preserves the stored precision.
 /// Returns (response, Some(new value) when changed, drag finished).
 pub fn hot_number_at(ui: &mut Ui, rect_min: egui::Pos2, id: egui::Id, value: f64, spec: &HotSpec, t: &Tokens) -> (Rect, Option<f64>, bool) {
     let (rect, out, done, _) = hot_number_step_at(ui, rect_min, id, value, spec, t);
@@ -82,6 +83,7 @@ pub fn hot_number_step_at(
 ) -> (Rect, Option<f64>, bool, Option<crate::num_math::Step>) {
     let HotSpec { speed, range, decimals, suffix } = *spec;
     let editing_id = id.with("editing");
+    let initial_id = id.with("edit-initial");
     let mut editing: Option<String> = ui.data(|d| d.get_temp(editing_id));
     if tab_stop(ui, id) && editing.is_none() {
         editing = Some(format!("{value:.decimals$}"));
@@ -90,6 +92,7 @@ pub fn hot_number_step_at(
     let galley = ui.painter().layout_no_wrap(text, Tokens::ui(12.0), t.hot_text);
     let rect = Rect::from_min_size(rect_min, galley.size() + vec2(4.0, 4.0));
     if let Some(mut buf) = editing {
+        let initial = ui.data_mut(|d| d.get_temp_mut_or_insert_with(initial_id, || buf.clone()).clone());
         let er = Rect::from_min_size(rect_min - vec2(2.0, 1.0), vec2((galley.size().x + 24.0).max(54.0), 18.0));
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(er));
         // (Tab stays with the field: it moves to the next hot-text field, not the next widget.)
@@ -102,11 +105,13 @@ pub fn hot_number_step_at(
                 .lock_focus(true),
         );
         let tab = r.has_focus().then(|| ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab).then_some(i.modifiers.shift))).flatten();
+        // Leaving a rounded number unchanged (also after text Undo) preserves stored precision.
         let (mut out, mut step) = (None, None);
         if r.lost_focus() || tab.is_some() {
             // Typed arithmetic reads too (`960/2`), a leading `*`, `/` or `+` applied to the value
             // shown (#3195).
-            if !ui.input(|i| i.key_pressed(egui::Key::Escape))
+            if buf != initial
+                && !ui.input(|i| i.key_pressed(egui::Key::Escape))
                 && let Some(typed) = crate::num_math::read(buf.trim().trim_end_matches(suffix), true)
             {
                 let v = match typed {
@@ -116,6 +121,7 @@ pub fn hot_number_step_at(
                 out = v.map(|v| v.clamp(range.0, range.1));
             }
             ui.data_mut(|d| d.remove::<String>(editing_id));
+            ui.data_mut(|d| d.remove::<String>(initial_id));
             if let Some(back) = tab {
                 r.surrender_focus();
                 let (key, pass) = (tab_order_id(ui), ui.ctx().cumulative_pass_nr());

@@ -5927,20 +5927,41 @@ fn scalar_editor(app: &mut EffectcraftApp, ui: &mut egui::Ui, ve: &ValueEdit<'_>
             widgets::mark_step(actions.last_mut(), step);
         }
     } else {
+        // Time Remap stores source seconds. Edit it in the composition's frames so a pointer
+        // pixel no longer skips an entire second (#3071); commands still receive seconds.
+        let remap = layer.props.get("timeRemap").is_some_and(|p| p.uid == uid);
+        let scale =
+            if remap { app.session.active_comp().map(|c| c.frame_rate.as_f64()).filter(|fps| fps.is_finite() && *fps > 0.0).unwrap_or(30.0) } else { 1.0 };
         // A Range Selector's Start, End and Offset count characters with Units = Index (#1814).
         let pct = (matches!(prop.ui, ParamUi::Percent) || prop.match_id == "opacity") && !effectcraft_engine::render::text::in_index_units(layer, uid);
-        let suffix = if pct { "%" } else { "" };
+        let suffix = if remap {
+            "f"
+        } else if pct {
+            "%"
+        } else {
+            ""
+        };
         let (r, nv, _, step) = widgets::hot_number_step_at(
             ui,
             pos2(x, y),
             egui::Id::unique(("v", uid, 0)),
-            *v,
-            &widgets::HotSpec { speed, range: (min, max), decimals: dec.max(1), suffix },
+            *v * scale,
+            &widgets::HotSpec {
+                speed: if remap { 0.25 } else { speed },
+                range: (min * scale, max * scale),
+                decimals: if remap { 2 } else { dec.max(1) },
+                suffix,
+            },
             &vt,
         );
         app.auto.add(&format!("timeline.prop.{uid}.value"), r, &prop.name);
         if let Some(nv) = nv {
-            ve.set(actions, json!(nv));
+            ve.set(actions, json!(nv / scale));
+            // The field's additive step is in displayed frames; prop.set takes seconds.
+            let step = step.map(|step| match step {
+                crate::num_math::Step::Add(frames) => crate::num_math::Step::Add(frames / scale),
+                _ => step,
+            });
             widgets::mark_step(actions.last_mut(), step);
         }
     }
