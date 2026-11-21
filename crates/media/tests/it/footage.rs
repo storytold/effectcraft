@@ -1964,3 +1964,74 @@ fn audio_delayed_first_packet_honored_on_sequential_and_seek() {
         assert_samples_close(&backward, &seq[start..start + 4800 * 2], 1e-4, "delayed backward seek vs sequential");
     }
 }
+
+#[test]
+fn avi_and_mpegts_route_through_craft_media_with_seek_and_cancel() {
+    use std::sync::atomic::AtomicBool;
+    for (file, args) in [
+        (
+            "route_h264.avi",
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=160x120:rate=24:duration=1",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:sample_rate=48000:duration=1",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-g",
+                "12",
+                "-c:a",
+                "mp3",
+            ][..],
+        ),
+        (
+            "route_h264.ts",
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=160x120:rate=24:duration=1",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:sample_rate=48000:duration=1",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-g",
+                "12",
+                "-c:a",
+                "aac",
+            ][..],
+        ),
+    ] {
+        let Some(p) = try_ffmpeg_fixture(file, args) else {
+            continue;
+        };
+        let f = probe(&p).expect(file);
+        assert!(f.has_video && f.has_audio, "{file} must have video+audio");
+        let pool = MediaPool::new();
+        let f15 = pool.frame(ItemId(1), &f, t_of(f.frame_rate, 15)).expect("frame 15");
+        let f3 = pool.frame(ItemId(1), &f, t_of(f.frame_rate, 3)).expect("backward seek frame 3");
+        assert_eq!((f15.width, f15.height), (160, 120));
+        let fresh_f3 = MediaPool::new().frame(ItemId(1), &f, t_of(f.frame_rate, 3)).expect("fresh frame 3");
+        assert!(psnr(&f3, &fresh_f3) > 50.0, "{file} backward seek frame 3 matches fresh");
+
+        let off = Arc::new(AtomicBool::new(true));
+        let mut cancelled = Some(Arc::clone(&f3));
+        pool.cancellable(&off, &mut || cancelled = pool.frame(ItemId(1), &f, t_of(f.frame_rate, 20)));
+        assert!(cancelled.is_none(), "{file} cancelled read must not decode");
+
+        let pcm_seek = pool.audio_samples(&f, Tick(TICKS_PER_SECOND / 2), 4800, 48_000);
+        assert_eq!(pcm_seek.len(), 9600);
+        let rms = (pcm_seek.iter().map(|v| v * v).sum::<f32>() / pcm_seek.len() as f32).sqrt();
+        assert!((rms - 0.0625).abs() < 0.03, "{file} audio seek rms {rms}");
+    }
+}
