@@ -440,7 +440,8 @@ fn depth_of_field_blurs_out_of_focus_layers() {
     let (mut p, cid, comp) = setup();
     let mut cam = camera(&mut p, &comp);
     set(&mut cam, "cameraOptions/dof", Value::Bool(true));
-    set(&mut cam, "cameraOptions/aperture", Value::Scalar(60.0));
+    // Radius = aperture · |z − f| / z · zoom / f / 18: 270 gives 15 px at z = zoom, f = zoom / 2.
+    set(&mut cam, "cameraOptions/aperture", Value::Scalar(270.0));
     let s = solid3(&mut p, &comp, [1.0, 1.0, 1.0], 60, 60, [100.0, 50.0, 0.0]);
     push(&mut p, cid, cam);
     push(&mut p, cid, s);
@@ -453,6 +454,37 @@ fn depth_of_field_blurs_out_of_focus_layers() {
     let e = b.get(70, 50)[3];
     assert!(e > 0.1 && e < 0.9, "soft edge {e}");
     assert!(b.get(66, 50)[3] > 0.01);
+}
+
+#[test]
+fn dof_blur_width_matches_after_effects() {
+    // Labs dof2 / dof3 (After Effects 26.5, Fast Rectangle iris): a 1200 × 300 comp, the camera
+    // at (600, 150, -zoom) with Aperture 400. With zoom = focus = 1000, a square at depth 2000
+    // has edges that ramp linearly over 22.2 px (Aperture · |depth − focus| / depth / 9 =
+    // 400 · ½ / 9); with focus 1500 they ramp over 7.2 px, with zoom 1500 and focus 1000 (depth
+    // 3000) over 47.1 px. The blur used to be nine times wider and to ignore zoom / focus.
+    let ramp = |zoom: f64, focus: f64| {
+        let (mut p, cid, comp) = setup_sized(1200, 300);
+        let mut cam = camera(&mut p, &comp);
+        set(&mut cam, "transform/position", Value::Vec3([600.0, 150.0, -zoom]));
+        set(&mut cam, "transform/poi", Value::Vec3([600.0, 150.0, 0.0]));
+        set(&mut cam, "cameraOptions/zoom", Value::Scalar(zoom));
+        set(&mut cam, "cameraOptions/dof", Value::Bool(true));
+        set(&mut cam, "cameraOptions/focusDistance", Value::Scalar(focus));
+        set(&mut cam, "cameraOptions/aperture", Value::Scalar(400.0));
+        set(&mut cam, "cameraOptions/irisShape", Value::Enum(0)); // Fast Rectangle
+        let s = solid3(&mut p, &comp, [1.0, 1.0, 1.0], 200, 200, [600.0, 150.0, zoom]);
+        push(&mut p, cid, cam);
+        push(&mut p, cid, s);
+        let img = render(&p, cid);
+        // The 10-90 % width of the left edge, 0.8 of the ramp.
+        let row: Vec<f32> = (0..600).map(|x| img.get(x, 150)[3]).collect();
+        row.iter().filter(|a| **a > 0.1 && **a < 0.9).count() as f64 / 0.8
+    };
+    for (zoom, focus, want) in [(1000.0, 1000.0, 22.2), (1000.0, 1500.0, 7.2), (1500.0, 1000.0, 47.1)] {
+        let got = ramp(zoom, focus);
+        assert!((got - want).abs() <= want * 0.08 + 1.5, "zoom {zoom}, focus {focus}: ramp {got} px, After Effects {want}");
+    }
 }
 
 /// A non-finite Focus Distance doesn't reach the blur: the camera focuses on the property's
@@ -485,11 +517,11 @@ fn dof_falls_back_when_focus_distance_is_not_finite() {
 /// radius of billions of buffer pixels, whose padded buffer can't be allocated.
 #[test]
 fn dof_blur_radius_is_bounded_for_degenerate_inputs() {
-    let scene = |focus: f64, scale: f64| {
+    let scene = |focus: f64, scale: f64, aperture: f64| {
         let (mut p, cid, comp) = setup();
         let mut cam = camera(&mut p, &comp);
         set(&mut cam, "cameraOptions/dof", Value::Bool(true));
-        set(&mut cam, "cameraOptions/aperture", Value::Scalar(60.0));
+        set(&mut cam, "cameraOptions/aperture", Value::Scalar(aperture));
         set(&mut cam, "cameraOptions/focusDistance", Value::Scalar(focus));
         let mut s = solid3(&mut p, &comp, [1.0, 1.0, 1.0], 60, 60, [100.0, 50.0, 0.0]);
         set(&mut s, "transform/scale", Value::Vec3([scale, scale, 100.0]));
@@ -499,14 +531,24 @@ fn dof_blur_radius_is_bounded_for_degenerate_inputs() {
     };
     let finite = |img: &effectcraft_raster::Image| img.data.iter().all(|px| px.iter().all(|c| c.is_finite()));
     // A 0%-scaled layer 10 px off the focal plane: an ordinary defocus times 1/sx (sx = 1e-9).
-    assert!(finite(&scene(zoom() + 10.0, 0.0)), "zero-scaled: non-finite pixels");
-    // Huge but finite Focus Distances (typed in, or a large expression result): the blur is as
-    // large as the buffer budget allows, never refused (which would render the layer sharp).
-    // 1e307 overflows the circle of confusion itself to infinity: still the largest blur.
-    for focus in [1.0e12, 1.0e307] {
-        let img = scene(focus, 100.0);
+    assert!(finite(&scene(zoom() + 10.0, 0.0, 60.0)), "zero-scaled: non-finite pixels");
+    // Huge but finite Focus Distances (typed in, or a large expression result) stay finite.
+    // They still blur: |z − focus| / focus is about 1, a radius of 60 · ½ / 9 = 3.3 px here
+    // (9 · 3e307 overflowed to infinity and left the layer sharp).
+    for focus in [1.0e12, 1.0e307, 3.0e307] {
+        let img = scene(focus, 100.0, 60.0);
         assert!(finite(&img), "focus {focus:e}: non-finite pixels");
-        assert!(img.get(100, 50)[3] < 0.5, "focus {focus:e}: the layer should be spread out, not sharp ({})", img.get(100, 50)[3]);
+        assert!(img.get(71, 50)[3] < 0.9, "focus {focus:e}: the edge should be soft ({})", img.get(71, 50)[3]);
+    }
+    // Huge Apertures: the blur is as large as the buffer budget allows, never refused (which
+    // would render the layer sharp). 1e308 overflows the circle of confusion to infinity: still
+    // the largest blur.
+    for aperture in [1.0e12, 1.0e308] {
+        let img = scene(2.0 * zoom(), 100.0, aperture);
+        assert!(finite(&img), "aperture {aperture:e}: non-finite pixels");
+        assert!(img.get(100, 50)[3] < 0.5, "aperture {aperture:e}: the layer should be spread out, not sharp ({})", img.get(100, 50)[3]);
+        // Spread out, not gone: some of it lands outside the 60 px solid (x 70-130).
+        assert!(img.get(100, 50)[3] > 0.0 && img.get(40, 50)[3] > 0.0, "aperture {aperture:e}: the blur should still cover the frame");
     }
 }
 
@@ -514,11 +556,11 @@ fn dof_blur_radius_is_bounded_for_degenerate_inputs() {
 /// any other radius stays within the buffer budget's cap.
 #[test]
 fn dof_radii_skip_degenerate_planes_and_respect_the_cap() {
-    let radii = |focus: f64, scale: f64| {
+    let radii = |focus: f64, scale: f64, aperture: f64| {
         let (mut p, cid, comp) = setup();
         let mut cam = camera(&mut p, &comp);
         set(&mut cam, "cameraOptions/dof", Value::Bool(true));
-        set(&mut cam, "cameraOptions/aperture", Value::Scalar(60.0));
+        set(&mut cam, "cameraOptions/aperture", Value::Scalar(aperture));
         set(&mut cam, "cameraOptions/focusDistance", Value::Scalar(focus));
         let mut s = solid3(&mut p, &comp, [1.0, 1.0, 1.0], 60, 60, [100.0, 50.0, 0.0]);
         set(&mut s, "transform/scale", Value::Vec3([scale, scale, 100.0]));
@@ -531,11 +573,11 @@ fn dof_radii_skip_degenerate_planes_and_respect_the_cap() {
         let cap = super::compose::dof_radius_cap(&dof, 60, 60);
         (super::compose::dof_radii_at(&cs, &dof, ctx.world_matrix(&cp.layers[1]), (60, 60), [0.0; 2], 1.0, cap), cap)
     };
-    let (r, _) = radii(zoom() + 10.0, 0.0);
+    let (r, _) = radii(zoom() + 10.0, 0.0, 60.0);
     assert!(r.iter().all(|&r| r == 0.0), "a 0%-scaled plane is not blurred");
-    let (r, cap) = radii(1.0e12, 100.0);
+    let (r, cap) = radii(2.0 * zoom(), 100.0, 1.0e12);
     assert!(cap > 1000.0, "a 60×60 buffer may blur by well over 1000 px: {cap}");
-    assert!(r.iter().all(|&r| r as f64 <= cap && r as f64 > cap - 1.0), "huge focus: every radius at the cap {cap}");
+    assert!(r.iter().all(|&r| r as f64 <= cap && r as f64 > cap - 1.0), "huge aperture: every radius at the cap {cap}");
 }
 
 /// Two layers that look the same on screen (400×100 at 100%, 1600×400 at 25%) at the same depth
@@ -547,9 +589,10 @@ fn dof_blur_is_independent_of_layer_scale() {
         let zoom = 800.0 * 50.0 / 36.0;
         let mut cam = camera(&mut p, &comp);
         set(&mut cam, "cameraOptions/dof", Value::Bool(true));
-        set(&mut cam, "cameraOptions/aperture", Value::Scalar(200.0));
-        // coc = aperture·|z − f| / z: a 40 px comp radius on the z = 0 plane (depth = zoom).
-        set(&mut cam, "cameraOptions/focusDistance", Value::Scalar(zoom + 2.0 * 40.0 * zoom / 200.0));
+        // Radius = aperture · |z − f| / z · zoom / f / 18 = 2520 · 0.4 / 1.4 / 18: 40 comp px
+        // on the z = 0 plane (depth = zoom, f = 1.4 zoom).
+        set(&mut cam, "cameraOptions/aperture", Value::Scalar(2520.0));
+        set(&mut cam, "cameraOptions/focusDistance", Value::Scalar(1.4 * zoom));
         let mut s = solid3(&mut p, &comp, [1.0, 1.0, 1.0], w, h, [400.0, 200.0, 0.0]);
         set(&mut s, "transform/scale", Value::Vec3([scale, scale, 100.0]));
         push(&mut p, cid, cam);
@@ -570,7 +613,8 @@ fn dof_blur_matches_across_render_resolutions() {
     let zoom = 800.0 * 50.0 / 36.0;
     let mut cam = camera(&mut p, &comp);
     set(&mut cam, "cameraOptions/dof", Value::Bool(true));
-    set(&mut cam, "cameraOptions/aperture", Value::Scalar(200.0));
+    // Radius = 3600 · 1 · ½ / 18 = 100 comp px on the z = 0 plane.
+    set(&mut cam, "cameraOptions/aperture", Value::Scalar(3600.0));
     set(&mut cam, "cameraOptions/focusDistance", Value::Scalar(2.0 * zoom));
     let s = solid3(&mut p, &comp, [1.0, 1.0, 1.0], 400, 100, [400.0, 200.0, 0.0]);
     push(&mut p, cid, cam);
