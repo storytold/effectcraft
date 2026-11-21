@@ -1592,6 +1592,81 @@ fn filmcraft_fallback_handles_mjpeg_mov() {
     assert_eq!((img.width, img.height), (160, 120));
 }
 
+/// A cold seek and uninterrupted playback must cross the same audible boundary. The PCM is
+/// contiguous, so the test isolates reset positioning from separately handled timestamp gaps.
+#[test]
+fn matroska_cold_seek_applies_codec_delay_once() {
+    assert_matroska_cold_seek_codec_delay(8_250_000); // Exactly 396 samples, but 8 indexed ticks.
+}
+
+#[test]
+fn matroska_cold_seek_matches_fractional_codec_delay_rounding() {
+    assert_matroska_cold_seek_codec_delay(8_260_000); // 396.48 samples, also 8 indexed ticks.
+}
+
+fn assert_matroska_cold_seek_codec_delay(delay_ns: i64) {
+    use craft_media::matroska::{self, MkvWriter, MuxOptions, TrackKind, TrackSpec};
+    use craft_video::prores::{ChromaFormat, Encoder, Frame, Profile};
+
+    const RATE: u32 = 48_000;
+    const PACKET_FRAMES: usize = 4_800;
+    const PACKET_NS: i64 = 100_000_000;
+    const CHANGE_PACKET: i64 = 32;
+    const HALF_WINDOW: usize = 192;
+
+    let profile = Profile::P4444;
+    let black = Frame::new(16, 16, ChromaFormat::Yuv444, 10, false).unwrap();
+    let picture = Encoder::new(profile, 16, 16).encode(&black).unwrap();
+    let mut video = TrackSpec::new(TrackKind::Video, "V_PRORES");
+    video.video_size = Some((16, 16));
+    video.codec_private = profile.fourcc().to_vec();
+    video.default_duration_ns = Some(4_000_000_000);
+
+    let mut audio = TrackSpec::new(TrackKind::Audio, "A_PCM/INT/LIT");
+    audio.audio = Some((f64::from(RATE), 1, Some(16)));
+    audio.codec_delay_ns = delay_ns as u64;
+    audio.default_duration_ns = Some(PACKET_NS as u64);
+    let mut mux = MkvWriter::new(std::io::Cursor::new(Vec::new()), vec![video, audio], MuxOptions::default()).unwrap();
+    mux.write_frame(0, 0, true, &picture, None).unwrap();
+    let silent = vec![0; PACKET_FRAMES * 2];
+    let signal = 16_384i16.to_le_bytes().repeat(PACKET_FRAMES);
+    for n in 0..40 {
+        let pcm = if n < CHANGE_PACKET { &silent } else { &signal };
+        mux.write_frame(1, n * PACKET_NS - delay_ns, true, pcm, None).unwrap();
+    }
+    let bytes = mux.finish().unwrap().into_inner();
+    let mkv = matroska::open(bytes.as_slice()).unwrap();
+    assert_eq!(mkv.tracks[1].samples[0].pts, -8);
+
+    // Distinct files and pools keep the two decoder states independent.
+    let dir = tempfile::tempdir().unwrap();
+    let warm_path = dir.path().join("sequential.mkv");
+    let cold_path = dir.path().join("cold.mkv");
+    std::fs::write(&warm_path, &bytes).unwrap();
+    std::fs::write(&cold_path, &bytes).unwrap();
+    let warm = probe(&warm_path).unwrap();
+    let cold = probe(&cold_path).unwrap();
+    for f in [&warm, &cold] {
+        assert!(f.has_audio);
+        assert_eq!(f.codec, "ProRes", "exercise the shared Matroska route, not legacy fallback");
+    }
+
+    let warm_pool = MediaPool::new();
+    for n in 0..CHANGE_PACKET - 1 {
+        let t = Tick::from_units(n * PACKET_FRAMES as i64, i64::from(RATE));
+        let _ = warm_pool.audio_samples(&warm, t, PACKET_FRAMES, RATE);
+    }
+    let boundary = CHANGE_PACKET * PACKET_FRAMES as i64 - delay_ns * i64::from(RATE) / 1_000_000_000;
+    let t = Tick::from_units(boundary - HALF_WINDOW as i64, i64::from(RATE));
+    let sequential = warm_pool.audio_samples(&warm, t, 2 * HALF_WINDOW, RATE);
+    assert_eq!(sequential.len(), 4 * HALF_WINDOW);
+    assert!(sequential[..2 * HALF_WINDOW].iter().all(|s| s.abs() < 1e-6));
+    assert!(sequential[2 * HALF_WINDOW..].iter().all(|s| s.abs() > 0.1));
+
+    let seek = MediaPool::new().audio_samples(&cold, t, 2 * HALF_WINDOW, RATE);
+    assert_eq!(seek, sequential, "cold seek must not shift the signal boundary");
+}
+
 #[test]
 fn matroska_opus_audio_timing_and_seek() {
     let Some(p) = try_ffmpeg_fixture(

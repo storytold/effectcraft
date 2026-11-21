@@ -288,10 +288,15 @@ fn compute_audio_starts(
         }
         ContainerFile::Matroska(f) => {
             let Some(track) = f.tracks.get(track_idx) else { return Vec::new() };
+            // Indexed PTS already subtracts CodecDelay rounded to the container clock.
+            // Translate between that clock and the warm path's whole-frame delay.
+            let tick_ns = i128::from(f.info.timestamp_scale.max(1));
             let delay_ns = i128::from(track.codec_delay_ns);
+            let indexed_delay_ns = ((delay_ns + tick_ns / 2) / tick_ns) * tick_ns;
+            let delay_frames = audio_frames_from_ns(delay_ns, native_rate);
             let stamp_for = |pts: i64| -> i64 {
-                let ns = i128::from(track.ticks_to_ns(pts)) - delay_ns;
-                i64::try_from(ns * rate / 1_000_000_000).unwrap_or(0)
+                let ns = i128::from(track.ticks_to_ns(pts)) + indexed_delay_ns;
+                i64::try_from(audio_frames_from_ns(ns, native_rate) - delay_frames).unwrap_or(0)
             };
             let tick_samples = i64::try_from(i128::from(track.ticks_to_ns(2)) * rate / 1_000_000_000).unwrap_or(i64::MAX).saturating_add(1);
             if codec == CodecId::Opus {
@@ -308,6 +313,10 @@ fn compute_audio_starts(
             contiguous_starts(packets, (frame / 2).max(tick_samples))
         }
     }
+}
+
+fn audio_frames_from_ns(ns: i128, rate: u32) -> i128 {
+    (ns * i128::from(rate)) / 1_000_000_000
 }
 
 fn open_audio_tracks<I>(container: &ContainerFile, source: &dyn ByteSource, candidates: I) -> Option<(Vec<AudioTrackEntry>, Vec<AudioStreamInfo>)>
