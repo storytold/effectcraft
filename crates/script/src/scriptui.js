@@ -52,7 +52,8 @@ var __uiTypes = {
   window: "Window", panel: "Panel", group: "Group", button: "Button", iconbutton: "IconButton",
   statictext: "StaticText", edittext: "EditText", checkbox: "Checkbox", radiobutton: "RadioButton",
   slider: "Slider", scrollbar: "Scrollbar", progressbar: "Progressbar", dropdownlist: "DropDownList",
-  listbox: "ListBox", tabbedpanel: "TabbedPanel", tab: "Tab", image: "ScriptUIImage"
+  listbox: "ListBox", tabbedpanel: "TabbedPanel", tab: "Tab", image: "ScriptUIImage",
+  canvas: "Canvas"
 };
 var __uiContainers = { window: 1, panel: 1, group: 1, tabbedpanel: 1, tab: 1 };
 
@@ -287,6 +288,8 @@ function DropDownList() {}
 function ListBox() {}
 function TabbedPanel() {}
 function Tab() {}
+// A script-painted canvas: `onDraw` paints it and `repaint()` asks for another pass.
+function Canvas() {}
 // ScriptUIImage: an image file (`src`) or embedded image bytes (`data`, a binary string as in
 // resource-string images: one character per byte).
 function ScriptUIImage(src, data, name) {
@@ -339,6 +342,10 @@ function __uiFontSize(f, g) {
   return x > 0 ? x : 12;
 }
 
+// Draw coordinates are rounded to hundredths of a pixel: the draw list travels as JSON inside
+// the window snapshot, and unrounded floats ("123.45678901234567") are most of its size.
+function __px(v) { return Math.round(__num(v) * 100) / 100; }
+
 // ScriptUIGraphics: what onDraw handlers paint with. Paths and paint calls are recorded into the
 // control's draw list (`draw` in the window snapshot), which frontends paint.
 function __uiGraphics() {
@@ -352,19 +359,19 @@ function __uiGraphics() {
     __rec: null,
     __push: function (op) { if (this.__rec) this.__rec.push(op); },
     newBrush: function (t, c) { return { type: t, color: __uiColor(c), theme: typeof c === "string" ? c : "" }; },
-    newPen: function (t, c, w) { return { type: t, color: __uiColor(c), theme: typeof c === "string" ? c : "", lineWidth: w === undefined ? 1 : __num(w) }; },
+    newPen: function (t, c, w) { return { type: t, color: __uiColor(c), theme: typeof c === "string" ? c : "", lineWidth: w === undefined ? 1 : __px(w) }; },
     newPath: function () { this.currentPath = []; return this.currentPath; },
-    moveTo: function (x, y) { this.currentPath.push({ k: "M", x: __num(x), y: __num(y) }); this.currentPoint = [__num(x), __num(y)]; },
-    lineTo: function (x, y) { this.currentPath.push({ k: "L", x: __num(x), y: __num(y) }); this.currentPoint = [__num(x), __num(y)]; },
+    moveTo: function (x, y) { this.currentPath.push({ k: "M", x: __px(x), y: __px(y) }); this.currentPoint = [__px(x), __px(y)]; },
+    lineTo: function (x, y) { this.currentPath.push({ k: "L", x: __px(x), y: __px(y) }); this.currentPoint = [__px(x), __px(y)]; },
     closePath: function () { this.currentPath.push({ k: "Z" }); },
     rectPath: function (x, y, w, h) {
       if (x instanceof Array) { h = x[3] - x[1]; w = x[2] - x[0]; y = x[1]; x = x[0]; }
-      this.currentPath.push({ k: "R", x: __num(x), y: __num(y), w: __num(w), h: __num(h) });
+      this.currentPath.push({ k: "R", x: __px(x), y: __px(y), w: __px(w), h: __px(h) });
       return this.currentPath;
     },
     ellipsePath: function (x, y, w, h) {
       if (x instanceof Array) { h = x[3] - x[1]; w = x[2] - x[0]; y = x[1]; x = x[0]; }
-      this.currentPath.push({ k: "E", x: __num(x), y: __num(y), w: __num(w), h: __num(h) });
+      this.currentPath.push({ k: "E", x: __px(x), y: __px(y), w: __px(w), h: __px(h) });
       return this.currentPath;
     },
     fillPath: function (brush, path) {
@@ -375,10 +382,10 @@ function __uiGraphics() {
     },
     drawString: function (text, pen, x, y, font) {
       var f = font || this.font;
-      this.__push({ op: "text", text: String(text), color: pen ? pen.color : null, x: __num(x || 0), y: __num(y || 0), size: __uiFontSize(f, this), style: String(f?.style !== undefined ? f.style : "") });
+      this.__push({ op: "text", text: String(text), color: pen ? pen.color : null, x: __px(x || 0), y: __px(y || 0), size: __px(__uiFontSize(f, this)), style: String(f?.style !== undefined ? f.style : "") });
     },
     drawOSControl: function () { this.__push({ op: "os" }); },
-    drawImage: function (img, x, y, w, h) { this.__push({ op: "image", image: __uiImageJson(img), x: __num(x || 0), y: __num(y || 0), w: w === undefined ? 0 : __num(w), h: h === undefined ? 0 : __num(h) }); },
+    drawImage: function (img, x, y, w, h) { this.__push({ op: "image", image: __uiImageJson(img), x: __px(x || 0), y: __px(y || 0), w: w === undefined ? 0 : __px(w), h: h === undefined ? 0 : __px(h) }); },
     drawFocusRing: function () {},
     measureString: function (s, font, boundaryWidth) {
       var size = __uiFontSize(font, this);
@@ -395,18 +402,46 @@ function __uiGraphics() {
   };
 }
 
+// Whether a canvas can be seen: it and its ancestors below the window are visible, and every
+// enclosing tab is the selected one of its tabbed panel.
+function __uiCanvasShown(c, win) {
+  for (var n = c; n && n !== win; n = n.parent) {
+    if (n.visible === false) return false;
+    if (n.parent && n.parent.type === "tabbedpanel") {
+      var sel = n.parent.__sel || [];
+      if (sel.length === 0 || sel[0] !== n.parent.children.indexOf(n)) return false;
+    }
+  }
+  return true;
+}
+
 // Run the onDraw handlers of a window's controls (after laying it out, so `size` is known),
 // recording what they paint.
 function __uiRunDraws(win) {
   var drawn = [];
   (function walk(c) {
-    if (typeof c.onDraw === "function") drawn.push(c);
+    // A hidden canvas keeps its dirty flag: its first paint happens once it is shown.
+    if (typeof c.onDraw === "function" && (c.type !== "canvas" || __uiCanvasShown(c, win))) drawn.push(c);
     for (var i = 0; i < (c.children || []).length; i++) walk(c.children[i]);
   })(win);
   if (!drawn.length) return;
-  __uiLayout(win);
+  // Laying out the whole window costs a full JSON round trip; a draw pass only needs it once
+  // (or after the tree changed), since the controls' sizes cannot change just by being redrawn.
+  if (!win.__laidOut) {
+    __uiLayout(win);
+    win.__laidOut = true;
+  }
   for (const elem of drawn) {
     var c = elem;
+    if (c.type === "canvas") {
+      // A canvas keeps its draw list until it asks for a repaint; a resize invalidates it.
+      var b = c.__lb;
+      var size = [b[2] - b[0], b[3] - b[1]];
+      if (c.__lastSize && (c.__lastSize[0] !== size[0] || c.__lastSize[1] !== size[1])) c.__dirty = true;
+      c.__lastSize = size;
+      if (!c.__dirty && c.__draw) continue;
+      c.__dirty = false;
+    }
     c.__draw = [];
     c.graphics.__rec = c.__draw;
     try {
@@ -421,6 +456,7 @@ function __uiRunDraws(win) {
 function __uiInit(o, type, win, parent, bounds, text, props) {
   o.type = type;
   o.window = win || o;
+  if (win) win.__laidOut = false;
   o.parent = parent || null;
   o.__id = win ? win.__next++ : 0;
   if (!win) {
@@ -446,6 +482,12 @@ function __uiInit(o, type, win, parent, bounds, text, props) {
   o.alignment = null;
   o.graphics = __uiGraphics();
   o.__listeners = {};
+  // A canvas paints on demand: onDraw runs when it is dirty (the first snapshot and after
+  // repaint()), not on every snapshot as the other controls do.
+  if (type === "canvas") {
+    o.__dirty = true;
+    o.__lastSize = null;
+  }
   if (o.properties.name) o.name = o.properties.name;
   if (__uiContainers[type]) {
     o.orientation = type === "group" ? "row" : type === "tabbedpanel" ? "stack" : "column";
@@ -594,6 +636,10 @@ function __uiProto() {
       if (e.indexOf("on") !== 0) e = "on" + e.charAt(0).toUpperCase() + e.slice(1);
       this.__fire(e);
     },
+    // A canvas repaints on the next snapshot; other controls redraw with every snapshot anyway.
+    repaint: function () {
+      if (this.type === "canvas") this.__dirty = true;
+    },
     // `capture`: the listener runs in the capture phase of mouse events (on the way down from
     // the window to the target) instead of the bubble phase.
     addEventListener: function (name, fn, capture) {
@@ -633,7 +679,7 @@ function __uiProto() {
 
 (function () {
   var all = ["Window", "Panel", "Group", "Button", "IconButton", "StaticText", "EditText", "Checkbox", "RadioButton", "Slider",
-    "Scrollbar", "Progressbar", "DropDownList", "ListBox", "TabbedPanel", "Tab", "ScriptUIImage"];
+    "Scrollbar", "Progressbar", "DropDownList", "ListBox", "Canvas", "TabbedPanel", "Tab", "ScriptUIImage"];
   for (const elem of all) {
     var C = __ecGlobal[elem];
     var p = __uiProto();

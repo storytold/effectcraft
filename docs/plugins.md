@@ -98,14 +98,45 @@ palette itself. A minimal panel:
 
 Supported controls: `panel`, `group`, `button`, `iconbutton`, `statictext`, `edittext`,
 `checkbox`, `radiobutton`, `slider`, `scrollbar`, `progressbar`, `dropdownlist`, `listbox`,
-`tabbedpanel` / `tab` and `image`, with ScriptUI's automatic layout (`orientation`,
+`canvas`, `tabbedpanel` / `tab` and `image`, with ScriptUI's automatic layout (`orientation`,
 `alignChildren`, `alignment`, `margins`, `spacing`, `preferredSize`), resource strings, event
 handlers (`onClick`, `onChange`, `onChanging`, `onClose`, `addEventListener`) and `onDraw` with
 ScriptUIGraphics. Mouse events (`addEventListener("mousedown" | "mouseup" | "mousemove" |
 "mouseover" | "mouseout" | "click", handler, capture?)`) reach the control under the pointer and
 its containers (capture, target, bubble; `stopPropagation()`), with a MouseEvent carrying
 `clientX`/`clientY` relative to the target, `button`, `detail` (click count) and the modifier
-keys. Agents use a panel like a user: `scriptui.list`, `scriptui.get` (its controls),
+keys.
+
+`canvas` is a script-painted surface for controls that draw all their own content — a curve
+editor, a gradient strip, a preview. Add it like any control, paint it in `onDraw` with
+ScriptUIGraphics, and call `canvas.repaint()` when what it shows changes. A canvas keeps its draw
+list between snapshots: `onDraw` runs when the canvas is first shown, after `repaint()`, and when
+its size changes. A mouse handler that moves a handle therefore re-runs only that canvas's
+`onDraw`: other canvases keep their draw lists, while non-canvas controls still redraw with
+every snapshot as before. Mouse events reach it like any control, with
+`clientX`/`clientY` in canvas coordinates; `preferredSize` (or `bounds`) sets its size.
+
+```js
+// A canvas that shows a point and drags it (a start for a curve editor's drawing area).
+var cv = ui.add("canvas", undefined, undefined, { name: "plot" });
+cv.preferredSize = [300, 200];
+var at = [150, 100];
+cv.onDraw = function () {
+  var g = this.graphics;
+  var bg = g.newBrush(g.BrushType.SOLID_COLOR, [0.12, 0.12, 0.12, 1]);
+  g.newPath(); g.rectPath(0, 0, this.size.width, this.size.height); g.fillPath(bg);
+  var dot = g.newBrush(g.BrushType.SOLID_COLOR, [0.3, 0.7, 1, 1]);
+  g.newPath(); g.ellipsePath(at[0] - 4, at[1] - 4, 8, 8); g.fillPath(dot);
+};
+cv.addEventListener("mousedown", function (e) { at = [e.clientX, e.clientY]; cv.repaint(); });
+cv.addEventListener("mousemove", function (e) {
+  if (!e.buttons) return;                      // buttons: 1 = the left button is held
+  at = [e.clientX, e.clientY];
+  cv.repaint();
+});
+```
+
+Agents use a panel like a user: `scriptui.list`, `scriptui.get` (its controls),
 `scriptui.click`, `scriptui.set`, `scriptui.mouse` and `scriptui.close`; every control has the automation id
 `scriptui.<window>.<control id or name>`. The bundled sample `Layer Tools.jsx`
 (`crates/engine/scripts/ScriptUI Panels/`) and the Ease Presets extension below are longer

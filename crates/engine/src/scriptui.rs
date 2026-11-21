@@ -54,6 +54,8 @@ pub enum WidgetKind {
     Progressbar,
     DropDownList,
     ListBox,
+    /// A script-painted canvas: `onDraw` paints it, `repaint()` asks for another pass.
+    Canvas,
     TabbedPanel,
     Tab,
     Image,
@@ -619,6 +621,8 @@ pub fn preferred(w: &Widget) -> [f64; 2] {
             WidgetKind::Progressbar => [100.0, 10.0],
             WidgetKind::DropDownList => [w.items.iter().map(|i| text_w(i)).fold(0.0, f64::max) + 36.0, 22.0],
             WidgetKind::ListBox => [(w.items.iter().map(|i| text_w(i)).fold(0.0, f64::max) + 24.0).max(80.0), (w.items.len().clamp(3, 10) as f64 * 18.0 + 4.0)],
+            // A canvas has no content of its own: its script sizes it with `preferredSize` or `bounds`.
+            WidgetKind::Canvas => [200.0, 200.0],
             _ => [20.0, 20.0],
         }
     };
