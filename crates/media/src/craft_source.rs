@@ -50,7 +50,7 @@ use craft_media_source::{
 };
 use craft_time::{FrameRate, Tick};
 use craft_video::frame::{ColorFamily, ColorTags, Plane, Samples, Subsampling, VideoFrame as DecodedVideoFrame};
-use craft_video::{TrackDecoder, TrackDecoderOptions};
+use craft_video::{TrackDecoder, TrackDecoderOptions, VideoError, prores};
 
 /// Maximum worker threads per `TrackDecoder` instance.
 const MAX_WORKERS: usize = 8;
@@ -1319,6 +1319,26 @@ struct VideoState {
     decoded: Vec<CachedFrame>,
 }
 
+fn decode_track_packet(
+    decoder: &mut TrackDecoder,
+    is_isobmff: bool,
+    packet: &[u8],
+    pts: i64,
+    decode_prores: impl FnOnce(&[u8], &prores::DecodeOptions) -> prores::Result<prores::Frame>,
+) -> std::result::Result<Vec<DecodedVideoFrame>, VideoError> {
+    if !is_isobmff || decoder.codec() != CodecId::ProRes {
+        return decoder.decode(packet, pts);
+    }
+    // The caller holds this source's VideoState lock. Do not let a ProRes band
+    // job yield to another request for the same source on the decode Rayon pool.
+    // ProRes packets carry a complete picture: TrackDecoder's ProRes arm adds
+    // the PTS to this same conversion and has no draft, reset or reorder work.
+    let options = prores::DecodeOptions { threads: false, ..Default::default() };
+    let mut frame = DecodedVideoFrame::try_from(decode_prores(packet, &options)?)?;
+    frame.pts = Some(pts);
+    Ok(vec![frame])
+}
+
 struct AudioTrackState {
     decoder: AudioTrackDecoder,
     audio_starts: AudioStarts,
@@ -1401,6 +1421,7 @@ impl MediaSource for CraftMediaSource {
         }
 
         let sample_count = self.file.sample_count(video_idx);
+        let is_isobmff = matches!(&self.file, ContainerFile::Isobmff(_));
         while !state.decoded.iter().any(|c| c.pts >= target_pts && c.draft == want_draft) {
             if filmcraft_media::cancel::cancelled() {
                 return Err(MediaError::Cancelled);
@@ -1409,7 +1430,8 @@ impl MediaSource for CraftMediaSource {
                 let idx = state.next_decode_idx;
                 let pts = self.file.sample_pts(video_idx, idx);
                 let pkt = self.file.read_sample(&*self.source, video_idx, idx)?;
-                let frames = state.decoder.decode(&pkt, pts).map_err(|e| MediaError::Decode(e.to_string()))?;
+                let frames = decode_track_packet(&mut state.decoder, is_isobmff, &pkt, pts, prores::decode_frame_with)
+                    .map_err(|e| MediaError::Decode(e.to_string()))?;
                 state.next_decode_idx = idx + 1;
                 push_decoded(&mut state.decoded, frames, want_draft, self.presentation, &self.file, video_idx)?;
             } else if !state.flushed {
@@ -2783,6 +2805,77 @@ mod tests {
             let out = to_craft_frame(vf_with_sar, presentation, Tick::ZERO).ok();
             assert_eq!(out.map(|f| f.par), Some((3, 4)));
         }
+    }
+
+    #[test]
+    fn shared_prores_mov_uses_serial_packets_with_edited_frame_and_alpha_parity() {
+        use isobmff::{Brand, Edit, Mp4Writer, SampleEntry, TrackConfig, WriteSample, WriterOptions};
+
+        let mut encoder = prores::Encoder::new(prores::Profile::P4444, 64, 48);
+        let mut input = prores::Frame::new(64, 48, prores::ChromaFormat::Yuv444, 12, true).expect("ProRes frame");
+        let mut entry = SampleEntry::prores(isobmff::FourCc(*b"ap4h"), 64, 48);
+        entry.video.as_mut().expect("visual entry").pixel_aspect = Some((4, 3));
+        let mut config = TrackConfig::new(entry, 1_000);
+        config.edits = vec![
+            Edit { segment_duration: 20, media_time: -1, media_rate: 0x0001_0000 },
+            Edit { segment_duration: 120, media_time: 0, media_rate: 0x0001_0000 },
+        ];
+        let mut writer = Mp4Writer::new(std::io::Cursor::new(Vec::new()), WriterOptions::new(Brand::Mov)).expect("MOV writer");
+        let track = writer.add_track(config).expect("picture track");
+        let mut packets = Vec::new();
+        for (luma, alpha) in [(512, 1_024), (1_536, 2_048), (3_072, 3_072)] {
+            input.y.fill(luma);
+            input.alpha.as_mut().expect("alpha input").fill(alpha);
+            let packet = encoder.encode(&input).expect("ProRes packet");
+            writer.write_sample(track, WriteSample { data: &packet, duration: 40, composition_offset: 0, is_sync: true }).expect("MOV sample");
+            packets.push(packet);
+        }
+        let bytes = writer.finish().expect("MOV finish").into_inner();
+        let demuxed = isobmff::open(bytes.as_slice()).expect("MOV demux");
+        assert_eq!(demuxed.tracks[track].edit_offset, 20);
+        let params = demuxed.tracks[track].codec_params();
+        let crate::stream::MediaSource::Craft(source) = crate::stream::open_bytes("serial.mov", bytes.into()).expect("MOV opener") else {
+            panic!("generated ProRes cannot fall back to FilmCraft");
+        };
+        assert!(source.info().video.as_ref().expect("video").has_alpha);
+
+        let mut decoder = TrackDecoder::new(&params).expect("ProRes decoder");
+        let mut passed_serial_options = false;
+        let selected = decode_track_packet(&mut decoder, true, &packets[1], 40, |packet, options| {
+            assert!(!options.threads);
+            assert!(options.bit_depth.is_none());
+            passed_serial_options = true;
+            prores::decode_frame_with(packet, options)
+        })
+        .expect("serial packet");
+        assert!(passed_serial_options, "the ISO-BMFF helper must select explicit serial decoding");
+        assert_eq!(selected[0].pts, Some(40));
+
+        // Seek late, then backwards, then forwards. The original parallel TrackDecoder is an
+        // independent oracle for every plane, including alpha, of each chosen compressed frame.
+        let presentation = FramePresentation { container_color: None, par: (4, 3), rotation: 0, aperture: None };
+        for (index, raw_pts, presented) in [(2, 80, 100), (0, 0, 20), (1, 40, 60)] {
+            let pts = Tick::from_units(presented, 1_000);
+            let actual = source.video_frame(FrameRequest::full(pts)).expect("shared MOV frame");
+            let packet = &packets[index];
+            let mut parallel =
+                decode_track_packet(&mut decoder, false, packet, raw_pts, |_, _| panic!("expected TrackDecoder")).expect("normal parallel packet");
+            let expected = to_craft_frame(parallel.pop().expect("one frame"), presentation, pts).expect("parallel frame");
+            assert!(parallel.is_empty());
+            assert_eq!((actual.width, actual.height, actual.pts, actual.par, actual.color), (64, 48, pts, (4, 3), expected.color));
+            let PixelData::Yuv16 { planes, bits, alpha: Some(alpha), .. } = &actual.data else { panic!("expected 12-bit ProRes with alpha") };
+            let PixelData::Yuv16 { planes: expected_planes, bits: expected_bits, alpha: Some(expected_alpha), .. } = &expected.data else {
+                panic!("expected parallel ProRes with alpha");
+            };
+            assert_eq!((*bits, *expected_bits), (12, 12));
+            assert_eq!(planes, expected_planes);
+            assert_eq!(alpha, expected_alpha);
+            assert!(alpha[0] > 0 && alpha[0] < 4_095);
+        }
+
+        let regular_error = decoder.decode(&[], 0).expect_err("empty ProRes packet").to_string();
+        let locked_error = decode_track_packet(&mut decoder, true, &[], 0, prores::decode_frame_with).expect_err("empty ProRes packet").to_string();
+        assert_eq!(locked_error, regular_error);
     }
 
     #[test]
