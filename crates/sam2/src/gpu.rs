@@ -74,10 +74,20 @@ pub struct Gpu {
     module: wgpu::ShaderModule,
     pipelines: Mutex<HashMap<&'static str, Arc<wgpu::ComputePipeline>>>,
     encoder: Mutex<Option<wgpu::CommandEncoder>>,
+    /// Dispatches recorded since the last submission ([`DISPATCHES_PER_SUBMIT`]).
+    pending: std::sync::atomic::AtomicUsize,
     turn: Mutex<()>,
     error: Arc<Mutex<Option<String>>>,
     adapter: String,
 }
+
+/// Dispatches per submission. The whole network used to go to the GPU as one command buffer at
+/// `flush`; on a mid-range GPU that one submission ran for seconds, and Windows' display-driver
+/// watchdog (TDR, 2 s) reset the driver ("display driver stopped responding"), losing the device
+/// and closing the app; it also kept the GPU from the UI for the whole run. Submitting a few
+/// dispatches at a time and waiting for them keeps each submission short and lets the UI's
+/// frames in between.
+const DISPATCHES_PER_SUBMIT: usize = 8;
 
 fn words(v: &[u32]) -> [u32; PARAM_WORDS] {
     let mut out = [0u32; PARAM_WORDS];
@@ -168,7 +178,17 @@ impl Gpu {
             sink.lock().unwrap_or_else(PoisonError::into_inner).get_or_insert_with(|| format!("GPU device lost ({reason:?}): {message}"));
         });
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("sam2 kernels"), source: wgpu::ShaderSource::Wgsl(SHADER.into()) });
-        Ok(Gpu { device, queue, module, pipelines: Mutex::default(), encoder: Mutex::new(None), turn: Mutex::new(()), error, adapter: info.name })
+        Ok(Gpu {
+            device,
+            queue,
+            module,
+            pipelines: Mutex::default(),
+            encoder: Mutex::new(None),
+            pending: Default::default(),
+            turn: Mutex::new(()),
+            error,
+            adapter: info.name,
+        })
     }
 
     /// One GPU pass at a time: a caller holds this while it queues, flushes and reads back a whole job, so
@@ -281,6 +301,15 @@ impl Gpu {
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, &group, &[]);
         pass.dispatch_workgroups(groups.0, groups.1, groups.2);
+        drop(pass);
+        if self.pending.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1 >= DISPATCHES_PER_SUBMIT {
+            self.pending.store(0, std::sync::atomic::Ordering::Relaxed);
+            if let Some(enc) = slot.take() {
+                drop(slot);
+                self.queue.submit([enc.finish()]);
+                let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+            }
+        }
     }
 
     /// Submit what is queued and wait for it to finish.
