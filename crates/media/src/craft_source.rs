@@ -337,6 +337,34 @@ impl ContainerFile {
         let leading = u128::from(leading_duration);
         offset(leading)..offset(leading + u128::from(media.segment_duration))
     }
+
+    /// Exclusive native packet position of the PCM edit's end. Unlike audio_edit_range,
+    /// this follows the demuxer's truncated packet placement, not the movie output clock.
+    fn pcm_edit_packet_end(&self, track_idx: usize, native_rate: u32) -> Option<i64> {
+        let Self::Isobmff(file) = self else { return None };
+        let track = file.tracks.get(track_idx)?;
+        // pcm_chunked alone describes how the sample table was indexed from entry one.
+        // With several descriptions the decoder may have selected a different entry.
+        let [entry] = track.entries.as_slice() else { return None };
+        if !matches!(entry.codec, isobmff::CodecConfig::Pcm(_))
+            || !track.pcm_chunked
+            || native_rate == 0
+            || track.timescale != native_rate
+            || file.timescale == 0
+        {
+            return None;
+        }
+        let (leading, media) = unit_rate_media_edit(&track.edits)?;
+        let movie_clock = u128::from(file.timescale);
+        let native_clock = u128::from(native_rate);
+        let packet_start = i128::from(track.edit_offset).checked_add(i128::from(media.media_time))?;
+        let expected_start = i128::try_from(u128::from(leading) * native_clock / movie_clock).ok()?;
+        if packet_start != expected_start {
+            return None;
+        }
+        let duration = i128::try_from((u128::from(media.segment_duration) * native_clock).div_ceil(movie_clock)).ok()?;
+        i64::try_from(packet_start.checked_add(duration)?).ok()
+    }
 }
 
 /// Where the container puts one audio packet, for [`contiguous_starts`].
@@ -996,6 +1024,11 @@ fn open_matroska(name: &str, source: SharedBytes) -> Option<Result<SharedSource>
     let (video_info, video_state, container_color, par, rotation, duration) = if let Some(v_idx) = video_idx {
         let video_track = &file.tracks[v_idx];
         if !video_track.frames_readable() {
+            return None;
+        }
+        // Native FFV1 without CodecPrivate cannot initialize the shared v3 decoder.
+        // Keep FilmCraft's metadata at open; an unsupported read stays a playback error.
+        if video_track.codec_private.is_empty() && matches!(&video_track.codec, matroska::Codec::Other(id) if id == "V_FFV1") {
             return None;
         }
         let video_params = video_track.codec_params();
@@ -1720,18 +1753,34 @@ impl MediaSource for CraftMediaSource {
 
         let decoded = match &entry.backend {
             AudioBackend::Decoder { seek_preroll_samples, state: state_mutex } => {
-                let mut state = state_mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                decode_audio_range(
-                    &self.file,
-                    &*self.source,
-                    entry.track_idx,
-                    native_rate,
-                    channels_count,
-                    *seek_preroll_samples,
-                    &mut state,
-                    native_start,
-                    native_frames,
-                )?
+                let packet_frames = self
+                    .file
+                    .pcm_edit_packet_end(entry.track_idx, native_rate)
+                    .map_or(native_frames, |end| usize::try_from((i128::from(end) - i128::from(native_start)).max(0)).unwrap_or(usize::MAX).min(native_frames));
+                let mut channels = if packet_frames == 0 && native_frames != 0 {
+                    vec![Vec::new(); channels_count]
+                } else {
+                    let mut state = state_mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    decode_audio_range(
+                        &self.file,
+                        &*self.source,
+                        entry.track_idx,
+                        native_rate,
+                        channels_count,
+                        *seek_preroll_samples,
+                        &mut state,
+                        native_start,
+                        packet_frames,
+                    )?
+                };
+                // A direct read still owes the full output window. For a resampled read, keep
+                // the clipped buffer short so its last valid sample remains the one-sided guard.
+                if sample_rate == native_rate && packet_frames < native_frames {
+                    for channel in &mut channels {
+                        channel.resize(native_frames, 0.0);
+                    }
+                }
+                channels
             }
             AudioBackend::MxfPcm { presented_start, presented_len } => {
                 if filmcraft_media::cancel::cancelled() {
@@ -3120,6 +3169,64 @@ mod tests {
     }
 
     #[test]
+    fn mov_pcm_fractional_empty_edit_excludes_packet_tail() {
+        const RATE: u32 = 44_100;
+        let mut samples = vec![0i16; 1_024];
+        samples[600] = 16_384;
+        samples[601] = -8_192;
+        let mux = |leading_ms| {
+            edited_pcm_mov(
+                RATE,
+                &samples,
+                vec![
+                    isobmff::Edit { segment_duration: leading_ms, media_time: -1, media_rate: 0x0001_0000 },
+                    isobmff::Edit { segment_duration: 2, media_time: 512, media_rate: 0x0001_0000 },
+                ],
+            )
+        };
+        let bytes: Arc<[u8]> = mux(9).into();
+        let demuxed = isobmff::open(bytes.as_ref()).expect("generated PCM MOV");
+        assert_eq!(demuxed.timescale, 1_000);
+        assert_eq!(demuxed.tracks[0].timescale, RATE);
+        assert!(demuxed.tracks[0].pcm_chunked);
+        assert_eq!(demuxed.tracks[0].edit_offset, -116);
+        let source = open_bytes("fractional-edit.mov", bytes).expect("shared MOV route").expect("open mapped PCM");
+        let read = |start, frames, rate| source.audio(start, frames, rate).expect("direct shared PCM read").channels.remove(0);
+
+        // The output range still includes native position 485. The source edit ends
+        // before raw frame 601 (position 485), but includes raw frame 600 (position 484).
+        assert_eq!(read(484, 3, RATE), [0.5, 0.0, 0.0]);
+        assert_eq!(read(485, 2, RATE), [0.0, 0.0], "packet-content-only tail");
+        assert_eq!(read(484, 1, RATE), [0.5], "backward seek retains the last visible source sample");
+        assert_eq!(read(968, 4, RATE * 2), [0.5, 0.5, 0.0, 0.0], "do not interpolate with the excluded sample");
+
+        let aligned = open_bytes("aligned-edit.mov", mux(10).into()).expect("shared MOV").expect("aligned clocks");
+        assert_eq!(aligned.audio(529, 3, RATE).expect("aligned PCM").channels[0], [0.5, 0.0, 0.0]);
+        let unedited = open_bytes("no-edit.mov", edited_pcm_mov(RATE, &samples, Vec::new()).into()).expect("shared MOV").expect("no edit");
+        assert_eq!(unedited.audio(600, 2, RATE).expect("unedited PCM").channels[0], [0.5, -0.25]);
+
+        let mut mixed = demuxed.clone();
+        let track = &mut mixed.tracks[0];
+        let mut non_pcm = track.entries[0].clone();
+        non_pcm.codec = isobmff::CodecConfig::Mp3;
+        track.entries.push(non_pcm.clone());
+        track.samples[0].description_index = 2;
+        assert_ne!(track.codec_params().codec, CodecId::Pcm, "first sample selects the other description");
+        assert_eq!(ContainerFile::Isobmff(mixed.clone()).pcm_edit_packet_end(0, RATE), None, "mixed descriptions");
+        let track = &mut mixed.tracks[0];
+        track.entries = vec![non_pcm];
+        track.samples[0].description_index = 1;
+        assert_eq!(ContainerFile::Isobmff(mixed).pcm_edit_packet_end(0, RATE), None, "sole non-PCM description");
+
+        let file = ContainerFile::Isobmff(demuxed.clone());
+        assert_eq!(file.pcm_edit_packet_end(0, RATE), Some(485));
+        assert_eq!(file.pcm_edit_packet_end(0, 48_000), None, "different track and native clocks");
+        let mut parsed = demuxed;
+        parsed.tracks[0].edits[1].segment_duration = u64::MAX;
+        assert_eq!(ContainerFile::Isobmff(parsed).pcm_edit_packet_end(0, RATE), None, "unrepresentable native end");
+    }
+
+    #[test]
     fn vui_overrides_container_color_and_falls_back_when_unspecified() {
         let container = color_from_isobmff(&isobmff::ColorInfo::Nclx { primaries: 9, transfer: 16, matrix: 9, full_range: false });
         assert_eq!(container.primaries, Primaries::Bt2020);
@@ -3153,6 +3260,88 @@ mod tests {
         assert_eq!(c.transfer, Transfer::Pq);
         assert_eq!(c.matrix, Matrix::Bt2020Ncl);
         assert_eq!(c.range, Range::Limited);
+    }
+
+    #[test]
+    #[cfg(any(unix, windows))]
+    fn matroska_ffv1_missing_config_keeps_legacy_probe() {
+        use crate::stream::{DecodedFrame, MediaSource as Opened};
+        use craft_video::ffv1::{Colorspace, Encoder, EncoderConfig, Frame};
+
+        let mut frame = Frame {
+            width: 16,
+            height: 16,
+            colorspace: Colorspace::YCbCr,
+            bit_depth: 8,
+            chroma_shift: (1, 1),
+            planes: vec![vec![48; 256], vec![96; 64], vec![160; 64]],
+        };
+        let encoder = Encoder::new(&frame, EncoderConfig::default()).expect("FFV1 encoder");
+        let first = encoder.encode(&frame).expect("first FFV1 keyframe");
+        frame.planes[0].fill(192);
+        let second = encoder.encode(&frame).expect("second FFV1 keyframe");
+
+        // The control changes only the container configuration, not the two coded keyframes.
+        let mux = |configuration| -> Arc<[u8]> {
+            let mut track = matroska::TrackSpec::new(matroska::TrackKind::Video, "V_FFV1");
+            track.video_size = Some((16, 16));
+            track.default_duration_ns = Some(40_000_000);
+            track.codec_private = configuration;
+            let mut mux = matroska::MkvWriter::new(std::io::Cursor::new(Vec::new()), vec![track], matroska::MuxOptions::default()).expect("MKV writer");
+            mux.write_frame(0, 0, true, &first, None).expect("write first keyframe");
+            mux.write_frame(0, 40_000_000, true, &second, None).expect("write second keyframe");
+            mux.finish().expect("finish MKV").into_inner().into()
+        };
+        let configured = mux(encoder.config_record());
+        let missing = mux(Vec::new());
+        let directory = tempfile::tempdir().expect("FFV1 fixture directory");
+        let configured_path = directory.path().join("configured.mkv");
+        let missing_path = directory.path().join("no-config.mkv");
+        std::fs::write(&configured_path, &configured).expect("write configured fixture");
+        std::fs::write(&missing_path, &missing).expect("write no-config fixture");
+
+        let configured_probe = crate::probe(&configured_path).expect("public probe of configured FFV1");
+        assert!(configured_probe.has_video);
+        assert_eq!((configured_probe.width, configured_probe.height), (16, 16));
+        assert_eq!((configured_probe.frame_rate.num, configured_probe.frame_rate.den), (25, 1));
+        let opened = crate::stream::open_source(&configured_path).expect("open in place").0.expect("open configured FFV1");
+        assert!(matches!(&opened, Opened::Craft(_)));
+        let zero = effectcraft_time::Tick::ZERO;
+        let later = effectcraft_time::Tick(craft_time::TICKS_PER_SECOND / 25);
+        for (pts, luma) in [(zero, 48), (later, 192), (zero, 48)] {
+            let frame = match opened.video_frame(pts, 1.0).expect("decode configured FFV1") {
+                DecodedFrame::Craft(frame) => Some(frame),
+                DecodedFrame::Film(_) => None,
+            }
+            .expect("decoded through the shared FFV1 reader");
+            assert_eq!(frame.pts.0, pts.0);
+            assert!(matches!(&frame.data, PixelData::Yuv8 { planes, chroma: Chroma::C420, alpha: None }
+                if planes[0].as_slice() == [luma; 256] && planes[1].as_slice() == [96; 64] && planes[2].as_slice() == [160; 64]));
+        }
+
+        let name = "no-config.mkv";
+        let legacy = filmcraft_codecs::open_bytes(name, missing.clone()).expect("legacy FFV1 metadata opens without config");
+        let legacy_probe = crate::probe::footage_from_info(name, legacy.info());
+        let legacy_error = legacy
+            .video_frame(filmcraft_media::FrameRequest { time: filmcraft_time::Tick::ZERO, scale: 1.0 })
+            .err()
+            .map(crate::MediaError::from)
+            .expect("FilmCraft does not play FFV1");
+        assert!(matches!(&legacy_error, crate::MediaError::Unsupported(message) if message.contains("no decoder")));
+
+        let missing_probe = crate::probe(&missing_path).expect("public probe preserves metadata without config");
+        let memory_probe = crate::probe_bytes(name, missing).expect("public memory probe preserves metadata without config");
+        for probe in [missing_probe, memory_probe] {
+            assert!(probe.has_video);
+            assert_eq!((probe.width, probe.height), (legacy_probe.width, legacy_probe.height));
+            assert_eq!(probe.frame_rate, legacy_probe.frame_rate);
+            assert_eq!(probe.duration, legacy_probe.duration);
+            assert_eq!(probe.codec, legacy_probe.codec);
+        }
+        let opened = crate::stream::open_source(&missing_path).expect("open in place").0.expect("open FFV1 metadata without config");
+        assert!(matches!(&opened, Opened::Film(_)));
+        let err = opened.video_frame(zero, 1.0).err().expect("unsupported is deferred to playback");
+        assert_eq!(err.to_string(), legacy_error.to_string());
     }
 
     #[test]
