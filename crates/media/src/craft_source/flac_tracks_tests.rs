@@ -18,56 +18,55 @@ struct Fixture {
     samples: Vec<Vec<i32>>,
 }
 
-#[allow(clippy::unwrap_used)]
 impl Fixture {
-    fn new() -> Self {
+    fn new() -> Result<Self, Box<dyn std::error::Error>> {
         let left: Vec<i32> = (0..FRAMES).map(|i| (i as i32 * 307 % 65_536) - 30_000).collect();
         let right: Vec<i32> = (0..FRAMES).map(|i| 28_000 - (i as i32 * 701 % 59_000)).collect();
         let mut config = EncoderConfig::new(RATE, 2, 24);
         config.block_size = BLOCK as u16;
-        let mut encoder = Encoder::new(config).unwrap();
-        let mut packets = encoder.encode_frames(&[&left, &right]).unwrap();
+        let mut encoder = Encoder::new(config)?;
+        let mut packets = encoder.encode_frames(&[&left, &right])?;
         packets.push(encoder.finish());
         let mut private = encoder.header(&[]);
         let offset = STREAMINFO_OFFSET as usize;
         private[offset..offset + 34].copy_from_slice(&encoder.streaminfo());
-        Self { private, packets, samples: vec![left, right] }
+        Ok(Self { private, packets, samples: vec![left, right] })
     }
 
-    fn mp4(&self) -> Vec<u8> {
+    fn mp4(&self) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         let offset = STREAMINFO_OFFSET as usize;
-        let mut entry = isobmff::SampleEntry::flac(self.private[offset..offset + 34].try_into().unwrap());
-        entry.audio.as_mut().unwrap().sample_rate = 48_000.0;
-        let mut writer = isobmff::Mp4Writer::new(Cursor::new(Vec::new()), isobmff::WriterOptions::new(isobmff::Brand::Mp4)).unwrap();
-        writer.add_track(isobmff::TrackConfig::new(entry, RATE)).unwrap();
+        let mut entry = isobmff::SampleEntry::flac(self.private[offset..offset + 34].try_into()?);
+        entry.audio.as_mut().ok_or("FLAC sample entry needs an audio header")?.sample_rate = 48_000.0;
+        let mut writer = isobmff::Mp4Writer::new(Cursor::new(Vec::new()), isobmff::WriterOptions::new(isobmff::Brand::Mp4))?;
+        writer.add_track(isobmff::TrackConfig::new(entry, RATE))?;
         for (i, packet) in self.packets.iter().enumerate() {
             let duration = (FRAMES - i * BLOCK).min(BLOCK) as u32;
-            writer.write_sample(0, isobmff::WriteSample { data: packet, duration, composition_offset: 0, is_sync: true }).unwrap();
+            writer.write_sample(0, isobmff::WriteSample { data: packet, duration, composition_offset: 0, is_sync: true })?;
         }
-        writer.finish().unwrap().into_inner()
+        Ok(writer.finish()?.into_inner())
     }
 
-    fn mkv(&self, private: &[u8]) -> Vec<u8> {
+    fn mkv(&self, private: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         let mut track = matroska::TrackSpec::new(matroska::TrackKind::Audio, "A_FLAC");
         track.audio = Some((f64::from(RATE), 2, Some(24)));
         track.codec_private = private.to_vec();
-        let mut writer = matroska::MkvWriter::new(Cursor::new(Vec::new()), vec![track], matroska::MuxOptions::default()).unwrap();
+        let mut writer = matroska::MkvWriter::new(Cursor::new(Vec::new()), vec![track], matroska::MuxOptions::default())?;
         for (i, packet) in self.packets.iter().enumerate() {
             // The muxer rounds starts to its millisecond clock. A 1000-frame packet
             // at 96 kHz does not start on a millisecond boundary after packet zero.
             let pts = (i * BLOCK) as i64 * 1_000_000_000 / i64::from(RATE);
             let duration = (FRAMES - i * BLOCK).min(BLOCK) as u64 * 1_000_000_000 / u64::from(RATE);
-            writer.write_frame(0, pts, true, packet, Some(duration)).unwrap();
+            writer.write_frame(0, pts, true, packet, Some(duration))?;
         }
-        writer.finish().unwrap().into_inner()
+        Ok(writer.finish()?.into_inner())
     }
 }
 
 #[test]
-fn flac_in_mp4_and_matroska_uses_shared_samples_after_cold_and_backward_seeks() {
-    let fixture = Fixture::new();
+fn flac_in_mp4_and_matroska_uses_shared_samples_after_cold_and_backward_seeks() -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new()?;
     let dir = tempfile::tempdir().unwrap();
-    for (name, bytes) in [("audio.mp4", fixture.mp4()), ("audio.mka", fixture.mkv(&fixture.private))] {
+    for (name, bytes) in [("audio.mp4", fixture.mp4()?), ("audio.mka", fixture.mkv(&fixture.private)?)] {
         let bytes: Arc<[u8]> = bytes.into();
         let path = dir.path().join(name);
         std::fs::write(&path, &bytes).unwrap();
@@ -100,16 +99,18 @@ fn flac_in_mp4_and_matroska_uses_shared_samples_after_cold_and_backward_seeks() 
             }
         }
     }
+    Ok(())
 }
 
 #[test]
-fn flac_without_the_expected_private_marker_keeps_matroska_fallback() {
-    let fixture = Fixture::new();
+fn flac_without_the_expected_private_marker_keeps_matroska_fallback() -> Result<(), Box<dyn std::error::Error>> {
+    let fixture = Fixture::new()?;
     let mut private = fixture.private.clone();
     private[..4].copy_from_slice(b"test");
-    let OpenedSource::Film(source) = stream::open_bytes("legacy.mka", fixture.mkv(&private).into()).unwrap() else {
+    let OpenedSource::Film(source) = stream::open_bytes("legacy.mka", fixture.mkv(&private)?.into()).unwrap() else {
         panic!("expected the legacy FLAC reader");
     };
     let decoded = source.audio(0, 16, RATE).unwrap();
     assert!(decoded.channels[0].iter().any(|&sample| sample != 0.0));
+    Ok(())
 }
