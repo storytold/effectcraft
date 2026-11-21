@@ -69,7 +69,7 @@ fn ref_decode_channel(p: &Psd, offset: usize, len: usize, w: usize, h: usize) ->
         }
         2 | 3 => {
             let rest = r.bytes(r.remaining())?;
-            let mut v = miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(rest, rowb * h).map_err(|e| Error::Invalid(format!("zip: {:?}", e.status)))?;
+            let mut v = craft_psd::compression::zip_decompress_up_to(rest, rowb * h).map_err(|e| Error::Invalid(e.to_string()))?;
             v.resize(rowb * h, 0);
             if comp == 3 {
                 ref_unpredict(p.depth, &mut v, w, h);
@@ -112,8 +112,7 @@ fn ref_composite(p: &Psd) -> Result<Pixels> {
         }
         2 | 3 => {
             let rest = r.bytes(r.remaining())?;
-            let v =
-                miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(rest, want * rowb * h).map_err(|e| Error::Invalid(format!("zip: {:?}", e.status)))?;
+            let v = craft_psd::compression::zip_decompress_up_to(rest, want * rowb * h).map_err(|e| Error::Invalid(e.to_string()))?;
             for (c, pl) in planes.iter_mut().enumerate().take(want) {
                 let mut plane = v.get(c * rowb * h..(c + 1) * rowb * h).ok_or(Error::Truncated)?.to_vec();
                 if comp == 3 {
