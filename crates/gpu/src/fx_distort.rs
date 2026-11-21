@@ -374,8 +374,9 @@ fn mosaic(e: &mut Enc, ctx: &EffectCtx, mut b: GBuf) -> Option<GBuf> {
     let ch = (h as f64 / vb as f64).max(1.0);
     let mut p = Params::default();
     if ctx.params.b("sharpColors") {
-        let centre = |i: usize, c: f64| (((i as f64 / c).floor() + 0.5) * c) as i64 as f32;
-        let data: Vec<f32> = (0..w).map(|x| centre(x, cw)).chain((0..h).map(|y| centre(y, ch))).collect();
+        // Each tile's last (bottom-right) pixel, as the CPU effect and After Effects' Sharp Colors.
+        let last = effectcraft_effects::mosaic_tile_last;
+        let data: Vec<f32> = (0..w).map(|x| last(x, hb, w) as f32).chain((0..h).map(|y| last(y, vb, h) as f32)).collect();
         p.u[0][0] = w as u32;
         let buf = e.data(&data);
         return run(e, "dst_mosaic_sharp", &p, b, Some(&buf));

@@ -979,8 +979,25 @@ mod tests {
         let avg = run_at("ec.stylize.mosaic", &[("horizontal", num(2.0)), ("vertical", num(1.0))], img.clone(), 0.0);
         // Left tile: the mean of x / 20 over x = 0..9 is 0.225.
         assert!((avg.img.get(3, 4)[0] - 0.225).abs() < 1e-4, "{:?}", avg.img.get(3, 4));
+        // Sharp Colors: each tile takes the colour of its bottom-right pixel, as in After Effects.
         let sharp = run_at("ec.stylize.mosaic", &[("horizontal", num(2.0)), ("vertical", num(1.0)), ("sharpColors", Value::Bool(true))], img.clone(), 0.0);
-        assert_eq!(sharp.img.get(3, 4), img.get(5, 5));
+        assert_eq!(sharp.img.get(3, 4), img.get(9, 9));
+        assert_eq!(sharp.img.get(12, 0), img.get(19, 9));
+    }
+
+    #[test]
+    fn mosaic_sharp_colors_tiles_end_on_whole_pixels() {
+        // 77 px in 70 tiles: tile 30 holds pixels 33..=34, tile 49 holds 53..=54. Floating-point
+        // tile edges picked 32 for x = 33 and 55 for x = 54.
+        assert_eq!(crate::mosaic_tile_last(33, 70, 77), 34);
+        assert_eq!(crate::mosaic_tile_last(54, 70, 77), 54);
+        // More tiles than pixels: every pixel is its own tile.
+        assert_eq!(crate::mosaic_tile_last(5, 40, 20), 5);
+        assert_eq!(crate::mosaic_tile_last(19, 7, 20), 19);
+        let img = ramp(77, 3);
+        let sharp = run_at("ec.stylize.mosaic", &[("horizontal", num(70.0)), ("vertical", num(1.0)), ("sharpColors", Value::Bool(true))], img.clone(), 0.0);
+        assert_eq!(sharp.img.get(33, 0), img.get(34, 2));
+        assert_eq!(sharp.img.get(54, 0), img.get(54, 2));
     }
 
     #[test]
