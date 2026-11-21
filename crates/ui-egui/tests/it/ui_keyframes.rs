@@ -467,6 +467,7 @@ fn graph_editor_buttons_that_do_not_fit_move_to_the_more_menu() {
         "snap",
         "reference",
         "transformBox",
+        "betweenFrames",
         "separateDimensions",
         "interpolationHold",
         "interpolationLinear",
