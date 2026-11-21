@@ -1026,3 +1026,57 @@ fn french_levels_channel_aliases_cover_every_item() {
     // "Alpha" needs no alias: the same word in both languages.
     assert_eq!(popup_alias("alpha"), None);
 }
+
+/// A parent id that names no layer is a link After Effects left behind (the high bit set, or the
+/// id of a layer since deleted); After Effects 26.5 shows such a layer with no parent, so the
+/// import does too, without reporting a lost link.
+#[test]
+fn a_parent_id_that_names_no_layer_is_no_parent() {
+    for stale in [0x8000_0000u32, 999] {
+        let bytes = mutate(&mut |c| {
+            if c.id == *b"ldta" {
+                set_data(c, 132, &stale.to_be_bytes());
+            }
+        });
+        let (p, r) = run(&bytes, true);
+        let r = r.unwrap_or_else(|e| panic!("parent id {stale:#x}: {e}"));
+        assert_eq!(losses(&r, LossCategory::ParentLinks), Vec::<String>::new(), "parent id {stale:#x}");
+        let comp = p.comp(r.comps[0]).unwrap();
+        assert!(comp.layers.iter().all(|l| l.parent.is_none()), "parent id {stale:#x}");
+    }
+}
+
+/// A layer whose header is unreadable but whose id (its first four bytes) is still there: its
+/// children report the lost parent link instead of silently losing it.
+#[test]
+fn a_child_of_a_layer_with_an_unreadable_header_reports_the_lost_link() {
+    let mut ids = Vec::new();
+    mutate(&mut |c| {
+        if c.id == *b"ldta"
+            && let Body::Data(d) = &c.body
+        {
+            ids.push(u32::from_be_bytes([d[0], d[1], d[2], d[3]]));
+        }
+    });
+    assert!(ids.len() >= 2, "{ids:?}");
+    let mut n = 0;
+    let bytes = mutate(&mut |c| {
+        if c.id == *b"ldta" {
+            if n == 0 {
+                // Only the id is left: too short for the header.
+                if let Body::Data(d) = &mut c.body {
+                    *d = d[..8].to_vec().into();
+                }
+            } else if n == 1 {
+                set_data(c, 132, &ids[0].to_be_bytes());
+            }
+            n += 1;
+        }
+    });
+    let (p, r) = run(&bytes, true);
+    let r = r.expect("import");
+    let lost = losses(&r, LossCategory::ParentLinks);
+    assert!(lost.iter().any(|l| l.contains("a layer whose header is unreadable")), "{lost:?}");
+    let comp = p.comp(r.comps[0]).unwrap();
+    assert!(comp.layers.iter().all(|l| l.parent.is_none()));
+}
