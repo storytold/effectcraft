@@ -2039,6 +2039,23 @@ fn middle_and_hand_drags_pan_the_viewer_and_the_pan_stays_after_release() {
     assert!((end[0] - after[0] + 50.0).abs() < 1.0 && (end[1] - after[1] + 30.0).abs() < 1.0, "{after:?} → {end:?}");
 }
 
+/// #3863: dragging right with the Zoom tool zooms in, left zooms out.
+#[test]
+fn zoom_tool_drag_scrubs_the_zoom() {
+    let mut h = harness();
+    h.state_mut().ui.tool = Tool::Zoom;
+    h.run_steps(2);
+    let c = rect(&h, "viewer.comp").center();
+    assert_eq!(h.state().ui.viewer.zoom, None, "starts fitted");
+    drag_with(&mut h, egui::PointerButton::Primary, c, c + vec2(150.0, 0.0));
+    let z1 = h.state().ui.viewer.zoom.unwrap_or(1.0);
+    assert!(z1 > 1.5, "the drag zooms in: {z1}");
+    let c = rect(&h, "viewer.comp").center();
+    drag_with(&mut h, egui::PointerButton::Primary, c, c - vec2(150.0, 0.0));
+    let z2 = h.state().ui.viewer.zoom.unwrap_or(1.0);
+    assert!(z2 < z1 * 0.75, "{z1} → {z2}");
+}
+
 /// #2854: a middle-drag over a layer pans the view and leaves the layer alone, selected or not,
 /// with any tool, and adds no undo step.
 #[test]
