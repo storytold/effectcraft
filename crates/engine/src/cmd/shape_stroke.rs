@@ -9,7 +9,7 @@ use effectcraft_project::{ItemId, Layer, LayerId, LayerSource, Node, PropGroup, 
 use effectcraft_time::Tick;
 use serde_json::{Value, json};
 
-use super::layer::color_p;
+use super::layer::color_opt_p;
 use super::shape_tool::{self, PaintKind};
 use super::{CommandSpec, bad, f_p, has_layers, layer_mut, layer_p, layers_p, merge_p};
 use crate::{EngineError, Result, Session, cmd};
@@ -428,8 +428,8 @@ fn fill_stroke(s: &mut Session, p: &Value) -> Result<Value> {
     if shapes.is_empty() {
         return Err(bad(c, "select a shape layer"));
     }
-    let rgba = |k: &str| color_p(p, k).map(|c| [c[0] as f64, c[1] as f64, c[2] as f64, 1.0]);
-    let (fill, stroke) = (rgba("fill"), rgba("stroke"));
+    let rgba = |k: &str| color_opt_p(p, k, c).map(|o| o.map(|v| [v[0] as f64, v[1] as f64, v[2] as f64, 1.0]));
+    let (fill, stroke) = (rgba("fill")?, rgba("stroke")?);
     let width = f_p(p, "strokeWidth").filter(|w| w.is_finite()).map(|w| w.max(0.0));
     let (fill_kind, stroke_kind) = (kind_p(p, "fillType", c)?, kind_p(p, "strokeType", c)?);
     let add_stroke = stroke_kind != Some(PaintKind::None) && width.map_or(stroke.is_some(), |w| w > 0.0);

@@ -36,7 +36,7 @@ impl Rgba {
     pub fn from_u8(r: u8, g: u8, b: u8) -> Rgba {
         rgba(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0)
     }
-    /// `#rrggbb` or `#rrggbbaa`.
+    /// `#rgb`, `#rrggbb` or `#rrggbbaa`.
     pub fn from_hex(s: &str) -> Option<Rgba> {
         let s = s.trim().trim_start_matches('#');
         let p = |i: usize| {
@@ -46,7 +46,17 @@ impl Rgba {
             }
             u8::from_str_radix(pair, 16).ok()
         };
+        // CSS-style three-digit form: each digit expands to a pair (#abc = #aabbcc), so a
+        // shorthand colour parses instead of falling back to a default (#3756).
+        let d = |i: usize| {
+            let b = *s.as_bytes().get(i)?;
+            if !b.is_ascii_hexdigit() {
+                return None;
+            }
+            Some((b as char).to_digit(16)? as u8 * 17)
+        };
         match s.len() {
+            3 => Some(Rgba::from_u8(d(0)?, d(1)?, d(2)?)),
             6 => Some(Rgba::from_u8(p(0)?, p(2)?, p(4)?)),
             8 => Some(Rgba { a: p(6)? as f32 / 255.0, ..Rgba::from_u8(p(0)?, p(2)?, p(4)?) }),
             _ => None,
@@ -325,5 +335,10 @@ mod tests {
         let c = Rgba::from_hex("#2D8CEB").unwrap();
         assert_eq!(c.to_hex(), "#2D8CEB");
         assert!(Rgba::from_hex("zz").is_none());
+        // Three-digit shorthand expands to pairs (#abc = #aabbcc).
+        assert_eq!(Rgba::from_hex("#fff"), Some(Rgba::WHITE));
+        assert_eq!(Rgba::from_hex("#aBc"), Some(Rgba::from_u8(0xAA, 0xBB, 0xCC)));
+        assert!(Rgba::from_hex("#ff").is_none());
+        assert!(Rgba::from_hex("#ffff").is_none());
     }
 }
