@@ -2245,6 +2245,9 @@ fn push_decoded(
     Ok(())
 }
 
+#[cfg(test)]
+mod rgb8_tests;
+
 fn to_craft_frame(vf: DecodedVideoFrame, presentation: FramePresentation, pts: Tick) -> Result<VideoFrame> {
     let FramePresentation { container_color, par: default_par, rotation, aperture } = presentation;
     let (mut width, mut height) = (vf.width(), vf.height());
@@ -2261,6 +2264,28 @@ fn to_craft_frame(vf: DecodedVideoFrame, presentation: FramePresentation, pts: T
     let (planes, alpha) = vf.into_planes();
 
     let data = match family {
+        ColorFamily::Rgb if color.range == Range::Full && planes.iter().chain(alpha.iter()).all(|p| p.bit_depth() == 8) => {
+            let luma = aperture.and_then(|clap| clean_aperture_region(clap, (width, height)));
+            if let Some(r) = luma {
+                (width, height) = (r.w as u32, r.h as u32);
+            }
+            let bytes = (width as usize)
+                .checked_mul(height as usize)
+                .and_then(|n| n.checked_mul(4))
+                .filter(|&n| n <= craft_frame::DEFAULT_MAX_FRAME_BYTES)
+                .ok_or_else(|| MediaError::Decode("RGB picture exceeds the frame buffer limit".into()))?;
+            let [r, g, b]: [Plane; 3] = planes.try_into().map_err(|_| MediaError::Decode("expected three RGB planes".into()))?;
+            let r = plane_u8(r, luma)?;
+            let g = plane_u8(g, luma)?;
+            let b = plane_u8(b, luma)?;
+            let alpha = alpha.map(|a| plane_u8(a, luma)).transpose()?.into_iter().flatten().chain(std::iter::repeat(255));
+            let mut rgba = Vec::new();
+            rgba.try_reserve_exact(bytes).map_err(|_| MediaError::Decode("could not allocate the RGB picture".into()))?;
+            for (((r, g), b), a) in r.into_iter().zip(g).zip(b).zip(alpha) {
+                rgba.extend_from_slice(&[r, g, b, a]);
+            }
+            PixelData::Rgba8(Arc::new(rgba))
+        }
         ColorFamily::YCbCr => {
             let chroma = match subsampling {
                 Subsampling::S420 => Chroma::C420,
@@ -2393,6 +2418,10 @@ fn rotate_frame(mut frame: VideoFrame, turns: u8) -> VideoFrame {
     let (w, h) = (frame.width as usize, frame.height as usize);
     let (nw, nh) = if turns % 2 == 1 { (frame.height, frame.width) } else { (frame.width, frame.height) };
     let data = match frame.data {
+        PixelData::Rgba8(pixels) => {
+            let rotated = rotate_plane(pixels.as_chunks::<4>().0, w, h, turns);
+            PixelData::Rgba8(Arc::new(rotated.into_flattened()))
+        }
         PixelData::Yuv8 { planes: [y, cb, cr], chroma, alpha } => {
             let (cw, ch, out_chroma) = match chroma {
                 Chroma::C420 => (w.div_ceil(2), h.div_ceil(2), Chroma::C420),
