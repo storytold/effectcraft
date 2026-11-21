@@ -480,6 +480,31 @@ fn region_of_interest_renders_and_crops() {
     assert_eq!(cropped.get(30, 50)[3], 1.0);
 }
 
+#[test]
+fn region_of_interest_crop_rejects_an_inactive_composition() {
+    let mut s = comp();
+    let active = s.active_comp_id().unwrap();
+    s.execute("comp.new", json!({"name": "Other", "width": 320, "height": 180, "frameRate": 30, "duration": 5})).unwrap();
+    let other = s.active_comp_id().unwrap();
+    assert_ne!(active, other);
+    s.open_comp(active);
+    let rect = [200.0, 100.0, 240.0, 160.0];
+    s.execute("view.setRegionOfInterest", json!({"rect": rect})).unwrap();
+    let before = s.project.clone();
+    let undo_steps = s.history.undo.len();
+
+    let error = s.execute("comp.cropToRegionOfInterest", json!({"comp": other.0})).unwrap_err();
+    assert!(matches!(error, crate::EngineError::BadParams { msg, .. } if msg.contains("active composition")));
+    assert!(s.project == before);
+    assert_eq!(s.history.undo.len(), undo_steps);
+    assert_eq!(s.state.region_of_interest, Some(rect));
+
+    s.execute("comp.cropToRegionOfInterest", json!({"comp": active.0})).unwrap();
+    let cropped = s.active_comp().unwrap();
+    assert_eq!((cropped.width, cropped.height), (240, 160));
+    assert_eq!(s.state.region_of_interest, None);
+}
+
 // ---------------------------------------------------------------- shape pen and vertices
 
 fn shape_path(s: &Session, lid: u64, uid: u64) -> effectcraft_keyframe::ShapePath {
