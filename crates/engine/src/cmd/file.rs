@@ -25,8 +25,16 @@ fn new_project(s: &mut Session, _: &Value) -> Result<Value> {
         s.update_sentinel();
         return Ok(json!({"template": tpl}));
     }
-    s.replace_project(Project::default(), None);
+    let mut proj = Project::default();
+    let notice = crate::ocio_project::seed_new_project(s.ocio_env.as_deref(), &s.prefs.project.default_ocio_config, &mut proj.settings);
+    s.replace_project(proj, None);
     s.update_sentinel();
+    if let Some(n) = &notice {
+        s.toast(n.clone());
+    }
+    if s.project.settings.color_engine == effectcraft_project::ColorEngine::Ocio || notice.is_some() {
+        return Ok(json!({"ocio": s.ocio_status(), "ocioNotice": notice}));
+    }
     Ok(Value::Null)
 }
 
@@ -75,12 +83,17 @@ pub(crate) fn open(s: &mut Session, p: &Value) -> Result<Value> {
             effectcraft_project::APP_VERSION
         ));
     }
+    // The OCIO config is read, never changed: a missing one falls back to the built-in config.
+    let ocio_notice = crate::ocio_project::notice(s.ocio_env.as_deref(), &s.project.settings, Some(&s.prefs.project.default_ocio_config));
+    if let Some(n) = &ocio_notice {
+        s.toast(n.clone());
+    }
     // Lazy open: footage is checked in the background (Progress panel), not before the
     // project shows.
     if s.check_footage_on_open {
         crate::footage_check::start(s, None, false)?;
     }
-    Ok(json!({"path": path, "savedBy": saved_by, "repaired": repaired}))
+    Ok(json!({"path": path, "savedBy": saved_by, "repaired": repaired, "ocio": s.ocio_status(), "ocioNotice": ocio_notice}))
 }
 
 /// The project file's text for `path`: `.ecproj` JSON, or XML for `.ecprojx` / `.xml` (a
@@ -641,7 +654,99 @@ pub(crate) fn data_footage(services: &dyn crate::Services, path: &str) -> Option
     })())
 }
 
+/// `file.projectSettings` ▸ `ocioConfig`, and the working space the active OCIO config allows
+/// (`before`: whether the project was OCIO-managed and its working space before this call).
+fn ocio_config_setting(
+    proj: &mut Project,
+    p: &Value,
+    env: Option<&str>,
+    before: (bool, Option<effectcraft_project::ColorSpace>),
+    notes: &mut Vec<String>,
+) -> Result<()> {
+    use crate::ocio_project::{self, Resolved};
+    use effectcraft_project::{ColorEngine, ColorSpace, HdrMode};
+    let cmd = "file.projectSettings";
+    let (was_ocio, ws_before) = before;
+    // Color ▸ OCIO Config. The form sends every field: an unchanged path is not chosen again.
+    let mut config_changed = false;
+    if let Some(v) = p.get("ocioConfig") {
+        let new = match v {
+            Value::Null => None,
+            Value::String(t) if t.trim().is_empty() => None,
+            Value::String(t) if t.contains(['\n', '\r']) => return Err(bad(cmd, "ocioConfig: a path to an .ocio file")),
+            Value::String(t) => Some(t.trim().to_string()),
+            _ => return Err(bad(cmd, "ocioConfig: a path to an .ocio file, or null to use the built-in config")),
+        };
+        if new != proj.settings.ocio_config {
+            if let Some(e) = env {
+                return Err(bad(cmd, format!("the OCIO environment variable is set ({e}) and overrides the project's OCIO config; unset it to choose one")));
+            }
+            // Choosing a config chooses the OCIO engine (the HDR default as for colorEngine).
+            if new.is_some() && proj.settings.color_engine != ColorEngine::Ocio {
+                proj.settings.color_engine = ColorEngine::Ocio;
+                if proj.settings.hdr == HdrMode::Clip {
+                    proj.settings.hdr = HdrMode::ToneMap;
+                }
+            }
+            proj.settings.ocio_config = new;
+            config_changed = true;
+        }
+    }
+    if proj.settings.ocio_config.is_some() && proj.settings.color_engine != ColorEngine::Ocio {
+        return Err(bad(cmd, "a project with an OCIO config uses the OCIO color engine: clear ocioConfig to use the adobe engine"));
+    }
+    if proj.settings.color_engine == ColorEngine::Ocio {
+        let switched = !was_ocio || config_changed;
+        let active = ocio_project::active(env, &proj.settings, None);
+        let ws_given = proj.settings.working_space != ws_before;
+        let aces_only = |proj: &effectcraft_project::Project| proj.settings.working_space.is_some_and(|w| w.is_linear());
+        match ocio_project::resolve(active.path.as_deref()) {
+            Resolved::BuiltIn => {
+                if switched && !aces_only(proj) {
+                    proj.settings.working_space = Some(ColorSpace::AcesCg);
+                }
+                if !aces_only(proj) {
+                    return Err(bad(cmd, "the OCIO built-in config's working spaces are acescg and aces2065"));
+                }
+            }
+            // Never blocks: the built-in config stands in (and its working spaces).
+            Resolved::Unreadable(e) => {
+                if !aces_only(proj) {
+                    proj.settings.working_space = Some(ColorSpace::AcesCg);
+                }
+                notes.push(format!("Can't read the OCIO config ({e}); using the built-in ACES config instead."));
+            }
+            Resolved::Refused(e) => {
+                if switched {
+                    return Err(bad(cmd, format!("can't use this OCIO config: {e}")));
+                }
+                if !aces_only(proj) {
+                    return Err(bad(cmd, "the OCIO built-in config's working spaces are acescg and aces2065"));
+                }
+                notes.push(format!("The OCIO config can't set the working space ({e}); the project keeps its working space."));
+            }
+            Resolved::Space(ws) => {
+                if switched {
+                    proj.settings.working_space = Some(ws);
+                } else if proj.settings.working_space != Some(ws) {
+                    if ws_given {
+                        return Err(bad(cmd, format!("the OCIO config's scene_linear space is {}: workingSpace must be {}", ws.label(), ws.id())));
+                    }
+                    notes.push(format!(
+                        "The OCIO config works in {}, but the project's working space is {}.",
+                        ws.label(),
+                        proj.settings.working_space.map_or("None", ColorSpace::label)
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn project_settings(s: &mut Session, p: &Value) -> Result<Value> {
+    let env = s.ocio_env.clone();
+    let mut notes: Vec<String> = vec![];
     s.edit("Project Settings", None, |proj, _| {
         if let Some(b) = str_p(p, "bitDepth") {
             proj.settings.bit_depth = match b {
@@ -665,6 +770,8 @@ fn project_settings(s: &mut Session, p: &Value) -> Result<Value> {
         }
         use effectcraft_project::{ColorEngine, ColorSpace, HdrMode};
         let cmd = "file.projectSettings";
+        let was_ocio = proj.settings.color_engine == ColorEngine::Ocio;
+        let ws_before = proj.settings.working_space;
         if let Some(e) = str_p(p, "colorEngine") {
             let engine = match e.to_ascii_lowercase().replace([' ', '-', '_'], "").as_str() {
                 "adobe" | "adobemanaged" | "builtin" => ColorEngine::Adobe,
@@ -700,9 +807,7 @@ fn project_settings(s: &mut Session, p: &Value) -> Result<Value> {
                 _ => return Err(bad(cmd, format!("workingGamma: 2.2|2.4, not `{g}`"))),
             };
         }
-        if proj.settings.color_engine == ColorEngine::Ocio && !proj.settings.working_space.is_some_and(|w| w.is_linear()) {
-            return Err(bad(cmd, "the OCIO built-in config's working spaces are acescg and aces2065"));
-        }
+        ocio_config_setting(proj, p, env.as_deref(), (was_ocio, ws_before), &mut notes)?;
         if let Some(h) = str_p(p, "hdr") {
             proj.settings.hdr = match h.to_ascii_lowercase().replace([' ', '-', '_'], "").as_str() {
                 "clip" | "off" | "none" => HdrMode::Clip,
@@ -743,7 +848,13 @@ fn project_settings(s: &mut Session, p: &Value) -> Result<Value> {
         }
         Ok(())
     })?;
-    Ok(serde_json::to_value(&s.project.settings).unwrap_or_default())
+    for n in &notes {
+        s.toast(n.clone());
+    }
+    let mut out = serde_json::to_value(&s.project.settings).unwrap_or_default();
+    out["ocio"] = s.ocio_status();
+    out["notes"] = json!(notes);
+    Ok(out)
 }
 
 /// Video Rendering and Effects: report or set the renderer (GPU Acceleration when a GPU
@@ -821,7 +932,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Project Settings...",
             ["File"],
             Some("Cmd+Alt+Shift+K"),
-            "{bitDepth?: 8|16|32, colorEngine?: adobe|ocio, workingSpace?: none|srgb|rec709|rec2020|p3|acescg|aces2065, workingGamma?: 2.2|2.4 (with no working space), linearize?, blendLinear?, hdr?: clip|compand|toneMap, outputSpace?: srgb|rec709|rec2020|p3|rec2100pq|rec2100hlg, renderer?: gpu|software, timeDisplay?: timecode|frames|feet35|feet16, frameStart?: 0|1 (Frame Count: Start at 0 / Start at 1)}",
+            "{bitDepth?: 8|16|32, colorEngine?: adobe|ocio, ocioConfig?: path to an .ocio file | null (the built-in config; choosing one selects the OCIO engine and the working space of its scene_linear role; refused while the OCIO environment variable overrides it; the result's `ocio` reports the active config, its source env|project|studioDefault|builtIn, and its displays, views and looks, not applied yet), workingSpace?: none|srgb|rec709|rec2020|p3|acescg|aces2065, workingGamma?: 2.2|2.4 (with no working space), linearize?, blendLinear?, hdr?: clip|compand|toneMap, outputSpace?: srgb|rec709|rec2020|p3|rec2100pq|rec2100hlg, renderer?: gpu|software, timeDisplay?: timecode|frames|feet35|feet16, frameStart?: 0|1 (Frame Count: Start at 0 / Start at 1)}",
             always,
             project_settings
         ),

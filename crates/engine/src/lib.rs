@@ -77,6 +77,7 @@ use interchange::{keyframe_text, keyframe_text_effects};
 pub use render_queue::{ExportJob, ExportResult, Exporter, JobState};
 pub use settings::autosave;
 pub use settings::config;
+pub use settings::ocio_project;
 pub use settings::prefs;
 pub use settings::shortcuts;
 pub use system::guard;
@@ -264,6 +265,10 @@ pub struct Session {
     /// event loop (the desktop app) turn this on; headless sessions run `footage.check` when
     /// they want it.
     pub check_footage_on_open: bool,
+    /// The `OCIO` environment variable, read by the host when the session is made (the engine
+    /// never reads the environment, so tests can set it): when set, the OCIO config of every
+    /// OCIO-managed project ([`ocio_project`]).
+    pub ocio_env: Option<String>,
     /// Footage paths that came from a document, with that document ([`doc_path`]).
     pub stored_paths: doc_path::StoredPaths,
     /// Each footage file's size and modification time when last seen (Settings ▸ Import ▸
@@ -405,6 +410,7 @@ impl Default for Session {
             next_task_id: 1,
             learn: None,
             check_footage_on_open: false,
+            ocio_env: None,
             stored_paths: Default::default(),
             footage_stamps: Default::default(),
             footage_reloads: Default::default(),

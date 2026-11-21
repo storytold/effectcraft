@@ -43,6 +43,7 @@ mod menu_cmds;
 mod model3d;
 mod models;
 mod motion_blur_depth;
+mod ocio_project;
 mod paint;
 mod panels;
 mod project_items;

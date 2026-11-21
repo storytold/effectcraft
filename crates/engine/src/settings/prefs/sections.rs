@@ -68,6 +68,9 @@ page!(ProjectPrefs {
     /// Open a template project for File ▸ New ▸ New Project.
     use_template: bool = false,
     template_path: String = String::new(),
+    /// Default OCIO Config: the `.ocio` file new projects (File ▸ New ▸ New Project) work with,
+    /// with the OCIO Color Engine. Empty: new projects use the Adobe-style engine.
+    default_ocio_config: String = String::new(),
     /// Write `.ecproj` files as compact JSON on one line (smaller, faster to save and open). Off:
     /// indented, one value per line, so they read and diff cleanly in version control.
     compact_project_files: bool = false,

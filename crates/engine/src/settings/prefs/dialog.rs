@@ -130,6 +130,10 @@ pub fn pages() -> Vec<Page> {
                 Section("New Project"),
                 s("project.useTemplate", "New Project Loads Template", B, true),
                 s("project.templatePath", "Template Project", Kind::Path, true),
+                s("project.defaultOcioConfig", "Default OCIO Config", Kind::Path, true),
+                Note(
+                    "New projects use this .ocio file with the OCIO color engine; its scene_linear role sets the working space. The OCIO environment variable, when set, overrides every project's config. Displays, views and looks of the config are not applied yet.",
+                ),
                 Section("Project Files"),
                 s("project.compactProjectFiles", "Save Compact Project Files", B, true),
                 Note(

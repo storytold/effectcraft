@@ -111,6 +111,8 @@ pub fn session() -> Session {
         helpers: helper_hooks(),
         plugin_previewer: effectcraft_plugin::wasm_available().then_some(effectcraft_plugin::preview as effectcraft_engine::PluginPreviewer),
         plugins_dir: config_dir().map(|d| d.join("Plug-ins")),
+        // OCIO-managed projects use the config `OCIO` names, as other OCIO applications do.
+        ocio_env: std::env::var("OCIO").ok().filter(|v| !v.trim().is_empty()),
         ..Default::default()
     };
     effectcraft_script::install(&mut s);
