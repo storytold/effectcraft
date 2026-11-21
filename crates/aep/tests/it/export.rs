@@ -15,6 +15,7 @@ mod remap;
 mod repairs;
 mod robustness;
 mod roundtrip;
+mod separate_dimensions;
 mod settings;
 mod shape_switch;
 mod stretch;
