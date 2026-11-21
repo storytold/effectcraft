@@ -21,8 +21,11 @@
 //!   - Shared (`craft-media::mxf` + `craft-video` + `MxfFile::read_pcm`): `H264`, `Hevc`, `Av1`,
 //!     `Vp9`, `Vp8`, `ProRes`, `Dnxhd`, `Mpeg2Video`; sound `Pcm` and `Aes3` (D-10).
 //!   - Fallback (`filmcraft-codecs`): compressed MXF sound or unsupported video codecs.
-//! - **Other containers (`AVI`, `MPEG-TS`/`PS`, `Ogg`, standalone `WAV`/`AIFF`/`FLAC`/`MP3`)**:
-//!   - Currently routed via `filmcraft-codecs` in `stream.rs` (pending subsequent cutover PRs).
+//! - **Other containers & standalone audio**:
+//!   - Shared (`craft_audio::Decoder` with `decode-native`): standalone `WAV`, `AIFF`, `MP3`/`MP2`/`MP1`,
+//!     `AAC` (ADTS), `AC-3`, and `Ogg` (`Opus`).
+//!   - Fallback (`filmcraft-codecs`): `AVI`, `MPEG-TS`/`PS`, `Ogg Vorbis`, `FLAC`, `CAF`, or
+//!     unsupported WAV/AIFF encodings.
 
 use std::sync::{Arc, Mutex};
 
@@ -79,7 +82,7 @@ fn looks_like_mxf(head: &[u8]) -> bool {
     head.windows(12).any(|w| w == [0x06, 0x0e, 0x2b, 0x34, 0x02, 0x05, 0x01, 0x01, 0x0d, 0x01, 0x02, 0x01])
 }
 
-/// Open an in-place ISO-BMFF, Matroska/WebM, or MXF source via `craft-media` / `craft-video`.
+/// Open an in-place ISO-BMFF, Matroska/WebM, MXF, or standalone audio source via `craft-media` / `craft-video` / `craft-audio`.
 /// Returns `None` when the container/codec/audio combination should fall back to `filmcraft-codecs`.
 #[cfg(any(unix, windows))]
 pub(crate) fn open_reader(name: &str, head: &[u8], reader: &SharedBytes) -> Option<Result<SharedSource>> {
@@ -92,10 +95,10 @@ pub(crate) fn open_reader(name: &str, head: &[u8], reader: &SharedBytes) -> Opti
     if looks_like_mxf(head) {
         return open_mxf(name, reader.clone());
     }
-    None
+    open_standalone_audio(name, head, reader.clone())
 }
 
-/// Open an in-memory ISO-BMFF, Matroska/WebM, or MXF source via `craft-media` / `craft-video`.
+/// Open an in-memory ISO-BMFF, Matroska/WebM, MXF, or standalone audio source via `craft-media` / `craft-video` / `craft-audio`.
 pub(crate) fn open_bytes(name: &str, bytes: Arc<[u8]>) -> Option<Result<SharedSource>> {
     if looks_like_isobmff(&bytes) {
         return open_isobmff(name, Arc::new(bytes));
@@ -106,7 +109,16 @@ pub(crate) fn open_bytes(name: &str, bytes: Arc<[u8]>) -> Option<Result<SharedSo
     if looks_like_mxf(&bytes) {
         return open_mxf(name, Arc::new(bytes));
     }
-    None
+    #[cfg(any(unix, windows))]
+    {
+        let head_len = <[u8]>::len(&bytes).min(64);
+        let head = bytes[..head_len].to_vec();
+        open_standalone_audio(name, &head, Arc::new(bytes))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        None
+    }
 }
 
 enum ContainerFile {
@@ -919,13 +931,7 @@ impl MediaSource for CraftMediaSource {
         }
 
         let native_rate = entry.native_rate;
-        let (native_start, native_frames) = if sample_rate == native_rate {
-            (start, frames)
-        } else {
-            let s0 = (i128::from(start) * i128::from(native_rate)) / i128::from(sample_rate);
-            let len = ((frames as u128 * u128::from(native_rate)).div_ceil(u128::from(sample_rate)) + 2) as usize;
-            (i64::try_from(s0).unwrap_or(0), len)
-        };
+        let (native_start, native_frames) = native_audio_window(start, frames, native_rate, sample_rate);
 
         let decoded = match &entry.backend {
             AudioBackend::Decoder { audio_starts, seek_preroll_samples, state: state_mutex } => {
@@ -977,24 +983,210 @@ impl MediaSource for CraftMediaSource {
             return Ok(AudioBuffer { sample_rate, channels: decoded });
         }
 
-        let mut resampled = vec![vec![0.0f32; frames]; channels_count];
-        let ratio = f64::from(native_rate) / f64::from(sample_rate);
-        for (c, out_ch) in resampled.iter_mut().enumerate() {
-            let in_ch = &decoded[c];
-            if in_ch.is_empty() {
-                continue;
-            }
-            for (i, dst) in out_ch.iter_mut().enumerate() {
-                let pos = i as f64 * ratio;
-                let idx = pos.floor() as usize;
-                let frac = (pos - idx as f64) as f32;
-                let s0 = in_ch.get(idx).copied().unwrap_or(0.0);
-                let s1 = in_ch.get(idx + 1).copied().unwrap_or(s0);
-                *dst = s0 + (s1 - s0) * frac;
+        Ok(AudioBuffer { sample_rate, channels: resample_audio(&decoded, channels_count, native_rate, sample_rate, frames) })
+    }
+}
+
+#[cfg(any(unix, windows))]
+struct SharedBytesSource(SharedBytes);
+
+#[cfg(any(unix, windows))]
+impl ByteSource for SharedBytesSource {
+    fn len(&self) -> u64 {
+        self.0.len()
+    }
+
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<()> {
+        self.0.read_at(offset, buf)
+    }
+}
+
+#[cfg(any(unix, windows))]
+struct StandaloneAudioState {
+    decoder: craft_audio::Decoder<'static>,
+    decoded_pos: i64,
+    buf: Vec<Vec<f32>>,
+}
+
+#[cfg(any(unix, windows))]
+struct StandaloneAudioSource {
+    info: MediaInfo,
+    native_rate: u32,
+    state: Mutex<StandaloneAudioState>,
+}
+
+#[cfg(any(unix, windows))]
+impl MediaSource for StandaloneAudioSource {
+    fn info(&self) -> &MediaInfo {
+        &self.info
+    }
+
+    fn video_frame(&self, _req: FrameRequest) -> Result<Arc<VideoFrame>> {
+        Err(MediaError::NoStream("video"))
+    }
+
+    fn audio(&self, start: i64, frames: usize, sample_rate: u32) -> Result<AudioBuffer> {
+        self.audio_stream(0, start, frames, sample_rate)
+    }
+
+    fn audio_stream(&self, stream: usize, start: i64, frames: usize, sample_rate: u32) -> Result<AudioBuffer> {
+        if stream != 0 {
+            return Err(MediaError::NoStream("audio"));
+        }
+        let channels_count = self.info.audio_streams.first().map_or(2, |s| s.channels as usize);
+        if frames == 0 || sample_rate == 0 {
+            return Ok(AudioBuffer::new(sample_rate, channels_count as u16, frames));
+        }
+        let native_rate = self.native_rate;
+        let (native_start, native_frames) = native_audio_window(start, frames, native_rate, sample_rate);
+
+        let mut state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let decoded = decode_standalone_range(native_rate, channels_count, &mut state, native_start, native_frames)?;
+        if sample_rate == native_rate {
+            return Ok(AudioBuffer { sample_rate, channels: decoded });
+        }
+        Ok(AudioBuffer { sample_rate, channels: resample_audio(&decoded, channels_count, native_rate, sample_rate, frames) })
+    }
+}
+
+#[cfg(any(unix, windows))]
+fn decode_standalone_range(native_rate: u32, channels_count: usize, state: &mut StandaloneAudioState, start: i64, frames: usize) -> Result<Vec<Vec<f32>>> {
+    let end = start.saturating_add(frames as i64);
+    if end <= 0 {
+        return Ok(vec![vec![0.0f32; frames]; channels_count]);
+    }
+
+    let buf_len = state.buf.first().map_or(0, Vec::len) as i64;
+    let buf_end = state.decoded_pos.saturating_add(buf_len);
+    if start < state.decoded_pos || start > buf_end + i64::from(native_rate) * 2 {
+        let target = u64::try_from(start.max(0)).unwrap_or(0);
+        let actual = state.decoder.seek(target).map_err(|e| MediaError::Decode(e.to_string()))?;
+        state.decoded_pos = i64::try_from(actual).unwrap_or(i64::MAX);
+        for ch in &mut state.buf {
+            ch.clear();
+        }
+    }
+
+    if state.buf.len() != channels_count {
+        state.buf = vec![Vec::new(); channels_count];
+    }
+
+    while state.decoded_pos + state.buf.first().map_or(0, Vec::len) as i64 <= end {
+        if filmcraft_media::cancel::cancelled() {
+            return Err(MediaError::Cancelled);
+        }
+        let Some(block) = state.decoder.next_block().map_err(|e| MediaError::Decode(e.to_string()))? else {
+            break;
+        };
+        for (c, ch) in state.buf.iter_mut().enumerate() {
+            if let Some(src_ch) = block.channels.get(c) {
+                ch.extend_from_slice(src_ch);
             }
         }
-        Ok(AudioBuffer { sample_rate, channels: resampled })
     }
+
+    Ok(drain_audio_window(&mut state.buf, &mut state.decoded_pos, channels_count, start, frames))
+}
+
+fn native_audio_window(start: i64, frames: usize, native_rate: u32, sample_rate: u32) -> (i64, usize) {
+    if sample_rate == native_rate {
+        return (start, frames);
+    }
+    let s0 = (i128::from(start) * i128::from(native_rate)) / i128::from(sample_rate);
+    let len = ((frames as u128 * u128::from(native_rate)).div_ceil(u128::from(sample_rate)) + 2) as usize;
+    (i64::try_from(s0).unwrap_or(0), len)
+}
+
+fn drain_audio_window(buf: &mut [Vec<f32>], decoded_pos: &mut i64, channels_count: usize, start: i64, frames: usize) -> Vec<Vec<f32>> {
+    let mut out = vec![vec![0.0f32; frames]; channels_count];
+    let avail = buf.first().map_or(0, Vec::len);
+    for i in 0..frames {
+        let pos = start.saturating_add(i as i64);
+        if pos >= *decoded_pos {
+            let off = (pos - *decoded_pos) as usize;
+            if off < avail {
+                for (c, out_ch) in out.iter_mut().enumerate() {
+                    out_ch[i] = buf[c][off];
+                }
+            }
+        }
+    }
+    let end = start.saturating_add(frames as i64);
+    let drop_to = (end - *decoded_pos).max(0) as usize;
+    let trim = drop_to.min(avail);
+    if trim > 0 {
+        for ch in buf {
+            ch.drain(..trim);
+        }
+        *decoded_pos = decoded_pos.saturating_add(trim as i64);
+    }
+    out
+}
+
+fn resample_audio(decoded: &[Vec<f32>], channels_count: usize, native_rate: u32, sample_rate: u32, frames: usize) -> Vec<Vec<f32>> {
+    let mut resampled = vec![vec![0.0f32; frames]; channels_count];
+    let ratio = f64::from(native_rate) / f64::from(sample_rate);
+    for (c, out_ch) in resampled.iter_mut().enumerate() {
+        let in_ch = &decoded[c];
+        if in_ch.is_empty() {
+            continue;
+        }
+        for (i, dst) in out_ch.iter_mut().enumerate() {
+            let pos = i as f64 * ratio;
+            let idx = pos.floor() as usize;
+            let frac = (pos - idx as f64) as f32;
+            let s0 = in_ch.get(idx).copied().unwrap_or(0.0);
+            let s1 = in_ch.get(idx + 1).copied().unwrap_or(s0);
+            *dst = s0 + (s1 - s0) * frac;
+        }
+    }
+    resampled
+}
+
+#[cfg(any(unix, windows))]
+fn open_standalone_audio(name: &str, head: &[u8], source: SharedBytes) -> Option<Result<SharedSource>> {
+    let ext = std::path::Path::new(name).extension().and_then(|e| e.to_str());
+    let container = craft_audio::detect_container(head, ext)?;
+    let container_name = match container {
+        craft_audio::Container::Wav => "wav",
+        craft_audio::Container::Aiff => "aiff",
+        craft_audio::Container::MpegAudio => "mp3",
+        craft_audio::Container::Adts => "aac",
+        craft_audio::Container::Ac3 => "ac3",
+        craft_audio::Container::Ogg => "ogg",
+        _ => return None,
+    };
+
+    let dec = craft_audio::Decoder::open(SharedBytesSource(source.clone()), ext, &craft_audio::DecodeOptions::default()).ok()?;
+    let audio_info = if dec.length_known() {
+        dec.info().clone()
+    } else {
+        craft_audio::Decoder::open(SharedBytesSource(source.clone()), ext, &craft_audio::DecodeOptions::default()).ok()?.probe().ok()?
+    };
+
+    let native_rate = audio_info.sample_rate.max(1);
+    let channels = u32::from(audio_info.channels).max(1);
+    let duration = Tick::from_units(i64::try_from(audio_info.frames).unwrap_or(i64::MAX), i64::from(native_rate));
+    let bits_per_sample = match audio_info.sample_format {
+        craft_audio::SampleFormat::Int8 => Some(8),
+        craft_audio::SampleFormat::Int16 => Some(16),
+        craft_audio::SampleFormat::Int24 => Some(24),
+        craft_audio::SampleFormat::Int32 | craft_audio::SampleFormat::Float32 => Some(32),
+        craft_audio::SampleFormat::Float64 => Some(64),
+        craft_audio::SampleFormat::Compressed | _ => None,
+    };
+    let info = MediaInfo {
+        name: name.to_string(),
+        kind: MediaKind::AudioOnly,
+        duration,
+        video: None,
+        audio_streams: vec![AudioStreamInfo { sample_rate: native_rate, channels, codec: audio_info.codec.name().to_string(), bits_per_sample }],
+        container: container_name.to_string(),
+        start_timecode: None,
+        file_size: Some(source.len()),
+    };
+
+    Some(Ok(Arc::new(StandaloneAudioSource { info, native_rate, state: Mutex::new(StandaloneAudioState { decoder: dec, decoded_pos: 0, buf: Vec::new() }) })))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1010,10 +1202,9 @@ fn decode_audio_range(
     start: i64,
     frames: usize,
 ) -> Result<Vec<Vec<f32>>> {
-    let mut out = vec![vec![0.0f32; frames]; channels_count];
     let end = start.saturating_add(frames as i64);
     if end <= 0 {
-        return Ok(out);
+        return Ok(vec![vec![0.0f32; frames]; channels_count]);
     }
 
     let buf_len = state.buf.first().map_or(0, Vec::len) as i64;
@@ -1077,29 +1268,7 @@ fn decode_audio_range(
         }
     }
 
-    let avail = state.buf.first().map_or(0, Vec::len);
-    for i in 0..frames {
-        let pos = start.saturating_add(i as i64);
-        if pos >= state.decoded_pos {
-            let off = (pos - state.decoded_pos) as usize;
-            if off < avail {
-                for (c, out_ch) in out.iter_mut().enumerate() {
-                    out_ch[i] = state.buf[c][off];
-                }
-            }
-        }
-    }
-
-    let drop_to = (end - state.decoded_pos).max(0) as usize;
-    let trim = drop_to.min(avail);
-    if trim > 0 {
-        for ch in &mut state.buf {
-            ch.drain(..trim);
-        }
-        state.decoded_pos = state.decoded_pos.saturating_add(trim as i64);
-    }
-
-    Ok(out)
+    Ok(drain_audio_window(&mut state.buf, &mut state.decoded_pos, channels_count, start, frames))
 }
 
 fn push_decoded(
@@ -1802,6 +1971,49 @@ mod tests {
         assert_eq!(src.info().container, "mxf");
         assert_eq!(src.info().audio_streams.len(), 1);
         assert!(open_bytes("op1a.mxf", Arc::from(vec![0u8; 4])).is_none());
+    }
+
+    #[test]
+    fn standalone_wav_opens_seeks_and_resamples_via_craft_audio() {
+        // Minimal 48 kHz stereo 16-bit PCM WAV with 4800 frames (0.1s).
+        let frames = 4800u32;
+        let data_bytes = frames * 4;
+        let mut wav = Vec::with_capacity(44 + data_bytes as usize);
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + data_bytes).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&48_000u32.to_le_bytes());
+        wav.extend_from_slice(&(48_000u32 * 4).to_le_bytes());
+        wav.extend_from_slice(&4u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&data_bytes.to_le_bytes());
+        for i in 0..frames * 2 {
+            let s = (((i as i32 * 257) % 16000) - 8000) as i16;
+            wav.extend_from_slice(&s.to_le_bytes());
+        }
+
+        let src = open_bytes("tone.wav", Arc::from(wav)).expect("recognized").expect("opened");
+        let info = src.info();
+        assert_eq!(info.container, "wav");
+        assert_eq!(info.kind, MediaKind::AudioOnly);
+        assert_eq!(info.audio_streams[0].sample_rate, 48_000);
+        assert_eq!(info.audio_streams[0].bits_per_sample, Some(16));
+
+        let head = src.audio(0, 512, 48_000).expect("head");
+        assert_eq!(head.channels[0].len(), 512);
+        let tail = src.audio(4000, 512, 48_000).expect("forward seek");
+        assert!(tail.channels[0].iter().any(|&v| v.abs() > 0.01));
+        let back = src.audio(0, 512, 48_000).expect("backward seek");
+        assert_eq!(head.channels[0], back.channels[0]);
+        let neg = src.audio(-50, 100, 48_000).expect("negative start");
+        assert!(neg.channels[0][..50].iter().all(|&v| v == 0.0));
+        let resampled = src.audio(0, 256, 44_100).expect("resampled");
+        assert_eq!(resampled.sample_rate, 44_100);
+        assert_eq!(resampled.channels[0].len(), 256);
     }
 
     /// 1024-sample frames at 48 kHz stamped to the nearest millisecond, then back in samples.
