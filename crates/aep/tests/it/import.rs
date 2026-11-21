@@ -14,6 +14,7 @@ mod cryptomatte;
 mod ease_round2;
 mod effects;
 mod effects_batch5;
+mod effects_checkerboard;
 mod effects_quickwins;
 mod effects_round2;
 mod effects_round3;
