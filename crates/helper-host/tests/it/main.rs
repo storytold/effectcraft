@@ -127,6 +127,10 @@ impl Provider for FakeProvider {
                 .collect();
         (v, vec!["fake helper: a warning".into()])
     }
+    fn time_invariant(&self, effect: &dyn EffectPlugin) -> bool {
+        // echo opts in too, but reads other times, so it stays keyed on time
+        ["org.test.helper.invert", "org.test.helper.echo"].contains(&effect.manifest().id.as_str())
+    }
 }
 
 /// The host side of a render in these checks: the input at any time is a flat grey of that
@@ -202,8 +206,9 @@ fn run_checks() -> bool {
     all &= check("scan registers the helper's effects", loaded == 6, &r);
     all &= check("helper warnings are reported", r["errors"].to_string().contains("a warning"), &r);
     all &= check(
-        "time_varying reaches the render cache",
-        effectcraft_effects::is_time_dependent("org.test.helper.echo") && !effectcraft_effects::is_time_dependent("org.test.helper.invert"),
+        "only effects that say time_invariant are reused across times",
+        !effectcraft_effects::is_time_dependent("org.test.helper.invert")
+            && ["echo", "pad", "noisy"].iter().all(|n| effectcraft_effects::is_time_dependent(&format!("org.test.helper.{n}"))),
         (),
     );
     all &= check(

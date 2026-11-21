@@ -43,6 +43,13 @@ pub trait Provider {
     fn wants_padding(&self, _effect: &dyn EffectPlugin) -> bool {
         true
     }
+    /// Whether `effect`'s output depends only on its input and parameter values at the render's
+    /// time (see [`RemoteEffect::time_invariant`]), so EffectCraft may reuse a static layer's
+    /// frame. Default false: the layer renders every frame. Ignored for an effect that reads
+    /// other times.
+    fn time_invariant(&self, _effect: &dyn EffectPlugin) -> bool {
+        false
+    }
     /// The effect instance is gone.
     fn destroy(&mut self, _instance: u64) {}
 }
@@ -104,7 +111,11 @@ impl Server<'_> {
         let mut effects = vec![];
         for e in list {
             let manifest = e.manifest().clone();
-            effects.push(RemoteEffect { padding: self.provider.wants_padding(e.as_ref()), time_varying: e.reads_other_times(), manifest: manifest.clone() });
+            effects.push(RemoteEffect {
+                padding: self.provider.wants_padding(e.as_ref()),
+                time_invariant: self.provider.time_invariant(e.as_ref()) && !e.reads_other_times(),
+                manifest: manifest.clone(),
+            });
             self.effects.insert(manifest.id, e);
         }
         self.send(&Reply::Effects { effects, errors })
