@@ -573,6 +573,42 @@ fn mov_pcm_edit_lists_preserve_first_read_and_seek_timing() {
 }
 
 #[test]
+fn mov_pcm_edit_list_unequal_clocks_saturate_preserving_sign() {
+    use craft_media::isobmff::{Brand, Edit, FourCc, Mp4Writer, PcmConfig, SampleEntry, TrackConfig, WriteSample, WriterOptions};
+    use craft_video::prores::{ChromaFormat, Encoder, Frame, Profile};
+
+    const TRACK_TIMESCALE: u32 = 1_000;
+    const AUDIO_RATE: u32 = 48_000;
+    let samples: Vec<[i16; 2]> = (0..4_800).map(|i| [4000 + (i % 127) as i16 * 32, -4000 - (i % 127) as i16 * 32]).collect();
+    let profile = Profile::Hq;
+    let mut encoder = Encoder::new(profile, 16, 16);
+    let packet = encoder.encode(&Frame::new(16, 16, ChromaFormat::Yuv422, 10, false).unwrap()).unwrap();
+
+    // Unequal clocks (1000 Hz track timescale vs 48 kHz audio sample rate) with a large leading
+    // empty edit whose scaled sample position overflows i64 positively.
+    let mut writer = Mp4Writer::new(std::io::Cursor::new(Vec::new()), WriterOptions::new(Brand::Mov)).unwrap();
+    let video = writer.add_track(TrackConfig::new(SampleEntry::prores(FourCc(profile.fourcc()), 16, 16), 24)).unwrap();
+    let pcm = PcmConfig { bits: 16, float: false, big_endian: false, signed: true, channels: 2, sample_rate: f64::from(AUDIO_RATE) };
+    let mut audio_config = TrackConfig::new(SampleEntry::pcm(pcm), TRACK_TIMESCALE);
+    audio_config.edits.push(Edit { segment_duration: (i64::MAX / 2) as u64, media_time: -1, media_rate: 0x0001_0000 });
+    audio_config.edits.push(Edit { segment_duration: 100, media_time: 0, media_rate: 0x0001_0000 });
+    let audio = writer.add_track(audio_config).unwrap();
+    writer.write_sample(video, WriteSample { data: &packet, duration: 24, composition_offset: 0, is_sync: true }).unwrap();
+    for chunk in samples.chunks(240) {
+        let data: Vec<u8> = chunk.iter().flat_map(|frame| frame.iter().flat_map(|s| s.to_le_bytes())).collect();
+        writer.write_sample(audio, WriteSample { data: &data, duration: 5, composition_offset: 0, is_sync: true }).unwrap();
+    }
+    let bytes: Arc<[u8]> = writer.finish().unwrap().into_inner().into();
+    let footage = probe_bytes("unequal-clocks-overflow.mov", bytes.clone()).expect("probe MOV");
+    let pool = MediaPool::new();
+    pool.add_bytes("unequal-clocks-overflow.mov", bytes);
+
+    let got = pool.audio_samples(&footage, Tick::ZERO, 1024, AUDIO_RATE);
+    assert_eq!(got.len(), 2048);
+    assert!(got.iter().all(|&s| s == 0.0), "overflowing leading edit must stay silent at t=0");
+}
+
+#[test]
 fn vp9_webm_frames() {
     let Some(p) = vp9_webm() else { return };
     let f = probe(&p).expect("probe");

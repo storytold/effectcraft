@@ -148,7 +148,7 @@ impl ContainerFile {
             ContainerFile::Isobmff(f) => {
                 let track = &f.tracks[track_idx];
                 let t_track = (i128::from(start.max(0)) * i128::from(track.timescale)) / i128::from(native_rate);
-                let sample_idx = track.sample_at_presentation_time(i64::try_from(t_track).unwrap_or(0)).unwrap_or(0);
+                let sample_idx = track.sample_at_presentation_time(i64::try_from(t_track).unwrap_or(i64::MAX)).unwrap_or(0);
                 // Back up a few packets for AAC/Opus overlap/preroll.
                 let seek_idx = sample_idx.saturating_sub(2);
                 (seek_idx, isobmff_audio_position(track, seek_idx, native_rate))
@@ -175,7 +175,8 @@ impl ContainerFile {
 /// Using the same signed position on open and seek preserves edit-list trim and leading silence.
 fn isobmff_audio_position(track: &isobmff::Track, sample_idx: usize, native_rate: u32) -> i64 {
     let pts = track.presentation_pts(sample_idx).unwrap_or(0);
-    i64::try_from((i128::from(pts) * i128::from(native_rate)) / i128::from(track.timescale.max(1))).unwrap_or(0)
+    let scaled = (i128::from(pts) * i128::from(native_rate)) / i128::from(track.timescale.max(1));
+    i64::try_from(scaled).unwrap_or(if scaled < 0 { i64::MIN } else { i64::MAX })
 }
 
 fn open_audio_tracks<I>(container: &ContainerFile, source: &dyn ByteSource, candidates: I) -> Option<(Vec<AudioTrackEntry>, Vec<AudioStreamInfo>)>
