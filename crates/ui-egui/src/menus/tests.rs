@@ -549,7 +549,7 @@ fn every_import_item_asks_through_the_shared_dialog_path() {
 }
 
 #[test]
-fn tga_is_available_in_import_replace_and_proxy_dialogs() {
+fn tga_is_available_in_import_replace_and_proxy_and_pcraft_in_import_replace() {
     use std::sync::{Arc, Mutex};
     let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
     let ctx = egui::Context::default();
@@ -560,6 +560,9 @@ fn tga_is_available_in_import_replace_and_proxy_dialogs() {
         assert_eq!(invoke(&mut app, &ctx, command, json!({})).unwrap(), json!({"dialog": command}));
         let crate::FileDialog::Open { exts, .. } = pending.lock().unwrap().pop().unwrap() else { panic!("not an open dialog") };
         assert!(exts.iter().any(|ext| ext == "tga"), "{command}: {exts:?}");
+        if command != "file.setProxy" {
+            assert!(exts.iter().any(|ext| ext == "pcraft"), "{command}: {exts:?}");
+        }
     }
 }
 
