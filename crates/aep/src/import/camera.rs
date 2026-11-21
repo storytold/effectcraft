@@ -1,8 +1,9 @@
-//! Camera and light options (docs/aep-format.md 3.12; cases 251-256, 341-345, 535-537).
+//! Camera and light options (docs/aep-format.md 3.12; cases 251-256, 341-345, 535-537) and the
+//! Material Options of a layer.
 //!
 //! The transform of a camera or light goes through [`crate::import::props::import_transform`] (the point
-//! of interest is the Anchor Point record, in pixels); this module imports the Camera Options and
-//! Light Options groups. A property is imported from its record (static value or keys, and an
+//! of interest is the Anchor Point record, in pixels); this module imports the Camera Options,
+//! Light Options and Material Options groups. A property is imported from its record (static value or keys, and an
 //! expression); a stored property that is not mapped is reported.
 
 use crate::{Layer as AepLayer, PropGroup as AepGroup, PropNode};
@@ -27,13 +28,33 @@ const CAMERA: [(&str, &str, Kind); 4] = [
 ];
 
 /// Light Options of a spot or point light (254, 343-345). Every light stores Casts Shadows as a
-/// set record holding 0 (off, 252, 254, 255).
-const LIGHT: [(&str, &str, Kind); 5] = [
+/// set record holding 0 (off, 252, 254, 255). Shadow Darkness and Diffusion are stored as shown
+/// (percent and pixels: 70 and 10 in the lab file `material_options`).
+const LIGHT: [(&str, &str, Kind); 7] = [
     ("ADBE Casts Shadows", "castsShadows", Kind::EffectBool),
     ("ADBE Light Intensity", "intensity", Kind::Number),
     ("ADBE Light Color", "color", Kind::EffectColor),
     ("ADBE Light Cone Angle", "coneAngle", Kind::Number),
     ("ADBE Light Cone Feather 2", "coneFeather", Kind::Number),
+    ("ADBE Light Shadow Darkness", "shadowDarkness", Kind::Number),
+    ("ADBE Light Shadow Diffusion", "shadowDiffusion", Kind::Number),
+];
+
+/// Material Options of a layer (lab file `material_options`, After Effects 2026: one property set
+/// on each layer). Casts Shadows and Accepts Shadows are stored 0-based (0 Off, 1 On, 2 Only),
+/// Accepts Lights 0 when off, the others as shown (percent). The properties in the default state
+/// (Shadow Color, Appears in Reflections and the Advanced 3D reflection and transparency values)
+/// hold nothing and are skipped.
+const MATERIAL: [(&str, &str, Kind); 9] = [
+    ("ADBE Casts Shadows", "castsShadows", Kind::Enum(3)),
+    ("ADBE Light Transmission", "lightTransmission", Kind::Number),
+    ("ADBE Accepts Shadows", "acceptsShadows", Kind::Enum(3)),
+    ("ADBE Accepts Lights", "acceptsLights", Kind::EffectBool),
+    ("ADBE Ambient Coefficient", "ambient", Kind::Number),
+    ("ADBE Diffuse Coefficient", "diffuse", Kind::Number),
+    ("ADBE Specular Coefficient", "specularIntensity", Kind::Number),
+    ("ADBE Shininess Coefficient", "specularShininess", Kind::Number),
+    ("ADBE Metal Coefficient", "metal", Kind::Number),
 ];
 
 /// Imports the Camera Options of `layer` into `options` (the layer's `cameraOptions` group).
@@ -67,6 +88,12 @@ pub(crate) fn import_light_options(layer: &AepLayer<'_, '_>, what: &str, tm: &Ti
     import_group(&group, &LIGHT, what, tm, options, col);
 }
 
+/// Imports the Material Options of `layer` into `options` (the layer's `materialOptions` group).
+pub(crate) fn import_material_options(layer: &AepLayer<'_, '_>, what: &str, tm: &TimeMap, options: &mut PropGroup, col: &mut Collector) {
+    let Some(PropNode::Group(group)) = layer.properties().and_then(|p| p.get("ADBE Material Options Group")) else { return };
+    import_group(&group, &MATERIAL, what, tm, options, col);
+}
+
 /// A record that holds something: keys, a set value (`tdsb` 1) or an expression. Point lights
 /// store their cone as `tdsb` 3 records with the defaults (252), which hold nothing.
 fn is_stored(p: &crate::Property<'_, '_>) -> bool {
@@ -98,7 +125,7 @@ fn import_group(group: &AepGroup<'_, '_>, table: &[(&str, &str, Kind)], what: &s
             continue;
         };
         if node.is_animated() {
-            if kind == Kind::EffectBool {
+            if matches!(kind, Kind::EffectBool | Kind::Enum(_)) {
                 col.lose(LossCategory::TransformProperties, format!("{what}: the keyframes of {name} are not imported (not sampled)"));
             } else {
                 import_keys(&node, kind, what, name, tm, prop, col);

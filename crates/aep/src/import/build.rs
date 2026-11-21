@@ -18,7 +18,7 @@ use effectcraft_project::{
 use effectcraft_time::Tick;
 
 use crate::import::ImportOptions;
-use crate::import::camera::{import_camera_options, import_light_options};
+use crate::import::camera::{import_camera_options, import_light_options, import_material_options};
 use crate::import::effects::{LayerCtx, PendingLayerRef, import_effects, resolve_layer_refs};
 use crate::import::markers::{import_markers, import_time_remap, insert_time_remap};
 use crate::import::masks::{MaskLayer, import_masks};
@@ -653,14 +653,7 @@ fn build_layers(project: &mut Project, cx: &mut Ctx<'_>, defs: &EffectDefinition
             // one-node camera does not (251, 256).
             l.auto_orient = camera_light_orient(h.is_auto_oriented(), light);
         }
-        if is_camera && let Some(options) = l.props.sub_mut("cameraOptions") {
-            import_camera_options(&layer, &what, comp.width, &tm, options, &mut cx.col);
-        }
-        if light.is_some()
-            && let Some(options) = l.props.sub_mut("lightOptions")
-        {
-            import_light_options(&layer, &what, &tm, options, &mut cx.col);
-        }
+        import_options(&mut l, &layer, &what, (is_camera, light.is_some()), comp.width, &tm, &mut cx.col);
         if is_shape && let Some(contents) = l.props.sub_mut("contents") {
             import_shapes(&layer, &what, &tm, &mut Ids(&mut project.next_id), contents, &mut cx.col);
         }
@@ -722,6 +715,22 @@ fn build_layers(project: &mut Project, cx: &mut Ctx<'_>, defs: &EffectDefinition
 
 /// The Source Text of a text layer from its text document and its expression, and the reports
 /// of what is not imported.
+/// The Camera Options of a camera, the Light Options of a light and the Material Options of a
+/// layer; `(camera, light)` say which of the first two the layer is.
+fn import_options(l: &mut Layer, layer: &AepLayer<'_, '_>, what: &str, (camera, light): (bool, bool), comp_width: u32, tm: &TimeMap, col: &mut Collector) {
+    if camera && let Some(options) = l.props.sub_mut("cameraOptions") {
+        import_camera_options(layer, what, comp_width, tm, options, col);
+    }
+    if light && let Some(options) = l.props.sub_mut("lightOptions") {
+        import_light_options(layer, what, tm, options, col);
+    }
+    // Every layer stores the group; only those with Material Options in EffectCraft (solid,
+    // footage, precomp, text and shape layers) take it.
+    if let Some(options) = l.props.sub_mut("materialOptions") {
+        import_material_options(layer, what, tm, options, col);
+    }
+}
+
 fn import_source_text(l: &mut Layer, layer: &AepLayer<'_, '_>, what: &str, cx: &mut Ctx<'_>) {
     match layer.text_document() {
         Some(doc) => {
