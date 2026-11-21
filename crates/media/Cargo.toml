@@ -33,7 +33,7 @@ craft-frame = { workspace = true }
 craft-media = { workspace = true, features = ["mpegts", "avi", "mxf"] }
 craft-media-source = { workspace = true }
 craft-time = { workspace = true }
-craft-video = { workspace = true, features = ["h264-decode", "hevc-decode", "vp9-decode", "vp8-decode", "av1-decode", "prores", "dnx", "mpeg2-decode", "threads"] }
+craft-video = { workspace = true, features = ["h264-decode", "hevc-decode", "vp9-decode", "vp8-decode", "av1-decode", "prores", "dnx", "mpeg2-decode", "ffv1", "apv-decode", "threads"] }
 filmcraft-frame = { workspace = true }
 filmcraft-color = { workspace = true }
 filmcraft-time = { workspace = true }
