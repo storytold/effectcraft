@@ -997,6 +997,8 @@ fn phase_hover(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, resp
         vertex_hits.iter().rev().filter(|h| h.tangent.is_some() == tangents).find(|h| h.pos.distance(pos) < reach).copied()
     };
     let gid = egui::Id::unique("viewer-gesture");
+    // A middle-drag pan sets the Grabbing cursor later this frame: no tool glyph over it.
+    let panning = middle_pan_owns(ui, resp, gid);
     // An overlay on top of the viewer (e.g. the camera tracker points) takes the hover, but the pointer is still over the viewer: keep wheel zoom working.
     let hover_pos = resp.hover_pos().or_else(|| if resp.contains_pointer() { ui.input(|i| i.pointer.hover_pos()) } else { None });
     if let Some(hp) = hover_pos {
@@ -1008,15 +1010,25 @@ fn phase_hover(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, resp
             Tool::Hand => egui::CursorIcon::Grab,
             Tool::Zoom => egui::CursorIcon::ZoomIn,
             Tool::Type | Tool::TypeVertical => egui::CursorIcon::Text,
-            Tool::Orbit => egui::CursorIcon::Alias,
+            // egui has no curved-arrow cursor. Alias is what the puppet pin rotate ring uses too (#3864), but
+            // Windows draws it as the plain arrow, so there we paint the tool's own glyph at the pointer.
+            Tool::Orbit | Tool::Rotate if cfg!(windows) => {
+                if !panning {
+                    pen_cursor(&ctx, hp, if app.ui.tool == Tool::Orbit { crate::icons::Icon::Orbit } else { crate::icons::Icon::Rotate });
+                }
+                egui::CursorIcon::None
+            }
+            Tool::Orbit | Tool::Rotate => egui::CursorIcon::Alias,
             Tool::PanCamera => egui::CursorIcon::Move,
             Tool::Dolly => egui::CursorIcon::ResizeVertical,
             t if t.is_pen() => {
-                pen_cursor(
-                    &ctx,
-                    hp,
-                    pen_cursor_icon(t, ov::segment_at(&paths, &map, hp, 5.0).is_some() || ov::motion_frame_at(&motion_frames, &key_hits, hp).is_some()),
-                );
+                if !panning {
+                    pen_cursor(
+                        &ctx,
+                        hp,
+                        pen_cursor_icon(t, ov::segment_at(&paths, &map, hp, 5.0).is_some() || ov::motion_frame_at(&motion_frames, &key_hits, hp).is_some()),
+                    );
+                }
                 egui::CursorIcon::None
             }
             t if t.is_shape() => egui::CursorIcon::Crosshair,
@@ -1129,11 +1141,16 @@ fn phase_press(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, resp
     v.text_owns = text_owns;
 }
 
+/// Whether a middle-drag pan is in progress (see [`middle_pan`]).
+fn middle_pan_owns(ui: &egui::Ui, resp: &egui::Response, gid: egui::Id) -> bool {
+    let (middle, primary) = ui.input(|i| (i.pointer.middle_down(), i.pointer.primary_down() || i.pointer.primary_released()));
+    middle && resp.is_pointer_button_down_on() && !(primary && ui.data(|d| d.get_temp::<Gesture>(gid)).is_some())
+}
+
 /// A middle-drag pans with any tool and doesn't enter the gesture phases, so nothing else can
 /// happen under it (#2854). A left-button gesture already running keeps going until it ends.
 fn middle_pan(app: &mut EffectcraftApp, ui: &egui::Ui, resp: &egui::Response, v: &Vw<'_>) -> bool {
-    let (middle, primary) = ui.input(|i| (i.pointer.middle_down(), i.pointer.primary_down() || i.pointer.primary_released()));
-    if !middle || !resp.is_pointer_button_down_on() || (primary && ui.data(|d| d.get_temp::<Gesture>(v.gid)).is_some()) {
+    if !middle_pan_owns(ui, resp, v.gid) {
         return false;
     }
     // No left button: a stored gesture is one whose release the viewer missed.
