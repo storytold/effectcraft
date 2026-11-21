@@ -990,6 +990,47 @@ fn the_unlabeled_alpha_question_does_not_replace_an_open_dialog() {
     assert_eq!(app.dialog, Some(crate::Dialog::Form), "with no dialog open it asks");
 }
 
+/// The unlabeled alpha question opens Interpret Footage on the imported footage, not on the
+/// footage selected before, and OK interprets the imported footage only.
+#[test]
+fn the_unlabeled_alpha_question_opens_on_the_imported_footage() {
+    use effectcraft_engine::project::{AlphaMode, Footage, FootageKind, ItemKind};
+    let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+    let ctx = egui::Context::default();
+    let still = |path: &str, loop_count: u32, alpha: AlphaMode| {
+        ItemKind::Footage(Footage {
+            path: path.into(),
+            kind: FootageKind::Still,
+            width: 4,
+            height: 4,
+            has_video: true,
+            loop_count,
+            alpha,
+            ..Default::default()
+        })
+    };
+    let project = std::sync::Arc::make_mut(&mut app.session.project);
+    let before = project.add_item("before.png", Default::default(), None, still("/m/before.png", 1, AlphaMode::Straight));
+    let matte = project.add_item("matte.tga", Default::default(), None, still("/m/matte.tga", 4, AlphaMode::Premultiplied));
+    app.session.state.project_selection = vec![before];
+    super::frontend(&mut app, &ctx, "file.interpretFootage", json!({"item": matte.0, "reason": "unlabeledAlpha"})).unwrap();
+    assert_eq!(app.dialog, Some(crate::Dialog::Form));
+    let params = app.dialog_state.form.params();
+    assert_eq!((params["loop"].clone(), params["alpha"].clone()), (json!(4.0), json!("premultiplied")), "{params}");
+    // OK with Alpha ▸ Ignore.
+    let alpha = app.dialog_state.form.fields.iter_mut().find(|f| f.key == "alpha").map(|f| &mut f.kind);
+    let Some(crate::panels::forms::FieldKind::Choice { options, sel }) = alpha else { panic!("no Alpha choice") };
+    *sel = options.iter().position(|(_, v)| v == "ignore").unwrap();
+    let form = app.dialog_state.form.clone();
+    app.session.execute(&form.command, form.params()).unwrap();
+    let alpha_of = |app: &EffectcraftApp, id| match app.session.project.item(id).map(|i| &i.kind) {
+        Some(ItemKind::Footage(f)) => (f.alpha, f.loop_count),
+        _ => panic!("not footage"),
+    };
+    assert_eq!(alpha_of(&app, matte), (AlphaMode::Ignore, 4));
+    assert_eq!(alpha_of(&app, before), (AlphaMode::Straight, 1));
+}
+
 /// File ▸ Import ▸ File… and Multiple Files… offer projects next to footage; File ▸ Replace
 /// Footage offers footage only.
 #[test]
