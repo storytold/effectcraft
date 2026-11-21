@@ -453,17 +453,26 @@ fn classic3d(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     for (var k = 0u; k < nf; k++) {
         let pl = planes[fi[k]];
-        var op = pl.mat1.z;
-        if ((pl.ints.z & 2u) != 0u) {
-            op *= d.w;
-        }
-        let s = fp[k] * op;
+        let s = fp[k] * pl.mat1.z;
         let mode = pl.ints.w;
         var n = 0.5;
         if (mode == 1u || mode == 2u) {
             n = hash_noise(u32(x), u32(y), pl.ints3.y);
         }
-        d = blend_pixel(mode, d, s, n);
+        if ((pl.ints.z & 2u) != 0u) {
+            // Preserve Transparency: the plain composite's colour at the alpha below; stencil
+            // and silhouette modes as usual (`effectcraft_color::blend_pixel_preserve`).
+            if (d.w > 0.0) {
+                let b = blend_pixel(mode, d, s, n);
+                if (is_stencil(mode)) {
+                    d = b;
+                } else if (b.w > 0.0) {
+                    d = vec4<f32>(b.xyz * (d.w / b.w), d.w);
+                }
+            }
+        } else {
+            d = blend_pixel(mode, d, s, n);
+        }
     }
     textureStore(out, pix, d);
 }

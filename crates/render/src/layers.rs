@@ -530,13 +530,10 @@ impl<'a> Renderer<'a> {
     pub(crate) fn composite_iso_with(&self, ctx: &EvalCtx, layer: &Layer, mut iso: Image, canvas: &mut Image, opacity: f32, matte_img: Option<Image>) {
         self.apply_track_matte(ctx, layer, &mut iso, matte_img);
         if layer.preserve_transparency {
-            iso.data.par_iter_mut().zip(canvas.data.par_iter()).for_each(|(p, q)| {
-                for c in p.iter_mut() {
-                    *c *= q[3];
-                }
-            });
+            canvas.blend_from_preserve(&iso, layer.blend_mode, opacity, layer.id.0 as u32);
+        } else {
+            canvas.blend_from(&iso, layer.blend_mode, opacity, layer.id.0 as u32);
         }
-        canvas.blend_from(&iso, layer.blend_mode, opacity, layer.id.0 as u32);
     }
 
     /// Multiply `img` (comp-sized) by the layer's track matte, if it has one; `matte_img` as in

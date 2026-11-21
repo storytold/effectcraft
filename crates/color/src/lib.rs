@@ -11,7 +11,7 @@ pub mod blend;
 pub mod icc;
 pub mod space;
 
-pub use blend::{BlendMode, blend_pixel};
+pub use blend::{BlendMode, blend_pixel, blend_pixel_preserve};
 use serde::{Deserialize, Serialize};
 pub use space::{ColorSpace, Conversion};
 

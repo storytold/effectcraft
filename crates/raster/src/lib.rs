@@ -14,7 +14,7 @@ pub mod scopes;
 pub mod warp;
 pub mod yuv;
 
-use effectcraft_color::{BlendMode, blend_pixel};
+use effectcraft_color::{BlendMode, blend_pixel, blend_pixel_preserve};
 use rayon::prelude::*;
 
 pub use blur::{
@@ -344,6 +344,14 @@ impl Image {
     }
     /// Blend `src` (same size) onto self with a mode and opacity.
     pub fn blend_from(&mut self, src: &Image, mode: BlendMode, opacity: f32, seed: u32) {
+        self.blend_with(src, mode, opacity, seed, blend_pixel);
+    }
+    /// [`Self::blend_from`] with Preserve Underlying Transparency
+    /// ([`effectcraft_color::blend_pixel_preserve`]): the alpha of self stays.
+    pub fn blend_from_preserve(&mut self, src: &Image, mode: BlendMode, opacity: f32, seed: u32) {
+        self.blend_with(src, mode, opacity, seed, blend_pixel_preserve);
+    }
+    fn blend_with(&mut self, src: &Image, mode: BlendMode, opacity: f32, seed: u32, blend: fn(BlendMode, Px, Px, f32) -> Px) {
         let w = self.width as usize;
         self.data.par_chunks_mut(w.max(1)).zip(src.data.par_chunks(w.max(1))).enumerate().for_each(|(y, (d, s))| {
             for x in 0..d.len() {
@@ -355,7 +363,7 @@ impl Image {
                     *c *= opacity;
                 }
                 let n = if matches!(mode, BlendMode::Dissolve | BlendMode::DancingDissolve) { hash_noise(x as u32, y as u32, seed) } else { 0.5 };
-                d[x] = blend_pixel(mode, d[x], sp, n);
+                d[x] = blend(mode, d[x], sp, n);
             }
         });
     }

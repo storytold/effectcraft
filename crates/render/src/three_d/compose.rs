@@ -15,7 +15,7 @@
 
 use std::sync::Arc;
 
-use effectcraft_color::{BlendMode, blend_pixel};
+use effectcraft_color::{BlendMode, blend_pixel, blend_pixel_preserve};
 use effectcraft_effects::Buf;
 use effectcraft_geom::{Mat3, Mat4, Vec3, vec3};
 use effectcraft_project::{Layer, LightKind, MatteKind, limits};
@@ -660,9 +660,8 @@ fn composite(canvas: &mut Image, items: &[Item], lights: &[LightState], casters:
             for (_, _, px, k) in &frags {
                 let it = active[*k];
                 let mut s = *px;
-                let op = it.opacity * if it.preserve { d[3] } else { 1.0 };
                 for c in s.iter_mut() {
-                    *c *= op;
+                    *c *= it.opacity;
                 }
                 let mode = it.layer.blend_mode;
                 let n = if matches!(mode, BlendMode::Dissolve | BlendMode::DancingDissolve) {
@@ -670,7 +669,7 @@ fn composite(canvas: &mut Image, items: &[Item], lights: &[LightState], casters:
                 } else {
                     0.5
                 };
-                d = blend_pixel(mode, d, s, n);
+                d = if it.preserve { blend_pixel_preserve(mode, d, s, n) } else { blend_pixel(mode, d, s, n) };
             }
             row[x] = d;
         }
