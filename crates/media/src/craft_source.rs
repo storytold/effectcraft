@@ -159,10 +159,20 @@ impl ContainerFile {
         }
     }
 
-    fn audio_seek_info(audio_starts: &[i64], seek_preroll_samples: i64, start: i64) -> (usize, i64) {
+    fn audio_packet_is_stamped(&self, track_idx: usize, sample_idx: usize) -> bool {
+        match self {
+            Self::Isobmff(_) => true,
+            Self::Matroska(f) => f.tracks[track_idx].samples.get(sample_idx).is_some_and(|s| s.lace == 0 || s.duration > 0),
+        }
+    }
+
+    fn audio_seek_info(&self, track_idx: usize, audio_starts: &[i64], seek_preroll_samples: i64, start: i64) -> (usize, i64) {
         let target = start.saturating_sub(seek_preroll_samples).max(0);
         let sample_idx = audio_starts.partition_point(|&s| s <= target).saturating_sub(1);
-        let seek_idx = sample_idx.saturating_sub(2);
+        let mut seek_idx = sample_idx.saturating_sub(2);
+        while seek_idx > 0 && !self.audio_packet_is_stamped(track_idx, seek_idx) {
+            seek_idx -= 1;
+        }
         let decoded_pos = audio_starts.get(seek_idx).copied().unwrap_or(0);
         (seek_idx, decoded_pos)
     }
@@ -816,7 +826,7 @@ fn decode_audio_range(
     let buf_len = state.buf.first().map_or(0, Vec::len) as i64;
     let buf_end = state.decoded_pos.saturating_add(buf_len);
     if start < state.decoded_pos || start > buf_end + i64::from(native_rate) * 2 {
-        let (seek_idx, decoded_pos) = ContainerFile::audio_seek_info(audio_starts, seek_preroll_samples, start);
+        let (seek_idx, decoded_pos) = file.audio_seek_info(track_idx, audio_starts, seek_preroll_samples, start);
         state.decoder.reset();
         state.next_sample = seek_idx;
         state.decoded_pos = decoded_pos;
@@ -830,12 +840,14 @@ fn decode_audio_range(
     }
 
     let sample_count = file.sample_count(track_idx);
-    while state.decoded_pos + state.buf.first().map_or(0, Vec::len) as i64 <= end && state.next_sample < sample_count {
+    while state.next_sample < sample_count {
         if filmcraft_media::cancel::cancelled() {
             return Err(MediaError::Cancelled);
         }
         let idx = state.next_sample;
-        let pk_start = audio_starts.get(idx).copied().unwrap_or_else(|| state.decoded_pos + state.buf.first().map_or(0, Vec::len) as i64);
+        let buf_len = state.buf.first().map_or(0, Vec::len) as i64;
+        let buf_end = state.decoded_pos.saturating_add(buf_len);
+        let pk_start = if buf_len > 0 && !file.audio_packet_is_stamped(track_idx, idx) { buf_end } else { audio_starts.get(idx).copied().unwrap_or(buf_end) };
         if pk_start >= end {
             break;
         }
@@ -1551,5 +1563,105 @@ mod tests {
         assert_eq!(contiguous_starts(packets, i64::MIN).len(), 4);
         assert_eq!(contiguous_starts(packets, i64::MAX).len(), 4);
         assert!(contiguous_starts([], 512).is_empty());
+    }
+
+    fn pcm_s16le_bytes(sample: i16, count: usize) -> Vec<u8> {
+        std::iter::repeat_n(sample.to_le_bytes(), count).flatten().collect()
+    }
+
+    #[test]
+    fn matroska_durationless_lace_variable_pcm_preserves_all_blocks() {
+        use std::io::Cursor;
+
+        let mut track = matroska::TrackSpec::new(matroska::TrackKind::Audio, "A_PCM/INT/LIT");
+        track.audio = Some((48_000.0, 1, Some(16)));
+        let mut mux = matroska::MkvWriter::new(Cursor::new(Vec::new()), vec![track], matroska::MuxOptions::default()).unwrap();
+        let blocks = [(8_000i16, 120usize), (-16_000i16, 200usize), (24_000i16, 80usize), (4_000i16, 100usize)];
+        let pts_ns = [0i64, 2_000_000, 4_000_000, 8_333_333];
+        for ((val, len), pts) in blocks.iter().zip(pts_ns) {
+            mux.write_frame(0, pts, true, &pcm_s16le_bytes(*val, *len), None).unwrap();
+        }
+        let bytes = mux.finish().unwrap().into_inner();
+        let mut mkv = matroska::open(bytes.as_slice()).unwrap();
+        // Simulate a durationless lace for blocks 0..3 sharing block 0's timestamp.
+        let base_pts = mkv.tracks[0].samples[0].pts;
+        for (lace, s) in mkv.tracks[0].samples[..3].iter_mut().enumerate() {
+            s.pts = base_pts;
+            s.duration = 0;
+            s.lace = lace as u16;
+        }
+        let params = mkv.tracks[0].codec_params();
+        let file = ContainerFile::Matroska(Box::new(mkv));
+        let (mut tracks, _) = open_audio_tracks(&file, &bytes, [(0, 4, params.clone(), 0)]).unwrap();
+
+        let decode = |track: &mut AudioTrackEntry, start: i64, frames: usize| {
+            decode_audio_range(&file, &bytes, 0, 48_000, 1, &track.audio_starts, track.seek_preroll_samples, track.state.get_mut().unwrap(), start, frames)
+                .unwrap()
+        };
+
+        let full = decode(&mut tracks[0], 0, 500);
+        assert_eq!(full[0].len(), 500);
+        // Each block's samples remain intact at their cumulative offsets (0..120, 120..320, 320..400, 400..500).
+        assert!((full[0][0] - (8_000.0 / 32_768.0)).abs() < 1e-4);
+        assert!((full[0][120] - (-16_000.0 / 32_768.0)).abs() < 1e-4);
+        assert!((full[0][320] - (24_000.0 / 32_768.0)).abs() < 1e-4);
+        assert!((full[0][400] - (4_000.0 / 32_768.0)).abs() < 1e-4);
+
+        // Chunked sequential reads and a backward seek into the lace must match the full read.
+        let (mut chunked_tracks, _) = open_audio_tracks(&file, &bytes, [(0, 4, params, 0)]).unwrap();
+        let mut chunked = Vec::new();
+        for (start, frames) in [(0, 150), (150, 200), (350, 150)] {
+            chunked.extend_from_slice(&decode(&mut chunked_tracks[0], start, frames)[0]);
+        }
+        assert_eq!(chunked, full[0]);
+
+        let rewound = decode(&mut tracks[0], 200, 250);
+        assert_eq!(rewound[0], full[0][200..450]);
+    }
+
+    #[test]
+    fn narrow_read_includes_overlapping_packet_like_wider_read() {
+        use std::io::Cursor;
+
+        let mut track = matroska::TrackSpec::new(matroska::TrackKind::Audio, "A_PCM/INT/LIT");
+        track.audio = Some((48_000.0, 1, Some(16)));
+        let mut mux = matroska::MkvWriter::new(Cursor::new(Vec::new()), vec![track], matroska::MuxOptions::default()).unwrap();
+        mux.write_frame(0, 0, true, &pcm_s16le_bytes(8_000, 1024), None).unwrap();
+        mux.write_frame(0, 10_666_667, true, &pcm_s16le_bytes(-16_000, 1024), None).unwrap();
+        let bytes = mux.finish().unwrap().into_inner();
+        let mkv = matroska::open(bytes.as_slice()).unwrap();
+        let params = mkv.tracks[0].codec_params();
+        let file = ContainerFile::Matroska(Box::new(mkv));
+
+        let open_with_overlap = || {
+            let (mut tracks, _) = open_audio_tracks(&file, &bytes, [(0, 2, params.clone(), 0)]).unwrap();
+            tracks[0].audio_starts = vec![0, 512];
+            tracks
+        };
+        let decode = |track: &mut AudioTrackEntry, start: i64, frames: usize| {
+            decode_audio_range(&file, &bytes, 0, 48_000, 1, &track.audio_starts, track.seek_preroll_samples, track.state.get_mut().unwrap(), start, frames)
+                .unwrap()
+        };
+
+        let mut wide_tracks = open_with_overlap();
+        let wide = decode(&mut wide_tracks[0], 0, 1536);
+
+        // Narrow read [0, 600) ends before packet 0's 1024-sample tail, yet must include packet 1 at 512.
+        let mut narrow_tracks = open_with_overlap();
+        let narrow = decode(&mut narrow_tracks[0], 0, 600);
+        assert_eq!(narrow[0], wide[0][..600]);
+        assert!((narrow[0][0] - (8_000.0 / 32_768.0)).abs() < 1e-4);
+        assert!((narrow[0][512] - (-16_000.0 / 32_768.0)).abs() < 1e-4);
+
+        // Chunked reads and a backward seek over the same interval must also match.
+        let mut chunked_tracks = open_with_overlap();
+        let mut chunked = Vec::new();
+        for (start, frames) in [(0, 300), (300, 300)] {
+            chunked.extend_from_slice(&decode(&mut chunked_tracks[0], start, frames)[0]);
+        }
+        assert_eq!(chunked, wide[0][..600]);
+
+        let rewound = decode(&mut wide_tracks[0], 0, 600);
+        assert_eq!(rewound[0], wide[0][..600]);
     }
 }
