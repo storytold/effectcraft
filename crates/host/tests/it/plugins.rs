@@ -438,3 +438,70 @@ fn abi_v2_plugins_render_with_real_neighbour_frames() {
     assert!((p[0] - 0.25).abs() < 0.01, "the next frame's red, with no previous frame: {p:?}");
     assert!((p[1] - 2.0 / 8.0).abs() < 0.01, "only the next frame is valid: {p:?}");
 }
+
+/// Records the comp camera it is handed.
+struct CameraProbe {
+    m: PluginManifest,
+    seen: Arc<std::sync::Mutex<Option<effectcraft_engine::effects::plugin::CompCamera>>>,
+}
+
+impl EffectPlugin for CameraProbe {
+    fn manifest(&self) -> &PluginManifest {
+        &self.m
+    }
+    fn render(&self, _frame: &mut PluginFrame, _params: &PluginParams, _time: f64) -> Result<(), String> {
+        Ok(())
+    }
+    fn render_v2(
+        &self,
+        _frame: &mut PluginFrame,
+        _params: &PluginParams,
+        _time: f64,
+        host: &dyn effectcraft_engine::effects::plugin::PluginHost,
+    ) -> Result<(), String> {
+        *self.seen.lock().unwrap() = host.comp_camera();
+        Ok(())
+    }
+}
+
+/// `comp_camera`'s W is the depth in front of the camera (what `zoom / W` scales by), for a 2D
+/// layer and a 3D one alike: a 3D layer's own projection would otherwise leave W = 1 on it.
+#[test]
+fn comp_camera_w_is_the_depth_for_2d_and_3d_layers() {
+    let seen = Arc::new(std::sync::Mutex::new(None));
+    let m = PluginManifest {
+        api: 2,
+        id: "org.test.cameraprobe".into(),
+        name: "Camera Probe".into(),
+        category: "Test Plug-ins".into(),
+        version: "1".into(),
+        author: String::new(),
+        description: String::new(),
+        params: vec![],
+    };
+    register_plugin(Arc::new(CameraProbe { m, seen: seen.clone() })).unwrap();
+    let (mut s, l) = setup();
+    s.execute("effect.apply", json!({"layer": l, "effect": "org.test.cameraprobe"})).unwrap();
+    // W and where the layer centre (20, 10) shows, in the layer's pixels
+    let mut n = 0;
+    let mut look = |s: &Session| {
+        n += 1;
+        let cid = s.active_comp_id().unwrap();
+        let _ = s.render(cid, Tick::ZERO, Default::default());
+        let c = seen.lock().unwrap().take().unwrap_or_else(|| panic!("no camera handed over (step {n})"));
+        let at = |r: [f64; 4]| r[0] * 20.0 + r[1] * 10.0 + r[3];
+        let w = at(c.matrix[2]);
+        (w, c.zoom, at(c.matrix[0]) / w, at(c.matrix[1]) / w)
+    };
+    let (w, zoom, x, y) = look(&s);
+    assert!(zoom > 0.0 && (w - zoom).abs() < 1e-6 * zoom, "2D: the default camera is zoom away: {w} vs {zoom}");
+    assert!((x - 20.0).abs() < 1e-6 && (y - 10.0).abs() < 1e-6, "{x}, {y}");
+    s.execute("layer.setSwitch", json!({"layers": [l], "switch": "threeD", "value": true})).unwrap();
+    let (w, _, x, y) = look(&s);
+    assert!((w - zoom).abs() < 1e-6 * zoom, "3D at z = 0: {w} vs {zoom}");
+    assert!((x - 20.0).abs() < 1e-6 && (y - 10.0).abs() < 1e-6, "{x}, {y}");
+    s.execute("prop.set", json!({"layer": l, "path": "transform/position", "value": [20.0, 10.0, zoom]})).unwrap();
+    let (w, _, x, y) = look(&s);
+    assert!((w - 2.0 * zoom).abs() < 1e-6 * zoom, "3D, one zoom further back: {w} vs {}", 2.0 * zoom);
+    assert!((x - 20.0).abs() < 1e-6 && (y - 10.0).abs() < 1e-6, "{x}, {y}");
+}

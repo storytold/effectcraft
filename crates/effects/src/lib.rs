@@ -517,6 +517,20 @@ pub struct LayerPixels {
     pub size: [f64; 2],
 }
 
+/// Where another layer sits relative to the running effect's layer (see
+/// [`EffectHost::layer_transform`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LayerXf {
+    /// The other layer's effect-space pixels (x, y, and z away from the viewer) → the running
+    /// effect's effect-space pixels (x, y, z): rows of an affine 3 × 4 matrix (its layer
+    /// transform, parents, 3D rotation and the running layer's own transform undone).
+    pub to_self: [[f64; 4]; 3],
+    /// The other layer's effect-space size ([`LayerPixels::size`]).
+    pub size: [f64; 2],
+    /// Its opacity at that time (0–1).
+    pub opacity: f64,
+}
+
 /// Services the renderer offers effects that look beyond their own pixels.
 pub trait EffectHost: Sync {
     /// Pixels entering the effect stack, in effect space, before any effects. For an
@@ -543,9 +557,19 @@ pub trait EffectHost: Sync {
     fn self_at(&self, _layer_time: f64, _effects: usize) -> Option<Buf> {
         None
     }
+    /// The comp time (seconds) of the running effect's layer at **layer time** `layer_time`,
+    /// through the layer's start and stretch (as [`EffectHost::self_at`]). `None` when unknown.
+    fn comp_time_of(&self, _layer_time: f64) -> Option<f64> {
+        None
+    }
     /// Layer `id` of the same composition at comp time `comp_time` (seconds), like
     /// [`EffectHost::layer`] but at another time.
     fn layer_at(&self, _id: u64, _comp_time: f64, _masks_and_effects: bool) -> Option<LayerPixels> {
+        None
+    }
+    /// Where layer `id` sits relative to the running effect's layer at comp time `comp_time`
+    /// (an emitter layer's transform for a particle system). `None` when unknown.
+    fn layer_transform(&self, _id: u64, _comp_time: f64) -> Option<LayerXf> {
         None
     }
     /// Auxiliary 3D channels (depth, object / material IDs, normals, Cryptomatte, any named
@@ -558,6 +582,15 @@ pub trait EffectHost: Sync {
     /// The composition's camera and first light relative to the effect's layer (Card
     /// Dance / Shatter / Card Wipe's Comp Camera and First Comp Light). `None` when unknown.
     fn comp_scene(&self) -> Option<CompScene> {
+        None
+    }
+    /// The composition's lights switched on at comp time `comp_time`, in the effect's space
+    /// (as [`EffectHost::comp_scene`]'s camera). Empty when unknown.
+    fn comp_lights(&self, _comp_time: f64) -> Vec<plugin::CompLightInfo> {
+        Vec::new()
+    }
+    /// [`EffectHost::comp_scene`] at comp time `comp_time` (seconds). `None` when unknown.
+    fn comp_scene_at(&self, _comp_time: f64) -> Option<CompScene> {
         None
     }
     /// The running effect's own parameters evaluated at another **layer time** (Radio Waves'

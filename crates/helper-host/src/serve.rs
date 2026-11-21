@@ -56,7 +56,7 @@ pub fn serve(provider: &mut dyn Provider) -> Result<(), String> {
 
 /// [`serve`] on any reader / writer.
 pub fn serve_io(provider: &mut dyn Provider, input: impl BufRead, output: impl Write) -> Result<(), String> {
-    let mut s = Server { provider, input: Box::new(input), output: Box::new(output), exchange: None, effects: HashMap::new(), depth: 0 };
+    let mut s = Server { provider, input: Box::new(input), output: Box::new(output), exchange: None, effects: HashMap::new(), depth: 0, features: vec![] };
     loop {
         let Some(req) = s.next_request()? else { return Ok(()) };
         if matches!(req, Request::Shutdown) {
@@ -73,6 +73,8 @@ struct Server<'p> {
     exchange: Option<Exchange>,
     effects: HashMap<String, Arc<dyn EffectPlugin>>,
     depth: u32,
+    /// The optional callbacks EffectCraft listed in `hello`.
+    features: Vec<String>,
 }
 
 impl Server<'_> {
@@ -113,7 +115,8 @@ impl Server<'_> {
     /// Answer one request (anything but `shutdown`).
     fn handle(&mut self, req: Request) -> Result<(), String> {
         match req {
-            Request::Hello { version, frames } => {
+            Request::Hello { version, frames, features } => {
+                self.features = features;
                 if version != PROTOCOL_VERSION {
                     return self.send(&Reply::Error { message: format!("this helper speaks protocol {PROTOCOL_VERSION}, not {version}") });
                 }
@@ -149,7 +152,9 @@ impl Server<'_> {
                 Ok(())
             }
             Request::Ping => self.send(&Reply::Pong),
-            Request::Image { .. } | Request::Params { .. } => self.send(&Reply::Error { message: "no callback is waiting for an answer".into() }),
+            Request::Image { .. } | Request::Params { .. } | Request::Transform { .. } | Request::Camera { .. } | Request::Lights { .. } => {
+                self.send(&Reply::Error { message: "no callback is waiting for an answer".into() })
+            }
             Request::Shutdown => Ok(()),
         }
     }
@@ -188,7 +193,7 @@ impl Server<'_> {
         loop {
             let req = self.next_request()?.ok_or("EffectCraft closed the pipe")?;
             match req {
-                Request::Image { .. } | Request::Params { .. } => return Ok(req),
+                Request::Image { .. } | Request::Params { .. } | Request::Transform { .. } | Request::Camera { .. } | Request::Lights { .. } => return Ok(req),
                 Request::Shutdown => return Err("EffectCraft asked the helper to shut down".into()),
                 other => self.handle(other)?,
             }
@@ -218,6 +223,46 @@ impl PluginHost for Callbacks<'_, '_> {
     }
     fn layer_input(&self, param_id: &str, layer_time: f64) -> Option<PluginImage> {
         self.server.try_borrow_mut().ok()?.image(&Reply::LayerInput { param: param_id.to_string(), time: layer_time })
+    }
+    fn layer_transform(&self, param_id: &str, layer_time: f64) -> Option<effectcraft_effects::plugin::LayerTransform> {
+        let mut s = self.server.try_borrow_mut().ok()?;
+        if !s.features.iter().any(|f| f == "layer_transform") {
+            return None;
+        }
+        match s.ask(&Reply::LayerTransform { param: param_id.to_string(), time: layer_time }) {
+            Ok(Request::Transform { transform }) => transform,
+            _ => None,
+        }
+    }
+    fn comp_camera(&self) -> Option<effectcraft_effects::plugin::CompCamera> {
+        let mut s = self.server.try_borrow_mut().ok()?;
+        if !s.features.iter().any(|f| f == "comp_camera") {
+            return None;
+        }
+        match s.ask(&Reply::CompCamera { time: None }) {
+            Ok(Request::Camera { camera }) => camera,
+            _ => None,
+        }
+    }
+    fn comp_lights(&self, layer_time: f64) -> Option<Vec<effectcraft_effects::plugin::CompLightInfo>> {
+        let mut s = self.server.try_borrow_mut().ok()?;
+        if !s.features.iter().any(|f| f == "comp_lights") {
+            return None;
+        }
+        match s.ask(&Reply::CompLights { time: layer_time }) {
+            Ok(Request::Lights { lights }) => lights,
+            _ => None,
+        }
+    }
+    fn comp_camera_at(&self, layer_time: f64) -> Option<effectcraft_effects::plugin::CompCamera> {
+        let mut s = self.server.try_borrow_mut().ok()?;
+        if !s.features.iter().any(|f| f == "comp_camera_time") {
+            return None;
+        }
+        match s.ask(&Reply::CompCamera { time: Some(layer_time) }) {
+            Ok(Request::Camera { camera }) => camera,
+            _ => None,
+        }
     }
     fn params_at(&self, layer_time: f64) -> Option<(Vec<f64>, Vec<String>)> {
         match self.server.try_borrow_mut().ok()?.ask(&Reply::ParamsAt { time: layer_time }) {
