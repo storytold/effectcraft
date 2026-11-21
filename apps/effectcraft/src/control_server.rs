@@ -22,16 +22,15 @@ pub const MAX_LINE: usize = 4 * 1024 * 1024;
 /// Connections served at once; further ones get an error line and are closed.
 pub const MAX_CONNECTIONS: usize = 16;
 
-pub fn start(port: u16, ctx: egui::Context) -> Receiver<ControlRequest> {
+pub fn bind(port: u16) -> std::io::Result<TcpListener> {
+    TcpListener::bind(("127.0.0.1", port))
+}
+
+pub fn start(listener: TcpListener, ctx: egui::Context) -> Receiver<ControlRequest> {
     let (tx, rx) = channel::<ControlRequest>();
-    let listener = match TcpListener::bind(("127.0.0.1", port)) {
-        Ok(l) => l,
-        Err(e) => {
-            log::error!("control server failed to bind 127.0.0.1:{port}: {e}");
-            return rx;
-        }
-    };
-    log::info!("control server listening on 127.0.0.1:{port}");
+    if let Ok(address) = listener.local_addr() {
+        log::info!("control server listening on {address}");
+    }
     std::thread::spawn(move || accept_loop(listener, tx, ctx));
     rx
 }
@@ -154,6 +153,15 @@ fn serve_lines<R: Read, W: Write>(read: R, mut out: W, mut handle: impl FnMut(St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn occupied_control_port_is_an_error_before_any_window_is_needed() {
+        let first = bind(0).unwrap();
+        let port = first.local_addr().unwrap().port();
+        assert_eq!(bind(port).unwrap_err().kind(), std::io::ErrorKind::AddrInUse);
+        drop(first);
+        assert!(bind(port).is_ok());
+    }
 
     fn run(input: &[u8]) -> (Vec<Value>, Vec<String>) {
         let mut out = Vec::new();
