@@ -1729,6 +1729,33 @@ fn audio_only_isobmff_and_matroska_route_through_craft_audio() {
 }
 
 #[test]
+fn mxf_route_backward_seek_cancel_and_pcm_audio() {
+    use std::sync::atomic::AtomicBool;
+    let Some(p) = mpeg2_mxf() else { return };
+    let f = probe(&p).expect("probe mxf");
+    assert_eq!(f.codec, "MPEG-2", "MXF MPEG-2 must route through shared craft-media::mxf");
+    let pool = MediaPool::new();
+    let f20 = pool.frame(ItemId(1), &f, t_of(f.frame_rate, 20)).expect("frame 20");
+    let f5 = pool.frame(ItemId(1), &f, t_of(f.frame_rate, 5)).expect("backward seek frame 5");
+    assert_eq!((f20.width, f20.height), (1280, 720));
+    assert_eq!((f5.width, f5.height), (1280, 720));
+    let fresh_f5 = MediaPool::new().frame(ItemId(1), &f, t_of(f.frame_rate, 5)).expect("fresh frame 5");
+    assert!(psnr(&f5, &fresh_f5) > 55.0, "MXF backward seek frame 5 matches fresh decode");
+
+    let off = Arc::new(AtomicBool::new(true));
+    let mut cancelled = Some(Arc::clone(&f5));
+    pool.cancellable(&off, &mut || cancelled = pool.frame(ItemId(1), &f, t_of(f.frame_rate, 30)));
+    assert!(cancelled.is_none(), "cancelled MXF read must not decode");
+
+    let pcm_start = pool.audio_samples(&f, Tick::ZERO, 4800, 48_000);
+    let pcm_seek = pool.audio_samples(&f, Tick(TICKS_PER_SECOND / 2), 4800, 48_000);
+    assert_eq!(pcm_start.len(), 9600);
+    assert_eq!(pcm_seek.len(), 9600);
+    let rms_seek = (pcm_seek.iter().map(|v| v * v).sum::<f32>() / pcm_seek.len() as f32).sqrt();
+    assert!((rms_seek - 0.0625).abs() < 0.02, "MXF PCM seek rms {rms_seek}");
+}
+
+#[test]
 fn standalone_audio_formats_route_through_craft_audio() {
     for (file, args) in [
         ("standalone_tone.wav", &["-c:a", "pcm_s16le"][..]),

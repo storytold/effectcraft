@@ -17,10 +17,14 @@
 //!     `Mp3`/`Mp2`/`Mp1` (with `CodecDelay` + `SeekPreRoll` timing).
 //!   - Fallback (`filmcraft-codecs`): `alpha_mode == 1` (`BlockAdditional` alpha), unreadable/zlib
 //!     encodings, `Mjpeg`/`Ffv1`/`Theora`/`Apv`, or unsupported audio (`Vorbis`/`Flac`/`Pcm`).
+//! - **MXF (`MXF`, video+audio & audio-only OP1a/OP-Atom)**:
+//!   - Shared (`craft-media::mxf` + `craft-video` + `MxfFile::read_pcm`): `H264`, `Hevc`, `Av1`,
+//!     `Vp9`, `Vp8`, `ProRes`, `Dnxhd`, `Mpeg2Video`; sound `Pcm` and `Aes3` (D-10).
+//!   - Fallback (`filmcraft-codecs`): compressed MXF sound or unsupported video codecs.
 //! - **Other containers & standalone audio**:
 //!   - Shared (`craft_audio::Decoder` with `decode-native`): standalone `WAV`, `AIFF`, `MP3`/`MP2`/`MP1`,
 //!     `AAC` (ADTS), `AC-3`, and `Ogg` (`Opus`).
-//!   - Fallback (`filmcraft-codecs`): `MXF`, `AVI`, `MPEG-TS`/`PS`, `Ogg Vorbis`, `FLAC`, `CAF`, or
+//!   - Fallback (`filmcraft-codecs`): `AVI`, `MPEG-TS`/`PS`, `Ogg Vorbis`, `FLAC`, `CAF`, or
 //!     unsupported WAV/AIFF encodings.
 
 use std::sync::{Arc, Mutex};
@@ -31,6 +35,7 @@ use craft_frame::{Chroma, PixelData, Region, VideoFrame};
 use craft_media::bitstream::unescape_rbsp;
 use craft_media::isobmff::{self, Mp4File};
 use craft_media::matroska::{self, MkvFile};
+use craft_media::mxf::{self, MxfFile, SoundFormat};
 use craft_media::{ByteSource, CodecId, CodecParams};
 use craft_media_source::{
     AudioStreamInfo, FrameRequest, MAX_AUDIO_STREAMS, MediaError, MediaInfo, MediaKind, MediaSource, Result, SharedBytes, SharedSource, VideoStreamInfo,
@@ -73,7 +78,12 @@ fn looks_like_matroska(head: &[u8]) -> bool {
     head.starts_with(&[0x1A, 0x45, 0xDF, 0xA3])
 }
 
-/// Open an in-place ISO-BMFF, Matroska/WebM, or standalone audio source via `craft-media` / `craft-audio`.
+/// True when `head` contains an MXF SMPTE KLV partition pack key.
+fn looks_like_mxf(head: &[u8]) -> bool {
+    head.windows(12).any(|w| w == [0x06, 0x0e, 0x2b, 0x34, 0x02, 0x05, 0x01, 0x01, 0x0d, 0x01, 0x02, 0x01])
+}
+
+/// Open an in-place ISO-BMFF, Matroska/WebM, MXF, or standalone audio source via `craft-media` / `craft-video` / `craft-audio`.
 /// Returns `None` when the container/codec/audio combination should fall back to `filmcraft-codecs`.
 #[cfg(any(unix, windows))]
 pub(crate) fn open_reader(name: &str, head: &[u8], reader: &SharedBytes) -> Option<Result<SharedSource>> {
@@ -83,16 +93,22 @@ pub(crate) fn open_reader(name: &str, head: &[u8], reader: &SharedBytes) -> Opti
     if looks_like_matroska(head) {
         return open_matroska(name, reader.clone());
     }
+    if looks_like_mxf(head) {
+        return open_mxf(name, reader.clone());
+    }
     open_standalone_audio(name, head, reader.clone())
 }
 
-/// Open an in-memory ISO-BMFF, Matroska/WebM, or standalone audio source via `craft-media` / `craft-audio`.
+/// Open an in-memory ISO-BMFF, Matroska/WebM, MXF, or standalone audio source via `craft-media` / `craft-video` / `craft-audio`.
 pub(crate) fn open_bytes(name: &str, bytes: Arc<[u8]>) -> Option<Result<SharedSource>> {
     if looks_like_isobmff(&bytes) {
         return open_isobmff(name, Arc::new(bytes));
     }
     if looks_like_matroska(&bytes) {
         return open_matroska(name, Arc::new(bytes));
+    }
+    if looks_like_mxf(&bytes) {
+        return open_mxf(name, Arc::new(bytes));
     }
     #[cfg(any(unix, windows))]
     {
@@ -109,6 +125,7 @@ pub(crate) fn open_bytes(name: &str, bytes: Arc<[u8]>) -> Option<Result<SharedSo
 enum ContainerFile {
     Isobmff(Mp4File),
     Matroska(Box<MkvFile>),
+    Mxf(Box<MxfFile>),
 }
 
 impl ContainerFile {
@@ -116,6 +133,7 @@ impl ContainerFile {
         match self {
             ContainerFile::Isobmff(f) => f.tracks.get(track_idx).map_or(0, |t| t.samples.len()),
             ContainerFile::Matroska(f) => f.tracks.get(track_idx).map_or(0, |t| t.samples.len()),
+            ContainerFile::Mxf(f) => f.tracks.get(track_idx).map_or(0, |t| t.samples.len()),
         }
     }
 
@@ -123,6 +141,7 @@ impl ContainerFile {
         match self {
             ContainerFile::Isobmff(f) => f.read_sample(src, track_idx, sample_idx).map_err(|e| MediaError::Io(e.to_string())),
             ContainerFile::Matroska(f) => f.read_sample(src, track_idx, sample_idx).map_err(|e| MediaError::Io(e.to_string())),
+            ContainerFile::Mxf(f) => f.read_sample(src, track_idx, sample_idx).map_err(|e| MediaError::Io(e.to_string())),
         }
     }
 
@@ -140,6 +159,16 @@ impl ContainerFile {
                 let idx = track.sample_at_pts(t_track)?;
                 Some((idx, track.samples[idx].pts))
             }
+            ContainerFile::Mxf(f) => {
+                let track = f.tracks.get(track_idx)?;
+                let offset = track.first_edit_unit();
+                let d = tick_to_rational_units(time, i64::from(track.edit_rate.num), i64::from(track.edit_rate.den));
+                let presented_len = track.duration.unwrap_or_else(|| i64::try_from(track.display_order.len()).unwrap_or(0).saturating_sub(offset).max(0));
+                let max_rel = presented_len.saturating_sub(1).max(0);
+                let pos = offset.saturating_add(d.clamp(0, max_rel));
+                let idx = track.sample_at(pos)?;
+                Some((idx, track.samples[idx].pts))
+            }
         }
     }
 
@@ -147,6 +176,7 @@ impl ContainerFile {
         match self {
             ContainerFile::Isobmff(f) => f.tracks[track_idx].sync_sample_before(target_idx),
             ContainerFile::Matroska(f) => f.tracks[track_idx].sync_sample_before(target_idx),
+            ContainerFile::Mxf(f) => f.tracks[track_idx].sync_before(target_idx),
         }
     }
 
@@ -154,6 +184,7 @@ impl ContainerFile {
         match self {
             ContainerFile::Isobmff(f) => f.tracks[track_idx].samples[sample_idx].pts,
             ContainerFile::Matroska(f) => f.tracks[track_idx].samples[sample_idx].pts,
+            ContainerFile::Mxf(f) => f.tracks[track_idx].samples[sample_idx].pts,
         }
     }
 
@@ -169,12 +200,17 @@ impl ContainerFile {
                 let ns = track.ticks_to_ns(raw_pts);
                 Tick::from_units(ns, 1_000_000_000)
             }
+            ContainerFile::Mxf(f) => {
+                let track = &f.tracks[track_idx];
+                let rel_pts = raw_pts.saturating_sub(track.first_edit_unit());
+                Tick::from_units(rel_pts.saturating_mul(i64::from(track.edit_rate.den)), i64::from(track.edit_rate.num.max(1)))
+            }
         }
     }
 
     fn audio_packet_is_stamped(&self, track_idx: usize, sample_idx: usize) -> bool {
         match self {
-            Self::Isobmff(_) => true,
+            Self::Isobmff(_) | Self::Mxf(_) => true,
             Self::Matroska(f) => f.tracks[track_idx].samples.get(sample_idx).is_some_and(|s| s.lace == 0 || s.duration > 0),
         }
     }
@@ -405,6 +441,7 @@ fn compute_audio_starts(container: &ContainerFile, track_idx: usize, codec: Code
             let packets = track.samples.iter().map(|s| PacketTime { stamp: stamp_for(s.pts), stamped: s.lace == 0 || s.duration > 0, samples: Some(frame) });
             AudioStarts::complete(contiguous_starts(packets, (frame / 2).max(tick_samples)))
         }
+        ContainerFile::Mxf(_) => AudioStarts::complete(Vec::new()),
     }
 }
 
@@ -457,8 +494,10 @@ where
         audio_tracks.push(AudioTrackEntry {
             track_idx: idx,
             native_rate,
-            seek_preroll_samples,
-            state: Mutex::new(AudioTrackState { decoder: dec, audio_starts, next_sample: 0, decoded_pos: initial_pos, buf: Vec::new() }),
+            backend: AudioBackend::Decoder {
+                seek_preroll_samples,
+                state: Mutex::new(AudioTrackState { decoder: dec, audio_starts, next_sample: 0, decoded_pos: initial_pos, buf: Vec::new() }),
+            },
         });
     }
     Some((audio_tracks, audio_infos))
@@ -783,6 +822,135 @@ fn open_matroska(name: &str, source: SharedBytes) -> Option<Result<SharedSource>
     })))
 }
 
+fn mxf_sound_window(track: &mxf::EssenceTrack) -> (u64, u64) {
+    let (sp_num, sp_den) = track.samples_per_edit_unit();
+    let sp_den = i128::from(sp_den.max(1));
+    let sp_num = i128::from(sp_num);
+    let offset_units = track.first_edit_unit();
+    let presented_start = u64::try_from((i128::from(offset_units) * sp_num) / sp_den).unwrap_or(0);
+    let stored = track.stored_sample_frames();
+    let presented_len = match track.duration {
+        Some(dur_units) => u64::try_from((i128::from(dur_units.max(0)) * sp_num) / sp_den).unwrap_or(u64::MAX).min(stored.saturating_sub(presented_start)),
+        None => stored.saturating_sub(presented_start),
+    };
+    (presented_start, presented_len)
+}
+
+fn mxf_start_timecode(tc: mxf::Timecode, rate: Option<FrameRate>) -> i64 {
+    let Some(rate) = rate else {
+        return tc.start;
+    };
+    if tc.rounded_base == 0 || rate.num <= 0 || rate.den <= 0 {
+        return tc.start;
+    }
+    let rounded_media = (rate.num as f64 / rate.den as f64).round().clamp(1.0, f64::from(u16::MAX)) as u16;
+    if rounded_media == tc.rounded_base {
+        return tc.start;
+    }
+    let (tc_num, tc_den) = if tc.drop_frame { (i128::from(tc.rounded_base) * 1000, 1001i128) } else { (i128::from(tc.rounded_base), 1i128) };
+    let converted = (i128::from(tc.start) * tc_den * i128::from(rate.num)) / (tc_num * i128::from(rate.den));
+    i64::try_from(converted).unwrap_or(tc.start)
+}
+
+fn open_mxf(name: &str, source: SharedBytes) -> Option<Result<SharedSource>> {
+    let file = mxf::open(&*source).ok()?;
+    let video_idx = file.tracks.iter().position(|t| t.kind == mxf::TrackKind::Picture && !t.samples.is_empty() && t.edit_rate.is_valid());
+    let sound_indices: Vec<usize> =
+        file.tracks.iter().enumerate().filter(|(_, t)| t.kind == mxf::TrackKind::Sound && !t.chunks.is_empty()).map(|(idx, _)| idx).collect();
+
+    if video_idx.is_none() && sound_indices.is_empty() {
+        return None;
+    }
+
+    // Fall back to FilmCraft for compressed MXF sound until MXF compressed audio is wired.
+    let mut audio_tracks = Vec::new();
+    let mut audio_infos = Vec::new();
+    for &idx in &sound_indices {
+        if audio_tracks.len() >= MAX_AUDIO_STREAMS {
+            break;
+        }
+        let t = &file.tracks[idx];
+        if !matches!(t.sound_format, SoundFormat::Pcm | SoundFormat::Aes3Element) {
+            return None;
+        }
+        let sound = t.sound.as_ref()?;
+        let rate = if sound.sample_rate.is_valid() { sound.sample_rate.as_f64().round().clamp(1.0, f64::from(u32::MAX)) as u32 } else { 48_000 };
+        let channels = sound.channels.max(1);
+        let (presented_start, presented_len) = mxf_sound_window(t);
+        audio_infos.push(AudioStreamInfo { sample_rate: rate, channels, codec: t.codec.codec_id().name().to_string(), bits_per_sample: Some(sound.bits) });
+        audio_tracks.push(AudioTrackEntry { track_idx: idx, native_rate: rate, backend: AudioBackend::MxfPcm { presented_start, presented_len } });
+    }
+
+    let (video_info, video_state, presentation, duration) = if let Some(v_idx) = video_idx {
+        let video_track = &file.tracks[v_idx];
+        let video_params = video_track.codec_params();
+        if !supports_video_codec(video_params.codec) || video_track.needs_reorder {
+            return None;
+        }
+        let (width, height) = video_track.picture.as_ref().map_or((0, 0), |p| (p.frame_width(), p.frame_height()));
+        let er = video_track.edit_rate;
+        let fps = f64::from(er.num) / f64::from(er.den.max(1));
+        let frame_rate = snap_common_fps(fps).unwrap_or_else(|| FrameRate::new(i64::from(er.num), i64::from(er.den)));
+        let dur_units = video_track.duration.unwrap_or_else(|| i64::try_from(video_track.display_order.len()).unwrap_or(0));
+        let duration = Tick::from_units(dur_units.saturating_mul(i64::from(er.den)), i64::from(er.num.max(1)));
+        let has_alpha = video_track.picture.as_ref().is_some_and(|p| p.alpha_depth > 0);
+        let video_decoder = match TrackDecoder::with_options(&video_params, TrackDecoderOptions { threads: Some(worker_cap()), draft: false }) {
+            Ok(d) => d,
+            Err(e) => return Some(Err(MediaError::Decode(e.to_string()))),
+        };
+        let v_info = VideoStreamInfo {
+            width,
+            height,
+            frame_rate,
+            par: (1, 1),
+            codec: video_params.codec.name().to_string(),
+            pixel_format: String::new(),
+            color: ColorInfo::REC709,
+            has_alpha,
+            bitrate: None,
+            hdr: None,
+        };
+        let v_state = Mutex::new(VideoState { decoder: video_decoder, next_decode_idx: 0, gop_start_idx: 0, flushed: false, decoded: Vec::new() });
+        (Some(v_info), Some(v_state), FramePresentation { container_color: None, par: (1, 1), rotation: 0, aperture: None }, duration)
+    } else {
+        let duration = audio_tracks
+            .iter()
+            .map(|entry| {
+                let presented_len = match entry.backend {
+                    AudioBackend::MxfPcm { presented_len, .. } => i64::try_from(presented_len).unwrap_or(i64::MAX),
+                    AudioBackend::Decoder { .. } => 0,
+                };
+                Tick::from_units(presented_len, i64::from(entry.native_rate))
+            })
+            .max()
+            .unwrap_or(Tick::ZERO);
+        (None, None, FramePresentation { container_color: None, par: (1, 1), rotation: 0, aperture: None }, duration)
+    };
+
+    let kind = if video_info.is_some() { MediaKind::Movie } else { MediaKind::AudioOnly };
+    let start_timecode = file.timecode.map(|tc| mxf_start_timecode(tc, video_info.as_ref().map(|v| v.frame_rate)));
+    let info = MediaInfo {
+        name: name.to_string(),
+        kind,
+        duration,
+        video: video_info,
+        audio_streams: audio_infos,
+        container: "mxf".to_string(),
+        start_timecode,
+        file_size: Some(source.len()),
+    };
+
+    Some(Ok(Arc::new(CraftMediaSource {
+        info,
+        source,
+        file: ContainerFile::Mxf(Box::new(file)),
+        video_track_idx: video_idx,
+        presentation,
+        video: video_state,
+        audio_tracks,
+    })))
+}
+
 struct CachedFrame {
     pts: i64,
     draft: bool,
@@ -807,11 +975,25 @@ struct AudioTrackState {
     buf: Vec<Vec<f32>>,
 }
 
+enum AudioBackend {
+    Decoder { seek_preroll_samples: i64, state: Mutex<AudioTrackState> },
+    MxfPcm { presented_start: u64, presented_len: u64 },
+}
+
 struct AudioTrackEntry {
     track_idx: usize,
     native_rate: u32,
-    seek_preroll_samples: i64,
-    state: Mutex<AudioTrackState>,
+    backend: AudioBackend,
+}
+
+#[cfg(test)]
+impl AudioTrackEntry {
+    fn decoder_parts(&mut self) -> (i64, &mut AudioTrackState) {
+        match &mut self.backend {
+            AudioBackend::Decoder { seek_preroll_samples, state } => (*seek_preroll_samples, state.get_mut().unwrap()),
+            AudioBackend::MxfPcm { .. } => panic!("expected decoder audio backend"),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -917,18 +1099,50 @@ impl MediaSource for CraftMediaSource {
         let native_rate = entry.native_rate;
         let (native_start, native_frames) = native_audio_window(start, frames, native_rate, sample_rate);
 
-        let mut state = entry.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let decoded = decode_audio_range(
-            &self.file,
-            &*self.source,
-            entry.track_idx,
-            native_rate,
-            channels_count,
-            entry.seek_preroll_samples,
-            &mut state,
-            native_start,
-            native_frames,
-        )?;
+        let decoded = match &entry.backend {
+            AudioBackend::Decoder { seek_preroll_samples, state: state_mutex } => {
+                let mut state = state_mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                decode_audio_range(
+                    &self.file,
+                    &*self.source,
+                    entry.track_idx,
+                    native_rate,
+                    channels_count,
+                    *seek_preroll_samples,
+                    &mut state,
+                    native_start,
+                    native_frames,
+                )?
+            }
+            AudioBackend::MxfPcm { presented_start, presented_len } => {
+                if filmcraft_media::cancel::cancelled() {
+                    return Err(MediaError::Cancelled);
+                }
+                let ContainerFile::Mxf(mxf_file) = &self.file else {
+                    return Err(MediaError::NoStream("audio"));
+                };
+                let req_end = native_start.saturating_add(native_frames as i64);
+                let win_len = i64::try_from(*presented_len).unwrap_or(i64::MAX);
+                if *presented_start == 0 && native_start >= 0 && req_end <= win_len {
+                    mxf_file.read_pcm(&*self.source, entry.track_idx, native_start as u64, native_frames).map_err(|e| MediaError::Io(e.to_string()))?
+                } else {
+                    let mut out = vec![vec![0.0f32; native_frames]; channels_count];
+                    let clamped_start = native_start.max(0).min(win_len);
+                    let clamped_end = req_end.max(0).min(win_len);
+                    let read_len = usize::try_from(clamped_end.saturating_sub(clamped_start)).unwrap_or(0);
+                    if read_len > 0 {
+                        let dst_off = usize::try_from(clamped_start - native_start).unwrap_or(0);
+                        let stored_start = presented_start.saturating_add(clamped_start as u64);
+                        let read = mxf_file.read_pcm(&*self.source, entry.track_idx, stored_start, read_len).map_err(|e| MediaError::Io(e.to_string()))?;
+                        for (dst, src) in out.iter_mut().zip(&read) {
+                            let n = src.len().min(read_len);
+                            dst[dst_off..dst_off + n].copy_from_slice(&src[..n]);
+                        }
+                    }
+                    out
+                }
+            }
+        };
 
         if sample_rate == native_rate {
             return Ok(AudioBuffer { sample_rate, channels: decoded });
@@ -1570,6 +1784,12 @@ fn tick_to_matroska_units(t: Tick, timebase: (u64, u64)) -> i64 {
     i64::try_from(v).unwrap_or(if v < 0 { i64::MIN } else { i64::MAX })
 }
 
+fn tick_to_rational_units(t: Tick, num: i64, den: i64) -> i64 {
+    let denom = i128::from(craft_time::TICKS_PER_SECOND) * i128::from(den.max(1));
+    let v = (i128::from(t.0) * i128::from(num.max(1))) / denom;
+    i64::try_from(v).unwrap_or(if v < 0 { i64::MIN } else { i64::MAX })
+}
+
 fn snap_common_fps(fps: f64) -> Option<FrameRate> {
     if !fps.is_finite() || fps <= 0.0 {
         return None;
@@ -1765,12 +1985,13 @@ mod tests {
         assert_eq!(*source.packets.lock().unwrap(), (0..AUDIO_LOOKAHEAD).collect::<Vec<_>>());
 
         let first = expected_positions[0];
-        assert_eq!(tracks[0].state.get_mut().unwrap().decoded_pos, first);
+        assert_eq!(tracks[0].decoder_parts().1.decoded_pos, first);
         let (mut reference, _) = open_audio_tracks(file, &source.bytes, [(0, OPUS_PACKETS, params.clone(), delay)]).unwrap();
-        reference[0].state.get_mut().unwrap().audio_starts = AudioStarts::complete(expected_positions.to_vec());
+        reference[0].decoder_parts().1.audio_starts = AudioStarts::complete(expected_positions.to_vec());
 
         let decode = |track: &mut AudioTrackEntry, src: &dyn ByteSource, start, frames| {
-            decode_audio_range(file, src, 0, OPUS_RATE, 1, track.seek_preroll_samples, track.state.get_mut().unwrap(), start, frames).unwrap()
+            let (preroll, state) = track.decoder_parts();
+            decode_audio_range(file, src, 0, OPUS_RATE, 1, preroll, state, start, frames).unwrap()
         };
         // A first read before the initial packet can be ordinary leading silence
         // or negative pre-roll. Neither should trigger the cold suffix scan.
@@ -1795,7 +2016,7 @@ mod tests {
         let backward_start = first + 2 * OPUS_FRAME as i64;
         let backward = decode(&mut tracks[0], source, backward_start, OPUS_FRAME);
         assert_eq!(backward, decode(&mut reference[0], &source.bytes, backward_start, OPUS_FRAME));
-        let state = tracks[0].state.get_mut().unwrap();
+        let (_, state) = tracks[0].decoder_parts();
         assert_eq!(state.audio_starts.positions.as_slice(), expected_positions);
         assert!(state.audio_starts.opus.is_none());
         early
@@ -1812,21 +2033,20 @@ mod tests {
     ) {
         let first = expected_positions[0];
         let decode = |track: &mut AudioTrackEntry, src: &dyn ByteSource, start, frames| {
-            decode_audio_range(file, src, 0, OPUS_RATE, 1, track.seek_preroll_samples, track.state.get_mut().unwrap(), start, frames).unwrap()
+            let (preroll, state) = track.decoder_parts();
+            decode_audio_range(file, src, 0, OPUS_RATE, 1, preroll, state, start, frames).unwrap()
         };
         // A genuinely random first request is not the leading-silence shortcut.
         let (mut fresh, _) = open_audio_tracks(file, source, [(0, OPUS_PACKETS, params.clone(), delay)]).unwrap();
         let (mut eager, _) = open_audio_tracks(file, &source.bytes, [(0, OPUS_PACKETS, params, delay)]).unwrap();
-        eager[0].state.get_mut().unwrap().audio_starts = AudioStarts::complete(expected_positions.to_vec());
+        eager[0].decoder_parts().1.audio_starts = AudioStarts::complete(expected_positions.to_vec());
         if laced {
-            assert_eq!(file.audio_seek_info(0, expected_positions, fresh[0].seek_preroll_samples, start).0, 144);
+            assert_eq!(file.audio_seek_info(0, expected_positions, fresh[0].decoder_parts().0, start).0, 144);
         }
         let transient_packet = 64;
         *source.fail_once_at.lock().unwrap() = Some(transient_packet);
         {
-            let entry = &mut fresh[0];
-            let preroll = entry.seek_preroll_samples;
-            let state = entry.state.get_mut().unwrap();
+            let (preroll, state) = fresh[0].decoder_parts();
             let error = decode_audio_range(file, source, 0, OPUS_RATE, 1, preroll, state, start, 3 * OPUS_FRAME).unwrap_err();
             assert!(matches!(error, MediaError::Io(_)));
             assert_eq!(state.audio_starts.opus.as_ref().unwrap().len, transient_packet);
@@ -1835,7 +2055,7 @@ mod tests {
         let cold = decode(&mut fresh[0], source, start, 3 * OPUS_FRAME);
         assert_eq!(cold, decode(&mut eager[0], &source.bytes, start, 3 * OPUS_FRAME));
         assert!(cold[0].iter().any(|s| s.abs() > 1e-5));
-        let state = fresh[0].state.get_mut().unwrap();
+        let (_, state) = fresh[0].decoder_parts();
         assert_eq!(state.audio_starts.positions.as_slice(), expected_positions);
         assert!(state.audio_starts.opus.is_none());
     }
@@ -2076,6 +2296,105 @@ mod tests {
     }
 
     #[test]
+    fn mxf_sniffer_and_rational_units() {
+        assert!(looks_like_mxf(&[0x06, 0x0e, 0x2b, 0x34, 0x02, 0x05, 0x01, 0x01, 0x0d, 0x01, 0x02, 0x01, 0x01, 0x02]));
+        assert!(!looks_like_mxf(&[0x00, 0x00, 0x00, 0x18, b'f', b't', b'y', b'p']));
+        assert_eq!(tick_to_rational_units(Tick(craft_time::TICKS_PER_SECOND), 25, 1), 25);
+        assert_eq!(tick_to_rational_units(Tick(craft_time::TICKS_PER_SECOND), 30000, 1001), 29);
+    }
+
+    #[test]
+    fn mxf_start_timecode_converts_mismatched_rates_and_preserves_matching() {
+        let tc = mxf::Timecode { start: 100, rounded_base: 24, drop_frame: false };
+        assert_eq!(mxf_start_timecode(tc, Some(FrameRate::FPS_23_976)), 100);
+        assert_eq!(mxf_start_timecode(tc, Some(FrameRate::FPS_24)), 100);
+        assert_eq!(mxf_start_timecode(tc, Some(FrameRate::new(48, 1))), 200);
+        let df = mxf::Timecode { start: 3000, rounded_base: 30, drop_frame: true };
+        assert_eq!(mxf_start_timecode(df, Some(FrameRate::FPS_29_97)), 3000);
+        assert_eq!(mxf_start_timecode(df, Some(FrameRate::new(60_000, 1001))), 6000);
+        assert_eq!(mxf_start_timecode(df, None), 3000);
+    }
+
+    #[test]
+    fn mxf_opatom_pcm_reads_windowed_and_resampled_audio() {
+        let opts = mxf::write::OpAtomPcm {
+            sample_rate: 48_000,
+            bits: 16,
+            channels: 2,
+            edit_rate: None,
+            ids: mxf::write::PackageIds::from_seed("eff-mxf-test", "pcm"),
+            timecode: Some(mxf::write::StartTimecode { frames: 240, rate: mxf::Rational::new(24, 1), drop_frame: false }),
+        };
+        let samples: Vec<i32> = (0..4800 * 2).map(|i| ((i * 137) % 16000) - 8000).collect();
+        let bytes = mxf::write::write_opatom_pcm(&opts, &samples).expect("write opatom pcm");
+        let src = open_bytes("test.mxf", Arc::from(bytes)).expect("recognized").expect("opened");
+        let info = src.info();
+        assert_eq!(info.container, "mxf");
+        assert_eq!(info.kind, MediaKind::AudioOnly);
+        assert_eq!(info.audio_streams.len(), 1);
+        assert_eq!(info.audio_streams[0].sample_rate, 48_000);
+        assert_eq!(info.audio_streams[0].channels, 2);
+
+        // Direct read at t=0
+        let buf = src.audio(0, 1024, 48_000).expect("direct read");
+        assert_eq!(buf.channels.len(), 2);
+        assert_eq!(buf.channels[0].len(), 1024);
+        assert!(buf.channels[0].iter().any(|&v| v.abs() > 0.01));
+
+        // Negative start and past-end read zero-fill cleanly
+        let neg = src.audio(-100, 200, 48_000).expect("negative start");
+        assert!(neg.channels[0][..100].iter().all(|&v| v == 0.0));
+        assert!(neg.channels[0][100..].iter().any(|&v| v.abs() > 0.01));
+        let past = src.audio(4700, 200, 48_000).expect("past end");
+        assert!(past.channels[0][..100].iter().any(|&v| v.abs() > 0.01));
+        assert!(past.channels[0][100..].iter().all(|&v| v == 0.0));
+
+        // Resampled read
+        let resampled = src.audio(0, 512, 44_100).expect("resampled");
+        assert_eq!(resampled.sample_rate, 44_100);
+        assert_eq!(resampled.channels[0].len(), 512);
+    }
+
+    #[test]
+    fn mxf_video_window_and_sound_trim_helpers() {
+        let mut cfg =
+            mxf::write::WriterConfig::new(mxf::write::Pattern::Op1a, mxf::Rational::new(25, 1), mxf::write::PackageIds::from_seed("eff-mxf-vid", "op1a"));
+        cfg.picture = Some(mxf::write::PictureDesc::new(mxf::write::PictureCoding::Avc { profile_idc: 66, intra: false }, 16, 16));
+        cfg.sound = vec![mxf::write::SoundDesc { sample_rate: 48_000, channels: 1, bits: 16 }];
+        let mut w = mxf::write::MxfWriter::new(std::io::Cursor::new(Vec::new()), cfg).expect("writer");
+        let pcm = mxf::write::encode_pcm(&[vec![0.1f32; 1920]], 16);
+        w.push_picture(&[0x00, 0x00, 0x00, 0x01, 0x65], mxf::write::FrameInfo::intra()).expect("pic0");
+        w.push_sound(0, &pcm).expect("snd0");
+        w.push_picture(&[0x00, 0x00, 0x00, 0x01, 0x41], mxf::write::FrameInfo::intra()).expect("pic1");
+        w.push_sound(0, &pcm).expect("snd1");
+        let raw_bytes = w.finish().expect("finish").into_inner();
+        let arc_bytes: Arc<[u8]> = Arc::from(raw_bytes.clone());
+        let mxf_bytes: SharedBytes = Arc::new(arc_bytes);
+        let mut file = mxf::open(&*mxf_bytes).expect("open mxf");
+
+        // Exercise ContainerFile::Mxf video helpers and trimmed sound window.
+        file.tracks[0].origin = 1;
+        file.tracks[0].duration = Some(1);
+        file.tracks[1].origin = 1;
+        file.tracks[1].duration = Some(1);
+        let (win_start, win_len) = mxf_sound_window(&file.tracks[1]);
+        assert_eq!((win_start, win_len), (1920, 1920));
+
+        let container = ContainerFile::Mxf(Box::new(file));
+        assert_eq!(container.sample_count(0), 2);
+        assert_eq!(container.target_sample(0, Tick::ZERO), Some((1, 1)));
+        assert_eq!(container.sync_sample_before(0, 1), 1);
+        assert_eq!(container.sample_pts(0, 1), 1);
+        assert_eq!(container.pts_to_tick(0, 1), Tick::ZERO);
+
+        // Exercise open_mxf video+sound path on valid Op1a Avc+PCM.
+        let src = open_bytes("op1a.mxf", Arc::from(raw_bytes)).expect("recognized").expect("opened");
+        assert_eq!(src.info().container, "mxf");
+        assert_eq!(src.info().audio_streams.len(), 1);
+        assert!(open_bytes("op1a.mxf", Arc::from(vec![0u8; 4])).is_none());
+    }
+
+    #[test]
     fn standalone_wav_opens_seeks_and_resamples_via_craft_audio() {
         // Minimal 48 kHz stereo 16-bit PCM WAV with 4800 frames (0.1s).
         let frames = 4800u32;
@@ -2205,7 +2524,8 @@ mod tests {
         let (mut tracks, _) = open_audio_tracks(&file, &bytes, [(0, 4, params.clone(), 0)]).unwrap();
 
         let decode = |track: &mut AudioTrackEntry, start: i64, frames: usize| {
-            decode_audio_range(&file, &bytes, 0, 48_000, 1, track.seek_preroll_samples, track.state.get_mut().unwrap(), start, frames).unwrap()
+            let (preroll, state) = track.decoder_parts();
+            decode_audio_range(&file, &bytes, 0, 48_000, 1, preroll, state, start, frames).unwrap()
         };
 
         let full = decode(&mut tracks[0], 0, 500);
@@ -2244,11 +2564,12 @@ mod tests {
 
         let open_with_overlap = || {
             let (mut tracks, _) = open_audio_tracks(&file, &bytes, [(0, 2, params.clone(), 0)]).unwrap();
-            tracks[0].state.get_mut().unwrap().audio_starts = AudioStarts::complete(vec![0, 512]);
+            tracks[0].decoder_parts().1.audio_starts = AudioStarts::complete(vec![0, 512]);
             tracks
         };
         let decode = |track: &mut AudioTrackEntry, start: i64, frames: usize| {
-            decode_audio_range(&file, &bytes, 0, 48_000, 1, track.seek_preroll_samples, track.state.get_mut().unwrap(), start, frames).unwrap()
+            let (preroll, state) = track.decoder_parts();
+            decode_audio_range(&file, &bytes, 0, 48_000, 1, preroll, state, start, frames).unwrap()
         };
 
         let mut wide_tracks = open_with_overlap();
