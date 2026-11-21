@@ -326,6 +326,10 @@ fn variable_font_axes_animator() {
     let before = area(&s);
     let gap_before = gap(&s);
     let l = s.active_comp().unwrap().layer(LayerId(t)).unwrap().clone();
+    // The timeline menus list exactly what the command accepts (#3964).
+    let menu_axes = crate::cmd::text_anim::font_axes_now(&s, &l);
+    let listed_tags = listed["axes"].as_array().unwrap().iter().map(|a| a["tag"].as_str().unwrap()).collect::<Vec<_>>();
+    assert_eq!(menu_axes.iter().map(|a| a.tag.as_str()).collect::<Vec<_>>(), listed_tags);
     let pg = l.props.find_group(anim).unwrap().sub("properties").unwrap().props().next().unwrap().uid;
     let target = if axis.max - axis.default >= axis.default - axis.min { axis.max } else { axis.min };
     let range = (target - axis.default) as f64;
