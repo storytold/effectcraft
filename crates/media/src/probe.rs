@@ -240,7 +240,7 @@ pub(crate) fn footage_from_craft_info(path: &str, info: &craft_media_source::Med
     }
 }
 
-fn profile_of_craft(c: &craft_color::ColorInfo) -> Option<effectcraft_project::ColorSpace> {
+pub(crate) fn profile_of_craft(c: &craft_color::ColorInfo) -> Option<effectcraft_project::ColorSpace> {
     use craft_color::{Primaries, Transfer};
     use effectcraft_project::ColorSpace;
     match (c.primaries, c.transfer) {
