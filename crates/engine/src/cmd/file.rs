@@ -283,6 +283,9 @@ struct PendingImport {
     errors: Vec<String>,
     /// EffectCraft projects merged in (`file.importProject` results); never added to a comp.
     projects: Vec<Value>,
+    /// Open the first composition a layered file imported as; a drop that contains a project
+    /// passes false so the open composition stays (#4000).
+    open_comps: bool,
 }
 
 /// Everything probing a file needs, apart from the session (it can run on a background thread).
@@ -496,13 +499,13 @@ fn prepare_import(s: &mut Session, p: &Value) -> Result<PendingImport> {
         page,
         psd_layer: p.get("layer").cloned(),
     };
-    Ok(PendingImport { sources, prober, comps, items, errors, projects })
+    Ok(PendingImport { sources, prober, comps, items, errors, projects, open_comps: b_p(p, "openComps").unwrap_or(true) })
 }
 
 /// The last part of an import: add the probed files to the project (one undo step) and select
 /// everything the import made, so the Project panel shows it.
 fn add_footage(s: &mut Session, pending: PendingImport, probed: Vec<std::result::Result<Probed, String>>) -> Result<Value> {
-    let PendingImport { comps, mut items, mut errors, projects, .. } = pending;
+    let PendingImport { comps, mut items, mut errors, projects, open_comps, .. } = pending;
     let mut found = vec![];
     let mut warnings = vec![];
     for r in probed {
@@ -550,7 +553,9 @@ fn add_footage(s: &mut Session, pending: PendingImport, probed: Vec<std::result:
             Ok(())
         })?;
     }
-    if let Some(c) = comps.first() {
+    // A drop that contains a project passes `openComps: false`: the composition it becomes is
+    // imported, but the open composition stays (#4000).
+    if open_comps && let Some(c) = comps.first() {
         s.open_comp(ItemId(*c));
     }
     for w in &warnings {
@@ -812,7 +817,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "File...",
             ["File", "Import"],
             Some("Cmd+I"),
-            "{paths: [string] (files or folders), sequence?: bool (the Sequence checkbox: true imports numbered stills of one run as one image sequence, one picked file bringing its whole run and several picked files that range; default false: picked or dropped files import as stills, as in After Effects; folders' runs import as sequences; false imports stills and a folder's files individually), alphabetical?: bool (Force Alphabetical Order: every image of that type in the folder, by name), frameRate?: fps (image sequences; default Settings ▸ Import ▸ Sequence Footage), importAs?: footage|composition|compositionLayerSizes (Photoshop, PDF, Illustrator and EPS files), layer?: name|index (footage of one Photoshop layer), page?: number from 1 (PDF / Illustrator page), drag?: bool (dropped files: Settings ▸ Import ▸ Default Drag Import As; files import as stills unless sequence), addToComp?: bool (also add them to the active comp, at time?, index?, position? as in layer.addItem), newComp?: bool (make one new composition of the footage and solids imported, as file.newCompFromSelection with single; a layered file imported as a composition is that composition and gets no other; takes precedence over addToComp), background?: bool (probe the files in a background job, jobs.list / jobs.wait; returns {job})}",
+            "{paths: [string] (files or folders), sequence?: bool (the Sequence checkbox: true imports numbered stills of one run as one image sequence, one picked file bringing its whole run and several picked files that range; default false: picked or dropped files import as stills, as in After Effects; folders' runs import as sequences; false imports stills and a folder's files individually), alphabetical?: bool (Force Alphabetical Order: every image of that type in the folder, by name), frameRate?: fps (image sequences; default Settings ▸ Import ▸ Sequence Footage), importAs?: footage|composition|compositionLayerSizes (Photoshop, PDF, Illustrator and EPS files), layer?: name|index (footage of one Photoshop layer), page?: number from 1 (PDF / Illustrator page), drag?: bool (dropped files: Settings ▸ Import ▸ Default Drag Import As; files import as stills unless sequence), openComps?: bool (open the first composition a layered file imports as; default true; a drop that contains a project passes false so the open composition stays), addToComp?: bool (also add them to the active comp, at time?, index?, position? as in layer.addItem), newComp?: bool (make one new composition of the footage and solids imported, as file.newCompFromSelection with single; a layered file imported as a composition is that composition and gets no other; takes precedence over addToComp), background?: bool (probe the files in a background job, jobs.list / jobs.wait; returns {job})}",
             always,
             import_cmd
         ),

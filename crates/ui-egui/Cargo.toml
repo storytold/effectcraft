@@ -65,6 +65,8 @@ pollster = "1"
 effectcraft-segment = { workspace = true }
 effectcraft-host = { workspace = true }
 effectcraft-media = { workspace = true }
+# Writes the layered Photoshop document of the mixed-drop test (test only).
+effectcraft-psd = { workspace = true }
 exr = { workspace = true }
 tempfile = { workspace = true }
 

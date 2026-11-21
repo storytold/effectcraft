@@ -2573,6 +2573,7 @@ dependencies = [
  "effectcraft-media",
  "effectcraft-path",
  "effectcraft-project",
+ "effectcraft-psd",
  "effectcraft-render",
  "effectcraft-segment",
  "effectcraft-text",
