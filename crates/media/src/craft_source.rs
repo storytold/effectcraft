@@ -1,15 +1,31 @@
-//! ISO-BMFF (MP4/MOV) and Matroska/WebM media-reader routes backed by `craft-media`,
-//! `craft-video`, `craft-audio`, and `craft-media-source`.
+//! ISO-BMFF (MP4/MOV/M4A) and Matroska/WebM (MKV/MKA/WebM) media-reader routes backed by
+//! `craft-media`, `craft-video`, `craft-audio`, and `craft-media-source`.
 //!
 //! Preserves sync-sample backward seek, B-frame reordering, cooperative cancellation, VUI +
 //! container colour resolution, draft mode for reduced-resolution playback, and bounded worker
 //! threads, while falling back to `filmcraft-codecs` for unsupported codecs or audio streams.
+//!
+//! ## Route Matrix (`crates/media`)
+//! - **ISO-BMFF (`MP4`/`MOV`/`M4A`, video+audio & audio-only)**:
+//!   - Shared (`craft-media::isobmff` + `craft-video` + `craft-audio`): `H264`, `Hevc`, `Av1`,
+//!     `Vp9`, `Vp8`, `ProRes` (coded alpha via `craft_video::prores::probe`, #3999), `Dnxhd`,
+//!     `Mpeg2Video`; audio `Aac`, `Alac`, `Opus`, `Ac3`, `Mp3`/`Mp2`/`Mp1`.
+//!   - Fallback (`filmcraft-codecs`): `Mjpeg`, `Mpeg4Video`, `Ffv1`, `Apv`, or unsupported audio.
+//! - **Matroska / WebM (`MKV`/`MKA`/`WebM`, video+audio & audio-only)**:
+//!   - Shared (`craft-media::matroska` + `craft-video` + `craft-audio`): `H264`, `Hevc`, `Av1`,
+//!     `Vp9`, `Vp8`, `ProRes`, `Dnxhd`, `Mpeg2Video`; audio `Aac`, `Alac`, `Opus`, `Ac3`,
+//!     `Mp3`/`Mp2`/`Mp1` (with `CodecDelay` + `SeekPreRoll` timing).
+//!   - Fallback (`filmcraft-codecs`): `alpha_mode == 1` (`BlockAdditional` alpha), unreadable/zlib
+//!     encodings, `Mjpeg`/`Ffv1`/`Theora`/`Apv`, or unsupported audio (`Vorbis`/`Flac`/`Pcm`).
+//! - **Other containers (`MXF`, `AVI`, `MPEG-TS`/`PS`, `Ogg`, standalone `WAV`/`AIFF`/`FLAC`/`MP3`)**:
+//!   - Currently routed via `filmcraft-codecs` in `stream.rs` (pending subsequent cutover PRs).
 
 use std::sync::{Arc, Mutex};
 
 use craft_audio::{AudioBuffer, TrackDecoder as AudioTrackDecoder};
 use craft_color::{ColorInfo, Matrix, Primaries, Range, Transfer};
-use craft_frame::{Chroma, PixelData, VideoFrame};
+use craft_frame::{Chroma, PixelData, Region, VideoFrame};
+use craft_media::bitstream::unescape_rbsp;
 use craft_media::isobmff::{self, Mp4File};
 use craft_media::matroska::{self, MkvFile};
 use craft_media::{ByteSource, CodecId, CodecParams};
@@ -143,32 +159,159 @@ impl ContainerFile {
         }
     }
 
-    fn audio_seek_info(&self, track_idx: usize, start: i64, native_rate: u32) -> (usize, i64) {
-        match self {
-            ContainerFile::Isobmff(f) => {
-                let track = &f.tracks[track_idx];
-                let t_track = (i128::from(start.max(0)) * i128::from(track.timescale)) / i128::from(native_rate);
-                let sample_idx = track.sample_at_presentation_time(i64::try_from(t_track).unwrap_or(i64::MAX)).unwrap_or(0);
-                // Back up a few packets for AAC/Opus overlap/preroll.
-                let seek_idx = sample_idx.saturating_sub(2);
-                (seek_idx, isobmff_audio_position(track, seek_idx, native_rate))
+    fn audio_seek_info(audio_starts: &[i64], seek_preroll_samples: i64, start: i64) -> (usize, i64) {
+        let target = start.saturating_sub(seek_preroll_samples).max(0);
+        let sample_idx = audio_starts.partition_point(|&s| s <= target).saturating_sub(1);
+        let seek_idx = sample_idx.saturating_sub(2);
+        let decoded_pos = audio_starts.get(seek_idx).copied().unwrap_or(0);
+        (seek_idx, decoded_pos)
+    }
+}
+
+/// Where the container puts one audio packet, for [`contiguous_starts`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PacketTime {
+    /// Its timestamp, in output samples.
+    stamp: i64,
+    /// Whether `stamp` is the packet's own. A Matroska frame after the first in a laced block
+    /// without a duration repeats the block's timestamp.
+    stamped: bool,
+    /// Samples it decodes to, when known.
+    samples: Option<i64>,
+}
+
+/// Packet start positions in output samples: each packet starts where the previous one ends,
+/// unless its own timestamp is more than `tolerance` samples from there (a real gap or overlap in
+/// the recording) or the previous packet's length is unknown; then it starts at its timestamp.
+///
+/// Container timestamps are coarser than a sample. Matroska stores milliseconds, and a remux to MP4
+/// (OBS's) turns that rounding into uneven sample durations: a 1024-sample AAC frame at 48 kHz
+/// lasts 21.33 ms, so frames are stamped at 0, 1008, 2064, 3072… Placing each decoded packet at its
+/// stamp overwrote the end of one packet and left a hole of silence after another, a click every
+/// few packets: crackling throughout playback and export (`storytold/effectcraft#1546`,
+/// `storytold/filmcraft#359`).
+fn contiguous_starts(packets: impl IntoIterator<Item = PacketTime>, tolerance: i64) -> Vec<i64> {
+    let tolerance = tolerance.max(0).unsigned_abs();
+    let mut next: Option<i64> = None;
+    packets
+        .into_iter()
+        .map(|p| {
+            let start = match next {
+                Some(n) if !p.stamped || n.abs_diff(p.stamp) <= tolerance => n,
+                _ => p.stamp,
+            };
+            next = p.samples.and_then(|k| start.checked_add(k));
+            start
+        })
+        .collect()
+}
+
+fn fixed_packet_samples(dec: &mut AudioTrackDecoder, codec: CodecId, lookahead: &[Vec<u8>]) -> Option<i64> {
+    if !matches!(codec, CodecId::Aac | CodecId::HeAac | CodecId::Mp1 | CodecId::Mp2 | CodecId::Mp3 | CodecId::Ac3 | CodecId::Eac3) {
+        return None;
+    }
+    let mut frame_len: Option<usize> = None;
+    for pkt in lookahead {
+        let Ok(block) = dec.decode(pkt) else {
+            dec.reset();
+            return None;
+        };
+        let n = block.channels.first().map_or(0, Vec::len);
+        if n == 0 {
+            dec.reset();
+            return None;
+        }
+        match frame_len {
+            None => frame_len = Some(n),
+            Some(prev) if prev != n => {
+                dec.reset();
+                return None;
             }
-            ContainerFile::Matroska(f) => {
-                let track = &f.tracks[track_idx];
-                let delay_ns = i128::from(track.codec_delay_ns);
-                let preroll_ns = i128::from(track.seek_pre_roll_ns.max(80_000_000));
-                let target_ns = (i128::from(start.max(0)) * 1_000_000_000) / i128::from(native_rate) + delay_ns;
-                let seek_ns = (target_ns - preroll_ns).max(0);
-                let t_track = track.ns_to_ticks(i64::try_from(seek_ns).unwrap_or(0));
-                let sample_idx = track.sample_at_pts(t_track).unwrap_or(0);
-                let seek_idx = sample_idx.saturating_sub(2);
-                let sample_pts = track.samples.get(seek_idx).map_or(0, |s| s.pts);
-                let sample_ns = i128::from(track.ticks_to_ns(sample_pts)) - delay_ns;
-                let decoded_pos = i64::try_from((sample_ns * i128::from(native_rate)) / 1_000_000_000).unwrap_or(0);
-                (seek_idx, decoded_pos)
-            }
+            Some(_) => {}
         }
     }
+    dec.reset();
+    frame_len.and_then(|n| i64::try_from(n).ok())
+}
+
+/// Duration of an Opus packet in 48 kHz samples from its TOC (RFC 6716 §3.1); `None` if invalid.
+fn opus_packet_samples(pkt: &[u8]) -> Option<u32> {
+    let &toc = pkt.first()?;
+    let config = toc >> 3;
+    let frame = match config {
+        0..=11 => [480, 960, 1920, 2880][(config & 3) as usize],
+        12..=15 => [480, 960][(config & 1) as usize],
+        _ => [120, 240, 480, 960][(config & 3) as usize],
+    };
+    let frames = match toc & 3 {
+        0 => 1,
+        1 | 2 => 2,
+        _ => (*pkt.get(1)? & 0x3F) as u32,
+    };
+    let n = frame * frames;
+    (n > 0 && n <= 5760).then_some(n)
+}
+
+fn compute_audio_starts(
+    container: &ContainerFile,
+    source: &dyn ByteSource,
+    track_idx: usize,
+    codec: CodecId,
+    native_rate: u32,
+    fixed_samples: Option<i64>,
+) -> Vec<i64> {
+    let rate = i128::from(native_rate);
+    match container {
+        ContainerFile::Isobmff(f) => {
+            let Some(track) = f.tracks.get(track_idx) else { return Vec::new() };
+            let ts = i128::from(track.timescale.max(1));
+            let stamps: Vec<i64> = (0..track.samples.len()).map(|i| isobmff_audio_position(track, i, native_rate)).collect();
+            let unit = i64::try_from((rate + ts - 1) / ts).unwrap_or(i64::MAX);
+            if codec == CodecId::Opus {
+                let packets = stamps.into_iter().enumerate().map(|(i, stamp)| {
+                    let samples = f.read_sample(source, track_idx, i).ok().and_then(|p| opus_packet_samples(&p)).map(i64::from);
+                    PacketTime { stamp, stamped: true, samples }
+                });
+                return contiguous_starts(packets, unit.saturating_mul(2).saturating_add(1));
+            }
+            let Some(frame) = fixed_samples else {
+                return stamps;
+            };
+            let tolerance = (frame / 2).max(unit.saturating_mul(2).saturating_add(1));
+            let packets = stamps.into_iter().map(|stamp| PacketTime { stamp, stamped: true, samples: Some(frame) });
+            contiguous_starts(packets, tolerance)
+        }
+        ContainerFile::Matroska(f) => {
+            let Some(track) = f.tracks.get(track_idx) else { return Vec::new() };
+            // Indexed PTS already subtracts CodecDelay rounded to the container clock.
+            // Translate between that clock and the warm path's whole-frame delay.
+            let tick_ns = i128::from(f.info.timestamp_scale.max(1));
+            let delay_ns = i128::from(track.codec_delay_ns);
+            let indexed_delay_ns = ((delay_ns + tick_ns / 2) / tick_ns) * tick_ns;
+            let delay_frames = audio_frames_from_ns(delay_ns, native_rate);
+            let stamp_for = |pts: i64| -> i64 {
+                let ns = i128::from(track.ticks_to_ns(pts)) + indexed_delay_ns;
+                i64::try_from(audio_frames_from_ns(ns, native_rate) - delay_frames).unwrap_or(0)
+            };
+            let tick_samples = i64::try_from(i128::from(track.ticks_to_ns(2)) * rate / 1_000_000_000).unwrap_or(i64::MAX).saturating_add(1);
+            if codec == CodecId::Opus {
+                let packets = track.samples.iter().enumerate().map(|(i, s)| {
+                    let samples = f.read_sample(source, track_idx, i).ok().and_then(|p| opus_packet_samples(&p)).map(i64::from);
+                    PacketTime { stamp: stamp_for(s.pts), stamped: s.lace == 0 || s.duration > 0, samples }
+                });
+                return contiguous_starts(packets, tick_samples);
+            }
+            let Some(frame) = fixed_samples else {
+                return track.samples.iter().map(|s| stamp_for(s.pts)).collect();
+            };
+            let packets = track.samples.iter().map(|s| PacketTime { stamp: stamp_for(s.pts), stamped: s.lace == 0 || s.duration > 0, samples: Some(frame) });
+            contiguous_starts(packets, (frame / 2).max(tick_samples))
+        }
+    }
+}
+
+fn audio_frames_from_ns(ns: i128, rate: u32) -> i128 {
+    (ns * i128::from(rate)) / 1_000_000_000
 }
 
 /// The decoded buffer starts on the presentation timeline, including negative trimmed samples.
@@ -185,7 +328,7 @@ where
 {
     let mut audio_tracks = Vec::new();
     let mut audio_infos = Vec::new();
-    for (idx, sample_count, params, codec_delay_ns) in candidates {
+    for (idx, sample_count, params, _codec_delay_ns) in candidates {
         if audio_tracks.len() >= MAX_AUDIO_STREAMS {
             break;
         }
@@ -196,14 +339,20 @@ where
             lookahead.push(pkt);
         }
         let refs: Vec<&[u8]> = lookahead.iter().map(Vec::as_slice).collect();
-        let dec = AudioTrackDecoder::new(&params, &refs).ok()?;
+        let mut dec = AudioTrackDecoder::new(&params, &refs).ok()?;
         let native_rate = dec.sample_rate().max(1);
         let channels = u32::from(dec.layout().channels()).max(1);
-        let delay_samples = i64::try_from((i128::from(codec_delay_ns) * i128::from(native_rate)) / 1_000_000_000).unwrap_or(0);
-        let decoded_pos = match container {
-            ContainerFile::Isobmff(f) => f.tracks.get(idx).map_or(0, |track| isobmff_audio_position(track, 0, native_rate)),
-            ContainerFile::Matroska(_) => -delay_samples,
+        let codec = dec.codec();
+        let fixed_samples = fixed_packet_samples(&mut dec, codec, &lookahead);
+        let audio_starts = compute_audio_starts(container, source, idx, codec, native_rate, fixed_samples);
+        let seek_preroll_samples = match container {
+            ContainerFile::Matroska(f) if codec == CodecId::Opus => {
+                let preroll_ns = i128::from(f.tracks[idx].seek_pre_roll_ns.max(80_000_000));
+                i64::try_from(preroll_ns * i128::from(native_rate) / 1_000_000_000).unwrap_or(0)
+            }
+            _ => 0,
         };
+        let initial_pos = audio_starts.first().copied().unwrap_or(0);
         audio_infos.push(AudioStreamInfo {
             sample_rate: native_rate,
             channels,
@@ -213,51 +362,74 @@ where
         audio_tracks.push(AudioTrackEntry {
             track_idx: idx,
             native_rate,
-            state: Mutex::new(AudioTrackState { decoder: dec, next_sample: 0, decoded_pos, buf: Vec::new() }),
+            audio_starts,
+            seek_preroll_samples,
+            state: Mutex::new(AudioTrackState { decoder: dec, next_sample: 0, decoded_pos: initial_pos, buf: Vec::new() }),
         });
     }
     Some((audio_tracks, audio_infos))
 }
 
-fn open_isobmff(name: &str, source: SharedBytes) -> Option<Result<SharedSource>> {
-    let file = isobmff::open(source.clone()).ok()?;
-    let video_idx =
-        file.tracks.iter().position(|t| t.kind == isobmff::TrackKind::Video && !t.samples.is_empty() && !t.entries.is_empty() && t.timescale > 0)?;
-    let video_track = &file.tracks[video_idx];
-    let video_params = video_track.codec_params();
-    if !supports_video_codec(video_params.codec) {
+/// A probe hint only: a single configured SPS can signal a visible size different from the
+/// sample entry. Multiple or in-band parameter sets leave the initial hint to the container.
+fn nal_visible_size_hint(config: &isobmff::CodecConfig) -> Option<(u32, u32)> {
+    let (_, _, width, height) = match config {
+        isobmff::CodecConfig::Avc(avc) => {
+            if avc.pps.is_empty() {
+                return None;
+            }
+            let mut sets = avc.sps.iter().filter(|n| n.first().is_some_and(|h| h & 0x1f == 7));
+            let sps = sets.next()?;
+            if sets.next().is_some() {
+                return None;
+            }
+            craft_video::h264::decode::params::Sps::parse(&unescape_rbsp(sps.get(1..)?)).ok()?.crop_rect()
+        }
+        isobmff::CodecConfig::Hevc(hevc) => {
+            let (mut vps, mut sps, mut pps) = (false, None, false);
+            for nal in hevc.arrays.iter().filter(|a| (32..=34).contains(&a.nal_type)).flat_map(|a| &a.nalus) {
+                match nal.first().map(|h| (h >> 1) & 0x3f) {
+                    Some(32) => vps = true,
+                    Some(33) if sps.is_some() => return None,
+                    Some(33) => sps = Some(nal),
+                    Some(34) => pps = true,
+                    _ => {}
+                }
+            }
+            if !vps || !pps {
+                return None;
+            }
+            craft_video::hevc::decode::params::Sps::parse(&unescape_rbsp(sps?.get(2..)?)).ok()?.crop_rect()
+        }
+        _ => return None,
+    };
+    (width != 0 && height != 0).then_some((width, height))
+}
+
+/// Apply a valid container clean aperture in decoded-picture coordinates, before rotation.
+fn clean_aperture_region(aperture: isobmff::CleanAperture, (width, height): (u32, u32)) -> Option<Region> {
+    let ratio = |(n, d): (u32, u32)| (d != 0).then(|| f64::from(n) / f64::from(d));
+    let offset = |(n, d): (i32, u32)| (d != 0).then(|| f64::from(n) / f64::from(d));
+    let w = ratio(aperture.width)?.round();
+    let h = ratio(aperture.height)?.round();
+    let dx = offset(aperture.horiz_offset)?;
+    let dy = offset(aperture.vert_offset)?;
+    let (frame_width, frame_height) = (f64::from(width), f64::from(height));
+    if w < 1.0 || h < 1.0 || w > frame_width || h > frame_height {
         return None;
     }
-
-    let container_color = video_track.video().and_then(|v| v.color.as_ref()).map(color_from_isobmff);
-    let color = container_color.unwrap_or(ColorInfo::REC709);
-    let (mut width, mut height) = video_track
-        .video()
-        .map(|v| (u32::from(v.width), u32::from(v.height)))
-        .filter(|&(w, h)| w > 0 && h > 0)
-        .unwrap_or((video_track.width, video_track.height));
-    let mut par = video_track.video().and_then(|v| v.pixel_aspect).filter(|&(n, d)| n > 0 && d > 0).unwrap_or((1, 1));
-    let rotation = video_track.display_rotation().unwrap_or(0) % 4;
-    if rotation % 2 == 1 {
-        std::mem::swap(&mut width, &mut height);
-        par = (par.1, par.0);
+    let x = ((frame_width - w) / 2.0 + dx).round();
+    let y = ((frame_height - h) / 2.0 + dy).round();
+    if x < 0.0 || y < 0.0 || x + w > frame_width || y + h > frame_height {
+        return None;
     }
-    let has_alpha = if video_params.codec == CodecId::ProRes {
-        // The coded alpha plane is authoritative for ProRes, not the MOV sample-entry depth.
-        let sample = video_track.samples.first()?;
-        if sample.size > MAX_PRORES_ALPHA_SAMPLE_BYTES {
-            return None;
-        }
-        let packet = file.read_sample(&*source, video_idx, 0).ok()?;
-        craft_video::prores::probe(&packet).ok()?.alpha != craft_video::prores::AlphaType::None
-    } else {
-        video_track.video().is_some_and(|v| v.depth == 32)
-    };
-    let frame_rate = estimate_isobmff_frame_rate(video_track);
-    let duration = Tick::from_units(i64::try_from(video_track.duration).unwrap_or(i64::MAX), i64::from(video_track.timescale));
-    let bitrate = video_track.entries.first().and_then(|e| e.bitrate).map(|b| u64::from(b.avg_bitrate)).filter(|&b| b > 0);
-    let codec_name = video_params.codec.name().to_string();
+    let r = Region { x: x as usize, y: y as usize, w: w as usize, h: h as usize };
+    (!r.is_full(width as usize, height as usize)).then_some(r)
+}
 
+fn open_isobmff(name: &str, source: SharedBytes) -> Option<Result<SharedSource>> {
+    let file = isobmff::open(source.clone()).ok()?;
+    let video_idx = file.tracks.iter().position(|t| t.kind == isobmff::TrackKind::Video && !t.samples.is_empty() && !t.entries.is_empty() && t.timescale > 0);
     let audio_candidates: Vec<(usize, usize, CodecParams, u64)> = file
         .tracks
         .iter()
@@ -266,69 +438,96 @@ fn open_isobmff(name: &str, source: SharedBytes) -> Option<Result<SharedSource>>
         .map(|(idx, t)| (idx, t.samples.len(), t.codec_params(), 0))
         .collect();
 
-    let container = ContainerFile::Isobmff(file);
-    let (audio_tracks, audio_infos) = open_audio_tracks(&container, &*source, audio_candidates)?;
+    if video_idx.is_none() && audio_candidates.is_empty() {
+        return None;
+    }
 
-    let video_decoder = match TrackDecoder::with_options(&video_params, TrackDecoderOptions { threads: Some(worker_cap()), draft: false }) {
-        Ok(d) => d,
-        Err(e) => return Some(Err(MediaError::Decode(e.to_string()))),
+    let (video_info, video_state, presentation, duration) = if let Some(v_idx) = video_idx {
+        let video_track = &file.tracks[v_idx];
+        let video_params = video_track.codec_params();
+        if !supports_video_codec(video_params.codec) {
+            return None;
+        }
+        let container_color = video_track.video().and_then(|v| v.color.as_ref()).map(color_from_isobmff);
+        let color = container_color.unwrap_or(ColorInfo::REC709);
+        let (mut width, mut height) = video_track
+            .video()
+            .map(|v| (u32::from(v.width), u32::from(v.height)))
+            .filter(|&(w, h)| w > 0 && h > 0)
+            .unwrap_or((video_track.width, video_track.height));
+        // Probe needs dimensions before decoding. Retain the original rational aperture separately
+        // so frame conversion can use the actual visible size, even with in-band parameter sets.
+        let aperture = video_track.video().and_then(|v| v.clean_aperture);
+        if let Some(clap) = aperture {
+            (width, height) = nal_visible_size_hint(&video_track.entries[0].codec).unwrap_or((width, height));
+            if let Some(region) = clean_aperture_region(clap, (width, height)) {
+                (width, height) = (region.w as u32, region.h as u32);
+            }
+        }
+        let mut par = video_track.video().and_then(|v| v.pixel_aspect).filter(|&(n, d)| n > 0 && d > 0).unwrap_or((1, 1));
+        let rotation = video_track.display_rotation().unwrap_or(0) % 4;
+        if rotation % 2 == 1 {
+            std::mem::swap(&mut width, &mut height);
+            par = (par.1, par.0);
+        }
+        let has_alpha = if video_params.codec == CodecId::ProRes {
+            // The coded alpha plane is authoritative for ProRes, not the MOV sample-entry depth.
+            let sample = video_track.samples.first()?;
+            if sample.size > MAX_PRORES_ALPHA_SAMPLE_BYTES {
+                return None;
+            }
+            let packet = file.read_sample(&*source, v_idx, 0).ok()?;
+            craft_video::prores::probe(&packet).ok()?.alpha != craft_video::prores::AlphaType::None
+        } else {
+            video_track.video().is_some_and(|v| v.depth == 32)
+        };
+        let frame_rate = estimate_isobmff_frame_rate(video_track);
+        let duration = Tick::from_units(i64::try_from(video_track.duration).unwrap_or(i64::MAX), i64::from(video_track.timescale));
+        let bitrate = video_track.entries.first().and_then(|e| e.bitrate).map(|b| u64::from(b.avg_bitrate)).filter(|&b| b > 0);
+        let codec_name = video_params.codec.name().to_string();
+        let video_decoder = match TrackDecoder::with_options(&video_params, TrackDecoderOptions { threads: Some(worker_cap()), draft: false }) {
+            Ok(d) => d,
+            Err(e) => return Some(Err(MediaError::Decode(e.to_string()))),
+        };
+        let v_info = VideoStreamInfo { width, height, frame_rate, par, codec: codec_name, pixel_format: String::new(), color, has_alpha, bitrate, hdr: None };
+        let v_state = Mutex::new(VideoState { decoder: video_decoder, next_decode_idx: 0, gop_start_idx: 0, flushed: false, decoded: Vec::new() });
+        (Some(v_info), Some(v_state), FramePresentation { container_color, par, rotation, aperture }, duration)
+    } else {
+        let duration = audio_candidates
+            .iter()
+            .map(|&(idx, _, _, _)| {
+                let t = &file.tracks[idx];
+                Tick::from_units(i64::try_from(t.duration).unwrap_or(i64::MAX), i64::from(t.timescale))
+            })
+            .max()
+            .unwrap_or(Tick::ZERO);
+        (None, None, FramePresentation { container_color: None, par: (1, 1), rotation: 0, aperture: None }, duration)
     };
 
+    let container = ContainerFile::Isobmff(file);
+    let (audio_tracks, audio_infos) = open_audio_tracks(&container, &*source, audio_candidates)?;
+    if video_info.is_none() && audio_tracks.is_empty() {
+        return None;
+    }
+
+    let kind = if video_info.is_some() { MediaKind::Movie } else { MediaKind::AudioOnly };
     let info = MediaInfo {
         name: name.to_string(),
-        kind: MediaKind::Movie,
+        kind,
         duration,
-        video: Some(VideoStreamInfo { width, height, frame_rate, par, codec: codec_name, pixel_format: String::new(), color, has_alpha, bitrate, hdr: None }),
+        video: video_info,
         audio_streams: audio_infos,
         container: "mp4".to_string(),
         start_timecode: None,
         file_size: Some(source.len()),
     };
 
-    Some(Ok(Arc::new(CraftMediaSource {
-        info,
-        source,
-        file: container,
-        video_track_idx: video_idx,
-        container_color,
-        par,
-        rotation,
-        video: Mutex::new(VideoState { decoder: video_decoder, next_decode_idx: 0, gop_start_idx: 0, flushed: false, decoded: Vec::new() }),
-        audio_tracks,
-    })))
+    Some(Ok(Arc::new(CraftMediaSource { info, source, file: container, video_track_idx: video_idx, presentation, video: video_state, audio_tracks })))
 }
 
 fn open_matroska(name: &str, source: SharedBytes) -> Option<Result<SharedSource>> {
     let file = matroska::open(source.clone()).ok()?;
-    let video_idx = file.tracks.iter().position(|t| t.kind == matroska::TrackKind::Video && !t.samples.is_empty() && t.timebase.0 > 0 && t.timebase.1 > 0)?;
-    let video_track = &file.tracks[video_idx];
-    if !video_track.frames_readable() {
-        return None;
-    }
-    let video_params = video_track.codec_params();
-    if !supports_video_codec(video_params.codec) {
-        return None;
-    }
-
-    let video_info = video_track.video.as_ref();
-    // WebM/Matroska alpha_mode == 1 stores alpha in BlockAdditional; fall back to FilmCraft.
-    if video_info.is_some_and(|v| v.alpha_mode == 1) {
-        return None;
-    }
-    let container_color = video_info.and_then(|v| v.color.as_ref()).map(color_from_matroska);
-    let color = container_color.unwrap_or(ColorInfo::REC709);
-    let (mut width, mut height) = video_info.map_or((0, 0), |v| (v.pixel_width, v.pixel_height));
-    let mut par = matroska_par(video_info, width, height);
-    let rotation = video_info.and_then(|v| v.display_rotation()).unwrap_or(0) % 4;
-    if rotation % 2 == 1 {
-        std::mem::swap(&mut width, &mut height);
-        par = (par.1, par.0);
-    }
-    let frame_rate = estimate_matroska_frame_rate(video_track);
-    let duration = matroska_duration(&file, video_track);
-    let codec_name = video_params.codec.name().to_string();
-    let container_name = if file.doc_type == "webm" { "webm" } else { "mkv" }.to_string();
-
+    let video_idx = file.tracks.iter().position(|t| t.kind == matroska::TrackKind::Video && !t.samples.is_empty() && t.timebase.0 > 0 && t.timebase.1 > 0);
     let audio_candidates: Vec<(usize, usize, CodecParams, u64)> = file
         .tracks
         .iter()
@@ -337,19 +536,42 @@ fn open_matroska(name: &str, source: SharedBytes) -> Option<Result<SharedSource>
         .map(|(idx, t)| (idx, t.samples.len(), t.codec_params(), t.codec_delay_ns))
         .collect();
 
-    let container = ContainerFile::Matroska(Box::new(file));
-    let (audio_tracks, audio_infos) = open_audio_tracks(&container, &*source, audio_candidates)?;
+    if video_idx.is_none() && audio_candidates.is_empty() {
+        return None;
+    }
 
-    let video_decoder = match TrackDecoder::with_options(&video_params, TrackDecoderOptions { threads: Some(worker_cap()), draft: false }) {
-        Ok(d) => d,
-        Err(e) => return Some(Err(MediaError::Decode(e.to_string()))),
-    };
-
-    let info = MediaInfo {
-        name: name.to_string(),
-        kind: MediaKind::Movie,
-        duration,
-        video: Some(VideoStreamInfo {
+    let container_name = if file.doc_type == "webm" { "webm" } else { "mkv" }.to_string();
+    let (video_info, video_state, container_color, par, rotation, duration) = if let Some(v_idx) = video_idx {
+        let video_track = &file.tracks[v_idx];
+        if !video_track.frames_readable() {
+            return None;
+        }
+        let video_params = video_track.codec_params();
+        if !supports_video_codec(video_params.codec) {
+            return None;
+        }
+        let v_meta = video_track.video.as_ref();
+        // WebM/Matroska alpha_mode == 1 stores alpha in BlockAdditional; fall back to FilmCraft.
+        if v_meta.is_some_and(|v| v.alpha_mode == 1) {
+            return None;
+        }
+        let container_color = v_meta.and_then(|v| v.color.as_ref()).map(color_from_matroska);
+        let color = container_color.unwrap_or(ColorInfo::REC709);
+        let (mut width, mut height) = v_meta.map_or((0, 0), |v| (v.pixel_width, v.pixel_height));
+        let mut par = matroska_par(v_meta, width, height);
+        let rotation = v_meta.and_then(|v| v.display_rotation()).unwrap_or(0) % 4;
+        if rotation % 2 == 1 {
+            std::mem::swap(&mut width, &mut height);
+            par = (par.1, par.0);
+        }
+        let frame_rate = estimate_matroska_frame_rate(video_track);
+        let duration = matroska_duration(&file, video_track);
+        let codec_name = video_params.codec.name().to_string();
+        let video_decoder = match TrackDecoder::with_options(&video_params, TrackDecoderOptions { threads: Some(worker_cap()), draft: false }) {
+            Ok(d) => d,
+            Err(e) => return Some(Err(MediaError::Decode(e.to_string()))),
+        };
+        let v_info = VideoStreamInfo {
             width,
             height,
             frame_rate,
@@ -360,7 +582,26 @@ fn open_matroska(name: &str, source: SharedBytes) -> Option<Result<SharedSource>
             has_alpha: false,
             bitrate: None,
             hdr: None,
-        }),
+        };
+        let v_state = Mutex::new(VideoState { decoder: video_decoder, next_decode_idx: 0, gop_start_idx: 0, flushed: false, decoded: Vec::new() });
+        (Some(v_info), Some(v_state), container_color, par, rotation, duration)
+    } else {
+        let duration = audio_candidates.iter().map(|&(idx, _, _, _)| matroska_duration(&file, &file.tracks[idx])).max().unwrap_or(Tick::ZERO);
+        (None, None, None, (1, 1), 0, duration)
+    };
+
+    let container = ContainerFile::Matroska(Box::new(file));
+    let (audio_tracks, audio_infos) = open_audio_tracks(&container, &*source, audio_candidates)?;
+    if video_info.is_none() && audio_tracks.is_empty() {
+        return None;
+    }
+
+    let kind = if video_info.is_some() { MediaKind::Movie } else { MediaKind::AudioOnly };
+    let info = MediaInfo {
+        name: name.to_string(),
+        kind,
+        duration,
+        video: video_info,
         audio_streams: audio_infos,
         container: container_name,
         start_timecode: None,
@@ -372,10 +613,8 @@ fn open_matroska(name: &str, source: SharedBytes) -> Option<Result<SharedSource>
         source,
         file: container,
         video_track_idx: video_idx,
-        container_color,
-        par,
-        rotation,
-        video: Mutex::new(VideoState { decoder: video_decoder, next_decode_idx: 0, gop_start_idx: 0, flushed: false, decoded: Vec::new() }),
+        presentation: FramePresentation { container_color, par, rotation, aperture: None },
+        video: video_state,
         audio_tracks,
     })))
 }
@@ -406,18 +645,26 @@ struct AudioTrackState {
 struct AudioTrackEntry {
     track_idx: usize,
     native_rate: u32,
+    audio_starts: Vec<i64>,
+    seek_preroll_samples: i64,
     state: Mutex<AudioTrackState>,
+}
+
+#[derive(Clone, Copy)]
+struct FramePresentation {
+    container_color: Option<ColorInfo>,
+    par: (u32, u32),
+    rotation: u8,
+    aperture: Option<isobmff::CleanAperture>,
 }
 
 struct CraftMediaSource {
     info: MediaInfo,
     source: SharedBytes,
     file: ContainerFile,
-    video_track_idx: usize,
-    container_color: Option<ColorInfo>,
-    par: (u32, u32),
-    rotation: u8,
-    video: Mutex<VideoState>,
+    video_track_idx: Option<usize>,
+    presentation: FramePresentation,
+    video: Option<Mutex<VideoState>>,
     audio_tracks: Vec<AudioTrackEntry>,
 }
 
@@ -427,15 +674,18 @@ impl MediaSource for CraftMediaSource {
     }
 
     fn video_frame(&self, req: FrameRequest) -> Result<Arc<VideoFrame>> {
-        let (target_idx, target_pts) = self.file.target_sample(self.video_track_idx, req.time).ok_or_else(|| MediaError::Decode("no video samples".into()))?;
+        let (Some(video_idx), Some(video_mutex)) = (self.video_track_idx, &self.video) else {
+            return Err(MediaError::NoStream("video"));
+        };
+        let (target_idx, target_pts) = self.file.target_sample(video_idx, req.time).ok_or_else(|| MediaError::Decode("no video samples".into()))?;
         let want_draft = req.scale < 0.99;
 
-        let mut state = self.video.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state = video_mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(hit) = state.decoded.iter().find(|c| c.pts == target_pts && c.draft == want_draft) {
             return Ok(hit.frame.clone());
         }
 
-        let sync_idx = self.file.sync_sample_before(self.video_track_idx, target_idx);
+        let sync_idx = self.file.sync_sample_before(video_idx, target_idx);
         let draft_changed = state.decoder.draft() != want_draft;
         if draft_changed {
             state.decoder.set_draft(want_draft);
@@ -450,22 +700,22 @@ impl MediaSource for CraftMediaSource {
             state.flushed = false;
         }
 
-        let sample_count = self.file.sample_count(self.video_track_idx);
+        let sample_count = self.file.sample_count(video_idx);
         while !state.decoded.iter().any(|c| c.pts >= target_pts && c.draft == want_draft) {
             if filmcraft_media::cancel::cancelled() {
                 return Err(MediaError::Cancelled);
             }
             if state.next_decode_idx < sample_count {
                 let idx = state.next_decode_idx;
-                let pts = self.file.sample_pts(self.video_track_idx, idx);
-                let pkt = self.file.read_sample(&*self.source, self.video_track_idx, idx)?;
+                let pts = self.file.sample_pts(video_idx, idx);
+                let pkt = self.file.read_sample(&*self.source, video_idx, idx)?;
                 let frames = state.decoder.decode(&pkt, pts).map_err(|e| MediaError::Decode(e.to_string()))?;
                 state.next_decode_idx = idx + 1;
-                push_decoded(&mut state.decoded, frames, want_draft, self.container_color, self.par, self.rotation, &self.file, self.video_track_idx)?;
+                push_decoded(&mut state.decoded, frames, want_draft, self.presentation, &self.file, video_idx)?;
             } else if !state.flushed {
                 let frames = state.decoder.flush().map_err(|e| MediaError::Decode(e.to_string()))?;
                 state.flushed = true;
-                push_decoded(&mut state.decoded, frames, want_draft, self.container_color, self.par, self.rotation, &self.file, self.video_track_idx)?;
+                push_decoded(&mut state.decoded, frames, want_draft, self.presentation, &self.file, video_idx)?;
                 break;
             } else {
                 break;
@@ -510,7 +760,18 @@ impl MediaSource for CraftMediaSource {
         };
 
         let mut state = entry.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let decoded = decode_audio_range(&self.file, &*self.source, entry.track_idx, native_rate, channels_count, &mut state, native_start, native_frames)?;
+        let decoded = decode_audio_range(
+            &self.file,
+            &*self.source,
+            entry.track_idx,
+            native_rate,
+            channels_count,
+            &entry.audio_starts,
+            entry.seek_preroll_samples,
+            &mut state,
+            native_start,
+            native_frames,
+        )?;
 
         if sample_rate == native_rate {
             return Ok(AudioBuffer { sample_rate, channels: decoded });
@@ -543,6 +804,8 @@ fn decode_audio_range(
     track_idx: usize,
     native_rate: u32,
     channels_count: usize,
+    audio_starts: &[i64],
+    seek_preroll_samples: i64,
     state: &mut AudioTrackState,
     start: i64,
     frames: usize,
@@ -556,7 +819,7 @@ fn decode_audio_range(
     let buf_len = state.buf.first().map_or(0, Vec::len) as i64;
     let buf_end = state.decoded_pos.saturating_add(buf_len);
     if start < state.decoded_pos || start > buf_end.saturating_add(i64::from(native_rate) * 2) {
-        let (seek_idx, decoded_pos) = file.audio_seek_info(track_idx, start, native_rate);
+        let (seek_idx, decoded_pos) = ContainerFile::audio_seek_info(audio_starts, seek_preroll_samples, start);
         state.decoder.reset();
         state.next_sample = seek_idx;
         state.decoded_pos = decoded_pos;
@@ -576,9 +839,38 @@ fn decode_audio_range(
             return Err(MediaError::Cancelled);
         }
         let idx = state.next_sample;
+        let pk_start = audio_starts.get(idx).copied().unwrap_or_else(|| state.decoded_pos + state.buf.first().map_or(0, Vec::len) as i64);
+        if pk_start >= end {
+            break;
+        }
         let pkt = file.read_sample(source, track_idx, idx)?;
         state.next_sample = idx + 1;
         let block = state.decoder.decode(&pkt).map_err(|e| MediaError::Decode(e.to_string()))?;
+        let buf_len = state.buf.first().map_or(0, Vec::len) as i64;
+        if buf_len == 0 {
+            state.decoded_pos = pk_start;
+        } else {
+            let buf_end = state.decoded_pos.saturating_add(buf_len);
+            if pk_start > buf_end {
+                let gap = usize::try_from(pk_start - buf_end).unwrap_or(0);
+                for ch in &mut state.buf {
+                    ch.resize(ch.len() + gap, 0.0);
+                }
+            } else if pk_start < buf_end {
+                if pk_start <= state.decoded_pos {
+                    for ch in &mut state.buf {
+                        ch.clear();
+                    }
+                    state.decoded_pos = pk_start;
+                } else {
+                    let overlap = usize::try_from(buf_end - pk_start).unwrap_or(0);
+                    for ch in &mut state.buf {
+                        let keep = ch.len().saturating_sub(overlap);
+                        ch.truncate(keep);
+                    }
+                }
+            }
+        }
         for (c, ch) in state.buf.iter_mut().enumerate() {
             if let Some(src_ch) = block.channels.get(c) {
                 ch.extend_from_slice(src_ch);
@@ -611,21 +903,18 @@ fn decode_audio_range(
     Ok(out)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn push_decoded(
     cache: &mut Vec<CachedFrame>,
     frames: Vec<DecodedVideoFrame>,
     draft: bool,
-    container_color: Option<ColorInfo>,
-    par: (u32, u32),
-    rotation: u8,
+    presentation: FramePresentation,
     file: &ContainerFile,
     track_idx: usize,
 ) -> Result<()> {
     for vf in frames {
         let pts = vf.pts.unwrap_or(0);
         let pts_tick = file.pts_to_tick(track_idx, pts);
-        let frame = Arc::new(to_craft_frame(vf, container_color, par, rotation, pts_tick)?);
+        let frame = Arc::new(to_craft_frame(vf, presentation, pts_tick)?);
         cache.push(CachedFrame { pts, draft, frame });
     }
     if cache.len() > MAX_CACHED_FRAMES {
@@ -635,9 +924,9 @@ fn push_decoded(
     Ok(())
 }
 
-fn to_craft_frame(vf: DecodedVideoFrame, container_color: Option<ColorInfo>, default_par: (u32, u32), rotation: u8, pts: Tick) -> Result<VideoFrame> {
-    let width = vf.width();
-    let height = vf.height();
+fn to_craft_frame(vf: DecodedVideoFrame, presentation: FramePresentation, pts: Tick) -> Result<VideoFrame> {
+    let FramePresentation { container_color, par: default_par, rotation, aperture } = presentation;
+    let (mut width, mut height) = (vf.width(), vf.height());
     let subsampling = vf.subsampling();
     let family = vf.family();
     let tags = vf.color;
@@ -662,17 +951,24 @@ fn to_craft_frame(vf: DecodedVideoFrame, container_color: Option<ColorInfo>, def
             let (Some(y), Some(cb), Some(cr)) = (iter.next(), iter.next(), iter.next()) else {
                 return Err(MediaError::Decode("missing YUV planes".into()));
             };
+            let (luma, chroma_region) = aperture
+                .and_then(|clap| clean_aperture_region(clap, (width, height)))
+                .and_then(|r| aligned_aperture(r, width as usize, height as usize, chroma))
+                .unzip();
+            if let Some(r) = luma {
+                (width, height) = (r.w as u32, r.h as u32);
+            }
             if bit_depth <= 8 {
-                let y = Arc::new(plane_u8(y)?);
-                let cb = Arc::new(plane_u8(cb)?);
-                let cr = Arc::new(plane_u8(cr)?);
-                let a = alpha.map(plane_u8).transpose()?.map(Arc::new);
+                let y = Arc::new(plane_u8(y, luma)?);
+                let cb = Arc::new(plane_u8(cb, chroma_region)?);
+                let cr = Arc::new(plane_u8(cr, chroma_region)?);
+                let a = alpha.map(|p| plane_u8(p, luma)).transpose()?.map(Arc::new);
                 PixelData::Yuv8 { planes: [y, cb, cr], chroma, alpha: a }
             } else {
-                let y = Arc::new(plane_u16(y)?);
-                let cb = Arc::new(plane_u16(cb)?);
-                let cr = Arc::new(plane_u16(cr)?);
-                let a = alpha.map(plane_u16).transpose()?.map(Arc::new);
+                let y = Arc::new(plane_u16(y, luma)?);
+                let cb = Arc::new(plane_u16(cb, chroma_region)?);
+                let cr = Arc::new(plane_u16(cr, chroma_region)?);
+                let a = alpha.map(|p| plane_u16(p, luma)).transpose()?.map(Arc::new);
                 PixelData::Yuv16 { planes: [y, cb, cr], chroma, bits: u32::from(bit_depth), alpha: a }
             }
         }
@@ -681,6 +977,20 @@ fn to_craft_frame(vf: DecodedVideoFrame, container_color: Option<ColorInfo>, def
 
     let frame = VideoFrame { width, height, data, color, par, pts };
     Ok(rotate_frame(frame, rotation))
+}
+
+/// Move the origin onto the chroma grid before clipping, keeping the size when it fits.
+fn aligned_aperture(region: Region, width: usize, height: usize, chroma: Chroma) -> Option<(Region, Region)> {
+    let (sx, sy) = chroma.shifts();
+    let (xs, ys) = (1usize << sx, 1usize << sy);
+    let x = region.x.min(width) & !(xs - 1);
+    let y = region.y.min(height) & !(ys - 1);
+    let luma = Region { x, y, ..region }.clip(width, height);
+    if luma.is_empty() || luma.is_full(width, height) {
+        return None;
+    }
+    let chroma = Region { x: luma.x / xs, y: luma.y / ys, w: luma.w.div_ceil(xs), h: luma.h.div_ceil(ys) };
+    Some((luma, chroma))
 }
 
 fn rotate_plane<T: Copy + Default>(src: &[T], w: usize, h: usize, turns: u8) -> Vec<T> {
@@ -781,52 +1091,62 @@ fn rotate_frame(mut frame: VideoFrame, turns: u8) -> VideoFrame {
     frame
 }
 
-fn plane_u8(p: Plane) -> Result<Vec<u8>> {
+fn plane_region(aperture: Option<Region>, width: usize, height: usize) -> Result<Region> {
+    let r = aperture.unwrap_or(Region { x: 0, y: 0, w: width, h: height });
+    if r.clip(width, height) != r {
+        return Err(MediaError::Decode("clean aperture exceeds a decoded plane".into()));
+    }
+    Ok(r)
+}
+
+fn plane_u8(p: Plane, aperture: Option<Region>) -> Result<Vec<u8>> {
     let (w, h, stride) = (p.width() as usize, p.height() as usize, p.stride());
+    let r = plane_region(aperture, w, h)?;
     match p.into_samples() {
         Samples::U8(mut v) => {
-            if stride == w {
+            if stride == w && r.is_full(w, h) {
                 v.truncate(w * h);
                 return Ok(v);
             }
-            let mut out = Vec::with_capacity(w * h);
-            for y in 0..h {
-                let row = y * stride;
-                out.extend_from_slice(&v[row..row + w]);
+            let mut out = Vec::with_capacity(r.w * r.h);
+            for y in r.y..r.y + r.h {
+                let row = y * stride + r.x;
+                out.extend_from_slice(&v[row..row + r.w]);
             }
             Ok(out)
         }
         Samples::U16(v) => {
-            let mut out = Vec::with_capacity(w * h);
-            for y in 0..h {
-                let row = y * stride;
-                out.extend(v[row..row + w].iter().map(|&s| s.min(255) as u8));
+            let mut out = Vec::with_capacity(r.w * r.h);
+            for y in r.y..r.y + r.h {
+                let row = y * stride + r.x;
+                out.extend(v[row..row + r.w].iter().map(|&s| s.min(255) as u8));
             }
             Ok(out)
         }
     }
 }
 
-fn plane_u16(p: Plane) -> Result<Vec<u16>> {
+fn plane_u16(p: Plane, aperture: Option<Region>) -> Result<Vec<u16>> {
     let (w, h, stride) = (p.width() as usize, p.height() as usize, p.stride());
+    let r = plane_region(aperture, w, h)?;
     match p.into_samples() {
         Samples::U16(mut v) => {
-            if stride == w {
+            if stride == w && r.is_full(w, h) {
                 v.truncate(w * h);
                 return Ok(v);
             }
-            let mut out = Vec::with_capacity(w * h);
-            for y in 0..h {
-                let row = y * stride;
-                out.extend_from_slice(&v[row..row + w]);
+            let mut out = Vec::with_capacity(r.w * r.h);
+            for y in r.y..r.y + r.h {
+                let row = y * stride + r.x;
+                out.extend_from_slice(&v[row..row + r.w]);
             }
             Ok(out)
         }
         Samples::U8(v) => {
-            let mut out = Vec::with_capacity(w * h);
-            for y in 0..h {
-                let row = y * stride;
-                out.extend(v[row..row + w].iter().map(|&s| u16::from(s)));
+            let mut out = Vec::with_capacity(r.w * r.h);
+            for y in r.y..r.y + r.h {
+                let row = y * stride + r.x;
+                out.extend(v[row..row + r.w].iter().map(|&s| u16::from(s)));
             }
             Ok(out)
         }
@@ -1050,7 +1370,7 @@ mod tests {
 
     #[test]
     fn plane_u8_handles_8bit_u16_storage_as_av1_produces() {
-        let out = Plane::packed(2, 2, 8, Samples::U16(vec![10, 20, 30, 255])).ok().and_then(|p| plane_u8(p).ok());
+        let out = Plane::packed(2, 2, 8, Samples::U16(vec![10, 20, 30, 255])).ok().and_then(|p| plane_u8(p, None).ok());
         assert_eq!(out.as_deref(), Some(&[10, 20, 30, 255][..]));
     }
 
@@ -1085,13 +1405,13 @@ mod tests {
     #[test]
     fn plane_stride_and_container_helpers_cover_variants() {
         if let Ok(p8) = Plane::new(2, 2, 4, 8, Samples::U8(vec![1, 2, 9, 9, 3, 4])) {
-            assert_eq!(plane_u8(p8).ok().as_deref(), Some(&[1, 2, 3, 4][..]));
+            assert_eq!(plane_u8(p8, None).ok().as_deref(), Some(&[1, 2, 3, 4][..]));
         }
         if let Ok(p16) = Plane::new(2, 2, 4, 10, Samples::U16(vec![10, 20, 99, 99, 30, 40])) {
-            assert_eq!(plane_u16(p16).ok().as_deref(), Some(&[10, 20, 30, 40][..]));
+            assert_eq!(plane_u16(p16, None).ok().as_deref(), Some(&[10, 20, 30, 40][..]));
         }
         if let Ok(p8_as_16) = Plane::packed(2, 1, 8, Samples::U8(vec![7, 8])) {
-            assert_eq!(plane_u16(p8_as_16).ok().as_deref(), Some(&[7, 8][..]));
+            assert_eq!(plane_u16(p8_as_16, None).ok().as_deref(), Some(&[7, 8][..]));
         }
 
         let nclc = color_from_isobmff(&isobmff::ColorInfo::Nclc { primaries: 1, transfer: 1, matrix: 1 });
@@ -1109,6 +1429,54 @@ mod tests {
     }
 
     #[test]
+    fn clean_aperture_rounds_signed_offsets_and_ignores_invalid_regions() {
+        let aperture = isobmff::CleanAperture { width: (17, 2), height: (15, 2), horiz_offset: (1, 2), vert_offset: (-1, 2) };
+        assert_eq!(clean_aperture_region(aperture, (16, 16)), Some(Region { x: 4, y: 4, w: 9, h: 8 }));
+        assert_eq!(clean_aperture_region(isobmff::CleanAperture { width: (17, 0), ..aperture }, (16, 16)), None);
+        assert_eq!(clean_aperture_region(isobmff::CleanAperture { horiz_offset: (10, 1), ..aperture }, (16, 16)), None);
+        let full = isobmff::CleanAperture { width: (16, 1), height: (16, 1), horiz_offset: (0, 1), vert_offset: (0, 1) };
+        assert_eq!(clean_aperture_region(full, (16, 16)), None);
+    }
+
+    #[test]
+    fn odd_clean_aperture_crops_luma_chroma_and_alpha_together() {
+        let luma = Plane::packed(6, 6, 8, Samples::U8((0..36).collect())).unwrap();
+        let chroma = Plane::packed(3, 3, 8, Samples::U8((0..9).collect())).unwrap();
+        let alpha = Plane::packed(6, 6, 8, Samples::U8((64..100).collect())).unwrap();
+        let frame = DecodedVideoFrame::new(6, 6, ColorFamily::YCbCr, Subsampling::S420, vec![luma, chroma.clone(), chroma], Some(alpha)).unwrap();
+        let aperture = Some(isobmff::CleanAperture { width: (3, 1), height: (3, 1), horiz_offset: (3, 2), vert_offset: (3, 2) });
+        let presentation = FramePresentation { container_color: None, par: (3, 2), rotation: 0, aperture };
+        let cropped = to_craft_frame(frame, presentation, Tick::ZERO).unwrap();
+        assert_eq!((cropped.width, cropped.height, cropped.par), (3, 3, (3, 2)));
+        let PixelData::Yuv8 { planes: [y, cb, cr], chroma: Chroma::C420, alpha: Some(a) } = cropped.data else {
+            panic!("expected cropped 4:2:0 with alpha");
+        };
+        assert_eq!(y.as_slice(), &[14, 15, 16, 20, 21, 22, 26, 27, 28]);
+        assert_eq!(cb.as_slice(), &[4, 5, 7, 8]);
+        assert_eq!(cr.as_slice(), cb.as_slice());
+        assert_eq!(a.as_slice(), &[78, 79, 80, 84, 85, 86, 90, 91, 92]);
+    }
+
+    #[test]
+    fn clean_aperture_uses_the_decoded_picture_not_a_coded_size_hint() {
+        let luma = Plane::packed(8, 6, 8, Samples::U8((0..48).collect())).unwrap();
+        let chroma = Plane::packed(8, 6, 8, Samples::U8(vec![128; 48])).unwrap();
+        let frame = DecodedVideoFrame::new(8, 6, ColorFamily::YCbCr, Subsampling::S444, vec![luma, chroma.clone(), chroma], None).unwrap();
+        let aperture = isobmff::CleanAperture { width: (4, 1), height: (4, 1), horiz_offset: (0, 1), vert_offset: (0, 1) };
+        // A coded/sample-entry size of 8×8 would put the crop one row too low on the decoded
+        // 8×6 picture. The aperture remains in rational form until this picture is available.
+        assert_eq!(clean_aperture_region(aperture, (8, 8)).unwrap().y, 2);
+        let presentation = FramePresentation { container_color: None, par: (1, 1), rotation: 0, aperture: Some(aperture) };
+        let cropped = to_craft_frame(frame, presentation, Tick::ZERO).unwrap();
+        assert_eq!((cropped.width, cropped.height), (4, 4));
+        let y = match &cropped.data {
+            PixelData::Yuv8 { planes, .. } => &planes[0],
+            _ => panic!("expected cropped luma"),
+        };
+        assert_eq!(y.as_slice(), &[10, 11, 12, 13, 18, 19, 20, 21, 26, 27, 28, 29, 34, 35, 36, 37]);
+    }
+
+    #[test]
     fn rotated_frame_preserves_container_par_without_double_inversion() {
         let make_vf = |sar: Option<(u32, u32)>| {
             let y = Plane::packed(2, 2, 8, Samples::U8(vec![1, 2, 3, 4])).ok()?;
@@ -1120,14 +1488,72 @@ mod tests {
         };
         // `default_par` is already rotated by the container opener (e.g. (4, 3) -> (3, 4) for 90°).
         let container_rotated_par = (3, 4);
+        let presentation = FramePresentation { container_color: None, par: container_rotated_par, rotation: 1, aperture: None };
         if let Some(vf_no_sar) = make_vf(None) {
-            let out = to_craft_frame(vf_no_sar, None, container_rotated_par, 1, Tick::ZERO).ok();
+            let out = to_craft_frame(vf_no_sar, presentation, Tick::ZERO).ok();
             assert_eq!(out.map(|f| f.par), Some((3, 4)));
         }
         // Decoder-supplied SAR is in coded coordinates and must be inverted once under 90° rotation.
         if let Some(vf_with_sar) = make_vf(Some((4, 3))) {
-            let out = to_craft_frame(vf_with_sar, None, container_rotated_par, 1, Tick::ZERO).ok();
+            let out = to_craft_frame(vf_with_sar, presentation, Tick::ZERO).ok();
             assert_eq!(out.map(|f| f.par), Some((3, 4)));
         }
+    }
+
+    /// 1024-sample frames at 48 kHz stamped to the nearest millisecond, then back in samples.
+    fn ms_stamps(count: i64) -> Vec<i64> {
+        (0..count).map(|k| (k * 1024 * 1000 + 24_000) / 48_000 * 48).collect()
+    }
+
+    fn timed(stamps: &[i64], samples: Option<i64>) -> Vec<PacketTime> {
+        stamps.iter().map(|&stamp| PacketTime { stamp, stamped: true, samples }).collect()
+    }
+
+    #[test]
+    fn rounded_stamps_give_back_to_back_packets() {
+        let stamps = ms_stamps(200);
+        assert_eq!(&stamps[..4], [0, 1008, 2064, 3072]);
+        let starts = contiguous_starts(timed(&stamps, Some(1024)), 512);
+        assert_eq!(starts, (0..200).map(|k| k * 1024).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn real_gaps_and_overlaps_resynchronise() {
+        // A 100 ms gap after packet 3, then a packet stamped 600 samples early.
+        let mut stamps: Vec<i64> = (0..8).map(|k| k * 1024).collect();
+        for s in &mut stamps[4..] {
+            *s += 4800;
+        }
+        stamps[7] -= 600;
+        let starts = contiguous_starts(timed(&stamps, Some(1024)), 512);
+        assert_eq!(starts, [0, 1024, 2048, 3072, 8896, 9920, 10944, 11368]);
+        // Within the tolerance: runs on.
+        stamps[7] += 200;
+        assert_eq!(contiguous_starts(timed(&stamps, Some(1024)), 512)[7], 11968);
+    }
+
+    #[test]
+    fn unstamped_packets_follow_on_and_unknown_lengths_resynchronise() {
+        let packets = [0, 1024, 1024, 1024, 4096].map(|stamp| PacketTime { stamp, stamped: true, samples: Some(1024) });
+        let mut laced = packets;
+        laced[2].stamped = false;
+        laced[3].stamped = false;
+        assert_eq!(contiguous_starts(laced, 512), [0, 1024, 2048, 3072, 4096]);
+        let mut unknown = timed(&[0, 1024, 2100, 3124], Some(1024));
+        unknown[1].samples = None;
+        assert_eq!(contiguous_starts(unknown, 512), [0, 1024, 2100, 3124]);
+    }
+
+    #[test]
+    fn hostile_values_stay_finite() {
+        let packets = [
+            PacketTime { stamp: i64::MAX, stamped: true, samples: Some(i64::MAX) },
+            PacketTime { stamp: i64::MIN, stamped: false, samples: Some(-5) },
+            PacketTime { stamp: 0, stamped: true, samples: Some(i64::MIN) },
+            PacketTime { stamp: 7, stamped: true, samples: None },
+        ];
+        assert_eq!(contiguous_starts(packets, i64::MIN).len(), 4);
+        assert_eq!(contiguous_starts(packets, i64::MAX).len(), 4);
+        assert!(contiguous_starts([], 512).is_empty());
     }
 }
