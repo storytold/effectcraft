@@ -25,9 +25,9 @@
 //! - **AVI / MPEG-TS / MPEG-PS**:
 //!   - Shared (`craft-media::avi`, `craft-media::mpegts` + `craft-video` + `craft-audio`):
 //!     `H264`, `Hevc`, `Mpeg2Video`, `Av1`, `Vp9`, `Vp8`, `ProRes`, `Dnxhd`; audio `Aac`,
-//!     `Ac3`/`Eac3`, `Mp3`/`Mp2`/`Mp1`, `Pcm`.
+//!     `Ac3`/`Eac3`, `Mp3`/`Mp2`/`Mp1`, `Pcm`. AVI also accepts complete 24/32-bit `BI_RGB` streams.
 //!   - Fallback (`filmcraft-codecs`): unsupported codecs (`Mjpeg`, `Mpeg4Video`, `Ffv1`, `Theora`,
-//!     `Apv`, raw RGB AVI) or unsupported audio.
+//!     `Apv`, other raw AVI layouts) or unsupported audio.
 //! - **Other containers & standalone audio**:
 //!   - Shared (`craft_audio::Decoder` with `decode-native`): standalone `WAV`, `AIFF`, `MP3`/`MP2`/`MP1`,
 //!     `AAC` (ADTS), `AC-3`, and `Ogg` (`Opus`).
@@ -52,6 +52,9 @@ use craft_media_source::{
 use craft_time::{FrameRate, Tick};
 use craft_video::frame::{ColorFamily, ColorTags, Plane, Samples, Subsampling, VideoFrame as DecodedVideoFrame};
 use craft_video::{TrackDecoder, TrackDecoderOptions};
+
+mod raw_avi;
+use raw_avi::RawAvi;
 
 /// Maximum worker threads per `TrackDecoder` instance.
 const MAX_WORKERS: usize = 8;
@@ -954,7 +957,7 @@ fn open_isobmff(name: &str, source: SharedBytes) -> Option<Result<SharedSource>>
             Err(e) => return Some(Err(MediaError::Decode(e.to_string()))),
         };
         let v_info = VideoStreamInfo { width, height, frame_rate, par, codec: codec_name, pixel_format, color, has_alpha, bitrate, hdr: None };
-        let v_state = Mutex::new(VideoState { decoder: video_decoder, next_decode_idx: 0, gop_start_idx: 0, flushed: false, decoded: Vec::new() });
+        let v_state = VideoState::packet(video_decoder);
         (Some(v_info), Some(v_state), FramePresentation { container_color, par, rotation, aperture }, duration)
     } else {
         let duration = audio_candidates
@@ -1063,7 +1066,7 @@ fn open_matroska(name: &str, source: SharedBytes) -> Option<Result<SharedSource>
             bitrate: None,
             hdr: None,
         };
-        let v_state = Mutex::new(VideoState { decoder: video_decoder, next_decode_idx: 0, gop_start_idx: 0, flushed: false, decoded: Vec::new() });
+        let v_state = VideoState::packet(video_decoder);
         (Some(v_info), Some(v_state), container_color, par, rotation, duration)
     } else {
         let duration = audio_candidates.iter().map(|&(idx, _, _, _)| matroska_duration(&file, &file.tracks[idx])).max().unwrap_or(Tick::ZERO);
@@ -1274,7 +1277,7 @@ fn open_parsed_mxf(name: &str, source: SharedBytes, file: mxf::MxfFile) -> Optio
             bitrate: None,
             hdr: None,
         };
-        let v_state = Mutex::new(VideoState { decoder: video_decoder, next_decode_idx: 0, gop_start_idx: 0, flushed: false, decoded: Vec::new() });
+        let v_state = VideoState::packet(video_decoder);
         (Some(v_info), Some(v_state), FramePresentation { container_color, par, rotation: 0, aperture: None }, duration)
     } else {
         let duration = audio_tracks
@@ -1346,6 +1349,25 @@ fn open_avi(name: &str, source: SharedBytes) -> Option<Result<SharedSource>> {
         return None;
     }
 
+    if let Some(idx) = video_idx
+        && let Some(raw) = RawAvi::new(&file.streams[idx])
+    {
+        // Shared AVI audio positions are relative to the first chunk. Keep the
+        // legacy path for a track with a separate stream start.
+        if audio_candidates.iter().any(|&(audio, _, _, _)| file.streams[audio].start != 0) {
+            return None;
+        }
+        let duration = audio_candidates
+            .iter()
+            .map(|&(audio, _, _, _)| {
+                let s = &file.streams[audio];
+                Tick::from_units(i64::from(s.length).saturating_mul(i64::from(s.scale.max(1))), i64::from(s.rate.max(1)))
+            })
+            .fold(raw.duration(file.streams[idx].chunks.len()), Tick::max);
+        let video = ContainerVideoPart { track_idx: idx, info: raw.info(&file.streams[idx]), state: Mutex::new(VideoState::RawAvi(raw)) };
+        return finish_container_source(name, "avi", source, ContainerFile::Avi(Box::new(file)), Some(video), duration, audio_candidates);
+    }
+
     let (video, duration) = if let Some(v_idx) = video_idx {
         let video_stream = &file.streams[v_idx];
         let video_params = video_stream.codec_params();
@@ -1368,7 +1390,7 @@ fn open_avi(name: &str, source: SharedBytes) -> Option<Result<SharedSource>> {
             let alpha = video_stream.chunks.first().and_then(|chunk| prores_has_alpha(chunk.size, || file.read_chunk(&*source, v_idx, 0).ok()));
             info.has_alpha = alpha.unwrap_or(false);
         }
-        let state = Mutex::new(VideoState { decoder: video_decoder, next_decode_idx: 0, gop_start_idx: 0, flushed: false, decoded: Vec::new() });
+        let state = VideoState::packet(video_decoder);
         (Some(ContainerVideoPart { track_idx: v_idx, info, state }), duration)
     } else {
         let duration = audio_candidates
@@ -1489,7 +1511,7 @@ fn open_mpeg(name: &str, fmt: mpegts::Format, source: SharedBytes) -> Option<Res
                 indexed_span()
             };
         let info = default_video_info(decoded_dims.0, decoded_dims.1, frame_rate, &video_params);
-        let state = Mutex::new(VideoState { decoder: video_decoder, next_decode_idx: 0, gop_start_idx: 0, flushed: false, decoded: Vec::new() });
+        let state = VideoState::packet(video_decoder);
         (Some(ContainerVideoPart { track_idx: v_idx, info, state }), duration)
     } else {
         let duration = audio_candidates
@@ -1508,7 +1530,18 @@ struct CachedFrame {
     frame: Arc<VideoFrame>,
 }
 
-struct VideoState {
+enum VideoState {
+    Packet(PacketVideoState),
+    RawAvi(RawAvi),
+}
+
+impl VideoState {
+    fn packet(decoder: TrackDecoder) -> Mutex<Self> {
+        Mutex::new(Self::Packet(PacketVideoState { decoder, next_decode_idx: 0, gop_start_idx: 0, flushed: false, decoded: Vec::new() }))
+    }
+}
+
+struct PacketVideoState {
     decoder: TrackDecoder,
     next_decode_idx: usize,
     gop_start_idx: usize,
@@ -1661,6 +1694,13 @@ impl MediaSource for CraftMediaSource {
         let want_draft = req.scale < 0.99;
 
         let mut state = video_mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let state = match &mut *state {
+            VideoState::Packet(state) => state,
+            VideoState::RawAvi(raw) => {
+                let ContainerFile::Avi(file) = &self.file else { return Err(MediaError::NoStream("AVI video")) };
+                return raw.frame(file, &*self.source, video_idx, target_idx);
+            }
+        };
         if let Some(hit) = state.decoded.iter().find(|c| c.pts == target_pts && c.draft == want_draft) {
             return Ok(hit.frame.clone());
         }
@@ -2572,6 +2612,9 @@ fn estimate_matroska_frame_rate(track: &matroska::Track) -> FrameRate {
     }
     FrameRate::FPS_30
 }
+
+#[cfg(all(test, any(unix, windows)))]
+mod raw_avi_tests;
 
 #[cfg(test)]
 mod tests {
