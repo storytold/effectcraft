@@ -448,15 +448,14 @@ fn phase_guides(app: &mut EffectcraftApp, ectx: &EvalCtx, v: &mut Vw<'_>) {
     // Guides.
     let overlays = app.overlays_visible();
     if overlays && app.ui.viewer.safe_margins {
-        let g = &app.session.prefs.grids;
-        let (act, title) = (1.0 - g.action_safe as f32 / 100.0, 1.0 - g.title_safe as f32 / 100.0);
+        let [act, title] = vt::safe_scales(app);
         for (k, a) in [(act, 120u8), (title, 160)] {
             let r = Rect::from_center_size(comp_rect.center(), comp_rect.size() * k);
-            painter.rect_stroke(r, 0.0, Stroke::new(1.0, Color32::from_white_alpha(a)), StrokeKind::Middle);
+            painter.rect_stroke(r, 0.0, Stroke::new(1.0, vt::safe_color(app, a)), StrokeKind::Middle);
         }
         let c = comp_rect.center();
-        painter.line_segment([c - vec2(10.0, 0.0), c + vec2(10.0, 0.0)], Stroke::new(1.0, Color32::from_white_alpha(140)));
-        painter.line_segment([c - vec2(0.0, 10.0), c + vec2(0.0, 10.0)], Stroke::new(1.0, Color32::from_white_alpha(140)));
+        painter.line_segment([c - vec2(10.0, 0.0), c + vec2(10.0, 0.0)], Stroke::new(1.0, vt::safe_color(app, 140)));
+        painter.line_segment([c - vec2(0.0, 10.0), c + vec2(0.0, 10.0)], Stroke::new(1.0, vt::safe_color(app, 140)));
     }
     if overlays && app.ui.viewer.grid {
         // Settings ▸ Grids & Guides: gridline spacing, subdivisions and colour.
