@@ -13,10 +13,11 @@ use std::io::{BufRead, Read, Write};
 use std::path::Path;
 use std::sync::Arc;
 
-use effectcraft_effects::plugin::{EffectPlugin, PluginFrame, PluginHost, PluginImage, PluginParams};
+use effectcraft_effects::plugin::{EffectPlugin, ParamChange, PluginFrame, PluginHost, PluginImage, PluginParams};
 
 use crate::frames::Exchange;
-use crate::protocol::{ImageRef, MAX_LINE, PROTOCOL_VERSION, RemoteEffect, RenderRequest, Reply, Request, reply_line};
+use crate::protocol::{FEATURE_MASKS, FEATURE_PARAM_CHANGED, ImageRef, MAX_LINE, PROTOCOL_VERSION, RemoteEffect, RenderRequest, Reply, Request, reply_line};
+use effectcraft_effects::MaskPath;
 
 /// How deep nested renders may go.
 const MAX_DEPTH: u32 = 16;
@@ -33,6 +34,12 @@ pub trait Provider {
     fn loads(&self) -> Vec<String> {
         vec![]
     }
+    /// How many processes of this helper EffectCraft may run at once (default 1: one process,
+    /// one render at a time). Each process serves its own conversation and builds its own copy of
+    /// every effect instance, so state is held once per process.
+    fn max_processes(&self) -> u32 {
+        1
+    }
     /// The effects available at start-up, and errors worth reporting.
     fn effects(&mut self) -> (Vec<Arc<dyn EffectPlugin>>, Vec<String>);
     /// Load effects from a file or folder the user picked.
@@ -43,8 +50,20 @@ pub trait Provider {
     fn wants_padding(&self, _effect: &dyn EffectPlugin) -> bool {
         true
     }
+    /// Whether every `render` / `padding` of `effect` should carry its layer's masks
+    /// ([`PluginHost::masks`] during the render; [`PluginHost::layer_masks`] works either way).
+    fn wants_masks(&self, _effect: &dyn EffectPlugin) -> bool {
+        false
+    }
     /// The effect instance is gone.
     fn destroy(&mut self, _instance: u64) {}
+    /// The protocol extensions announced in `hello` (`features`). The default is everything
+    /// [`serve`] implements: `param_changed` goes to [`EffectPlugin::param_changed`] for the
+    /// parameters in [`EffectPlugin::notify_params`]; `masks` passes masks to effects that want them
+    /// ([`Provider::wants_masks`]) and answers [`PluginHost::layer_masks`].
+    fn features(&self) -> Vec<String> {
+        vec![FEATURE_PARAM_CHANGED.into(), FEATURE_MASKS.into()]
+    }
 }
 
 /// Serve requests on stdin / stdout until EffectCraft says `shutdown` or closes the pipe.
@@ -104,7 +123,14 @@ impl Server<'_> {
         let mut effects = vec![];
         for e in list {
             let manifest = e.manifest().clone();
-            effects.push(RemoteEffect { padding: self.provider.wants_padding(e.as_ref()), manifest: manifest.clone() });
+            let mut remote = RemoteEffect::new(manifest.clone(), self.provider.wants_padding(e.as_ref()));
+            if !e.notify_params().is_empty() {
+                remote.notify_params = Some(serde_json::json!(e.notify_params()));
+            }
+            if self.provider.wants_masks(e.as_ref()) {
+                remote.masks = Some(serde_json::Value::Bool(true));
+            }
+            effects.push(remote);
             self.effects.insert(manifest.id, e);
         }
         self.send(&Reply::Effects { effects, errors })
@@ -122,7 +148,9 @@ impl Server<'_> {
                     Err(e) => return self.send(&Reply::Error { message: format!("can't open the frame exchange file: {e}") }),
                 }
                 let (name, helper_version, loads) = (self.provider.name(), self.provider.version(), self.provider.loads());
-                self.send(&Reply::Hello { version: PROTOCOL_VERSION, name, helper_version, loads })
+                let max_processes = Some(self.provider.max_processes()).filter(|n| *n > 1).map(serde_json::Value::from);
+                let features = Some(self.provider.features()).filter(|f| !f.is_empty()).map(|f| serde_json::json!(f));
+                self.send(&Reply::Hello { version: PROTOCOL_VERSION, name, helper_version, loads, max_processes, features })
             }
             Request::Describe => {
                 let (list, errors) = self.provider.effects();
@@ -132,24 +160,37 @@ impl Server<'_> {
                 Ok((list, errors)) => self.describe(list, errors),
                 Err(message) => self.send(&Reply::Error { message }),
             },
-            Request::Padding { effect, instance, time, scale, layer_size, flat, texts } => {
+            Request::Padding { effect, instance, time, scale, layer_size, flat, texts, masks } => {
                 let Some(e) = self.effects.get(&effect).cloned() else {
                     return self.send(&Reply::Error { message: format!("unknown effect `{effect}`") });
                 };
                 let params = PluginParams { manifest: e.manifest(), flat: &flat, texts: &texts };
-                let pixels = e.padding(&params, time, scale, layer_size, instance);
+                let host = PaddingHost { masks: masks.unwrap_or_default(), time };
+                let pixels = e.padding_v2(&params, time, scale, layer_size, instance, &host);
                 self.send(&Reply::Padding { pixels })
             }
             Request::Render(r) => match self.render(&r) {
                 Ok(()) => self.send(&Reply::Done),
                 Err(message) => self.send(&Reply::Error { message }),
             },
+            Request::ParamChanged { effect, instance, param, time, layer_size, values, texts } => {
+                let Some(e) = self.effects.get(&effect).cloned() else {
+                    return self.send(&Reply::Error { message: format!("unknown effect `{effect}`") });
+                };
+                let change = ParamChange { param, instance_key: instance, time, layer_size, values, texts, budget: None };
+                match e.param_changed(&change) {
+                    Ok(v) => self.send(&Reply::SetParams { values: Some(serde_json::Value::Object(v.into_iter().collect())), ui: None }),
+                    Err(message) => self.send(&Reply::Error { message }),
+                }
+            }
             Request::Destroy { instance } => {
                 self.provider.destroy(instance);
                 Ok(())
             }
             Request::Ping => self.send(&Reply::Pong),
-            Request::Image { .. } | Request::Params { .. } => self.send(&Reply::Error { message: "no callback is waiting for an answer".into() }),
+            Request::Image { .. } | Request::Params { .. } | Request::Masks { .. } => {
+                self.send(&Reply::Error { message: "no callback is waiting for an answer".into() })
+            }
             Request::Shutdown => Ok(()),
         }
     }
@@ -188,7 +229,7 @@ impl Server<'_> {
         loop {
             let req = self.next_request()?.ok_or("EffectCraft closed the pipe")?;
             match req {
-                Request::Image { .. } | Request::Params { .. } => return Ok(req),
+                Request::Image { .. } | Request::Params { .. } | Request::Masks { .. } => return Ok(req),
                 Request::Shutdown => return Err("EffectCraft asked the helper to shut down".into()),
                 other => self.handle(other)?,
             }
@@ -236,5 +277,41 @@ impl PluginHost for Callbacks<'_, '_> {
     }
     fn frame_range(&self) -> Option<(f64, f64)> {
         self.req.frame_range
+    }
+    fn masks(&self) -> Vec<MaskPath> {
+        self.req.masks.clone().unwrap_or_default()
+    }
+    fn layer_masks(&self, param_id: &str, layer_time: f64) -> Option<Vec<MaskPath>> {
+        match self.server.try_borrow_mut().ok()?.ask(&Reply::LayerMasks { param: param_id.to_string(), time: layer_time }) {
+            Ok(Request::Masks { masks }) => masks,
+            _ => None,
+        }
+    }
+}
+
+/// The [`PluginHost`] of a padding request: its masks, nothing else.
+struct PaddingHost {
+    masks: Vec<MaskPath>,
+    time: f64,
+}
+
+impl PluginHost for PaddingHost {
+    fn input_at(&self, _: f64) -> Option<PluginImage> {
+        None
+    }
+    fn layer_input(&self, _: &str, _: f64) -> Option<PluginImage> {
+        None
+    }
+    fn params_at(&self, _: f64) -> Option<(Vec<f64>, Vec<String>)> {
+        None
+    }
+    fn frame_rate(&self) -> f64 {
+        30.0
+    }
+    fn time(&self) -> f64 {
+        self.time
+    }
+    fn masks(&self) -> Vec<MaskPath> {
+        self.masks.clone()
     }
 }

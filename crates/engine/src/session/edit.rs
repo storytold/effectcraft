@@ -22,7 +22,9 @@ impl Session {
 
     /// The shared body of [`Session::edit`] and [`Session::edit_text_doc`].
     ///
-    /// Runs `f` on a clone of the project and editor state, then synchronizes derived data (global
+    /// Runs `f` on a clone of the project and editor state, writes what plug-in effects answer
+    /// about the parameters it changed into the same clone ([`Session::notify_param_changes`]),
+    /// then synchronizes derived data (global
     /// light and Essential Graphics), queues invalidated Warp Stabilizer/camera-tracker work and
     /// Roto Brush instances needing re-propagation in the `*_pending` lists. If the clone has the same
     /// content the project and history are left as they were (only editor-state changes from `f`
@@ -37,6 +39,9 @@ impl Session {
         let mut p = (*self.project).clone();
         let mut st = self.state.clone();
         let r = f(&mut p, &mut st)?;
+        // Plug-in effects that asked to hear about the user's changes of some parameters set
+        // others with them, in this same step (#3663).
+        self.notify_param_changes(&before, &mut p);
         // Layer styles: one Global Light per comp, whichever layer edited it.
         effectcraft_project::styles::sync_global_light(&before, &mut p);
         // Essential Properties of precomp layers follow their comps' Essential Graphics.

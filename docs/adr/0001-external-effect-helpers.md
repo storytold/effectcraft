@@ -35,7 +35,7 @@ that are built, released and installed separately.
 - **Protocol** (`docs/external-helpers.md`): JSON lines over the helper's stdin / stdout
   (`hello` → `describe` → `render` with callbacks → `done`, plus `padding`, `load`, `destroy`,
   `ping`, `shutdown`). Pixels go through a **frame exchange file** (in `/dev/shm` on Linux, the
-  temp folder elsewhere) addressed by offsets, never through the pipe. Callbacks (`input_at`,
+  temp folder elsewhere, a temporary file on Windows) addressed by offsets, never through the pipe. Callbacks (`input_at`,
   `layer_input`, `params_at`) let temporal effects (motion blur, retiming) read other frames
   while rendering; nested renders through the same helper are supported.
 - **Discovery.** EffectCraft looks in `helpers/` next to the executable (and
