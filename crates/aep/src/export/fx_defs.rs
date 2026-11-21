@@ -5,7 +5,10 @@
 //! effect itself (read-back e1-zpardfull).
 //!
 //! The rows were listed from our effect cases (356-397 and the later effect batches) through the
-//! reader; `effect_map` names the parameters the importer and exporter convert.
+//! reader; `effect_map` names the parameters the importer and exporter convert. HDR Highlight
+//! Compression, Echo, Linear Wipe, Offset and Color Stabilizer were listed from a project made by
+//! After Effects 26.5 with each effect at its defaults; they agree with the importer block of
+//! 2026-11-05 (`1100-quickwins.aep`, aep-format.md 3.7).
 
 /// The id of the `ADBE Effect Built In Params` entry, the last of every effect.
 pub(crate) const BUILT_IN: u16 = u16::MAX;
@@ -50,6 +53,31 @@ const fn p(id: u16, code: u8, default: &'static [f64], range: Option<(f64, f64)>
 
 const fn fx(match_name: &'static str, name: &'static str, params: &'static [PDef]) -> FxDef {
     FxDef { match_name, name, params }
+}
+
+/// The sequence data (`sdat`) an effect's instance must carry, as its length and its leading bytes
+/// (the rest is zero). After Effects 26.5 crashes rendering these effects without it:
+///
+/// - Color Stabilizer: aerender failed 3 of 3 on an exported instance; the same instance with these
+///   16 bytes rendered as the original. They are what After Effects 26.5 writes for a new instance
+///   and for one with every parameter changed.
+/// - Invert: aerender stopped with error 512 on an exported instance; with this block (`ff ff ff ff`
+///   and 9244 zero bytes, what After Effects 26.5 saved for an instance with its channel and blend
+///   changed) it rendered as the original. Instances saved at their defaults hold the same length
+///   with other non-zero bytes after the first four.
+///
+/// Every other effect of the table is written without one: Curves, Levels, Levels (Individual
+/// Controls) and Glow carry one in After Effects' files too, but their exported instances render
+/// without it.
+pub(crate) const SEQUENCE_DATA: &[(&str, usize, &[u8])] =
+    &[("ADBE Deflicker", 16, &[0xde, 0xf1, 0x1c, 0xe4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]), ("ADBE Invert", 9248, &[0xff, 0xff, 0xff, 0xff])];
+
+/// The sequence data the instances of `match_name` carry, when they need one.
+pub(crate) fn sequence_data(match_name: &str) -> Option<Vec<u8>> {
+    let (_, len, head) = SEQUENCE_DATA.iter().find(|(m, _, _)| *m == match_name)?;
+    let mut data = vec![0u8; (*len).max(head.len())];
+    data.get_mut(..head.len())?.copy_from_slice(head);
+    Some(data)
 }
 
 #[rustfmt::skip]
@@ -704,6 +732,42 @@ pub(crate) static FX_DEFS: &[FxDef] = &[
         p(2, 1, &[7.0], Some((1.0, 31.0)), Some(31.0), Some(1.0), 0x00000000),
         p(5, 1, &[8.0], Some((1.0, 10.0)), Some(10.0), Some(1.0), 0x00000000),
         p(4, 11, &[], None, None, None, 0x00000000),
+        p(BUILT_IN, 9, &[], None, None, None, 0x00000000),
+    ]),
+    fx("ADBE HDR ToneMap", "HDR Highlight Compression", &[
+        p(0, 0, &[], None, None, None, 0x00000000),
+        p(1, 10, &[100.0], Some((0.0, 100.0)), Some(100.0), Some(0.0), 0x00000001),
+        p(BUILT_IN, 9, &[], None, None, None, 0x00000000),
+    ]),
+    fx("ADBE Echo", "Echo", &[
+        p(0, 0, &[], None, None, None, 0x00000000),
+        p(1, 10, &[-0.03333333507180214], Some((-5.0, 5.0)), Some(30000.0), Some(-30000.0), 0x00030000),
+        p(2, 1, &[1.0], Some((0.0, 10.0)), Some(30000.0), Some(0.0), 0x00000000),
+        p(3, 10, &[1.0], Some((0.0, 1.0)), Some(1.0), Some(0.0), 0x00020000),
+        p(4, 10, &[1.0], Some((0.0, 1.0)), Some(100.0), Some(0.0), 0x00020000),
+        p(5, 7, &[1.0], None, None, None, 0x00000007),
+        p(BUILT_IN, 9, &[], None, None, None, 0x00000000),
+    ]),
+    fx("ADBE Linear Wipe", "Linear Wipe", &[
+        p(0, 0, &[], None, None, None, 0x00000000),
+        p(1, 2, &[0.0], Some((0.0, 100.0)), Some(100.0), Some(0.0), 0x00000001),
+        p(2, 3, &[90.0], None, None, None, 0x00000000),
+        p(3, 2, &[0.0], Some((0.0, 100.0)), Some(32000.0), Some(0.0), 0x00010000),
+        p(BUILT_IN, 9, &[], None, None, None, 0x00000000),
+    ]),
+    fx("ADBE Offset", "Offset", &[
+        p(0, 0, &[], None, None, None, 0x00000000),
+        p(1, 6, &[0.5, 0.5], None, None, None, 0x00000000),
+        p(2, 2, &[0.0], Some((0.0, 1.0)), Some(1.0), Some(0.0), 0x00010001),
+        p(BUILT_IN, 9, &[], None, None, None, 0x00000000),
+    ]),
+    fx("ADBE Deflicker", "Color Stabilizer", &[
+        p(0, 0, &[], None, None, None, 0x00000000),
+        p(1, 7, &[2.0], None, None, None, 0x00000003),
+        p(2, 6, &[0.1999969482421875, 0.5], None, None, None, 0x00000000),
+        p(3, 6, &[0.5, 0.5], None, None, None, 0x00000000),
+        p(4, 6, &[0.8000030517578125, 0.5], None, None, None, 0x00000000),
+        p(5, 2, &[3.0], Some((1.0, 5.0)), Some(50.0), Some(1.0), 0x00010000),
         p(BUILT_IN, 9, &[], None, None, None, 0x00000000),
     ]),
 ];

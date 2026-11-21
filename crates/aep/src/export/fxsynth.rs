@@ -4,9 +4,10 @@
 //!
 //! What After Effects needs (read-backs in `docs/aep-export.md`, "Built in code"): a `parT` entry
 //! per parameter (`tdmn` + a 148-byte `pard`) whose bytes may be zero, since After Effects takes
-//! the definitions from the effect itself (e1-zpardfull); no `sdat` (e2-nosdat). The `pard` fields
-//! the importer reads back (type, default, valid maximum, slider range, popup item count) are
-//! written from the table so that an exported file imports again.
+//! the definitions from the effect itself (e1-zpardfull); no `sdat` (e2-nosdat) unless
+//! `fx_defs::SEQUENCE_DATA` names one. The `pard` fields the importer reads back (type, default,
+//! valid maximum, slider range, popup item count) are written from the table so that an exported
+//! file imports again.
 
 use crate::Chunk;
 use crate::effect_map::{Conv, by_match_name};
@@ -276,7 +277,13 @@ pub(crate) fn default_sspc(fx: &FxDef) -> Chunk<'static> {
         }
     }
     values.push(tdmn(GROUP_END));
-    Chunk::list(*b"sspc", vec![fnam, Chunk::list(*b"parT", part), Chunk::list(*b"tdgp", values), Chunk::data(*b"pgui", vec![0u8; 16])])
+    let mut sspc = vec![fnam, Chunk::list(*b"parT", part), Chunk::list(*b"tdgp", values)];
+    // After Effects writes `sdat` between the value group and `pgui`.
+    if let Some(data) = crate::export::fx_defs::sequence_data(fx.match_name) {
+        sspc.push(Chunk::data(*b"sdat", data));
+    }
+    sspc.push(Chunk::data(*b"pgui", vec![0u8; 16]));
+    Chunk::list(*b"sspc", sspc)
 }
 
 #[cfg(test)]
