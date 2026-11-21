@@ -197,7 +197,7 @@ fn differs(g: &PropGroup, def: Option<&PropGroup>, depth: usize) -> bool {
 
 /// The text document `doc` in the file's terms (text, style runs, paragraphs, box); what the file
 /// cannot hold is reported for `what`.
-fn plan_doc(doc: &TextDoc, what: &str, col: &mut Collector) -> TextPlan {
+pub(crate) fn plan_doc(doc: &TextDoc, what: &str, col: &mut Collector) -> TextPlan {
     let base = doc.base_style();
     let runs = doc.runs();
     // Characters in EffectCraft's text, each with its run, CRLF and LF made After Effects' CR.

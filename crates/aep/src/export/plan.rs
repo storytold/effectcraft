@@ -173,6 +173,9 @@ pub(crate) struct LayerPlan {
     /// The time scale the layer's properties count in.
     pub time_scale: u32,
     pub props: Vec<PropPlan>,
+    /// A precomp layer of a composition with written Essential Graphics controls: its values,
+    /// one per control (`essential.rs`).
+    pub overrides: Vec<crate::export::essential::OvPlan>,
     /// The layer's masks, in stack order.
     pub masks: Vec<crate::export::masks::MaskPlan>,
     /// The layer's effects, in stack order.
@@ -204,6 +207,7 @@ fn comp_header(cp: &CompPlan) -> CompPlan {
         display_start: cp.display_start,
         markers: Vec::new(),
         layers: Vec::new(),
+        essential: None,
     }
 }
 
@@ -227,6 +231,8 @@ pub(crate) struct CompPlan {
     /// Composition markers (written into the `Markers` view layer).
     pub markers: Vec<crate::export::markers::MarkerPlan>,
     pub layers: Vec<LayerPlan>,
+    /// The Essential Graphics controls that are written (`essential.rs`).
+    pub essential: Option<crate::export::essential::EgPlan>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -427,7 +433,8 @@ pub(crate) fn plan(project: &Project, col: &mut Collector) -> ProjectPlan {
     }
     let component = components(&precomp_links(project));
     let cx = PlanCx { project, by_parent: &by_parent, ok: &ok, component: &component };
-    let root = plan_children(&cx, None, col);
+    let mut root = plan_children(&cx, None, col);
+    plan_overrides(project, &mut root, col);
     // The base writes an empty render queue.
     for job in &project.render_queue {
         let comp = project.items.get(&job.comp).map_or("a missing composition", |i| i.name.as_str());
@@ -591,9 +598,6 @@ fn plan_comp(cx: &PlanCx<'_>, comp_id: ItemId, name: &str, comp: &Comp, col: &mu
     if !comp.guides.is_empty() {
         col.lose(LossCategory::CompositionOptions, format!("'{name}': {} guides", comp.guides.len()));
     }
-    if comp.essential.is_some() {
-        col.lose(LossCategory::CompositionOptions, format!("'{name}': Essential Graphics"));
-    }
     // Advanced settings that change rendered frames, which the base does not decode: written at
     // After Effects' defaults (the samples per frame and adaptive limit are the 16 and 128 every
     // sample holds at cdta 200 and 196, base.rs), so any other value is reported. Viewer state
@@ -639,6 +643,7 @@ fn plan_comp(cx: &PlanCx<'_>, comp_id: ItemId, name: &str, comp: &Comp, col: &mu
         display_start,
         markers: comp_markers,
         layers: Vec::new(),
+        essential: None,
     };
     let ids: HashSet<LayerId> = comp.layers.iter().map(|l| l.id).collect();
     let at = CompAt { id: comp_id, name, comp, ids: &ids };
@@ -652,7 +657,66 @@ fn plan_comp(cx: &PlanCx<'_>, comp_id: ItemId, name: &str, comp: &Comp, col: &mu
     resolve_parents(&mut cp, &exported, name, col);
     resolve_mattes(&mut cp, &exported, name, col);
     resolve_effect_layers(&mut cp, &exported, name, col);
+    let (essential, lost) = crate::export::essential::plan_controls(comp_id, comp, &|l| exported.contains(&l));
+    for why in lost {
+        col.lose(LossCategory::CompositionOptions, format!("'{name}': Essential Graphics control {why}"));
+    }
+    cp.essential = essential;
     cp
+}
+
+/// The Essential Graphics controls of every written composition.
+fn collect_controls(entries: &[Entry], out: &mut HashMap<ItemId, crate::export::essential::EgPlan>, depth: usize) {
+    if depth > MAX_FOLDER_DEPTH {
+        return;
+    }
+    for e in entries {
+        match &e.plan {
+            ItemPlan::Folder(kids) => collect_controls(kids, out, depth + 1),
+            ItemPlan::Comp(cp) => {
+                if let Some(eg) = &cp.essential {
+                    out.insert(e.ec, eg.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Fills the overrides of every precomp layer whose composition has written controls: one
+/// value per control, the instance's own where it overrides the composition.
+fn plan_overrides(project: &Project, root: &mut [Entry], col: &mut Collector) {
+    let mut controls = HashMap::new();
+    collect_controls(root, &mut controls, 0);
+    if controls.is_empty() {
+        return;
+    }
+    fill_overrides(project, root, &controls, col, 0);
+}
+
+fn fill_overrides(project: &Project, entries: &mut [Entry], controls: &HashMap<ItemId, crate::export::essential::EgPlan>, col: &mut Collector, depth: usize) {
+    if depth > MAX_FOLDER_DEPTH {
+        return;
+    }
+    for e in entries {
+        match &mut e.plan {
+            ItemPlan::Folder(kids) => fill_overrides(project, kids, controls, col, depth + 1),
+            ItemPlan::Comp(cp) => {
+                let Some(outer) = project.comp(e.ec) else { continue };
+                for lp in &mut cp.layers {
+                    let LayerSrc::Comp(inner_id) = &lp.src else { continue };
+                    let (Some(eg), Some(inner), Some(layer)) =
+                        (controls.get(inner_id), project.comp(*inner_id), outer.layers.iter().find(|l| l.id == lp.ec_id))
+                    else {
+                        continue;
+                    };
+                    let what = format!("{}: '{}'", e.name, layer.name);
+                    lp.overrides = crate::export::essential::plan_overrides(project, inner, eg, layer, &what, col);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// An effect's layer parameter that names a layer that is not exported falls back to the owning
@@ -1191,6 +1255,7 @@ fn plan_layer(cx: &PlanCx<'_>, at: CompAt<'_>, cp: &CompPlan, layer: &Layer, col
         guide: layer.switches.guide,
         three_d: layer.switches.three_d || cam_light,
         props,
+        overrides: Vec::new(),
         masks,
         fx,
         source_size,

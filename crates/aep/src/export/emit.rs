@@ -399,6 +399,10 @@ fn build_comp(cx: &mut Cx<'_>, id: u32, e: &Entry, cp: &CompPlan) -> R<Chunk<'st
     set_time_scales(&mut item, cp.tb.timescale, 0)?;
     let at = cx.t.layer_at.min(kids_mut(&mut item)?.len());
     kids_mut(&mut item)?.splice(at..at, blocks);
+    if let Some(eg) = cp.essential.as_ref().filter(|eg| !eg.controls.is_empty()) {
+        let lists = crate::export::essential::control_lists(eg, id, &layer_ids)?;
+        crate::export::essential::put_control_lists(&mut item, lists)?;
+    }
     put_used_comps(cx, &mut item, cp)?;
     Ok(item)
 }
@@ -611,6 +615,13 @@ fn build_layer(cx: &mut Cx<'_>, id: u32, lp: &LayerPlan, cp: &CompPlan, layer_id
     if let Some(remap) = &lp.remap {
         put_time_remap(cx, layr, remap)?;
     }
+    if !lp.overrides.is_empty() {
+        let proto = crate::export::essential::text_proto(&cx.t.text_point).ok_or_else(|| tpl("text prototype without a Source Text record"))?;
+        let guids: Vec<[u8; 16]> = lp.overrides.iter().map(|_| unique_guid(cx)).collect();
+        let layr = block.get_mut(0).ok_or_else(|| tpl("empty layer block"))?;
+        crate::export::essential::put_overrides(layr, &lp.overrides, &proto, lp.time_scale, &guids)?;
+    }
+    let layr = block.get_mut(0).ok_or_else(|| tpl("empty layer block"))?;
     put_properties(cx, layr, lp, cp)?;
     put_masks(cx, layr, lp)?;
     put_effects(cx, layr, lp, id, layer_ids)?;

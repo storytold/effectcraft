@@ -7,6 +7,7 @@ mod bounds;
 mod built;
 mod ease;
 mod effects;
+mod essential;
 mod footage;
 mod masks;
 mod objects;
