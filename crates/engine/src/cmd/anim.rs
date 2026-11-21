@@ -7,7 +7,7 @@ use effectcraft_time::Tick;
 use serde_json::{Value, json};
 
 use super::prop::{KeyTimeBase, key_time, key_timing, prop_ref};
-use super::{CommandSpec, bad, comp_id, f_p, has_comp, has_keys, layers_p, merge_p, str_p, time_p};
+use super::{CommandSpec, bad, comp_id, f_p, has_comp, has_keys, layers_p, merge_p, resolve_effect_path, str_p, time_p};
 use crate::{EngineError, KeyClip, KeyRef, Result, Session, cmd, query};
 
 fn has_key_clip(s: &Session) -> std::result::Result<(), String> {
@@ -108,9 +108,11 @@ fn paste(s: &mut Session, p: &Value) -> Result<Value> {
                     .or_else(|| {
                         s.state.selected_props.iter().filter(|(sl, _)| sl == lid).filter_map(|(_, u)| l.props.find(*u)).find(|pr| compatible(pr, sample))
                     })
-                    .or_else(|| l.props.prop(&c.path))
+                    .or_else(|| l.props.prop(&resolve_effect_path(l, &c.path)))
             } else {
-                l.props.prop(&c.path)
+                // Effect properties (Puppet pins...) are found through the effect's uid: the dots in a match id
+                // like `ec.distort.puppet` would otherwise cut the path apart.
+                l.props.prop(&resolve_effect_path(l, &c.path))
             };
             if let Some(pr) = target.filter(|pr| compatible(pr, sample) && !pr.static_only) {
                 plan.push((*lid, pr.uid, ci));
