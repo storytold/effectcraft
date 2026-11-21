@@ -568,7 +568,7 @@ struct Opened {
 impl Opened {
     /// `src` with what its container says: `header` is an MP4/MOV's ftyp and moov (or the whole
     /// file), `file` the file for other containers' AAC configuration.
-    fn new(src: MediaSource, header: Option<&[u8]>, file: Option<&dyn filmcraft_media::ByteReader>) -> Opened {
+    fn new(src: MediaSource, header: Option<&[u8]>, file: Option<&dyn craft_media::ByteSource>) -> Opened {
         let turn = header.map_or(Orientation::NoTransforms, crate::probe::video_turn);
         Opened { order: channel_order(&src, header, file), src, turn }
     }
@@ -576,7 +576,7 @@ impl Opened {
 
 /// The order `src`'s audio channels decode in; multichannel AAC's by its configuration, where
 /// the container's header shows it ([`crate::aac::config`]).
-fn channel_order(src: &MediaSource, header: Option<&[u8]>, file: Option<&dyn filmcraft_media::ByteReader>) -> Order {
+fn channel_order(src: &MediaSource, header: Option<&[u8]>, file: Option<&dyn craft_media::ByteSource>) -> Order {
     match src.primary_audio() {
         Some((_, channels, codec)) if codec.contains("AAC") && channels > 2 => {
             crate::aac::config(header, file).map_or(Order::Aac, |asc| crate::downmix::aac_order(&asc))
@@ -1220,7 +1220,7 @@ impl Inner {
             let opened = bytes.and_then(|bytes| {
                 let name = std::path::Path::new(&**path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
                 let src = crate::stream::open_bytes(&name, bytes.clone())?;
-                Ok(Opened::new(src, Some(&bytes), Some(&filmcraft_media::reader::MemReader(bytes.clone()))))
+                Ok(Opened::new(src, Some(&bytes), Some(&bytes)))
             });
             (opened, read)
         });

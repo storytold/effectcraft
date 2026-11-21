@@ -27,7 +27,7 @@ craft-dpx = { workspace = true }
 craft-exr = { workspace = true, features = ["decode"] }
 craft-gif = { workspace = true, features = ["frames"] }
 craft-webp = { workspace = true, features = ["frames"] }
-craft-audio = { workspace = true, features = ["decode-native", "aac-decode", "alac-decode", "opus-decode", "ac3-decode", "mp3-decode", "mpa-decode"] }
+craft-audio = { workspace = true, features = ["decode-native", "aac-decode", "alac-decode", "opus-decode", "ac3-decode", "mp3-decode", "mpa-decode", "flac-decode"] }
 craft-color = { workspace = true }
 craft-frame = { workspace = true }
 craft-media = { workspace = true, features = ["mpegts", "avi", "mxf"] }
@@ -52,5 +52,7 @@ gif = { workspace = true }
 tempfile = { workspace = true }
 # (tests render comps that read layers through effects; already a dependency of effectcraft-render)
 effectcraft-effects = { workspace = true }
-# Pure-Rust AAC test fixture encoding (no external ffmpeg dependency).
-craft-audio = { workspace = true, features = ["aac-encode"] }
+# Pure-Rust AAC and FLAC fixture encoding.
+craft-audio = { workspace = true, features = ["aac-encode", "flac-encode"] }
+# APV import parity fixtures use the existing shared encoder.
+craft-video = { workspace = true, features = ["apv-encode"] }
