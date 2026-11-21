@@ -3910,7 +3910,7 @@ fn waveform_row(app: &mut EffectcraftApp, g: &Rw, rc: &RowCtx<'_>) {
     gp.rect_filled(wr, 0.0, t.tl_bg);
     app.auto.add(&format!("timeline.layer.{}.waveform", layer.id.0), wr, "Waveform");
     match super::waveform::summary(app, &ctx, ItemId(*item)) {
-        Some(s) => super::waveform::draw(&gp, wr.shrink2(vec2(0.0, 2.0)), &tm, layer, &s, Color32::from_rgb(0x5f, 0xc8, 0x8a)),
+        Some(s) => super::waveform::draw(&gp, wr.shrink2(vec2(0.0, 2.0)), &tm, layer, &s, Color32::from_rgb(0xa9, 0xc9, 0xb2)),
         None => {
             gp.text(
                 pos2(tm.x(layer.in_point.seconds()).max(wr.min.x) + 6.0, wr.center().y),

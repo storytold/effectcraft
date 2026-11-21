@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use effectcraft_engine::project::{ItemId, ItemKind, Layer, LayerSource, Project, Property};
 use effectcraft_engine::render::audio::{self, db_to_gain};
 use effectcraft_engine::time::Tick;
-use egui::{Color32, Painter, Rect, Stroke, pos2};
+use egui::{Color32, Painter, Rect, pos2};
 
 use super::timeline::TMap;
 use crate::EffectcraftApp;
@@ -124,18 +124,17 @@ fn level_gains(layer: &Layer, levels: Option<&Property>, t: Tick) -> [f32; 2] {
     }
 }
 
-/// Draw `layer`'s waveform in `rect` (left channel above right), columns mapped through the
-/// timeline's time map and the layer's time mapping, limited to its [in, out) span and drawn as
-/// the layer plays (see [`played`]).
+/// Draw `layer`'s waveform in `rect` (left channel above right, each rising from its own baseline as a
+/// single-sided peak envelope), columns mapped through the timeline's time map and the layer's time
+/// mapping, limited to its [in, out) span and drawn as the layer plays (see [`played`]).
 pub(crate) fn draw(p: &Painter, rect: Rect, tm: &TMap, layer: &Layer, s: &Summary, color: Color32) {
-    let mid = [rect.min.y + rect.height() * 0.25, rect.min.y + rect.height() * 0.75];
-    let half = rect.height() * 0.25 - 1.0;
+    // One lane per channel; each draws the peak level of its column rising from the lane's baseline
+    // (not mirrored around a centre line).
+    let lane_h = (rect.height() * 0.5 - 2.0).max(1.0);
+    let base = [rect.min.y + rect.height() * 0.5 - 1.0, rect.max.y - 1.0];
     let x0 = tm.x(layer.in_point.seconds()).max(rect.min.x).floor() as i32;
     let x1 = tm.x(layer.out_point.seconds()).min(rect.max.x).ceil() as i32;
     let levels = layer.props.sub("audio").and_then(|g| g.get("levels"));
-    for c in 0..2 {
-        p.line_segment([pos2(x0 as f32, mid[c]), pos2(x1 as f32, mid[c])], Stroke::new(1.0, color.gamma_multiply(0.5)));
-    }
     let mirror = played(layer);
     for x in x0..x1 {
         let (ta, tb) = (tm.t(x as f32), tm.t(x as f32 + 1.0));
@@ -149,9 +148,9 @@ pub(crate) fn draw(p: &Painter, rect: Rect, tm: &TMap, layer: &Layer, s: &Summar
         }
         let gain = level_gains(layer, levels, Tick::from_seconds_f64((ta + tb) * 0.5));
         for c in 0..2 {
-            let (lo, hi) = ((agg[c * 2] * gain[c]).clamp(-1.0, 1.0), (agg[c * 2 + 1] * gain[c]).clamp(-1.0, 1.0));
-            let (ya, yb) = (mid[c] - hi * half, mid[c] - lo * half);
-            p.line_segment([pos2(x as f32 + 0.5, ya), pos2(x as f32 + 0.5, yb.max(ya + 1.0))], Stroke::new(1.0, color));
+            let peak = (agg[c * 2].abs().max(agg[c * 2 + 1].abs()) * gain[c]).clamp(0.0, 1.0);
+            let top = base[c] - (peak * lane_h).max(1.0);
+            p.rect_filled(Rect::from_min_max(pos2(x as f32, top), pos2(x as f32 + 1.0, base[c])), 0.0, color);
         }
     }
 }
