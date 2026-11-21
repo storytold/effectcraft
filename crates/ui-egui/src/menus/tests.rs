@@ -622,6 +622,60 @@ fn dropped_files_keep_import_errors_alongside_local_drop_errors() {
     std::fs::remove_dir_all(folder).unwrap();
 }
 
+/// #4000: dropping an EffectCraft project imports it into the open project as a folder named
+/// after its file (as File ▸ Import ▸ EffectCraft Project… does), instead of opening it and
+/// replacing the open project, as After Effects imports a dropped .aep.
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn dropping_a_project_imports_it_and_keeps_the_open_project() {
+    #[derive(Debug)]
+    struct Drop(std::path::PathBuf);
+    impl egui::DroppedFile for Drop {
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+        fn bytes(&self) -> Result<Vec<u8>, String> {
+            std::fs::read(&self.0).map_err(|e| e.to_string())
+        }
+    }
+    let dir = std::env::temp_dir().join(format!("ec-drop-project-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    // The project on disk: one composition with a solid.
+    let mut other = effectcraft_engine::Session::default();
+    other.execute("comp.new", json!({"name": "Dropped Comp", "width": 64, "height": 36, "duration": 1})).unwrap();
+    other.execute("layer.newSolid", json!({"color": "#00ff00"})).unwrap();
+    let dropped = dir.join("Dropped.ecproj");
+    other.execute("file.saveAs", json!({"path": dropped.to_string_lossy()})).unwrap();
+    // The open project, saved so the drop cannot wait on a Save changes? dialog.
+    let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+    app.session.execute("comp.new", json!({"name": "Open Comp", "width": 64, "height": 36, "duration": 1})).unwrap();
+    let open_comp = app.session.active_comp_id().unwrap();
+    let open_path = dir.join("Open.ecproj");
+    app.session.execute("file.saveAs", json!({"path": open_path.to_string_lossy()})).unwrap();
+    let ctx = egui::Context::default();
+    ctx.run_ui(egui::RawInput { dropped_files: vec![std::sync::Arc::new(Drop(dropped))], ..Default::default() }, |ui| {
+        crate::prefs_live::dropped_files(&mut app, ui, ui.max_rect());
+    })
+    .textures_delta
+    .clear();
+    assert_eq!(app.session.path.as_deref(), open_path.to_str(), "the open project file stays");
+    assert_eq!(app.session.active_comp_id(), Some(open_comp), "the open composition stays");
+    use effectcraft_engine::project::ItemKind;
+    let folder = app
+        .session
+        .project
+        .items
+        .iter()
+        .find(|(_, it)| it.name == "Dropped.ecproj" && matches!(it.kind, ItemKind::Folder))
+        .map(|(id, _)| *id)
+        .expect("the dropped project imports as a folder named after its file");
+    assert!(
+        app.session.project.items.values().any(|it| it.name == "Dropped Comp" && matches!(it.kind, ItemKind::Comp(_)) && it.parent == Some(folder)),
+        "the dropped project's composition lands in that folder"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn importing_without_a_form_shows_immediate_file_errors() {
     let folder = std::env::temp_dir().join(format!("effectcraft-drop-import-{}", std::process::id()));

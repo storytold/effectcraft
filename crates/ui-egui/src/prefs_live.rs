@@ -73,44 +73,16 @@ pub fn dropped_files(app: &mut EffectcraftApp, ui: &egui::Ui, bounds: Rect) {
         l.ends_with(".ecproj") || l.ends_with(".ecprojx")
     });
 
-    if proj.len() > 1 {
-        errors.push(crate::i18n::tr_args("Only one project can be opened per drop; skipped {} more", &[&proj.len().saturating_sub(1)]));
-    }
-    // While the After Effects losses prompt waits, opening a project would replace it (and the
-    // project the answer imports into): the project waits for the answer, dropped again after it.
-    let proj = if crate::panels::aep_losses::asking(app) && !proj.is_empty() {
-        errors.push(crate::i18n::tr_args("Skipped {} more file(s) while a dialog is open; import them again after it", &[&1]));
-        Vec::new()
-    } else {
-        proj
-    };
-
     // After Effects projects import as projects (File ▸ Import ▸ Adobe After Effects Project…),
     // each into a folder named after its file, opening its first composition.
-    let (aep, mut rest): (Vec<String>, Vec<String>) = rest.into_iter().partition(|p| effectcraft_engine::commands::is_aep_path(p));
-    // A project in the drop changes the active composition: the other files go to the Project
-    // panel only, not into a composition.
+    let (aep, rest): (Vec<String>, Vec<String>) = rest.into_iter().partition(|p| effectcraft_engine::commands::is_aep_path(p));
+    // With a project in the drop the other files go to the Project panel only, not into a
+    // composition.
     let has_project = !proj.is_empty() || !aep.is_empty();
-
-    // Opened first, so the other files land in the project it opens. While it waits on Save
-    // changes? the rest of the drop is skipped with a note: it would land in the project about
-    // to be replaced.
-    let mut waiting = false;
-    if let Some(p) = proj.first() {
-        match crate::menus::invoke(app, &ctx, "file.open", json!({"path": p})) {
-            Ok(r) => waiting = crate::menus::waits_on_dialog(&r),
-            Err(e) => errors.push(crate::i18n::tr_args("Cannot open dropped project {}: {}", &[&p, &e])),
-        }
-    }
-    let mut aep = aep;
-    if waiting {
-        let skipped = rest.len() + aep.len();
-        if skipped > 0 {
-            errors.push(crate::i18n::tr_args("Skipped {} more file(s) while a dialog is open; import them again after it", &[&skipped]));
-        }
-        rest.clear();
-        aep.clear();
-    }
+    // EffectCraft projects import as projects too: file.import merges each into a folder named
+    // after its file (file.importProject), as After Effects imports a dropped .aep. The open
+    // project stays (#4000); the projects import before the other files, as File ▸ Import does.
+    let rest = proj.into_iter().chain(rest).collect::<Vec<_>>();
 
     // One with losses asks first; the projects after it wait for the answer, the other files
     // import meanwhile. The errors name their files.
