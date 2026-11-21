@@ -16,8 +16,8 @@ fn reencode_with(bytes: &[u8], version: Version, comp: Compression, merged_alpha
     if let Some(info) = file.layer_info.as_mut() {
         info.merged_alpha = merged_alpha;
         for rec in &mut info.layers {
-            for ch in &mut rec.channels {
-                let (w, h) = rec.channel_rect(ch.id).size().expect("channel rect");
+            let rects: Vec<(usize, usize)> = rec.channels.iter().map(|ch| rec.channel_rect(ch.id).size().expect("channel rect")).collect();
+            for (ch, (w, h)) in rec.channels.iter_mut().zip(rects) {
                 if w > 0 && h > 0 {
                     let decoded = ch.decode(w, h, depth, old_ver).expect("decode channel");
                     *ch = craft_psd::ChannelData::encode(ch.id, comp, &decoded, w, h, depth, version).expect("encode channel");
