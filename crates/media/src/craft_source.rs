@@ -2203,7 +2203,35 @@ fn to_craft_frame(vf: DecodedVideoFrame, presentation: FramePresentation, pts: T
                 PixelData::Yuv16 { planes: [y, cb, cr], chroma, bits: u32::from(bit_depth), alpha: a }
             }
         }
-        ColorFamily::Rgb | ColorFamily::Gray => return Err(MediaError::Unsupported("non-YCbCr pixel format".into())),
+        ColorFamily::Gray => {
+            let y = planes.into_iter().next().ok_or_else(|| MediaError::Decode("missing grayscale plane".into()))?;
+            let luma = aperture.and_then(|clap| clean_aperture_region(clap, (width, height)));
+            if let Some(r) = luma {
+                (width, height) = (r.w as u32, r.h as u32);
+            }
+            // Chroma is constant, so subsampling does not change the visible grayscale picture.
+            let chroma = Chroma::C420;
+            let chroma_len = (width as usize)
+                .div_ceil(2)
+                .checked_mul((height as usize).div_ceil(2))
+                .ok_or_else(|| MediaError::Decode("monochrome chroma size overflows".into()))?;
+            match bit_depth {
+                8 => {
+                    let y = Arc::new(plane_u8(y, luma)?);
+                    let alpha = alpha.map(|p| plane_u8(p, luma)).transpose()?.map(Arc::new);
+                    let neutral = Arc::new(vec![128; chroma_len]);
+                    PixelData::Yuv8 { planes: [y, neutral.clone(), neutral], chroma, alpha }
+                }
+                9..=16 => {
+                    let y = Arc::new(plane_u16(y, luma)?);
+                    let alpha = alpha.map(|p| plane_u16(p, luma)).transpose()?.map(Arc::new);
+                    let neutral = Arc::new(vec![1u16 << (bit_depth - 1); chroma_len]);
+                    PixelData::Yuv16 { planes: [y, neutral.clone(), neutral], chroma, bits: u32::from(bit_depth), alpha }
+                }
+                _ => return Err(MediaError::Unsupported("monochrome bit depth below 8".into())),
+            }
+        }
+        ColorFamily::Rgb => return Err(MediaError::Unsupported("non-YCbCr pixel format".into())),
     };
 
     let frame = VideoFrame { width, height, data, color, par, pts };
@@ -4418,3 +4446,6 @@ mod tests {
         assert_eq!(read_count, 0);
     }
 }
+
+#[cfg(test)]
+mod monochrome_tests;
