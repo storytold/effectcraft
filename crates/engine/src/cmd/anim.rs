@@ -56,6 +56,17 @@ fn compatible(a: &Property, b: &effectcraft_keyframe::Value) -> bool {
     a.value.kind_name() == b.kind_name() && a.value.components().len() == b.components().len()
 }
 
+/// A copied value (keyframe or unanimated property) shaped for the property `target` it is pasted
+/// into. A copied Source Text keeps its whole document, characters and style, as in After Effects
+/// (#3901): its JSON form is the characters only, so going through it would take the font, size
+/// and colours from the target's current value. Every other kind goes through the JSON form.
+pub(super) fn pasted_value(target: &KValue, copied: &KValue) -> Option<KValue> {
+    match (target, copied) {
+        (KValue::Text(_), KValue::Text(_)) => Some(copied.clone()),
+        _ => target.coerce_json(&copied.to_json()),
+    }
+}
+
 pub(crate) fn locked_selection(comp: &effectcraft_project::Comp, selected: &[KeyRef]) -> Vec<KeyRef> {
     selected.iter().filter(|k| comp.layer(k.layer).is_some_and(|l| l.switches.locked)).copied().collect()
 }
@@ -131,7 +142,7 @@ fn paste(s: &mut Session, p: &Value) -> Result<Value> {
             for (k, lt) in clip[*ci].keys.iter().zip(times) {
                 let mut k = k.clone();
                 k.time = lt;
-                if let Some(v) = pr.value.coerce_json(&k.value.to_json()) {
+                if let Some(v) = pasted_value(&pr.value, &k.value) {
                     k.value = v;
                 }
                 if pr.hold_only {
