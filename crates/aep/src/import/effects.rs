@@ -317,6 +317,13 @@ pub(crate) fn import_mapped(p: &EffectParam<'_, '_>, m: &ParamMap, cx: &LayerCtx
         if let Some(stored) = p.stored() {
             let before = prop.keys.len();
             import_keys(&stored, kind, cx.layer, &p.match_name, cx.tm, prop, col);
+            if m.kind == ParamKind::IntSlider {
+                for k in &mut prop.keys {
+                    k.value = whole(&k.value);
+                }
+                // `import_keys` also sets the static value to the first key's.
+                prop.value = whole(&prop.value);
+            }
             if prop.keys.len() == before {
                 col.lose_with(LossCategory::DamagedData, || format!("{here}: parameter {label} has no readable keyframe, default used"));
             }
@@ -357,12 +364,24 @@ pub(crate) fn import_mapped(p: &EffectParam<'_, '_>, m: &ParamMap, cx: &LayerCtx
         },
         _ => convert(value, kind),
     };
+    let converted = if m.kind == ParamKind::IntSlider { converted.map(|v| whole(&v)) } else { converted };
     match converted {
         Some(v) => {
             report_beyond_limit(m.limit, std::iter::once(&v), here, label, col);
             prop.value = v;
         }
         None => col.lose_with(LossCategory::DamagedData, || format!("{here}: parameter {label} holds a value that is not valid ({value:?}), default used")),
+    }
+}
+
+/// The whole number After Effects uses for an integer slider's stored value. The file keeps a
+/// fraction set through scripting (Echo's Number Of Echoes stored as 1.75 and Mosaic's blocks as
+/// 6.25, After Effects 26.5), but After Effects reads back and renders the nearest whole number
+/// (2 echoes; 6 blocks, the render matched within 1 level).
+fn whole(v: &Value) -> Value {
+    match v {
+        Value::Scalar(x) if x.is_finite() => Value::Scalar(x.round()),
+        other => other.clone(),
     }
 }
 
