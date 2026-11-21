@@ -724,6 +724,7 @@ Layer.prototype = {
   get opacity() { return this.transform.opacity; },
   get anchorPoint() { return this.transform.anchorPoint; },
   get text() { return this.__group('text'); },
+  get motionTrackers() { return this.__group('motionTrackers'); },
   get cameraOption() { return this.__group('cameraOptions'); },
   get lightOption() { return this.__group('lightOptions'); },
   get marker() { return new Markers(this.__c, this.__l); },
@@ -1183,7 +1184,7 @@ __global('thisComp', function () { return __S.comp || (__S.comp = new Comp(__S.c
 __global('thisLayer', function () { return __S.layer || (__S.layer = __layer(__S.c, __S.l)); });
 __global('thisProperty', function () { return __S.prop || (__S.prop = __mkProp(__S.c, __S.l, __S.path)); });
 ['name', 'index', 'inPoint', 'outPoint', 'startTime', 'width', 'height', 'hasParent', 'parent', 'hasVideo', 'enabled', 'active', 'source',
-  'transform', 'position', 'scale', 'rotation', 'opacity', 'anchorPoint', 'text', 'marker'].forEach(function (k) {
+  'transform', 'position', 'scale', 'rotation', 'opacity', 'anchorPoint', 'text', 'motionTrackers', 'marker'].forEach(function (k) {
   __global(k, function () { return thisLayer[k]; });
 });
 ['numKeys', 'velocity', 'speed'].forEach(function (k) {

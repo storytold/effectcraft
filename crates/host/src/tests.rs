@@ -382,6 +382,29 @@ fn pick_whip_expressions_evaluate() {
     assert_eq!(value(&s, a, "transform/rotation").as_f64(), 12.0);
 }
 
+/// The pick whip's tracker references evaluate (#3971): the compact form it writes for a track
+/// point (`motionTrackers.tracker1.trackPoint1.featureCenter`, bare on the tracked layer itself)
+/// reads the tracked value, on the same layer and across layers.
+#[test]
+fn pick_whip_tracker_expressions_evaluate() {
+    let mut s = super::session();
+    s.execute("comp.new", json!({"name": "C", "width": 200, "height": 200, "frameRate": 30, "duration": 2})).unwrap();
+    let a = s.execute("layer.newSolid", json!({"color": "#ffffff"})).unwrap()["layer"].as_u64().unwrap();
+    let b = s.execute("layer.newSolid", json!({"name": "Src", "color": "#ff0000"})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("track.new", json!({"layer": b})).unwrap();
+    let point = "motionTrackers/#1/#1/featureCenter";
+    s.execute("prop.set", json!({"layer": b, "path": point, "value": [12, 34]})).unwrap();
+    // Same layer: the bare reference the issue shows.
+    s.execute("prop.pickWhip", json!({"layer": b, "path": "transform/position", "target": {"layer": b, "path": point}})).unwrap();
+    let got = s.execute("prop.get", json!({"layer": b, "path": "transform/position"})).unwrap();
+    assert_eq!(got["expression"], "motionTrackers.tracker1.trackPoint1.featureCenter");
+    assert_eq!(value(&s, b, "transform/position").as_vec2(), [12.0, 34.0]);
+    // Across layers: the same reference behind thisComp.layer(...).
+    s.execute("prop.pickWhip", json!({"layer": a, "path": "transform/position", "target": {"layer": b, "path": point}})).unwrap();
+    assert_eq!(value(&s, a, "transform/position").as_vec2(), [12.0, 34.0]);
+    assert_eq!(s.execute("expr.errors", json!({})).unwrap()["count"], 0);
+}
+
 /// The expression error bar's list: evaluation errors and syntax errors, with the layer and
 /// property they belong to.
 #[test]
