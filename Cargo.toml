@@ -97,13 +97,13 @@ same-file = "1.0"
 tempfile = "3.27"
 
 # codecs + containers shared by the Craft apps (crates/media, crates/export); keep all in sync.
-craft-media = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "ba25ccd233934d1b2f74e3c0f235168bf5f13ef3", default-features = false, features = ["isobmff", "matroska"] }
-craft-media-source = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "ba25ccd233934d1b2f74e3c0f235168bf5f13ef3" }
-craft-frame = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "ba25ccd233934d1b2f74e3c0f235168bf5f13ef3" }
-craft-color = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "ba25ccd233934d1b2f74e3c0f235168bf5f13ef3" }
-craft-time = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "ba25ccd233934d1b2f74e3c0f235168bf5f13ef3" }
-craft-audio = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "ba25ccd233934d1b2f74e3c0f235168bf5f13ef3", default-features = false, features = ["aac-decode", "aac-encode", "alac-decode", "opus-decode", "opus-encode", "ac3-decode", "mp3-decode", "mpa-decode"] }
-craft-video = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "ba25ccd233934d1b2f74e3c0f235168bf5f13ef3", features = ["h264-decode", "h264-encode", "prores", "hevc-encode", "vp9-encode", "av1", "threads"] }
+craft-media = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "587339c787682592ed46bab5a15cae52e60da2e3", default-features = false, features = ["isobmff", "matroska"] }
+craft-media-source = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "587339c787682592ed46bab5a15cae52e60da2e3" }
+craft-frame = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "587339c787682592ed46bab5a15cae52e60da2e3" }
+craft-color = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "587339c787682592ed46bab5a15cae52e60da2e3" }
+craft-time = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "587339c787682592ed46bab5a15cae52e60da2e3" }
+craft-audio = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "587339c787682592ed46bab5a15cae52e60da2e3", default-features = false, features = ["aac-decode", "aac-encode", "alac-decode", "opus-decode", "opus-encode", "ac3-decode", "mp3-decode", "mpa-decode"] }
+craft-video = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "587339c787682592ed46bab5a15cae52e60da2e3", features = ["h264-decode", "h264-encode", "prores", "hevc-encode", "vp9-encode", "av1", "threads"] }
 
 # footage decoding: FilmCraft's pure-Rust crates, pinned to a revision (plan/adr/0001).
 # Only `crates/media`, `crates/export` and `crates/interchange` may depend on these.
