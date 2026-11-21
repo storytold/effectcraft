@@ -248,7 +248,7 @@ fn play(session: effectcraft_engine::Session, cid: ItemId, secs: f64, gpu: bool)
     }
     h.state().frames.clear();
     let (reply, _r) = std::sync::mpsc::channel();
-    let _ = tx.send(ControlRequest { method: "ui.playback".into(), params: json!({"action": "play"}), reply });
+    let _ = tx.send(ControlRequest { method: "ui.playback".into(), params: json!({"action": "play"}), reply, abandoned: Default::default() });
     let t0 = Instant::now();
     let (mut started, mut stalled, mut last, mut scales) = (None, 0.0, t0, std::collections::BTreeMap::<u32, u64>::new());
     // When each new frame went on screen (seconds since play was pressed): the cadence. The

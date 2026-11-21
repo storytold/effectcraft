@@ -3,6 +3,11 @@ use super::hooks::Hooks;
 use super::state::{FrameWindow, PlaybackPass, ShotTarget};
 use super::*;
 
+/// How long one tick runs control requests before the window paints again
+/// ([`EffectcraftApp::control_budget`]): a tenth of a second, so a script's quick requests run
+/// in one tick and a backlog of slow ones still lets the window answer.
+const CONTROL_BUDGET: std::time::Duration = std::time::Duration::from_millis(100);
+
 mod clipboard;
 mod files;
 mod frame;
@@ -64,6 +69,8 @@ impl EffectcraftApp {
             last_viewer_scale: None,
             control_rx: None,
             deferred: vec![],
+            control_backlog: vec![],
+            control_budget: CONTROL_BUDGET,
             synthetic: vec![],
             forwarded: ForwardedInput::default(),
             input_waiters: vec![],
