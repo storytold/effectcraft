@@ -101,8 +101,6 @@ fn fxw_style(style: u32, k: f32, u: f32, v: f32) -> vec2<f32> {
 fn fxw_warp_fwd(q: vec2<f32>) -> vec2<f32> {
     let h = P.f[0].zw;
     let k = P.f[1].x;
-    let hd = P.f[1].y;
-    let vd = P.f[1].z;
     let vertical = P.u[0].z != 0u;
     let n = q / h;
     var uv = n;
@@ -114,9 +112,15 @@ fn fxw_warp_fwd(q: vec2<f32>) -> vec2<f32> {
     if (vertical) {
         o = w.yx;
     }
-    o.y *= 1.0 + 0.5 * hd * o.x;
-    o.x *= 1.0 + 0.5 * vd * o.y;
     return o * h;
+}
+
+fn fxw_warp_sample(q: vec2<f32>) -> vec4<f32> {
+    let size = vec2<f32>(textureDimensions(src));
+    if (all(q > vec2<f32>(-0.5)) && all(q < size + 0.5)) {
+        return sample_bilinear(src, q.x, q.y);
+    }
+    return vec4<f32>(0.0);
 }
 
 @compute @workgroup_size(16, 16)
@@ -126,7 +130,26 @@ fn fxw_warp(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
     let c = P.f[0].xy;
-    let t = fxw_centre(p) - c;
+    let distorted = fxw_centre(p) - c;
+    let h = P.f[0].zw;
+    // Undo the perspective scales in reverse order, as in the CPU inverse. Squeeze
+    // ends at the zero-width tip. Only the centre can sample the collapsed edge.
+    let x_scale = 1.0 + P.f[1].z * (distorted.y / h.y);
+    if ((P.u[0].y == 13u && x_scale < 0.0) || (x_scale == 0.0 && distorted.x != 0.0)) {
+        textureStore(out, p, vec4<f32>(0.0));
+        return;
+    }
+    let x = distorted.x / select(x_scale, 1.0, x_scale == 0.0);
+    let y_scale = 1.0 + P.f[1].y * (x / h.x);
+    if (y_scale == 0.0 && distorted.y != 0.0) {
+        textureStore(out, p, vec4<f32>(0.0));
+        return;
+    }
+    let t = vec2<f32>(x, distorted.y / select(y_scale, 1.0, y_scale == 0.0));
+    if (P.f[1].x == 0.0) {
+        textureStore(out, p, fxw_warp_sample(t + c));
+        return;
+    }
     var s = t;
     for (var i = 0; i < 12; i++) {
         let f = fxw_warp_fwd(s);
@@ -156,7 +179,7 @@ fn fxw_warp(@builtin(global_invocation_id) gid: vec3<u32>) {
         textureStore(out, p, vec4<f32>(0.0));
         return;
     }
-    textureStore(out, p, sample_bilinear(src, s.x + c.x, s.y + c.y));
+    textureStore(out, p, fxw_warp_sample(s + c));
 }
 
 // ---------------------------------------------------------------- CC Bend It (distort2::bend_it)

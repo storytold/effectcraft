@@ -735,6 +735,37 @@ fn warp_style(style: u32, k: f64, u: f64, v: f64) -> (f64, f64) {
     }
 }
 
+/// Symmetric padding for Warp on both render paths. Bound the two perspective scales in
+/// forward order over the bent layer, and retain the previous allowance for bend alone.
+pub fn warp_pad(ctx: &EffectCtx, scale: f64) -> u32 {
+    let k = ctx.params.f("bend") / 100.0;
+    let bend = k.abs();
+    let hd = (ctx.params.f("horizontalDistortion") / 100.0).abs();
+    let vd = (ctx.params.f("verticalDistortion") / 100.0).abs();
+    let (hx, hy) = (ctx.layer_size[0] * scale * 0.5, ctx.layer_size[1] * scale * 0.5);
+    let mut pad = (bend + hd + vd) * 0.6 * hx.max(hy);
+    if hd != 0.0 || vd != 0.0 {
+        // Upper bounds on the magnitude of each style coordinate for |u|, |v| <= 1.
+        let (u, v) = match ctx.params.e("warpStyle") {
+            0 => (1.0 + 0.3 * bend, 1.0 + bend),
+            1..=6 => (1.0, 1.0 + bend),
+            7..=10 => (1.0, 1.0 + 0.5 * bend),
+            11 | 12 => (1.0 + 0.5 * bend, 1.0 + 0.5 * bend),
+            13 => (1.0_f64.max((1.0 - 0.5 * k).abs()), 1.0_f64.max((1.0 + 0.5 * k).abs())),
+            _ => (1.0, 1.0),
+        };
+        let (x, y) = if ctx.params.e("warpAxis") == 1 { (v, u) } else { (u, v) };
+        let y = y * (1.0 + hd * x);
+        if hd != 0.0 {
+            pad = pad.max((y - 1.0) * hy);
+        }
+        if vd != 0.0 {
+            pad = pad.max((x * (1.0 + vd * y) - 1.0) * hx);
+        }
+    }
+    pad.ceil().min(4096.0) as u32 + 1
+}
+
 fn warp(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let k = ctx.params.f("bend") / 100.0;
     let hd = ctx.params.f("horizontalDistortion") / 100.0;
@@ -742,18 +773,25 @@ fn warp(ctx: &EffectCtx, mut b: Buf) -> Buf {
     if k == 0.0 && hd == 0.0 && vd == 0.0 {
         return b;
     }
-    let (hx, hy) = (ctx.layer_size[0] * b.scale * 0.5, ctx.layer_size[1] * b.scale * 0.5);
     if !ctx.adjustment {
-        let pad = ((k.abs() + hd.abs() + vd.abs()) * 0.6 * hx.max(hy)).ceil().min(4096.0);
-        b.pad(pad as u32 + 1);
+        b.pad(warp_pad(ctx, b.scale));
     }
-    b.img = remap(&b.img, false, warp_inverse(ctx, &b));
+    b.img = remap(&b.img, false, warp_inverse(ctx, &b, [b.img.width, b.img.height]));
     b
 }
 
+/// Undo a perspective scale. At a collapsed edge its centre is the only visible point.
+fn warp_unscale(value: f64, scale: f64) -> Option<f64> {
+    if scale == 0.0 {
+        return (value == 0.0).then_some(0.0);
+    }
+    let unscaled = value / scale;
+    unscaled.is_finite().then_some(unscaled)
+}
+
 /// Warp's inverse map for buffer geometry `b` (padded): the source point of an output point
-/// (buffer px), by Newton iterations on the forward warp; `None` = transparent.
-fn warp_inverse(ctx: &EffectCtx, b: &Buf) -> impl Fn(f64, f64) -> Option<(f64, f64)> + Sync + use<> {
+/// (buffer px), by undoing perspective and then solving the bend. Returns `None` for transparency.
+fn warp_inverse(ctx: &EffectCtx, b: &Buf, [w, h]: [u32; 2]) -> impl Fn(f64, f64) -> Option<(f64, f64)> + Sync + use<> {
     let k = ctx.params.f("bend") / 100.0;
     let hd = ctx.params.f("horizontalDistortion") / 100.0;
     let vd = ctx.params.f("verticalDistortion") / 100.0;
@@ -766,13 +804,26 @@ fn warp_inverse(ctx: &EffectCtx, b: &Buf) -> impl Fn(f64, f64) -> Option<(f64, f
         let (u0, v0) = ((x - c.0) / hx, (y - c.1) / hy);
         let (u, v) = if vertical { (v0, u0) } else { (u0, v0) };
         let (wu, wv) = warp_style(style, k, u, v);
-        let (mut x1, mut y1) = if vertical { (wv, wu) } else { (wu, wv) };
-        // Horizontal / vertical distortion: perspective-like size change across the layer.
-        y1 *= 1.0 + 0.5 * hd * x1;
-        x1 *= 1.0 + 0.5 * vd * y1;
+        let (x1, y1) = if vertical { (wv, wu) } else { (wu, wv) };
         (c.0 + x1 * hx, c.1 + y1 * hy)
     };
+    // A nearly closed perspective scale can yield huge coordinates. Bound them before
+    // bilinear sampling converts them to pixel indices, including the half-pixel fringe.
+    let source_point = move |x, y| ((-0.5..f64::from(w) + 0.5).contains(&x) && (-0.5..f64::from(h) + 0.5).contains(&y)).then_some((x, y));
     move |x, y| {
+        // Undo the vertical and horizontal perspective scales in reverse order. Solving
+        // them directly keeps the bend's Newton iterations away from the perspective folds.
+        let dy = y - c.1;
+        let taper = 1.0 + vd * (dy / hy);
+        if style == 13 && taper < 0.0 {
+            return None; // Squeeze ends at the tip, before the scale would mirror the image.
+        }
+        let dx = warp_unscale(x - c.0, taper)?;
+        let dy = warp_unscale(dy, 1.0 + hd * (dx / hx))?;
+        let (x, y) = (c.0 + dx, c.1 + dy);
+        if k == 0.0 {
+            return source_point(x, y);
+        }
         let (mut sx, mut sy) = (x, y);
         for _ in 0..12 {
             let (fx, fy) = fwd(sx, sy);
@@ -792,10 +843,7 @@ fn warp_inverse(ctx: &EffectCtx, b: &Buf) -> impl Fn(f64, f64) -> Option<(f64, f
             sy -= (-j10 * rx + j00 * ry) / det;
         }
         let (fx, fy) = fwd(sx, sy);
-        if (fx - x).abs() + (fy - y).abs() > 0.5 {
-            return None;
-        }
-        Some((sx, sy))
+        if (fx - x).abs() + (fy - y).abs() <= 0.5 { source_point(sx, sy) } else { None }
     }
 }
 
@@ -804,7 +852,7 @@ fn warp_inverse(ctx: &EffectCtx, b: &Buf) -> impl Fn(f64, f64) -> Option<(f64, f
 /// the pixel empty: the plan of the GPU compositor's Warp where the Newton iterations must run
 /// in f64 to land on the CPU's pixels (strong Fisheye / Twist bends).
 pub fn warp_inverse_map(ctx: &EffectCtx, b: &Buf, w: u32, h: u32) -> Image {
-    let f = warp_inverse(ctx, b);
+    let f = warp_inverse(ctx, b, [w, h]);
     crate::util::gen_image(w, h, |x, y| match f(x as f64 + 0.5, y as f64 + 0.5) {
         Some((sx, sy)) => [sx as f32, sy as f32, 1.0, 0.0],
         None => [0.0; 4],
