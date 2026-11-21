@@ -474,7 +474,15 @@ impl Helper {
         };
         let mut c = Conn { child, input, written, rx, exchange, top: 0, last_used: Instant::now(), generation };
         let frames = c.exchange.path().to_string_lossy().into_owned();
-        match c.call(&Request::Hello { version: PROTOCOL_VERSION, frames }, load_timeout()) {
+        match c.call(
+            &Request::Hello {
+                version: PROTOCOL_VERSION,
+                frames,
+                // Manifests may declare `gradient` parameters.
+                features: vec!["gradient_params".into()],
+            },
+            load_timeout(),
+        ) {
             Ok(Reply::Hello { version, name, helper_version, loads }) if version == PROTOCOL_VERSION => {
                 let mut i = lock(&self.info);
                 (i.name, i.version, i.loads) = (name, helper_version, loads);

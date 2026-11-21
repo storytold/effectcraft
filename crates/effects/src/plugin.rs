@@ -17,8 +17,8 @@
 //! * parameters are flattened to `f64`s in declaration order: slider / angle / checkbox (0 or 1)
 //!   / popup (0-based index) take one value, point two (**frame pixels**, already mapped to the
 //!   buffer), colour four (RGBA 0–1); API 2 adds point3 (x, y mapped like a point, z as is),
-//!   layer (one value: the layer id, -1 for none), and text / hidden strings, which take no
-//!   slot and are read with [`PluginParams::text`];
+//!   layer (one value: the layer id, -1 for none), and text / hidden strings and gradients,
+//!   which take no slot and are read with [`PluginParams::text`] (a gradient as JSON);
 //! * `time` is layer time in seconds; `scale` is the buffer's pixels per layer pixel (scale
 //!   pixel distances like blur radii by it);
 //! * rendering must be deterministic (same inputs, same output) and may run on several threads
@@ -33,7 +33,7 @@
 
 use std::sync::{Arc, OnceLock, RwLock};
 
-use effectcraft_keyframe::Value;
+use effectcraft_keyframe::{Gradient, Value};
 use effectcraft_project::ParamUi;
 use serde::{Deserialize, Serialize};
 
@@ -117,6 +117,30 @@ pub enum PluginParamKind {
         #[serde(default)]
         default: String,
     },
+    /// API 2: a colour gradient (colour and opacity stops), shown as a strip that opens the
+    /// Gradient Editor, animatable like a shape's gradient. It takes no slot: the plug-in reads it
+    /// with [`PluginParams::text`] as JSON, `{"colors": [[pos, [r, g, b, a]]…], "opacities":
+    /// [[pos, alpha]…]}` (positions 0–1, straight colour). The default is written as a gradient
+    /// property takes it (`["#ff0000", "#ffffff"]`, `[[pos, colour]…]` or `{colors, opacities}`;
+    /// white to black when left out). Hosts that know it list `"gradient_params"` to helpers.
+    Gradient {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        default: Option<serde_json::Value>,
+    },
+}
+
+/// A gradient parameter's default: white to black when none is given, `None` when it is not a
+/// gradient (too many stops, bad colours, a stop outside 0–1).
+fn gradient_default(d: &Option<serde_json::Value>) -> Option<Gradient> {
+    let Some(j) = d else {
+        return Some(Gradient::default());
+    };
+    match Value::Gradient(Gradient::default()).coerce_json(j)? {
+        Value::Gradient(g) if !g.colors.is_empty() && g.colors.iter().map(|c| c.0).chain(g.opacities.iter().map(|o| o.0)).all(|t| (0.0..=1.0).contains(&t)) => {
+            Some(g)
+        }
+        _ => None,
+    }
 }
 
 fn hundred() -> f64 {
@@ -139,18 +163,25 @@ impl PluginParamKind {
             PluginParamKind::Point { .. } => 2,
             PluginParamKind::Point3 { .. } => 3,
             PluginParamKind::Color { .. } => 4,
-            PluginParamKind::Text { .. } | PluginParamKind::Hidden { .. } => 0,
+            PluginParamKind::Text { .. } | PluginParamKind::Hidden { .. } | PluginParamKind::Gradient { .. } => 0,
             _ => 1,
         }
     }
     /// Whether the parameter holds a string (it flattens to no `f64`s but one entry of
-    /// [`PluginParams::texts`]).
+    /// [`PluginParams::texts`]; a gradient's is its JSON).
     pub fn is_text(&self) -> bool {
-        matches!(self, PluginParamKind::Text { .. } | PluginParamKind::Hidden { .. })
+        matches!(self, PluginParamKind::Text { .. } | PluginParamKind::Hidden { .. } | PluginParamKind::Gradient { .. })
     }
     /// Whether the kind needs plug-in API 2 (WebAssembly plug-ins can't carry it).
     pub fn needs_v2(&self) -> bool {
-        matches!(self, PluginParamKind::Point3 { .. } | PluginParamKind::Layer | PluginParamKind::Text { .. } | PluginParamKind::Hidden { .. })
+        matches!(
+            self,
+            PluginParamKind::Point3 { .. }
+                | PluginParamKind::Layer
+                | PluginParamKind::Text { .. }
+                | PluginParamKind::Hidden { .. }
+                | PluginParamKind::Gradient { .. }
+        )
     }
 }
 
@@ -227,6 +258,16 @@ impl PluginManifest {
                 && default.len() > MAX_TEXT
             {
                 return Err(format!("plug-in `{}`: the default of `{}` is longer than {MAX_TEXT} bytes", self.id, p.id));
+            }
+            if let PluginParamKind::Gradient { default } = &p.kind
+                && gradient_default(default).is_none()
+            {
+                return Err(format!(
+                    "plug-in `{}`: gradient `{}` needs a default of 2 to {} stops at 0–1 (`[\"#ff0000\", \"#ffffff\"]`, `[[pos, colour]…]` or `{{colors, opacities}}`)",
+                    self.id,
+                    p.id,
+                    effectcraft_keyframe::value::MAX_GRADIENT_STOPS
+                ));
             }
             if let PluginParamKind::Slider { default, min, max, slider_min, slider_max, .. } = &p.kind {
                 let (lo, hi) = (slider_min.unwrap_or(*min), slider_max.unwrap_or(*max));
@@ -490,6 +531,8 @@ fn param_spec(p: &PluginParam) -> ParamSpec {
         PluginParamKind::Layer => (Value::Layer(None), ParamUi::Layer),
         PluginParamKind::Text { default } => (Value::Str(default.clone()), ParamUi::Text),
         PluginParamKind::Hidden { default } => (Value::Str(default.clone()), ParamUi::Hidden),
+        // (validated at registration; a default that stopped parsing falls back to white-black)
+        PluginParamKind::Gradient { default } => (Value::Gradient(gradient_default(default).unwrap_or_default()), ParamUi::Gradient),
     };
     ParamSpec { id: leak(&p.id), name: leak(&p.name), default, ui }
 }
@@ -614,14 +657,15 @@ pub fn flatten_params(m: &PluginManifest, params: &Params, offset: [f64; 2], sca
             PluginParamKind::Checkbox { .. } => out.push(if v.map(Value::as_bool).unwrap_or(false) { 1.0 } else { 0.0 }),
             PluginParamKind::Popup { .. } => out.push(v.map(Value::as_enum).unwrap_or(0) as f64),
             PluginParamKind::Layer => out.push(v.and_then(Value::as_layer).map(|l| l as f64).unwrap_or(-1.0)),
-            PluginParamKind::Text { .. } | PluginParamKind::Hidden { .. } => {}
+            PluginParamKind::Text { .. } | PluginParamKind::Hidden { .. } | PluginParamKind::Gradient { .. } => {}
             _ => out.push(v.map(Value::as_f64).unwrap_or(0.0)),
         }
     }
     out
 }
 
-/// The strings of an instance's text / hidden parameters, in declaration order.
+/// The strings of an instance's text / hidden / gradient parameters, in declaration order (a
+/// gradient as its JSON, see [`PluginParamKind::Gradient`]).
 pub fn flatten_texts(m: &PluginManifest, params: &Params) -> Vec<String> {
     m.params
         .iter()
@@ -630,6 +674,13 @@ pub fn flatten_texts(m: &PluginManifest, params: &Params) -> Vec<String> {
                 Some(Value::Str(s)) => s.clone(),
                 _ => default.clone(),
             }),
+            PluginParamKind::Gradient { default } => {
+                let g = match params.get(&p.id) {
+                    Some(Value::Gradient(g)) => g.clone(),
+                    _ => gradient_default(default).unwrap_or_default(),
+                };
+                Some(serde_json::to_string(&g).unwrap_or_default())
+            }
             _ => None,
         })
         .collect()
