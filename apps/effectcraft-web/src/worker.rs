@@ -59,6 +59,10 @@ impl Offload for WorkerOffload {
     fn start(&self, req: WorkerRequest, inbox: Arc<Inbox>) -> Result<(), String> {
         let id = req.id;
         let files = js_sys::Array::new();
+        // The host's fonts first (sent once per worker: `workerRun` skips what it already has).
+        for (p, d) in crate::fonts::all() {
+            files.push(&js_sys::Array::of3(&JsValue::from_str(&p), &js_sys::Uint8Array::from(&d[..]), &JsValue::from_f64(d.len() as f64)));
+        }
         for p in &req.files {
             if let Some((d, version)) = crate::files::get_versioned(p) {
                 files.push(&js_sys::Array::of3(&JsValue::from_str(p), &js_sys::Uint8Array::from(&d[..]), &JsValue::from_f64(version as f64)));
@@ -178,10 +182,20 @@ pub fn pool() -> Arc<effectcraft_media::MediaPool> {
     POOL.with(|p| p.borrow().clone()).unwrap_or_else(|| Arc::new(effectcraft_media::MediaPool::new()))
 }
 
-/// A footage file for the jobs that follow.
+/// A footage file, or a font from the page ([`crate::fonts`]), for the jobs or frames that follow.
 #[wasm_bindgen(js_name = workerFile)]
 pub fn worker_file(path: String, bytes: js_sys::Uint8Array) {
     let data: Arc<[u8]> = bytes.to_vec().into();
+    if crate::fonts::receive(&path, &data) {
+        // Layers drawn without the font are drawn again.
+        SESSION.with(|c| {
+            if let Some(s) = c.borrow().as_ref() {
+                s.layer_cache.clear();
+            }
+        });
+        crate::frames::fonts_changed();
+        return;
+    }
     crate::files::STORE.put_file(&path, data.clone(), false);
     POOL.with(|p| {
         if let Some(p) = p.borrow().as_ref() {

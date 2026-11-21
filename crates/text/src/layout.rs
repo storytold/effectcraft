@@ -1303,6 +1303,12 @@ fn cache() -> &'static Mutex<HashMap<u64, (u64, Arc<Layout>)>> {
     C.get_or_init(Default::default)
 }
 
+/// Drop every cached layout: the installed fonts changed, so the same text and styles may lay out
+/// with other faces.
+pub(crate) fn clear_cache() {
+    cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
+}
+
 /// Lay out `text` in one style (cached by text and styles).
 pub fn layout(text: &str, style: &TextStyle, para: &ParagraphStyle) -> Arc<Layout> {
     layout_rich(text, &[(0..text.len(), style.clone())], std::slice::from_ref(para))
@@ -1318,6 +1324,7 @@ pub fn layout_rich(text: &str, runs: &[(Range<usize>, TextStyle)], paras: &[Para
     runs.hash(&mut h);
     paras.hash(&mut h);
     let key = h.finish();
+    let generation = crate::fonts::faces_generation();
     static CLOCK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let now = CLOCK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     if let Some(e) = cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner).get_mut(&key) {
@@ -1326,6 +1333,11 @@ pub fn layout_rich(text: &str, runs: &[(Range<usize>, TextStyle)], paras: &[Para
     }
     let l = Arc::new(layout_rich_uncached(text, runs, paras));
     let mut c = cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    // A font arrived while this was laid out, or the caches were being cleared when it started:
+    // the result may miss the new font, so it isn't kept.
+    if !crate::fonts::may_cache(generation) {
+        return l;
+    }
     if c.len() >= 512 {
         // evict the oldest quarter
         let mut ages: Vec<u64> = c.values().map(|v| v.0).collect();
