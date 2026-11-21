@@ -665,7 +665,7 @@ fn changed_from(g: &PropGroup, default: &PropGroup, out: &mut Vec<Uid>) {
     for c in &g.children {
         match c {
             Node::Prop(pr) => {
-                if default.get(&pr.match_id).is_some_and(|d| d.value != pr.value) && !out.contains(&pr.uid) {
+                if !pr.is_animated() && pr.expr.is_none() && default.get(&pr.match_id).is_some_and(|d| d.value != pr.value) {
                     out.push(pr.uid);
                 }
             }
@@ -674,6 +674,38 @@ fn changed_from(g: &PropGroup, default: &PropGroup, out: &mut Vec<Uid>) {
                     changed_from(sg, d, out);
                 }
             }
+        }
+    }
+}
+
+/// Static changes inside shape Contents, comparing each item with its own Add-menu defaults.
+/// A group can hold more than one item of the same kind, including nested groups.
+fn changed_shape_contents(contents: &PropGroup, out: &mut Vec<Uid>) {
+    let mut defaults = BTreeMap::new();
+    let mut items: Vec<_> = contents.children.iter().rev().filter_map(Node::as_group).collect();
+    while let Some(item) = items.pop() {
+        // Both variants are stored as "star"; a static Polygon has no inner radius.
+        let kind = if item.match_id == "star" && item.get("innerRadius").is_none() { "polygon" } else { item.match_id.as_str() };
+        let default = defaults.entry(kind).or_insert_with(|| {
+            let mut next = 0;
+            let mut ids = Ids(&mut next);
+            super::layer::default_shape_item(&mut ids, kind).or_else(|| {
+                // Surface properties are added separately to Front, Bevel, Side and Back.
+                Some(build::shape_surface(&mut ids, kind)?.with(build::shape_surface_prop(&mut ids, "color")?))
+            })
+        });
+        if let Some(default) = default {
+            changed_from(item, default, out);
+        }
+        // Extra dash/gap pairs exist only after the user adds them to a stroke.
+        if matches!(kind, "stroke" | "gstroke")
+            && let Some(dashes) = item.sub("dashes")
+        {
+            let extra = build::EXTRA_DASHES.into_iter().flat_map(|(dash, gap)| [dash, gap]).filter_map(|id| dashes.get(id));
+            out.extend(extra.filter(|p| !p.is_animated() && p.expr.is_none()).map(|p| p.uid));
+        }
+        if let Some(nested) = item.sub("contents") {
+            items.extend(nested.children.iter().rev().filter_map(Node::as_group));
         }
     }
 }
@@ -767,6 +799,9 @@ fn reveal(s: &mut Session, p: &Value) -> Result<Value> {
                 }
             }
             if let Some(fresh) = &fresh {
+                if top.match_id == "contents" {
+                    changed_shape_contents(top, &mut found);
+                }
                 if let Some(default) = default_group(top, l, fresh) {
                     changed_from(top, &default, &mut found);
                 }

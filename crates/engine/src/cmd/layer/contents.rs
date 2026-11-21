@@ -82,6 +82,25 @@ pub(super) fn mask_props(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(Value::Null)
 }
 
+/// A new item from the shape Contents Add menu, also the reference for Reveal All Modified Properties.
+pub(in crate::cmd) fn default_shape_item(ids: &mut Ids, kind: &str) -> Option<PropGroup> {
+    Some(match kind {
+        "group" => build::shape_group(ids, "Group 1", vec![]),
+        "rect" | "rectangle" => build::shape_rect(ids, [200.0, 200.0], [0.0, 0.0], 0.0),
+        "ellipse" => build::shape_ellipse(ids, [200.0, 200.0], [0.0, 0.0]),
+        "star" => build::shape_star(ids, true, 5.0, [0.0, 0.0], 100.0, 50.0),
+        "polygon" => build::shape_star(ids, false, 5.0, [0.0, 0.0], 100.0, 0.0),
+        "fill" => build::shape_fill(ids, [1.0, 0.0, 0.0, 1.0]),
+        "stroke" => build::shape_stroke(ids, [1.0, 1.0, 1.0, 1.0], 2.0),
+        "path" => build::shape_path(ids, Default::default()),
+        "gfill" | "gradientFill" => build::shape_gradient_fill(ids, false, [-100.0, 0.0], [100.0, 0.0], Default::default()),
+        "gstroke" | "gradientStroke" => build::shape_gradient_stroke(ids, false, [-100.0, 0.0], [100.0, 0.0], Default::default(), 2.0),
+        "trim" | "trimPaths" => build::shape_trim(ids, 0.0, 100.0, 0.0),
+        "repeater" => build::shape_repeater(ids, 3.0, [100.0, 0.0]),
+        k => build::shape_simple_op(ids, k)?,
+    })
+}
+
 pub(super) fn add_shape_item(s: &mut Session, p: &Value) -> Result<Value> {
     let (cid, lid) = layer_p(s, p, "layer.addShapeItem")?;
     let kind = str_p(p, "kind").ok_or_else(|| bad("layer.addShapeItem", "missing `kind`"))?.to_string();
@@ -120,21 +139,7 @@ pub(super) fn add_shape_item(s: &mut Session, p: &Value) -> Result<Value> {
             proj.next_id = next;
             return Ok(uid);
         }
-        let g = match kind.as_str() {
-            "group" => build::shape_group(&mut ids, "Group 1", vec![]),
-            "rect" | "rectangle" => build::shape_rect(&mut ids, [200.0, 200.0], [0.0, 0.0], 0.0),
-            "ellipse" => build::shape_ellipse(&mut ids, [200.0, 200.0], [0.0, 0.0]),
-            "star" => build::shape_star(&mut ids, true, 5.0, [0.0, 0.0], 100.0, 50.0),
-            "polygon" => build::shape_star(&mut ids, false, 5.0, [0.0, 0.0], 100.0, 0.0),
-            "fill" => build::shape_fill(&mut ids, [1.0, 0.0, 0.0, 1.0]),
-            "stroke" => build::shape_stroke(&mut ids, [1.0, 1.0, 1.0, 1.0], 2.0),
-            "path" => build::shape_path(&mut ids, Default::default()),
-            "gfill" | "gradientFill" => build::shape_gradient_fill(&mut ids, false, [-100.0, 0.0], [100.0, 0.0], Default::default()),
-            "gstroke" | "gradientStroke" => build::shape_gradient_stroke(&mut ids, false, [-100.0, 0.0], [100.0, 0.0], Default::default(), 2.0),
-            "trim" | "trimPaths" => build::shape_trim(&mut ids, 0.0, 100.0, 0.0),
-            "repeater" => build::shape_repeater(&mut ids, 3.0, [100.0, 0.0]),
-            k => build::shape_simple_op(&mut ids, k).ok_or_else(|| bad("layer.addShapeItem", format!("unknown kind `{k}`")))?,
-        };
+        let g = default_shape_item(&mut ids, &kind).ok_or_else(|| bad("layer.addShapeItem", format!("unknown kind `{kind}`")))?;
         let uid = g.uid;
         proj.next_id = next;
         shape_item_target(proj, cid, lid, group_uid)?.children.push(g.into());

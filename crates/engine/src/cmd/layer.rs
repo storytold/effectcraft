@@ -22,6 +22,7 @@ mod switches;
 mod timing;
 mod transform;
 
+pub(super) use contents::default_shape_item;
 use contents::{add_mask, add_shape_item, mask_props, set_text};
 use create::{add_item, new_adjustment, new_null, new_shape, new_solid, new_text};
 pub(crate) use create::{color_p, fit_span, index_p, insert_layer, insert_layer_at, new_layer_span, place, position_p, show_span};
