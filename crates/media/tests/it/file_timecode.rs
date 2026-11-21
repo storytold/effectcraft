@@ -97,22 +97,15 @@ fn shared_mov_timecode_rebases_edl_labels_on_its_own_presentation_clock() {
         let video = w.add_track(video_cfg).expect("video track");
 
         let tc = TimecodeConfig { timescale: TC_CLOCK, frame_duration: 4, frames_per_second: 24, ..Default::default() };
-        let entry = SampleEntry {
-            format: FourCc(*b"tmcd"),
-            data_reference_index: 1,
-            codec: CodecConfig::Timecode(tc),
-            video: None,
-            audio: None,
-            bitrate: None,
-        };
+        let entry =
+            SampleEntry { format: FourCc(*b"tmcd"), data_reference_index: 1, codec: CodecConfig::Timecode(tc), video: None, audio: None, bitrate: None };
         let mut tc_cfg = TrackConfig::new(entry, TC_CLOCK);
         tc_cfg.edits = tc_edits;
         let tc = w.add_track(tc_cfg).expect("timecode track");
         for packet in &packets {
             w.write_sample(video, WriteSample { data: packet, duration: 2, composition_offset: 0, is_sync: true }).expect("write ProRes");
         }
-        w.write_sample(tc, WriteSample { data: &counter.to_be_bytes(), duration: 12, composition_offset: 0, is_sync: true })
-            .expect("write timecode");
+        w.write_sample(tc, WriteSample { data: &counter.to_be_bytes(), duration: 12, composition_offset: 0, is_sync: true }).expect("write timecode");
         w.finish().expect("finish").into_inner()
     };
 

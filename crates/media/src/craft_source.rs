@@ -460,8 +460,7 @@ fn isobmff_timecode_origin(file: &Mp4File, video_idx: usize, video_rate: FrameRa
         return None;
     }
 
-    let mut tracks =
-        file.tracks.iter().filter(|track| track.kind == isobmff::TrackKind::Timecode && linked.is_none_or(|id| track.id == *id));
+    let mut tracks = file.tracks.iter().filter(|track| track.kind == isobmff::TrackKind::Timecode && linked.is_none_or(|id| track.id == *id));
     let track = tracks.next()?;
     if tracks.next().is_some() {
         return None;
