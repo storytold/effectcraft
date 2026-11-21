@@ -29,7 +29,8 @@
 //! parameter kinds. External effect helpers (`effectcraft-helper-host`) are built on it.
 //!
 //! The WebAssembly ABI is versioned separately ([`WASM_API_VERSION`]): ABI 1 is `ec_render`;
-//! ABI 2 adds `ec_render2`, which receives the layer's previous and next frames.
+//! ABI 2 adds `ec_render2`, which receives the layer's previous and next frames; ABI 3 adds the
+//! optional `ec_pad` ([`EffectPlugin::padding`]) and renders with either export.
 
 use std::sync::{Arc, OnceLock, RwLock};
 
@@ -42,9 +43,10 @@ use crate::{Buf, EffectCtx, EffectSpec, ParamSpec, Params, RenderFn};
 /// The plug-in API version this build implements (manifests with API 1 or 2 are accepted).
 pub const PLUGIN_API_VERSION: u32 = 2;
 /// The newest WebAssembly ABI this build implements (a module's `ec_api_version`). ABI 1 is
-/// `ec_render`; ABI 2 adds `ec_render2` and the layer's neighbouring frames. This is separate
-/// from the plug-in API version: a module's manifest `api` stays 1 or 2.
-pub const WASM_API_VERSION: u32 = 2;
+/// `ec_render`; ABI 2 adds `ec_render2` and the layer's neighbouring frames; ABI 3 adds the
+/// optional `ec_pad` (padding) and renders with either export. This is separate from the
+/// plug-in API version: a module's manifest `api` stays 1 or 2.
+pub const WASM_API_VERSION: u32 = 3;
 /// The oldest WebAssembly ABI this build still loads.
 pub const MIN_WASM_API_VERSION: u32 = 1;
 
@@ -411,7 +413,7 @@ pub trait EffectPlugin: Send + Sync {
     }
     /// Whether rendering reads the layer at other times (its neighbouring frames). Default
     /// false; the render cache keys a layer with such an effect on its layer time. WebAssembly
-    /// ABI 2 plug-ins return true.
+    /// plug-ins that render with `ec_render2` (ABI 2, and ABI 3 modules that export it) return true.
     fn reads_other_times(&self) -> bool {
         false
     }
