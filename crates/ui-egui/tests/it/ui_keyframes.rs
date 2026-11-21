@@ -447,6 +447,60 @@ fn a_graph_handle_drag_moves_the_handles_of_every_selected_key() {
     assert!((handle(&h, 0).x - k0.x - px_per_s * 0.2).abs() < 2.0, "key 0's handle moved on screen");
 }
 
+/// #3376: Scale is one property drawn as one curve per dimension, and a handle drag moves the
+/// same handle of every selected key on the dragged curve only: the other dimensions of the same
+/// property keep their easing, so each dimension can be eased on its own.
+#[test]
+fn a_graph_handle_drag_leaves_the_property_s_other_dimensions_alone() {
+    let (mut h, id, _) = harness();
+    let s = &mut h.state_mut().session;
+    for (t, v) in [(0.0, [50.0, 100.0]), (1.0, [100.0, 50.0]), (2.0, [50.0, 100.0])] {
+        s.execute("prop.addKey", json!({"layer": id.0, "path": "transform/scale", "time": t, "value": v})).unwrap();
+    }
+    let uid = s.active_comp().unwrap().layer(id).unwrap().props.prop("transform/scale").unwrap().uid;
+    s.execute("prop.select", json!({"layer": id.0, "prop": uid})).unwrap();
+    s.execute("keys.selectAll", json!({})).unwrap();
+    s.execute("keys.easyEase", json!({})).unwrap();
+    h.state_mut().ui.timeline.graph_editor = true;
+    h.run_steps(4);
+    // Per key, per dimension: (in, out) influence.
+    let influences = |h: &Harness<'_, EffectcraftApp>| -> Vec<Vec<(f64, f64)>> {
+        let l = h.state().session.active_comp().unwrap().layer(id).unwrap().clone();
+        l.props
+            .prop("transform/scale")
+            .unwrap()
+            .keys
+            .iter()
+            .map(|k| (0..2).map(|d| (k.in_ease.get(d).map_or(0.0, |e| e.influence), k.out_ease.get(d).map_or(0.0, |e| e.influence))).collect())
+            .collect()
+    };
+    let handle = |h: &Harness<'_, EffectcraftApp>, dim: usize, key: usize, side: &str| {
+        let e =
+            h.state().auto.find(&format!("timeline.graph.handle.{uid}.{dim}.{key}.{side}")).unwrap_or_else(|| panic!("no handle {dim}/{key}/{side}")).clone();
+        pos2(e.rect[0] + e.rect[2] / 2.0, e.rect[1] + e.rect[3] / 2.0)
+    };
+    let px_per_s = {
+        let at = |i: usize| h.state().auto.find(&format!("timeline.graph.key.{uid}.0.{i}")).unwrap().rect[0];
+        at(1) - at(0)
+    };
+    let (before, y_before) = (influences(&h), handle(&h, 1, 0, "out"));
+    let undo = h.state().session.history.undo.len();
+    // Key 1's X out handle 0.2 s further out (the keys are 1 s apart): X's out handles on both
+    // keys go along, Y's stay.
+    let k1 = handle(&h, 0, 1, "out");
+    drag(&mut h, k1, k1 + egui::vec2(px_per_s * 0.2, 0.0), Default::default());
+    let after = influences(&h);
+    for i in [0, 1] {
+        assert!((after[i][0].1 - before[i][0].1 - 0.2).abs() < 0.01, "key {i} X: {:?} → {:?}", before[i], after[i]);
+    }
+    for i in [0, 1] {
+        assert_eq!((after[i][0].0, after[i][1]), (before[i][0].0, before[i][1]), "key {i}: the in handles and Y stay");
+    }
+    assert_eq!(after[2], before[2], "key 2 has no out handle and stays as it was");
+    assert_eq!(h.state().session.history.undo.len(), undo + 1, "one undo step");
+    assert!((handle(&h, 1, 0, "out").x - y_before.x).abs() < 1.0, "Y's handle did not move on screen");
+}
+
 /// #457: on a Timeline narrower than the Graph Editor's whole button row, the buttons that don't
 /// fit go to a "»" menu at the end of the bar instead of being cut off; each stays reachable and
 /// works from there.
