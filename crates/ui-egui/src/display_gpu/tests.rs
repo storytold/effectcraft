@@ -26,6 +26,7 @@ struct Dev {
 }
 
 fn device() -> Option<Dev> {
+    crate::hold_gpu_lock();
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle().with_env());
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).ok()?;
     let (device, queue) =
