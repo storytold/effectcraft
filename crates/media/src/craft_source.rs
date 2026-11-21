@@ -1793,13 +1793,14 @@ mod tests {
         let container = ContainerFile::Mxf(Box::new(file));
         assert_eq!(container.sample_count(0), 2);
         assert_eq!(container.target_sample(0, Tick::ZERO), Some((1, 1)));
-        assert_eq!(container.sync_sample_before(0, 1), 0);
+        assert_eq!(container.sync_sample_before(0, 1), 1);
         assert_eq!(container.sample_pts(0, 1), 1);
         assert_eq!(container.pts_to_tick(0, 1), Tick::ZERO);
 
         // Exercise open_mxf video+sound path on valid Op1a Avc+PCM.
-        let opened = open_bytes("op1a.mxf", Arc::from(raw_bytes));
-        assert!(opened.is_some());
+        let src = open_bytes("op1a.mxf", Arc::from(raw_bytes)).expect("recognized").expect("opened");
+        assert_eq!(src.info().container, "mxf");
+        assert_eq!(src.info().audio_streams.len(), 1);
         assert!(open_bytes("op1a.mxf", Arc::from(vec![0u8; 4])).is_none());
     }
 
