@@ -102,7 +102,7 @@ impl Psd {
             hidden: rec.flags.hidden(),
             protect_transparency: rec.flags.transparency_protected(),
             channels,
-            name: mac_roman_string(&rec.name),
+            name: crate::read::decode_mac_roman(&rec.name),
             ..Default::default()
         };
         if let craft_psd::MaskData::Mask(m) = &rec.mask {
@@ -487,11 +487,6 @@ fn error(e: &craft_psd::PsdError) -> Error {
         craft_psd::PsdError::Unsupported(s) => Error::Unsupported(s.clone()),
         other => Error::Invalid(other.to_string()),
     }
-}
-
-/// A Pascal string's bytes in the system (Mac Roman) encoding; ASCII covers the common case.
-fn mac_roman_string(b: &[u8]) -> String {
-    b.iter().map(|&b| if b < 0x80 { b as char } else { super::read::mac_roman(b) }).collect()
 }
 
 /// App representation only; binary field framing belongs to craft-psd.
