@@ -9,8 +9,9 @@
 //! - **ISO-BMFF (`MP4`/`MOV`/`M4A`, video+audio & audio-only)**:
 //!   - Shared (`craft-media::isobmff` + `craft-video` + `craft-audio`): `H264`, `Hevc`, `Av1`,
 //!     `Vp9`, `Vp8`, `ProRes` (coded alpha via `craft_video::prores::probe`, #3999), `Dnxhd`,
-//!     `Mpeg2Video`; audio `Aac`, `Alac`, `Opus`, `Ac3`, `Mp3`/`Mp2`/`Mp1`.
-//!   - Fallback (`filmcraft-codecs`): `Mjpeg`, `Mpeg4Video`, `Ffv1`, `Apv`, or unsupported audio.
+//!     `Mpeg2Video`, and strictly admitted video-only `Apv` MP4;
+//!     audio `Aac`, `Alac`, `Opus`, `Ac3`, `Mp3`/`Mp2`/`Mp1`.
+//!   - Fallback (`filmcraft-codecs`): `Mjpeg`, `Mpeg4Video`, `Ffv1`, other `Apv`, or unsupported audio.
 //! - **Matroska / WebM (`MKV`/`MKA`/`WebM`, video+audio & audio-only)**:
 //!   - Shared (`craft-media::matroska` + `craft-video` + `craft-audio`): `H264`, `Hevc`, `Av1`,
 //!     `Vp9`, `Vp8`, `ProRes`, `Dnxhd`, `Mpeg2Video`; audio `Aac`, `Alac`, `Opus`, `Ac3`,
@@ -68,6 +69,12 @@ const MAX_PRORES_ALPHA_SAMPLE_BYTES: u32 = 32 * 1024 * 1024;
 /// existing colour policy; the ProRes header parser requires the complete declared frame.
 const MAX_MXF_PRORES_COLOR_SAMPLE_BYTES: u32 = 4 * 1024 * 1024;
 
+/// Only migrate APV MP4 files with bounded complete access-unit reads.
+const MAX_SHARED_APV_SAMPLE_BYTES: u32 = 32 * 1024 * 1024;
+// Match the Film GOP cache's per-source decoded-plane ceiling.
+const MAX_SHARED_APV_CACHE_BYTES: usize = 384 << 20;
+const ISOBMFF_IDENTITY_MATRIX: [i32; 9] = [0x10000, 0, 0, 0, 0x10000, 0, 0, 0, 0x4000_0000];
+
 fn worker_cap() -> usize {
     std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(1, MAX_WORKERS)
 }
@@ -92,7 +99,6 @@ fn supports_video_codec(codec: CodecId) -> bool {
             | CodecId::Dnxhd
             | CodecId::Mpeg2Video
             | CodecId::Ffv1
-            | CodecId::Apv
     )
 }
 
@@ -792,6 +798,69 @@ fn isobmff_timecode_origin(file: &Mp4File, video_idx: usize, video_rate: FrameRa
     i64::try_from(i128::from(tc.start_frame?) - delta / divisor).ok().filter(|&origin| origin >= 0)
 }
 
+/// Admit only the APV MP4 shape whose timing and explicit color do not need the legacy
+/// edit-list, snap/rebase or inferred-color policies. Inspect the existing index only;
+/// APV's auxiliary alpha is per access unit and must still be decoded from each frame.
+fn simple_mp4_apv_profile(file: &Mp4File, track: &isobmff::Track) -> Option<craft_video::apv::Profile> {
+    use craft_video::apv::Profile;
+    if file.major_brand.0 != *b"isom" || file.fragmented || file.tracks.len() != 1 || !track.edits.is_empty() || track.edit_offset != 0 {
+        return None;
+    }
+    let [entry] = track.entries.as_slice() else { return None };
+    let isobmff::CodecConfig::Apv(cfg) = &entry.codec else { return None };
+    let video = entry.video.as_ref()?;
+    let profile = Profile::from_idc(cfg.profile_idc)?;
+    // The parser also accepts omitted/incomplete configuration fields. A simple complete
+    // version-1 record has a single primary-frame descriptor, optionally with four color bytes.
+    let record_size = if cfg.color_description_present { 22 } else { 18 };
+    if !matches!(profile, Profile::P422_10 | Profile::P4444_10)
+        || cfg.raw_record.len() != record_size
+        || !cfg.raw_record.starts_with(&[1, 1, 1, 1])
+        || cfg.bit_depth_minus8 != 2
+        || cfg.chroma_format_idc != profile.default_chroma().idc()
+        || cfg.frame_width == 0
+        || cfg.frame_height == 0
+        || (cfg.frame_width, cfg.frame_height) != (u32::from(video.width), u32::from(video.height))
+        || (track.width, track.height) != (cfg.frame_width, cfg.frame_height)
+        || video.clean_aperture.is_some()
+        || video.mastering_display.is_some()
+        || video.content_light.is_some()
+        || video.pixel_aspect.is_some_and(|par| par != (1, 1))
+        || track.matrix != ISOBMFF_IDENTITY_MATRIX
+        || !matches!(video.color.as_ref(), Some(isobmff::ColorInfo::Nclx { primaries: 1, transfer: 1, matrix: 1, full_range: false }))
+    {
+        return None;
+    }
+    let step = track.samples.first()?.duration;
+    if step == 0 {
+        return None;
+    }
+    let rate = FrameRate::COMMON.into_iter().find(|r| i128::from(track.timescale) * i128::from(r.den) == i128::from(step) * i128::from(r.num))?;
+    // Coarse timing needs the legacy nominal-grid snap policy before rounding. Admit only
+    // tracks the Film reader itself would treat as fine, using the same tick quantization.
+    let den = i64::from(track.timescale);
+    let unit = filmcraft_time::Tick::from_rational(1, 1, den);
+    let rate = filmcraft_time::FrameRate::new(rate.num, rate.den);
+    if unit.0.saturating_mul(2) >= rate.frame_duration().0 {
+        return None;
+    }
+    let mut pos = 0i64;
+    for sample in &track.samples {
+        if sample.description_index != 1
+            || !sample.is_sync
+            || sample.size == 0
+            || sample.size > MAX_SHARED_APV_SAMPLE_BYTES
+            || sample.duration != step
+            || sample.pts != pos
+            || sample.dts != pos
+        {
+            return None;
+        }
+        pos = pos.checked_add(i64::from(step))?;
+    }
+    (u64::try_from(pos).ok()? == track.duration).then_some(profile)
+}
+
 fn open_isobmff(name: &str, source: SharedBytes) -> Option<Result<SharedSource>> {
     let file = isobmff::open(source.clone()).ok()?;
     let video_idx = file.tracks.iter().position(|t| t.kind == isobmff::TrackKind::Video && !t.samples.is_empty() && !t.entries.is_empty() && t.timescale > 0);
@@ -810,9 +879,14 @@ fn open_isobmff(name: &str, source: SharedBytes) -> Option<Result<SharedSource>>
     let (video_info, video_state, presentation, duration) = if let Some(v_idx) = video_idx {
         let video_track = &file.tracks[v_idx];
         let video_params = video_track.codec_params();
-        if !supports_video_codec(video_params.codec) {
-            return None;
-        }
+        let apv_profile = if video_params.codec == CodecId::Apv {
+            Some(simple_mp4_apv_profile(&file, video_track)?)
+        } else {
+            if !supports_video_codec(video_params.codec) {
+                return None;
+            }
+            None
+        };
         let container_color = video_track.video().and_then(|v| v.color.as_ref()).map(color_from_isobmff);
         let color = container_color.unwrap_or(ColorInfo::REC709);
         let (mut width, mut height) = video_track
@@ -839,18 +913,29 @@ fn open_isobmff(name: &str, source: SharedBytes) -> Option<Result<SharedSource>>
             // The coded alpha plane is authoritative for ProRes, not the MOV sample-entry depth.
             let sample = video_track.samples.first()?;
             prores_has_alpha(sample.size, || file.read_sample(&*source, v_idx, 0).ok())?
+        } else if let Some(profile) = apv_profile {
+            profile.default_chroma().has_alpha()
         } else {
             video_track.video().is_some_and(|v| v.depth == 32)
         };
         let frame_rate = estimate_isobmff_frame_rate(video_track);
         let duration = Tick::from_units(i64::try_from(video_track.duration).unwrap_or(i64::MAX), i64::from(video_track.timescale));
-        let bitrate = video_track.entries.first().and_then(|e| e.bitrate).map(|b| u64::from(b.avg_bitrate)).filter(|&b| b > 0);
-        let codec_name = video_params.codec.name().to_string();
+        let (codec_name, pixel_format, bitrate) = if let Some(profile) = apv_profile {
+            let format = if has_alpha { "YUVA 4:4:4:4 10-bit" } else { "YUV 4:2:2 10-bit" };
+            let bytes: u128 = video_track.samples.iter().map(|sample| u128::from(sample.size)).sum();
+            let bitrate = (bytes * 8 * u128::from(video_track.timescale))
+                .checked_div(u128::from(video_track.duration))
+                .and_then(|b| u64::try_from(b).ok());
+            (profile.name().into(), format.into(), bitrate)
+        } else {
+            let bitrate = video_track.entries.first().and_then(|e| e.bitrate).map(|b| u64::from(b.avg_bitrate)).filter(|&b| b > 0);
+            (video_params.codec.name().to_string(), String::new(), bitrate)
+        };
         let video_decoder = match TrackDecoder::with_options(&video_params, TrackDecoderOptions { threads: Some(worker_cap()), draft: false }) {
             Ok(d) => d,
             Err(e) => return Some(Err(MediaError::Decode(e.to_string()))),
         };
-        let v_info = VideoStreamInfo { width, height, frame_rate, par, codec: codec_name, pixel_format: String::new(), color, has_alpha, bitrate, hdr: None };
+        let v_info = VideoStreamInfo { width, height, frame_rate, par, codec: codec_name, pixel_format, color, has_alpha, bitrate, hdr: None };
         let v_state = Mutex::new(VideoState { decoder: video_decoder, next_decode_idx: 0, gop_start_idx: 0, flushed: false, decoded: Vec::new() });
         (Some(v_info), Some(v_state), FramePresentation { container_color, par, rotation, aperture }, duration)
     } else {
@@ -866,6 +951,9 @@ fn open_isobmff(name: &str, source: SharedBytes) -> Option<Result<SharedSource>>
     };
 
     let start_timecode = video_idx.zip(video_info.as_ref()).and_then(|(idx, info)| isobmff_timecode_origin(&file, idx, info.frame_rate));
+    let apv_cache = video_idx
+        .is_some_and(|idx| matches!(file.tracks[idx].codec(), Some(isobmff::CodecConfig::Apv(_))))
+        .then(ApvFrameCache::default);
     let container = ContainerFile::Isobmff(file);
     let (audio_tracks, audio_infos) = open_audio_tracks(&container, &*source, audio_candidates)?;
     if video_info.is_none() && audio_tracks.is_empty() {
@@ -884,7 +972,7 @@ fn open_isobmff(name: &str, source: SharedBytes) -> Option<Result<SharedSource>>
         file_size: Some(source.len()),
     };
 
-    Some(Ok(Arc::new(CraftMediaSource { info, source, file: container, video_track_idx: video_idx, presentation, video: video_state, audio_tracks })))
+    Some(Ok(Arc::new(CraftMediaSource { info, source, file: container, video_track_idx: video_idx, presentation, video: video_state, audio_tracks, apv_cache })))
 }
 
 fn open_matroska(name: &str, source: SharedBytes) -> Option<Result<SharedSource>> {
@@ -978,6 +1066,7 @@ fn open_matroska(name: &str, source: SharedBytes) -> Option<Result<SharedSource>
         presentation: FramePresentation { container_color, par, rotation, aperture: None },
         video: video_state,
         audio_tracks,
+        apv_cache: None,
     })))
 }
 
@@ -1023,6 +1112,7 @@ fn finish_container_source(
         presentation: FramePresentation { container_color: None, par: (1, 1), rotation: 0, aperture: None },
         video: video_state,
         audio_tracks,
+        apv_cache: None,
     })))
 }
 
@@ -1192,6 +1282,7 @@ fn open_parsed_mxf(name: &str, source: SharedBytes, file: mxf::MxfFile) -> Optio
         presentation,
         video: video_state,
         audio_tracks,
+        apv_cache: None,
     })))
 }
 
@@ -1396,6 +1487,83 @@ struct CraftMediaSource {
     presentation: FramePresentation,
     video: Option<Mutex<VideoState>>,
     audio_tracks: Vec<AudioTrackEntry>,
+    apv_cache: Option<ApvFrameCache>,
+}
+
+#[derive(Default)]
+struct ApvFrameCache {
+    entries: Mutex<Vec<CachedFrame>>,
+    decode_gate: Mutex<()>,
+}
+
+fn apv_cache_fits_pair(a: usize, b: usize) -> bool {
+    a.saturating_add(b) <= MAX_SHARED_APV_CACHE_BYTES
+}
+
+impl ApvFrameCache {
+    fn get(&self, pts: i64) -> Option<Arc<VideoFrame>> {
+        let entries = self.entries.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        entries.iter().find(|entry| entry.pts == pts).map(|entry| entry.frame.clone())
+    }
+
+    fn get_or_decode(&self, pts: i64, decode: impl FnOnce() -> Result<VideoFrame>) -> Result<Arc<VideoFrame>> {
+        if let Some(frame) = self.get(pts) {
+            return Ok(frame);
+        }
+        // The short cache lock is not held while waiting or decoding. The decoder and
+        // pixel adapter must be strictly serial here: Rayon could reenter the same source.
+        let _gate = self.decode_gate.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(frame) = self.get(pts) {
+            return Ok(frame);
+        }
+        let frame = Arc::new(decode()?);
+        let mut entries = self.entries.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if entries.len() == 2 {
+            entries.remove(0);
+        }
+        if entries.first().is_some_and(|other| !apv_cache_fits_pair(other.frame.byte_size(), frame.byte_size())) {
+            entries.clear();
+        }
+        // Like Film, keep the current frame even if it alone exceeds the cache ceiling.
+        entries.push(CachedFrame { pts, draft: false, frame: frame.clone() });
+        Ok(frame)
+    }
+}
+
+impl CraftMediaSource {
+    fn apv_frame(&self, track: &isobmff::Track, video_idx: usize, cache: &ApvFrameCache, time: Tick) -> Result<Arc<VideoFrame>> {
+        // The admitted fine timebase uses Film's nearest-unit lookup, not the floor used
+        // by other shared routes. Track selection timing is distinct from the frame's pts.
+        let lookup = filmcraft_time::Tick(time.0.max(0)).to_rational_round(1, i64::from(track.timescale));
+        let target = track.sample_at_presentation_time(lookup).ok_or_else(|| MediaError::Decode("no video samples".into()))?;
+        let pts = track.samples[target].pts;
+        cache.get_or_decode(pts, || {
+            if filmcraft_media::cancel::cancelled() {
+                return Err(MediaError::Cancelled);
+            }
+            // This is an in-memory copy or positional file read, then a serial decode
+            // and in-thread plane conversion; none can schedule a nested render.
+            let packet = self.file.read_sample(&*self.source, video_idx, target)?;
+            let options = craft_video::apv::DecodeOptions { threads: false, ..Default::default() };
+            let mut decoded = craft_video::apv::decode_frame_with(&packet, &options).map_err(|e| MediaError::Decode(e.to_string()))?;
+            if decoded.chroma == craft_video::apv::ChromaFormat::Monochrome {
+                // A primary AU with an unexpected monochrome profile is still playable in Film:
+                // its adapter expands it to neutral 4:4:4 without dropping any auxiliary alpha.
+                let neutral = 1u16 << decoded.bit_depth.saturating_sub(1);
+                decoded.chroma = craft_video::apv::ChromaFormat::Yuv444;
+                decoded.cb = vec![neutral; decoded.y.len()];
+                decoded.cr = vec![neutral; decoded.y.len()];
+            }
+            let decoded = DecodedVideoFrame::try_from(decoded).map_err(|e| MediaError::Decode(e.to_string()))?;
+            let mut frame = to_craft_frame(decoded, self.presentation, Tick::ZERO)?;
+            // Film's explicit nclx wins for APV YUV, even when the AU says full range.
+            // The shared converter preserves both coded and per-AU auxiliary alpha.
+            if let Some(color) = self.presentation.container_color {
+                frame.color = color;
+            }
+            Ok(frame)
+        })
+    }
 }
 
 impl MediaSource for CraftMediaSource {
@@ -1407,6 +1575,12 @@ impl MediaSource for CraftMediaSource {
         let (Some(video_idx), Some(video_mutex)) = (self.video_track_idx, &self.video) else {
             return Err(MediaError::NoStream("video"));
         };
+        if let Some(cache) = &self.apv_cache
+            && let ContainerFile::Isobmff(file) = &self.file
+            && let Some(track) = file.tracks.get(video_idx)
+        {
+            return self.apv_frame(track, video_idx, cache, req.time);
+        }
         let (target_idx, target_pts) = self.file.target_sample(video_idx, req.time).ok_or_else(|| MediaError::Decode("no video samples".into()))?;
         let want_draft = req.scale < 0.99;
 
@@ -2428,6 +2602,207 @@ mod tests {
         let offsets = track.samples.iter().map(|s| s.offset).collect::<Vec<_>>();
         let params = track.codec_params();
         OpusFixture { bytes, file: ContainerFile::Matroska(Box::new(file)), offsets, params, delay: OPUS_CODEC_DELAY_NS as u64 }
+    }
+
+    #[test]
+    fn apv_cache_counts_both_frames_without_allocating_8k_planes() {
+        let yuva_8k = 7_680usize * 4_320 * 4 * 2;
+        assert!(apv_cache_fits_pair(yuva_8k, MAX_SHARED_APV_CACHE_BYTES - yuva_8k));
+        assert!(!apv_cache_fits_pair(yuva_8k, yuva_8k));
+        assert!(!apv_cache_fits_pair(usize::MAX, 1));
+    }
+
+    #[test]
+    fn apv_cache_releases_entry_lock_and_does_not_cache_errors_or_duplicate_a_hit() {
+        let cache = ApvFrameCache::default();
+        let failed = cache.get_or_decode(1, || {
+            assert!(cache.entries.try_lock().is_ok());
+            assert!(matches!(cache.decode_gate.try_lock(), Err(std::sync::TryLockError::WouldBlock)));
+            Err(MediaError::Cancelled)
+        });
+        assert!(matches!(failed, Err(MediaError::Cancelled)));
+        let frame = cache.get_or_decode(1, || {
+            assert!(cache.entries.try_lock().is_ok());
+            Ok(VideoFrame {
+                width: 1,
+                height: 1,
+                data: PixelData::Yuv16 {
+                    planes: [Arc::new(vec![200]), Arc::new(vec![512]), Arc::new(vec![512])],
+                    chroma: Chroma::C444,
+                    bits: 10,
+                    alpha: None,
+                },
+                color: ColorInfo::REC709,
+                par: (1, 1),
+                pts: Tick::ZERO,
+            })
+        }).unwrap();
+        let hit = cache.get_or_decode(1, || panic!("a cache hit must not decode again")).unwrap();
+        assert!(Arc::ptr_eq(&frame, &hit));
+    }
+
+    struct ApvFixture {
+        bytes: Arc<[u8]>,
+        y: Vec<Vec<u16>>,
+        alpha: Vec<Option<Vec<u16>>>,
+    }
+
+    fn generated_apv_mp4(brand: isobmff::Brand, coded_alpha: bool, incomplete_config: bool, coarse_timebase: bool, rec709: bool) -> ApvFixture {
+        use std::io::Cursor;
+
+        use craft_video::apv::{Encoder, EncoderConfig, Frame, Profile, decode_frame};
+        use isobmff::{ApvConfig, Mp4Writer, SampleEntry, TrackConfig, WriteSample, WriterOptions};
+
+        let profile = if coded_alpha { Profile::P4444_10 } else { Profile::P422_10 };
+        let mut config = EncoderConfig::new(profile, 16, 16);
+        config.qp = Some(16);
+        // The APV header and apvC both disagree with the authoritative explicit nclx.
+        config.color_description_present = true;
+        config.color.primaries = 9;
+        config.color.transfer = 16;
+        config.color.matrix = 9;
+        config.color.full_range = true;
+        let mut encoder = Encoder::with_config(config).unwrap();
+        let mut record = encoder.decoder_config_record();
+        if incomplete_config {
+            // The legacy decoder takes its dimensions from the AU rather than this record.
+            record[8..12].fill(0);
+        }
+        let mut entry = SampleEntry::apv(ApvConfig::from_record(record).unwrap(), 16, 16);
+        entry.video.as_mut().unwrap().color = Some(if rec709 {
+            isobmff::ColorInfo::Nclx { primaries: 1, transfer: 1, matrix: 1, full_range: false }
+        } else {
+            isobmff::ColorInfo::Nclx { primaries: 9, transfer: 16, matrix: 9, full_range: true }
+        });
+        let mut writer = Mp4Writer::new(Cursor::new(Vec::new()), WriterOptions::new(brand)).unwrap();
+        let (timescale, duration) = if coarse_timebase { (25, 1) } else { (25_000, 1_000) };
+        let idx = writer.add_track(TrackConfig::new(entry, timescale)).unwrap();
+
+        let mut expected_y = Vec::new();
+        let mut expected_alpha = Vec::new();
+        for (i, y) in [160, 720].into_iter().enumerate() {
+            let mut frame = Frame::new(16, 16, profile.default_chroma(), 10, coded_alpha);
+            frame.y.fill(y);
+            if let Some(alpha) = frame.alpha.as_mut() {
+                alpha.fill(if i == 0 { 256 } else { 768 });
+            }
+            let mut au = encoder.encode(&frame).unwrap();
+            let mut alpha = if coded_alpha { decode_frame(&au).unwrap().alpha } else { None };
+            if i == 1 && !coded_alpha {
+                let mono_profile = Profile::P400_10;
+                let mut mono_encoder = Encoder::new(mono_profile, 16, 16).unwrap();
+                let mut mono = Frame::new(16, 16, mono_profile.default_chroma(), 10, false);
+                mono.y.fill(480);
+                let alpha_au = mono_encoder.encode(&mono).unwrap();
+                alpha = Some(decode_frame(&alpha_au).unwrap().y);
+                // The first generated monochrome PBU becomes the matching auxiliary alpha.
+                let len = u32::from_be_bytes(alpha_au[4..8].try_into().unwrap());
+                au.extend_from_slice(&len.to_be_bytes());
+                au.push(27);
+                au.extend_from_slice(&alpha_au[9..8 + len as usize]);
+            }
+            expected_y.push(decode_frame(&au).unwrap().y);
+            expected_alpha.push(alpha);
+            writer.write_sample(idx, WriteSample { data: &au, duration, composition_offset: 0, is_sync: true }).unwrap();
+        }
+        ApvFixture { bytes: writer.finish().unwrap().into_inner().into(), y: expected_y, alpha: expected_alpha }
+    }
+
+    #[test]
+    fn simple_apv_mp4_import_preserves_film_color_alpha_and_backward_seek() {
+        use crate::stream::{DecodedFrame, MediaSource as Opened};
+        use effectcraft_project::{AlphaMode, ColorSpace};
+
+        let step = craft_time::TICKS_PER_SECOND / 25;
+        for coded_alpha in [false, true] {
+            let ApvFixture { bytes, y, alpha } = generated_apv_mp4(isobmff::Brand::Mp4, coded_alpha, false, false, true);
+            let path = "paired-apv.mp4";
+            assert_ne!(y[0], y[1], "regression requires visibly different frames");
+            assert_eq!(alpha[0].is_some(), coded_alpha);
+            assert!(alpha[1].is_some(), "late auxiliary/coded alpha fixture must be live");
+            let direct_film = filmcraft_codecs::open_bytes(path, bytes.clone()).unwrap();
+            let old_footage = crate::probe::footage_from_info(path, direct_film.info());
+            let shared = crate::stream::open_bytes(path, bytes.clone()).unwrap();
+            let Opened::Craft(source) = &shared else { panic!("admitted APV must use shared decoding") };
+            let footage = crate::probe_bytes(path, bytes).unwrap();
+            assert_eq!((footage.width, footage.height), (16, 16));
+            assert_eq!(footage.frame_rate, old_footage.frame_rate);
+            assert_eq!(footage.native_rate.unwrap_or(footage.frame_rate), old_footage.native_rate.unwrap_or(old_footage.frame_rate));
+            assert_eq!(footage.duration, old_footage.duration);
+            assert_eq!(footage.duration.0, step * 2);
+            assert_eq!(footage.pixel_aspect, old_footage.pixel_aspect);
+            assert_eq!(footage.file_timecode, None);
+            assert_eq!(footage.file_timecode, old_footage.file_timecode);
+            assert_eq!(footage.alpha, if coded_alpha { AlphaMode::Straight } else { AlphaMode::Ignore });
+            assert_eq!(footage.alpha, old_footage.alpha);
+            assert_eq!(footage.color_profile, Some(ColorSpace::Rec709));
+            assert_eq!(footage.color_profile, old_footage.color_profile);
+            assert_eq!(footage.codec, old_footage.codec);
+            let shared_video = source.info().video.as_ref().unwrap();
+            let film_video = direct_film.info().video.as_ref().unwrap();
+            assert_eq!(shared_video.pixel_format, film_video.pixel_format);
+            assert_eq!(shared_video.bitrate, film_video.bitrate);
+
+            let film = Opened::Film(direct_film);
+            let boundary = step - craft_time::TICKS_PER_SECOND / 50_000;
+            for (at, i) in [(step, 1), (0, 0), (boundary - 1, 0), (boundary, 1), (step - 1, 1), (0, 0)] {
+                let time = effectcraft_time::Tick(at);
+                let DecodedFrame::Craft(new) = shared.video_frame(time, 1.0).unwrap() else { panic!("shared frame") };
+                let DecodedFrame::Film(old) = film.video_frame(time, 1.0).unwrap() else { panic!("legacy frame") };
+                assert_eq!(new.color, ColorInfo::REC709);
+                assert_eq!(old.color, filmcraft_color::ColorInfo::REC709);
+                // Film carries the presentation position in its cache key, not its APV pixel payload.
+                assert_eq!(old.pts.0, 0);
+                assert_eq!(new.pts.0, old.pts.0);
+                let PixelData::Yuv16 { planes: new_planes, bits, alpha: new_alpha, .. } = &new.data else { panic!("APV 10-bit YUV frame") };
+                let filmcraft_frame::PixelData::Yuv16 { planes: old_planes, bits: old_bits, alpha: old_alpha, .. } = &old.data else {
+                    panic!("legacy APV 10-bit YUV frame")
+                };
+                assert_eq!(*bits, 10);
+                assert_eq!(bits, old_bits);
+                assert_eq!(new_planes[0].as_ref(), &y[i]);
+                for (new, old) in new_planes.iter().zip(old_planes) {
+                    assert_eq!(new.as_ref(), old.as_ref());
+                }
+                assert_eq!(new_alpha.as_deref(), alpha[i].as_ref());
+                assert_eq!(new_alpha.as_deref(), old_alpha.as_deref());
+            }
+        }
+    }
+
+    #[test]
+    fn apv_mov_incomplete_apvc_and_coarse_timebase_keep_the_playable_film_route() {
+        use crate::stream::MediaSource as Opened;
+        for (brand, incomplete, coarse) in [(isobmff::Brand::Mov, false, false), (isobmff::Brand::Mp4, true, false), (isobmff::Brand::Mp4, false, true)] {
+            let bytes = generated_apv_mp4(brand, false, incomplete, coarse, true).bytes;
+            let parsed = isobmff::open(bytes.as_ref()).unwrap();
+            assert_eq!(parsed.is_quicktime, brand == isobmff::Brand::Mov);
+            // Byte routing, independent of the apparent extension.
+            let opened = crate::stream::open_bytes("unadmitted-apv.mp4", bytes).unwrap();
+            assert!(matches!(opened, Opened::Film(_)));
+            assert_eq!(opened.video_frame(effectcraft_time::Tick::ZERO, 1.0).unwrap().width(), 16);
+        }
+    }
+
+    #[test]
+    fn clean_pq_apv_mp4_keeps_the_playable_film_route() {
+        use crate::stream::MediaSource as Opened;
+        use effectcraft_project::ColorSpace;
+
+        // Same fine-timebase isom encode as the admitted test, differing only in nclx.
+        let bytes = generated_apv_mp4(isobmff::Brand::Mp4, false, false, false, false).bytes;
+        let parsed = isobmff::open(bytes.as_ref()).unwrap();
+        assert_eq!(parsed.major_brand.0, *b"isom");
+        assert_eq!(parsed.tracks[0].timescale, 25_000);
+        assert!(matches!(
+            parsed.tracks[0].video().and_then(|video| video.color.as_ref()),
+            Some(isobmff::ColorInfo::Nclx { primaries: 9, transfer: 16, matrix: 9, full_range: true })
+        ));
+        let path = "pq-apv.mp4";
+        let opened = crate::stream::open_bytes(path, bytes.clone()).unwrap();
+        assert!(matches!(opened, Opened::Film(_)));
+        assert_eq!(opened.video_frame(effectcraft_time::Tick::ZERO, 1.0).unwrap().width(), 16);
+        assert_eq!(crate::probe_bytes(path, bytes).unwrap().color_profile, Some(ColorSpace::Rec2100Pq));
     }
 
     fn generated_opus_mp4(lead: usize) -> OpusFixture {
@@ -3534,7 +3909,7 @@ mod tests {
     #[test]
     fn ffv1_and_apv_video_codecs_route_through_craft_video() {
         assert!(supports_video_codec(CodecId::Ffv1));
-        assert!(supports_video_codec(CodecId::Apv));
+        assert!(!supports_video_codec(CodecId::Apv), "APV requires the guarded ISO-BMFF admission path");
 
         let template = craft_video::ffv1::Frame {
             width: 16,
