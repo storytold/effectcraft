@@ -410,8 +410,9 @@ pub trait EffectPlugin: Send + Sync {
         self.render(frame, params, time)
     }
     /// Whether rendering reads the layer at other times (its neighbouring frames). Default
-    /// false; the render cache keys a layer with such an effect on its layer time. WebAssembly
-    /// ABI 2 plug-ins return true.
+    /// false; the render cache keys a layer with such an effect on its layer time, so effects
+    /// that change with time on their own return true too. WebAssembly modules say so with
+    /// `ec_flags` (ABI 2 modules without it return true).
     fn reads_other_times(&self) -> bool {
         false
     }

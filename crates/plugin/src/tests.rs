@@ -486,3 +486,70 @@ fn abi_v2_without_a_host_gets_zeroed_neighbours() {
     assert!(!effectcraft_effects::is_time_dependent("org.test.neighbours.v1"));
     assert!(gain.id.starts_with("org.test."));
 }
+
+/// `module` with extra exports appended.
+fn with_exports(module: &str, exports: &str) -> String {
+    format!("{}\n  {exports})", module.strip_suffix(')').unwrap())
+}
+
+/// Plug-in `id`'s padding for flattened parameters `flat`.
+fn padding_of(id: &str, flat: &[f64]) -> u32 {
+    let p = effectcraft_effects::plugin::plugin(id).unwrap();
+    p.padding(&effectcraft_effects::plugin::PluginParams { manifest: p.manifest(), flat, texts: &[] }, 0.0, 1.0, [4.0, 2.0], 0)
+}
+
+#[test]
+fn ec_padding_grows_the_buffer_and_is_clamped() {
+    // Pads `gain × 10` pixels (gain is the first parameter).
+    let pad = with_exports(
+        &gain_module("org.test.pad", ""),
+        "(func (export \"ec_padding\") (param $p i32) (param $n i32) (param f64 f64 f64 f64) (result i32) local.get $p f64.load f64.const 10 f64.mul i32.trunc_sat_f64_s)",
+    );
+    let spec = load_wasm(pad.as_bytes(), "pad.wat").unwrap();
+    let mut next = 1;
+    let g = effectcraft_effects::instantiate(spec, &mut Ids(&mut next), spec.name, [4.0, 2.0]);
+    let mut params = effectcraft_effects::flatten_params(&g, &mut |p| p.value.clone());
+    params.values.insert("gain".into(), effectcraft_keyframe::Value::Scalar(0.3));
+    let ctx = EffectCtx { params: &params, time: 0.0, layer_size: [4.0, 2.0], seed: 1, adjustment: false, env: EffectEnv::default() };
+    let out = (spec.render)(&ctx, Buf { img: Image::filled(4, 2, [0.8, 0.6, 0.2, 1.0]), offset: [0.0; 2], scale: 1.0 });
+    assert_eq!((out.img.width, out.img.height), (10, 8), "3 pixels on every side");
+    assert_eq!(out.offset, [3.0, 3.0]);
+    let p = out.img.get(3, 3);
+    assert!((p[0] - 0.24).abs() < 1e-6 && (p[2] - 0.06).abs() < 1e-6 && p[3] == 1.0, "{p:?}");
+    // Huge and negative requests are clamped; modules without the export pad nothing.
+    assert_eq!(padding_of("org.test.pad", &[1e9, 0.0, 0.0, 0.0, 1.0, 1.0]), 4096);
+    assert_eq!(padding_of("org.test.pad", &[-5.0, 0.0, 0.0, 0.0, 1.0, 1.0]), 0);
+    load_wasm(gain_module("org.test.nopad", "").as_bytes(), "nopad.wat").unwrap();
+    assert_eq!(padding_of("org.test.nopad", &[1.0; 6]), 0);
+    // A trapping `ec_padding` pads nothing; a mistyped one fails to load.
+    let trap = with_exports(&gain_module("org.test.padtrap", ""), "(func (export \"ec_padding\") (param i32 i32 f64 f64 f64 f64) (result i32) unreachable)");
+    load_wasm(trap.as_bytes(), "padtrap.wat").unwrap();
+    assert_eq!(padding_of("org.test.padtrap", &[1.0; 6]), 0);
+    let bad = with_exports(&gain_module("org.test.padbad", ""), "(func (export \"ec_padding\") (param i32) (result i32) i32.const 1)");
+    assert!(load_err(load_wasm(bad.as_bytes(), "padbad.wat")).contains("ec_padding"));
+}
+
+#[test]
+fn ec_flags_make_a_module_time_keyed_without_neighbour_frames() {
+    let flags = |v: &str| format!("(func (export \"ec_flags\") (result i32) i32.const {v})");
+    // ABI 1 with bit 0: keyed on time.
+    load_wasm(with_exports(&gain_module("org.test.flags.v1", ""), &flags("1")).as_bytes(), "flags1.wat").unwrap();
+    assert!(effectcraft_effects::plugin::reads_other_times("org.test.flags.v1"));
+    assert!(effectcraft_effects::is_time_dependent("org.test.flags.v1"));
+    // ABI 2 with only bit 0: keyed on time, but the host fetches no neighbours and passes none
+    // (green = flags / 8 = 0, blue = prev_time = 0, red reads address 0 twice).
+    load_wasm(with_exports(&neighbour_module("org.test.flags.v2"), &flags("1")).as_bytes(), "flags2.wat").unwrap();
+    assert!(effectcraft_effects::plugin::reads_other_times("org.test.flags.v2"));
+    let p = effectcraft_effects::plugin::plugin("org.test.flags.v2").unwrap();
+    let params = effectcraft_effects::plugin::PluginParams { manifest: p.manifest(), flat: &[], texts: &[] };
+    let mut px = vec![[0.0f32; 4]; 2];
+    let host = Host { time: 0.5, fps: 4.0, prev: Some((0.25, neighbour_image(0.1))), next: Some((0.75, neighbour_image(0.6))) };
+    let mut frame = effectcraft_effects::plugin::PluginFrame { width: 2, height: 1, pixels: &mut px, scale: 1.0, origin: [0.0; 2], layer_size: [2.0, 1.0] };
+    p.render_v2(&mut frame, &params, 0.5, &host).unwrap();
+    assert_eq!(px[0], [0.0, 0.0, 0.0, 1.0], "no neighbour frames: {px:?}");
+    // Neither bit: not time-keyed. A mistyped `ec_flags` fails to load.
+    load_wasm(with_exports(&neighbour_module("org.test.flags.none"), &flags("0")).as_bytes(), "flags0.wat").unwrap();
+    assert!(!effectcraft_effects::plugin::reads_other_times("org.test.flags.none"));
+    let bad = with_exports(&gain_module("org.test.flags.bad", ""), "(func (export \"ec_flags\") (result f64) f64.const 1)");
+    assert!(load_err(load_wasm(bad.as_bytes(), "flagsbad.wat")).contains("ec_flags"));
+}
