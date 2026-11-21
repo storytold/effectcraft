@@ -29,9 +29,10 @@
 //!     `Apv`, raw RGB AVI) or unsupported audio.
 //! - **Other containers & standalone audio**:
 //!   - Shared (`craft_audio::Decoder` with `decode-native`): standalone `WAV`, `AIFF`, `MP3`/`MP2`/`MP1`,
-//!     `AAC` (ADTS), `AC-3`, and `Ogg` (`Opus`).
-//!   - Fallback (`filmcraft-codecs`): `Ogg Vorbis`, `FLAC`, `CAF`, or unsupported WAV/AIFF
-//!     encodings.
+//!     `AAC` (ADTS), `AC-3`, and `Ogg` (`Opus`). Bounded standalone FLAC uses the shared native
+//!     FLAC decoder and the same resampling policy.
+//!   - Fallback (`filmcraft-codecs`): `Ogg Vorbis`, `CAF`, or FLAC and WAV/AIFF input the shared
+//!     readers decline.
 
 use std::sync::{Arc, Mutex};
 
@@ -51,6 +52,8 @@ use craft_media_source::{
 use craft_time::{FrameRate, Tick};
 use craft_video::frame::{ColorFamily, ColorTags, Plane, Samples, Subsampling, VideoFrame as DecodedVideoFrame};
 use craft_video::{TrackDecoder, TrackDecoderOptions};
+
+mod standalone_flac;
 
 /// Maximum worker threads per `TrackDecoder` instance.
 const MAX_WORKERS: usize = 8;
@@ -133,6 +136,9 @@ pub(crate) fn open_reader(name: &str, head: &[u8], reader: &SharedBytes) -> Opti
     if let Some(fmt) = mpegts::sniff(head) {
         return open_mpeg(name, fmt, reader.clone());
     }
+    if let Some(source) = standalone_flac::open_reader(name, head, reader) {
+        return Some(Ok(source));
+    }
     open_standalone_audio(name, head, reader.clone())
 }
 
@@ -152,6 +158,9 @@ pub(crate) fn open_bytes(name: &str, bytes: Arc<[u8]>) -> Option<Result<SharedSo
     }
     if let Some(fmt) = mpegts::sniff(&bytes) {
         return open_mpeg(name, fmt, Arc::new(bytes));
+    }
+    if let Some(source) = standalone_flac::open_bytes(name, &bytes) {
+        return Some(Ok(source));
     }
     #[cfg(any(unix, windows))]
     {
@@ -1668,7 +1677,14 @@ impl MediaSource for StandaloneAudioSource {
 
 /// Step the fractional input position as an exact integer quotient and remainder;
 /// rounding happens only when interpolating a sample, independent of the window.
-fn resample_audio_with_phase(decoded: &[Vec<f32>], native_rate: u32, sample_rate: u32, frames: usize, phase: u64, first_output: usize) -> Vec<Vec<f32>> {
+fn resample_audio_with_phase(
+    decoded: &[impl AsRef<[f32]>],
+    native_rate: u32,
+    sample_rate: u32,
+    frames: usize,
+    phase: u64,
+    first_output: usize,
+) -> Vec<Vec<f32>> {
     let mut out = vec![vec![0.0; frames]; decoded.len()];
     let divisor = u64::from(sample_rate);
     let first = first_output as u128 * u128::from(native_rate) + u128::from(phase);
@@ -1678,6 +1694,7 @@ fn resample_audio_with_phase(decoded: &[Vec<f32>], native_rate: u32, sample_rate
     let remainder_step = u64::from(native_rate % sample_rate);
     let inverse_rate = f64::from(sample_rate).recip();
     for (samples, dst) in decoded.iter().zip(&mut out) {
+        let samples = samples.as_ref();
         let (mut index, mut remainder) = (first_index, first_remainder);
         for sample in dst.iter_mut().skip(first_output) {
             let Some(&a) = samples.get(index) else { break };
@@ -1739,11 +1756,16 @@ fn resampling_window(start: i64, frames: usize, native_rate: u32, sample_rate: u
     if sample_rate == native_rate {
         return Some((start, frames, 0));
     }
+    let (origin, phase) = resampling_origin(start, native_rate, sample_rate)?;
+    let len = ((frames as u128 * u128::from(native_rate)).div_ceil(u128::from(sample_rate)) + 2) as usize;
+    Some((origin, len, phase))
+}
+
+fn resampling_origin(start: i64, native_rate: u32, sample_rate: u32) -> Option<(i64, u64)> {
     let scaled = i128::from(start) * i128::from(native_rate);
     let divisor = i128::from(sample_rate);
     let origin = i64::try_from(scaled.div_euclid(divisor)).ok()?;
-    let len = ((frames as u128 * u128::from(native_rate)).div_ceil(u128::from(sample_rate)) + 2) as usize;
-    Some((origin, len, scaled.rem_euclid(divisor) as u64))
+    Some((origin, scaled.rem_euclid(divisor) as u64))
 }
 
 fn drain_audio_window(buf: &mut [Vec<f32>], decoded_pos: &mut i64, channels_count: usize, start: i64, frames: usize) -> Vec<Vec<f32>> {
