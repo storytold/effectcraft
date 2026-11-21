@@ -1230,9 +1230,10 @@ fn open_avi(name: &str, source: SharedBytes) -> Option<Result<SharedSource>> {
         };
         let mut info = default_video_info(width, height, frame_rate, &video_params);
         if video_params.codec == CodecId::ProRes {
-            // The coded alpha plane is authoritative for ProRes, regardless of AVI header depth.
-            let chunk = video_stream.chunks.first()?;
-            info.has_alpha = prores_has_alpha(chunk.size, || file.read_chunk(&*source, v_idx, 0).ok())?;
+            // The coded alpha plane is authoritative when it can be probed. Otherwise,
+            // keep the old AVI default without dropping an otherwise readable stream.
+            let alpha = video_stream.chunks.first().and_then(|chunk| prores_has_alpha(chunk.size, || file.read_chunk(&*source, v_idx, 0).ok()));
+            info.has_alpha = alpha.unwrap_or(false);
         }
         let state = Mutex::new(VideoState { decoder: video_decoder, next_decode_idx: 0, gop_start_idx: 0, flushed: false, decoded: Vec::new() });
         (Some(ContainerVideoPart { track_idx: v_idx, info, state }), duration)
@@ -3519,48 +3520,90 @@ mod tests {
         assert_eq!(rewound[0], wide[0][..600]);
     }
 
-    #[test]
-    fn avi_prores_coded_alpha_parity() {
+    fn generated_avi_prores(with_alpha: bool, invalid_first: bool) -> Vec<u8> {
         use craft_video::prores::{ChromaFormat, ColorInfo as ProResColor, Encoder, EncoderConfig, Frame as ProResFrame, Interlace, Profile};
 
-        let encode_prores_avi = |with_alpha: bool| -> Vec<u8> {
-            let mut cfg = EncoderConfig::new(Profile::P4444, 16, 16);
-            cfg.encode_alpha = with_alpha;
-            cfg.threads = false;
-            let mut enc = Encoder::with_config(cfg);
-            let frame = ProResFrame {
-                width: 16,
-                height: 16,
-                chroma: ChromaFormat::Yuv444,
-                bit_depth: 10,
-                y: vec![512; 256],
-                cb: vec![512; 256],
-                cr: vec![512; 256],
-                alpha: with_alpha.then(|| vec![512; 256]),
-                interlace: Interlace::Progressive,
-                color: ProResColor::default(),
-                aspect_ratio: 0,
-                frame_rate_code: 0,
-            };
-            let pkt = enc.encode(&frame).expect("encode prores");
-            let mut w = avi::AviWriter::new(
-                std::io::Cursor::new(Vec::new()),
-                vec![avi::StreamSpec::Video(avi::VideoSpec::new(*b"ap4h", 16, 16, 24, 1))],
-                avi::MuxOptions::default(),
-            )
-            .expect("avi writer");
-            w.write_chunk(0, &pkt, true).expect("write prores chunk");
-            w.finish().expect("finish avi").into_inner()
+        let mut cfg = EncoderConfig::new(Profile::P4444, 16, 16);
+        cfg.encode_alpha = with_alpha;
+        cfg.threads = false;
+        let mut enc = Encoder::with_config(cfg);
+        let frame = ProResFrame {
+            width: 16,
+            height: 16,
+            chroma: ChromaFormat::Yuv444,
+            bit_depth: 10,
+            y: vec![512; 256],
+            cb: vec![512; 256],
+            cr: vec![512; 256],
+            alpha: with_alpha.then(|| vec![512; 256]),
+            interlace: Interlace::Progressive,
+            color: ProResColor::default(),
+            aspect_ratio: 0,
+            frame_rate_code: 0,
         };
+        let pkt = enc.encode(&frame).expect("encode prores");
+        let mut w = avi::AviWriter::new(
+            std::io::Cursor::new(Vec::new()),
+            vec![avi::StreamSpec::Video(avi::VideoSpec::new(*b"ap4h", 16, 16, 24, 1))],
+            avi::MuxOptions::default(),
+        )
+        .expect("avi writer");
+        if invalid_first {
+            w.write_chunk(0, &[0], true).expect("write nonempty invalid first chunk");
+        }
+        w.write_chunk(0, &pkt, true).expect("write prores chunk");
+        w.finish().expect("finish avi").into_inner()
+    }
 
-        let alpha_src = open_bytes("alpha.avi", Arc::from(encode_prores_avi(true))).expect("recognized").expect("opened");
+    #[test]
+    fn avi_prores_coded_alpha_parity() {
+        let alpha_src = open_bytes("alpha.avi", Arc::from(generated_avi_prores(true, false))).expect("recognized").expect("opened");
         assert!(alpha_src.info().video.as_ref().unwrap().has_alpha);
         let frame = alpha_src.video_frame(FrameRequest { time: Tick::ZERO, scale: 1.0 }).expect("decode alpha frame");
         assert!(matches!(frame.data, PixelData::Yuv16 { alpha: Some(_), .. }));
 
-        let opaque_src = open_bytes("opaque.avi", Arc::from(encode_prores_avi(false))).expect("recognized").expect("opened");
+        let opaque_src = open_bytes("opaque.avi", Arc::from(generated_avi_prores(false, false))).expect("recognized").expect("opened");
         assert!(!opaque_src.info().video.as_ref().unwrap().has_alpha);
         let frame = opaque_src.video_frame(FrameRequest { time: Tick::ZERO, scale: 1.0 }).expect("decode opaque frame");
         assert!(matches!(frame.data, PixelData::Yuv16 { alpha: None, .. }));
+    }
+
+    #[test]
+    fn avi_prores_unreadable_first_alpha_header_keeps_shared_playback() {
+        use crate::stream::{DecodedFrame, MediaSource as Opened};
+        use effectcraft_project::AlphaMode;
+
+        let bytes: Arc<[u8]> = generated_avi_prores(true, true).into();
+        let demuxed = avi::open(bytes.as_ref()).expect("generated AVI");
+        let video = &demuxed.streams[0];
+        assert_eq!(video.codec_params().codec, CodecId::ProRes);
+        assert_eq!((video.rate, video.scale), (24, 1));
+        assert_eq!(video.chunks.len(), 2);
+        assert_eq!(video.chunks[0].size, 1);
+        assert!(video.keyframes_known && video.chunks[1].key);
+
+        let path = "invalid-first-prores.avi";
+        let opened = crate::stream::open_bytes(path, bytes.clone()).expect("first unreadable header does not reject AVI");
+        let Opened::Craft(shared) = &opened else { panic!("AVI remains on the shared reader") };
+        assert!(!shared.info().video.as_ref().unwrap().has_alpha);
+        assert_eq!(crate::probe_bytes(path, bytes).unwrap().alpha, AlphaMode::Ignore);
+
+        let later = effectcraft_time::Tick(craft_time::TICKS_PER_SECOND / 24);
+        let DecodedFrame::Craft(frame) = opened.video_frame(later, 1.0).expect("indexed second keyframe remains playable") else {
+            panic!("expected a shared frame");
+        };
+        assert_eq!((frame.width, frame.height, frame.pts.0), (16, 16, later.0));
+        assert!(matches!(frame.data, PixelData::Yuv16 { alpha: Some(_), .. }));
+    }
+
+    #[test]
+    fn oversized_prores_alpha_probe_refuses_without_reading() {
+        let mut read_count = 0;
+        let alpha = prores_has_alpha(MAX_PRORES_ALPHA_SAMPLE_BYTES + 1, || {
+            read_count += 1;
+            None
+        });
+        assert_eq!(alpha, None);
+        assert_eq!(read_count, 0);
     }
 }
