@@ -81,7 +81,19 @@ fn prores_has_alpha(packet_size: u32, read: impl FnOnce() -> Option<Vec<u8>>) ->
 }
 
 fn supports_video_codec(codec: CodecId) -> bool {
-    matches!(codec, CodecId::H264 | CodecId::Hevc | CodecId::Av1 | CodecId::Vp9 | CodecId::Vp8 | CodecId::ProRes | CodecId::Dnxhd | CodecId::Mpeg2Video)
+    matches!(
+        codec,
+        CodecId::H264
+            | CodecId::Hevc
+            | CodecId::Av1
+            | CodecId::Vp9
+            | CodecId::Vp8
+            | CodecId::ProRes
+            | CodecId::Dnxhd
+            | CodecId::Mpeg2Video
+            | CodecId::Ffv1
+            | CodecId::Apv
+    )
 }
 
 /// True when `head` begins with a plausible ISO-BMFF top-level box.
@@ -3564,6 +3576,32 @@ mod tests {
         let seek_mov = open_bytes("edited-pcm.mov", mov_bytes).expect("recognized").expect("opened");
         let seek_window = seek_mov.audio(6_218, 2, 44_100).expect("fresh seek").channels.remove(0);
         assert_eq!(seek_window, full_window[18..20], "fresh seek must match full read");
+    }
+
+    #[test]
+    fn ffv1_and_apv_video_codecs_route_through_craft_video() {
+        assert!(supports_video_codec(CodecId::Ffv1));
+        assert!(supports_video_codec(CodecId::Apv));
+
+        let template = craft_video::ffv1::Frame {
+            width: 16,
+            height: 16,
+            colorspace: craft_video::ffv1::Colorspace::YCbCr,
+            bit_depth: 8,
+            chroma_shift: (1, 1),
+            planes: vec![vec![128; 256], vec![128; 64], vec![128; 64]],
+        };
+        let ffv1_enc = craft_video::ffv1::Encoder::new(&template, craft_video::ffv1::EncoderConfig::default()).expect("ffv1 encoder");
+        let mut ffv1_params = CodecParams::new(CodecId::Ffv1);
+        ffv1_params.width = Some(16);
+        ffv1_params.height = Some(16);
+        ffv1_params.extradata = ffv1_enc.config_record();
+        assert!(TrackDecoder::with_options(&ffv1_params, TrackDecoderOptions { threads: Some(1), draft: false }).is_ok(), "Ffv1 decoder");
+
+        let mut apv_params = CodecParams::new(CodecId::Apv);
+        apv_params.width = Some(16);
+        apv_params.height = Some(16);
+        assert!(TrackDecoder::with_options(&apv_params, TrackDecoderOptions { threads: Some(1), draft: false }).is_ok(), "Apv decoder");
     }
 
     #[test]
