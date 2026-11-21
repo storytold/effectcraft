@@ -518,6 +518,12 @@ impl EffectcraftApp {
                     }
                 }
                 DocAction::Close(id) => crate::menus::invoke(self, &ctx, "comp.close", json!({"comp": id})),
+                DocAction::CloseOthers(id) => {
+                    // The kept comp's Timeline must be the one shown, as when a comp tab is activated.
+                    let _ = self.apply_dock(Action::Activate { panel: PanelKind::Timeline });
+                    self.focus_panel(&ctx, PanelKind::Timeline);
+                    crate::menus::invoke(self, &ctx, "comp.closeOthers", json!({"comp": id}))
+                }
             };
             if let Err(error) = result {
                 self.ui.status = error;

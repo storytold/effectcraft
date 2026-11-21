@@ -163,6 +163,24 @@ fn close(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(Value::Null)
 }
 
+/// Close Other Timeline Panels: keep one composition's Timeline open and show it. The other
+/// compositions stay in the project; only their open Timeline tabs close.
+fn close_others(s: &mut Session, p: &Value) -> Result<Value> {
+    let id = comp_id(s, p)?;
+    let closed = s.state.open_comps.iter().filter(|c| **c != id).count();
+    s.state.open_comps.retain(|c| *c == id);
+    if !s.state.open_comps.contains(&id) {
+        s.state.open_comps.push(id);
+    }
+    s.activate_comp(id);
+    Ok(json!({"closed": closed}))
+}
+
+/// More than one composition has its Timeline open.
+fn has_other_open_comps(s: &Session) -> std::result::Result<(), String> {
+    if s.state.open_comps.len() > 1 { Ok(()) } else { Err("no other composition has its Timeline open".into()) }
+}
+
 fn work_area(s: &mut Session, p: &Value) -> Result<Value> {
     let cid = comp_id(s, p)?;
     let t = s.time();
@@ -310,6 +328,7 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!("comp.trimToWorkArea", "Trim Comp to Work Area", ["Composition"], Some("Cmd+Shift+X"), "{comp?}", has_comp, trim_to_wa),
         cmd!("comp.open", "Open Composition", [], None, "{comp: id|name}", always, open),
         cmd!("comp.close", "Close Composition", [], None, "{comp?}", has_comp, close),
+        cmd!("comp.closeOthers", "Close Other Timeline Panels", [], None, "{comp?}", has_other_open_comps, close_others),
         cmd!("comp.workArea", "Set Work Area", [], None, "{start?, end?, set?: begin|end (at CTI)}", has_comp, work_area),
         cmd!("comp.setSwitch", "Composition Switch", [], None, "{switch: hideShy|motionBlur|frameBlending|draft3d, value?}", has_comp, comp_switch),
         cmd!("comp.addMarker", "Add Marker", [], Some("Num*"), "{time?, comment?}", has_comp, add_marker),

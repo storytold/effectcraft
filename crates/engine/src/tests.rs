@@ -8,6 +8,7 @@ mod anim_tools;
 mod aux_footage;
 mod blender;
 mod camera_track;
+mod close_other_comps;
 mod codec_options;
 mod color_view;
 mod crypto_pick;
