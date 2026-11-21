@@ -936,18 +936,25 @@ fn reads_comp_scene(layer: &Layer) -> bool {
 
 /// What scene-reading effects see: the comp scene as `layer` sees it, every light at this time
 /// (a plug-in's `comp_lights` lists them all) and the camera and light layers themselves, keyed
-/// as they are (a plug-in may read the camera or lights at other times).
+/// as they are (a plug-in may read the camera or lights at other times). Those callbacks also go
+/// through this layer's own world transform at the time asked, so its Transform group and its
+/// parents are keyed too (the layer key leaves Transform out: it only moves the result).
 fn hash_comp_scene(h: &mut KeyHasher, ctx: &EvalCtx, layer: &Layer) {
-    hash_debug(h, &crate::comp_scene(ctx, layer));
-    hash_debug(h, &crate::three_d::light::lights_at(ctx));
-    for l in ctx.comp.layers.iter().filter(|l| l.is_camera() || l.is_light()) {
-        hash_debug(h, l);
-        // Their world transforms follow their parents (the same bounded walk as `world_matrix`).
+    // A layer's parents, with the same bounded walk as `world_matrix`.
+    let parents = |h: &mut KeyHasher, l: &Layer| {
         let (mut cur, mut guard) = (l.parent, 0);
         while let Some(p) = cur.and_then(|id| ctx.comp.layer(id)).filter(|_| guard < 64) {
             hash_debug(h, p);
             (cur, guard) = (p.parent, guard + 1);
         }
+    };
+    hash_debug(h, &crate::comp_scene(ctx, layer));
+    hash_debug(h, &crate::three_d::light::lights_at(ctx));
+    hash_debug(h, &layer.props.sub("transform"));
+    parents(h, layer);
+    for l in ctx.comp.layers.iter().filter(|l| l.is_camera() || l.is_light()) {
+        hash_debug(h, l);
+        parents(h, l);
     }
 }
 
