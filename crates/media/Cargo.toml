@@ -54,3 +54,5 @@ tempfile = { workspace = true }
 effectcraft-effects = { workspace = true }
 # Pure-Rust AAC and FLAC fixture encoding.
 craft-audio = { workspace = true, features = ["aac-encode", "flac-encode"] }
+# APV import parity fixtures use the existing shared encoder.
+craft-video = { workspace = true, features = ["apv-encode"] }
