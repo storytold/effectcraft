@@ -1073,6 +1073,12 @@ fn plan_layer(cx: &PlanCx<'_>, at: CompAt<'_>, cp: &CompPlan, layer: &Layer, col
     if let LayerSrc::Text(tp) = &mut src {
         tp.animators = crate::export::textanim::plan(layer, cp, &format!("{comp_name}: '{}'", layer.name), col);
     }
+    // Camera and light option keys count in the layer's time base too.
+    match &mut src {
+        LayerSrc::Camera(c) => c.keys = crate::export::camlight::plan_camera_keys(layer, cp, &what("camera"), col),
+        LayerSrc::Light(l) => l.keys = crate::export::camlight::plan_light_keys(layer, cp, &what("light"), col),
+        _ => {}
+    }
 
     // Switches and features that are not written.
     let sw = &layer.switches;
