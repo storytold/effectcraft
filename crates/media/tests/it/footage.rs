@@ -1652,3 +1652,33 @@ fn audio_only_isobmff_and_matroska_route_through_craft_audio() {
         assert!((rms_seek - 0.0625).abs() < 0.02, "{file} seek rms {rms_seek}");
     }
 }
+
+#[test]
+fn standalone_audio_formats_route_through_craft_audio() {
+    for (file, args) in [
+        ("standalone_tone.wav", &["-c:a", "pcm_s16le"][..]),
+        ("standalone_tone.aiff", &["-c:a", "pcm_s16be"][..]),
+        ("standalone_tone.mp3", &["-c:a", "libmp3lame", "-b:a", "128k"][..]),
+        ("standalone_tone.aac", &["-c:a", "aac", "-b:a", "128k"][..]),
+        ("standalone_tone.ac3", &["-c:a", "ac3", "-b:a", "192k"][..]),
+        ("standalone_tone.ogg", &["-c:a", "libopus"][..]),
+    ] {
+        let mut ffmpeg_args = vec!["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=1"];
+        ffmpeg_args.extend_from_slice(args);
+        let Some(p) = try_ffmpeg_fixture(file, &ffmpeg_args) else {
+            continue;
+        };
+        let f = probe(&p).expect(file);
+        assert_eq!(f.kind, FootageKind::Audio, "{file} must probe as Audio");
+        assert!(!f.has_video, "{file} has no video");
+        assert!(f.has_audio, "{file} has audio");
+        assert!(f.duration >= Tick(TICKS_PER_SECOND * 8 / 10), "{file} duration {:?}", f.duration);
+        let pool = MediaPool::new();
+        let start = pool.audio_samples(&f, Tick::ZERO, 4800, 48_000);
+        let seek = pool.audio_samples(&f, Tick(TICKS_PER_SECOND / 2), 4800, 48_000);
+        assert_eq!(start.len(), 9600, "{file} start len");
+        assert_eq!(seek.len(), 9600, "{file} seek len");
+        let rms_seek = (seek.iter().map(|v| v * v).sum::<f32>() / seek.len() as f32).sqrt();
+        assert!((rms_seek - 0.0625).abs() < 0.03, "{file} seek rms {rms_seek}");
+    }
+}
