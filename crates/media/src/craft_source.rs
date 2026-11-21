@@ -64,6 +64,9 @@ const AUDIO_SEEK_BACKUP_PACKETS: usize = 2;
 
 /// Complete first-sample read cap for the ProRes alpha probe; larger samples use the legacy route.
 const MAX_PRORES_ALPHA_SAMPLE_BYTES: u32 = 32 * 1024 * 1024;
+/// Complete first-presented sample cap for the MXF ProRes colour probe. Larger samples retain the
+/// existing colour policy; the ProRes header parser requires the complete declared frame.
+const MAX_MXF_PRORES_COLOR_SAMPLE_BYTES: u32 = 4 * 1024 * 1024;
 
 fn worker_cap() -> usize {
     std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(1, MAX_WORKERS)
@@ -1117,6 +1120,8 @@ fn open_parsed_mxf(name: &str, source: SharedBytes, file: mxf::MxfFile) -> Optio
             Ok(d) => d,
             Err(e) => return Some(Err(MediaError::Decode(e.to_string()))),
         };
+        let (color, container_color) =
+            mxf_prores_color(&file, &*source, v_idx).map_or((ColorInfo::REC709, None), |(probe, descriptor)| (probe, Some(descriptor)));
         let v_info = VideoStreamInfo {
             width,
             height,
@@ -1124,13 +1129,13 @@ fn open_parsed_mxf(name: &str, source: SharedBytes, file: mxf::MxfFile) -> Optio
             par,
             codec: video_params.codec.name().to_string(),
             pixel_format: String::new(),
-            color: ColorInfo::REC709,
+            color,
             has_alpha,
             bitrate: None,
             hdr: None,
         };
         let v_state = Mutex::new(VideoState { decoder: video_decoder, next_decode_idx: 0, gop_start_idx: 0, flushed: false, decoded: Vec::new() });
-        (Some(v_info), Some(v_state), FramePresentation { container_color: None, par, rotation: 0, aperture: None }, duration)
+        (Some(v_info), Some(v_state), FramePresentation { container_color, par, rotation: 0, aperture: None }, duration)
     } else {
         let duration = audio_tracks
             .iter()
@@ -2113,6 +2118,51 @@ fn resolve_color(vui: ColorTags, container: Option<ColorInfo>) -> ColorInfo {
     ColorInfo { matrix, transfer, primaries, range }
 }
 
+/// Resolve the clip's initial probe colour from the first presented ProRes frame, without
+/// changing decoder state or a project's saved interpretation. Later frames still resolve their
+/// own decoder fields against the descriptor; this is not a variable-profile clip probe.
+fn mxf_prores_color(file: &MxfFile, source: &dyn ByteSource, track_idx: usize) -> Option<(ColorInfo, ColorInfo)> {
+    use effectcraft_project::ColorSpace;
+
+    let track = file.tracks.get(track_idx)?;
+    if !matches!(track.codec, mxf::Codec::ProRes { .. }) {
+        return None;
+    }
+    let descriptor = color_from_mxf(track.picture.as_ref()?)?;
+    let (start, len) = mxf_picture_window(track);
+    if len == 0 {
+        return None;
+    }
+    let index = track.sample_at(start)?;
+    let sample = track.samples.get(index)?;
+    if !(28..=MAX_MXF_PRORES_COLOR_SAMPLE_BYTES).contains(&sample.size) {
+        return None;
+    }
+    let packet = file.read_sample(source, track_idx, index).ok()?;
+    let tags = craft_video::prores::probe(&packet).ok()?.color;
+    let tags = ColorTags { primaries: tags.primaries, transfer: tags.transfer, matrix: tags.matrix, full_range: false };
+    let color = resolve_color(tags, Some(descriptor));
+    // Only opt in when the managed compositor can represent the resolved primaries/transfer.
+    // The general profile mapper also approximates some other pairs for existing routes.
+    match crate::probe::profile_of_craft(&color) {
+        Some(ColorSpace::Rec2100Pq | ColorSpace::Rec2100Hlg) => Some((color, descriptor)),
+        Some(ColorSpace::Rec709) if color.primaries == Primaries::Bt709 => Some((color, descriptor)),
+        _ => None,
+    }
+}
+
+fn color_from_mxf(picture: &mxf::PictureInfo) -> Option<ColorInfo> {
+    let (primaries, transfer, matrix) = picture.color_codes();
+    if (primaries, transfer, matrix) == (None, None, None) {
+        return None;
+    }
+    // Use the existing H.273 defaults without changing MXF quantisation range policy.
+    Some(resolve_color(
+        ColorTags { primaries: primaries.unwrap_or(2), transfer: transfer.unwrap_or(2), matrix: matrix.unwrap_or(2), full_range: false },
+        None,
+    ))
+}
+
 fn color_from_isobmff(c: &isobmff::ColorInfo) -> ColorInfo {
     match c {
         isobmff::ColorInfo::Nclx { primaries, transfer, matrix, full_range } => ColorInfo {
@@ -2783,6 +2833,161 @@ mod tests {
             let out = to_craft_frame(vf_with_sar, presentation, Tick::ZERO).ok();
             assert_eq!(out.map(|f| f.par), Some((3, 4)));
         }
+    }
+
+    fn mxf_prores_color_packet(codes: (u8, u8, u8)) -> Vec<u8> {
+        use craft_video::prores::{self, ChromaFormat, Encoder, EncoderConfig, Frame, Profile};
+
+        let mut frame = Frame::new(16, 12, ChromaFormat::Yuv422, 10, false).expect("ProRes frame");
+        frame.y.fill(512);
+        frame.cb.fill(512);
+        frame.cr.fill(512);
+        let (primaries, transfer, matrix) = codes;
+        let mut encoder = EncoderConfig::new(Profile::Hq, 16, 12);
+        encoder.color = prores::ColorInfo { primaries, transfer, matrix };
+        let packet = Encoder::with_config(encoder).encode(&frame).expect("encode ProRes");
+        let bits = prores::probe(&packet).expect("ProRes header").color;
+        assert_eq!((bits.primaries, bits.transfer, bits.matrix), codes);
+        packet
+    }
+
+    fn mxf_prores_color_fixture(color: mxf::write::ColorSpace, packets: &[&[u8]]) -> Arc<[u8]> {
+        let ids = mxf::write::PackageIds::from_seed("eff-mxf-color", "op1a");
+        let mut cfg = mxf::write::WriterConfig::new(mxf::write::Pattern::Op1a, mxf::Rational::new(25, 1), ids);
+        let mut picture = mxf::write::PictureDesc::new(mxf::write::PictureCoding::ProRes { profile: 4 }, 16, 12);
+        picture.color = color;
+        cfg.picture = Some(picture);
+        let mut writer = mxf::write::MxfWriter::new(std::io::Cursor::new(Vec::new()), cfg).expect("writer");
+        for packet in packets {
+            writer.push_picture(packet, mxf::write::FrameInfo::intra()).expect("picture");
+        }
+        writer.finish().expect("finish").into_inner().into()
+    }
+
+    #[test]
+    fn mxf_descriptor_color_fills_unspecified_shared_prores_fields() {
+        use effectcraft_project::ColorSpace;
+
+        let pq = ColorInfo { primaries: Primaries::Bt2020, transfer: Transfer::Pq, matrix: Matrix::Bt2020Ncl, range: Range::Limited };
+        let mixed = ColorInfo { matrix: Matrix::Bt709, ..pq };
+        for (descriptor, descriptor_codes, packet_codes, profile, expected) in [
+            (mxf::write::ColorSpace::Rec2020Pq, (9, 16, 9), (2, 2, 2), Some(ColorSpace::Rec2100Pq), pq),
+            (mxf::write::ColorSpace::Rec2020Pq, (9, 16, 9), (1, 1, 1), Some(ColorSpace::Rec709), ColorInfo::REC709),
+            (mxf::write::ColorSpace::Rec2020Pq, (9, 16, 9), (2, 2, 1), Some(ColorSpace::Rec2100Pq), mixed),
+            (mxf::write::ColorSpace::Rec2020Pq, (9, 16, 9), (1, 2, 1), Some(ColorSpace::Rec709), ColorInfo::REC709),
+            (mxf::write::ColorSpace::Rec709, (1, 1, 1), (2, 2, 2), Some(ColorSpace::Rec709), ColorInfo::REC709),
+        ] {
+            let bytes = mxf_prores_color_fixture(descriptor, &[&mxf_prores_color_packet(packet_codes)]);
+            let file = mxf::open(bytes.as_ref()).expect("demux fixture");
+            let picture = file.tracks[0].picture.as_ref().expect("picture descriptor");
+            let (p, t, m) = descriptor_codes;
+            assert_eq!(picture.color_codes(), (Some(p), Some(t), Some(m)));
+            let footage = crate::probe::probe_bytes("color.mxf", bytes.clone()).expect("public probe");
+            assert_eq!(footage.codec, "ProRes", "must use the shared MXF route");
+            assert_eq!(footage.color_profile, profile);
+
+            let source = open_bytes("color.mxf", bytes).expect("recognized MXF").expect("shared MXF");
+            let info = source.info().video.as_ref().expect("video");
+            assert_eq!(info.color, expected);
+            assert!(info.hdr.is_none(), "color labels alone are not HDR static metadata");
+            let decoded = source.video_frame(FrameRequest { time: Tick::ZERO, scale: 1.0 }).expect("decode frame");
+            assert_eq!(decoded.color, expected);
+        }
+    }
+
+    #[test]
+    fn mxf_prores_explicit_rec709_keeps_managed_pixels_and_saved_interpretation() {
+        use effectcraft_color::{ColorSpace, Label};
+        use effectcraft_project::{BitDepth, Comp, ItemKind, LayerSource, Project, build};
+        use effectcraft_render::{RenderOpts, Renderer};
+
+        let packet = mxf_prores_color_packet((1, 1, 1));
+        let render = |descriptor, saved_override| {
+            let bytes = mxf_prores_color_fixture(descriptor, &[&packet]);
+            let path = "managed-color.mxf";
+            let mut footage = crate::probe::probe_bytes(path, bytes.clone()).expect("public probe");
+            assert_eq!(footage.codec, "ProRes", "must use the shared MXF route");
+            assert_eq!(footage.color_profile, Some(ColorSpace::Rec709));
+            if saved_override {
+                footage.color_profile = Some(ColorSpace::Rec2100Pq);
+            }
+            let pool = crate::MediaPool::new();
+            pool.add_bytes(path, bytes);
+
+            let mut project = Project::default();
+            project.settings.bit_depth = BitDepth::Bpc32;
+            project.settings.working_space = Some(ColorSpace::Srgb);
+            let rate = effectcraft_time::FrameRate::new(25, 1);
+            let mut comp = Comp::new(16, 12, rate, rate.tick_of(1));
+            let item = project.add_item("Footage", Label::Aqua, None, ItemKind::Footage(footage));
+            let layer = build::layer(&mut project, &comp, "Footage", LayerSource::Footage { item }, (16, 12), Some(comp.duration));
+            comp.layers.push(layer);
+            let comp_id = project.add_item("Comp", Label::Sandstone, None, ItemKind::Comp(comp.into()));
+            Renderer::new(&project, &pool, RenderOpts::default()).comp_frame(comp_id, effectcraft_time::Tick::ZERO).get(8, 6)
+        };
+
+        let rec709 = render(mxf::write::ColorSpace::Rec709, false);
+        let conflicting = render(mxf::write::ColorSpace::Rec2020Pq, false);
+        let overridden = render(mxf::write::ColorSpace::Rec2020Pq, true);
+        assert!(rec709[0] > 0.1 && rec709[0] < 0.9 && rec709[3] > 0.99, "not an opaque midtone: {rec709:?}");
+        assert!(rec709.iter().zip(conflicting).all(|(a, b)| (a - b).abs() < 1e-4), "{rec709:?} vs {conflicting:?}");
+        assert!((overridden[0] - conflicting[0]).abs() > 0.02, "saved interpretation did not change the pixel: {overridden:?} vs {conflicting:?}");
+    }
+
+    #[test]
+    fn mxf_prores_color_reads_one_bounded_presented_packet() {
+        struct Reads<'a> {
+            bytes: &'a [u8],
+            log: Mutex<Vec<(u64, usize)>>,
+            fail: bool,
+        }
+        impl ByteSource for Reads<'_> {
+            fn len(&self) -> u64 {
+                if self.fail { u64::MAX } else { self.bytes.len() as u64 }
+            }
+            fn read_at(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<()> {
+                self.log.lock().unwrap().push((offset, buf.len()));
+                if self.fail {
+                    return Err(std::io::Error::other("unreadable fixture packet"));
+                }
+                self.bytes.read_at(offset, buf)
+            }
+        }
+
+        let unspecified = mxf_prores_color_packet((2, 2, 2));
+        let rec709 = mxf_prores_color_packet((1, 1, 1));
+        let bytes = mxf_prores_color_fixture(mxf::write::ColorSpace::Rec2020Pq, &[&unspecified, &rec709]);
+        let mut file = mxf::open(bytes.as_ref()).expect("demux fixture");
+        // Exercise a material edit on parsed metadata: stored packet zero is hidden.
+        file.tracks[0].start_position = 1;
+        let sample = file.tracks[0].samples[1];
+        let mut reads = Reads { bytes: &bytes, log: Mutex::new(Vec::new()), fail: false };
+        let (probe, descriptor) = mxf_prores_color(&file, &reads, 0).expect("first presented ProRes header");
+        assert_eq!(probe, ColorInfo::REC709);
+        assert_eq!(descriptor.transfer, Transfer::Pq);
+        assert_eq!(std::mem::take(reads.log.get_mut().unwrap()), [(sample.offset, sample.size as usize)]);
+
+        reads.fail = true;
+        assert_eq!(mxf_prores_color(&file, &reads, 0), None);
+        assert_eq!(std::mem::take(reads.log.get_mut().unwrap()), [(sample.offset, sample.size as usize)]);
+        // The source reports ample backing so only the cap can explain the skipped read.
+        file.tracks[0].samples[1].size = MAX_MXF_PRORES_COLOR_SAMPLE_BYTES + 1;
+        assert_eq!(mxf_prores_color(&file, &reads, 0), None);
+        assert!(reads.log.get_mut().unwrap().is_empty());
+
+        file.tracks[0].samples[1] = sample;
+        file.tracks[0].codec = mxf::Codec::Vc3;
+        assert_eq!(mxf_prores_color(&file, &reads, 0), None);
+        assert!(reads.log.get_mut().unwrap().is_empty());
+    }
+
+    #[test]
+    fn mxf_absent_color_labels_keep_defaults_and_range_policy() {
+        let picture = mxf::PictureInfo { component_depth: 10, black_ref_level: Some(0), white_ref_level: Some(1023), ..Default::default() };
+        assert!(picture.full_range());
+        assert_eq!(picture.color_codes(), (None, None, None));
+        assert_eq!(color_from_mxf(&picture), None);
+        assert_eq!(resolve_color(ColorTags::UNSPECIFIED, color_from_mxf(&picture)), ColorInfo::REC709);
     }
 
     #[test]
