@@ -51,13 +51,50 @@ fn half(src: &Image) -> Image {
     out
 }
 
+/// Half the width and height (in source pixels) of what a destination pixel averages when `m`
+/// shrinks the source on either of its own axes: a box of `1 / scale` on a shrunken axis and of
+/// one pixel (which is a bilinear read) on any other. `None` when neither axis shrinks. The GPU
+/// compositor samples with the same footprint.
+pub fn box_footprint(m: &Mat3) -> Option<(f64, f64)> {
+    let scale = |v: effectcraft_geom::Vec2| v.x.hypot(v.y);
+    let (sx, sy) = (scale(m.apply_vec(vec2(1.0, 0.0))), scale(m.apply_vec(vec2(0.0, 1.0))));
+    let shrunk = |s: f64| s < 1.0 - 1e-6;
+    let half = |s: f64| if shrunk(s) { 0.5 / s } else { 0.5 };
+    (shrunk(sx) || shrunk(sy)).then(|| (half(sx), half(sy)))
+}
+
+/// The average of `img` over the box of half-sizes `(hx, hy)` centred on `(x, y)`, the box lined
+/// up with the source's own axes however the layer is rotated, as After Effects filters a layer
+/// it shrinks. What lies outside the image is transparent.
+fn sample_box(img: &Image, x: f64, y: f64, (hx, hy): (f64, f64)) -> Px {
+    let (w, h) = (img.width as usize, img.height as usize);
+    let (l, r, t, b) = (x - hx, x + hx, y - hy, y + hy);
+    let range = |lo: f64, hi: f64, n: usize| ((lo.floor().max(0.0) as usize).min(n), (hi.ceil().max(0.0) as usize).min(n));
+    let (x0, x1) = range(l, r, w);
+    let (y0, y1) = range(t, b, h);
+    let per_area = 1.0 / (4.0 * hx * hy);
+    // Summed in f64: the weights of a solid area must add up to exactly 1.
+    let mut out = [0.0f64; 4];
+    for j in y0..y1 {
+        let cover_y = b.min((j + 1) as f64) - t.max(j as f64);
+        let line = &img.data[j * w..(j + 1) * w];
+        for (i, p) in line.iter().enumerate().take(x1).skip(x0) {
+            let k = (r.min((i + 1) as f64) - l.max(i as f64)) * cover_y * per_area;
+            for (c, v) in out.iter_mut().zip(p) {
+                *c += *v as f64 * k;
+            }
+        }
+    }
+    out.map(|v| v as f32)
+}
+
 /// Draw `src` transformed by `m` (src pixel space → dst pixel space) onto `dst` with blending.
 ///
 /// Affine transforms with non-stencil modes take a fast path (per-row span clipping, interior
 /// bilinear without bounds checks, integer-translation copies, inlined Normal blending); it
 /// matches [`composite_warp_reference`] to float rounding.
 pub fn composite_warp(dst: &mut Image, src: &Image, m: &Mat3, opts: &WarpOpts) {
-    composite_warp_impl(dst, src, m, opts, true, None, None);
+    composite_warp_impl(dst, src, m, opts, Path::Fast, None, None);
 }
 
 /// [`composite_warp`], also returning the destination pixels it changed when it knows them:
@@ -65,7 +102,7 @@ pub fn composite_warp(dst: &mut Image, src: &Image, m: &Mat3, opts: &WarpOpts) {
 /// `None` otherwise. With `quantize` (an 8/16 bpc destination's levels), the fast path also
 /// quantises each pixel it blends ([`crate::quantize_px`]): exactly when this returns `Some`.
 pub fn composite_warp_changed(dst: &mut Image, src: &Image, m: &Mat3, opts: &WarpOpts, quantize: Option<f32>) -> Option<[u32; 4]> {
-    composite_warp_impl(dst, src, m, opts, true, None, quantize)
+    composite_warp_impl(dst, src, m, opts, Path::Fast, None, quantize)
 }
 
 /// `dst += warp(src) · weight` (plain sum, no blending): motion-blur sub-samples accumulate
@@ -73,7 +110,7 @@ pub fn composite_warp_changed(dst: &mut Image, src: &Image, m: &Mat3, opts: &War
 pub fn accumulate_warp(dst: &mut Image, src: &Image, m: &Mat3, sampling: Sampling, weight: f32) {
     let opts = WarpOpts { sampling, ..Default::default() };
     if m.is_affine() && m.inverse().is_some_and(|i| i.is_affine()) {
-        composite_warp_impl(dst, src, m, &opts, true, Some(weight), None);
+        composite_warp_impl(dst, src, m, &opts, Path::Fast, Some(weight), None);
         return;
     }
     let mut tmp = Image::new(dst.width, dst.height);
@@ -87,7 +124,7 @@ pub fn accumulate_warp(dst: &mut Image, src: &Image, m: &Mat3, sampling: Samplin
 
 /// The straightforward per-pixel implementation (reference for the fast path's tests).
 pub fn composite_warp_reference(dst: &mut Image, src: &Image, m: &Mat3, opts: &WarpOpts) {
-    composite_warp_impl(dst, src, m, opts, false, None, None);
+    composite_warp_impl(dst, src, m, opts, Path::Reference, None, None);
 }
 
 /// Bilinear blend of four taps (same operation order as [`Image::sample_bilinear`]).
@@ -206,6 +243,8 @@ fn union(r: [usize; 4], q: [usize; 4]) -> [usize; 4] {
 /// Sampling, blending and destination bounds for an affine row operation.
 struct AffineRows {
     sampling: Sampling,
+    /// Bilinear sampling of a shrunken source: see [`box_footprint`].
+    footprint: Option<(f64, f64)>,
     opacity: f32,
     quantize: Option<f32>,
     bounds: [usize; 4],
@@ -213,7 +252,7 @@ struct AffineRows {
 
 /// Blend visible source samples and return the rectangle of changed pixels.
 fn affine_rows(dst: &mut Image, img: &Image, inv: &Mat3, rows: AffineRows, blend: impl Fn(Px, Px, u32, u32) -> Px + Sync) -> [usize; 4] {
-    let AffineRows { sampling, opacity: op, quantize, bounds: [x0, x1, y0, y1] } = rows;
+    let AffineRows { sampling, footprint, opacity: op, quantize, bounds: [x0, x1, y0, y1] } = rows;
     let levels = quantize.map(|l| (l, 1.0 / l));
     let w = dst.width as usize;
     let m = inv.0;
@@ -221,10 +260,11 @@ fn affine_rows(dst: &mut Image, img: &Image, inv: &Mat3, rows: AffineRows, blend
     let step = vec2(m[0][0], m[1][0]);
     // Pure integer translation: every sample lands on a pixel centre, so all filters return the
     // source pixel itself (bicubic still clamps negatives, as in the reference).
+    let (mx, my) = footprint.map_or((1.0, 1.0), |(hx, hy)| (hx.max(1.0), hy.max(1.0)));
     let int_tx = m[0][0] == 1.0 && m[1][1] == 1.0 && m[0][1] == 0.0 && m[1][0] == 0.0 && m[0][2].fract() == 0.0 && m[1][2].fract() == 0.0;
     // Bilinear samples skip the transparent parts of the source (most of a thin shape's or a
     // glow-padded layer's buffer) without reading them.
-    let clear = (sampling == Sampling::Bilinear && !int_tx).then(|| ClearTiles::new(img));
+    let clear = (sampling == Sampling::Bilinear && !int_tx && footprint.is_none()).then(|| ClearTiles::new(img));
     let empty = [usize::MAX, usize::MAX, 0, 0];
     dst.data
         .par_chunks_mut(w)
@@ -236,8 +276,8 @@ fn affine_rows(dst: &mut Image, img: &Image, inv: &Mat3, rows: AffineRows, blend
             let fy = y as f64 + 0.5;
             let p0 = vec2(m[0][0] * (x0 as f64 + 0.5) + m[0][1] * fy + m[0][2], m[1][0] * (x0 as f64 + 0.5) + m[1][1] * fy + m[1][2]);
             let n = x1 - x0;
-            let (ax, bx) = span(p0.x, step.x, -1.0, iw + 1.0, n);
-            let (ay, by) = span(p0.y, step.y, -1.0, ih + 1.0, n);
+            let (ax, bx) = span(p0.x, step.x, -mx, iw + mx, n);
+            let (ay, by) = span(p0.y, step.y, -my, ih + my, n);
             let (lo, hi) = (ax.max(ay), bx.min(by));
             if lo >= hi {
                 return empty;
@@ -274,10 +314,11 @@ fn affine_rows(dst: &mut Image, img: &Image, inv: &Mat3, rows: AffineRows, blend
                 for i in lo..hi {
                     let x = x0 + i;
                     let p = vec2(p0.x + step.x * i as f64, p0.y + step.y * i as f64);
-                    if p.x < -1.0 || p.y < -1.0 || p.x > iw + 1.0 || p.y > ih + 1.0 {
+                    if p.x < -mx || p.y < -my || p.x > iw + mx || p.y > ih + my {
                         continue;
                     }
                     let mut s = match (sampling, &clear) {
+                        (Sampling::Bilinear, None) if footprint.is_some() => footprint.map_or([0.0; 4], |f| sample_box(img, p.x, p.y, f)),
                         (Sampling::Nearest, _) => img.get(p.x.floor() as i64, p.y.floor() as i64),
                         (Sampling::Bilinear, Some(clear)) => match sample_bilinear_fast(img, clear, p.x, p.y) {
                             Some(s) => s,
@@ -306,12 +347,24 @@ fn affine_rows(dst: &mut Image, img: &Image, inv: &Mat3, rows: AffineRows, blend
         .reduce(|| empty, union)
 }
 
+/// How [`composite_warp_impl`] draws.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Path {
+    /// Row spans and the other fast paths of [`composite_warp`].
+    Fast,
+    /// One pixel at a time ([`composite_warp_reference`]).
+    Reference,
+    /// [`Path::Fast`], shrinking through the halving pyramid rather than a box under each pixel:
+    /// [`resample`], whose results callers build on (half-size footage conversion matches it).
+    Pyramid,
+}
+
 fn composite_warp_impl(
     dst: &mut Image,
     src: &Image,
     m: &Mat3,
     opts: &WarpOpts,
-    allow_fast: bool,
+    path: Path,
     accumulate: Option<f32>,
     quantize: Option<f32>,
 ) -> Option<[u32; 4]> {
@@ -325,7 +378,8 @@ fn composite_warp_impl(
     let mut level_img;
     let mut img = src;
     let mut inv = inv;
-    if scale < 0.5 && m.is_affine() {
+    let footprint = if m.is_affine() && opts.sampling == Sampling::Bilinear && path != Path::Pyramid { box_footprint(m) } else { None };
+    if footprint.is_none() && scale < 0.5 && m.is_affine() {
         let mut s = scale;
         let mut f = 1.0;
         level_img = half(src);
@@ -358,28 +412,34 @@ fn composite_warp_impl(
     if let Some(k) = accumulate
         && affine
     {
-        let r = affine_rows(dst, img, &inv, AffineRows { sampling: opts.sampling, opacity: 1.0, quantize: None, bounds: [x0, x1, y0, y1] }, |d, s, _, _| {
-            [d[0] + s[0] * k, d[1] + s[1] * k, d[2] + s[2] * k, d[3] + s[3] * k]
-        });
+        let r = affine_rows(
+            dst,
+            img,
+            &inv,
+            AffineRows { sampling: opts.sampling, footprint, opacity: 1.0, quantize: None, bounds: [x0, x1, y0, y1] },
+            |d, s, _, _| [d[0] + s[0] * k, d[1] + s[1] * k, d[2] + s[2] * k, d[3] + s[3] * k],
+        );
         return changed(r);
     }
-    if allow_fast && affine && !mode.is_stencil() {
+    if path != Path::Reference && affine && !mode.is_stencil() {
         let r = match mode {
             BlendMode::Normal => {
-                affine_rows(dst, img, &inv, AffineRows { sampling: opts.sampling, opacity: op, quantize, bounds: [x0, x1, y0, y1] }, |d, s, _, _| {
+                affine_rows(dst, img, &inv, AffineRows { sampling: opts.sampling, footprint, opacity: op, quantize, bounds: [x0, x1, y0, y1] }, |d, s, _, _| {
                     let k = 1.0 - s[3];
                     [s[0] + d[0] * k, s[1] + d[1] * k, s[2] + d[2] * k, s[3] + d[3] * k]
                 })
             }
             BlendMode::Dissolve | BlendMode::DancingDissolve => {
                 let seed = opts.seed;
-                affine_rows(dst, img, &inv, AffineRows { sampling: opts.sampling, opacity: op, quantize, bounds: [x0, x1, y0, y1] }, |d, s, x, y| {
+                affine_rows(dst, img, &inv, AffineRows { sampling: opts.sampling, footprint, opacity: op, quantize, bounds: [x0, x1, y0, y1] }, |d, s, x, y| {
                     blend_pixel(mode, d, s, hash_noise(x, y, seed))
                 })
             }
-            _ => affine_rows(dst, img, &inv, AffineRows { sampling: opts.sampling, opacity: op, quantize, bounds: [x0, x1, y0, y1] }, |d, s, _, _| {
-                blend_pixel(mode, d, s, 0.5)
-            }),
+            _ => {
+                affine_rows(dst, img, &inv, AffineRows { sampling: opts.sampling, footprint, opacity: op, quantize, bounds: [x0, x1, y0, y1] }, |d, s, _, _| {
+                    blend_pixel(mode, d, s, 0.5)
+                })
+            }
         };
         return changed(r);
     }
@@ -395,7 +455,8 @@ fn composite_warp_impl(
             } else {
                 inv.apply(vec2(x as f64 + 0.5, fy))
             };
-            if p.x < -1.0 || p.y < -1.0 || p.x > img.width as f64 + 1.0 || p.y > img.height as f64 + 1.0 {
+            let (mx, my) = footprint.map_or((1.0, 1.0), |(hx, hy)| (hx.max(1.0), hy.max(1.0)));
+            if p.x < -mx || p.y < -my || p.x > img.width as f64 + mx || p.y > img.height as f64 + my {
                 if mode.is_stencil() {
                     row[x] = blend_pixel(mode, row[x], [0.0; 4], 0.5);
                 }
@@ -403,7 +464,7 @@ fn composite_warp_impl(
             }
             let mut s = match opts.sampling {
                 Sampling::Nearest => img.get(p.x.floor() as i64, p.y.floor() as i64),
-                Sampling::Bilinear => img.sample_bilinear(p.x, p.y),
+                Sampling::Bilinear => footprint.map_or_else(|| img.sample_bilinear(p.x, p.y), |f| sample_box(img, p.x, p.y, f)),
                 Sampling::Bicubic => img.sample_bicubic(p.x, p.y),
             };
             if s[3] <= 0.0 && !mode.is_stencil() {
@@ -438,13 +499,70 @@ pub fn resample(src: &Image, w: u32, h: u32) -> Image {
         return out;
     }
     let m = Mat3::scale(vec2(w as f64 / src.width as f64, h as f64 / src.height as f64));
-    composite_warp(&mut out, src, &m, &WarpOpts::default());
+    composite_warp_impl(&mut out, src, &m, &WarpOpts::default(), Path::Pyramid, None, None);
     out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn rows_image(rows: &[f32]) -> Image {
+        let mut src = Image::new(3, rows.len() as u32);
+        for (y, v) in rows.iter().enumerate() {
+            for x in 0..3 {
+                src.set(x, y as u32, [*v, *v, *v, 1.0]);
+            }
+        }
+        src
+    }
+
+    fn test_rows() -> Vec<f32> {
+        (0..40).map(|i| if i % 7 == 0 || i % 3 == 1 { 1.0 } else { 0.0 }).collect()
+    }
+
+    #[test]
+    fn a_layer_squashed_on_one_axis_averages_the_area_under_each_pixel() {
+        let rows = test_rows();
+        for (ay, rows_per_pixel) in [(0.05, 20.0), (0.4, 2.5)] {
+            let mut dst = Image::new(3, 8);
+            composite_warp(&mut dst, &rows_image(&rows), &Mat3::scale(vec2(1.0, ay)), &WarpOpts::default());
+            let want: f32 = (0..rows.len()).map(|i| ((rows_per_pixel as f32).min((i + 1) as f32) - (i as f32).max(0.0)).max(0.0) * rows[i]).sum::<f32>()
+                / rows_per_pixel as f32;
+            assert!((dst.get(1, 0)[0] - want).abs() < 1e-4, "{ay}: {:?} vs {want}", dst.get(1, 0));
+        }
+    }
+
+    #[test]
+    fn a_fractional_position_averages_around_the_destination_pixel() {
+        // Scale 0.2 placed 0.5 down: destination row 1 covers source rows 2.5 to 7.5.
+        let rows = test_rows();
+        let mut dst = Image::new(3, 10);
+        composite_warp(&mut dst, &rows_image(&rows), &(Mat3::translate(vec2(0.0, 0.5)) * Mat3::scale(vec2(1.0, 0.2))), &WarpOpts::default());
+        let want = (rows[2] * 0.5 + rows[3] + rows[4] + rows[5] + rows[6] + rows[7] * 0.5) / 5.0;
+        assert!((dst.get(1, 1)[0] - want).abs() < 1e-4, "{:?} vs {want}", dst.get(1, 1));
+    }
+
+    #[test]
+    fn a_box_of_one_pixel_is_a_bilinear_read() {
+        let mut img = Image::new(2, 2);
+        img.set(0, 0, [1.0, 0.0, 0.0, 1.0]);
+        img.set(1, 1, [0.0, 0.0, 1.0, 1.0]);
+        for (x, y) in [(0.7, 0.9), (1.2, 1.4), (1.0, 1.0)] {
+            let (a, b) = (sample_box(&img, x, y, (0.5, 0.5)), img.sample_bilinear(x, y));
+            for (p, q) in a.iter().zip(b) {
+                assert!((p - q).abs() < 1e-5, "({x}, {y}): {a:?} vs {b:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_shrunken_layer_fades_out_past_its_edge() {
+        // Half the box beyond the image is transparent.
+        let img = Image::filled(4, 4, [1.0, 1.0, 1.0, 1.0]);
+        let edge = sample_box(&img, 0.0, 2.0, (2.0, 0.5));
+        assert!((edge[3] - 0.5).abs() < 1e-5, "{edge:?}");
+    }
 
     #[test]
     fn identity_warp_copies() {
