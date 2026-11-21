@@ -505,6 +505,76 @@ fn prores_alpha_uses_coded_frame_not_mov_depth() {
     }
 }
 
+/// Generated PCM ramps expose edit-list timing without an external encoder or oracle.
+#[test]
+fn mov_pcm_edit_lists_preserve_first_read_and_seek_timing() {
+    use craft_media::isobmff::{self, Brand, Edit, FourCc, Mp4Writer, PcmConfig, SampleEntry, TrackConfig, WriteSample, WriterOptions};
+    use craft_video::prores::{ChromaFormat, Encoder, Frame, Profile};
+
+    const RATE: u32 = 48_000;
+    const AUDIO_FRAMES: usize = 12_000;
+    let samples: Vec<[i16; 2]> = (0..AUDIO_FRAMES).map(|i| [1000 + (i % 257) as i16 * 32, -2000 - (i % 193) as i16 * 16]).collect();
+    let profile = Profile::Hq;
+    let mut encoder = Encoder::new(profile, 16, 16);
+    let packet = encoder.encode(&Frame::new(16, 16, ChromaFormat::Yuv422, 10, false).unwrap()).unwrap();
+    // The extreme edits also guard signed buffer arithmetic on the first audio request.
+    for offset in [0i64, 480, -480, -i64::MAX, i64::MAX - i64::MAX % 48] {
+        let mut writer = Mp4Writer::new(std::io::Cursor::new(Vec::new()), WriterOptions::new(Brand::Mov)).unwrap();
+        let video = writer.add_track(TrackConfig::new(SampleEntry::prores(FourCc(profile.fourcc()), 16, 16), 24)).unwrap();
+        let pcm = PcmConfig { bits: 16, float: false, big_endian: false, signed: true, channels: 2, sample_rate: f64::from(RATE) };
+        let mut audio_config = TrackConfig::new(SampleEntry::pcm(pcm), RATE);
+        if offset > 0 {
+            audio_config.edits.push(Edit { segment_duration: (offset / 48) as u64, media_time: -1, media_rate: 0x0001_0000 });
+        }
+        if offset != 0 {
+            audio_config.edits.push(Edit { segment_duration: 240, media_time: (-offset).max(0), media_rate: 0x0001_0000 });
+        }
+        let audio = writer.add_track(audio_config).unwrap();
+        writer.write_sample(video, WriteSample { data: &packet, duration: 24, composition_offset: 0, is_sync: true }).unwrap();
+        for chunk in samples.chunks(256) {
+            let data: Vec<u8> = chunk.iter().flat_map(|frame| frame.iter().flat_map(|s| s.to_le_bytes())).collect();
+            writer.write_sample(audio, WriteSample { data: &data, duration: chunk.len() as u32, composition_offset: 0, is_sync: true }).unwrap();
+        }
+        let bytes: Arc<[u8]> = writer.finish().unwrap().into_inner().into();
+        let mov = isobmff::open(bytes.as_ref()).unwrap();
+        let track = mov.tracks.iter().find(|t| t.kind == isobmff::TrackKind::Audio).unwrap();
+        assert_eq!(track.edit_offset, offset, "fixture must carry the requested audio edit");
+        assert_eq!(track.presentation_pts(0), Some(offset));
+
+        let name = format!("pcm-edit-{offset}.mov");
+        let footage = probe_bytes(&name, bytes.clone()).expect("probe generated MOV");
+        assert_eq!(footage.codec, "ProRes", "must exercise the shared importer");
+        assert!(footage.has_audio);
+        let pool = MediaPool::new();
+        pool.add_bytes(&name, bytes);
+        let check = |start: usize, count: usize| {
+            let got = pool.audio_samples(&footage, Tick::from_units(start as i64, i64::from(RATE)), count, RATE);
+            assert_eq!(got.len(), count * 2);
+            for (i, frame) in got.as_chunks::<2>().0.iter().enumerate() {
+                let source = i64::try_from(start + i).unwrap().saturating_sub(offset);
+                let expected = usize::try_from(source).ok().and_then(|p| samples.get(p)).copied().unwrap_or([0, 0]);
+                for c in 0..2 {
+                    assert_eq!(frame[c], f32::from(expected[c]) / 32768.0, "edit {offset}, request {start}, frame {i}, channel {c}");
+                }
+            }
+            got
+        };
+        let first = check(0, 2048);
+        let mut sequential = Vec::new();
+        let mut start = 0;
+        while start < 2048 {
+            let count = 127.min(2048 - start);
+            sequential.extend(check(start, count));
+            start += count;
+        }
+        assert_eq!(sequential, first, "edit {offset}: chunking must preserve samples");
+        for start in [3000, 100, 6000, 0, 480, 700] {
+            check(start, 600);
+        }
+        assert_eq!(check(0, 2048), first, "edit {offset}: reopening the decode window must preserve samples");
+    }
+}
+
 /// A synthetic asymmetrical aperture and rotation must determine what the shared importer shows.
 #[test]
 fn mov_renders_clean_aperture_before_display_rotation() {

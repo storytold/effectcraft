@@ -291,6 +291,21 @@ impl ContainerFile {
         let decoded_pos = audio_starts.get(seek_idx).copied().unwrap_or(0);
         (seek_idx, decoded_pos)
     }
+
+    fn audio_silent_prefix(&self, track_idx: usize, start: i64, frames: usize, sample_rate: u32) -> usize {
+        let Self::Isobmff(file) = self else { return 0 };
+        let Some((leading_duration, media_time)) = file.tracks.get(track_idx).and_then(|track| unit_rate_media_edit(&track.edits)) else {
+            return 0;
+        };
+        if leading_duration == 0 || media_time == 0 || file.timescale == 0 {
+            return 0;
+        }
+
+        // The net packet offset includes the trim and can put decoder preroll inside
+        // the empty edit. Use the empty edit's duration on the output clock instead.
+        let first_presented = (u128::from(leading_duration) * u128::from(sample_rate)).div_ceil(u128::from(file.timescale)) as i128;
+        usize::try_from((first_presented - i128::from(start)).max(0)).unwrap_or(usize::MAX).min(frames)
+    }
 }
 
 /// Where the container puts one audio packet, for [`contiguous_starts`].
@@ -468,12 +483,7 @@ fn compute_audio_starts(container: &ContainerFile, track_idx: usize, codec: Code
         ContainerFile::Isobmff(f) => {
             let Some(track) = f.tracks.get(track_idx) else { return AudioStarts::complete(Vec::new()) };
             let ts = i128::from(track.timescale.max(1));
-            let stamps: Vec<i64> = (0..track.samples.len())
-                .map(|i| {
-                    let pts = track.presentation_pts(i).unwrap_or(0);
-                    i64::try_from(i128::from(pts) * rate / ts).unwrap_or(0)
-                })
-                .collect();
+            let stamps: Vec<i64> = (0..track.samples.len()).map(|i| isobmff_audio_position(track, i, native_rate)).collect();
             let unit = i64::try_from((rate + ts - 1) / ts).unwrap_or(i64::MAX);
             if codec == CodecId::Opus {
                 return AudioStarts::opus(stamps, unit.saturating_mul(2).saturating_add(1));
@@ -557,6 +567,14 @@ fn compute_audio_starts(container: &ContainerFile, track_idx: usize, codec: Code
 
 fn audio_frames_from_ns(ns: i128, rate: u32) -> i128 {
     (ns * i128::from(rate)) / 1_000_000_000
+}
+
+/// The decoded buffer starts on the presentation timeline, including negative trimmed samples.
+/// Using the same signed position on open and seek preserves edit-list trim and leading silence.
+fn isobmff_audio_position(track: &isobmff::Track, sample_idx: usize, native_rate: u32) -> i64 {
+    let pts = track.presentation_pts(sample_idx).unwrap_or(0);
+    let scaled = (i128::from(pts) * i128::from(native_rate)) / i128::from(track.timescale.max(1));
+    i64::try_from(scaled).unwrap_or(if scaled < 0 { i64::MIN } else { i64::MAX })
 }
 
 fn open_audio_tracks<I>(container: &ContainerFile, source: &dyn ByteSource, candidates: I) -> Option<(Vec<AudioTrackEntry>, Vec<AudioStreamInfo>)>
@@ -670,17 +688,24 @@ fn clean_aperture_region(aperture: isobmff::CleanAperture, (width, height): (u32
     (!r.is_full(width as usize, height as usize)).then_some(r)
 }
 
-/// A single unit-rate media span, optionally preceded by one empty span. A
-/// scalar EDL origin cannot describe dwell, disjoint edits or respeeding.
-fn continuous_edit_mapping(track: &isobmff::Track, movie_timescale: u32) -> Option<(i64, i64)> {
+/// A single unit-rate media span, optionally preceded by one empty span.
+fn unit_rate_media_edit(edits: &[isobmff::Edit]) -> Option<(u64, i64)> {
     const UNIT_RATE: i32 = 0x0001_0000;
-    let (leading_duration, media) = match track.edits.as_slice() {
-        [] => return (track.edit_offset == 0).then_some((0, 0)),
+    let (leading_duration, media) = match edits {
         [media] => (0, media),
         [empty, media] if empty.media_time == -1 && empty.segment_duration > 0 && empty.media_rate == UNIT_RATE => (empty.segment_duration, media),
         _ => return None,
     };
-    if media.media_time < 0 || media.segment_duration == 0 || media.media_rate != UNIT_RATE || movie_timescale == 0 || track.timescale == 0 {
+    (media.media_time >= 0 && media.segment_duration != 0 && media.media_rate == UNIT_RATE).then_some((leading_duration, media.media_time))
+}
+
+/// A scalar EDL origin cannot describe dwell, disjoint edits or respeeding.
+fn continuous_edit_mapping(track: &isobmff::Track, movie_timescale: u32) -> Option<(i64, i64)> {
+    if track.edits.is_empty() {
+        return (track.edit_offset == 0).then_some((0, 0));
+    }
+    let (leading_duration, media_time) = unit_rate_media_edit(&track.edits)?;
+    if movie_timescale == 0 || track.timescale == 0 {
         return None;
     }
     // Check the raw movie-to-media conversion before the demuxer's rounded
@@ -690,8 +715,8 @@ fn continuous_edit_mapping(track: &isobmff::Track, movie_timescale: u32) -> Opti
     if lead % movie_clock != 0 {
         return None;
     }
-    let offset = i64::try_from(lead / movie_clock - i128::from(media.media_time)).ok()?;
-    (offset == track.edit_offset).then_some((media.media_time, offset))
+    let offset = i64::try_from(lead / movie_clock - i128::from(media_time)).ok()?;
+    (offset == track.edit_offset).then_some((media_time, offset))
 }
 
 /// The EDL origin is the timecode at presentation time zero, not the raw
@@ -1389,12 +1414,15 @@ impl MediaSource for CraftMediaSource {
             return Err(MediaError::Decode("invalid audio sample rate 0".into()));
         }
         let channels_count = self.info.audio_streams.get(stream).map_or(2, |s| s.channels as usize);
-        if frames == 0 {
-            return Ok(AudioBuffer::new(sample_rate, channels_count as u16, 0));
+        let silent_frames = self.file.audio_silent_prefix(entry.track_idx, start, frames, sample_rate);
+        let audible_frames = frames - silent_frames;
+        if audible_frames == 0 {
+            return Ok(AudioBuffer::new(sample_rate, channels_count as u16, frames));
         }
 
+        let audible_start = i64::try_from(i128::from(start) + silent_frames as i128).unwrap_or(i64::MAX);
         let native_rate = entry.native_rate;
-        let (native_start, native_frames) = native_audio_window(start, frames, native_rate, sample_rate);
+        let (native_start, native_frames) = native_audio_window(audible_start, audible_frames, native_rate, sample_rate);
 
         let decoded = match &entry.backend {
             AudioBackend::Decoder { seek_preroll_samples, state: state_mutex } => {
@@ -1441,11 +1469,15 @@ impl MediaSource for CraftMediaSource {
             }
         };
 
-        if sample_rate == native_rate {
-            return Ok(AudioBuffer { sample_rate, channels: decoded });
+        let mut channels =
+            if sample_rate == native_rate { decoded } else { resample_audio(&decoded, channels_count, native_rate, sample_rate, audible_frames) };
+        if silent_frames > 0 {
+            for channel in &mut channels {
+                channel.resize(frames, 0.0);
+                channel.rotate_right(silent_frames);
+            }
         }
-
-        Ok(AudioBuffer { sample_rate, channels: resample_audio(&decoded, channels_count, native_rate, sample_rate, frames) })
+        Ok(AudioBuffer { sample_rate, channels })
     }
 }
 
@@ -1565,7 +1597,7 @@ fn drain_audio_window(buf: &mut [Vec<f32>], decoded_pos: &mut i64, channels_coun
     for i in 0..frames {
         let pos = start.saturating_add(i as i64);
         if pos >= *decoded_pos {
-            let off = (pos - *decoded_pos) as usize;
+            let off = usize::try_from(pos.saturating_sub(*decoded_pos)).unwrap_or(usize::MAX);
             if off < avail {
                 for (c, out_ch) in out.iter_mut().enumerate() {
                     out_ch[i] = buf[c][off];
@@ -1574,7 +1606,7 @@ fn drain_audio_window(buf: &mut [Vec<f32>], decoded_pos: &mut i64, channels_coun
         }
     }
     let end = start.saturating_add(frames as i64);
-    let drop_to = (end - *decoded_pos).max(0) as usize;
+    let drop_to = usize::try_from(end.saturating_sub(*decoded_pos).max(0)).unwrap_or(usize::MAX);
     let trim = drop_to.min(avail);
     if trim > 0 {
         for ch in buf {
@@ -1671,7 +1703,7 @@ fn decode_audio_range(
     let buf_len = state.buf.first().map_or(0, Vec::len) as i64;
     let buf_end = state.decoded_pos.saturating_add(buf_len);
     let moves_backward = start < state.decoded_pos;
-    if moves_backward || start > buf_end + i64::from(native_rate) * 2 {
+    if moves_backward || start > buf_end.saturating_add(i64::from(native_rate) * 2) {
         let target = start.saturating_sub(seek_preroll_samples).max(0);
         let (seek_idx, decoded_pos) = if moves_backward && state.next_sample == 0 && state.audio_starts.seek_proves_first_packet(target) {
             (0, state.decoded_pos)
@@ -2394,6 +2426,91 @@ mod tests {
     fn worker_cap_is_bounded() {
         let cap = worker_cap();
         assert!((1..=MAX_WORKERS).contains(&cap), "cap={cap}");
+    }
+
+    /// Generated AAC permits unequal track/sample clocks, unlike the MOV writer's PCM tracks.
+    #[test]
+    fn mov_aac_edit_positions_saturate_with_unequal_clocks() {
+        use craft_audio::aac::{Encoder, EncoderConfig};
+        use isobmff::{Brand, Edit, Mp4Writer, SampleEntry, TrackConfig, WriteSample, WriterOptions};
+
+        const RATE: u32 = 48_000;
+        let mut encoder = Encoder::new(EncoderConfig::cbr(RATE, 1, 64_000)).unwrap();
+        let tone: Vec<f32> = (0..2048).map(|i| (i as f32 * 0.13).sin() * 0.25).collect();
+        let mut packets = encoder.encode(&[&tone]);
+        packets.extend(encoder.flush());
+        assert!(!packets.is_empty());
+        for (offset, expected) in [(10i64, 480i64), (-10, -480), (i64::MAX / 2, i64::MAX), (-i64::MAX / 2, i64::MIN)] {
+            let mut writer = Mp4Writer::new(std::io::Cursor::new(Vec::new()), WriterOptions::new(Brand::Mov)).unwrap();
+            let mut config = TrackConfig::new(SampleEntry::aac(encoder.audio_specific_config(), 1, RATE), 1_000);
+            if offset > 0 {
+                config.edits.push(Edit { segment_duration: offset as u64, media_time: -1, media_rate: 0x0001_0000 });
+            }
+            config.edits.push(Edit { segment_duration: 100, media_time: (-offset).max(0), media_rate: 0x0001_0000 });
+            let track_idx = writer.add_track(config).expect("AAC accepts unequal media and sample clocks");
+            for packet in &packets {
+                writer.write_sample(track_idx, WriteSample { data: packet, duration: 21, composition_offset: 0, is_sync: true }).unwrap();
+            }
+            let bytes = writer.finish().unwrap().into_inner();
+            let mov = isobmff::open(bytes.as_slice()).unwrap();
+            let track = &mov.tracks[0];
+            assert_eq!((track.timescale, track.edit_offset, track.presentation_pts(0)), (1_000, offset, Some(offset)));
+            let params = track.codec_params();
+            assert_eq!((params.codec, params.sample_rate), (CodecId::Aac, Some(RATE)));
+            // Check the conversion itself: a decode error substituted with silence cannot pass.
+            assert_eq!(isobmff_audio_position(track, 0, RATE), expected);
+            let file = ContainerFile::Isobmff(mov);
+            let (mut tracks, infos) = open_audio_tracks(&file, &bytes, [(0, packets.len(), params, 0)]).expect("shared AAC source");
+            assert_eq!(infos[0].sample_rate, RATE);
+            let (preroll, state) = tracks[0].decoder_parts();
+            assert_eq!(state.audio_starts.start(&file, 0, 0), Some(expected));
+            for start in [0, 6_000, 0] {
+                let decoded = decode_audio_range(&file, &bytes, 0, RATE, 1, preroll, state, start, 64).expect("the result-returning shared read must succeed");
+                assert_eq!(decoded[0].len(), 64);
+                if expected == i64::MAX || expected == i64::MIN {
+                    assert!(decoded[0].iter().all(|&v| v == 0.0), "out-of-range edits have no audible samples at {start}");
+                }
+            }
+        }
+    }
+
+    /// Original PCM generated in memory to exercise an empty edit followed by a trim.
+    #[test]
+    fn mov_pcm_trim_after_empty_edit_preserves_leading_silence() {
+        use isobmff::{Brand, Edit, Mp4Writer, PcmConfig, SampleEntry, TrackConfig, WriteSample, WriterOptions};
+
+        const RATE: u32 = 48_000;
+        const DELAY_MS: u64 = 100;
+        const DELAY: i64 = 4_800;
+        let samples: Vec<i16> = (0..12_000).map(|i| 1_000 + (i % 257) as i16 * 32).collect();
+        for trim in [2_400i64, 4_800, 9_600] {
+            let mut writer = Mp4Writer::new(std::io::Cursor::new(Vec::new()), WriterOptions::new(Brand::Mov)).unwrap();
+            let pcm = PcmConfig { bits: 16, float: false, big_endian: false, signed: true, channels: 1, sample_rate: f64::from(RATE) };
+            let mut config = TrackConfig::new(SampleEntry::pcm(pcm), RATE);
+            config.edits = vec![
+                Edit { segment_duration: DELAY_MS, media_time: -1, media_rate: 0x0001_0000 },
+                Edit { segment_duration: 40, media_time: trim, media_rate: 0x0001_0000 },
+            ];
+            let track = writer.add_track(config).unwrap();
+            for chunk in samples.chunks(256) {
+                let data: Vec<u8> = chunk.iter().flat_map(|sample| sample.to_le_bytes()).collect();
+                writer.write_sample(track, WriteSample { data: &data, duration: chunk.len() as u32, composition_offset: 0, is_sync: true }).unwrap();
+            }
+            let bytes = writer.finish().unwrap().into_inner();
+            let file = isobmff::open(bytes.as_slice()).unwrap();
+            assert_eq!(file.timescale, 1_000);
+            assert_eq!(file.tracks[0].edit_offset, DELAY - trim);
+
+            let source = open_bytes("edited-pcm.mov", bytes.into()).expect("shared MOV route").unwrap();
+            let sample = |index: i64| f32::from(samples[index as usize]) / 32_768.0;
+            let expected = [0.0, 0.0, sample(trim), sample(trim + 1)];
+            let read = |start, frames, rate| source.audio(start, frames, rate).expect("direct shared PCM read").channels.remove(0);
+            assert_eq!(read(DELAY - 2, 4, RATE), expected, "first read, trim {trim}");
+            assert_eq!(read(0, DELAY as usize, RATE), vec![0.0; DELAY as usize], "backward seek, trim {trim}");
+            assert_eq!(read(DELAY, 2, RATE), expected[2..], "read from first presented sample, trim {trim}");
+            assert_eq!(read(DELAY * 2 - 4, 5, RATE * 2), [0.0, 0.0, 0.0, 0.0, sample(trim)], "resampled read, trim {trim}");
+            assert_eq!(read(4_408, 3, 44_100), [0.0, 0.0, sample(trim)], "nonintegral resampling ratio, trim {trim}");
+        }
     }
 
     #[test]
