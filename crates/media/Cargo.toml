@@ -52,3 +52,5 @@ gif = { workspace = true }
 tempfile = { workspace = true }
 # (tests render comps that read layers through effects; already a dependency of effectcraft-render)
 effectcraft-effects = { workspace = true }
+# Pure-Rust AAC test fixture encoding (no external ffmpeg dependency).
+craft-audio = { workspace = true, features = ["aac-encode"] }
