@@ -51,6 +51,7 @@ impl EffectHost for MovingProducer {
             "producer/producerX" => Some(n(x)),
             "producer/producerY" => Some(n(50.0)),
             "producer/producerZ" => Some(n(0.0)),
+            "cannon/cannonPosition" => Some(Value::Vec2([x, 50.0])),
             _ => None,
         }
     }
@@ -256,6 +257,33 @@ fn moving_producers_match_the_cpu_on_the_gpu() {
         let gpu = effectcraft_effects::particle_state(id, &ctx(EffectEnv { host: Some(&gpu_host), ..Default::default() })).unwrap();
         assert!(crate::particles::DISPATCHES.load(std::sync::atomic::Ordering::Relaxed) > before, "{id}: simulated on the GPU");
         agree(&format!("{id} moving producer"), &cpu, &gpu, 1e-4, cpu.len() / 100 + 1);
+    }
+
+    let p = params(
+        "ec.sim.particleplayground",
+        &[
+            ("cannonEnabled", Value::Bool(true)),
+            ("grid/particlesAcross", n(0.0)),
+            ("grid/particlesDown", n(0.0)),
+            ("cannon/barrelRadius", n(0.0)),
+            ("cannon/particlesPerSecond", n(60.0)),
+            ("cannon/velocity", n(0.0)),
+            ("cannon/velocityRandomSpread", n(0.0)),
+            ("gravity/gravityForce", n(0.0)),
+        ],
+    );
+    let cpu_host = MovingProducer { gpu: None, index: 0, start_x: 20.0 };
+    let gpu_host = MovingProducer { gpu: Some(g), index: 0, start_x: 20.0 };
+    let ctx = |env| EffectCtx { params: &p, time: 1.0, layer_size: [320.0, 240.0], seed: 32, adjustment: false, env };
+    let cpu = effectcraft_effects::playground_state(&ctx(EffectEnv { host: Some(&cpu_host), ..Default::default() })).unwrap();
+    let before = crate::particles::DISPATCHES.load(std::sync::atomic::Ordering::Relaxed);
+    let gpu = effectcraft_effects::playground_state(&ctx(EffectEnv { host: Some(&gpu_host), ..Default::default() })).unwrap();
+    assert!(crate::particles::DISPATCHES.load(std::sync::atomic::Ordering::Relaxed) > before, "particle playground: simulated on the GPU");
+    agree("particle playground moving producer", &cpu, &gpu, 1e-4, cpu.len() / 100 + 1);
+    let births = effectcraft_effects::psim::births(60.0, 60, 60_000).unwrap();
+    for q in &gpu {
+        let birth = births[q.id as usize] as f32;
+        assert!((q.p[0] - (20.0 + birth)).abs() < 1e-4, "particle {} at {:?}, expected {}", q.id, q.p, 20.0 + birth);
     }
 }
 

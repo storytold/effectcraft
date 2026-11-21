@@ -33,7 +33,6 @@ pub struct EngineDesc {
 /// Particle Playground's Cannon with gravity only (see `sim3::Pg`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CannonDesc {
-    pub pos: [f32; 2],
     pub barrel_angle: f32,
     pub barrel_radius: f32,
     pub dir_spread: f32,
@@ -60,9 +59,9 @@ pub struct SimRequest<'a> {
     pub steps: u64,
     /// Birth step of every particle id born before `steps` (ascending).
     pub births: &'a [u32],
-    /// Engine producer position at the start of each simulated step, in the system's own
-    /// coordinates: entry `i` is the position used by particles born in step `i` and by the force
-    /// centre during step `i`.
+    /// Producer position at the start of each simulated step, in the system's own coordinates:
+    /// entry `i` is the position used by particles born in step `i` and by the force centre
+    /// during step `i`.
     pub producers: &'a [[f32; 3]],
     pub system: ParticleSystem,
 }

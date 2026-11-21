@@ -1527,7 +1527,7 @@ pub fn is_time_dependent(id: &str) -> bool {
 /// their Birth Rate and producer position at every step, #1373)? Caches keyed on the current
 /// values can't see what an expression returned then.
 pub fn reads_param_history(id: &str) -> bool {
-    matches!(id, "ec.sim.ccparticleworld" | "ec.sim.ccparticlesystems2" | "ec.sim.ccmrmercury")
+    matches!(id, "ec.sim.ccparticleworld" | "ec.sim.ccparticlesystems2" | "ec.sim.ccmrmercury" | "ec.sim.particleplayground")
 }
 
 /// Run an effect on a buffer.

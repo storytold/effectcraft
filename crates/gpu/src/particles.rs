@@ -126,9 +126,9 @@ fn uniforms(req: &SimRequest, n: u32, s0: u64, prev_n: u32) -> Vec<u8> {
         ParticleSystem::Cannon(c) => {
             u[3] = 1;
             u2 = [0, 1, c.seed, prev_n];
-            f[0] = [c.pos[0], c.pos[1], c.barrel_angle, c.barrel_radius];
-            f[1] = [c.dir_spread, c.vel, c.vel_spread, c.grav_spread];
-            f[2] = [c.gravity[0], c.gravity[1], dt, 0.0];
+            f[0] = [c.barrel_angle, c.barrel_radius, c.dir_spread, c.vel];
+            f[1] = [c.vel_spread, c.grav_spread, dt, 0.0];
+            f[2] = [c.gravity[0], c.gravity[1], 0.0, 0.0];
             f[3] = c.bounds;
         }
     }
@@ -163,23 +163,16 @@ pub(crate) fn simulate(g: &GpuContext, req: &SimRequest) -> Option<Vec<SimPartic
     if steps == 0 {
         return None;
     }
-    // Engine systems sample a producer at every step. The Cannon's position stays in its
-    // descriptor.
-    let producers = match req.system {
-        ParticleSystem::Engine(_) => {
-            if req.producers.len() < steps {
-                return None;
-            }
-            &req.producers[..steps]
-        }
-        ParticleSystem::Cannon(_) => &[][..],
-    };
+    if req.producers.len() < steps {
+        return None;
+    }
     // Check the storage-buffer size before allocating the history fingerprint or its bytes.
-    let producer_size = if producers.is_empty() { 16 } else { steps.checked_mul(16)? };
+    let producer_size = steps.checked_mul(16)?;
     if u64::try_from(producer_size).ok()? > g.device.limits().max_storage_buffer_binding_size {
         return None;
     }
-    let producer_prefix = if producers.is_empty() { vec![0; steps.checked_add(1)?] } else { producer_prefixes(producers) };
+    let producers = &req.producers[..steps];
+    let producer_prefix = producer_prefixes(producers);
     let deferred = g.deferred.clone();
     let key = deferred.as_ref().map(|_| sim_key(req));
     if let (Some(d), Some(k)) = (&deferred, key) {
@@ -223,7 +216,7 @@ pub(crate) fn simulate(g: &GpuContext, req: &SimRequest) -> Option<Vec<SimPartic
     let d = &g.device;
     let births: Vec<u8> = req.births.iter().flat_map(|b| b.to_le_bytes()).collect();
     let births = g.buffer_init(Some("births"), &births, wgpu::BufferUsages::STORAGE);
-    let producer_bytes = if producers.is_empty() { packed_producers(&[[0.0; 3]]) } else { packed_producers(producers) };
+    let producer_bytes = packed_producers(producers);
     let producers = g.buffer_init(Some("particle producers"), &producer_bytes, wgpu::BufferUsages::STORAGE);
     let prev = prev.unwrap_or_else(|| {
         d.create_buffer(&wgpu::BufferDescriptor { label: Some("particles"), size: STATE_BYTES, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false })
