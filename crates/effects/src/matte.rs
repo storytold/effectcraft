@@ -142,7 +142,7 @@ fn refine(ctx: &EffectCtx, mut b: Buf, hard: bool) -> Buf {
     // Reduce Chatter: where the previous and next frames agree but this one differs, the matte
     // is chattering; average the three there. Where they disagree (motion) it is left alone.
     let chatter = (pr.f("reduceChatter") / 100.0).clamp(0.0, 1.0) as f32;
-    if chatter > 0.0 {
+    if chatter > 0.0 && !ctx.env.host.is_some_and(|h| h.unsafe_time_sample()) {
         let prev = frame_at(ctx.time - 1.0 / fps);
         let next = frame_at(ctx.time + 1.0 / fps);
         if let (Some(p), Some(n)) = (&prev, &next) {
@@ -172,7 +172,7 @@ fn refine(ctx: &EffectCtx, mut b: Buf, hard: bool) -> Buf {
                     n += 1.0;
                 }
             }
-            if n > 1.0 {
+            if n > 1.0 && !ctx.env.host.is_some_and(|h| h.unsafe_time_sample()) {
                 acc.data.iter_mut().for_each(|a| *a /= n);
                 na = acc;
             }

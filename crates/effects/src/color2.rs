@@ -383,6 +383,10 @@ fn smoothed_histograms(ctx: &EffectCtx, img: &Image) -> [Vec<f64>; 4] {
             }
         }
     }
+    // A declined frame makes the smoothing unsafe: analyse the current frame alone.
+    if host.unsafe_time_sample() {
+        return histograms(img);
+    }
     h
 }
 

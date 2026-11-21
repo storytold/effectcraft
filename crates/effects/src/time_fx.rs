@@ -185,6 +185,11 @@ fn fetch_with(ctx: &EffectCtx, times: &[f64], effects: usize) -> Option<Frames> 
     uniq.dedup();
     // Every effect before this one (the host bounds the count to them).
     let bufs: Vec<(i64, Option<Buf>)> = uniq.iter().map(|&k| (k, host.self_at(k as f64 / 1e6, effects))).collect();
+    // A decline while sampling (any of the calls above may have set the flag) must decline the
+    // whole fetch too, not substitute a transparent frame for that time.
+    if host.unsafe_time_sample() {
+        return None;
+    }
     let first = bufs.iter().find_map(|(_, b)| b.as_ref())?;
     let scale = first.scale;
     // Union of every frame's extent in layer pixels (offset = where layer (0,0) sits).

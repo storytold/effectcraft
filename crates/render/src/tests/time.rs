@@ -7,6 +7,7 @@ use effectcraft_color::Label;
 use effectcraft_effects::plugin::{EffectPlugin, PluginFrame, PluginManifest, PluginParams, register_plugin};
 use effectcraft_keyframe::{Keyframe, ShapePath, Value};
 use effectcraft_project::build::{self, Ids};
+use effectcraft_project::styles as st;
 use effectcraft_project::{Comp, Footage, FootageKind, ItemId, ItemKind, LayerSource, MaskMode, Project, Quality, Solid};
 use effectcraft_time::{FrameRate, Tick};
 
@@ -407,4 +408,78 @@ fn posterize_time_on_an_adjustment_layer_declines_wireframe_layers() {
     let centre = img.get(48, 27);
     assert_eq!(centre[3], 0.0, "centre must stay unfilled: {centre:?}");
     assert_eq!(img.get(0, 0), [1.0, 1.0, 1.0, 1.0], "outline");
+}
+
+/// A lower layer whose Advanced Blending leaves its defaults partway through the echo window needs
+/// the compositor's styled path from then on, so the sample at that time is unsafe. Echo Minimum
+/// must pass its input through — not take the minimum with a transparent stand-in for the declined
+/// sample, which would clear the result.
+#[test]
+fn echo_on_an_adjustment_layer_declines_when_a_sample_turns_unsafe() {
+    let mut p = Project::default();
+    p.settings.bit_depth = effectcraft_project::BitDepth::Bpc32;
+    let comp = Comp::new(96, 54, FrameRate::FPS_30, Tick::from_seconds_f64(2.0));
+    let cid = p.add_item("Comp", Label::Sandstone, None, ItemKind::Comp(comp.clone().into()));
+    let sid = p.add_item("Solid", Label::Red, None, ItemKind::Solid(Solid { color: [1.0, 0.0, 0.0], width: 96, height: 54, pixel_aspect: 1.0 }));
+    let mut under = build::layer(&mut p, &comp, "Under", LayerSource::Solid { item: sid }, (96, 54), None);
+    // A disabled style creates the Blending Options tree; the fill opacity alone flips the layer
+    // from plain content to the styled path between the echo samples.
+    let mut next = p.next_id;
+    st::add_style(&mut under, &mut Ids(&mut next), "dropShadow", &comp.global_light, false).unwrap();
+    p.next_id = next;
+    let fill = under.props.prop_mut(&format!("{}/blendingOptions/advancedBlending/fillOpacity", st::GROUP)).unwrap();
+    fill.keys = vec![Keyframe::new(Tick::from_seconds_f64(0.49), Value::Scalar(100.0)), Keyframe::new(Tick::from_seconds_f64(0.5), Value::Scalar(50.0))];
+    let aid = p.add_item("AdjSolid", Label::Red, None, ItemKind::Solid(Solid { color: [1.0, 1.0, 1.0], width: 96, height: 54, pixel_aspect: 1.0 }));
+    let mut adj = build::layer(&mut p, &comp, "Adj", LayerSource::Solid { item: aid }, (96, 54), None);
+    adj.switches.adjustment = true;
+    let spec = effectcraft_effects::find("ec.time.echo").unwrap();
+    let mut next = p.next_id;
+    let mut g = effectcraft_effects::instantiate(spec, &mut Ids(&mut next), spec.name, [96.0, 54.0]);
+    g.prop_mut("echoTime").unwrap().value = Value::Scalar(-0.1);
+    g.prop_mut("numberOfEchoes").unwrap().value = Value::Scalar(2.0);
+    g.prop_mut("echoOperator").unwrap().value = Value::Enum(2); // Minimum
+    p.next_id = next;
+    adj.props.sub_mut("effects").unwrap().children.push(g.into());
+    p.comp_mut(cid).unwrap().layers = vec![adj, under].into();
+    let r = crate::Renderer::new(&p, &crate::NoFootage, crate::RenderOpts::default());
+    let img = r.comp_frame(cid, Tick::from_seconds_f64(0.55));
+    // Samples 0.35 s and 0.45 s are plain; 0.55 s needs the styled path. The whole effect declines
+    // and the input (red at 50 % fill) passes through instead of being cleared by the Minimum.
+    let c = img.get(48, 27);
+    assert!(c[0] > 0.4 && c[3] > 0.4, "input must pass through: {c:?}");
+}
+
+/// #4001: a Posterize Time adjustment inside a same-size collapsed precomp runs on the parent
+/// canvas. `below_at` only sees the precomp's own layers (none below the adjustment here), so it
+/// cannot reconstruct the inherited composite and must decline: the time effect passes the parent
+/// background through instead of holding transparency and erasing it.
+#[test]
+fn posterize_time_on_an_adjustment_layer_in_a_collapsed_precomp_keeps_the_inherited_comp() {
+    let mut p = Project::default();
+    p.settings.bit_depth = effectcraft_project::BitDepth::Bpc32;
+    // Inner comp: only a full-frame Posterize Time adjustment.
+    let inner = Comp::new(96, 54, FrameRate::FPS_30, Tick::from_seconds_f64(2.0));
+    let iid = p.add_item("Inner", Label::Sandstone, None, ItemKind::Comp(inner.clone().into()));
+    let aid = p.add_item("AdjSolid", Label::Red, None, ItemKind::Solid(Solid { color: [1.0, 1.0, 1.0], width: 96, height: 54, pixel_aspect: 1.0 }));
+    let mut adj = build::layer(&mut p, &inner, "Adj", LayerSource::Solid { item: aid }, (96, 54), None);
+    adj.switches.adjustment = true;
+    let spec = effectcraft_effects::find("ec.time.posterizetime").unwrap();
+    let mut next = p.next_id;
+    let mut g = effectcraft_effects::instantiate(spec, &mut Ids(&mut next), spec.name, [96.0, 54.0]);
+    g.prop_mut("frameRate").unwrap().value = Value::Scalar(4.0);
+    p.next_id = next;
+    adj.props.sub_mut("effects").unwrap().children.push(g.into());
+    p.comp_mut(iid).unwrap().layers = vec![adj].into();
+    // Outer comp: a red background beneath the same-size collapsed precomp (Normal blend, no matte).
+    let outer = Comp::new(96, 54, FrameRate::FPS_30, Tick::from_seconds_f64(2.0));
+    let cid = p.add_item("Outer", Label::Sandstone, None, ItemKind::Comp(outer.clone().into()));
+    let rid = p.add_item("Red", Label::Red, None, ItemKind::Solid(Solid { color: [1.0, 0.0, 0.0], width: 96, height: 54, pixel_aspect: 1.0 }));
+    let red = build::layer(&mut p, &outer, "Red", LayerSource::Solid { item: rid }, (96, 54), None);
+    let mut pre = build::layer(&mut p, &outer, "Inner", LayerSource::Comp { item: iid }, (96, 54), None);
+    pre.switches.collapse = true;
+    p.comp_mut(cid).unwrap().layers = vec![pre, red].into();
+    let r = crate::Renderer::new(&p, &crate::NoFootage, crate::RenderOpts::default());
+    let img = r.comp_frame(cid, Tick::from_seconds_f64(0.3));
+    // The inherited red background must survive: holding transparency here would erase it.
+    assert_eq!(img.get(48, 27), [1.0, 0.0, 0.0, 1.0], "inherited background erased");
 }

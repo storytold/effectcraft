@@ -30,16 +30,22 @@ impl FxHost<'_, '_, '_> {
     /// Posterize Time (and Echo and the rest) hold *that* composite.
     ///
     /// `None` when this cannot be answered safely — a region of interest, a nested render past the
-    /// effect-depth limit, an effect earlier in the same stack (the composite below is not what
-    /// reaches the time effect then), or a layer below that needs more than its own content (a
-    /// mask, an effect, a layer style, 3D, a track matte, a wireframe outline). The caller then
-    /// passes its input through, which is what happened before.
+    /// effect-depth limit, an enclosing collapsed precomp (the adjustment runs on the parent's
+    /// canvas, not the layers below here), an effect earlier in the same stack (the composite below
+    /// is not what reaches the time effect then), or a layer below that needs more than its own
+    /// content (a mask, an effect, a layer style, 3D, a track matte, a wireframe outline). The
+    /// caller then passes its input through, which is what happened before.
     fn below_at(&self, t: f64) -> Option<Buf> {
         let decline = || {
             self.unsafe_sample.store(true, std::sync::atomic::Ordering::Relaxed);
             None
         };
         if self.r.opts.roi.is_some() || self.r.depth > MAX_FX_DEPTH {
+            return decline();
+        }
+        // Inside a collapsed precomp the adjustment runs on the parent's canvas: the layers below
+        // here are not the composite that reaches it, so keep the previous pass-through.
+        if self.r.outer.is_some() {
             return decline();
         }
         // A time effect holds what reaches it: on an ordinary layer that is its own source with the
