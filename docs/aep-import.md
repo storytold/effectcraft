@@ -367,6 +367,7 @@ for the `unlisted` ones. The categories:
 | `unsupported_layers` | an unknown layer type, a layer without a usable source, a precomposition loop (the layer is cut) |
 | `unsupported_items` | a project item of an unknown kind; an item made from a Photoshop layer without pixels (it shows the merged image), or from one as big as the document but not at its corner (shown at its own size), or an item as big as neither the layer nor the document (shown on the document) |
 | `damaged_data` | a header, key or value that could not be read, numbers that are not finite or beyond ±1e9 (default used); an unreadable text document (the text layer is imported with empty text), damaged style runs |
+| `essential_graphics` ("Essential Graphics") | per composition with Essential Properties (`LIST CCtl` in its `LIST CIFO` / `CIF2` / `CIF3`), how many: they and the values precomp layers override them with are not imported, so every instance shows the composition's own values |
 
 `limitations` states what the reader cannot see at all, so it can be neither imported nor counted:
 frame blending, 3D material options, audio levels, guides, the mask colour, lock, feather falloff, motion blur and RotoBezier switches, and for text per-character 3D, text on a path and style slots of unknown meaning (stored values of these that differ from the default are reported as text layer features). They are listed in every report.

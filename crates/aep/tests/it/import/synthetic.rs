@@ -1026,3 +1026,27 @@ fn french_levels_channel_aliases_cover_every_item() {
     // "Alpha" needs no alias: the same word in both languages.
     assert_eq!(popup_alias("alpha"), None);
 }
+
+#[test]
+fn essential_properties_are_reported_not_dropped_silently() {
+    // A composition's Essential Properties are `LIST CCtl` chunks in its `LIST CIFO`, `CIF2` and
+    // `CIF3` (After Effects 26.5). They are not imported, so every instance of the composition
+    // shows its own values: that must be reported.
+    let (_, r) = run(SYNTHETIC, true);
+    assert_eq!(losses(&r.unwrap(), LossCategory::EssentialGraphics), Vec::<String>::new(), "no controls, no loss");
+    let bytes = mutate(&mut |c| {
+        if let Body::List { list_type, children } = &mut c.body
+            && list_type.starts_with(b"CIF")
+        {
+            for _ in 0..2 {
+                children.push(Chunk::list(*b"CCtl", vec![Chunk::data(*b"CTyp", vec![0, 0, 0, 2])]));
+            }
+        }
+    });
+    let (_, r) = run(&bytes, true);
+    let lost = losses(&r.unwrap(), LossCategory::EssentialGraphics);
+    assert_eq!(lost.len(), 1, "{lost:?}");
+    assert!(lost[0].contains("'C'") && lost[0].contains("2 Essential Properties"), "{lost:?}");
+    let (_, refused) = run(&bytes, false);
+    assert!(refused.is_err(), "a loss refuses the import without allow_losses");
+}

@@ -127,6 +127,7 @@ pub(crate) fn run(project: &mut Project, view: &AepProject<'_, '_>, options: &Im
                 };
                 let map = TimeMap { timescale: tb.timescale, frame_duration: tb.frame_duration, rate };
                 let comp = new_comp(&header, comp_view.renderer(), &map, &name, &mut cx.col);
+                report_essential_graphics(&item, &name, &mut cx.col);
                 let id = project.add_item(&name, label, Some(parent), ItemKind::Comp(Arc::new(comp)));
                 cx.created.push(id);
                 cx.col.imported.compositions += 1;
@@ -152,6 +153,26 @@ pub(crate) fn run(project: &mut Project, view: &AepProject<'_, '_>, options: &Im
 
     let Ctx { created, col, .. } = cx;
     (root, order, created, col.finish())
+}
+
+/// Reports a composition's Essential Properties, which are not imported: each is a `LIST CCtl`
+/// in the composition item's `LIST CIFO` / `CIF2` / `CIF3` (After Effects 26.5, a file made for
+/// these tests with five properties: CIF2 and CIF3 hold all five, CIFO three of them; a
+/// composition without Essential Properties has those lists with only their `LIST CpS2` name).
+/// The largest list gives the count.
+fn report_essential_graphics(item: &AepItem<'_, '_>, name: &str, col: &mut Collector) {
+    let controls = item
+        .chunk()
+        .children()
+        .filter(|c| matches!(c.list_type(), Some(t) if t.starts_with(b"CIF")))
+        .map(|cif| cif.children().filter(|c| c.is_list(b"CCtl")).count())
+        .max()
+        .unwrap_or(0);
+    if controls > 0 {
+        col.lose_with(LossCategory::EssentialGraphics, || {
+            format!("composition '{name}': {controls} Essential Properties, not imported (instances show the composition's own values)")
+        });
+    }
 }
 
 fn item_label(item: &AepItem<'_, '_>) -> Label {
