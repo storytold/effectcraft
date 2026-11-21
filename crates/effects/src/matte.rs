@@ -139,6 +139,8 @@ fn refine(ctx: &EffectCtx, mut b: Buf, hard: bool) -> Buf {
         (o.img.width == b.img.width && o.img.height == b.img.height && (o.offset[0] - b.offset[0]).abs() < 1e-6 && (o.offset[1] - b.offset[1]).abs() < 1e-6)
             .then(|| refine_alpha(&o.img))
     };
+    // A declined time sample below discards both temporal stages: keep the spatial-only matte.
+    let spatial = na.clone();
     // Reduce Chatter: where the previous and next frames agree but this one differs, the matte
     // is chattering; average the three there. Where they disagree (motion) it is left alone.
     let chatter = (pr.f("reduceChatter") / 100.0).clamp(0.0, 1.0) as f32;
@@ -177,6 +179,9 @@ fn refine(ctx: &EffectCtx, mut b: Buf, hard: bool) -> Buf {
                 na = acc;
             }
         }
+    }
+    if ctx.env.host.is_some_and(|h| h.unsafe_time_sample()) {
+        na = spatial;
     }
     if view_edges {
         // The refined matte in grey with the analysed edge band tinted.
@@ -483,6 +488,55 @@ mod tests {
             assert!(partial(&mb) > partial(&sharp) + 10, "{id}: {} vs {}", partial(&mb), partial(&sharp));
             // Without a host both are inert.
             assert_eq!(run(id, &[("reduceChatter", num(100.0)), ("useMotionBlur", Value::Bool(true))], edge(10)), run(id, &[], edge(10)));
+        }
+    }
+
+    /// A host that serves the neighbouring frames (chatter succeeds) but declines every shutter
+    /// sample of the current frame and flags the render unsafe.
+    struct UnsafeShutter {
+        flagged: std::sync::atomic::AtomicBool,
+    }
+    impl crate::EffectHost for UnsafeShutter {
+        fn layer(&self, _: u64, _: bool) -> Option<crate::LayerPixels> {
+            None
+        }
+        fn audio(&self, _: u64, _: f64, _: usize, _: u32) -> Option<Vec<f32>> {
+            None
+        }
+        fn self_at(&self, t: f64, _: usize) -> Option<Buf> {
+            let f = (t * 10.0).round() as i64;
+            if f == 0 {
+                self.flagged.store(true, std::sync::atomic::Ordering::Relaxed);
+                return None;
+            }
+            Some(Buf { img: edge(10 + (f & 1)), offset: [0.0; 2], scale: 1.0 })
+        }
+        fn unsafe_time_sample(&self) -> bool {
+            self.flagged.load(std::sync::atomic::Ordering::Relaxed)
+        }
+    }
+
+    /// #4001: a declined shutter sample must discard *both* temporal stages. Reduce Chatter runs
+    /// on the safe neighbours first; when the motion-blur samples then decline, the chatter result
+    /// may not reach the output — the spatial-only matte is restored.
+    #[test]
+    fn refine_mattes_restore_the_spatial_matte_when_a_shutter_sample_declines() {
+        for id in ["ec.matte.refinesoft", "ec.matte.refinehard"] {
+            let base = [("feather", num(0.0)), ("smooth", num(0.0)), ("decontaminate", Value::Bool(false))];
+            let run_with = |extra: &[(&str, Value)]| {
+                let host = UnsafeShutter { flagged: std::sync::atomic::AtomicBool::new(false) };
+                let env = crate::EffectEnv { host: Some(&host), frame_rate: 10.0, ..Default::default() };
+                let mut v: Vec<(&str, Value)> = base.to_vec();
+                v.extend_from_slice(extra);
+                crate::run_fx(id, &v, edge(10), 0.0, env).img
+            };
+            // Without the temporal stages nothing is sampled: the spatial-only matte.
+            let spatial = run_with(&[]);
+            let temporal = run_with(&[("reduceChatter", num(100.0)), ("useMotionBlur", Value::Bool(true))]);
+            assert!(
+                temporal.data.iter().zip(&spatial.data).all(|(a, b)| (0..4).all(|k| (a[k] - b[k]).abs() < 1e-5)),
+                "{id}: the spatial matte must be restored"
+            );
         }
     }
 }
