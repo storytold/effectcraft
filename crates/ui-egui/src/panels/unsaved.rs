@@ -188,6 +188,15 @@ fn answer_with(app: &mut EffectcraftApp, ctx: &egui::Context, a: Answer) {
         return;
     }
     app.dialog_state.unsaved.answered = true;
+    // Don't Save is the answer to "drop the changes": New and Open then proceed even when the
+    // engine could not keep a copy of them.
+    let mut params = params;
+    if matches!(a, Answer::Discard)
+        && matches!(id.as_str(), "file.newProject" | "file.open")
+        && let Some(m) = params.as_object_mut()
+    {
+        m.insert("discard".into(), json!(true));
+    }
     let before = (app.session.path.clone(), app.session.revision);
     if let Err(e) = crate::menus::invoke(app, ctx, &id, params) {
         app.ui.status = e;
