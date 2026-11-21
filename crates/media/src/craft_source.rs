@@ -1455,9 +1455,7 @@ mod tests {
             // Independent eager placement oracle: fixed 20 ms packets, an explicit 200 ms gap,
             // no drift from alternating Matroska stamp jitter, and delay applied once.
             let delay_frames = if matroska_file { CODEC_DELAY_FRAMES } else { 0 };
-            let expected_positions: Vec<_> = (0..PACKETS)
-                .map(|i| (i * FRAME + if i >= GAP_AT { GAP } else { 0 }) as i64 - delay_frames)
-                .collect();
+            let expected_positions: Vec<_> = (0..PACKETS).map(|i| (i * FRAME + if i >= GAP_AT { GAP } else { 0 }) as i64 - delay_frames).collect();
             let (mut reference, _) = open_audio_tracks(&file, &source.bytes, [(0, PACKETS, params, delay)]).unwrap();
             reference[0].state.get_mut().unwrap().audio_starts = AudioStarts::complete(expected_positions);
 
