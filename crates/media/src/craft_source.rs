@@ -159,6 +159,13 @@ impl ContainerFile {
         }
     }
 
+    fn audio_packet_is_stamped(&self, track_idx: usize, sample_idx: usize) -> bool {
+        match self {
+            Self::Isobmff(_) => true,
+            Self::Matroska(f) => f.tracks[track_idx].samples.get(sample_idx).is_some_and(|s| s.lace == 0 || s.duration > 0),
+        }
+    }
+
     fn audio_seek_info(audio_starts: &[i64], seek_preroll_samples: i64, start: i64) -> (usize, i64) {
         let target = start.saturating_sub(seek_preroll_samples).max(0);
         let sample_idx = audio_starts.partition_point(|&s| s <= target).saturating_sub(1);
@@ -192,18 +199,89 @@ struct PacketTime {
 /// `storytold/filmcraft#359`).
 fn contiguous_starts(packets: impl IntoIterator<Item = PacketTime>, tolerance: i64) -> Vec<i64> {
     let tolerance = tolerance.max(0).unsigned_abs();
-    let mut next: Option<i64> = None;
-    packets
-        .into_iter()
-        .map(|p| {
-            let start = match next {
-                Some(n) if !p.stamped || n.abs_diff(p.stamp) <= tolerance => n,
-                _ => p.stamp,
-            };
-            next = p.samples.and_then(|k| start.checked_add(k));
-            start
+    let mut next = None;
+    packets.into_iter().map(|p| place_packet(p, &mut next, tolerance)).collect()
+}
+
+fn packet_start(packet: PacketTime, next: Option<i64>, tolerance: u64) -> i64 {
+    match next {
+        Some(n) if !packet.stamped || n.abs_diff(packet.stamp) <= tolerance => n,
+        _ => packet.stamp,
+    }
+}
+
+fn place_packet(packet: PacketTime, next: &mut Option<i64>, tolerance: u64) -> i64 {
+    let start = packet_start(packet, *next, tolerance);
+    *next = packet.samples.and_then(|n| start.checked_add(n));
+    start
+}
+
+struct OpusPrefix {
+    len: usize,
+    next: Option<i64>,
+    tolerance: u64,
+}
+
+struct AudioStarts {
+    // For Opus, unvisited entries still hold raw container stamps. Resolve in place
+    // as packets arrive, reusing this table for the finished timeline.
+    positions: Vec<i64>,
+    opus: Option<OpusPrefix>,
+}
+
+impl AudioStarts {
+    fn complete(positions: Vec<i64>) -> Self {
+        Self { positions, opus: None }
+    }
+
+    fn opus(positions: Vec<i64>, tolerance: i64) -> Self {
+        let opus = (!positions.is_empty()).then_some(OpusPrefix { len: 0, next: None, tolerance: tolerance.max(0).unsigned_abs() });
+        Self { positions, opus }
+    }
+
+    fn start(&self, file: &ContainerFile, track: usize, idx: usize) -> Option<i64> {
+        let stamp = *self.positions.get(idx)?;
+        let Some(prefix) = &self.opus else { return Some(stamp) };
+        if idx < prefix.len {
+            return Some(stamp);
+        }
+        debug_assert_eq!(idx, prefix.len);
+        (idx == prefix.len).then(|| {
+            let packet = PacketTime { stamp, stamped: file.audio_packet_is_stamped(track, idx), samples: None };
+            packet_start(packet, prefix.next, prefix.tolerance)
         })
-        .collect()
+    }
+
+    fn observe(&mut self, file: &ContainerFile, track: usize, idx: usize, packet: Option<&[u8]>) {
+        let Some(prefix) = &mut self.opus else { return };
+        if idx != prefix.len {
+            return;
+        }
+        let timing = PacketTime {
+            stamp: self.positions[idx],
+            stamped: file.audio_packet_is_stamped(track, idx),
+            samples: packet.and_then(opus_packet_samples).map(i64::from),
+        };
+        self.positions[idx] = place_packet(timing, &mut prefix.next, prefix.tolerance);
+        prefix.len += 1;
+        if prefix.len == self.positions.len() {
+            self.opus = None;
+        }
+    }
+
+    fn finish_for_seek(&mut self, file: &ContainerFile, source: &dyn ByteSource, track: usize) -> Result<()> {
+        // The exact recurrence can carry a timing phase across arbitrarily many
+        // rounded or laced packets. A first discontinuous seek may still have to
+        // index the unread suffix; normal open and sequential decode never do this.
+        while let Some(idx) = self.opus.as_ref().map(|prefix| prefix.len) {
+            if filmcraft_media::cancel::cancelled() {
+                return Err(MediaError::Cancelled);
+            }
+            let packet = file.read_sample(source, track, idx).ok();
+            self.observe(file, track, idx, packet.as_deref());
+        }
+        Ok(())
+    }
 }
 
 fn fixed_packet_samples(dec: &mut AudioTrackDecoder, codec: CodecId, lookahead: &[Vec<u8>]) -> Option<i64> {
@@ -252,18 +330,11 @@ fn opus_packet_samples(pkt: &[u8]) -> Option<u32> {
     (n > 0 && n <= 5760).then_some(n)
 }
 
-fn compute_audio_starts(
-    container: &ContainerFile,
-    source: &dyn ByteSource,
-    track_idx: usize,
-    codec: CodecId,
-    native_rate: u32,
-    fixed_samples: Option<i64>,
-) -> Vec<i64> {
+fn compute_audio_starts(container: &ContainerFile, track_idx: usize, codec: CodecId, native_rate: u32, fixed_samples: Option<i64>) -> AudioStarts {
     let rate = i128::from(native_rate);
     match container {
         ContainerFile::Isobmff(f) => {
-            let Some(track) = f.tracks.get(track_idx) else { return Vec::new() };
+            let Some(track) = f.tracks.get(track_idx) else { return AudioStarts::complete(Vec::new()) };
             let ts = i128::from(track.timescale.max(1));
             let stamps: Vec<i64> = (0..track.samples.len())
                 .map(|i| {
@@ -273,21 +344,17 @@ fn compute_audio_starts(
                 .collect();
             let unit = i64::try_from((rate + ts - 1) / ts).unwrap_or(i64::MAX);
             if codec == CodecId::Opus {
-                let packets = stamps.into_iter().enumerate().map(|(i, stamp)| {
-                    let samples = f.read_sample(source, track_idx, i).ok().and_then(|p| opus_packet_samples(&p)).map(i64::from);
-                    PacketTime { stamp, stamped: true, samples }
-                });
-                return contiguous_starts(packets, unit.saturating_mul(2).saturating_add(1));
+                return AudioStarts::opus(stamps, unit.saturating_mul(2).saturating_add(1));
             }
             let Some(frame) = fixed_samples else {
-                return stamps;
+                return AudioStarts::complete(stamps);
             };
             let tolerance = (frame / 2).max(unit.saturating_mul(2).saturating_add(1));
             let packets = stamps.into_iter().map(|stamp| PacketTime { stamp, stamped: true, samples: Some(frame) });
-            contiguous_starts(packets, tolerance)
+            AudioStarts::complete(contiguous_starts(packets, tolerance))
         }
         ContainerFile::Matroska(f) => {
-            let Some(track) = f.tracks.get(track_idx) else { return Vec::new() };
+            let Some(track) = f.tracks.get(track_idx) else { return AudioStarts::complete(Vec::new()) };
             // Indexed PTS already subtracts CodecDelay rounded to the container clock.
             // Translate between that clock and the warm path's whole-frame delay.
             let tick_ns = i128::from(f.info.timestamp_scale.max(1));
@@ -300,17 +367,13 @@ fn compute_audio_starts(
             };
             let tick_samples = i64::try_from(i128::from(track.ticks_to_ns(2)) * rate / 1_000_000_000).unwrap_or(i64::MAX).saturating_add(1);
             if codec == CodecId::Opus {
-                let packets = track.samples.iter().enumerate().map(|(i, s)| {
-                    let samples = f.read_sample(source, track_idx, i).ok().and_then(|p| opus_packet_samples(&p)).map(i64::from);
-                    PacketTime { stamp: stamp_for(s.pts), stamped: s.lace == 0 || s.duration > 0, samples }
-                });
-                return contiguous_starts(packets, tick_samples);
+                return AudioStarts::opus(track.samples.iter().map(|s| stamp_for(s.pts)).collect(), tick_samples);
             }
             let Some(frame) = fixed_samples else {
-                return track.samples.iter().map(|s| stamp_for(s.pts)).collect();
+                return AudioStarts::complete(track.samples.iter().map(|s| stamp_for(s.pts)).collect());
             };
             let packets = track.samples.iter().map(|s| PacketTime { stamp: stamp_for(s.pts), stamped: s.lace == 0 || s.duration > 0, samples: Some(frame) });
-            contiguous_starts(packets, (frame / 2).max(tick_samples))
+            AudioStarts::complete(contiguous_starts(packets, (frame / 2).max(tick_samples)))
         }
     }
 }
@@ -341,7 +404,12 @@ where
         let channels = u32::from(dec.layout().channels()).max(1);
         let codec = dec.codec();
         let fixed_samples = fixed_packet_samples(&mut dec, codec, &lookahead);
-        let audio_starts = compute_audio_starts(container, source, idx, codec, native_rate, fixed_samples);
+        let mut audio_starts = compute_audio_starts(container, idx, codec, native_rate, fixed_samples);
+        if codec == CodecId::Opus {
+            for (s_idx, pkt) in lookahead.iter().enumerate() {
+                audio_starts.observe(container, idx, s_idx, Some(pkt));
+            }
+        }
         let seek_preroll_samples = match container {
             ContainerFile::Matroska(f) if codec == CodecId::Opus => {
                 let preroll_ns = i128::from(f.tracks[idx].seek_pre_roll_ns.max(80_000_000));
@@ -349,7 +417,7 @@ where
             }
             _ => 0,
         };
-        let initial_pos = audio_starts.first().copied().unwrap_or(0);
+        let initial_pos = audio_starts.start(container, idx, 0).unwrap_or(0);
         audio_infos.push(AudioStreamInfo {
             sample_rate: native_rate,
             channels,
@@ -359,9 +427,8 @@ where
         audio_tracks.push(AudioTrackEntry {
             track_idx: idx,
             native_rate,
-            audio_starts,
             seek_preroll_samples,
-            state: Mutex::new(AudioTrackState { decoder: dec, next_sample: 0, decoded_pos: initial_pos, buf: Vec::new() }),
+            state: Mutex::new(AudioTrackState { decoder: dec, audio_starts, next_sample: 0, decoded_pos: initial_pos, buf: Vec::new() }),
         });
     }
     Some((audio_tracks, audio_infos))
@@ -632,6 +699,7 @@ struct VideoState {
 
 struct AudioTrackState {
     decoder: AudioTrackDecoder,
+    audio_starts: AudioStarts,
     next_sample: usize,
     /// Sample index (in native-rate frames) of `buf[0]` relative to track start (0).
     decoded_pos: i64,
@@ -642,7 +710,6 @@ struct AudioTrackState {
 struct AudioTrackEntry {
     track_idx: usize,
     native_rate: u32,
-    audio_starts: Vec<i64>,
     seek_preroll_samples: i64,
     state: Mutex<AudioTrackState>,
 }
@@ -763,7 +830,6 @@ impl MediaSource for CraftMediaSource {
             entry.track_idx,
             native_rate,
             channels_count,
-            &entry.audio_starts,
             entry.seek_preroll_samples,
             &mut state,
             native_start,
@@ -801,7 +867,6 @@ fn decode_audio_range(
     track_idx: usize,
     native_rate: u32,
     channels_count: usize,
-    audio_starts: &[i64],
     seek_preroll_samples: i64,
     state: &mut AudioTrackState,
     start: i64,
@@ -816,7 +881,8 @@ fn decode_audio_range(
     let buf_len = state.buf.first().map_or(0, Vec::len) as i64;
     let buf_end = state.decoded_pos.saturating_add(buf_len);
     if start < state.decoded_pos || start > buf_end + i64::from(native_rate) * 2 {
-        let (seek_idx, decoded_pos) = ContainerFile::audio_seek_info(audio_starts, seek_preroll_samples, start);
+        state.audio_starts.finish_for_seek(file, source, track_idx)?;
+        let (seek_idx, decoded_pos) = ContainerFile::audio_seek_info(&state.audio_starts.positions, seek_preroll_samples, start);
         state.decoder.reset();
         state.next_sample = seek_idx;
         state.decoded_pos = decoded_pos;
@@ -835,11 +901,12 @@ fn decode_audio_range(
             return Err(MediaError::Cancelled);
         }
         let idx = state.next_sample;
-        let pk_start = audio_starts.get(idx).copied().unwrap_or_else(|| state.decoded_pos + state.buf.first().map_or(0, Vec::len) as i64);
+        let pk_start = state.audio_starts.start(file, track_idx, idx).unwrap_or_else(|| state.decoded_pos + state.buf.first().map_or(0, Vec::len) as i64);
         if pk_start >= end {
             break;
         }
         let pkt = file.read_sample(source, track_idx, idx)?;
+        state.audio_starts.observe(file, track_idx, idx, Some(&pkt));
         state.next_sample = idx + 1;
         let block = state.decoder.decode(&pkt).map_err(|e| MediaError::Decode(e.to_string()))?;
         let buf_len = state.buf.first().map_or(0, Vec::len) as i64;
@@ -1293,6 +1360,130 @@ fn estimate_matroska_frame_rate(track: &matroska::Track) -> FrameRate {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // One 20 ms mono packet from craft-audio's generated tone.opus test fixture.
+    // Re-mux it into ordinary small audio-only files without an external encoder.
+    const OPUS_TONE: &[u8] = b"\x78\x82\x01\xB7\x6C\x7E\x40\xE6\x00\x00\x0A\xBE\x9A\xA7\xBE\xFF\xB6\x85\xD7\x0A\x71\xE0\xDD\
+        \x6B\xA0\xE3\xC6\xC5\xC3\x32\xC6\x64\x1E\x6E\x63\x52\x3A\x45\x0C\x8A\x53\x8F\x44\x18\xB0\x8C\
+        \x64\xAB\xEC\x98\x96\x79\x6C\x54\x53\x30\x55\x4E\x82\xE4\x16\xCA\x59\x49\xD8\xC7\x09\x5D\x59";
+
+    struct OpusPayloadReads {
+        bytes: Vec<u8>,
+        offsets: Vec<u64>,
+        packets: Mutex<Vec<usize>>,
+    }
+
+    impl ByteSource for OpusPayloadReads {
+        fn len(&self) -> u64 {
+            self.bytes.len() as u64
+        }
+
+        fn read_at(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<()> {
+            if buf.len() == OPUS_TONE.len()
+                && let Ok(index) = self.offsets.binary_search(&offset)
+            {
+                self.packets.lock().unwrap().push(index);
+            }
+            self.bytes.as_slice().read_at(offset, buf)
+        }
+    }
+
+    #[test]
+    fn opus_open_and_first_sequential_read_do_not_scan_tail_packets() {
+        use std::io::Cursor;
+
+        const RATE: u32 = 48_000;
+        const FRAME: usize = 960;
+        const PACKETS: usize = 192;
+        const GAP_AT: usize = 96;
+        const GAP: usize = 9_600;
+        const CODEC_DELAY_NS: i64 = 6_500_000;
+        const CODEC_DELAY_FRAMES: i64 = 312;
+
+        let opus = isobmff::OpusConfig { output_channels: 1, pre_skip: CODEC_DELAY_FRAMES as u16, input_sample_rate: RATE, ..Default::default() };
+        assert_eq!(opus_packet_samples(OPUS_TONE), Some(FRAME as u32));
+        for matroska_file in [false, true] {
+            let (bytes, file, offsets, params, delay) = if matroska_file {
+                let mut track = matroska::TrackSpec::new(matroska::TrackKind::Audio, "A_OPUS");
+                track.audio = Some((f64::from(RATE), 1, None));
+                track.codec_private = opus.opus_head();
+                track.codec_delay_ns = CODEC_DELAY_NS as u64;
+                track.seek_pre_roll_ns = 80_000_000;
+                track.default_duration_ns = Some(20_000_000);
+                let mut mux = matroska::MkvWriter::new(Cursor::new(Vec::new()), vec![track], matroska::MuxOptions::default()).unwrap();
+                for idx in 0..PACKETS {
+                    let gap_ns = if idx >= GAP_AT { 200_000_000 } else { 0 };
+                    let jitter = if idx % 2 == 0 { 0 } else { 1_000_000 };
+                    mux.write_frame(0, idx as i64 * 20_000_000 + gap_ns + jitter - CODEC_DELAY_NS, true, OPUS_TONE, None).unwrap();
+                }
+                let bytes = mux.finish().unwrap().into_inner();
+                let file = matroska::open(bytes.as_slice()).unwrap();
+                let track = &file.tracks[0];
+                let offsets = track.samples.iter().map(|s| s.offset).collect::<Vec<_>>();
+                let params = track.codec_params();
+                (bytes, ContainerFile::Matroska(Box::new(file)), offsets, params, CODEC_DELAY_NS as u64)
+            } else {
+                let entry = isobmff::SampleEntry {
+                    format: isobmff::FourCc(*b"Opus"),
+                    data_reference_index: 1,
+                    codec: isobmff::CodecConfig::Opus(opus.clone()),
+                    video: None,
+                    audio: Some(isobmff::AudioParams { channels: 1, sample_size: 16, sample_rate: f64::from(RATE), ..Default::default() }),
+                    bitrate: None,
+                };
+                let mut mux = isobmff::Mp4Writer::new(Cursor::new(Vec::new()), isobmff::WriterOptions::new(isobmff::Brand::Mp4)).unwrap();
+                mux.add_track(isobmff::TrackConfig::new(entry, RATE)).unwrap();
+                for idx in 0..PACKETS {
+                    let duration = (if idx + 1 == GAP_AT { FRAME + GAP } else { FRAME }) as u32;
+                    mux.write_sample(0, isobmff::WriteSample { data: OPUS_TONE, duration, composition_offset: 0, is_sync: true }).unwrap();
+                }
+                let bytes = mux.finish().unwrap().into_inner();
+                let file = isobmff::open(bytes.as_slice()).unwrap();
+                let track = &file.tracks[0];
+                let offsets = track.samples.iter().map(|s| s.offset).collect::<Vec<_>>();
+                let params = track.codec_params();
+                (bytes, ContainerFile::Isobmff(file), offsets, params, 0)
+            };
+            assert_eq!(offsets.len(), PACKETS);
+            assert!(offsets.windows(2).all(|w| w[0] < w[1]));
+            // Start counting after container metadata indexing. This isolates payload reads by the app
+            // opener, independent of how the demuxer peeks at block headers or buffers the file.
+            let source = OpusPayloadReads { bytes, offsets, packets: Mutex::new(Vec::new()) };
+            let (mut tracks, _) = open_audio_tracks(&file, &source, [(0, PACKETS, params.clone(), delay)]).unwrap();
+            assert_eq!(*source.packets.lock().unwrap(), (0..AUDIO_LOOKAHEAD).collect::<Vec<_>>());
+
+            // Independent eager placement oracle: fixed 20 ms packets, an explicit 200 ms gap,
+            // no drift from alternating Matroska stamp jitter, and delay applied once.
+            let delay_frames = if matroska_file { CODEC_DELAY_FRAMES } else { 0 };
+            let expected_positions: Vec<_> = (0..PACKETS)
+                .map(|i| (i * FRAME + if i >= GAP_AT { GAP } else { 0 }) as i64 - delay_frames)
+                .collect();
+            let (mut reference, _) = open_audio_tracks(&file, &source.bytes, [(0, PACKETS, params, delay)]).unwrap();
+            reference[0].state.get_mut().unwrap().audio_starts = AudioStarts::complete(expected_positions);
+
+            let decode = |track: &mut AudioTrackEntry, src: &dyn ByteSource, start, frames| {
+                decode_audio_range(&file, src, 0, RATE, 1, track.seek_preroll_samples, track.state.get_mut().unwrap(), start, frames).unwrap()
+            };
+            let early = decode(&mut tracks[0], &source, 0, 12 * FRAME);
+            assert_eq!(early, decode(&mut reference[0], &source.bytes, 0, 12 * FRAME));
+            assert!(early[0].iter().all(|s| s.is_finite()));
+            assert!(early[0].iter().any(|s| s.abs() > 1e-5), "real Opus decoding, not a silent fallback");
+            {
+                let reads = source.packets.lock().unwrap();
+                assert!(reads.iter().any(|&i| i >= AUDIO_LOOKAHEAD), "exercise the incremental frontier");
+                assert!(reads.iter().all(|&i| i < 14) && reads.len() <= AUDIO_LOOKAHEAD + 14, "{reads:?}");
+            }
+
+            // The old exact eager index is still the oracle for a genuine discontinuous seek.
+            let start = (150 * FRAME + GAP) as i64 - delay_frames;
+            let cold = decode(&mut tracks[0], &source, start, 3 * FRAME);
+            assert_eq!(cold, decode(&mut reference[0], &source.bytes, start, 3 * FRAME));
+            assert!(cold[0].iter().any(|s| s.abs() > 1e-5));
+            let state = tracks[0].state.get_mut().unwrap();
+            assert_eq!(state.audio_starts.positions, reference[0].state.get_mut().unwrap().audio_starts.positions);
+            assert!(state.audio_starts.opus.is_none());
+        }
+    }
 
     #[test]
     fn worker_cap_is_bounded() {
