@@ -751,7 +751,7 @@ fn open_mxf(name: &str, source: SharedBytes) -> Option<Result<SharedSource>> {
             .map(|entry| {
                 let presented_len = match entry.backend {
                     AudioBackend::MxfPcm { presented_len, .. } => i64::try_from(presented_len).unwrap_or(i64::MAX),
-                    AudioBackend::Decoder(_) => 0,
+                    AudioBackend::Decoder { .. } => 0,
                 };
                 Tick::from_units(presented_len, i64::from(entry.native_rate))
             })
