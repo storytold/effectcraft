@@ -179,6 +179,21 @@ fn stroke_taper_narrows_each_end_by_shape() {
     assert!(dabs(&[("strokeTaper/startLength", num(100.0))]) < dabs(&[]));
 }
 
+/// A taper shorter than a pixel on a very long stroke is not covered by the body: the slack on
+/// the ends of a stroke's pieces is a fixed fraction of a pixel, not of the piece's length.
+#[test]
+fn stroke_tiny_taper_on_a_long_stroke_is_not_covered() {
+    let masks = vec![MaskShape { name: "Mask 1".into(), points: vec![[8.25, 32.5], [3848.25, 32.5]], closed: false, inverted: false }];
+    let env = EffectEnv { masks: &masks, ..Default::default() };
+    let set = [("brushSize", num(12.0)), ("brushHardness", num(100.0)), ("paintStyle", Value::Enum(1)), ("strokeTaper/startLength", num(0.01))];
+    let out = run_env("ec.generate.stroke", &set, Image::new(3860, 64), 0.0, env);
+    // Pixel centre (8.5, 37.5): 0.25 px into the 0.38 px taper and 5 px off the axis, just
+    // outside the taper's slanted edge (so only antialiased, under half), where the 6 px body
+    // reaching back over the taper would cover it fully.
+    let a = out.img.data[37 * 3860 + 8][3];
+    assert!(a < 0.5, "coverage {a} outside the taper's edge");
+}
+
 /// A short taper cuts only its own end of the stroke into pieces: the full-width body stays one
 /// piece, so tapering a long stroke does not multiply the rasterising work along all of it.
 #[test]
@@ -209,7 +224,9 @@ fn stroke_short_taper_comes_to_a_point() {
     // corners get round dabs.
     let line = vec![[8.0, 32.0], [56.0, 32.0]];
     let dense: Vec<[f64; 2]> = (8..=56).map(|x| [x as f64, 32.0]).collect();
-    for points in [line, dense] {
+    // A redundant vertex a pixel from the tip, on pixel centres.
+    let collinear = vec![[8.0, 32.5], [9.0, 32.5], [56.0, 32.5]];
+    for points in [line, dense, collinear] {
         let n = points.len();
         let masks = vec![MaskShape { name: "Mask 1".into(), points, closed: false, inverted: false }];
         let env = EffectEnv { masks: &masks, ..Default::default() };

@@ -76,14 +76,17 @@ fn fg2_segs(@builtin(global_invocation_id) gid: vec3<u32>) {
         let l2 = dx * dx + dy * dy;
         var d = 0.0;
         if (data[at + 7u] > 0.5) {
-            // Ribbon: square ends (with slack against f32 rounding), linear half-width.
+            // Ribbon: square ends with 1e-3 px of slack (raster.rs RIBBON_END_SLACK), linear
+            // half-width.
             if (l2 <= 1e-12) {
                 continue;
             }
-            let tr = ((px - ax) * dx + (py - ay) * dy) / l2;
-            if (tr < -1e-4 || tr > 1.0001) {
+            let l = sqrt(l2);
+            let along = ((px - ax) * dx + (py - ay) * dy) / l;
+            if (along < -1e-3 || along > l + 1e-3) {
                 continue;
             }
+            let tr = along / l;
             let rb = data[at + 6u];
             let slant = sqrt(1.0 + (rb - r) * (rb - r) / l2);
             r = mix(r, rb, clamp(tr, 0.0, 1.0));

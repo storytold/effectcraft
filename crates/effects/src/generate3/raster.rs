@@ -71,9 +71,10 @@ pub struct Ribbon {
     pub rb: f64,
 }
 
-/// Slack on a ribbon's square ends (as a fraction of its length; the GPU kernel uses the same) so that a pixel centre on the
-/// shared end of two pieces is never missed by both through rounding.
-const RIBBON_END_SLACK: f64 = 1e-4;
+/// Slack in pixels on a ribbon's square ends (the GPU kernel uses the same), so that a pixel
+/// centre on the shared end of two pieces is never missed by both through rounding. It is in
+/// pixels, not a fraction of the length, so a long piece does not reach over a short neighbour.
+const RIBBON_END_SLACK: f64 = 1e-3;
 
 /// Max-combine ribbons into `out` with the brush falloff of [`raster_segs`]: the distance is
 /// measured across the ribbon, against its half-width where the pixel centre falls along it.
@@ -114,10 +115,11 @@ pub(crate) fn raster_ribbons(out: &mut Plane, ribbons: &[Ribbon], hardness: f64)
             let x1 = ((s.a[0].max(s.b[0]) + pad).ceil().max(0.0) as usize).min(w);
             for (x, o) in row.iter_mut().enumerate().take(x1).skip(x0) {
                 let px = x as f64 + 0.5;
-                let t = ((px - s.a[0]) * dx + (py - s.a[1]) * dy) / l2;
-                if !(-RIBBON_END_SLACK..=1.0 + RIBBON_END_SLACK).contains(&t) {
+                let along = ((px - s.a[0]) * dx + (py - s.a[1]) * dy) / l;
+                if !(-RIBBON_END_SLACK..=l + RIBBON_END_SLACK).contains(&along) {
                     continue;
                 }
+                let t = along / l;
                 let r = s.ra + (s.rb - s.ra) * t.clamp(0.0, 1.0);
                 let d = r + (((px - s.a[0]) * dy - (py - s.a[1]) * dx).abs() / l - r) / slant;
                 let (inner, outer) = (r * hard - 0.5, r + 0.5);
