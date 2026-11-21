@@ -279,3 +279,92 @@ pub(crate) fn probe_source(path: &Path) -> Option<Result<MediaSource>> {
 pub(crate) fn probe_source(_path: &Path) -> Option<Result<MediaSource>> {
     None
 }
+
+#[cfg(all(test, any(unix, windows)))]
+mod tests {
+    use super::*;
+    use craft_media::isobmff::{self, Brand, CodecConfig, Mp4Writer, SampleEntry, TrackConfig, WriteSample, WriterOptions};
+    use filmcraft_frame::PixelData;
+    use image::ExtendedColorType;
+    use image::codecs::jpeg::JpegEncoder;
+
+    const WIDTH: u16 = 16;
+    const HEIGHT: u16 = 16;
+
+    fn generated_mjpeg_mov() -> Arc<[u8]> {
+        // Original synthetic fixture: encode two authored solid RGB tiles, not external media.
+        let mut writer = Mp4Writer::new(std::io::Cursor::new(Vec::new()), WriterOptions::new(Brand::Mov)).expect("MOV writer");
+        let video = writer.add_track(TrackConfig::new(SampleEntry::jpeg(WIDTH, HEIGHT), 1_000)).expect("MJPEG track");
+        for rgb in [[220, 32, 24], [19, 36, 224]] {
+            let rgb = rgb.repeat(usize::from(WIDTH) * usize::from(HEIGHT));
+            let mut jpeg = Vec::new();
+            JpegEncoder::new_with_quality(&mut jpeg, 90)
+                .encode(&rgb, u32::from(WIDTH), u32::from(HEIGHT), ExtendedColorType::Rgb8)
+                .expect("encode synthetic JPEG frame");
+            writer
+                .write_sample(video, WriteSample { data: &jpeg, duration: 40, composition_offset: 0, is_sync: true })
+                .expect("write JPEG MOV sample");
+        }
+        writer.finish().expect("finish MJPEG MOV").into_inner().into()
+    }
+
+    fn legacy_mjpeg_pixels(source: &MediaSource, time: Tick) -> Arc<Vec<u8>> {
+        let frame = match source.video_frame(time, 1.0).expect("decode legacy MJPEG") {
+            DecodedFrame::Film(frame) => Some(frame),
+            DecodedFrame::Craft(_) => None,
+        }
+        .expect("the MJPEG baseline must use FilmCraft");
+        assert_eq!((frame.width, frame.height), (u32::from(WIDTH), u32::from(HEIGHT)));
+        let rgba = match &frame.data {
+            PixelData::Rgba8(rgba) => Some(rgba),
+            _ => None,
+        }
+        .expect("legacy MJPEG decodes to RGBA8");
+        assert_eq!(rgba.len(), usize::from(WIDTH) * usize::from(HEIGHT) * 4);
+        rgba.clone()
+    }
+
+    #[test]
+    fn generated_mjpeg_mov_preserves_legacy_probe_and_seek() {
+        let bytes = generated_mjpeg_mov();
+        let mov = isobmff::open(bytes.as_ref()).expect("demux generated MOV");
+        assert!(mov.is_quicktime);
+        assert_eq!(mov.tracks.len(), 1);
+        let track = &mov.tracks[0];
+        assert!(matches!(track.codec(), Some(CodecConfig::Jpeg { .. })));
+        assert_eq!(track.timescale, 1_000);
+        assert_eq!(track.samples.len(), 2);
+        assert_eq!((track.samples[0].pts, track.samples[1].pts), (0, 40));
+
+        let dir = tempfile::tempdir().expect("fixture directory");
+        let name = "generated-mjpeg.mov";
+        let path = dir.path().join(name);
+        std::fs::write(&path, bytes.as_ref()).expect("write MOV fixture");
+        let native_probe = crate::probe(&path).expect("native MJPEG probe");
+        let memory_probe = crate::probe_bytes(name, bytes.clone()).expect("registered-byte MJPEG probe");
+        let direct = filmcraft_codecs::open_bytes(name, bytes.clone()).expect("direct FilmCraft reference");
+        let legacy_probe = crate::probe::footage_from_info(name, direct.info());
+        let step = Tick::from_units(1, 25);
+        for probe in [native_probe, memory_probe] {
+            assert!(probe.has_video && !probe.has_audio);
+            assert_eq!((probe.width, probe.height), (u32::from(WIDTH), u32::from(HEIGHT)));
+            assert_eq!((probe.frame_rate.num, probe.frame_rate.den), (25, 1));
+            assert_eq!(probe.duration, Tick::from_units(2, 25));
+            assert_eq!(probe.codec, legacy_probe.codec);
+            assert_eq!(probe.color_profile, legacy_probe.color_profile);
+        }
+
+        let native = open_source(&path).expect("native source").0.expect("open native MJPEG");
+        let memory = open_bytes(name, bytes).expect("open memory MJPEG");
+        assert!(matches!(&native, MediaSource::Film(_)));
+        assert!(matches!(&memory, MediaSource::Film(_)));
+        let legacy = MediaSource::Film(direct);
+        for (time, dominant) in [(Tick::ZERO, 0), (step, 2), (Tick::ZERO, 0)] {
+            let expected = legacy_mjpeg_pixels(&legacy, time);
+            // Independent colour check: a repeated first frame or blank decode cannot pass parity.
+            assert!(expected.chunks_exact(4).all(|p| p[dominant] > 180 && p[2 - dominant] < 80 && p[3] == 255));
+            assert_eq!(legacy_mjpeg_pixels(&native, time), expected);
+            assert_eq!(legacy_mjpeg_pixels(&memory, time), expected);
+        }
+    }
+}
