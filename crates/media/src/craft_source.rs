@@ -93,9 +93,16 @@ pub(crate) fn open_bytes(name: &str, bytes: Arc<[u8]>) -> Option<Result<SharedSo
     if looks_like_matroska(&bytes) {
         return open_matroska(name, Arc::new(bytes));
     }
-    let head_len = <[u8]>::len(&bytes).min(64);
-    let head = bytes[..head_len].to_vec();
-    open_standalone_audio(name, &head, Arc::new(bytes))
+    #[cfg(any(unix, windows))]
+    {
+        let head_len = <[u8]>::len(&bytes).min(64);
+        let head = bytes[..head_len].to_vec();
+        open_standalone_audio(name, &head, Arc::new(bytes))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        None
+    }
 }
 
 enum ContainerFile {
@@ -628,8 +635,10 @@ impl MediaSource for CraftMediaSource {
     }
 }
 
+#[cfg(any(unix, windows))]
 struct SharedBytesSource(SharedBytes);
 
+#[cfg(any(unix, windows))]
 impl ByteSource for SharedBytesSource {
     fn len(&self) -> u64 {
         self.0.len()
@@ -640,18 +649,21 @@ impl ByteSource for SharedBytesSource {
     }
 }
 
+#[cfg(any(unix, windows))]
 struct StandaloneAudioState {
     decoder: craft_audio::Decoder<'static>,
     decoded_pos: i64,
     buf: Vec<Vec<f32>>,
 }
 
+#[cfg(any(unix, windows))]
 struct StandaloneAudioSource {
     info: MediaInfo,
     native_rate: u32,
     state: Mutex<StandaloneAudioState>,
 }
 
+#[cfg(any(unix, windows))]
 impl MediaSource for StandaloneAudioSource {
     fn info(&self) -> &MediaInfo {
         &self.info
@@ -669,12 +681,9 @@ impl MediaSource for StandaloneAudioSource {
         if stream != 0 {
             return Err(MediaError::NoStream("audio"));
         }
-        if sample_rate == 0 {
-            return Err(MediaError::Decode("invalid audio sample rate 0".into()));
-        }
         let channels_count = self.info.audio_streams.first().map_or(2, |s| s.channels as usize);
-        if frames == 0 {
-            return Ok(AudioBuffer::new(sample_rate, channels_count as u16, 0));
+        if frames == 0 || sample_rate == 0 {
+            return Ok(AudioBuffer::new(sample_rate, channels_count as u16, frames));
         }
         let native_rate = self.native_rate;
         let (native_start, native_frames) = if sample_rate == native_rate {
@@ -694,6 +703,7 @@ impl MediaSource for StandaloneAudioSource {
     }
 }
 
+#[cfg(any(unix, windows))]
 fn decode_standalone_range(native_rate: u32, channels_count: usize, state: &mut StandaloneAudioState, start: i64, frames: usize) -> Result<Vec<Vec<f32>>> {
     let mut out = vec![vec![0.0f32; frames]; channels_count];
     let end = start.saturating_add(frames as i64);
@@ -774,6 +784,7 @@ fn resample_audio(decoded: &[Vec<f32>], channels_count: usize, native_rate: u32,
     resampled
 }
 
+#[cfg(any(unix, windows))]
 fn open_standalone_audio(name: &str, head: &[u8], source: SharedBytes) -> Option<Result<SharedSource>> {
     let ext = std::path::Path::new(name).extension().and_then(|e| e.to_str());
     let container = craft_audio::detect_container(head, ext)?;
