@@ -282,15 +282,21 @@ impl StrokeTaper {
         }
     }
 
-    /// Brush radius factor (0–1) at distance `s` along a drawn stroke `len` long.
-    fn factor(&self, s: f64, len: f64) -> f64 {
-        let (mut ls, mut le) = (self.start * len, self.end * len);
-        // Tapers longer than the stroke together share it in proportion.
+    /// Start and end taper lengths on a drawn stroke `len` long; tapers longer than the stroke
+    /// together share it in proportion.
+    fn lengths(&self, len: f64) -> (f64, f64) {
+        let (ls, le) = (self.start * len, self.end * len);
         if ls + le > len && ls + le > 0.0 {
             let f = len / (ls + le);
-            ls *= f;
-            le *= f;
+            (ls * f, le * f)
+        } else {
+            (ls, le)
         }
+    }
+
+    /// Brush radius factor (0–1) at distance `s` along a drawn stroke `len` long.
+    fn factor(&self, s: f64, len: f64) -> f64 {
+        let (ls, le) = self.lengths(len);
         let mut k: f64 = 1.0;
         if ls > 0.0 && s < ls {
             k = k.min(Self::ramp(s / ls, self.start_shape));
@@ -302,8 +308,9 @@ impl StrokeTaper {
     }
 }
 
-/// Segments along a polyline with the brush radius `r` narrowed by `taper`: each segment is
-/// cut into short pieces whose radius follows the taper, so the width changes smoothly.
+/// Segments along a polyline with the brush radius `r` narrowed by `taper`. Only the tapered
+/// ends are cut into short pieces whose radius follows the taper (so the width changes
+/// smoothly); the full-width body between them stays one segment per polyline edge.
 fn tapered_segs(pts: &[[f64; 2]], r: f64, taper: &StrokeTaper, out: &mut Vec<Seg>) {
     let lens: Vec<f64> = pts.windows(2).map(|w| ((w[1][0] - w[0][0]).powi(2) + (w[1][1] - w[0][1]).powi(2)).sqrt()).collect();
     let len: f64 = lens.iter().sum();
@@ -311,16 +318,34 @@ fn tapered_segs(pts: &[[f64; 2]], r: f64, taper: &StrokeTaper, out: &mut Vec<Seg
         poly_segs(pts, false, r, 1.0, out);
         return;
     }
-    // Pieces about a pixel long (never more than 100 000 of them for one stroke).
-    let step = (r * 0.5).clamp(0.5, 2.0).max(len / 100_000.0);
+    let (ls, le) = taper.lengths(len);
+    // Pieces about a pixel long, at least eight per taper (never more than 100 000 in all).
+    let piece = |zone: f64| (r * 0.5).clamp(0.5, 2.0).min(zone / 8.0).max(len / 100_000.0).max(1e-3);
+    // (from, to, piece length or 0 for one full-width segment) along the drawn stroke.
+    let zones = [(0.0, ls, piece(ls)), (ls, len - le, 0.0), (len - le, len, piece(le))];
     let mut acc = 0.0;
     for (w, &l) in pts.windows(2).zip(&lens) {
-        let n = (l / step).ceil().max(1.0) as usize;
-        for i in 0..n {
-            let (t0, t1) = (i as f64 / n as f64, (i + 1) as f64 / n as f64);
-            let at = |t: f64| [w[0][0] + (w[1][0] - w[0][0]) * t, w[0][1] + (w[1][1] - w[0][1]) * t];
-            let mid = acc + l * (t0 + t1) * 0.5;
-            out.push(Seg { a: at(t0), b: at(t1), r: r * taper.factor(mid, len), v: 1.0 });
+        if l <= 0.0 {
+            continue;
+        }
+        let at = |s: f64| {
+            let t = ((s - acc) / l).clamp(0.0, 1.0);
+            [w[0][0] + (w[1][0] - w[0][0]) * t, w[0][1] + (w[1][1] - w[0][1]) * t]
+        };
+        for &(z0, z1, step) in &zones {
+            let (a, b) = (z0.max(acc), z1.min(acc + l));
+            if b - a <= 1e-9 {
+                continue;
+            }
+            if step <= 0.0 {
+                out.push(Seg { a: at(a), b: at(b), r, v: 1.0 });
+                continue;
+            }
+            let n = ((b - a) / step).ceil().max(1.0) as usize;
+            for i in 0..n {
+                let (s0, s1) = (a + (b - a) * i as f64 / n as f64, a + (b - a) * (i + 1) as f64 / n as f64);
+                out.push(Seg { a: at(s0), b: at(s1), r: r * taper.factor((s0 + s1) * 0.5, len), v: 1.0 });
+            }
         }
         acc += l;
     }

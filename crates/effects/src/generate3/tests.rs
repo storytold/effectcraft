@@ -179,6 +179,32 @@ fn stroke_taper_narrows_each_end_by_shape() {
     assert!(dabs(&[("strokeTaper/startLength", num(100.0))]) < dabs(&[]));
 }
 
+/// A short taper cuts only its own end of the stroke into pieces: the full-width body stays one
+/// segment, so tapering a long stroke does not multiply the rasterising work along all of it.
+#[test]
+fn stroke_taper_keeps_the_body_whole() {
+    let masks = vec![MaskShape { name: "Mask 1".into(), points: vec![[0.0, 32.0], [3840.0, 32.0]], closed: false, inverted: false }];
+    let env = EffectEnv { masks: &masks, ..Default::default() };
+    let segs = |set: &[(&str, Value)]| {
+        let s = crate::find("ec.generate.stroke").unwrap();
+        let mut params = Params { values: s.params.iter().map(|p| (p.id.to_string(), p.default.clone())).collect() };
+        params.values.insert("brushSize".into(), num(200.0));
+        for (k, v) in set {
+            params.values.insert(k.to_string(), v.clone());
+        }
+        let ctx = EffectCtx { params: &params, time: 0.0, layer_size: [3840.0, 64.0], seed: 3, adjustment: false, env };
+        let b = Buf { img: Image::new(3840, 64), offset: [0.0, 0.0], scale: 1.0 };
+        match paint_plan("ec.generate.stroke", &ctx, &b).unwrap().cov {
+            Coverage::Segs { segs, .. } => segs,
+            Coverage::Convex(_) => Vec::new(),
+        }
+    };
+    let tapered = segs(&[("strokeTaper/startLength", num(1.0))]);
+    // The 38 px taper is pieces about a pixel long; the other 3800 px are not.
+    assert!(tapered.len() > 8 && tapered.len() < 100, "{} segments", tapered.len());
+    assert!(tapered.iter().any(|s| (s.b[0] - s.a[0]).abs() > 1000.0 && s.r >= 99.0));
+}
+
 #[test]
 fn vegas_traces_contours() {
     let mut img = Image::new(64, 64);
