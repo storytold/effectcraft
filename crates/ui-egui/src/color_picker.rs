@@ -9,7 +9,7 @@
 use egui::{Color32, Rect, Response, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 
 use crate::i18n::tr;
-use crate::widgets::{open_popup, popup_is_open, pressed_outside, select_all};
+use crate::widgets::{open_on_press, popup_is_open, pressed_outside, select_all};
 
 /// A colour button for egui-laid-out rows and dialogs: a swatch that opens [`color_popup`]. Don't
 /// use egui's `color_edit_button_rgb(a)` for project colours: they read linear values, so the
@@ -21,23 +21,38 @@ pub fn srgb_color_button(ui: &mut Ui, c: &mut [f32; 3]) -> Response {
     let stroke = if resp.hovered() { ui.visuals().widgets.hovered.fg_stroke } else { ui.visuals().widgets.inactive.bg_stroke };
     ui.painter().rect_filled(rect, 2.0, srgb32(*c));
     ui.painter().rect_stroke(rect, 2.0, stroke, StrokeKind::Inside);
-    if resp.clicked() {
-        open_popup(ui, resp.id);
-    }
+    open_on_press(ui, &resp, resp.id);
     if color_popup(ui, resp.id, rect.left_bottom(), c) {
         resp.mark_changed();
     }
     resp
 }
 
-/// The colour picker as a popup at `pos`, bound to `c`, opened with [`open_popup`]. Returns true
-/// when the colour changed (Cancel, Escape and the original swatch change it back; the eyedropper
-/// changes it to the colour it samples).
+/// The colour picker as a popup at `pos`, bound to `c`, opened with `widgets::open_popup` or a
+/// trigger's [`open_on_press`]. Returns true when the colour changed (Cancel, Escape and the
+/// original swatch change it back; the eyedropper changes it to the colour it samples).
 pub fn color_popup(ui: &mut Ui, id: egui::Id, pos: egui::Pos2, c: &mut [f32; 3]) -> bool {
+    let orig_id = id.with("original");
+    let pass_id = id.with("open-pass");
     if !popup_is_open(ui, id) {
+        // The trigger can close the picker from outside — a press on the swatch toggles it shut —
+        // and that path returns here before the open state below is cleared. Leaving the
+        // first-draw marker behind would make the next press read it, take that press for one
+        // outside the picker and close the picker it just opened (#2686).
+        if ui.data(|d| d.get_temp::<u64>(pass_id)).is_some() {
+            disarm(ui.ctx(), id);
+            ui.data_mut(|d| {
+                d.remove::<[f32; 3]>(orig_id);
+                d.remove::<u64>(pass_id);
+                // Closed: the next Escape is the dialog's again — but only if this picker owns
+                // the marker; another picker can still be open and keeps it (#2828).
+                if d.get_temp::<(egui::Id, u64)>(open_pass_id()).is_some_and(|(owner, _)| owner == id) {
+                    d.remove::<(egui::Id, u64)>(open_pass_id());
+                }
+            });
+        }
         return false;
     }
-    let orig_id = id.with("original");
     let original = ui.data_mut(|d| *d.get_temp_mut_or_insert_with(orig_id, || *c));
     // Read before a sample is taken: the press that samples the viewer lands outside the picker, and
     // must not close it.
@@ -68,7 +83,6 @@ pub fn color_popup(ui: &mut Ui, id: egui::Id, pos: egui::Pos2, c: &mut [f32; 3])
     // at its requested position from its second pass on (the first pass reports it at the
     // origin), so the click that just opened the picker would be read as a press outside it and
     // the picker would flash and close in that one frame (#1476).
-    let pass_id = id.with("open-pass");
     let drawn_before = ui.data(|d| d.get_temp::<u64>(pass_id)).is_some_and(|p| p < ui.ctx().cumulative_pass_nr());
     if drawn_before && pressed_outside(ui.ctx(), &area.response) && !on_viewer {
         out.close.get_or_insert(true);
@@ -84,8 +98,11 @@ pub fn color_popup(ui: &mut Ui, id: egui::Id, pos: egui::Pos2, c: &mut [f32; 3])
             d.insert_temp(id.with("open"), false);
             d.remove::<[f32; 3]>(orig_id);
             d.remove::<u64>(pass_id);
-            // Closed: the next Escape is the dialog's again.
-            d.remove::<u64>(open_pass_id());
+            // Closed: the next Escape is the dialog's again — but only if this picker owns the
+            // marker; another picker can still be open and keeps it (#2828).
+            if d.get_temp::<(egui::Id, u64)>(open_pass_id()).is_some_and(|(owner, _)| owner == id) {
+                d.remove::<(egui::Id, u64)>(open_pass_id());
+            }
         });
     } else {
         refresh_armed(ui.ctx(), id);
@@ -93,14 +110,17 @@ pub fn color_popup(ui: &mut Ui, id: egui::Id, pos: egui::Pos2, c: &mut [f32; 3])
         let pass = ui.ctx().cumulative_pass_nr();
         ui.data_mut(|d| {
             d.insert_temp(pass_id, pass);
-            d.insert_temp(open_pass_id(), pass);
+            // The marker names its owner: with several pickers open at once (Settings' labels
+            // page), one closing must not take Escape from the others (#2828).
+            d.insert_temp(open_pass_id(), (id, pass));
         });
     }
     out.changed || sampled
 }
 
-/// The `egui::Id` of the pass number in which a colour picker last stayed open, which
-/// [`open_recently`] uses to keep Escape for the picker rather than the dialog under it.
+/// The `egui::Id` of the pass number in which a colour picker last stayed open, together with the
+/// id of the picker that owns it, which [`open_recently`] uses to keep Escape for the picker
+/// rather than the dialog under it.
 fn open_pass_id() -> egui::Id {
     egui::Id::unique("color-picker-open-pass")
 }
@@ -108,10 +128,12 @@ fn open_pass_id() -> egui::Id {
 /// A colour picker is open: it was drawn, and stayed open, in this pass or the last one (so one
 /// that stops being drawn without closing, its dialog gone, doesn't count for long). Escape then
 /// belongs to the picker (it goes back to the original colour and closes), not to the dialog it
-/// was opened from. Closing clears this at once, so the next Escape reaches the dialog.
+/// was opened from. The marker names the picker owning it — several can be open at once, on
+/// Settings' labels page — and a picker closing clears it only when it is that owner, so the
+/// picker still open keeps Escape; clearing it makes the next Escape reach the dialog.
 pub fn open_recently(ctx: &egui::Context) -> bool {
-    let pass: Option<u64> = ctx.data(|d| d.get_temp(open_pass_id()));
-    pass.is_some_and(|p| p.saturating_add(1) >= ctx.cumulative_pass_nr())
+    let pass: Option<(egui::Id, u64)> = ctx.data(|d| d.get_temp(open_pass_id()));
+    pass.is_some_and(|(_, p)| p.saturating_add(1) >= ctx.cumulative_pass_nr())
 }
 
 /// The armed eyedropper of a picker: the picker's popup id, the pass it was last drawn in, and the
