@@ -46,8 +46,14 @@ fn select_label_group(s: &mut Session, p: &Value) -> Result<Value> {
         "all" | "visibleAll" => false,
         _ => return Err(bad(c, "scope: selected|all|visibleSelected|visibleAll")),
     };
-    let visible: Option<Vec<u64>> =
-        (scope.starts_with("visible")).then(|| p.get("visible").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_u64).collect())).flatten();
+    let visible = match p.get("visible") {
+        Some(v) if scope.starts_with("visible") && !v.is_null() => {
+            let invalid = || bad(c, "`visible` must be an array of property uids");
+            let ids = v.as_array().ok_or_else(invalid)?;
+            Some(ids.iter().map(|v| v.as_u64().ok_or_else(invalid)).collect::<Result<Vec<_>>>()?)
+        }
+        _ => None,
+    };
     let key_layers: Vec<_> = s.state.selected_keys.iter().map(|k| k.layer).collect();
     let mut sel = Vec::new();
     for l in &comp.layers {
