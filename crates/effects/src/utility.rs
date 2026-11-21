@@ -1,6 +1,7 @@
 //! Utility effects: bounds growth, HDR inspection/compression, Cineon log conversion and colour
 //! lookup tables (.cube).
 
+use std::path::Path;
 use std::sync::Arc;
 
 use crate::file_cache::{self, Registered};
@@ -449,7 +450,7 @@ pub fn load_lut(src: &str) -> Option<Arc<Lut>> {
     }
     file_cache::cached(LUTS.get(), src, || {
         let lut = match lut_file(src) {
-            Some(path) => file_cache::read(path).ok().and_then(|t| parse_cube(&t)),
+            Some(path) => file_cache::read(path).map_err(|e| log::warn!("LUT not loaded: {e}")).ok().and_then(|t| parse_cube(&t)),
             None => parse_cube(src),
         }
         .map(Arc::new);
@@ -461,6 +462,29 @@ pub fn load_lut(src: &str) -> Option<Arc<Lut>> {
 /// The size of a LUT's tables.
 pub(crate) fn lut_bytes(l: &Lut) -> usize {
     l.d1.len().saturating_add(l.d3.len()).saturating_mul(std::mem::size_of::<[f32; 3]>())
+}
+
+/// Largest text file an effect reads (a LUT, an OCIO config, Mocha shape data): 1 GiB, over the
+/// ~0.45 GB a 256³ `.cube` takes with six decimals, so no supported LUT is refused.
+const MAX_TEXT_FILE_BYTES: u64 = 1 << 30;
+
+/// A text file an effect parameter or a saved project names: only a regular file, and only up to
+/// [`MAX_TEXT_FILE_BYTES`] (`/dev/zero` or a FIFO would never end).
+pub(crate) fn read_text_file(path: &Path) -> std::io::Result<String> {
+    use std::io::Read;
+    let too_big =
+        || std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{} is not a text file of at most {} MiB", path.display(), MAX_TEXT_FILE_BYTES >> 20));
+    let (file, meta) = effectcraft_project::open_regular_file(path)?;
+    if meta.len() > MAX_TEXT_FILE_BYTES {
+        return Err(too_big());
+    }
+    // One byte past the limit: a file that grew after the metadata check is an error, not a prefix.
+    let mut text = String::new();
+    file.take(MAX_TEXT_FILE_BYTES + 1).read_to_string(&mut text)?;
+    if text.len() as u64 > MAX_TEXT_FILE_BYTES {
+        return Err(too_big());
+    }
+    Ok(text)
 }
 
 fn apply_lut(ctx: &EffectCtx, mut b: Buf) -> Buf {
@@ -1014,5 +1038,40 @@ mod tests {
         let out = run("ec.utility.growbounds", &[("pixels", num(5.0))], test_img());
         assert_eq!((out.img.width, out.img.height), (18, 18));
         assert_eq!(out.offset, [5.0, 5.0]);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod read_text_file_tests {
+    #[test]
+    fn oversized_text_is_rejected_before_reading() {
+        let path = std::env::temp_dir().join(format!("ec-fx-oversized-{}", std::process::id()));
+        let file = std::fs::File::create(&path).unwrap();
+        // Extending a Unix file leaves a sparse hole: no gigabyte buffer or data write.
+        file.set_len(super::MAX_TEXT_FILE_BYTES + 1).unwrap();
+        drop(file);
+        let error = super::read_text_file(&path).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(crate::file_cache::read(&path.to_string_lossy()).is_err());
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn devices_and_fifos_are_refused_without_reading() {
+        assert!(super::read_text_file(std::path::Path::new("/dev/zero")).is_err());
+        let dir = std::env::temp_dir().join(format!("ec-fx-fifo-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fifo = dir.join("lut.cube");
+        let _ = std::fs::remove_file(&fifo);
+        assert!(std::process::Command::new("mkfifo").arg(&fifo).status().unwrap().success());
+        // Opening a FIFO with no writer would block: this returns at once.
+        assert!(super::read_text_file(&fifo).is_err());
+        // Current LUT and OCIO caches must retain the same regular-file guard.
+        assert!(crate::file_cache::read(&fifo.to_string_lossy()).is_err());
+        assert!(crate::file_cache::read("/dev/zero").is_err());
+        assert!(super::load_lut(&fifo.to_string_lossy()).is_none());
+        // An OCIO FileTransform source reads through the same bounded reader.
+        assert!(crate::ocio::load_file(&fifo.to_string_lossy()).is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
