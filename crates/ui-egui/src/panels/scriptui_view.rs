@@ -18,6 +18,8 @@ use crate::EffectcraftApp;
 use crate::dock::{PanelKind, WorkspaceExt as _};
 use crate::theme::Tokens;
 
+mod text;
+
 enum Act {
     Click(u32, u32),
     Set(u32, u32, Value),
@@ -298,9 +300,7 @@ fn paint_draw(ui: &egui::Ui, rect: Rect, ops: &[DrawOp], t: &Tokens, services: &
                     p.add(if closed { egui::Shape::closed_line(pts, s) } else { egui::Shape::line(pts, s) });
                 }
             }
-            DrawOp::Text { text, color, x, y, size, .. } => {
-                p.text(at(*x, *y), Align2::LEFT_TOP, text, Tokens::ui(*size as f32), draw_color(color, t.text));
-            }
+            DrawOp::Text { text: s, color, x, y, size, font, .. } => text::paint_text(&p, at(*x, *y), s, *font, *size, draw_color(color, t.text)),
             DrawOp::Image { image, x, y, w, h } => {
                 let tex = image.as_ref().and_then(|i| image_texture(ui.ctx(), i, services));
                 let size = match &tex {
@@ -752,7 +752,7 @@ mod tests {
         let ops = [
             DrawOp::Fill { color, path: path.clone() },
             DrawOp::Stroke { color, width: 1.0, path },
-            DrawOp::Text { text: "Hi".into(), color, x: 0.0, y: 0.0, size: 12.0, style: String::new() },
+            DrawOp::Text { text: "Hi".into(), color, x: 0.0, y: 0.0, size: 12.0, style: String::new(), font: Default::default() },
         ];
         let t = Tokens::for_kind(crate::theme::ThemeKind::Dark);
         let mut out = egui::Context::default().run_ui(egui::RawInput::default(), |ui| {
@@ -763,9 +763,10 @@ mod tests {
         let (mut fill, mut stroke, mut text) = (false, false, false);
         for s in out.shapes {
             match s.shape {
-                egui::Shape::Mesh(m) => fill |= m.vertices.iter().all(|v| v.color == want),
+                egui::Shape::Mesh(m) if m.texture_id == egui::TextureId::default() => fill |= m.vertices.iter().all(|v| v.color == want),
+                // drawString: the glyph texture tinted with the colour.
+                egui::Shape::Mesh(m) => text |= m.vertices.iter().all(|v| v.color == want),
                 egui::Shape::Path(p) => stroke |= matches!(p.stroke.color, egui::epaint::ColorMode::Solid(c) if c == want),
-                egui::Shape::Text(t) => text |= t.fallback_color == want,
                 _ => {}
             }
         }

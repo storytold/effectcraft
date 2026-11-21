@@ -19,6 +19,9 @@ use serde_json::{Value, json};
 
 use crate::{EngineError, Result, Session};
 
+mod text;
+pub use text::{MAX_COVERAGE_SIDE, MAX_UI_FONT_SIZE, MAX_UI_TEXT_UNITS, UiFont, UiLine, UiText, UiTextError, measure_text};
+
 /// What kind of window a script made.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -159,6 +162,10 @@ pub enum DrawOp {
         size: f64,
         #[serde(default)]
         style: String,
+        /// The face the font resolved to ([`UiFont::resolve`]); the text is laid out with
+        /// [`UiText::layout`], as `measureString` measures it.
+        #[serde(default)]
+        font: UiFont,
     },
     /// `drawOSControl()`: the control's default look.
     Os,
@@ -942,7 +949,9 @@ mod tests {
         assert_eq!(j["path"][0], json!({"k": "M", "x": 0.0, "y": 0.0}));
         assert_eq!(serde_json::from_value::<DrawOp>(j).unwrap(), op);
         let t: DrawOp = serde_json::from_value(json!({"op": "text", "text": "Hi", "color": null, "x": 1, "y": 2, "size": 14})).unwrap();
-        assert!(matches!(t, DrawOp::Text { size, .. } if size == 14.0));
+        assert!(matches!(t, DrawOp::Text { size, font: UiFont::Regular, .. } if size == 14.0));
+        let t: DrawOp = serde_json::from_value(json!({"op": "text", "text": "Hi", "color": null, "x": 1, "y": 2, "size": 14, "font": "mono"})).unwrap();
+        assert!(matches!(t, DrawOp::Text { font: UiFont::Mono, .. }));
     }
 
     #[test]

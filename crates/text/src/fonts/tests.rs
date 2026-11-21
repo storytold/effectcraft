@@ -656,3 +656,13 @@ fn a_font_file_replaced_at_the_same_path_is_read_again() {
     assert_eq!(new_meta.len(), 11);
     assert_eq!(old.as_slice(), b"old");
 }
+
+/// A kept layout learns its fallbacks may have changed: setting the CJK locale, even to the same
+/// language, moves the generation.
+#[test]
+fn locale_requests_move_the_generation() {
+    let before = generation();
+    let current = requested_cjk_locale();
+    set_cjk_locale(current.as_deref().unwrap_or(""));
+    assert!(generation() > before);
+}
