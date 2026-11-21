@@ -1547,7 +1547,7 @@ mod tests {
             channels: 2,
             edit_rate: None,
             ids: mxf::write::PackageIds::from_seed("eff-mxf-test", "pcm"),
-            timecode: Some(mxf::write::StartTimecode { start: 240, drop_frame: false }),
+            timecode: Some(mxf::write::StartTimecode { frames: 240, rate: mxf::Rational::new(24, 1), drop_frame: false }),
         };
         let samples: Vec<i32> = (0..4800 * 2).map(|i| ((i as i32 * 137) % 16000) - 8000).collect();
         let bytes = mxf::write::write_opatom_pcm(&opts, &samples).expect("write opatom pcm");
@@ -1560,21 +1560,21 @@ mod tests {
         assert_eq!(info.audio_streams[0].channels, 2);
 
         // Direct read at t=0
-        let buf = src.audio_samples(0, 0, 1024, 48_000).expect("direct read");
+        let buf = src.audio(0, 1024, 48_000).expect("direct read");
         assert_eq!(buf.channels.len(), 2);
         assert_eq!(buf.channels[0].len(), 1024);
         assert!(buf.channels[0].iter().any(|&v| v.abs() > 0.01));
 
         // Negative start and past-end read zero-fill cleanly
-        let neg = src.audio_samples(0, -100, 200, 48_000).expect("negative start");
+        let neg = src.audio(-100, 200, 48_000).expect("negative start");
         assert!(neg.channels[0][..100].iter().all(|&v| v == 0.0));
         assert!(neg.channels[0][100..].iter().any(|&v| v.abs() > 0.01));
-        let past = src.audio_samples(0, 4700, 200, 48_000).expect("past end");
+        let past = src.audio(4700, 200, 48_000).expect("past end");
         assert!(past.channels[0][..100].iter().any(|&v| v.abs() > 0.01));
         assert!(past.channels[0][100..].iter().all(|&v| v == 0.0));
 
         // Resampled read
-        let resampled = src.audio_samples(0, 0, 512, 44_100).expect("resampled");
+        let resampled = src.audio(0, 512, 44_100).expect("resampled");
         assert_eq!(resampled.sample_rate, 44_100);
         assert_eq!(resampled.channels[0].len(), 512);
     }
