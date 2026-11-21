@@ -98,7 +98,7 @@ tempfile = "3.27"
 
 # codecs + containers shared by the Craft apps (crates/media, crates/export); keep all in sync.
 craft-media = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "6a061a30bdd4a6cc24329334d5e44241896edba6", default-features = false, features = ["isobmff", "matroska"] }
-craft-media-source = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "6a061a30bdd4a6cc24329334d5e44241896edba6" }
+craft-media-source = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "ba25ccd233934d1b2f74e3c0f235168bf5f13ef3" }
 craft-frame = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "6a061a30bdd4a6cc24329334d5e44241896edba6" }
 craft-color = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "6a061a30bdd4a6cc24329334d5e44241896edba6" }
 craft-time = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "6a061a30bdd4a6cc24329334d5e44241896edba6" }
@@ -107,15 +107,15 @@ craft-video = { version = "0.1.0", git = "https://github.com/storytold/craft-lib
 
 # footage decoding: FilmCraft's pure-Rust crates, pinned to a revision (plan/adr/0001).
 # Only `crates/media`, `crates/export` and `crates/interchange` may depend on these.
-filmcraft-codecs = { git = "https://github.com/storytold/filmcraft", rev = "3612b4f3f96fd37e9288484a4b66d9f5e6594580" }
-filmcraft-media = { git = "https://github.com/storytold/filmcraft", rev = "3612b4f3f96fd37e9288484a4b66d9f5e6594580" }
-filmcraft-frame = { git = "https://github.com/storytold/filmcraft", rev = "3612b4f3f96fd37e9288484a4b66d9f5e6594580" }
-filmcraft-color = { git = "https://github.com/storytold/filmcraft", rev = "3612b4f3f96fd37e9288484a4b66d9f5e6594580" }
-filmcraft-time = { git = "https://github.com/storytold/filmcraft", rev = "3612b4f3f96fd37e9288484a4b66d9f5e6594580" }
+filmcraft-codecs = { git = "https://github.com/storytold/filmcraft", rev = "3d7465142f89c2e67ce662e1b44c8abe52e65f52" }
+filmcraft-media = { git = "https://github.com/storytold/filmcraft", rev = "3d7465142f89c2e67ce662e1b44c8abe52e65f52" }
+filmcraft-frame = { git = "https://github.com/storytold/filmcraft", rev = "3d7465142f89c2e67ce662e1b44c8abe52e65f52" }
+filmcraft-color = { git = "https://github.com/storytold/filmcraft", rev = "3d7465142f89c2e67ce662e1b44c8abe52e65f52" }
+filmcraft-time = { git = "https://github.com/storytold/filmcraft", rev = "3d7465142f89c2e67ce662e1b44c8abe52e65f52" }
 # timeline interchange (EDL, FCP7 XML, FCPXML, OTIO) for Premiere Pro interop (crates/interchange only)
-filmcraft-interchange = { git = "https://github.com/storytold/filmcraft", rev = "3612b4f3f96fd37e9288484a4b66d9f5e6594580" }
-filmcraft-project = { git = "https://github.com/storytold/filmcraft", rev = "3612b4f3f96fd37e9288484a4b66d9f5e6594580" }
-filmcraft-geom = { git = "https://github.com/storytold/filmcraft", rev = "3612b4f3f96fd37e9288484a4b66d9f5e6594580" }
+filmcraft-interchange = { git = "https://github.com/storytold/filmcraft", rev = "3d7465142f89c2e67ce662e1b44c8abe52e65f52" }
+filmcraft-project = { git = "https://github.com/storytold/filmcraft", rev = "3d7465142f89c2e67ce662e1b44c8abe52e65f52" }
+filmcraft-geom = { git = "https://github.com/storytold/filmcraft", rev = "3d7465142f89c2e67ce662e1b44c8abe52e65f52" }
 
 # gpu (the same wgpu eframe / egui-wgpu use)
 wgpu = { version = "30.0.1", features = ["fragile-send-sync-non-atomic-wasm"] }
