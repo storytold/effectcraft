@@ -313,25 +313,39 @@ fn import_footage(project: &mut Project, cx: &mut Ctx<'_>, item: &AepItem<'_, '_
         layer: source_layer(&f, &name, &mut cx.col),
         ..Footage::default()
     };
-    // The native frame rate and the stored duration of sequences and clips (352, 603, 606).
-    if matches!(kind, FootageKind::Sequence | FootageKind::Video) && f.native_frame_rate > 0 {
-        footage.frame_rate = effectcraft_time::FrameRate::new(i64::from(f.native_frame_rate), 1);
+    // The native frame rate and the stored duration of sequences and clips (352, 603, 606). The
+    // rate is 16.16 fixed point at `sspc@58`, whose whole part is the `u32` at 56: 23.976 and
+    // 29.97 keep their fraction (`ntsc-footage` lab sample).
+    let native = sspc_rate(item, 58).or_else(|| (f.native_frame_rate > 0).then(|| effectcraft_time::FrameRate::new(i64::from(f.native_frame_rate), 1)));
+    if matches!(kind, FootageKind::Sequence | FootageKind::Video)
+        && let Some(native) = native
+    {
+        footage.frame_rate = native;
     }
     if kind == FootageKind::Sequence {
         footage.sync_sequence_duration();
     } else if let Some(d) = f.duration.filter(|d| d.num > 0 && d.den > 0) {
         footage.duration = cx_ticks(d.num, d.den);
-        // A clip conformed to another rate (645: 25 native frames at 30 fps): the stored duration
-        // counts native frames, which now last 1 / conform s each.
-        let conform_rate = item.conform_frame_rate().unwrap_or(0);
-        if kind == FootageKind::Video && conform_rate > 0 && f.native_frame_rate > 0 && conform_rate != f.native_frame_rate {
-            let native = effectcraft_time::FrameRate::new(i64::from(f.native_frame_rate), 1);
-            let conform = effectcraft_time::FrameRate::new(i64::from(conform_rate), 1);
-            if let Some(frames) = d.num.checked_mul(i64::from(f.native_frame_rate)).map(|n| n / d.den.max(1)) {
-                footage.native_rate = Some(native);
-                footage.frame_rate = conform;
-                footage.duration = conform.tick_of(frames);
-            }
+        // A 23.976 or 29.97 clip stores its duration in 2997ths (the lab sample: 90 frames at
+        // 29.97 as 9000 / 2997 s, After Effects' 29.97 being 2997 / 100): it lasts its frames at
+        // the exact rate, so its end falls on the frames of a composition at that rate.
+        if kind == FootageKind::Video
+            && let Some(native) = native.filter(|r| r.den != 1)
+            && let Some(frames) = native_frames(d, native)
+        {
+            footage.duration = native.tick_of(frames);
+        }
+        // A clip conformed to another rate (645: 25 native frames at 30 fps; the lab sample: 25
+        // conformed to 29.97 at `sspc@148`): the stored duration counts native frames, which now
+        // last 1 / conform s each.
+        if kind == FootageKind::Video
+            && let (Some(native), Some(conform)) = (native, sspc_rate(item, 148))
+            && conform != native
+            && let Some(frames) = native_frames(d, native)
+        {
+            footage.native_rate = Some(native);
+            footage.frame_rate = conform;
+            footage.duration = conform.tick_of(frames);
         }
     }
     let id = project.add_item(&name, label, Some(parent), ItemKind::Footage(footage));
@@ -340,6 +354,45 @@ fn import_footage(project: &mut Project, cx: &mut Ctx<'_>, item: &AepItem<'_, '_
     if let Some(i) = aep_id {
         cx.sources.insert(i, Source { item: id, name, kind: SourceKind::Footage, width: f.width, height: f.height });
     }
+}
+
+/// The native frames in a clip's stored duration `d`. A 23.976 or 29.97 clip counts in 2997ths of
+/// a second, 125 or 100 per frame (`ntsc-footage` lab sample): the frames are read in that
+/// timebase. Multiplying by the exact rate instead (1000 / 1001 of the typed one) drifts by a
+/// frame from about 500 000 frames. Other durations are scaled by the rate and rounded. `None`
+/// for a negative or implausibly long duration.
+fn native_frames(d: Rational, native: effectcraft_time::FrameRate) -> Option<i64> {
+    if d.den == 2997
+        && let Some((_, typed)) =
+            crate::container::TimeBase::NTSC.into_iter().find(|((n, d), _)| effectcraft_time::FrameRate::new(i64::from(*n), i64::from(*d)) == native)
+    {
+        #[allow(clippy::cast_possible_truncation)]
+        let units = (2997.0 / f64::from(typed)).round() as i64;
+        if units > 0 && d.num >= 0 {
+            return Some(d.num.checked_add(units / 2)? / units);
+        }
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let frames = (d.num as f64 / d.den as f64 * native.as_f64()).round();
+    #[allow(clippy::cast_possible_truncation)]
+    (0.0..1e12).contains(&frames).then_some(frames as i64)
+}
+
+/// A footage rate stored as 16.16 fixed point in the item's `sspc` at `at` (the native rate at 58,
+/// a conformed rate at 148): a whole rate, or 23.976 / 29.97 / 59.94 / 119.88 when it is the value
+/// After Effects stores for them; another fraction keeps its whole part. `None` when it is 0.
+fn sspc_rate(item: &AepItem<'_, '_>, at: usize) -> Option<effectcraft_time::FrameRate> {
+    let sspc = item.chunk().child_list(b"Pin ")?.child(b"sspc")?.bytes()?;
+    let fixed = u32::from_be_bytes(sspc.get(at..at + 4)?.try_into().ok()?);
+    if fixed >> 16 == 0 {
+        return None;
+    }
+    if fixed & 0xffff != 0
+        && let Some(((n, d), _)) = crate::container::TimeBase::NTSC.into_iter().find(|(_, v)| (f64::from(*v) * 65536.0).round() == f64::from(fixed))
+    {
+        return Some(effectcraft_time::FrameRate::new(i64::from(n), i64::from(d)));
+    }
+    Some(effectcraft_time::FrameRate::new(i64::from(fixed >> 16), 1))
 }
 
 /// Whether `path` names a file whose page is framed as After Effects places it
@@ -1213,6 +1266,21 @@ mod tests {
         for path in [r"C:\fixture\x\still.eps", "a.epsf", "a.epsi", "still.png", r"C:\dir.ai\file", "ai", ""] {
             assert!(!is_placed_page_path(path), "{path}");
         }
+    }
+
+    /// A 23.976 or 29.97 clip stores its duration in 2997ths of a second, 125 or 100 per frame.
+    /// Scaling that by the exact rate (1000 / 1001 of the typed one) drifted to one frame too
+    /// many from about 500 000 frames.
+    #[test]
+    fn long_ntsc_clips_keep_their_frame_count() {
+        let rate = |n| effectcraft_time::FrameRate::new(n, 1001);
+        for frames in [90_i64, 500_000, 600_000, 2_000_000] {
+            assert_eq!(native_frames(Rational { num: frames * 100, den: 2997 }, rate(30000)), Some(frames), "29.97, {frames}");
+            assert_eq!(native_frames(Rational { num: frames * 125, den: 2997 }, rate(24000)), Some(frames), "23.976, {frames}");
+        }
+        // Other timebases still scale by the rate.
+        assert_eq!(native_frames(Rational { num: 3, den: 1 }, effectcraft_time::FrameRate::new(25, 1)), Some(75));
+        assert_eq!(native_frames(Rational { num: -100, den: 2997 }, rate(30000)), None);
     }
 
     #[test]

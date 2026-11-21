@@ -99,10 +99,13 @@ pub(crate) struct FootagePlan {
     pub height: u32,
     /// Duration as stored, `num / den` seconds.
     pub duration: (u32, u32),
-    /// Native frame rate (sequences and clips), 0 otherwise.
+    /// A sequence's whole frame rate, or a clip's time scale (`sspc@50`: the rate for a whole
+    /// rate, 2997 for 23.976 and 29.97, `ntsc-footage` lab sample); 0 otherwise.
     pub fps: u32,
-    /// The rate a clip is conformed to (`sspc@146`, also the effective rate at @150; 645), 0 when
-    /// it plays at its native rate.
+    /// The native frame rate in 16.16 fixed point (`sspc@58`), 0 when there is none.
+    pub rate: u32,
+    /// The rate a clip is conformed to in 16.16 fixed point (`sspc@148`, also the effective rate
+    /// at @152; 645), 0 when it plays at its native rate.
     pub conform: u32,
     pub numbering: Option<Numbering>,
     /// The duration in seconds (the Time Remapping maximum of a layer showing it).
@@ -166,7 +169,36 @@ fn parse_numbered(name: &str) -> Option<(String, u32, u32, String)> {
 /// Whole frames at an integer rate, or `None` (a rate After Effects' footage header stores as an
 /// integer: 30 in 353 and 603, 25 in 606).
 fn integer_rate(f: &Footage) -> Option<u32> {
-    let r = f.frame_rate;
+    integer_rate_of(f.frame_rate)
+}
+
+/// How a clip's frame rate is stored.
+#[derive(Clone, Copy)]
+struct ClipRate {
+    rate: effectcraft_time::FrameRate,
+    /// Units per second (`sspc@50`).
+    timescale: u32,
+    /// Units per frame.
+    units: u32,
+    /// The rate in 16.16 fixed point.
+    fixed: u32,
+}
+
+/// The stored form of a clip rate: a whole rate counts in its own frames (25 in 606), 23.976 and
+/// 29.97 in 2997ths of a second, 125 and 100 per frame (`ntsc-footage` lab sample, After Effects
+/// 2026), as do 59.94 and 119.88 (50 and 25 per frame, not sampled). Other rates: `None`.
+fn clip_rate(r: effectcraft_time::FrameRate) -> Option<ClipRate> {
+    if let Some(fps) = integer_rate_of(r) {
+        return Some(ClipRate { rate: r, timescale: fps, units: 1, fixed: fps.checked_mul(1 << 16)? });
+    }
+    let typed = crate::export::timebase::ntsc_typed(r)?;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let units = (2997.0 / f64::from(typed)).round() as u32;
+    Some(ClipRate { rate: r, timescale: 2997, units, fixed: crate::export::timebase::fixed_rate(r) })
+}
+
+/// A whole positive rate.
+fn integer_rate_of(r: effectcraft_time::FrameRate) -> Option<u32> {
     (r.den == 1 && r.num > 0).then(|| u32::try_from(r.num).ok()).flatten()
 }
 
@@ -237,6 +269,7 @@ pub(crate) fn plan_footage(name: &str, f: &Footage, col: &mut Collector) -> Opti
         height,
         duration: (0, kind.still_den()),
         fps: 0,
+        rate: 0,
         conform: 0,
         numbering: None,
         seconds: 0.0,
@@ -269,6 +302,7 @@ pub(crate) fn plan_footage(name: &str, f: &Footage, col: &mut Collector) -> Opti
             let count = u32::try_from(files.len()).unwrap_or(u32::MAX);
             plan.alias = dir.to_string();
             plan.fps = fps;
+            plan.rate = fps << 16;
             plan.duration = (count, fps);
             plan.seconds = f64::from(count) / f64::from(fps.max(1));
             plan.numbering = Some(Numbering { prefix, suffix, start, end: start.saturating_add(count.saturating_sub(1)), digits });
@@ -278,45 +312,47 @@ pub(crate) fn plan_footage(name: &str, f: &Footage, col: &mut Collector) -> Opti
             }
         }
         FtKind::Mp4 | FtKind::Mov => {
-            let Some(fps) = integer_rate(f) else {
-                col.lose(LossCategory::FootageItems, what(&format!("a clip at {} fps is not exported (only whole rates are sampled)", f.frame_rate.label())));
+            let Some(play) = clip_rate(f.frame_rate) else {
+                col.lose(
+                    LossCategory::FootageItems,
+                    what(&format!("a clip at {} fps is not exported (only whole rates, 23.976 and 29.97 are sampled)", f.frame_rate.label())),
+                );
                 return None;
             };
-            // A conformed clip (645): the frames play at `fps`, the stored duration stays in the
-            // native rate's frames, and the conformed rate goes to @146 and @150.
+            // A conformed clip (645): the frames play at the conformed rate, the stored duration
+            // stays in the native rate's units, and the conformed rate goes to @148 and @152.
             let native = match f.native_rate {
-                Some(n) if n != f.frame_rate => {
-                    if n.den == 1 && n.num > 0 && n.num <= i64::from(u32::MAX) {
-                        u32::try_from(n.num).ok()
-                    } else {
+                Some(n) if n != f.frame_rate => match clip_rate(n) {
+                    Some(r) => Some(r),
+                    None => {
                         col.lose(
                             LossCategory::FootageItems,
                             what(&format!("a clip with the native rate {} fps is written at its conformed rate only", n.label())),
                         );
                         None
                     }
-                }
+                },
                 _ => None,
             };
-            let frames = (f.duration.seconds() * f64::from(fps)).round();
+            let frames = (f.duration.seconds() * play.rate.as_f64()).round();
             let frames = if frames.is_finite() && frames >= 1.0 && frames < f64::from(u32::MAX) {
                 frames as u32
             } else {
                 col.lose(LossCategory::FootageItems, what("a duration that cannot be stored, written as 1 frame"));
                 1
             };
-            plan.seconds = f64::from(frames) / f64::from(fps.max(1));
-            match native {
-                Some(n) => {
-                    plan.fps = n;
-                    plan.conform = fps;
-                    plan.duration = (frames, n);
-                }
-                None => {
-                    plan.fps = fps;
-                    plan.duration = (frames, fps);
-                }
-            }
+            plan.seconds = f64::from(frames) / play.rate.as_f64();
+            let stored = native.unwrap_or(play);
+            plan.fps = stored.timescale;
+            plan.rate = stored.fixed;
+            plan.conform = if native.is_some() { play.fixed } else { 0 };
+            // The duration in the stored rate's units must fit the 32-bit field: a clip that long
+            // would come back shorter, so it is not written.
+            let Some(units) = frames.checked_mul(stored.units) else {
+                col.lose(LossCategory::FootageItems, what("a clip too long to store at its rate is not exported"));
+                return None;
+            };
+            plan.duration = (units, stored.timescale);
         }
         FtKind::Wav => {
             // The sample rate is the denominator (351: 48 000 / 48 000 for 1 s).
@@ -583,11 +619,15 @@ pub(crate) fn build_footage(protos: &FtProtos, id: u32, label: u8, name: &str, p
             if matches!(p.kind, FtKind::Mp4 | FtKind::Mov) {
                 put_u32(sspc, 50, p.fps)?;
             }
-            put_u32(sspc, 56, p.fps)?;
-            put_u32(sspc, 150, if p.conform > 0 { p.conform } else { p.fps })?;
+            // The rates are 16.16 fixed point (29.97 is `001d f852`; `ntsc-footage` lab sample).
+            put_u16(sspc, 56, 0)?;
+            put_u32(sspc, 58, p.rate)?;
+            put_u16(sspc, 150, 0)?;
+            put_u32(sspc, 152, if p.conform > 0 { p.conform } else { p.rate })?;
         }
         if p.conform > 0 {
-            put_u32(sspc, 146, p.conform)?;
+            put_u16(sspc, 146, 0)?;
+            put_u32(sspc, 148, p.conform)?;
         }
         if let Some(n) = &p.numbering {
             put_u32(sspc, 172, n.start)?;
