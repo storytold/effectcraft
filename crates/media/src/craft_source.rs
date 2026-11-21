@@ -234,6 +234,24 @@ fn fixed_packet_samples(dec: &mut AudioTrackDecoder, codec: CodecId, lookahead: 
     frame_len.and_then(|n| i64::try_from(n).ok())
 }
 
+/// Duration of an Opus packet in 48 kHz samples from its TOC (RFC 6716 §3.1); `None` if invalid.
+fn opus_packet_samples(pkt: &[u8]) -> Option<u32> {
+    let &toc = pkt.first()?;
+    let config = toc >> 3;
+    let frame = match config {
+        0..=11 => [480, 960, 1920, 2880][(config & 3) as usize],
+        12..=15 => [480, 960][(config & 1) as usize],
+        _ => [120, 240, 480, 960][(config & 3) as usize],
+    };
+    let frames = match toc & 3 {
+        0 => 1,
+        1 | 2 => 2,
+        _ => (*pkt.get(1)? & 0x3F) as u32,
+    };
+    let n = frame * frames;
+    (n > 0 && n <= 5760).then_some(n)
+}
+
 fn compute_audio_starts(
     container: &ContainerFile,
     source: &dyn ByteSource,
@@ -256,11 +274,7 @@ fn compute_audio_starts(
             let unit = i64::try_from((rate + ts - 1) / ts).unwrap_or(i64::MAX);
             if codec == CodecId::Opus {
                 let packets = stamps.into_iter().enumerate().map(|(i, stamp)| {
-                    let samples = f
-                        .read_sample(source, track_idx, i)
-                        .ok()
-                        .and_then(|p| (p.len() >= 2).then(|| craft_media::ogg::opus_packet_samples([p[0], p[1]], p.len() as u32)).flatten())
-                        .map(i64::from);
+                    let samples = f.read_sample(source, track_idx, i).ok().and_then(|p| opus_packet_samples(&p)).map(i64::from);
                     PacketTime { stamp, stamped: true, samples }
                 });
                 return contiguous_starts(packets, unit.saturating_mul(2).saturating_add(1));
@@ -282,11 +296,7 @@ fn compute_audio_starts(
             let tick_samples = i64::try_from(i128::from(track.ticks_to_ns(2)) * rate / 1_000_000_000).unwrap_or(i64::MAX).saturating_add(1);
             if codec == CodecId::Opus {
                 let packets = track.samples.iter().enumerate().map(|(i, s)| {
-                    let samples = f
-                        .read_sample(source, track_idx, i)
-                        .ok()
-                        .and_then(|p| (p.len() >= 2).then(|| craft_media::ogg::opus_packet_samples([p[0], p[1]], p.len() as u32)).flatten())
-                        .map(i64::from);
+                    let samples = f.read_sample(source, track_idx, i).ok().and_then(|p| opus_packet_samples(&p)).map(i64::from);
                     PacketTime { stamp: stamp_for(s.pts), stamped: s.lace == 0 || s.duration > 0, samples }
                 });
                 return contiguous_starts(packets, tick_samples);
@@ -320,10 +330,11 @@ where
         let mut dec = AudioTrackDecoder::new(&params, &refs).ok()?;
         let native_rate = dec.sample_rate().max(1);
         let channels = u32::from(dec.layout().channels()).max(1);
-        let fixed_samples = fixed_packet_samples(&mut dec, dec.codec(), &lookahead);
-        let audio_starts = compute_audio_starts(container, source, idx, dec.codec(), native_rate, fixed_samples);
+        let codec = dec.codec();
+        let fixed_samples = fixed_packet_samples(&mut dec, codec, &lookahead);
+        let audio_starts = compute_audio_starts(container, source, idx, codec, native_rate, fixed_samples);
         let seek_preroll_samples = match container {
-            ContainerFile::Matroska(f) if dec.codec() == CodecId::Opus => {
+            ContainerFile::Matroska(f) if codec == CodecId::Opus => {
                 let preroll_ns = i128::from(f.tracks[idx].seek_pre_roll_ns.max(80_000_000));
                 i64::try_from(preroll_ns * i128::from(native_rate) / 1_000_000_000).unwrap_or(0)
             }
