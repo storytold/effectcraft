@@ -106,7 +106,8 @@ fn bulge(e: &mut Enc, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
 }
 
 fn wave_warp(e: &mut Enc, ctx: &EffectCtx, mut b: GBuf) -> Option<GBuf> {
-    let h = ctx.params.f("height") * b.scale;
+    // Wave Height is the trough-to-peak distance, so the wave displaces by ±Height/2 (#3924).
+    let h = ctx.params.f("height") * b.scale * 0.5;
     let w = (ctx.params.f("width") * b.scale).max(1.0);
     let dir = ctx.params.f("direction").to_radians();
     let speed = ctx.params.f("speed");
