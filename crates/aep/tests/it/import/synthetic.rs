@@ -1026,3 +1026,28 @@ fn french_levels_channel_aliases_cover_every_item() {
     // "Alpha" needs no alias: the same word in both languages.
     assert_eq!(popup_alias("alpha"), None);
 }
+
+#[test]
+fn a_looped_sequence_keeps_its_loop_count() {
+    // Interpret Footage ▸ Loop is the `u16` at `sspc` byte 128 (corpus `05_footage_images`: 3 on
+    // the sequence looped three times, 1 on every other item).
+    let footage = |bytes: &[u8]| {
+        let (p, r) = run(bytes, true);
+        r.unwrap();
+        p.items.values().find_map(|i| if let ItemKind::Footage(f) = &i.kind { Some(f.clone()) } else { None }).expect("the sequence")
+    };
+    assert_eq!(footage(SYNTHETIC).loop_count, 1);
+    let looped = mutate(&mut |c| {
+        if c.id == *b"sspc" && c.bytes().is_some_and(|b| b.get(22..26) == Some(b"png!".as_slice())) {
+            set_data(c, 128, &3u16.to_be_bytes());
+        }
+    });
+    assert_eq!(footage(&looped).loop_count, 3);
+    // 0 is a single play.
+    let zero = mutate(&mut |c| {
+        if c.id == *b"sspc" && c.bytes().is_some_and(|b| b.get(22..26) == Some(b"png!".as_slice())) {
+            set_data(c, 128, &[0, 0]);
+        }
+    });
+    assert_eq!(footage(&zero).loop_count, 1);
+}

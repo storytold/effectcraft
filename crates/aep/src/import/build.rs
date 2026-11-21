@@ -334,12 +334,26 @@ fn import_footage(project: &mut Project, cx: &mut Ctx<'_>, item: &AepItem<'_, '_
             }
         }
     }
+    footage.loop_count = loop_count(item);
     let id = project.add_item(&name, label, Some(parent), ItemKind::Footage(footage));
     cx.created.push(id);
     cx.col.imported.footage += 1;
     if let Some(i) = aep_id {
         cx.sources.insert(i, Source { item: id, name, kind: SourceKind::Footage, width: f.width, height: f.height });
     }
+}
+
+/// Interpret Footage ▸ Loop: the big-endian `u16` at byte 128 of `sspc` (corpus
+/// `05_footage_images`: 3 on the image sequence looped 3 times, 1 on each of the other 226
+/// footage and solid items of the corpus). A missing record or 0 is a single play.
+fn loop_count(item: &AepItem<'_, '_>) -> u32 {
+    item.chunk()
+        .child_list(b"Pin ")
+        .and_then(|p| p.child(b"sspc"))
+        .and_then(|c| c.bytes())
+        .and_then(|b| b.get(128..130))
+        .and_then(|b| <[u8; 2]>::try_from(b).ok())
+        .map_or(1, |b| u32::from(u16::from_be_bytes(b)).max(1))
 }
 
 /// Whether `path` names a file whose page is framed as After Effects places it
