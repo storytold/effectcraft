@@ -18,9 +18,9 @@ pub enum LossCategory {
     /// Effects on layers that are not written (not in the table, a parameter
     /// without a counterpart, an expression on a parameter).
     Effects,
-    /// Mask data that is not written: a disabled mask or one without a usable path, keys on Mask
-    /// Opacity or Expansion, expressions on mask properties, the lock, mask motion blur other than
-    /// Same As Layer, Linear feather falloff, RotoBezier and variable-width feather points.
+    /// Mask data that is not written: a disabled mask or one without a usable path, expressions on
+    /// mask properties, the lock, mask motion blur other than Same As Layer, Linear feather
+    /// falloff, RotoBezier and variable-width feather points.
     Masks,
     /// Layer and composition markers.
     Markers,
