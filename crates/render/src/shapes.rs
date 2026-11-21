@@ -59,10 +59,6 @@ struct Draw {
     blend: BlendMode,
     /// Front / Bevel / Side / Back colours of the paint's extrusion (Advanced 3D).
     surfaces: SurfaceColors,
-    /// Paint item of the contents group this draw was collected in (as opposed to one bubbled up
-    /// from a nested group). Merge Paths drops only these paints above it (#1174); a group's own
-    /// fill or stroke keeps rendering inside the group.
-    local: bool,
 }
 
 /// Straight RGB colours of an extrusion's surfaces, by [`effectcraft_model::extrude::Surface`]
@@ -319,7 +315,6 @@ fn collect_in(ctx: &EvalCtx, layer: &Layer, contents: &PropGroup, arena: &mut Ve
                     opacity: opacity(g),
                     blend: blend_mode(ctx, layer, g),
                     surfaces: [None; 4],
-                    local: true,
                 });
             }
             "stroke" => {
@@ -333,7 +328,6 @@ fn collect_in(ctx: &EvalCtx, layer: &Layer, contents: &PropGroup, arena: &mut Ve
                     opacity: opacity(g),
                     blend: blend_mode(ctx, layer, g),
                     surfaces: [None; 4],
-                    local: true,
                 });
             }
             "gfill" | "gstroke" => {
@@ -357,7 +351,6 @@ fn collect_in(ctx: &EvalCtx, layer: &Layer, contents: &PropGroup, arena: &mut Ve
                     opacity: opacity(g),
                     blend: blend_mode(ctx, layer, g),
                     surfaces: [None; 4],
-                    local: true,
                 });
             }
             "trim" => {
@@ -417,10 +410,10 @@ fn collect_in(ctx: &EvalCtx, layer: &Layer, contents: &PropGroup, arena: &mut Ve
                 let input: Vec<BezPath> = live.iter().map(|&i| arena[i].clone()).collect();
                 arena.push(ops::merge(&input, mode));
                 live = vec![arena.len() - 1];
-                // As in After Effects, fills and strokes above a Merge Paths in its group are not
-                // rendered: the merged path is painted by the paint items below it. Paint inside
-                // groups above the merge still renders — it belongs to those groups (#1174).
-                draws.retain(|d| !d.local);
+                // As in After Effects, the merged path replaces its inputs and only the paint items
+                // below it paint it: every draw so far paints inputs of this merge, in its own group
+                // or in the groups above it, so none of them renders (#2175).
+                draws.clear();
             }
             "group" => {
                 let Some(inner) = g.sub("contents") else { continue };
@@ -432,7 +425,6 @@ fn collect_in(ctx: &EvalCtx, layer: &Layer, contents: &PropGroup, arena: &mut Ve
                 for mut d in cd {
                     d.xf = m * d.xf;
                     d.opacity *= op;
-                    d.local = false;
                     draws.push(d);
                 }
                 live.extend(cl);

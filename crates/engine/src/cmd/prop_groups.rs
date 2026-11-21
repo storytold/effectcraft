@@ -261,12 +261,18 @@ pub(crate) fn paste_contents(s: &mut Session, p: &Value) -> Result<Value> {
 /// paints still draw the merged path (the renderer drops the draws above a Merge Paths), else after
 /// the last path item.
 fn merge_spot(contents: &PropGroup) -> usize {
-    let is = |n: &Node, ids: &[&str]| matches!(n, Node::Group(g) if ids.contains(&g.match_id.as_str()));
-    let paints = ["fill", "stroke", "gfill", "gstroke"];
-    match contents.children.iter().position(|n| is(n, &paints)) {
-        Some(i) => i,
-        None => contents.children.iter().rposition(|n| is(n, &["rect", "ellipse", "star", "path"])).map_or(0, |i| i + 1),
-    }
+    contents.children.iter().position(is_paint).unwrap_or_else(|| after_last_path(contents))
+}
+
+/// A Fill, Stroke, Gradient Fill or Gradient Stroke item.
+pub(super) fn is_paint(n: &Node) -> bool {
+    matches!(n, Node::Group(g) if ["fill", "stroke", "gfill", "gstroke"].contains(&g.match_id.as_str()))
+}
+
+/// Just below the last path or group of `contents`: a Merge Paths here takes them all in.
+pub(super) fn after_last_path(contents: &PropGroup) -> usize {
+    let is_path = |n: &Node| matches!(n, Node::Group(g) if ["rect", "ellipse", "star", "path", "group"].contains(&g.match_id.as_str()));
+    contents.children.iter().rposition(is_path).map_or(0, |i| i + 1)
 }
 
 /// Edit ▸ Duplicate with shape items, text animators or selectors selected: each is copied in
