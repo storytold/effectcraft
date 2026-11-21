@@ -1056,6 +1056,17 @@ fn open_matroska(name: &str, source: SharedBytes) -> Option<Result<SharedSource>
         let frame_rate = estimate_matroska_frame_rate(video_track);
         let duration = matroska_duration(&file, video_track);
         let codec_name = video_params.codec.name().to_string();
+        let coded_alpha = if video_params.codec == CodecId::ProRes {
+            // Bound the reconstructed packet, including the prefix restored by Matroska.
+            // Unknown alpha must not disable the shared reader for later pictures.
+            video_track
+                .sample_size(0)
+                .and_then(|size| u32::try_from(size).ok())
+                .and_then(|size| prores_has_alpha(size, || file.read_sample(&*source, v_idx, 0).ok()))
+                .unwrap_or(false)
+        } else {
+            false
+        };
         let video_decoder = match TrackDecoder::with_options(&video_params, TrackDecoderOptions { threads: Some(worker_cap()), draft: false }) {
             Ok(d) => d,
             Err(e) => return Some(Err(MediaError::Decode(e.to_string()))),
@@ -1068,7 +1079,7 @@ fn open_matroska(name: &str, source: SharedBytes) -> Option<Result<SharedSource>
             codec: codec_name,
             pixel_format: String::new(),
             color,
-            has_alpha: false,
+            has_alpha: coded_alpha,
             bitrate: None,
             hdr: None,
         };
@@ -3623,6 +3634,62 @@ mod tests {
         assert_eq!(snap_common_fps(f64::NAN), None);
         assert_eq!(tick_to_matroska_units(Tick(craft_time::TICKS_PER_SECOND), (1, 1000)), 1000);
         assert_eq!(tick_to_units(Tick(craft_time::TICKS_PER_SECOND), 90000), 90000);
+    }
+
+    fn prores_matroska(packets: &[&[u8]]) -> Arc<[u8]> {
+        use craft_media::matroska::{MkvWriter, MuxOptions, TrackKind, TrackSpec};
+        use craft_video::prores::Profile;
+        use std::io::Cursor;
+
+        let mut track = TrackSpec::new(TrackKind::Video, "V_PRORES");
+        track.video_size = Some((16, 16));
+        track.codec_private = Profile::P4444.fourcc().to_vec();
+        track.default_duration_ns = Some(40_000_000);
+        let mut mux = MkvWriter::new(Cursor::new(Vec::new()), vec![track], MuxOptions::default()).expect("Matroska writer");
+        for (index, packet) in packets.iter().enumerate() {
+            mux.write_frame(0, index as i64 * 40_000_000, true, packet, None).expect("write ProRes");
+        }
+        mux.finish().expect("finish Matroska").into_inner().into()
+    }
+
+    #[test]
+    fn matroska_prores_coded_alpha_reaches_the_public_probe() {
+        use craft_video::prores::{ChromaFormat, Encoder, EncoderConfig, Frame, Profile};
+        use effectcraft_project::AlphaMode;
+
+        for with_alpha in [true, false] {
+            let mut config = EncoderConfig::new(Profile::P4444, 16, 16);
+            config.encode_alpha = with_alpha;
+            config.threads = false;
+            let mut picture = Frame::new(16, 16, ChromaFormat::Yuv444, 10, with_alpha).expect("allocate picture");
+            if let Some(alpha) = &mut picture.alpha {
+                alpha.fill(512);
+            }
+            let packet = Encoder::with_config(config).encode(&picture).expect("encode ProRes");
+            let bytes = prores_matroska(&[&packet]);
+
+            let source = open_bytes("alpha.mkv", bytes.clone()).expect("recognized Matroska").expect("shared Matroska");
+            let frame = source.video_frame(FrameRequest { time: Tick::ZERO, scale: 1.0 }).expect("decode ProRes");
+            assert_eq!(matches!(frame.data, PixelData::Yuv16 { alpha: Some(_), .. }), with_alpha);
+
+            let footage = crate::probe::probe_bytes("alpha.mkv", bytes).expect("public Matroska probe");
+            assert_eq!(footage.codec, "ProRes");
+            assert_eq!(footage.alpha, if with_alpha { AlphaMode::Straight } else { AlphaMode::Ignore });
+        }
+    }
+
+    #[test]
+    fn matroska_prores_unreadable_alpha_probe_keeps_the_shared_route() {
+        use craft_video::prores::{ChromaFormat, Encoder, Frame, Profile};
+
+        let picture = Frame::new(16, 16, ChromaFormat::Yuv444, 10, false).expect("allocate picture");
+        let packet = Encoder::new(Profile::P4444, 16, 16).encode(&picture).expect("encode ProRes");
+        let bytes = prores_matroska(&[&[0; 3], &packet]);
+        let source = open_bytes("later-frame.mkv", bytes).expect("recognized Matroska").expect("shared Matroska");
+        assert!(!source.info().video.as_ref().expect("video info").has_alpha);
+        let time = Tick::from_units(40, 1_000);
+        let later = source.video_frame(FrameRequest { time, scale: 1.0 }).expect("read intact second picture");
+        assert_eq!(later.pts, time);
     }
 
     #[test]
