@@ -416,7 +416,7 @@ fn hue_vs_sat_arrives_with_its_y_scaled_other_moved_curves_are_reported() {
 }
 
 #[test]
-fn the_master_rgb_curve_arrives_moved_channel_curves_are_reported() {
+fn the_rgb_curves_arrive_in_the_order_master_red_green_blue() {
     // 1200 `-60-preset-curves-rgb`: the first of the four curves, its midpoint raised.
     let master = curve(0, &[(0.0, 0.0), (0.491_408_934_707_903_76, 0.786_885_245_901_639_3), (1.0, 1.0)]);
     let identity = curve(0, &[(0.0, 0.0), (1.0, 1.0)]);
@@ -426,14 +426,34 @@ fn the_master_rgb_curve_arrives_moved_channel_curves_are_reported() {
     assert_eq!(losses(&r), Vec::<String>::new());
     assert_eq!(val(&g, "curves/rgbCurves/master"), Value::Str("0,0 0.49140893470790376,0.7868852459016393 1,1".into()));
     assert_eq!(val(&g, "curves/rgbCurves/red"), Value::Str("0,0 1,1".into()));
-    // A moved channel curve: which channel it is is not known, reported.
+    // The channel curves, each moved differently: the second is red, the third green, the fourth blue.
     let mut d = identity.clone();
-    d.extend(&master);
-    (0..2).for_each(|_| d.extend(&identity));
+    for mid in [0.25, 0.5, 0.75] {
+        d.extend(curve(0, &[(0.0, 0.0), (mid, 0.875), (1.0, 1.0)]));
+    }
     let (g, r) = run(&[(39, Rec::Data(d))]);
-    let l = losses(&r);
-    assert!(l.len() == 1 && l[0].contains("1 channel curve(s) of RGB Curve (ADBE Lumetri-0039) are not imported"), "{l:?}");
+    assert_eq!(losses(&r), Vec::<String>::new());
     assert_eq!(val(&g, "curves/rgbCurves/master"), Value::Str("0,0 1,1".into()));
+    assert_eq!(val(&g, "curves/rgbCurves/red"), Value::Str("0,0 0.25,0.875 1,1".into()));
+    assert_eq!(val(&g, "curves/rgbCurves/green"), Value::Str("0,0 0.5,0.875 1,1".into()));
+    assert_eq!(val(&g, "curves/rgbCurves/blue"), Value::Str("0,0 0.75,0.875 1,1".into()));
+    // Only one channel moved: the others keep the default.
+    let mut d = identity.clone();
+    d.extend(&identity);
+    d.extend(&identity);
+    d.extend(curve(0, &[(0.0, 0.0), (0.5, 0.875), (1.0, 1.0)]));
+    let (g, r) = run(&[(39, Rec::Data(d))]);
+    assert_eq!(losses(&r), Vec::<String>::new());
+    assert_eq!(val(&g, "curves/rgbCurves/red"), Value::Str("0,0 1,1".into()));
+    assert_eq!(val(&g, "curves/rgbCurves/blue"), Value::Str("0,0 0.5,0.875 1,1".into()));
+    // Points that are not numbers: reported, the curve stays at its default.
+    let mut d = identity.clone();
+    d.extend(curve(0, &[(0.0, 0.0), (0.5, f64::NAN), (1.0, 1.0)]));
+    d.extend(&identity);
+    d.extend(&identity);
+    let (g, r) = run(&[(39, Rec::Data(d))]);
+    assert!(losses(&r).iter().any(|x| x.contains("the red curve of RGB Curve (ADBE Lumetri-0039)")), "{:?}", losses(&r));
+    assert_eq!(val(&g, "curves/rgbCurves/red"), Value::Str("0,0 1,1".into()));
     // Damaged: the wrong length.
     let (_, r) = run(&[(39, Rec::Data(master))]);
     assert!(losses(&r).iter().any(|x| x.contains("RGB Curve (ADBE Lumetri-0039) is unreadable")), "{:?}", losses(&r));
