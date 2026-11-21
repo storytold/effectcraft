@@ -152,6 +152,8 @@ pub(crate) struct LayerPlan {
     pub in_rel: i32,
     pub out_rel: i32,
     pub blend: u8,
+    /// Preserve Underlying Transparency (`ldta@103`: 1 on, 0 off).
+    pub preserve_transparency: bool,
     pub parent: Option<LayerId>,
     /// Track matte: the matte layer and the mode (`ldta@107`: 1 alpha, 2 alpha inverted, 3 luma,
     /// 4 luma inverted; 403-406).
@@ -1080,7 +1082,6 @@ fn plan_layer(cx: &PlanCx<'_>, at: CompAt<'_>, cp: &CompPlan, layer: &Layer, col
         (sw.quality == Quality::Wireframe, "Wireframe quality (written as Best)"),
         (sw.sampling != effectcraft_project::Sampling::Bilinear, "Bicubic sampling (written as Bilinear)"),
         (sw.frame_blend != effectcraft_project::FrameBlend::Off, "frame blending"),
-        (layer.preserve_transparency, "Preserve Transparency"),
         (layer.auto_orient != effectcraft_project::AutoOrient::Off && !matches!(src, LayerSrc::Camera(_) | LayerSrc::Light(_)), "Auto-Orient"),
         (layer.environment || layer.environment_background, "the environment layer setting"),
         (layer.markers_locked, "Lock Markers"),
@@ -1176,6 +1177,7 @@ fn plan_layer(cx: &PlanCx<'_>, at: CompAt<'_>, cp: &CompPlan, layer: &Layer, col
         stretch,
         time_scale,
         blend,
+        preserve_transparency: layer.preserve_transparency,
         parent,
         matte,
         markers,
