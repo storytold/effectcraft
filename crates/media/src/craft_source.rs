@@ -185,6 +185,16 @@ impl ContainerFile {
                 let idx = track.sample_at_pts(t_track)?;
                 Some((idx, track.samples[idx].pts))
             }
+            ContainerFile::Avi(f) => {
+                let s = f.streams.get(track_idx)?;
+                if s.chunks.is_empty() || s.rate == 0 || s.scale == 0 {
+                    return None;
+                }
+                let max_idx = i64::try_from(s.chunks.len() - 1).unwrap_or(0);
+                let d = tick_to_rational_units(time, i64::from(s.rate), i64::from(s.scale)).clamp(0, max_idx);
+                let idx = usize::try_from(d).ok()?;
+                Some((idx, d))
+            }
             ContainerFile::Mpeg { file, origin_pts } => {
                 let s = file.streams.get(track_idx)?;
                 let t_90k = tick_to_units(time, 90_000).saturating_add(*origin_pts);
