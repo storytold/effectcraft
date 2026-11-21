@@ -81,3 +81,56 @@ fn shift_click_adds_puppet_pins_and_delete_removes_them_together() {
     h.state_mut().session.undo();
     assert_eq!(pin_count(&h, layer), 3, "one Undo restores both pins");
 }
+
+/// #2021: use the same clipboard events a native Copy/Paste shortcut sends.
+#[test]
+fn animator_clipboard_copy_and_paste_events_copy_the_group_not_the_layer() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"width":320,"height":180,"duration":4})).unwrap();
+    let b = s.execute("layer.newText", json!({"name":"Target","text":"Target"})).unwrap()["layer"].as_u64().unwrap();
+    let a = s.execute("layer.newText", json!({"name":"Source","text":"Source"})).unwrap()["layer"].as_u64().unwrap();
+    let uid = s.execute("layer.applyTextPreset", json!({"layer":a,"preset":"fadeUpCharacters"})).unwrap()["animators"][0].as_u64().unwrap();
+    let l = s.active_comp().unwrap().layer(LayerId(a)).unwrap();
+    let open = [l.props.group("text").unwrap().uid, l.props.group("text/animators").unwrap().uid];
+    let mut app = EffectcraftApp::new(s);
+    app.ui.timeline.open_layers.insert(a);
+    app.ui.timeline.open_groups.extend(open);
+    let mut h = Harness::builder().with_size(vec2(1600.0, 1100.0)).build_eframe(|_| app);
+    h.run_steps(4);
+    click(&mut h, uid, Modifiers::NONE);
+    h.event(egui::Event::Copy);
+    h.step();
+    let text = h
+        .output()
+        .platform_output
+        .commands
+        .iter()
+        .find_map(|c| match c {
+            egui::OutputCommand::CopyText(t) => Some(t.clone()),
+            _ => None,
+        })
+        .expect("copy populates the native clipboard");
+    assert_eq!(text, "EffectCraft: 1 text animator");
+    let r = h.state().auto.find(&format!("timeline.layer.{b}.row")).unwrap().rect;
+    let pos = egui::pos2(r[0] + r[2] / 2.0, r[1] + r[3] / 2.0);
+    h.event(egui::Event::PointerMoved(pos));
+    h.step();
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE });
+        h.step();
+    }
+    h.run_steps(2);
+    assert_eq!(h.state().session.state.selected_layers, [LayerId(b)]);
+    let before = h.state().session.project.clone();
+    let undo = h.state().session.history.undo.len();
+    h.event(egui::Event::Paste(text));
+    h.run_steps(3);
+    let comp = h.state().session.active_comp().unwrap();
+    assert_eq!(comp.layers.len(), 2);
+    let animators = comp.layer(LayerId(b)).unwrap().props.group("text/animators").unwrap();
+    assert_eq!(animators.groups().count(), 1);
+    assert_ne!(animators.groups().next().unwrap().uid, uid);
+    assert_eq!(h.state().session.history.undo.len(), undo + 1);
+    h.state_mut().session.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(h.state().session.project, before);
+}
