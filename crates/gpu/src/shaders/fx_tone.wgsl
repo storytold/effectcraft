@@ -20,14 +20,6 @@ fn fxt_rem360(x: f32) -> f32 {
 }
 
 // Levels (Individual Controls) channel `i` (data: 5 × (ib, iw, g, ob, ow, identity)).
-// color_fx::levels_gamma: unclipped values below 0 mirror the curve.
-fn fxt_gamma(t: f32, g: f32) -> f32 {
-    if (t >= 0.0) {
-        return powz(t, 1.0 / g);
-    }
-    return -powz(-t, 1.0 / g);
-}
-
 fn fxt_lv(i: u32, v: f32, clip_b: bool, clip_w: bool) -> f32 {
     let o = i * 6u;
     if (data[o + 5u] != 0.0) {
@@ -47,21 +39,31 @@ fn fxt_lv(i: u32, v: f32, clip_b: bool, clip_w: bool) -> f32 {
     let g = max(data[o + 2u], 0.01);
     var curve = sign(t) * 1e30;
     if (!(abs(t) > 1.0 && log2(abs(t)) / g > 99.7)) {
-        curve = clamp(fxt_gamma(t, g), -1e30, 1e30);
+        curve = clamp(levels_gamma(t, g), -1e30, 1e30);
     }
     return data[o + 3u] + (data[o + 4u] - data[o + 3u]) * curve;
 }
 
 // color_fx::level (data offset o: ib, iw, g, ob, ow, clip black, clip white).
 fn fxt_level(o: u32, v: f32) -> f32 {
-    var t = (v - data[o]) / max(data[o + 1u] - data[o], 1e-6);
-    if (data[o + 5u] != 0.0) {
-        t = max(t, 0.0);
+    return levels_level(v, data[o], data[o + 1u], data[o + 2u], data[o + 3u], data[o + 4u], data[o + 5u] != 0.0, data[o + 6u] != 0.0);
+}
+
+fn fxt_level_restraight(q: vec4<f32>, straight: vec3<f32>) -> vec3<f32> {
+    if (q.w <= 1e-6) {
+        return vec3<f32>(0.0);
     }
-    if (data[o + 6u] != 0.0) {
-        t = min(t, 1.0);
+    var c = straight;
+    for (var i = 0u; i < 3u; i++) {
+        if (abs(straight[i]) < 0x1p+127f) {
+            c[i] = q[i] / q.w;
+        }
     }
-    return data[o + 3u] + (data[o + 4u] - data[o + 3u]) * fxt_gamma(t, data[o + 2u]);
+    return c;
+}
+
+fn fxt_level_alpha(o: u32, v: f32) -> f32 {
+    return levels_alpha(v, data[o], data[o + 1u], data[o + 2u], data[o + 3u], data[o + 4u], data[o + 5u] != 0.0, data[o + 6u] != 0.0);
 }
 
 fn fxt_level_ident(o: u32) -> bool {
@@ -545,7 +547,7 @@ fn fxt_point(@builtin(global_invocation_id) gid: vec3<u32>) {
             if (!straight_skip) {
                 q = vec4<f32>(r * a, a);
             }
-            let qc = fxt_straight(q);
+            let qc = fxt_level_restraight(q, r);
             let qa = max(q.w, 0.0);
             var any_ch = false;
             for (var k = 0u; k < 4u; k++) {
@@ -566,7 +568,7 @@ fn fxt_point(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
             var na = qa;
             if (!fxt_level_ident(28u)) {
-                na = clamp(fxt_level(28u, qa), 0.0, 1.0);
+                na = fxt_level_alpha(28u, qa);
             }
             o = vec4<f32>(oc * na, na);
         }

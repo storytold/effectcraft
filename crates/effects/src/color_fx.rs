@@ -259,7 +259,7 @@ pub fn levels_channel_ids(ch: usize) -> [String; 5] {
     ["InBlack", "InWhite", "Gamma", "OutBlack", "OutWhite"].map(|s| format!("{pre}{s}"))
 }
 
-fn level(v: f32, [ib, iw, g, ob, ow]: [f32; 5], (clip_b, clip_w): (bool, bool)) -> f32 {
+fn level_f32(v: f32, [ib, iw, g, ob, ow]: [f32; 5], (clip_b, clip_w): (bool, bool)) -> f32 {
     let mut t = (v - ib) / (iw - ib).max(1e-6);
     if clip_b {
         t = t.max(0.0);
@@ -268,6 +268,34 @@ fn level(v: f32, [ib, iw, g, ob, ow]: [f32; 5], (clip_b, clip_w): (bool, bool)) 
         t = t.min(1.0);
     }
     ob + (ow - ob) * levels_gamma(t, g)
+}
+
+fn level(v: f32, settings: [f32; 5], clip: (bool, bool)) -> f32 {
+    let mapped = level_f32(v, settings, clip);
+    if mapped.is_finite() || v.is_nan() { mapped } else { level_beyond_f32(v, settings, clip) }
+}
+
+fn level_alpha(a: f32, settings: [f32; 5], clip: (bool, bool)) -> f32 {
+    let mapped = level_f32(a, settings, clip);
+    let [_, _, _, ob, _] = settings;
+    let mapped = if mapped.is_nan() && !a.is_nan() { ob } else { mapped };
+    mapped.clamp(0.0, 1.0)
+}
+
+fn level_beyond_f32(v: f32, [ib, iw, g, ob, ow]: [f32; 5], (clip_b, clip_w): (bool, bool)) -> f32 {
+    if ow == ob {
+        return ob;
+    }
+    let mut t = (f64::from(v) - f64::from(ib)) / f64::from((iw - ib).max(1e-6));
+    if clip_b {
+        t = t.max(0.0);
+    }
+    if clip_w {
+        t = t.min(1.0);
+    }
+    let curve = t.abs().powf(1.0 / f64::from(g)).copysign(t);
+    let mapped = f64::from(ob) + (f64::from(ow) - f64::from(ob)) * curve;
+    mapped.clamp(-f64::from(f32::MAX), f64::from(f32::MAX)) as f32
 }
 
 const LEVELS_IDENTITY: [f32; 5] = [0.0, 1.0, 1.0, 0.0, 1.0];
@@ -297,7 +325,7 @@ fn levels(ctx: &EffectCtx, mut b: Buf) -> Buf {
                 o[i] = level(c[i], chans[i].0, chans[i].1);
             }
         }
-        let na = if ident(&chans[3]) { a } else { level(a, chans[3].0, chans[3].1).clamp(0.0, 1.0) };
+        let na = if ident(&chans[3]) { a } else { level_alpha(a, chans[3].0, chans[3].1) };
         *px = crate::util::premul(o, na);
     });
     b

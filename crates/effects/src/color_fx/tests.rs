@@ -506,3 +506,139 @@ fn colorama_palettes_modify_selection_masking_and_add_phase() {
     assert_eq!(p.eval(0.75, true), [0.5, 0.0, 0.5, 1.0], "wraps around");
     assert_eq!(p.eval(0.25, false), [1.0, 0.0, 0.0, 1.0]);
 }
+
+fn levels_overflow_settings(prefix: &str) -> Vec<(String, Value)> {
+    let ids = levels_channel_ids(LEVELS_CHANNEL_PREFIX.iter().position(|p| *p == prefix).map_or(0, |i| i + 1));
+    let values = [0.5, 0.5, 0.1, 0.5, 0.5];
+    let clip = if prefix.is_empty() {
+        ["clipToOutputBlack", "clipToOutputWhite"].map(String::from)
+    } else {
+        ["ClipToOutputBlack", "ClipToOutputWhite"].map(|s| format!("{prefix}{s}"))
+    };
+    ids.into_iter().zip(values).map(|(id, v)| (id, num(v))).chain(clip.map(|id| (id, Value::Enum(0)))).collect()
+}
+
+#[test]
+fn levels_stays_finite_with_an_empty_input_range_and_clipping_off() {
+    for prefix in ["", "red", "green", "blue", "alpha"] {
+        let owned = levels_overflow_settings(prefix);
+        let vals: Vec<(&str, Value)> = owned.iter().map(|(id, v)| (id.as_str(), v.clone())).collect();
+        for v in [0.6, 0.4, 1.0, 0.0, 2.0, -1.0] {
+            let o = px("ec.color.levels", &vals, [v, v, v, 1.0]);
+            assert!(o.iter().all(|c| c.is_finite()), "{prefix:?} at {v}: {o:?}");
+        }
+    }
+}
+
+fn levels_unbounded(v: f32, [ib, iw, g, ob, ow]: [f32; 5], (clip_b, clip_w): (bool, bool)) -> f32 {
+    let mut t = (v - ib) / (iw - ib).max(1e-6);
+    if clip_b {
+        t = t.max(0.0);
+    }
+    if clip_w {
+        t = t.min(1.0);
+    }
+    let curve = if t >= 0.0 { t.powf(1.0 / g) } else { -(-t).powf(1.0 / g) };
+    ob + (ow - ob) * curve
+}
+
+#[test]
+fn levels_saturates_only_where_the_output_would_overflow() {
+    let unclipped = (false, false);
+    assert_eq!(level(0.6, [0.5, 0.5, 0.1, 0.0, 1.0], unclipped), f32::MAX);
+    assert_eq!(level(0.4, [0.5, 0.5, 0.1, 0.0, 1.0], unclipped), -f32::MAX);
+    assert_eq!(level(0.6, [0.5, 0.5, 0.1, 1.0, 0.0], unclipped), -f32::MAX);
+    assert_eq!(level(0.6, [0.5, 0.5, 0.1, 0.3, 0.3], unclipped), 0.3);
+    assert_eq!(level(f32::MAX, [0.0, 0.5, 1.0, 0.0, 1.0], unclipped), f32::MAX);
+    assert_eq!(level(-f32::MAX, [0.0, 0.5, 1.0, 0.0, 1.0], unclipped), -f32::MAX);
+    assert_eq!(level(f32::MAX, [0.0, 0.5, 1.0, 0.0, 1.0], (false, true)), 1.0);
+    let finite_beyond_1e30 = [0.0, 0.0, 0.1, 0.0, 1.0];
+    let want = levels_unbounded(0.004096, finite_beyond_1e30, unclipped);
+    assert!(want.is_finite() && want > 1e35, "{want}");
+    assert_eq!(level(0.004096, finite_beyond_1e30, unclipped).to_bits(), want.to_bits());
+}
+
+fn levels_exact(v: f32, settings: [f32; 5]) -> f64 {
+    let [ib, iw, g, ob, ow] = settings.map(f64::from);
+    let t = (f64::from(v) - ib) / (iw - ib).max(1e-6);
+    ob + (ow - ob) * t.abs().powf(1.0 / g).copysign(t)
+}
+
+#[test]
+fn levels_is_exact_where_only_an_intermediate_overflows() {
+    let unclipped = (false, false);
+    for (v, settings) in [
+        (f32::MAX, [0.0, 0.5, 10.0, 0.0, 1.0]),
+        (-f32::MAX, [0.0, 0.5, 10.0, 0.0, 1.0]),
+        (f32::from_bits(0x7f3f_ffff), [0.0, 0.75, 10.0, 0.0, 1.0]),
+        (0.0071313, [0.0, 0.0, 0.1, 0.0, 0.001]),
+        (0.0071313, [0.0, 0.0, 0.1, 0.0, -0.001]),
+    ] {
+        let want = levels_exact(v, settings);
+        let got = level(v, settings, unclipped);
+        assert!(got.is_finite() && got.abs() < f32::MAX, "{v} {settings:?}: {got}");
+        assert!(((f64::from(got) - want) / want).abs() < 1e-5, "{v} {settings:?}: {got} vs {want}");
+    }
+}
+
+#[test]
+fn levels_alpha_keeps_the_clamp_of_an_overflowing_curve() {
+    let unclipped = (false, false);
+    assert_eq!(level_alpha(0.01, [0.0, 0.0, 0.1, 0.0, 1e-41], unclipped), 1.0);
+    assert_eq!(level_alpha(0.01, [0.0, 0.0, 0.1, 1e-41, 0.0], unclipped), 0.0);
+    assert_eq!(level_alpha(0.6, [0.5, 0.5, 0.1, 0.3, 0.3], unclipped), 0.3);
+    let vals = [
+        ("alphaInBlack", num(0.0)),
+        ("alphaInWhite", num(0.0)),
+        ("alphaGamma", num(0.1)),
+        ("alphaOutWhite", num(1e-41)),
+        ("alphaClipToOutputBlack", Value::Enum(0)),
+        ("alphaClipToOutputWhite", Value::Enum(0)),
+    ];
+    let out = px("ec.color.levels", &vals, [0.004, 0.004, 0.004, 0.01]);
+    assert!(close(out, [0.4, 0.4, 0.4, 1.0], 1e-6), "{out:?}");
+}
+
+#[test]
+fn levels_keeps_a_finite_rgb_stage_for_the_channel_stage() {
+    let vals = [
+        ("inBlack", num(0.0)),
+        ("inWhite", num(0.0)),
+        ("gamma", num(0.1)),
+        ("clipToOutputBlack", Value::Enum(0)),
+        ("clipToOutputWhite", Value::Enum(0)),
+        ("redGamma", num(10.0)),
+        ("redOutBlack", num(-1.0)),
+        ("redOutWhite", num(-0.999)),
+        ("redClipToOutputBlack", Value::Enum(0)),
+        ("redClipToOutputWhite", Value::Enum(0)),
+    ];
+    let red = px("ec.color.levels", &vals, [0.0015, 0.0, 0.0, 1.0])[0];
+    let rgb_stage = levels_unbounded(0.0015, [0.0, 0.0, 0.1, 0.0, 1.0], (false, false));
+    let want = levels_unbounded(rgb_stage, [0.0, 1.0, 10.0, -1.0, -0.999], (false, false));
+    assert!((want - 0.49998).abs() < 1e-4, "{want}");
+    assert!((red - want).abs() < 1e-6, "{red} vs {want}");
+}
+
+#[test]
+fn levels_curves_that_were_finite_render_unchanged() {
+    let mut compared = 0;
+    for ib in [-1.0, 0.0, 0.2, 0.5] {
+        for iw in [-0.5, 0.0, 0.5, 0.9, 1.0, 2.0] {
+            for g in [0.1, 0.5, 1.0, 2.2, 10.0] {
+                for (ob, ow) in [(0.0, 1.0), (-1.0, 2.0), (0.1, 0.9), (1.0, 0.0), (0.5, 0.5)] {
+                    for clip in [(false, false), (true, false), (false, true), (true, true)] {
+                        for v in [-2.0, -0.5, 0.0, 0.0015, 0.004096, 0.25, 0.5, 0.75, 1.0, 1.5, 4.0, 16.0] {
+                            let want = levels_unbounded(v, [ib, iw, g, ob, ow], clip);
+                            if want.is_finite() {
+                                assert_eq!(level(v, [ib, iw, g, ob, ow], clip).to_bits(), want.to_bits(), "{v} {:?} {clip:?}", [ib, iw, g, ob, ow]);
+                                compared += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(compared > 10_000, "{compared}");
+}

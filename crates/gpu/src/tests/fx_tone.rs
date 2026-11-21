@@ -7,7 +7,7 @@ use effectcraft_project::{BitDepth, Comp, ItemKind, LayerSource, build};
 use effectcraft_render::RenderOpts;
 use effectcraft_time::{FrameRate, Tick};
 
-use crate::tests::{Scene, c, check, compare_at, effect_case, n, opts, set};
+use crate::tests::{Scene, c, check, compare_at, effect_case, effect_direct, effect_direct_on, n, opts, set};
 
 fn e(v: u32) -> Value {
     Value::Enum(v)
@@ -44,6 +44,109 @@ fn levels_and_gamma() {
     effect_case("ec.color.levels", &[("alphaInWhite", n(0.6)), ("redInWhite", n(0.5)), ("redClipToOutputWhite", e(0))]);
     effect_case("ec.color.gammapedestalgain", &[("redGamma", n(1.4)), ("greenPedestal", n(0.1)), ("blueGain", n(0.8))]);
     effect_case("ec.color.gammapedestalgain", &[("blackStretch", n(2.0)), ("redGain", n(1.2))]);
+}
+
+fn levels_controls(prefix: &str, values: [f64; 5]) -> Vec<(String, Value)> {
+    let ids = if prefix.is_empty() {
+        ["inBlack", "inWhite", "gamma", "outBlack", "outWhite", "clipToOutputBlack", "clipToOutputWhite"].map(String::from)
+    } else {
+        ["InBlack", "InWhite", "Gamma", "OutBlack", "OutWhite", "ClipToOutputBlack", "ClipToOutputWhite"].map(|s| format!("{prefix}{s}"))
+    };
+    ids.into_iter().zip(values.map(n).into_iter().chain([e(0), e(0)])).collect()
+}
+
+#[test]
+fn levels_stays_finite_and_matches_the_cpu_with_clipping_off() {
+    let empty_input = [0.5, 0.5, 0.1, 0.0, 1.0];
+    let empty_input_and_output = [0.5, 0.5, 0.1, 0.5, 0.5];
+    let cases = [
+        levels_controls("", empty_input_and_output),
+        levels_controls("", empty_input),
+        levels_controls("red", empty_input),
+        levels_controls("alpha", empty_input),
+        [levels_controls("", empty_input), levels_controls("red", empty_input)].concat(),
+        [levels_controls("", [0.0, 0.0, 0.1, 0.0, 1.0]), levels_controls("red", [0.0, 1.0, 10.0, -1.0, -0.999])].concat(),
+    ];
+    for owned in &cases {
+        let vals: Vec<(&str, Value)> = owned.iter().map(|(id, v)| (id.as_str(), v.clone())).collect();
+        for adjustment in [false, true] {
+            for out in effect_direct("ec.color.levels", &vals, adjustment) {
+                assert!(out.data.iter().flatten().all(|v| v.is_finite()), "{vals:?} adj {adjustment}");
+            }
+        }
+    }
+}
+
+#[test]
+fn levels_matches_the_cpu_at_the_edge_of_f32() {
+    let edge = [f32::from_bits(0x7f3f_ffff), f32::MAX, 0.0071313, -f32::MAX, 0.25];
+    let source = |w: u32, h: u32| {
+        let mut img = effectcraft_raster::Image::new(w, h);
+        for (i, px) in img.data.iter_mut().enumerate() {
+            *px = [edge[i % 5], edge[(i + 1) % 5], edge[(i + 2) % 5], 1.0];
+        }
+        img
+    };
+    let settings = [[0.0, 0.75, 10.0, 0.0, 1.0], [0.0, 0.0, 0.1, 0.0, 0.001], [0.0, 0.5, 10.0, 0.0, 1.0], [0.0, 0.5, 1.0, 0.0, 1.0]];
+    for prefix in ["", "red"] {
+        for values in settings {
+            let unclipped = levels_controls(prefix, values);
+            let clip_white =
+                [unclipped.clone(), vec![(if prefix.is_empty() { "clipToOutputWhite".into() } else { format!("{prefix}ClipToOutputWhite") }, e(1))]].concat();
+            for owned in [unclipped, clip_white] {
+                let vals: Vec<(&str, Value)> = owned.iter().map(|(id, v)| (id.as_str(), v.clone())).collect();
+                for out in effect_direct_on("ec.color.levels", &vals, false, source) {
+                    assert!(out.data.iter().flatten().all(|v| v.is_finite()), "{vals:?}");
+                }
+            }
+        }
+    }
+}
+
+fn filled(px: [f32; 4]) -> impl Fn(u32, u32) -> effectcraft_raster::Image + Copy {
+    move |w, h| effectcraft_raster::Image::filled(w, h, px)
+}
+
+fn levels_first_pixel(vals: &[(String, Value)], px: [f32; 4]) -> Vec<[f32; 4]> {
+    let vals: Vec<(&str, Value)> = vals.iter().map(|(id, v)| (id.as_str(), v.clone())).collect();
+    effect_direct_on("ec.color.levels", &vals, false, filled(px)).into_iter().map(|out| out.data[0]).collect()
+}
+
+#[test]
+fn levels_keeps_finite_results_near_f32_max_distinct() {
+    let adjacent = [f32::from_bits(0x7f7f_fffd), f32::from_bits(0x7f7f_fffe), f32::MAX, 1.0];
+    for [r, g, b, _] in levels_first_pixel(&levels_controls("", [0.0, 1.0, 1.0, 1.0, 2.0]), adjacent) {
+        assert!([r, g, b].iter().all(|v| v.is_finite()) && r < g && g < b, "{r:e} {g:e} {b:e}");
+    }
+    for [r, g, b, _] in levels_first_pixel(&levels_controls("", [0.0, 1.0, 0.5, 0.0, 1.0]), [1.8440e19, 1.8445e19, 1.0, 1.0]) {
+        assert!([r, g, b].iter().all(|v| v.is_finite()) && 3.4e38 < r && r < g && g < f32::MAX, "{r:e} {g:e} {b:e}");
+    }
+}
+
+#[test]
+fn levels_keeps_a_finite_rgb_stage_for_the_channel_stage() {
+    let chained = [levels_controls("", [0.0, 0.0, 0.1, 0.0, 1.0]), levels_controls("red", [0.0, 1.0, 10.0, -1.0, -0.999])].concat();
+    for [r, ..] in levels_first_pixel(&chained, [0.0015, 0.0, 0.0, 1.0]) {
+        assert!((r - 0.4999808).abs() < 1e-4, "{r}");
+    }
+}
+
+#[test]
+fn levels_alpha_keeps_the_clamp_of_an_overflowing_curve() {
+    for [.., a] in levels_first_pixel(&levels_controls("alpha", [0.0, 0.0, 0.1, 0.0, 2e-38]), [0.004, 0.004, 0.004, 0.01]) {
+        assert_eq!(a, 1.0);
+    }
+}
+
+#[test]
+fn levels_channel_stage_reads_a_saturated_master_back_finite() {
+    let owned = [levels_controls("", [0.5, 0.5, 0.1, 0.0, 1.0]), levels_controls("red", [0.0, 1.0, 10.0, 0.0, 1.0])].concat();
+    let vals: Vec<(&str, Value)> = owned.iter().map(|(id, v)| (id.as_str(), v.clone())).collect();
+    for alpha in [0.75, 0.3, 1.0] {
+        for out in effect_direct_on("ec.color.levels", &vals, false, filled([0.45 * alpha, 0.55 * alpha, 0.0, alpha])) {
+            assert!(out.data.iter().flatten().all(|v| v.is_finite()), "alpha {alpha}: {:?}", out.data[0]);
+        }
+    }
 }
 
 #[test]
