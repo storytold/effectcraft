@@ -64,9 +64,20 @@ const AUDIO_SEEK_BACKUP_PACKETS: usize = 2;
 
 /// Complete first-sample read cap for the ProRes alpha probe; larger samples use the legacy route.
 const MAX_PRORES_ALPHA_SAMPLE_BYTES: u32 = 32 * 1024 * 1024;
+/// Complete first-presented sample cap for the MXF ProRes colour probe. Larger samples retain the
+/// existing colour policy; the ProRes header parser requires the complete declared frame.
+const MAX_MXF_PRORES_COLOR_SAMPLE_BYTES: u32 = 4 * 1024 * 1024;
 
 fn worker_cap() -> usize {
     std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(1, MAX_WORKERS)
+}
+
+fn prores_has_alpha(packet_size: u32, read: impl FnOnce() -> Option<Vec<u8>>) -> Option<bool> {
+    if packet_size > MAX_PRORES_ALPHA_SAMPLE_BYTES {
+        return None;
+    }
+    let packet = read()?;
+    Some(craft_video::prores::probe(&packet).ok()?.alpha != craft_video::prores::AlphaType::None)
 }
 
 fn supports_video_codec(codec: CodecId) -> bool {
@@ -305,19 +316,23 @@ impl ContainerFile {
         (seek_idx, decoded_pos)
     }
 
-    fn audio_silent_prefix(&self, track_idx: usize, start: i64, frames: usize, sample_rate: u32) -> usize {
-        let Self::Isobmff(file) = self else { return 0 };
-        let Some((leading_duration, media_time)) = file.tracks.get(track_idx).and_then(|track| unit_rate_media_edit(&track.edits)) else {
-            return 0;
+    fn audio_edit_range(&self, track_idx: usize, start: i64, frames: usize, sample_rate: u32) -> std::ops::Range<usize> {
+        let Self::Isobmff(file) = self else { return 0..frames };
+        let Some((leading_duration, media)) = file.tracks.get(track_idx).and_then(|track| unit_rate_media_edit(&track.edits)) else {
+            return 0..frames;
         };
-        if leading_duration == 0 || media_time == 0 || file.timescale == 0 {
-            return 0;
+        if file.timescale == 0 {
+            return 0..frames;
         }
 
-        // The net packet offset includes the trim and can put decoder preroll inside
-        // the empty edit. Use the empty edit's duration on the output clock instead.
-        let first_presented = (u128::from(leading_duration) * u128::from(sample_rate)).div_ceil(u128::from(file.timescale)) as i128;
-        usize::try_from((first_presented - i128::from(start)).max(0)).unwrap_or(usize::MAX).min(frames)
+        // Packet positions include preroll. The edit's movie-clock boundaries
+        // determine which samples are presented, with the end excluded.
+        let offset = |ticks: u128| {
+            let frame = (ticks * u128::from(sample_rate)).div_ceil(u128::from(file.timescale)) as i128;
+            usize::try_from((frame - i128::from(start)).max(0)).unwrap_or(usize::MAX).min(frames)
+        };
+        let leading = u128::from(leading_duration);
+        offset(leading)..offset(leading + u128::from(media.segment_duration))
     }
 }
 
@@ -702,14 +717,14 @@ fn clean_aperture_region(aperture: isobmff::CleanAperture, (width, height): (u32
 }
 
 /// A single unit-rate media span, optionally preceded by one empty span.
-fn unit_rate_media_edit(edits: &[isobmff::Edit]) -> Option<(u64, i64)> {
+fn unit_rate_media_edit(edits: &[isobmff::Edit]) -> Option<(u64, &isobmff::Edit)> {
     const UNIT_RATE: i32 = 0x0001_0000;
     let (leading_duration, media) = match edits {
         [media] => (0, media),
         [empty, media] if empty.media_time == -1 && empty.segment_duration > 0 && empty.media_rate == UNIT_RATE => (empty.segment_duration, media),
         _ => return None,
     };
-    (media.media_time >= 0 && media.segment_duration != 0 && media.media_rate == UNIT_RATE).then_some((leading_duration, media.media_time))
+    (media.media_time >= 0 && media.segment_duration != 0 && media.media_rate == UNIT_RATE).then_some((leading_duration, media))
 }
 
 /// A scalar EDL origin cannot describe dwell, disjoint edits or respeeding.
@@ -717,7 +732,7 @@ fn continuous_edit_mapping(track: &isobmff::Track, movie_timescale: u32) -> Opti
     if track.edits.is_empty() {
         return (track.edit_offset == 0).then_some((0, 0));
     }
-    let (leading_duration, media_time) = unit_rate_media_edit(&track.edits)?;
+    let (leading_duration, media) = unit_rate_media_edit(&track.edits)?;
     if movie_timescale == 0 || track.timescale == 0 {
         return None;
     }
@@ -728,8 +743,8 @@ fn continuous_edit_mapping(track: &isobmff::Track, movie_timescale: u32) -> Opti
     if lead % movie_clock != 0 {
         return None;
     }
-    let offset = i64::try_from(lead / movie_clock - i128::from(media_time)).ok()?;
-    (offset == track.edit_offset).then_some((media_time, offset))
+    let offset = i64::try_from(lead / movie_clock - i128::from(media.media_time)).ok()?;
+    (offset == track.edit_offset).then_some((media.media_time, offset))
 }
 
 /// The EDL origin is the timecode at presentation time zero, not the raw
@@ -823,11 +838,7 @@ fn open_isobmff(name: &str, source: SharedBytes) -> Option<Result<SharedSource>>
         let has_alpha = if video_params.codec == CodecId::ProRes {
             // The coded alpha plane is authoritative for ProRes, not the MOV sample-entry depth.
             let sample = video_track.samples.first()?;
-            if sample.size > MAX_PRORES_ALPHA_SAMPLE_BYTES {
-                return None;
-            }
-            let packet = file.read_sample(&*source, v_idx, 0).ok()?;
-            craft_video::prores::probe(&packet).ok()?.alpha != craft_video::prores::AlphaType::None
+            prores_has_alpha(sample.size, || file.read_sample(&*source, v_idx, 0).ok())?
         } else {
             video_track.video().is_some_and(|v| v.depth == 32)
         };
@@ -1129,6 +1140,8 @@ fn open_parsed_mxf(name: &str, source: SharedBytes, file: mxf::MxfFile) -> Optio
             Ok(d) => d,
             Err(e) => return Some(Err(MediaError::Decode(e.to_string()))),
         };
+        let (color, container_color) =
+            mxf_prores_color(&file, &*source, v_idx).map_or((ColorInfo::REC709, None), |(probe, descriptor)| (probe, Some(descriptor)));
         let v_info = VideoStreamInfo {
             width,
             height,
@@ -1136,13 +1149,13 @@ fn open_parsed_mxf(name: &str, source: SharedBytes, file: mxf::MxfFile) -> Optio
             par,
             codec: video_params.codec.name().to_string(),
             pixel_format: String::new(),
-            color: ColorInfo::REC709,
+            color,
             has_alpha,
             bitrate: None,
             hdr: None,
         };
         let v_state = Mutex::new(VideoState { decoder: video_decoder, next_decode_idx: 0, gop_start_idx: 0, flushed: false, decoded: Vec::new() });
-        (Some(v_info), Some(v_state), FramePresentation { container_color: None, par, rotation: 0, aperture: None }, duration)
+        (Some(v_info), Some(v_state), FramePresentation { container_color, par, rotation: 0, aperture: None }, duration)
     } else {
         let duration = audio_tracks
             .iter()
@@ -1227,7 +1240,12 @@ fn open_avi(name: &str, source: SharedBytes) -> Option<Result<SharedSource>> {
             Ok(d) => d,
             Err(e) => return Some(Err(MediaError::Decode(e.to_string()))),
         };
-        let info = default_video_info(width, height, frame_rate, &video_params);
+        let mut info = default_video_info(width, height, frame_rate, &video_params);
+        if video_params.codec == CodecId::ProRes {
+            // The coded alpha plane is authoritative for ProRes, regardless of AVI header depth.
+            let chunk = video_stream.chunks.first()?;
+            info.has_alpha = prores_has_alpha(chunk.size, || file.read_chunk(&*source, v_idx, 0).ok())?;
+        }
         let state = Mutex::new(VideoState { decoder: video_decoder, next_decode_idx: 0, gop_start_idx: 0, flushed: false, decoded: Vec::new() });
         (Some(ContainerVideoPart { track_idx: v_idx, info, state }), duration)
     } else {
@@ -1458,15 +1476,20 @@ impl MediaSource for CraftMediaSource {
             return Err(MediaError::Decode("invalid audio sample rate 0".into()));
         }
         let channels_count = self.info.audio_streams.get(stream).map_or(2, |s| s.channels as usize);
-        let silent_frames = self.file.audio_silent_prefix(entry.track_idx, start, frames, sample_rate);
-        let audible_frames = frames - silent_frames;
+        let edit_range = self.file.audio_edit_range(entry.track_idx, start, frames, sample_rate);
+        let audible_frames = edit_range.len();
         if audible_frames == 0 {
             return Ok(AudioBuffer::new(sample_rate, channels_count as u16, frames));
         }
 
-        let audible_start = i64::try_from(i128::from(start) + silent_frames as i128).unwrap_or(i64::MAX);
+        let audible_start = i64::try_from(i128::from(start) + edit_range.start as i128).unwrap_or(i64::MAX);
         let native_rate = entry.native_rate;
-        let (native_start, native_frames) = native_audio_window(audible_start, audible_frames, native_rate, sample_rate);
+        let (native_start, mut native_frames) = native_audio_window(audible_start, audible_frames, native_rate, sample_rate);
+        if native_rate != sample_rate {
+            // The resampler asks for lookahead. Do not interpolate with samples
+            // that are stored in the track but lie beyond the edit.
+            native_frames = self.file.audio_edit_range(entry.track_idx, native_start, native_frames, native_rate).end;
+        }
 
         let decoded = match &entry.backend {
             AudioBackend::Decoder { seek_preroll_samples, state: state_mutex } => {
@@ -1515,10 +1538,10 @@ impl MediaSource for CraftMediaSource {
 
         let mut channels =
             if sample_rate == native_rate { decoded } else { resample_audio(&decoded, channels_count, native_rate, sample_rate, audible_frames) };
-        if silent_frames > 0 {
+        if audible_frames < frames {
             for channel in &mut channels {
                 channel.resize(frames, 0.0);
-                channel.rotate_right(silent_frames);
+                channel.rotate_right(edit_range.start);
             }
         }
         Ok(AudioBuffer { sample_rate, channels })
@@ -2125,6 +2148,48 @@ fn resolve_color(vui: ColorTags, container: Option<ColorInfo>) -> ColorInfo {
     ColorInfo { matrix, transfer, primaries, range }
 }
 
+/// Resolve the clip's initial probe colour from the first presented ProRes frame, without
+/// changing decoder state or a project's saved interpretation. Later frames still resolve their
+/// own decoder fields against the descriptor; this is not a variable-profile clip probe.
+fn mxf_prores_color(file: &MxfFile, source: &dyn ByteSource, track_idx: usize) -> Option<(ColorInfo, ColorInfo)> {
+    use effectcraft_project::ColorSpace;
+
+    let track = file.tracks.get(track_idx)?;
+    if !matches!(track.codec, mxf::Codec::ProRes { .. }) {
+        return None;
+    }
+    let descriptor = color_from_mxf(track.picture.as_ref()?)?;
+    let (start, len) = mxf_picture_window(track);
+    if len == 0 {
+        return None;
+    }
+    let index = track.sample_at(start)?;
+    let sample = track.samples.get(index)?;
+    if !(28..=MAX_MXF_PRORES_COLOR_SAMPLE_BYTES).contains(&sample.size) {
+        return None;
+    }
+    let packet = file.read_sample(source, track_idx, index).ok()?;
+    let tags = craft_video::prores::probe(&packet).ok()?.color;
+    let tags = ColorTags { primaries: tags.primaries, transfer: tags.transfer, matrix: tags.matrix, full_range: false };
+    let color = resolve_color(tags, Some(descriptor));
+    // Only opt in when the managed compositor can represent the resolved primaries/transfer.
+    // The general profile mapper also approximates some other pairs for existing routes.
+    match crate::probe::profile_of_craft(&color) {
+        Some(ColorSpace::Rec2100Pq | ColorSpace::Rec2100Hlg) => Some((color, descriptor)),
+        Some(ColorSpace::Rec709) if color.primaries == Primaries::Bt709 => Some((color, descriptor)),
+        _ => None,
+    }
+}
+
+fn color_from_mxf(picture: &mxf::PictureInfo) -> Option<ColorInfo> {
+    let (primaries, transfer, matrix) = picture.color_codes();
+    if (primaries, transfer, matrix) == (None, None, None) {
+        return None;
+    }
+    // Use the existing H.273 defaults without changing MXF quantisation range policy.
+    Some(resolve_color(ColorTags { primaries: primaries.unwrap_or(2), transfer: transfer.unwrap_or(2), matrix: matrix.unwrap_or(2), full_range: false }, None))
+}
+
 fn color_from_isobmff(c: &isobmff::ColorInfo) -> ColorInfo {
     match c {
         isobmff::ColorInfo::Nclx { primaries, transfer, matrix, full_range } => ColorInfo {
@@ -2562,29 +2627,37 @@ mod tests {
         }
     }
 
-    /// Original PCM generated in memory to exercise an empty edit followed by a trim.
+    /// Original PCM generated in memory at the MOV writer's default movie timescale.
+    fn edited_pcm_mov(rate: u32, samples: &[i16], edits: Vec<isobmff::Edit>) -> Vec<u8> {
+        use isobmff::{Brand, Mp4Writer, PcmConfig, SampleEntry, TrackConfig, WriteSample, WriterOptions};
+
+        let mut writer = Mp4Writer::new(std::io::Cursor::new(Vec::new()), WriterOptions::new(Brand::Mov)).unwrap();
+        let pcm = PcmConfig { bits: 16, float: false, big_endian: false, signed: true, channels: 1, sample_rate: f64::from(rate) };
+        let mut config = TrackConfig::new(SampleEntry::pcm(pcm), rate);
+        config.edits = edits;
+        let track = writer.add_track(config).unwrap();
+        for chunk in samples.chunks(256) {
+            let data: Vec<u8> = chunk.iter().flat_map(|sample| sample.to_le_bytes()).collect();
+            writer.write_sample(track, WriteSample { data: &data, duration: chunk.len() as u32, composition_offset: 0, is_sync: true }).unwrap();
+        }
+        writer.finish().unwrap().into_inner()
+    }
+
     #[test]
     fn mov_pcm_trim_after_empty_edit_preserves_leading_silence() {
-        use isobmff::{Brand, Edit, Mp4Writer, PcmConfig, SampleEntry, TrackConfig, WriteSample, WriterOptions};
-
         const RATE: u32 = 48_000;
         const DELAY_MS: u64 = 100;
         const DELAY: i64 = 4_800;
         let samples: Vec<i16> = (0..12_000).map(|i| 1_000 + (i % 257) as i16 * 32).collect();
         for trim in [2_400i64, 4_800, 9_600] {
-            let mut writer = Mp4Writer::new(std::io::Cursor::new(Vec::new()), WriterOptions::new(Brand::Mov)).unwrap();
-            let pcm = PcmConfig { bits: 16, float: false, big_endian: false, signed: true, channels: 1, sample_rate: f64::from(RATE) };
-            let mut config = TrackConfig::new(SampleEntry::pcm(pcm), RATE);
-            config.edits = vec![
-                Edit { segment_duration: DELAY_MS, media_time: -1, media_rate: 0x0001_0000 },
-                Edit { segment_duration: 40, media_time: trim, media_rate: 0x0001_0000 },
-            ];
-            let track = writer.add_track(config).unwrap();
-            for chunk in samples.chunks(256) {
-                let data: Vec<u8> = chunk.iter().flat_map(|sample| sample.to_le_bytes()).collect();
-                writer.write_sample(track, WriteSample { data: &data, duration: chunk.len() as u32, composition_offset: 0, is_sync: true }).unwrap();
-            }
-            let bytes = writer.finish().unwrap().into_inner();
+            let bytes = edited_pcm_mov(
+                RATE,
+                &samples,
+                vec![
+                    isobmff::Edit { segment_duration: DELAY_MS, media_time: -1, media_rate: 0x0001_0000 },
+                    isobmff::Edit { segment_duration: 40, media_time: trim, media_rate: 0x0001_0000 },
+                ],
+            );
             let file = isobmff::open(bytes.as_slice()).unwrap();
             assert_eq!(file.timescale, 1_000);
             assert_eq!(file.tracks[0].edit_offset, DELAY - trim);
@@ -2598,6 +2671,38 @@ mod tests {
             assert_eq!(read(DELAY, 2, RATE), expected[2..], "read from first presented sample, trim {trim}");
             assert_eq!(read(DELAY * 2 - 4, 5, RATE * 2), [0.0, 0.0, 0.0, 0.0, sample(trim)], "resampled read, trim {trim}");
             assert_eq!(read(4_408, 3, 44_100), [0.0, 0.0, sample(trim)], "nonintegral resampling ratio, trim {trim}");
+        }
+    }
+
+    #[test]
+    fn mov_pcm_audio_is_silent_after_the_edit_span() {
+        const RATE: u32 = 48_000;
+        const EDIT_MS: u64 = 41;
+        const TRIM: i64 = 9_600;
+        const EDIT_FRAMES: usize = 1_968;
+        let samples: Vec<i16> = (0..12_000).map(|i| 1_000 + (i % 257) as i16 * 32).collect();
+        let last = f32::from(samples[TRIM as usize + EDIT_FRAMES - 1]) / 32_768.0;
+        let previous = f32::from(samples[TRIM as usize + EDIT_FRAMES - 2]) / 32_768.0;
+        for delay_ms in [0, 100] {
+            let mut edits = Vec::new();
+            if delay_ms > 0 {
+                edits.push(isobmff::Edit { segment_duration: delay_ms, media_time: -1, media_rate: 0x0001_0000 });
+            }
+            edits.push(isobmff::Edit { segment_duration: EDIT_MS, media_time: TRIM, media_rate: 0x0001_0000 });
+            let bytes = edited_pcm_mov(RATE, &samples, edits);
+            let source = open_bytes("edited-pcm.mov", bytes.into()).expect("shared MOV route").unwrap();
+            let read = |start, frames, rate| source.audio(start, frames, rate).expect("direct shared PCM read").channels.remove(0);
+
+            let end = ((delay_ms + EDIT_MS) * 48) as i64;
+            assert_eq!(read(end - 2, 4, RATE), [previous, last, 0.0, 0.0], "crossing the boundary, delay {delay_ms}");
+            assert_eq!(read(end, 2, RATE), [0.0, 0.0], "read after the end");
+            assert_eq!(read(end - 2, 2, RATE), [previous, last], "backward seek");
+            assert_eq!(read(end * 2 - 4, 6, RATE * 2), [previous, (previous + last) / 2.0, last, last, 0.0, 0.0]);
+
+            let first_silent = ((delay_ms + EDIT_MS) * 44_100).div_ceil(1_000) as i64;
+            let boundary = read(first_silent - 1, 2, 44_100);
+            assert!(boundary[0] > 0.0, "sample before the fractional boundary");
+            assert_eq!(boundary[1], 0.0, "sample after the fractional boundary");
         }
     }
 
@@ -2795,6 +2900,161 @@ mod tests {
             let out = to_craft_frame(vf_with_sar, presentation, Tick::ZERO).ok();
             assert_eq!(out.map(|f| f.par), Some((3, 4)));
         }
+    }
+
+    fn mxf_prores_color_packet(codes: (u8, u8, u8)) -> Vec<u8> {
+        use craft_video::prores::{self, ChromaFormat, Encoder, EncoderConfig, Frame, Profile};
+
+        let mut frame = Frame::new(16, 12, ChromaFormat::Yuv422, 10, false).expect("ProRes frame");
+        frame.y.fill(512);
+        frame.cb.fill(512);
+        frame.cr.fill(512);
+        let (primaries, transfer, matrix) = codes;
+        let mut encoder = EncoderConfig::new(Profile::Hq, 16, 12);
+        encoder.color = prores::ColorInfo { primaries, transfer, matrix };
+        let packet = Encoder::with_config(encoder).encode(&frame).expect("encode ProRes");
+        let bits = prores::probe(&packet).expect("ProRes header").color;
+        assert_eq!((bits.primaries, bits.transfer, bits.matrix), codes);
+        packet
+    }
+
+    fn mxf_prores_color_fixture(color: mxf::write::ColorSpace, packets: &[&[u8]]) -> Arc<[u8]> {
+        let ids = mxf::write::PackageIds::from_seed("eff-mxf-color", "op1a");
+        let mut cfg = mxf::write::WriterConfig::new(mxf::write::Pattern::Op1a, mxf::Rational::new(25, 1), ids);
+        let mut picture = mxf::write::PictureDesc::new(mxf::write::PictureCoding::ProRes { profile: 4 }, 16, 12);
+        picture.color = color;
+        cfg.picture = Some(picture);
+        let mut writer = mxf::write::MxfWriter::new(std::io::Cursor::new(Vec::new()), cfg).expect("writer");
+        for packet in packets {
+            writer.push_picture(packet, mxf::write::FrameInfo::intra()).expect("picture");
+        }
+        writer.finish().expect("finish").into_inner().into()
+    }
+
+    #[test]
+    fn mxf_descriptor_color_fills_unspecified_shared_prores_fields() {
+        use effectcraft_project::ColorSpace;
+
+        let pq = ColorInfo { primaries: Primaries::Bt2020, transfer: Transfer::Pq, matrix: Matrix::Bt2020Ncl, range: Range::Limited };
+        let mixed = ColorInfo { matrix: Matrix::Bt709, ..pq };
+        for (descriptor, descriptor_codes, packet_codes, profile, expected) in [
+            (mxf::write::ColorSpace::Rec2020Pq, (9, 16, 9), (2, 2, 2), Some(ColorSpace::Rec2100Pq), pq),
+            (mxf::write::ColorSpace::Rec2020Pq, (9, 16, 9), (1, 1, 1), Some(ColorSpace::Rec709), ColorInfo::REC709),
+            (mxf::write::ColorSpace::Rec2020Pq, (9, 16, 9), (2, 2, 1), Some(ColorSpace::Rec2100Pq), mixed),
+            (mxf::write::ColorSpace::Rec2020Pq, (9, 16, 9), (1, 2, 1), Some(ColorSpace::Rec709), ColorInfo::REC709),
+            (mxf::write::ColorSpace::Rec709, (1, 1, 1), (2, 2, 2), Some(ColorSpace::Rec709), ColorInfo::REC709),
+        ] {
+            let bytes = mxf_prores_color_fixture(descriptor, &[&mxf_prores_color_packet(packet_codes)]);
+            let file = mxf::open(bytes.as_ref()).expect("demux fixture");
+            let picture = file.tracks[0].picture.as_ref().expect("picture descriptor");
+            let (p, t, m) = descriptor_codes;
+            assert_eq!(picture.color_codes(), (Some(p), Some(t), Some(m)));
+            let footage = crate::probe::probe_bytes("color.mxf", bytes.clone()).expect("public probe");
+            assert_eq!(footage.codec, "ProRes", "must use the shared MXF route");
+            assert_eq!(footage.color_profile, profile);
+
+            let source = open_bytes("color.mxf", bytes).expect("recognized MXF").expect("shared MXF");
+            let info = source.info().video.as_ref().expect("video");
+            assert_eq!(info.color, expected);
+            assert!(info.hdr.is_none(), "color labels alone are not HDR static metadata");
+            let decoded = source.video_frame(FrameRequest { time: Tick::ZERO, scale: 1.0 }).expect("decode frame");
+            assert_eq!(decoded.color, expected);
+        }
+    }
+
+    #[test]
+    fn mxf_prores_explicit_rec709_keeps_managed_pixels_and_saved_interpretation() {
+        use effectcraft_color::{ColorSpace, Label};
+        use effectcraft_project::{BitDepth, Comp, ItemKind, LayerSource, Project, build};
+        use effectcraft_render::{RenderOpts, Renderer};
+
+        let packet = mxf_prores_color_packet((1, 1, 1));
+        let render = |descriptor, saved_override| {
+            let bytes = mxf_prores_color_fixture(descriptor, &[&packet]);
+            let path = "managed-color.mxf";
+            let mut footage = crate::probe::probe_bytes(path, bytes.clone()).expect("public probe");
+            assert_eq!(footage.codec, "ProRes", "must use the shared MXF route");
+            assert_eq!(footage.color_profile, Some(ColorSpace::Rec709));
+            if saved_override {
+                footage.color_profile = Some(ColorSpace::Rec2100Pq);
+            }
+            let pool = crate::MediaPool::new();
+            pool.add_bytes(path, bytes);
+
+            let mut project = Project::default();
+            project.settings.bit_depth = BitDepth::Bpc32;
+            project.settings.working_space = Some(ColorSpace::Srgb);
+            let rate = effectcraft_time::FrameRate::new(25, 1);
+            let mut comp = Comp::new(16, 12, rate, rate.tick_of(1));
+            let item = project.add_item("Footage", Label::Aqua, None, ItemKind::Footage(footage));
+            let layer = build::layer(&mut project, &comp, "Footage", LayerSource::Footage { item }, (16, 12), Some(comp.duration));
+            comp.layers.push(layer);
+            let comp_id = project.add_item("Comp", Label::Sandstone, None, ItemKind::Comp(comp.into()));
+            Renderer::new(&project, &pool, RenderOpts::default()).comp_frame(comp_id, effectcraft_time::Tick::ZERO).get(8, 6)
+        };
+
+        let rec709 = render(mxf::write::ColorSpace::Rec709, false);
+        let conflicting = render(mxf::write::ColorSpace::Rec2020Pq, false);
+        let overridden = render(mxf::write::ColorSpace::Rec2020Pq, true);
+        assert!(rec709[0] > 0.1 && rec709[0] < 0.9 && rec709[3] > 0.99, "not an opaque midtone: {rec709:?}");
+        assert!(rec709.iter().zip(conflicting).all(|(a, b)| (a - b).abs() < 1e-4), "{rec709:?} vs {conflicting:?}");
+        assert!((overridden[0] - conflicting[0]).abs() > 0.02, "saved interpretation did not change the pixel: {overridden:?} vs {conflicting:?}");
+    }
+
+    #[test]
+    fn mxf_prores_color_reads_one_bounded_presented_packet() {
+        struct Reads<'a> {
+            bytes: &'a [u8],
+            log: Mutex<Vec<(u64, usize)>>,
+            fail: bool,
+        }
+        impl ByteSource for Reads<'_> {
+            fn len(&self) -> u64 {
+                if self.fail { u64::MAX } else { self.bytes.len() as u64 }
+            }
+            fn read_at(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<()> {
+                self.log.lock().unwrap().push((offset, buf.len()));
+                if self.fail {
+                    return Err(std::io::Error::other("unreadable fixture packet"));
+                }
+                self.bytes.read_at(offset, buf)
+            }
+        }
+
+        let unspecified = mxf_prores_color_packet((2, 2, 2));
+        let rec709 = mxf_prores_color_packet((1, 1, 1));
+        let bytes = mxf_prores_color_fixture(mxf::write::ColorSpace::Rec2020Pq, &[&unspecified, &rec709]);
+        let mut file = mxf::open(bytes.as_ref()).expect("demux fixture");
+        // Exercise a material edit on parsed metadata: stored packet zero is hidden.
+        file.tracks[0].start_position = 1;
+        let sample = file.tracks[0].samples[1];
+        let mut reads = Reads { bytes: &bytes, log: Mutex::new(Vec::new()), fail: false };
+        let (probe, descriptor) = mxf_prores_color(&file, &reads, 0).expect("first presented ProRes header");
+        assert_eq!(probe, ColorInfo::REC709);
+        assert_eq!(descriptor.transfer, Transfer::Pq);
+        assert_eq!(std::mem::take(reads.log.get_mut().unwrap()), [(sample.offset, sample.size as usize)]);
+
+        reads.fail = true;
+        assert_eq!(mxf_prores_color(&file, &reads, 0), None);
+        assert_eq!(std::mem::take(reads.log.get_mut().unwrap()), [(sample.offset, sample.size as usize)]);
+        // The source reports ample backing so only the cap can explain the skipped read.
+        file.tracks[0].samples[1].size = MAX_MXF_PRORES_COLOR_SAMPLE_BYTES + 1;
+        assert_eq!(mxf_prores_color(&file, &reads, 0), None);
+        assert!(reads.log.get_mut().unwrap().is_empty());
+
+        file.tracks[0].samples[1] = sample;
+        file.tracks[0].codec = mxf::Codec::Vc3;
+        assert_eq!(mxf_prores_color(&file, &reads, 0), None);
+        assert!(reads.log.get_mut().unwrap().is_empty());
+    }
+
+    #[test]
+    fn mxf_absent_color_labels_keep_defaults_and_range_policy() {
+        let picture = mxf::PictureInfo { component_depth: 10, black_ref_level: Some(0), white_ref_level: Some(1023), ..Default::default() };
+        assert!(picture.full_range());
+        assert_eq!(picture.color_codes(), (None, None, None));
+        assert_eq!(color_from_mxf(&picture), None);
+        assert_eq!(resolve_color(ColorTags::UNSPECIFIED, color_from_mxf(&picture)), ColorInfo::REC709);
     }
 
     #[test]
@@ -3295,5 +3555,50 @@ mod tests {
         apv_params.width = Some(16);
         apv_params.height = Some(16);
         assert!(TrackDecoder::with_options(&apv_params, TrackDecoderOptions { threads: Some(1), draft: false }).is_ok(), "Apv decoder");
+    }
+
+    #[test]
+    fn avi_prores_coded_alpha_parity() {
+        use craft_video::prores::{ChromaFormat, ColorInfo as ProResColor, Encoder, EncoderConfig, Frame as ProResFrame, Interlace, Profile};
+
+        let encode_prores_avi = |with_alpha: bool| -> Vec<u8> {
+            let mut cfg = EncoderConfig::new(Profile::P4444, 16, 16);
+            cfg.encode_alpha = with_alpha;
+            cfg.threads = false;
+            let mut enc = Encoder::with_config(cfg);
+            let frame = ProResFrame {
+                width: 16,
+                height: 16,
+                chroma: ChromaFormat::Yuv444,
+                bit_depth: 10,
+                y: vec![512; 256],
+                cb: vec![512; 256],
+                cr: vec![512; 256],
+                alpha: with_alpha.then(|| vec![512; 256]),
+                interlace: Interlace::Progressive,
+                color: ProResColor::default(),
+                aspect_ratio: 0,
+                frame_rate_code: 0,
+            };
+            let pkt = enc.encode(&frame).expect("encode prores");
+            let mut w = avi::AviWriter::new(
+                std::io::Cursor::new(Vec::new()),
+                vec![avi::StreamSpec::Video(avi::VideoSpec::new(*b"ap4h", 16, 16, 24, 1))],
+                avi::MuxOptions::default(),
+            )
+            .expect("avi writer");
+            w.write_chunk(0, &pkt, true).expect("write prores chunk");
+            w.finish().expect("finish avi").into_inner()
+        };
+
+        let alpha_src = open_bytes("alpha.avi", Arc::from(encode_prores_avi(true))).expect("recognized").expect("opened");
+        assert!(alpha_src.info().video.as_ref().unwrap().has_alpha);
+        let frame = alpha_src.video_frame(FrameRequest { time: Tick::ZERO, scale: 1.0 }).expect("decode alpha frame");
+        assert!(matches!(frame.data, PixelData::Yuv16 { alpha: Some(_), .. }));
+
+        let opaque_src = open_bytes("opaque.avi", Arc::from(encode_prores_avi(false))).expect("recognized").expect("opened");
+        assert!(!opaque_src.info().video.as_ref().unwrap().has_alpha);
+        let frame = opaque_src.video_frame(FrameRequest { time: Tick::ZERO, scale: 1.0 }).expect("decode opaque frame");
+        assert!(matches!(frame.data, PixelData::Yuv16 { alpha: None, .. }));
     }
 }
