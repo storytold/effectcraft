@@ -827,8 +827,8 @@ fn open_avi(name: &str, source: SharedBytes) -> Option<Result<SharedSource>> {
     finish_container_source(name, "avi", source, ContainerFile::Avi(Box::new(file)), video_idx, video_info, video_state, duration, audio_candidates)
 }
 
-fn estimate_mpeg_frame_rate(units: &[mpegts::Unit]) -> FrameRate {
-    let mut pts: Vec<i64> = units.iter().filter_map(|u| u.pts).take(64).collect();
+fn estimate_mpeg_frame_rate_pts(pts: impl IntoIterator<Item = i64>) -> FrameRate {
+    let mut pts: Vec<i64> = pts.into_iter().take(64).collect();
     pts.sort_unstable();
     let mut deltas: Vec<i64> = pts.windows(2).map(|w| w[1] - w[0]).filter(|&d| d > 0).collect();
     if deltas.is_empty() {
@@ -837,6 +837,10 @@ fn estimate_mpeg_frame_rate(units: &[mpegts::Unit]) -> FrameRate {
     deltas.sort_unstable();
     let median = deltas[deltas.len() / 2];
     snap_common_fps(90_000.0 / median as f64).unwrap_or(FrameRate::FPS_30)
+}
+
+fn estimate_mpeg_frame_rate(units: &[mpegts::Unit]) -> FrameRate {
+    estimate_mpeg_frame_rate_pts(units.iter().filter_map(|u| u.pts))
 }
 
 fn open_mpeg(name: &str, fmt: mpegts::Format, source: SharedBytes) -> Option<Result<SharedSource>> {
@@ -1847,12 +1851,7 @@ mod tests {
     fn avi_and_mpeg_helpers_and_in_memory_route() {
         assert_eq!(tick_to_rational_units(Tick(craft_time::TICKS_PER_SECOND), 24, 1), 24);
         assert_eq!(tick_to_rational_units(Tick(-1), 24, 1), 0);
-        let units = [
-            mpegts::Unit { pts: Some(0), dts: None, key: true, disposable: false, size: 1, pos: 0, offset: 0, picture: None },
-            mpegts::Unit { pts: Some(3000), dts: None, key: false, disposable: false, size: 1, pos: 0, offset: 0, picture: None },
-            mpegts::Unit { pts: Some(6000), dts: None, key: false, disposable: false, size: 1, pos: 0, offset: 0, picture: None },
-        ];
-        assert_eq!(estimate_mpeg_frame_rate(&units), FrameRate::FPS_30);
+        assert_eq!(estimate_mpeg_frame_rate_pts([0, 3000, 6000]), FrameRate::FPS_30);
         assert_eq!(estimate_mpeg_frame_rate(&[]), FrameRate::FPS_30);
 
         let streams = vec![avi::StreamSpec::Video(avi::VideoSpec::new(*b"H264", 16, 16, 24, 1)), avi::StreamSpec::Audio(avi::AudioSpec::pcm(48_000, 2, 16))];
