@@ -684,3 +684,14 @@ fn a_prolog_keeps_the_built_in_cmyk_conversion() {
     let doc = eps(b"0.1 0.2 0.3 0.4 setcmykcolor currentcmykcolor 0.4 eq exch 0.3 eq and exch 0.2 eq and exch 0.1 eq and { 0 0 10 10 rectfill } if\n");
     assert_eq!(shape_names(&doc).len(), 1);
 }
+
+#[test]
+fn eps_restore_undoes_dictionary_changes() {
+    // Illustrator's prolog counts graphics states in a dictionary and relies on `restore` to
+    // take the count back down.
+    let doc = eps(b"/w 10 def /d 1 dict def d /v 1 put save /w 40 def d /v 2 put restore 0 0 w 10 rectfill d /v get 1 eq { 100 0 10 10 rectfill } if\n");
+    let img = render(&doc);
+    assert_eq!(img.get(20, 95)[3], 0.0, "w is 10 again");
+    assert!(img.get(5, 95)[3] > 0.99);
+    assert!(img.get(105, 95)[3] > 0.99, "d's entry is 1 again");
+}
