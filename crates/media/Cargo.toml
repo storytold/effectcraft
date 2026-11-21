@@ -30,7 +30,7 @@ craft-webp = { workspace = true, features = ["frames"] }
 craft-audio = { workspace = true, features = ["decode-native", "aac-decode", "alac-decode", "opus-decode", "ac3-decode", "mp3-decode", "mpa-decode"] }
 craft-color = { workspace = true }
 craft-frame = { workspace = true }
-craft-media = { workspace = true, features = ["mpegts"] }
+craft-media = { workspace = true, features = ["mpegts", "avi", "mxf"] }
 craft-media-source = { workspace = true }
 craft-time = { workspace = true }
 craft-video = { workspace = true, features = ["h264-decode", "hevc-decode", "vp9-decode", "vp8-decode", "av1-decode", "prores", "dnx", "mpeg2-decode", "threads"] }

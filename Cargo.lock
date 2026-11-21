@@ -1417,6 +1417,7 @@ name = "craft-media"
 version = "0.1.0"
 source = "git+https://github.com/storytold/craft-libs?rev=3dff4793f1a5bd1f99a4fe3280d48f515158dff3#3dff4793f1a5bd1f99a4fe3280d48f515158dff3"
 dependencies = [
+ "chrono",
  "thiserror 2.0.21",
 ]
 
