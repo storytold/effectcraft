@@ -332,6 +332,34 @@ impl ContainerFile {
         let leading = u128::from(leading_duration);
         offset(leading)..offset(leading + u128::from(media.segment_duration))
     }
+
+    /// Exclusive native packet position of the PCM edit's end. Unlike audio_edit_range,
+    /// this follows the demuxer's truncated packet placement, not the movie output clock.
+    fn pcm_edit_packet_end(&self, track_idx: usize, native_rate: u32) -> Option<i64> {
+        let Self::Isobmff(file) = self else { return None };
+        let track = file.tracks.get(track_idx)?;
+        // pcm_chunked alone describes how the sample table was indexed from entry one.
+        // With several descriptions the decoder may have selected a different entry.
+        let [entry] = track.entries.as_slice() else { return None };
+        if !matches!(entry.codec, isobmff::CodecConfig::Pcm(_))
+            || !track.pcm_chunked
+            || native_rate == 0
+            || track.timescale != native_rate
+            || file.timescale == 0
+        {
+            return None;
+        }
+        let (leading, media) = unit_rate_media_edit(&track.edits)?;
+        let movie_clock = u128::from(file.timescale);
+        let native_clock = u128::from(native_rate);
+        let packet_start = i128::from(track.edit_offset).checked_add(i128::from(media.media_time))?;
+        let expected_start = i128::try_from(u128::from(leading) * native_clock / movie_clock).ok()?;
+        if packet_start != expected_start {
+            return None;
+        }
+        let duration = i128::try_from((u128::from(media.segment_duration) * native_clock).div_ceil(movie_clock)).ok()?;
+        i64::try_from(packet_start.checked_add(duration)?).ok()
+    }
 }
 
 /// Where the container puts one audio packet, for [`contiguous_starts`].
@@ -1717,18 +1745,34 @@ impl MediaSource for CraftMediaSource {
 
         let decoded = match &entry.backend {
             AudioBackend::Decoder { seek_preroll_samples, state: state_mutex } => {
-                let mut state = state_mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                decode_audio_range(
-                    &self.file,
-                    &*self.source,
-                    entry.track_idx,
-                    native_rate,
-                    channels_count,
-                    *seek_preroll_samples,
-                    &mut state,
-                    native_start,
-                    native_frames,
-                )?
+                let packet_frames = self
+                    .file
+                    .pcm_edit_packet_end(entry.track_idx, native_rate)
+                    .map_or(native_frames, |end| usize::try_from((i128::from(end) - i128::from(native_start)).max(0)).unwrap_or(usize::MAX).min(native_frames));
+                let mut channels = if packet_frames == 0 && native_frames != 0 {
+                    vec![Vec::new(); channels_count]
+                } else {
+                    let mut state = state_mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    decode_audio_range(
+                        &self.file,
+                        &*self.source,
+                        entry.track_idx,
+                        native_rate,
+                        channels_count,
+                        *seek_preroll_samples,
+                        &mut state,
+                        native_start,
+                        packet_frames,
+                    )?
+                };
+                // A direct read still owes the full output window. For a resampled read, keep
+                // the clipped buffer short so its last valid sample remains the one-sided guard.
+                if sample_rate == native_rate && packet_frames < native_frames {
+                    for channel in &mut channels {
+                        channel.resize(native_frames, 0.0);
+                    }
+                }
+                channels
             }
             AudioBackend::MxfPcm { presented_start, presented_len } => {
                 if filmcraft_media::cancel::cancelled() {
@@ -3114,6 +3158,64 @@ mod tests {
             assert!(boundary[0] > 0.0, "sample before the fractional boundary");
             assert_eq!(boundary[1], 0.0, "sample after the fractional boundary");
         }
+    }
+
+    #[test]
+    fn mov_pcm_fractional_empty_edit_excludes_packet_tail() {
+        const RATE: u32 = 44_100;
+        let mut samples = vec![0i16; 1_024];
+        samples[600] = 16_384;
+        samples[601] = -8_192;
+        let mux = |leading_ms| {
+            edited_pcm_mov(
+                RATE,
+                &samples,
+                vec![
+                    isobmff::Edit { segment_duration: leading_ms, media_time: -1, media_rate: 0x0001_0000 },
+                    isobmff::Edit { segment_duration: 2, media_time: 512, media_rate: 0x0001_0000 },
+                ],
+            )
+        };
+        let bytes: Arc<[u8]> = mux(9).into();
+        let demuxed = isobmff::open(bytes.as_ref()).expect("generated PCM MOV");
+        assert_eq!(demuxed.timescale, 1_000);
+        assert_eq!(demuxed.tracks[0].timescale, RATE);
+        assert!(demuxed.tracks[0].pcm_chunked);
+        assert_eq!(demuxed.tracks[0].edit_offset, -116);
+        let source = open_bytes("fractional-edit.mov", bytes).expect("shared MOV route").expect("open mapped PCM");
+        let read = |start, frames, rate| source.audio(start, frames, rate).expect("direct shared PCM read").channels.remove(0);
+
+        // The output range still includes native position 485. The source edit ends
+        // before raw frame 601 (position 485), but includes raw frame 600 (position 484).
+        assert_eq!(read(484, 3, RATE), [0.5, 0.0, 0.0]);
+        assert_eq!(read(485, 2, RATE), [0.0, 0.0], "packet-content-only tail");
+        assert_eq!(read(484, 1, RATE), [0.5], "backward seek retains the last visible source sample");
+        assert_eq!(read(968, 4, RATE * 2), [0.5, 0.5, 0.0, 0.0], "do not interpolate with the excluded sample");
+
+        let aligned = open_bytes("aligned-edit.mov", mux(10).into()).expect("shared MOV").expect("aligned clocks");
+        assert_eq!(aligned.audio(529, 3, RATE).expect("aligned PCM").channels[0], [0.5, 0.0, 0.0]);
+        let unedited = open_bytes("no-edit.mov", edited_pcm_mov(RATE, &samples, Vec::new()).into()).expect("shared MOV").expect("no edit");
+        assert_eq!(unedited.audio(600, 2, RATE).expect("unedited PCM").channels[0], [0.5, -0.25]);
+
+        let mut mixed = demuxed.clone();
+        let track = &mut mixed.tracks[0];
+        let mut non_pcm = track.entries[0].clone();
+        non_pcm.codec = isobmff::CodecConfig::Mp3;
+        track.entries.push(non_pcm.clone());
+        track.samples[0].description_index = 2;
+        assert_ne!(track.codec_params().codec, CodecId::Pcm, "first sample selects the other description");
+        assert_eq!(ContainerFile::Isobmff(mixed.clone()).pcm_edit_packet_end(0, RATE), None, "mixed descriptions");
+        let track = &mut mixed.tracks[0];
+        track.entries = vec![non_pcm];
+        track.samples[0].description_index = 1;
+        assert_eq!(ContainerFile::Isobmff(mixed).pcm_edit_packet_end(0, RATE), None, "sole non-PCM description");
+
+        let file = ContainerFile::Isobmff(demuxed.clone());
+        assert_eq!(file.pcm_edit_packet_end(0, RATE), Some(485));
+        assert_eq!(file.pcm_edit_packet_end(0, 48_000), None, "different track and native clocks");
+        let mut parsed = demuxed;
+        parsed.tracks[0].edits[1].segment_duration = u64::MAX;
+        assert_eq!(ContainerFile::Isobmff(parsed).pcm_edit_packet_end(0, RATE), None, "unrepresentable native end");
     }
 
     #[test]
