@@ -711,10 +711,16 @@ fn fragment(it: &Item, sx: f64, sy: f64, lights: &[LightState], casters: &[&Item
 }
 
 fn shade_texel(it: &Item, g: &Geo, u: f64, v: f64, t: Px, lights: &[LightState], casters: &[&Item]) -> Px {
-    if lights.is_empty() || !it.mat.accepts_lights {
-        if it.mat.accepts_shadows == 2 {
-            return [0.0; 4];
-        }
+    // Accepts Shadows: Only turns the layer into a shadow matte: white where no shadow falls, black
+    // in full shadow, the layer's colour and the lights' colour and intensity ignored, alpha the
+    // layer's own (lab `accept_only`, After Effects 26.5: a (0.2, 0.6, 0.4) solid renders 255 white
+    // under a white spot at 100 % and an orange one at 50 %, also with Accepts Lights off; the
+    // shadow of a parallel light is 0; at 50 % opacity the alpha is 128).
+    let only = it.mat.accepts_shadows == 2;
+    if lights.is_empty() {
+        return if only { [t[3]; 4] } else { t };
+    }
+    if !it.mat.accepts_lights && !only {
         return t;
     }
     let a = t[3];
@@ -734,9 +740,12 @@ fn shade_texel(it: &Item, g: &Geo, u: f64, v: f64, t: Px, lights: &[LightState],
         }
         tr
     };
-    let (lit, shadow_amt) = shade(rgb, p, g.normal, g.cam.to_viewer(p), &it.mat, lights, &shadow);
-    if it.mat.accepts_shadows == 2 {
-        return [0.0, 0.0, 0.0, a * shadow_amt];
+    // A matte takes its shadows also with Accepts Lights off.
+    let mat = if only { Material { accepts_lights: true, ..it.mat } } else { it.mat };
+    let (lit, shadow_amt) = shade(rgb, p, g.normal, g.cam.to_viewer(p), &mat, lights, &shadow);
+    if only {
+        let w = (1.0 - shadow_amt) * a;
+        return [w, w, w, a];
     }
     [lit[0] * a, lit[1] * a, lit[2] * a, a]
 }

@@ -350,6 +350,74 @@ fn shadow_darkness_and_accepts_off() {
 }
 
 #[test]
+fn accepts_shadows_only_is_a_white_matte_with_black_shadows() {
+    // Lab accept_only (After Effects 26.5): a coloured solid with Accepts Shadows: Only renders
+    // white where no shadow falls and black in the full shadow of a parallel light, with its own
+    // alpha; its colour, the light's colour and intensity and Accepts Lights do not change it.
+    // It used to render transparent outside the shadow and a black shadow.
+    let (mut p, cid, comp) = setup();
+    let mut recv = solid3(&mut p, &comp, [0.2, 0.6, 0.4], 400, 200, [100.0, 50.0, 100.0]);
+    set(&mut recv, "materialOptions/acceptsShadows", Value::Enum(2));
+    set(&mut recv, "materialOptions/acceptsLights", Value::Bool(false));
+    let mut caster = solid3(&mut p, &comp, [1.0, 1.0, 1.0], 100, 200, [40.0, 50.0, 0.0]);
+    set(&mut caster, "materialOptions/castsShadows", Value::Enum(2)); // Only: invisible caster
+    let mut l = light(&mut p, &comp, LightKind::Parallel, [100.0, 50.0, -500.0]);
+    set(&mut l, "transform/poi", Value::Vec3([100.0, 50.0, 0.0]));
+    set(&mut l, "lightOptions/castsShadows", Value::Bool(true));
+    set(&mut l, "lightOptions/intensity", Value::Scalar(50.0));
+    set(&mut l, "lightOptions/color", Value::Color([1.0, 0.5, 0.25, 1.0]));
+    push(&mut p, cid, l);
+    push(&mut p, cid, caster);
+    push(&mut p, cid, recv);
+    let img = render(&p, cid);
+    let lit = img.get(170, 50);
+    assert!(lit.iter().all(|v| close(*v, 1.0, 1e-3)), "white matte: {lit:?}");
+    let dark = img.get(40, 50);
+    assert!(dark[..3].iter().all(|v| *v < 1e-3) && close(dark[3], 1.0, 1e-3), "black shadow: {dark:?}");
+    let c = p.comp_mut(cid).unwrap();
+    set(&mut c.layers[2], "transform/opacity", Value::Scalar(50.0));
+    let half = render(&p, cid).get(170, 50);
+    assert!(close(half[3], 0.5, 1e-3), "the layer's alpha: {half:?}");
+}
+
+#[test]
+fn accepts_shadows_only_scales_by_the_sample_alpha_and_the_shadow() {
+    // A half-transparent sample (a precomp of a 50 % solid) at 100 % opacity under a 50 % dark
+    // shadow: (1 - 0.5) · 0.5 = 0.25 in each channel and alpha 0.5 (premultiplied). A matte that
+    // skipped the sample alpha would give 0.5, one that took any shadow as full black 0.
+    let (mut p, cid, comp) = setup();
+    let inner = Comp::new(400, 200, FrameRate::FPS_30, Tick::from_seconds_f64(2.0));
+    let iid = p.add_item("Inner", Label::Sandstone, None, ItemKind::Comp(inner.clone().into()));
+    let sid = p.add_item("Solid", Label::Red, None, ItemKind::Solid(Solid { color: [0.2, 0.6, 0.4], width: 400, height: 200, pixel_aspect: 1.0 }));
+    let mut half = build::layer(&mut p, &inner, "Solid", LayerSource::Solid { item: sid }, (400, 200), None);
+    set(&mut half, "transform/opacity", Value::Scalar(50.0));
+    p.comp_mut(iid).unwrap().layers.push(half);
+    let mut recv = build::layer(&mut p, &comp, "Inner", LayerSource::Comp { item: iid }, (400, 200), None);
+    recv.switches.three_d = true;
+    set(&mut recv, "transform/position", Value::Vec3([100.0, 50.0, 100.0]));
+    set(&mut recv, "materialOptions/acceptsShadows", Value::Enum(2));
+    let mut caster = solid3(&mut p, &comp, [1.0, 1.0, 1.0], 100, 200, [40.0, 50.0, 0.0]);
+    set(&mut caster, "materialOptions/castsShadows", Value::Enum(2)); // Only: invisible caster
+    let mut l = light(&mut p, &comp, LightKind::Parallel, [100.0, 50.0, -500.0]);
+    set(&mut l, "transform/poi", Value::Vec3([100.0, 50.0, 0.0]));
+    set(&mut l, "lightOptions/castsShadows", Value::Bool(true));
+    set(&mut l, "lightOptions/shadowDarkness", Value::Scalar(50.0));
+    // Without lights the matte is white with the sample's alpha.
+    push(&mut p, cid, recv);
+    let unlit = render(&p, cid).get(170, 50);
+    assert!(unlit.iter().all(|v| close(*v, 0.5, 1e-3)), "no lights: {unlit:?}");
+    let layers = &mut p.comp_mut(cid).unwrap().layers;
+    layers.insert(0, caster);
+    layers.insert(0, l);
+    let img = render(&p, cid);
+    let dark = img.get(40, 50);
+    let want = [0.25, 0.25, 0.25, 0.5];
+    assert!(dark.iter().zip(want).all(|(v, w)| close(*v, w, 1e-3)), "half shadow on a half sample: {dark:?}");
+    let lit = img.get(170, 50);
+    assert!(lit.iter().all(|v| close(*v, 0.5, 1e-3)), "unshadowed half sample: {lit:?}");
+}
+
+#[test]
 fn shadow_diffusion_is_a_soft_ramp_not_copies() {
     // #2444: a wide Shadow Diffusion stamped 3 × 3 copies of the caster, so the penumbra stepped
     // through three flat levels instead of ramping smoothly from lit to shadowed.
