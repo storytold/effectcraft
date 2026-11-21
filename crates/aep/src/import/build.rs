@@ -474,13 +474,38 @@ fn blend_code(code: u8) -> Option<BlendMode> {
 }
 
 /// `start + offset * stretch` of two stored times, exact and unreduced when they share a
-/// denominator (so frames stay frames), reduced otherwise.
-fn absolute(start: Rational, offset: Rational, stretch: Rational, reduced: Option<Rational>) -> Option<(i64, i64)> {
-    if start.den == offset.den && start.den != 0 && stretch.den == 1 {
+/// denominator (so frames stay frames), reduced otherwise. The product of three stored
+/// denominators can pass `i64` before it is reduced (a stretch such as 1431655765/2147483647 on a
+/// layer starting at 29 s), so it is reduced in `i128`; a time that still doesn't fit is rounded
+/// to ticks. `None` only when a denominator is zero.
+fn absolute(start: Rational, offset: Rational, stretch: Rational) -> Option<(i64, i64)> {
+    if start.den == 0 || offset.den == 0 || stretch.den == 0 {
+        return None;
+    }
+    if start.den == offset.den && stretch.den == 1 {
         let num = i128::from(start.num).checked_add(i128::from(offset.num).checked_mul(i128::from(stretch.num))?)?;
         return Some((i64::try_from(num).ok()?, start.den));
     }
-    reduced.map(|r| (r.num, r.den))
+    // Each factor is at most 2^32 in size: the products stay far inside `i128`.
+    let scaled_num = i128::from(offset.num).checked_mul(i128::from(stretch.num))?;
+    let scaled_den = i128::from(offset.den).checked_mul(i128::from(stretch.den))?;
+    let den = i128::from(start.den).checked_mul(scaled_den)?;
+    let num = i128::from(start.num).checked_mul(scaled_den)?.checked_add(scaled_num.checked_mul(i128::from(start.den))?)?;
+    let (mut a, mut b) = (num.unsigned_abs(), den.unsigned_abs());
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    let g = i128::try_from(a.max(1)).ok()?;
+    let (num, den) = if den < 0 { (-num / g, -den / g) } else { (num / g, den / g) };
+    if let (Ok(n), Ok(d)) = (i64::try_from(num), i64::try_from(den)) {
+        return Some((n, d));
+    }
+    // Whole seconds exactly, the fraction rounded to the nearest tick (`den` is positive here).
+    let tps = i128::from(effectcraft_time::TICKS_PER_SECOND);
+    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+    let fraction = ((num.rem_euclid(den) as f64 / den as f64) * effectcraft_time::TICKS_PER_SECOND as f64).round() as i128;
+    let ticks = num.div_euclid(den).checked_mul(tps)?.checked_add(fraction)?;
+    Some((i64::try_from(ticks).ok()?, effectcraft_time::TICKS_PER_SECOND))
 }
 
 /// The light kinds that are sampled.
@@ -1010,7 +1035,7 @@ fn apply_timing(l: &mut Layer, h: &LayerHeader, tm: &TimeMap, name: &str, col: &
         .map(|(what, _)| what)
         .collect();
     l.start_time = tm.ticks(h.start.num, h.start.den);
-    let points = [(h.in_relative, h.in_point()), (h.out_relative, h.out_point())].map(|(offset, reduced)| absolute(h.start, offset, stretch, reduced));
+    let points = [h.in_relative, h.out_relative].map(|offset| absolute(h.start, offset, stretch));
     if !unreadable.is_empty() {
         col.lose_with(LossCategory::DamagedData, || {
             format!("layer '{name}': the stored {} time is unreadable (zero denominator), 0 is used", unreadable.join(", "))
