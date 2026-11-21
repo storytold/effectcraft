@@ -124,3 +124,129 @@ fn selected_link_exposes_its_source_and_offline_reason_to_keyboard_users() {
     assert!(h.query_by_role_and_label(egui::accesskit::Role::Status, "Ready — saved source snapshot").is_some());
     assert!(!h.get_by_role_and_label(egui::accesskit::Role::TreeItem, row_name).accesskit_node().description().unwrap_or_default().contains("Offline:"));
 }
+
+/// Rapidly revisiting a cancelled source time must eventually deliver the last requested
+/// linked frame. Its unkeyed external dependencies prevent disk reuse, not the RAM cache bar.
+#[test]
+fn rapid_linked_seeks_deliver_the_final_frame_and_its_ram_cache_entry() {
+    use effectcraft_engine::project::{Footage, FootageKind, LinkedComposition};
+    use effectcraft_engine::render::{FootageSource, Image};
+    use effectcraft_engine::time::FrameRate;
+    use std::cell::RefCell;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::time::{Duration, Instant};
+
+    thread_local! {
+        static CANCEL: RefCell<Option<Arc<AtomicBool>>> = const { RefCell::new(None) };
+    }
+    #[derive(Default)]
+    struct Seeking {
+        entered: AtomicBool,
+        cancelled: AtomicUsize,
+    }
+    impl FootageSource for Seeking {
+        fn cancellable(&self, cancel: &Arc<AtomicBool>, f: &mut dyn FnMut()) {
+            let previous = CANCEL.replace(Some(cancel.clone()));
+            f();
+            CANCEL.set(previous);
+        }
+        fn frame(&self, _: ItemId, footage: &Footage, time: Tick) -> Option<Arc<Image>> {
+            if CANCEL.with_borrow(Option::is_some) {
+                self.entered.store(true, Ordering::SeqCst);
+            }
+            let wait = if time == Tick::ZERO { 3_000 } else { 100 };
+            for _ in 0..wait {
+                if CANCEL.with_borrow(|cancel| cancel.as_ref().is_some_and(|cancel| cancel.load(Ordering::SeqCst))) {
+                    self.cancelled.fetch_add(1, Ordering::SeqCst);
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            let value = (footage.frame_rate.frame_at(time).rem_euclid(251) + 1) as f32 / 255.0;
+            Some(Arc::new(Image::filled(footage.width, footage.height, [value, 0.25, 0.75, 1.0])))
+        }
+    }
+
+    // This fixture is entirely in memory; no saved project or user footage is accessed.
+    let mut source = Session::default();
+    source.execute("comp.new", json!({"name":"Source","width":32,"height":18,"frameRate":23.976,"duration":10})).unwrap();
+    let source_comp = source.active_comp_id().unwrap();
+    let source_rate = source.project.comp(source_comp).unwrap().frame_rate;
+    let clip = Arc::make_mut(&mut source.project).add_item(
+        "Seeking clip",
+        Default::default(),
+        None,
+        ItemKind::Footage(Footage {
+            kind: FootageKind::Video,
+            width: 32,
+            height: 18,
+            frame_rate: source_rate,
+            duration: Tick::from_seconds_f64(10.0),
+            has_video: true,
+            ..Default::default()
+        }),
+    );
+    source.execute("layer.addItem", json!({"item":clip.0})).unwrap();
+    let mut destination = Session::default();
+    destination.execute("comp.new", json!({"name":"Main","width":32,"height":18,"frameRate":29.97,"duration":10})).unwrap();
+    let main = destination.active_comp_id().unwrap();
+    let rate: FrameRate = destination.project.comp(main).unwrap().frame_rate;
+    let linked = Arc::make_mut(&mut destination.project).add_item(
+        "Linked Source",
+        Default::default(),
+        None,
+        ItemKind::Footage(Footage {
+            kind: FootageKind::LinkedComposition,
+            width: 32,
+            height: 18,
+            frame_rate: source_rate,
+            duration: Tick::from_seconds_f64(10.0),
+            has_video: true,
+            linked_comp: Some(LinkedComposition {
+                source_project_id: source.project.project_id.clone(),
+                composition_id: source.project.item(source_comp).unwrap().stable_id.clone(),
+                last_known_name: "Source".into(),
+                source_color: Some(source.project.settings.linked_color_space()),
+                resolved: Some(source.project.clone()),
+                resolved_comp: Some(source_comp),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+    );
+    destination.execute("layer.addItem", json!({"item":linked.0})).unwrap();
+    destination.state.project_selection.clear();
+    let seeking = Arc::new(Seeking::default());
+    destination.footage = seeking.clone();
+    let final_frame = 208;
+    let expected = effectcraft_ui_egui::frames::to_color_image(&destination.render(main, rate.tick_of(final_frame), Default::default()));
+    seeking.entered.store(false, Ordering::SeqCst);
+    let mut h = Harness::builder().with_size(egui::vec2(1200.0, 800.0)).build_eframe(|_| {
+        let mut app = EffectcraftApp::new(destination);
+        app.ui.cache_when_idle = false;
+        app
+    });
+    h.state_mut().session.execute("view.res.full", json!({})).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !seeking.entered.load(Ordering::SeqCst) && Instant::now() < deadline {
+        h.step();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(seeking.entered.load(Ordering::SeqCst), "the viewer reaches the nested source decoder");
+    for frame in [179, 3, 93, 17, 220, 4, 117, 0, 73, 17, 0, 208] {
+        h.state_mut().session.set_time(rate.tick_of(frame));
+        h.step();
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let delivered = |h: &mut Harness<'_, EffectcraftApp>| {
+        h.state_mut().viewer_pixels().is_some_and(|pixels| pixels.as_ref() == &expected)
+            && h.state().frames.cached_frames(&h.state().shown_series(main)).contains(&final_frame)
+    };
+    while !delivered(&mut h) && Instant::now() < deadline {
+        h.step();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(seeking.cancelled.load(Ordering::SeqCst) > 0, "rapid seeks cancel a superseded nested read");
+    assert!(delivered(&mut h), "the final requested image is shown and belongs to the green RAM-cache series");
+}

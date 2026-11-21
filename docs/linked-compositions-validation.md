@@ -93,6 +93,10 @@ proven failures of a pristine base runtime; a separate baseline run is still nee
 
 ### Export blocker
 
+This section records the initial hardening result. The subsequent
+[rapid-seek fix](linked-preview-stall.md) addresses the reproduced decoder scheduling
+deadlock and passed ten default-parallel export round trips, without the serial workaround.
+
 Cold full-length parallel export stalled before creating the output, both for the linked
 30 fps destination and for its ordinary 24 fps source comp containing only a movie layer.
 Three-frame exports succeeded. A full 36-frame linked export with `RAYON_NUM_THREADS=1`
@@ -106,8 +110,9 @@ code and the ordinary/linked/serial comparisons, not a captured native stack tra
 code was left unchanged. The regression retains its assertions and now bounds each export
 subprocess to 30 seconds so a stall fails instead of hanging CI indefinitely.
 
-Default parallel video export, a clean baseline comparison, browser runtime entropy, and
-maintainer agreement on identity compatibility remain gates before submission/merge. No
+At that point, parallel export remained blocked. After the preview follow-up, a clean baseline
+comparison, browser runtime entropy, and maintainer agreement on identity compatibility still
+remain gates before submission/merge. No
 test was removed, disabled or newly ignored to obtain a passing result.
 
 ### Focused verification and performance

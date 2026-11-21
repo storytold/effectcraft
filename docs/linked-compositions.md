@@ -193,9 +193,10 @@ cross-application workflow.
 - Compositions that can read a linked item conservatively bypass frame/layer caching. Unused
   linked assets do not disable caching for unrelated compositions. Fine-grained linked-frame
   keys and persistent caching remain performance work.
-- Validation reproduced a cold parallel ProRes decode/export stall, also with an ordinary
-  movie composition containing no project links. Single-threaded export works as a diagnostic
-  workaround. Default parallel movie export remains a submission blocker; see the
+- The native movie decoder scheduling fix prevents the reproduced rapid-seek/parallel-export
+  deadlock. Its validation includes a 512-jump linked preview test and ten default-parallel
+  video/audio exports; see the [preview follow-up](linked-preview-stall.md). Unrelated full-CI
+  failures and the identity migration review remain recorded in the
   [validation notes](linked-compositions-validation.md).
 - Source identity is checked independently from the composition's displayed name. Sources
   need to be saved by this build before they can be linked.

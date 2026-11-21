@@ -21,6 +21,9 @@ use crate::reads;
 use crate::stream::MediaSource;
 use crate::{MediaError, Result};
 
+#[cfg(not(target_arch = "wasm32"))]
+mod movie_jobs;
+
 /// Default frame-cache budget: 1 GiB of decoded frames.
 pub const DEFAULT_BUDGET: usize = 1 << 30;
 
@@ -594,6 +597,10 @@ type GifSlot = Arc<OnceLock<(std::result::Result<Arc<Anim>, String>, ReadFile)>>
 struct Inner {
     /// Opened movie/audio sources by path, at most [`MAX_OPEN_SOURCES`].
     sources: Mutex<Sources>,
+    /// Only one frame job per movie enters the decode pool at once. A codec may use rayon
+    /// while holding its decoder lock; another job for that movie must not be stolen there.
+    #[cfg(not(target_arch = "wasm32"))]
+    movie_jobs: Arc<movie_jobs::MovieJobs>,
     /// Files opened into `sources` (see [`PoolStats::opened`]).
     opened: AtomicU64,
     /// In-memory files registered with `add_bytes` (web builds, tests).
@@ -774,6 +781,8 @@ impl MediaPool {
         Self {
             inner: Arc::new(Inner {
                 sources: Mutex::default(),
+                #[cfg(not(target_arch = "wasm32"))]
+                movie_jobs: Arc::default(),
                 files: Mutex::default(),
                 models: Mutex::default(),
                 gifs: Mutex::default(),
@@ -1649,14 +1658,20 @@ impl Inner {
             let (me, at, f) = (self.clone(), loc.clone(), footage.clone());
             // The request's cancel flag and decoding hints go with it (#329).
             let hints = filmcraft_media::cancel::Context::current();
-            threads.spawn(move || {
+            let decode = move || {
+                let run = || hints.run(|| if filmcraft_media::cancel::cancelled() { Err(MediaError::Cancelled) } else { me.decode_source(&at, &f) });
                 #[cfg(not(test))]
-                let decoded = reads::captured(|| hints.run(|| me.decode_source(&at, &f)));
+                let decoded = reads::captured(run);
                 // (the decodes counted on that thread are this thread's)
                 #[cfg(test)]
-                let decoded = crate::exr_channels::counting(|| reads::captured(|| hints.run(|| me.decode_source(&at, &f))));
+                let decoded = crate::exr_channels::counting(|| reads::captured(run));
                 let _ = tx.send(decoded);
-            });
+            };
+            if loc.media_t.is_some() {
+                self.movie_jobs.spawn(threads, loc.key.path.clone(), decode);
+            } else {
+                threads.spawn(decode);
+            }
             // A plain block: this thread runs nothing else meanwhile.
             return match rx.recv() {
                 #[cfg(not(test))]
@@ -2641,6 +2656,79 @@ mod tests {
         assert!(started.elapsed() < WAIT_LIMIT, "nobody waited out the time limit: {:?}", started.elapsed());
         assert_eq!(on_frame_workers.load(Ordering::SeqCst), 0, "no part of the decode ran on a frame worker");
         assert_eq!(pool.stats().decodes, 1);
+    }
+
+    /// Requests waiting for one movie do not occupy codec workers. Cancellation and a
+    /// decoder panic must leave subsequent seeks able to run, including other movies.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn queued_movie_seeks_skip_cancelled_work_and_advance_after_a_decoder_panics() {
+        let pool = MediaPool::new();
+        pool.set_read_ahead(false);
+        let movie = Footage {
+            path: "/queued-movie.mov".into(),
+            kind: FootageKind::Video,
+            has_video: true,
+            width: 16,
+            height: 16,
+            duration: Tick::from_seconds_f64(2.0),
+            ..Footage::default()
+        };
+        let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        let release_rx = Mutex::new(release_rx);
+        let calls = Arc::new(AtomicU64::new(0));
+        let counted = calls.clone();
+        *lock(&pool.inner.gate) = Some(Arc::new(move || {
+            match counted.fetch_add(1, Ordering::SeqCst) {
+                0 => {
+                    entered_tx.send(()).unwrap();
+                    lock(&release_rx).recv_timeout(std::time::Duration::from_secs(20)).unwrap();
+                }
+                2 => panic!("simulated movie decoder failure"),
+                _ => {}
+            }
+            Some(Ok(Image::new(16, 16)))
+        }));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let request = |tag, footage: Footage, frame, cancel: Arc<AtomicBool>| {
+            let (pool, tx) = (pool.clone(), tx.clone());
+            std::thread::spawn(move || {
+                let result = filmcraft_media::cancel::with_cancel(&cancel, || pool.frame_at(&footage, footage.frame_rate.tick_of(frame)));
+                tx.send((tag, result)).unwrap();
+            })
+        };
+        let active = request("active", movie.clone(), 0, Arc::default());
+        entered_rx.recv_timeout(std::time::Duration::from_secs(20)).unwrap();
+        let wait_for_queue = |count| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            while pool.inner.movie_jobs.queued(&movie.path) < count && std::time::Instant::now() < deadline {
+                std::thread::yield_now();
+            }
+            assert!(pool.inner.movie_jobs.queued(&movie.path) >= count, "movie request did not enter the waiting queue");
+        };
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancelled = request("cancelled", movie.clone(), 1, cancel.clone());
+        wait_for_queue(1);
+        cancel.store(true, Ordering::Relaxed);
+        let failed = request("failed", movie.clone(), 2, Arc::default());
+        wait_for_queue(2);
+        let recovered = request("recovered", movie.clone(), 3, Arc::default());
+        wait_for_queue(3);
+        let other = request("other", Footage { path: "/other-movie.mov".into(), ..movie }, 0, Arc::default());
+        let (tag, result) = rx.recv_timeout(std::time::Duration::from_secs(20)).unwrap();
+        assert_eq!(tag, "other", "another movie can finish while the first movie is blocked");
+        assert!(result.is_ok());
+        release_tx.send(()).unwrap();
+        let results: HashMap<_, _> = (0..4).map(|_| rx.recv_timeout(std::time::Duration::from_secs(20)).unwrap()).collect();
+        assert!(results["active"].is_ok());
+        assert!(matches!(&results["cancelled"], Err(MediaError::Cancelled)));
+        assert!(results["failed"].as_ref().unwrap_err().to_string().contains("the decode stopped"));
+        assert!(results["recovered"].is_ok(), "a panic cannot strand the next seek");
+        assert_eq!(calls.load(Ordering::SeqCst), 4, "the cancelled request never entered the decoder");
+        for worker in [active, cancelled, failed, recovered, other] {
+            worker.join().unwrap();
+        }
     }
 
     /// Where a thread decodes a picture itself (no decode threads), a request that comes to it
