@@ -52,6 +52,9 @@ pub struct PendingWrite {
     /// Originating project identity: the path changes on Save As, the epoch on Open/New.
     pub(crate) project_path: Option<String>,
     pub(crate) project_epoch: u64,
+    /// For a project-file save ([`crate::Session::autosave_tick`] with the `projectFile` location):
+    /// the snapshot being written, which becomes the saved project once the write succeeds.
+    pub(crate) saves_project: Option<std::sync::Arc<effectcraft_project::Project>>,
     handle: std::sync::Arc<std::sync::Mutex<Option<std::thread::JoinHandle<std::io::Result<()>>>>>,
 }
 
@@ -71,7 +74,12 @@ impl PendingWrite {
         work: impl FnOnce() -> std::io::Result<()> + Send + 'static,
     ) -> std::io::Result<PendingWrite> {
         let h = std::thread::Builder::new().name("autosave".into()).spawn(work)?;
-        Ok(PendingWrite { path, slot, revision, project_path, project_epoch, handle: std::sync::Arc::new(std::sync::Mutex::new(Some(h))) })
+        Ok(PendingWrite { path, slot, revision, project_path, project_epoch, saves_project: None, handle: std::sync::Arc::new(std::sync::Mutex::new(Some(h))) })
+    }
+    /// Mark this write as a save of the project file itself, written from `snapshot`.
+    pub(crate) fn saving_project(mut self, snapshot: std::sync::Arc<effectcraft_project::Project>) -> Self {
+        self.saves_project = Some(snapshot);
+        self
     }
     pub fn is_finished(&self) -> bool {
         self.handle.lock().map(|h| h.as_ref().is_none_or(|h| h.is_finished())).unwrap_or(true)
