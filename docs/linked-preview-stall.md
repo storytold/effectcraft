@@ -60,9 +60,21 @@ linked UI workflow regressions passed.
 
 ## Build and remaining validation
 
-The updated desktop executable is built in `target/linked-preview-fixed/debug/effectcraft.exe`
-so the running sandbox windows and their unsaved edits can remain intact. Save and close the
-old windows before continuing work in the updated build.
+The desktop application and CLI were first staged in `target/linked-preview-fixed/debug/`
+while the original executable was locked by the running application. After the user saved
+and closed the application, both verified binaries were copied back to `target/debug/`.
+Continue using `target/debug/effectcraft.exe`. Its SHA-256 was checked against the staged
+build before and after copying, and the reopened GUI process was verified to use that path.
+
+The saved destination was then reopened with the native control channel and its existing
+preferences. All three linked sources reported ready, with GPU acceleration active on the
+RTX 3080 through Vulkan. Four rounds of 32 rapid playhead jumps, clearing only regenerable
+memory caches between rounds, each produced newly completed renders without a render error.
+The original playhead position was restored; the session remained clean and the saved
+project's SHA-256 was unchanged. This live check observes render completion, not the current
+frame's RAM entry: that stronger assertion belongs to the viewer reproduction above. Native
+window capture/accessibility inspection was unavailable because the computer-use provider
+rejected the returned window identity, so no visual green-bar confirmation is claimed here.
 
 The final cached frame was compared with a fresh independent serial render of the copied
 project using a separate MediaPool. All pixels matched exactly at both 480 × 270 and Full
