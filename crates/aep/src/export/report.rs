@@ -36,8 +36,9 @@ pub enum LossCategory {
     Lights,
     /// 3D model and primitive layers (skipped as a whole).
     ModelLayers,
-    /// Footage items that are not written (a file type without a prototype, a layered file's
-    /// layer, a sequence with gaps or at a fractional rate), and items in a folder loop.
+    /// Footage items that are not written (a file type without a prototype, a smart object's or
+    /// placed layer of a layered file, a sequence with gaps or at a fractional rate), and items in
+    /// a folder loop.
     FootageItems,
     /// Layers whose source is not exported (footage that is not written, a precomposition that is
     /// missing or closes a loop, other).
