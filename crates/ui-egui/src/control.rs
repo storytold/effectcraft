@@ -683,7 +683,8 @@ fn playback(app: &mut EffectcraftApp, p: &Value, now: f64) -> Outcome {
         "play" => app.play(now),
         "stop" => app.stop(),
         "status" => {}
-        _ => app.toggle_play(now),
+        "toggle" => app.toggle_play(now),
+        _ => return err(format!("unknown playback action `{action}` (play, stop, toggle, status)")),
     }
     ok(
         json!({"playing": app.playback.playing, "time": app.session.time().seconds(), "audio": app.audio.is_some(), "levelsDb": app.meter.level_db, "peaksDb": app.meter.peak_db}),
@@ -977,6 +978,47 @@ mod tests {
         let reply = waiter.finish(&mut app);
         assert_eq!(reply["ok"], false, "an abandoned render cannot silently report a replacement project's queue");
         assert!(reply["error"].as_str().unwrap().contains("replaced before completion"));
+    }
+
+    #[test]
+    fn playback_unknown_action_does_not_change_state() {
+        let mut app = crate::EffectcraftApp::new(effectcraft_engine::Session::default());
+        app.session.execute("comp.new", serde_json::json!({})).unwrap();
+        for playing in [false, true] {
+            app.playback.playing = playing;
+            let before = app.session.time();
+            let super::Outcome::Done(reply) = super::playback(&mut app, &serde_json::json!({"action": "pause"}), 0.0) else {
+                panic!("playback replies immediately");
+            };
+            assert_eq!(reply["ok"], false);
+            assert!(reply["error"].as_str().unwrap().contains("unknown playback action"));
+            assert_eq!(app.playback.playing, playing);
+            assert_eq!(app.session.time(), before);
+        }
+    }
+
+    #[test]
+    fn playback_toggle_default_and_status_keep_their_behavior() {
+        let mut app = crate::EffectcraftApp::new(effectcraft_engine::Session::default());
+        app.session.execute("comp.new", serde_json::json!({})).unwrap();
+        for params in [serde_json::json!({}), serde_json::json!({"action": "toggle"})] {
+            for playing in [true, false] {
+                let super::Outcome::Done(reply) = super::playback(&mut app, &params, 0.0) else {
+                    panic!("playback replies immediately");
+                };
+                assert_eq!(reply["ok"], true);
+                assert_eq!(reply["result"]["playing"], playing);
+                assert_eq!(app.playback.playing, playing);
+                let before = app.session.time();
+                let super::Outcome::Done(status) = super::playback(&mut app, &serde_json::json!({"action": "status"}), 0.0) else {
+                    panic!("playback replies immediately");
+                };
+                assert_eq!(status["ok"], true);
+                assert_eq!(status["result"]["playing"], playing);
+                assert_eq!(app.playback.playing, playing);
+                assert_eq!(app.session.time(), before);
+            }
+        }
     }
 
     #[test]
