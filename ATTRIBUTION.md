@@ -162,3 +162,4 @@ under [`docs/brand/LICENSE-brand.txt`](docs/brand/LICENSE-brand.txt). Forks and 
 | Asset | Author | Source | Licence |
 |---|---|---|---|
 | `crates/media/tests/fixtures/pce61-ffmpeg.aac-fixture` | Dylan M. Taylor | Original sine waves; reproducible recipe in `crates/media/tests/fixtures/README.md` | MIT OR Apache-2.0 |
+| `crates/media/tests/fixtures/monochrome-av1.mkv` | Terra854 | Original grayscale ramps from `crates/media/tests/fixtures/generate-monochrome-av1.sh` | MIT OR Apache-2.0 |
