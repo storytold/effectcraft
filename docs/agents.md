@@ -1,8 +1,10 @@
 # Driving EffectCraft from agents
 
-Everything in EffectCraft is an engine command with a stable id and JSON params. Menus, shortcuts,
-panel gestures, the CLI, the control channel and MCP all go through the same commands, so anything a
-user can do, an agent can do too. There are three ways in:
+EffectCraft exposes engine commands with stable ids and JSON params through the CLI, the control
+channel and MCP. UI-only commands use the running app's frontend dispatcher through the control
+channel or an attached MCP bridge. In headless sessions, registered frontend-only commands still
+undergo their normal enablement checks and perform no UI action. Actual UI actions and bridge-only
+`ui_*` tools require the running app. There are three ways in:
 
 Render-queue outputs cannot replace footage, proxies or the project file. See
 [render source protection](file-format-parity.md#render-source-protection) for aliases, default names and sequence
