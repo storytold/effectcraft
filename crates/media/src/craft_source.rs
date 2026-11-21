@@ -525,7 +525,7 @@ fn open_mxf(name: &str, source: SharedBytes) -> Option<Result<SharedSource>> {
             break;
         }
         let t = &file.tracks[idx];
-        if !matches!(t.sound_format, SoundFormat::Pcm | SoundFormat::Aes3) {
+        if !matches!(t.sound_format, SoundFormat::Pcm | SoundFormat::Aes3Element) {
             return None;
         }
         let sound = t.sound.as_ref()?;
