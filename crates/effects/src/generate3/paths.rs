@@ -336,7 +336,7 @@ fn tapered_segs(pts: &[[f64; 2]], r: f64, taper: &StrokeTaper, segs: &mut Vec<Se
     // (from, to, piece length or 0 for one full-width ribbon) along the drawn stroke.
     let zones = [(0.0, ls, piece(ls)), (ls, len - le, 0.0), (len - le, len, piece(le))];
     let dab = |q: [f64; 2], r: f64| Seg { a: q, b: q, r, v: 1.0 };
-    // `x` limited to the distance from `s` to a tapered tip, so nothing drawn at a corner
+    // `x` limited to the distance from `s` to a tapered tip, so a round corner dab never
     // reaches back past the point.
     let tip_room = |s: f64, mut x: f64| {
         if ls > 0.0 {
@@ -350,10 +350,13 @@ fn tapered_segs(pts: &[[f64; 2]], r: f64, taper: &StrokeTaper, segs: &mut Vec<Se
     // Unit directions of the non-empty edges.
     let dirs: Vec<Option<[f64; 2]>> = pts.windows(2).zip(&lens).map(|(w, &l)| (l > 0.0).then(|| [(w[1][0] - w[0][0]) / l, (w[1][1] - w[0][1]) / l])).collect();
     // How far the pieces meeting at a corner at `s` reach past it to close the outer side of
-    // the bend (a miter, for turns up to 60°; sharper corners rely on the corner dab).
+    // the bend (a miter, for turns up to 60°; sharper corners rely on the corner dab). Not
+    // limited by a tip's distance: on the gentle turns of a curve it is a small fraction of a
+    // pixel, and at a sharp turn the next edge's own square end already reaches further back,
+    // so a limit would only cut a notch into the outer side of the bend.
     let reach = |s: f64, d0: [f64; 2], d1: [f64; 2]| {
         let turn = (d0[0] * d1[0] + d0[1] * d1[1]).clamp(-1.0, 1.0).acos().min(std::f64::consts::FRAC_PI_3);
-        tip_room(s, radius(s) * (turn * 0.5).tan())
+        radius(s) * (turn * 0.5).tan()
     };
     if ls <= 0.0 {
         segs.push(dab(pts[0], r));

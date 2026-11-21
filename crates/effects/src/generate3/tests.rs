@@ -209,6 +209,23 @@ fn stroke_soft_taper_meets_the_body_without_a_seam() {
     }
 }
 
+/// A sharp corner a pixel past a short start taper keeps the outer side of its bend: what is
+/// drawn there past the corner, away from the tip, is not cut short by the tip's distance.
+#[test]
+fn stroke_corner_near_a_short_taper_keeps_its_outer_bend() {
+    let masks = vec![MaskShape { name: "Mask 1".into(), points: vec![[8.0, 32.0], [9.0, 32.0], [33.0, 73.569]], closed: false, inverted: false }];
+    let env = EffectEnv { masks: &masks, ..Default::default() };
+    let cov = |set: &[(&str, Value)]| {
+        let mut all = vec![("brushSize", num(12.0)), ("brushHardness", num(100.0)), ("paintStyle", Value::Enum(1))];
+        all.extend(set.iter().cloned());
+        run_env("ec.generate.stroke", &all, Image::new(64, 80), 0.0, env).img
+    };
+    let (round, tapered) = (cov(&[]), cov(&[("strokeTaper/startLength", num(1.0))]));
+    // Pixel centre (11.5, 28.5): outside the 60° bend at (9, 32), past the corner.
+    let (r, t) = (round.data[28 * 64 + 11][3], tapered.data[28 * 64 + 11][3]);
+    assert!(r > 0.9 && t > r - 0.05, "{t} tapered, {r} untapered outside the bend");
+}
+
 /// A short taper cuts only its own end of the stroke into pieces: the full-width body stays one
 /// piece, so tapering a long stroke does not multiply the rasterising work along all of it.
 #[test]
