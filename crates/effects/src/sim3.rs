@@ -681,7 +681,7 @@ fn pg_accelerated(ctx: &EffectCtx, key: u64, pg: &Pg) -> Option<std::sync::Arc<P
         seed: pg.seed,
         bounds: pg.bounds,
     };
-    let req = crate::psim::SimRequest { key, steps, births: &births, system: crate::psim::ParticleSystem::Cannon(desc) };
+    let req = crate::psim::SimRequest { key, steps, births: &births, producers: &[], system: crate::psim::ParticleSystem::Cannon(desc) };
     let parts = backend.simulate(&req)?;
     Some(std::sync::Arc::new(PgState {
         parts: parts

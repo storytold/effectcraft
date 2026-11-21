@@ -522,12 +522,44 @@ pub fn params_key(ctx: &crate::EffectCtx, b: &crate::Buf, salt: u64) -> u64 {
     params_key_except(ctx, b, salt, &[])
 }
 
+/// Whether a flattened parameter is one of the paths in `skip`.
+///
+/// [`crate::flatten_params`] gives a grouped parameter both its canonical path (for example
+/// `producer/position`) and a positional alias (for example `#1/position`). The aliases carry
+/// the same value, so skipping only the canonical path would still let the current producer
+/// position change a simulation key. Group metadata maps each alias back to its canonical path.
+fn skipped_param(ctx: &crate::EffectCtx, id: &str, skip: &[&str]) -> bool {
+    if skip.iter().any(|s| id.starts_with(s)) {
+        return true;
+    }
+    if !id.contains('#') {
+        return false;
+    }
+    let mut canonical = String::new();
+    let mut prefix = String::new();
+    for part in id.split('/') {
+        let group = part.strip_prefix('#').filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())).and_then(|_| {
+            let metadata = format!("{prefix}{part}/@match");
+            match ctx.params.values.get(&metadata) {
+                Some(crate::Value::Str(group)) => Some(group.as_str()),
+                _ => None,
+            }
+        });
+        canonical.push_str(group.unwrap_or(part));
+        canonical.push('/');
+        prefix.push_str(part);
+        prefix.push('/');
+    }
+    canonical.pop();
+    skip.iter().any(|s| canonical.starts_with(s))
+}
+
 /// [`params_key`] without the parameters whose ids start with one of `skip` (ones that only
 /// change how the simulation is viewed, so animating them doesn't restart it).
 pub fn params_key_except(ctx: &crate::EffectCtx, b: &crate::Buf, salt: u64, skip: &[&str]) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    let mut keys: Vec<&String> = ctx.params.values.keys().filter(|k| !skip.iter().any(|s| k.starts_with(s))).collect();
+    let mut keys: Vec<&String> = ctx.params.values.keys().filter(|k| !skipped_param(ctx, k, skip)).collect();
     keys.sort();
     for k in keys {
         k.hash(&mut h);
