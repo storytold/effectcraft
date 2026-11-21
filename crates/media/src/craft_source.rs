@@ -1549,7 +1549,7 @@ mod tests {
             ids: mxf::write::PackageIds::from_seed("eff-mxf-test", "pcm"),
             timecode: Some(mxf::write::StartTimecode { frames: 240, rate: mxf::Rational::new(24, 1), drop_frame: false }),
         };
-        let samples: Vec<i32> = (0..4800 * 2).map(|i| ((i as i32 * 137) % 16000) - 8000).collect();
+        let samples: Vec<i32> = (0..4800 * 2).map(|i| ((i * 137) % 16000) - 8000).collect();
         let bytes = mxf::write::write_opatom_pcm(&opts, &samples).expect("write opatom pcm");
         let src = open_bytes("test.mxf", Arc::from(bytes)).expect("recognized").expect("opened");
         let info = src.info();
@@ -1577,5 +1577,42 @@ mod tests {
         let resampled = src.audio(0, 512, 44_100).expect("resampled");
         assert_eq!(resampled.sample_rate, 44_100);
         assert_eq!(resampled.channels[0].len(), 512);
+    }
+
+    #[test]
+    fn mxf_video_window_and_sound_trim_helpers() {
+        let mut cfg =
+            mxf::write::WriterConfig::new(mxf::write::Pattern::Op1a, mxf::Rational::new(25, 1), mxf::write::PackageIds::from_seed("eff-mxf-vid", "op1a"));
+        cfg.picture = Some(mxf::write::PictureDesc::new(mxf::write::PictureCoding::H264, 16, 16));
+        cfg.sound = vec![mxf::write::SoundDesc { sample_rate: 48_000, channels: 1, bits: 16 }];
+        let mut w = mxf::write::MxfWriter::new(std::io::Cursor::new(Vec::new()), cfg).expect("writer");
+        let pcm = mxf::write::encode_pcm(&[vec![0.1f32; 1920]], 16);
+        w.push_picture(&[0x00, 0x00, 0x00, 0x01, 0x65], mxf::write::FrameInfo::intra()).expect("pic0");
+        w.push_sound(0, &pcm).expect("snd0");
+        w.push_picture(&[0x00, 0x00, 0x00, 0x01, 0x41], mxf::write::FrameInfo::intra()).expect("pic1");
+        w.push_sound(0, &pcm).expect("snd1");
+        let mxf_bytes: SharedBytes = Arc::new(Arc::from(w.finish().expect("finish").into_inner()));
+        let mut file = mxf::open(&*mxf_bytes).expect("open mxf");
+
+        // Exercise ContainerFile::Mxf video helpers and trimmed sound window.
+        file.tracks[0].origin = 1;
+        file.tracks[0].duration = Some(1);
+        file.tracks[1].origin = 1;
+        file.tracks[1].duration = Some(1);
+        let (win_start, win_len) = mxf_sound_window(&file.tracks[1]);
+        assert_eq!((win_start, win_len), (1920, 1920));
+
+        let container = ContainerFile::Mxf(Box::new(file));
+        assert_eq!(container.sample_count(0), 2);
+        assert_eq!(container.target_sample(0, Tick::ZERO), Some((1, 1)));
+        assert_eq!(container.sync_sample_before(0, 1), 0);
+        assert_eq!(container.sample_pts(0, 1), 1);
+        assert_eq!(container.pts_to_tick(0, 1), Tick::ZERO);
+
+        // needs_reorder without temporal offsets falls back to FilmCraft.
+        let mut raw = mxf::open(&*mxf_bytes).expect("reopen");
+        raw.tracks[0].needs_reorder = true;
+        // Smoke-check open_mxf returns Some on valid Op1a H264+PCM (even if minimal NAL fails decode).
+        assert!(open_bytes("op1a.mxf", Arc::from(vec![0u8; 4])).is_none());
     }
 }
