@@ -1334,15 +1334,12 @@ fn open_mpeg(name: &str, fmt: mpegts::Format, source: SharedBytes) -> Option<Res
         }
         let frame_rate = estimate_mpeg_frame_rate(&video_stream.units);
         let indexed_span = || video_stream.pts_range().map_or(Tick::ZERO, |(_, hi)| Tick::from_units(hi.saturating_sub(origin_pts), 90_000));
-        let duration = if file.streams.len() == 1
-            && video_params.codec == CodecId::H264
-            && video_stream.skipped_bytes == 0
-            && clean_ts_packet_index(&file, &*source)
-        {
-            regular_ts_picture_end(&video_stream.units, origin_pts, frame_rate).unwrap_or_else(indexed_span)
-        } else {
-            indexed_span()
-        };
+        let duration =
+            if file.streams.len() == 1 && video_params.codec == CodecId::H264 && video_stream.skipped_bytes == 0 && clean_ts_packet_index(&file, &*source) {
+                regular_ts_picture_end(&video_stream.units, origin_pts, frame_rate).unwrap_or_else(indexed_span)
+            } else {
+                indexed_span()
+            };
         let info = default_video_info(decoded_dims.0, decoded_dims.1, frame_rate, &video_params);
         let state = Mutex::new(VideoState { decoder: video_decoder, next_decode_idx: 0, gop_start_idx: 0, flushed: false, decoded: Vec::new() });
         (Some(ContainerVideoPart { track_idx: v_idx, info, state }), duration)
@@ -3257,7 +3254,7 @@ mod tests {
     }
 
     fn generated_two_frame_ts() -> Vec<u8> {
-        use craft_video::h264::encode::{Encoder, EncoderConfig, YuvFrame};
+        use craft_video::h264::{Encoder, EncoderConfig, YuvFrame};
         use mpegts::mux::{Codec, Config, Frame, Muxer, Stream};
 
         let mut config = EncoderConfig::new(16, 16, 25, 1);
@@ -3322,10 +3319,7 @@ mod tests {
             let parsed = mpegts::open(bytes.as_slice()).unwrap();
             assert_eq!(parsed.warnings.iter().any(|warning| warning.contains("transport error indicator")), warned);
             assert_eq!(parsed.streams[0].units.len(), 2);
-            assert_eq!(
-                regular_ts_picture_end(&parsed.streams[0].units, 90_000, FrameRate::FPS_25),
-                Some(Tick(craft_time::TICKS_PER_SECOND * 2 / 25))
-            );
+            assert_eq!(regular_ts_picture_end(&parsed.streams[0].units, 90_000, FrameRate::FPS_25), Some(Tick(craft_time::TICKS_PER_SECOND * 2 / 25)));
             assert!(!clean_ts_packet_index(&parsed, bytes.as_slice()));
             // The same shared route still opens and retains its prior duration.
             let source = crate::stream::open_bytes("damaged-tail.ts", bytes.into()).unwrap();
