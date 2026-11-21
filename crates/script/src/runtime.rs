@@ -379,10 +379,29 @@ fn without_verbatim_prefix(p: std::path::PathBuf) -> std::path::PathBuf {
 
 pub(crate) const GATE: &str = "Preferences ▸ Scripting & Expressions ▸ Allow Scripts to Write Files and Access Network";
 
+/// Writes a script may never make, whatever the file preference says: anything under the app's
+/// settings folder. Files there run or load without asking — `Scripts/Startup` at launch,
+/// `Scripts/Shutdown` at quit, `Scripts/ScriptUI Panels` from the Window menu, and `helpers/` and
+/// `Plug-ins/` hold programs the app starts — so a script able to write one would turn its file
+/// access into code that runs later, even after the preference is turned off (#audit F1a).
+fn refuse_settings_write(s: &Session, p: &std::path::Path, path: &str) -> Result<(), String> {
+    let Some(root) = s.config.as_ref().and_then(|c| c.dir()) else { return Ok(()) };
+    let root = normalize(&root.to_string_lossy());
+    if p.starts_with(&root) {
+        return Err(format!(
+            "Unable to write {path}: scripts can't write into EffectCraft's settings folder, where a file would run or load without asking"
+        ));
+    }
+    Ok(())
+}
+
 /// The file-access gate: reads under the project's folder are always allowed; other reads, all
 /// writes and listing other folders need the Allow Scripts to Write Files preference.
 fn check_access(s: &Session, path: &str, write: bool) -> Result<std::path::PathBuf, String> {
     let p = normalize(path);
+    if write {
+        refuse_settings_write(s, &p, path)?;
+    }
     if s.prefs.scripting.allow_scripts_write_files {
         return Ok(p);
     }
