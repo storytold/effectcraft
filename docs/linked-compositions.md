@@ -190,9 +190,11 @@ cross-application workflow.
   Known dependencies remain protected after a failed refresh in that session. If a destination
   is reopened while its source cannot be read, only the source project path is known and
   protected; the reference-only file does not inventory unavailable source media.
-- Compositions that can read a linked item conservatively bypass frame/layer caching. Unused
-  linked assets do not disable caching for unrelated compositions. Fine-grained linked-frame
-  keys and persistent caching remain performance work.
+- Compositions that can read a linked item conservatively bypass persistent frame and
+  intermediate layer-cache reuse. Completed viewer frames still enter the RAM preview cache
+  and can show the timeline's green cache marks. Unused linked assets do not disable caching
+  for unrelated compositions. Fine-grained linked-frame keys and persistent caching remain
+  performance work.
 - The native movie decoder scheduling fix prevents the reproduced rapid-seek/parallel-export
   deadlock. Its validation includes a 512-jump linked preview test and ten default-parallel
   video/audio exports; see the [preview follow-up](linked-preview-stall.md). Unrelated full-CI

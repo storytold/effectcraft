@@ -110,12 +110,24 @@ code and the ordinary/linked/serial comparisons, not a captured native stack tra
 code was left unchanged. The regression retains its assertions and now bounds each export
 subprocess to 30 seconds so a stall fails instead of hanging CI indefinitely.
 
-At that point, parallel export remained blocked. After the preview follow-up, a clean baseline
-comparison, browser runtime entropy, and maintainer agreement on identity compatibility still
-remain gates before submission/merge. No
-test was removed, disabled or newly ignored to obtain a passing result.
+At that point, parallel export remained blocked. The subsequent decoder scheduling fix
+resolved the reproduced stall and passed ten default-parallel export round trips. A clean
+baseline comparison, browser runtime entropy, and maintainer agreement on identity
+compatibility still remain gates before marking the feature ready for merge. No test was
+removed, disabled or newly ignored to obtain a passing result.
 
 ### Focused verification and performance
+
+The latest decoder follow-up passed 179 media unit tests (one pre-existing ignored test),
+all ten linked UI workflows, and ten native movie refresh/export/decode round trips at
+default parallelism. Its 512-seek reproduction and Full-resolution pixel comparison passed.
+The installed sandbox also completed new GPU renders after each of four rounds of 32 live
+playhead jumps without modifying the saved project. Details and the distinction between
+live render completion and directly checked RAM entries are in
+[linked-preview-stall.md](linked-preview-stall.md). These results do not make the full
+workspace test gate green.
+
+The following table records the earlier hardening pass, before that decoder fix:
 
 After the fixes, workspace all-target clippy with `-D warnings` passed again, and every
 workspace test binary built successfully. Focused execution then passed:
@@ -134,10 +146,11 @@ duration, replacement-media and missing-file recovery assertions. Its serial con
 is explicit; it does not resolve or replace the failed default parallel export result.
 The final sandbox application and CLI build also passed under their existing executable names.
 
-A bounded parallel run passed its complete assertions, but the next repeat stalled and
-failed in 31.16 seconds through the new export timeout. Earlier full-length linked and
-ordinary source exports also stalled without a decoder code change. This is an intermittent
-failure requiring investigation, not a resolved issue.
+Before the decoder fix, a bounded parallel run passed its complete assertions, but the next
+repeat stalled and failed in 31.16 seconds through the new export timeout. Earlier full-length
+linked and ordinary source exports also stalled. This was the intermittent failure later
+reproduced and resolved by the decoder scheduling follow-up; it is retained here as historical
+evidence rather than a current export blocker.
 
 The CPU benchmark used a Ryzen 9 5950X (16 cores/32 logical processors), the dev build, and a
 960 × 540, 30 fps composition with 120 static 160 × 90 solids, each with Gaussian Blur 12 and
