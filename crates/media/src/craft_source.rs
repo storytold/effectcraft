@@ -110,31 +110,31 @@ fn looks_like_matroska(head: &[u8]) -> bool {
     head.starts_with(&[0x1A, 0x45, 0xDF, 0xA3])
 }
 
-/// True when `head` contains an MXF SMPTE KLV partition pack key.
-fn looks_like_mxf(head: &[u8]) -> bool {
-    head.windows(12).any(|w| w == [0x06, 0x0e, 0x2b, 0x34, 0x02, 0x05, 0x01, 0x01, 0x0d, 0x01, 0x02, 0x01])
-}
+/// The MXF sniffer needs the 16-byte partition key after the bounded 64 KiB run-in.
+#[cfg(any(unix, windows))]
+pub(crate) const NATIVE_SNIFF_HEAD_LEN: usize = 64 * 1024 + 16;
 
 /// Open an in-place ISO-BMFF, Matroska/WebM, MXF, AVI, MPEG-TS/PS, or standalone audio source via `craft-media` / `craft-video` / `craft-audio`.
 /// Returns `None` when the container/codec/audio combination should fall back to `filmcraft-codecs`.
 #[cfg(any(unix, windows))]
 pub(crate) fn open_reader(name: &str, head: &[u8], reader: &SharedBytes) -> Option<Result<SharedSource>> {
-    if looks_like_isobmff(head) {
+    let usual_head = &head[..head.len().min(craft_media_source::HEAD_LEN)];
+    if looks_like_isobmff(usual_head) {
         return open_isobmff(name, reader.clone());
     }
-    if looks_like_matroska(head) {
+    if looks_like_matroska(usual_head) {
         return open_matroska(name, reader.clone());
     }
-    if looks_like_mxf(head) {
+    if mxf::sniff(head) {
         return open_mxf(name, reader.clone());
     }
-    if avi::sniff(head) {
+    if avi::sniff(usual_head) {
         return open_avi(name, reader.clone());
     }
-    if let Some(fmt) = mpegts::sniff(head) {
+    if let Some(fmt) = mpegts::sniff(usual_head) {
         return open_mpeg(name, fmt, reader.clone());
     }
-    open_standalone_audio(name, head, reader.clone())
+    open_standalone_audio(name, usual_head, reader.clone())
 }
 
 /// Open an in-memory ISO-BMFF, Matroska/WebM, MXF, AVI, MPEG-TS/PS, or standalone audio source via `craft-media` / `craft-video` / `craft-audio`.
@@ -145,7 +145,7 @@ pub(crate) fn open_bytes(name: &str, bytes: Arc<[u8]>) -> Option<Result<SharedSo
     if looks_like_matroska(&bytes) {
         return open_matroska(name, Arc::new(bytes));
     }
-    if looks_like_mxf(&bytes) {
+    if mxf::sniff(&bytes) {
         return open_mxf(name, Arc::new(bytes));
     }
     if avi::sniff(&bytes) {
@@ -4017,11 +4017,60 @@ mod tests {
     }
 
     #[test]
-    fn mxf_sniffer_and_rational_units() {
-        assert!(looks_like_mxf(&[0x06, 0x0e, 0x2b, 0x34, 0x02, 0x05, 0x01, 0x01, 0x0d, 0x01, 0x02, 0x01, 0x01, 0x02]));
-        assert!(!looks_like_mxf(&[0x00, 0x00, 0x00, 0x18, b'f', b't', b'y', b'p']));
+    fn mxf_rational_units() {
         assert_eq!(tick_to_rational_units(Tick(craft_time::TICKS_PER_SECOND), 25, 1), 25);
         assert_eq!(tick_to_rational_units(Tick(craft_time::TICKS_PER_SECOND), 30000, 1001), 29);
+    }
+
+    #[test]
+    fn mxf_routing_leaves_avi_payload_partition_markers_in_avi() {
+        // Partitions might occur as arbitrary sample bytes in another container.
+        let mut detected = Vec::new();
+        for (padding, kind) in [(0, 3), (66_000, 2)] {
+            let key = [0x06, 0x0e, 0x2b, 0x34, 0x02, 0x05, 0x01, 0x01, 0x0d, 0x01, 0x02, 0x01, 0x01, kind, 0x04, 0x00];
+            let mut pcm = vec![0; padding];
+            pcm.extend(key);
+            let mut writer = avi::AviWriter::new(
+                std::io::Cursor::new(Vec::new()),
+                vec![avi::StreamSpec::Audio(avi::AudioSpec::pcm(48_000, 1, 16))],
+                avi::MuxOptions::default(),
+            )
+            .expect("AVI writer");
+            writer.write_chunk(0, &pcm, true).expect("PCM chunk");
+            let bytes = writer.finish().expect("finish AVI").into_inner();
+            detected.push(open_bytes("audio.avi", bytes.into()).and_then(Result::ok).map(|src| src.info().container.clone()));
+        }
+        assert_eq!(detected, [Some("avi".to_string()), Some("avi".to_string())]);
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn mxf_routing_opens_a_header_at_the_native_run_in_boundary() {
+        use crate::stream::{MediaSource, open_source, probe_source};
+
+        let options = mxf::write::OpAtomPcm {
+            sample_rate: 48_000,
+            bits: 16,
+            channels: 1,
+            edit_rate: None,
+            ids: mxf::write::PackageIds::from_seed("mxf-run-in", "pcm"),
+            timecode: None,
+        };
+        let mut bytes = vec![0xab; 65_535];
+        bytes.extend(mxf::write::write_opatom_pcm(&options, &[8192; 480]).expect("write OpAtom PCM"));
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let path = dir.path().join("run-in.mxf");
+        std::fs::write(&path, &bytes).expect("write MXF fixture");
+
+        let memory = open_bytes("run-in.mxf", bytes.into()).expect("recognize in memory").expect("open in memory");
+        let expected = memory.audio(0, 16, 48_000).expect("read memory PCM").channels;
+        assert_eq!(expected[0], vec![0.25; 16]);
+
+        let (disk, _) = open_source(&path).expect("open file");
+        let MediaSource::Craft(disk) = disk.expect("open disk MXF") else { panic!("use shared MXF reader on disk") };
+        assert_eq!(disk.audio(0, 16, 48_000).expect("read disk PCM").channels, expected);
+        let probe = probe_source(&path).expect("recognize disk probe").expect("open disk probe");
+        assert!(matches!(probe, MediaSource::Craft(src) if src.info().container == "mxf"));
     }
 
     #[test]
