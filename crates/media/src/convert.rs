@@ -137,7 +137,7 @@ impl<'a> From<&'a crate::stream::DecodedFrame> for FrameView<'a> {
 
 /// Convert a FilmCraft frame to an [`Image`].
 #[cfg(test)]
-pub(crate) fn frame_to_image(f: &VideoFrame, op: AlphaOp) -> Image {
+pub(crate) fn frame_to_image<'a>(f: impl Into<FrameView<'a>>, op: AlphaOp) -> Image {
     frame_to_image_in(f, op, Vec::new())
 }
 
