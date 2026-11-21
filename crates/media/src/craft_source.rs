@@ -1047,6 +1047,25 @@ fn mxf_picture_window(track: &mxf::EssenceTrack) -> (i64, i64) {
     (start, track.duration.unwrap_or(available).clamp(0, available))
 }
 
+/// Pixel aspect is the descriptor's display aspect divided by the frame's raster aspect.
+fn mxf_picture_par(dar: mxf::Rational, width: u32, height: u32) -> (u32, u32) {
+    const SQUARE: (u32, u32) = (1, 1);
+    if !dar.is_valid() || width == 0 || height == 0 {
+        return SQUARE;
+    }
+    // Positive i32 by u32 fits u64; reduce before narrowing to the frame's u32 pair.
+    let num = u64::from(dar.num as u32) * u64::from(height);
+    let den = u64::from(dar.den as u32) * u64::from(width);
+    let (mut a, mut b) = (num, den);
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    match (u32::try_from(num / a), u32::try_from(den / a)) {
+        (Ok(num), Ok(den)) => (num, den),
+        _ => SQUARE,
+    }
+}
+
 fn open_mxf(name: &str, source: SharedBytes) -> Option<Result<SharedSource>> {
     let file = mxf::open(&*source).ok()?;
     open_parsed_mxf(name, source, file)
@@ -1087,6 +1106,7 @@ fn open_parsed_mxf(name: &str, source: SharedBytes, file: mxf::MxfFile) -> Optio
             return None;
         }
         let (width, height) = video_track.picture.as_ref().map_or((0, 0), |p| (p.frame_width(), p.frame_height()));
+        let par = video_track.picture.as_ref().map_or((1, 1), |p| mxf_picture_par(p.aspect_ratio, width, height));
         let er = video_track.edit_rate;
         let fps = f64::from(er.num) / f64::from(er.den.max(1));
         let frame_rate = snap_common_fps(fps).unwrap_or_else(|| FrameRate::new(i64::from(er.num), i64::from(er.den)));
@@ -1101,7 +1121,7 @@ fn open_parsed_mxf(name: &str, source: SharedBytes, file: mxf::MxfFile) -> Optio
             width,
             height,
             frame_rate,
-            par: (1, 1),
+            par,
             codec: video_params.codec.name().to_string(),
             pixel_format: String::new(),
             color: ColorInfo::REC709,
@@ -1110,7 +1130,7 @@ fn open_parsed_mxf(name: &str, source: SharedBytes, file: mxf::MxfFile) -> Optio
             hdr: None,
         };
         let v_state = Mutex::new(VideoState { decoder: video_decoder, next_decode_idx: 0, gop_start_idx: 0, flushed: false, decoded: Vec::new() });
-        (Some(v_info), Some(v_state), FramePresentation { container_color: None, par: (1, 1), rotation: 0, aperture: None }, duration)
+        (Some(v_info), Some(v_state), FramePresentation { container_color: None, par, rotation: 0, aperture: None }, duration)
     } else {
         let duration = audio_tracks
             .iter()
@@ -2762,6 +2782,56 @@ mod tests {
         if let Some(vf_with_sar) = make_vf(Some((4, 3))) {
             let out = to_craft_frame(vf_with_sar, presentation, Tick::ZERO).ok();
             assert_eq!(out.map(|f| f.par), Some((3, 4)));
+        }
+    }
+
+    #[test]
+    fn mxf_descriptor_aspect_reaches_shared_probe_and_frame() {
+        use craft_video::prores::{ChromaFormat, Encoder, Frame, Profile};
+
+        let frame = Frame::new(16, 12, ChromaFormat::Yuv422, 10, false).expect("ProRes frame");
+        let packet = Encoder::new(Profile::Hq, 16, 12).encode(&frame).expect("encode ProRes");
+        for (dar, expected) in [(mxf::Rational::new(16, 9), (4, 3)), (mxf::Rational::new(0, 0), (1, 1))] {
+            let ids = mxf::write::PackageIds::from_seed("eff-mxf-par", "op1a");
+            let mut cfg = mxf::write::WriterConfig::new(mxf::write::Pattern::Op1a, mxf::Rational::new(25, 1), ids);
+            let mut picture = mxf::write::PictureDesc::new(mxf::write::PictureCoding::ProRes { profile: 4 }, 16, 12);
+            picture.aspect = dar;
+            cfg.picture = Some(picture);
+            let mut writer = mxf::write::MxfWriter::new(std::io::Cursor::new(Vec::new()), cfg).expect("writer");
+            writer.push_picture(&packet, mxf::write::FrameInfo::intra()).expect("picture");
+            let bytes: Arc<[u8]> = writer.finish().expect("finish").into_inner().into();
+
+            let file = mxf::open(bytes.as_ref()).expect("demux fixture");
+            assert_eq!(file.tracks[0].picture.as_ref().expect("picture descriptor").aspect_ratio, dar);
+            let footage = crate::probe::probe_bytes("aspect.mxf", bytes.clone()).expect("public probe");
+            // The FilmCraft backend labels the same essence "Apple ProRes 422 HQ".
+            assert_eq!(footage.codec, "ProRes", "must use the shared MXF route");
+            assert_eq!(footage.pixel_aspect, f64::from(expected.0) / f64::from(expected.1));
+
+            let source = open_bytes("aspect.mxf", bytes).expect("recognized MXF").expect("shared MXF");
+            assert_eq!(source.info().video.as_ref().expect("video").par, expected);
+            let decoded = source.video_frame(FrameRequest { time: Tick::ZERO, scale: 1.0 }).expect("decode frame");
+            assert_eq!(decoded.par, expected);
+        }
+    }
+
+    #[test]
+    fn mxf_descriptor_aspect_is_bounded_and_yields_to_decoder_sar() {
+        let wide = mxf::Rational::new(i32::MAX, i32::MAX);
+        assert_eq!(mxf_picture_par(wide, u32::MAX, u32::MAX), (1, 1));
+        assert_eq!(mxf_picture_par(wide, 12, 16), (4, 3));
+        assert_eq!(mxf_picture_par(mxf::Rational::new(i32::MAX, 1), 1, u32::MAX), (1, 1));
+        assert_eq!(mxf_picture_par(mxf::Rational::new(16, 9), 0, 12), (1, 1));
+
+        let par = mxf_picture_par(mxf::Rational::new(16, 9), 16, 12);
+        let presentation = FramePresentation { container_color: None, par, rotation: 0, aperture: None };
+        for (sar, expected) in [(None, (4, 3)), (Some((0, 2)), (4, 3)), (Some((2, 1)), (2, 1))] {
+            let y = Plane::packed(2, 2, 8, Samples::U8(vec![1, 2, 3, 4])).expect("luma");
+            let cb = Plane::packed(1, 1, 8, Samples::U8(vec![128])).expect("chroma");
+            let cr = Plane::packed(1, 1, 8, Samples::U8(vec![128])).expect("chroma");
+            let mut frame = DecodedVideoFrame::new(2, 2, ColorFamily::YCbCr, Subsampling::S420, vec![y, cb, cr], None).expect("decoded frame");
+            frame.sar = sar;
+            assert_eq!(to_craft_frame(frame, presentation, Tick::ZERO).expect("converted").par, expected);
         }
     }
 
