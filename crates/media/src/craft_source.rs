@@ -2088,11 +2088,44 @@ mod tests {
         w.write_chunk(0, &[0x00, 0x00, 0x00, 0x01, 0x41], false).expect("v1");
         w.write_chunk(1, &pcm, true).expect("a1");
         let raw = w.finish().expect("finish").into_inner();
+        let avi_file = avi::open(raw.as_slice()).expect("open avi");
+        let avi_container = ContainerFile::Avi(Box::new(avi_file));
+        assert_eq!(avi_container.sample_count(0), 2);
+        assert_eq!(avi_container.target_sample(0, Tick::ZERO), Some((0, 0)));
+        assert_eq!(avi_container.sync_sample_before(0, 1), 0);
+        assert_eq!(avi_container.sample_pts(0, 1), 1);
+        assert!(avi_container.pts_to_tick(0, 1) > Tick::ZERO);
+
         let src = open_bytes("test.avi", Arc::from(raw)).expect("recognized").expect("opened");
         assert_eq!(src.info().container, "avi");
         assert_eq!(src.info().audio_streams[0].sample_rate, 48_000);
         let audio = src.audio(0, 512, 48_000).expect("avi audio");
         assert_eq!(audio.channels[0].len(), 512);
+
+        // Audio-only AVI route.
+        let mut wa =
+            avi::AviWriter::new(std::io::Cursor::new(Vec::new()), vec![avi::StreamSpec::Audio(avi::AudioSpec::pcm(48_000, 1, 16))], avi::MuxOptions::default())
+                .expect("audio avi writer");
+        wa.write_chunk(0, &pcm_s16le_bytes(4_000, 1024), true).expect("a0");
+        let audio_avi =
+            open_bytes("audio.avi", Arc::from(wa.finish().expect("finish audio avi").into_inner())).expect("recognized audio avi").expect("opened audio avi");
+        assert_eq!(audio_avi.info().kind, MediaKind::AudioOnly);
+        assert_eq!(audio_avi.audio(0, 256, 48_000).expect("audio avi read").channels[0].len(), 256);
+
+        // MPEG-TS route and ContainerFile::Mpeg helpers.
+        let mut ts = mpegts::mux::Muxer::new(Vec::new(), mpegts::mux::Config::default(), &[mpegts::mux::Stream::new(0x100, mpegts::mux::Codec::H264)])
+            .expect("ts muxer");
+        ts.write_frame(0, &mpegts::mux::Frame { data: &[0x00, 0x00, 0x00, 0x01, 0x65, 0x88], pts: 90_000, dts: None, key: true }).expect("ts f0");
+        ts.write_frame(0, &mpegts::mux::Frame { data: &[0x00, 0x00, 0x00, 0x01, 0x41, 0x9A], pts: 93_000, dts: None, key: false }).expect("ts f1");
+        let ts_bytes = ts.finish().expect("finish ts");
+        let ts_file = mpegts::open(ts_bytes.as_slice()).expect("open ts");
+        let ts_container = ContainerFile::Mpeg { file: Box::new(ts_file), origin_pts: 90_000 };
+        assert!(ts_container.target_sample(0, Tick::ZERO).is_some());
+        let _ = ts_container.sync_sample_before(0, 1);
+        assert_eq!(ts_container.sample_pts(0, 0), 90_000);
+        assert_eq!(ts_container.pts_to_tick(0, 90_000), Tick::ZERO);
+        let ts_src = open_bytes("test.ts", Arc::from(ts_bytes)).expect("recognized ts").expect("opened ts");
+        assert_eq!(ts_src.info().container, "mpeg-ts");
     }
 
     fn pcm_s16le_bytes(sample: i16, count: usize) -> Vec<u8> {
