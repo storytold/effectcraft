@@ -38,7 +38,7 @@ impl DecodedFrame {
 }
 
 /// An opened movie/audio source, routed through `craft-media-source` for migrated formats
-/// (currently software MP4/H.264) and `filmcraft-media` for remaining formats.
+/// (ISO-BMFF and Matroska/WebM with supported codecs) and `filmcraft-media` for remaining formats.
 #[derive(Clone)]
 pub(crate) enum MediaSource {
     Craft(craft_media_source::SharedSource),
@@ -74,7 +74,7 @@ impl MediaSource {
 
 /// Open an in-memory movie/audio source, trying migrated `craft-media-source` routes first.
 pub(crate) fn open_bytes(name: &str, bytes: Arc<[u8]>) -> Result<MediaSource> {
-    if let Some(res) = crate::mp4_h264::open_bytes(name, bytes.clone()) {
+    if let Some(res) = crate::craft_source::open_bytes(name, bytes.clone()) {
         return res.map(MediaSource::Craft).map_err(MediaError::from);
     }
     filmcraft_codecs::open_bytes(name, bytes).map(MediaSource::Film).map_err(MediaError::from)
@@ -174,7 +174,7 @@ pub(crate) fn open_source(path: &Path) -> Option<(Result<MediaSource>, FileStamp
     let name = name_of(path);
     let craft_reader: craft_media_source::SharedBytes = reader.clone();
     if let Ok(head) = craft_media_source::read_range(&*craft_reader, 0, craft_media_source::HEAD_LEN)
-        && let Some(res) = crate::mp4_h264::open_reader(&name, &head, &craft_reader)
+        && let Some(res) = crate::craft_source::open_reader(&name, &head, &craft_reader)
     {
         return Some((res.map(MediaSource::Craft).map_err(MediaError::from), stamp));
     }
@@ -268,7 +268,7 @@ pub(crate) fn probe_source(path: &Path) -> Option<Result<MediaSource>> {
     }
     let name = name_of(path);
     let craft_reader: craft_media_source::SharedBytes = reader.clone();
-    if let Some(res) = crate::mp4_h264::open_reader(&name, &head, &craft_reader) {
+    if let Some(res) = crate::craft_source::open_reader(&name, &head, &craft_reader) {
         return Some(res.map(MediaSource::Craft).map_err(MediaError::from));
     }
     let fc_reader: filmcraft_media::SharedReader = reader;
