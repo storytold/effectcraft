@@ -2117,6 +2117,8 @@ mod tests {
             .expect("ts muxer");
         ts.write_frame(0, &mpegts::mux::Frame { data: &[0x00, 0x00, 0x00, 0x01, 0x65, 0x88], pts: 90_000, dts: None, key: true }).expect("ts f0");
         ts.write_frame(0, &mpegts::mux::Frame { data: &[0x00, 0x00, 0x00, 0x01, 0x41, 0x9A], pts: 93_000, dts: None, key: false }).expect("ts f1");
+        ts.write_frame(0, &mpegts::mux::Frame { data: &[0x00, 0x00, 0x00, 0x01, 0x41, 0x9A], pts: 96_000, dts: None, key: false }).expect("ts f2");
+        ts.write_frame(0, &mpegts::mux::Frame { data: &[0x00, 0x00, 0x00, 0x01, 0x41, 0x9A], pts: 99_000, dts: None, key: false }).expect("ts f3");
         let ts_bytes = ts.finish().expect("finish ts");
         let ts_file = mpegts::open(ts_bytes.as_slice()).expect("open ts");
         let ts_container = ContainerFile::Mpeg { file: Box::new(ts_file), origin_pts: 90_000 };
