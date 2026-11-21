@@ -36,11 +36,18 @@ pub trait Services: Send + Sync {
         self.write_file(path, data)
     }
     /// The files in folder `dir` (full paths; no folders, no hidden files), for image-sequence
-    /// detection on import. Empty when it can't be read.
+    /// detection on import. A link to a file counts, listed by its own path, so a folder of links
+    /// to frames is a sequence (#3569). Empty when it can't be read.
     fn list_dir(&self, dir: &str) -> Vec<String> {
         let Ok(rd) = std::fs::read_dir(if dir.is_empty() { "." } else { dir }) else { return vec![] };
+        // `DirEntry::file_type` doesn't follow links: only a link's target is looked up.
+        let is_file = |e: &std::fs::DirEntry| match e.file_type() {
+            Ok(t) if t.is_symlink() => std::fs::metadata(e.path()).is_ok_and(|m| m.is_file()),
+            Ok(t) => t.is_file(),
+            Err(_) => false,
+        };
         rd.filter_map(|e| e.ok())
-            .filter(|e| e.file_type().is_ok_and(|t| t.is_file()) && !e.file_name().to_string_lossy().starts_with('.'))
+            .filter(|e| is_file(e) && !e.file_name().to_string_lossy().starts_with('.'))
             .map(|e| e.path().to_string_lossy().to_string())
             .collect()
     }

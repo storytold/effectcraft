@@ -71,6 +71,30 @@ fn one_picked_numbered_file_imports_its_run_as_one_sequence() {
     assert!(w.contains("previous frame is held") && !w.contains("placeholder"), "{w}");
 }
 
+/// #3569: a folder of links to frames is a sequence, numbered by the links' own names, also when
+/// the files they point to sit in another folder under other names. The frames are read through
+/// the links. A dangling link and a link to a folder stay out of the run.
+#[cfg(unix)]
+#[test]
+fn a_folder_of_links_to_frames_imports_as_one_sequence() {
+    let real = folder(&["take-a.png", "take-b.png", "take-c.png"]);
+    let dir = folder(&[]);
+    for (link, target) in [("shot_0001.png", "take-a.png"), ("shot_0002.png", "take-b.png"), ("shot_0003.png", "take-c.png"), ("shot_0004.png", "gone.png")] {
+        std::os::unix::fs::symlink(at(&real, target), at(&dir, link)).unwrap();
+    }
+    std::os::unix::fs::symlink(&real, at(&dir, "shot_0005.png")).unwrap();
+    let links: Vec<String> = ["shot_0001.png", "shot_0002.png", "shot_0003.png"].iter().map(|n| at(&dir, n)).collect();
+    let mut s = session();
+    let r = s.execute("file.import", json!({"paths": [at(&dir, "shot_0002.png")], "sequence": true})).unwrap();
+    let (name, f) = footage(&s, &r["items"][0]);
+    assert_eq!((name.as_str(), f.kind), ("shot_[0001-0003].png", FootageKind::Sequence), "{r}");
+    assert_eq!(f.sequence, links);
+    // A picked folder of links imports its run too.
+    let r = s.execute("file.import", json!({"paths": [dir], "sequence": true})).unwrap();
+    let (name, f) = footage(&s, &r["items"][0]);
+    assert_eq!((name.as_str(), f.sequence), ("shot_[0001-0003].png", links), "{r}");
+}
+
 /// Picking every frame of a sequence used to make one item per frame (each a whole sequence on
 /// the desktop, a still in the browser).
 #[test]
