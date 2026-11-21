@@ -135,6 +135,33 @@ impl Mapping {
     }
 }
 
+/// What a `map_async` callback does with its result, kept apart from wgpu so tests can drive
+/// every branch without a GPU: a failed map completes `ticket` with the error and is never
+/// unmapped; a map a timeout already cancelled is left alone; a map nobody waits for any more is
+/// unmapped through `mapping`; otherwise `ticket` completes with `on_mapped`.
+pub(crate) fn finish_map<E: std::fmt::Display>(
+    r: Result<(), E>,
+    mapping: &Mapping,
+    ticket: Ticket,
+    unmap: impl FnOnce(),
+    on_mapped: impl FnOnce() -> Result<Vec<u8>, Error>,
+) {
+    if let Err(e) = r {
+        mapping.failed();
+        ticket.complete(Err(format!("GPU buffer mapping: {e}")));
+        return;
+    }
+    if !mapping.mapped() {
+        return;
+    }
+    // Timed out or cancelled: nobody reads the mapping.
+    if !ticket.active() {
+        mapping.unmap(unmap);
+        return;
+    }
+    ticket.complete(on_mapped());
+}
+
 /// User callbacks run outside locks and are isolated one at a time. On panic=abort
 /// (including the usual wasm build), Rust panics cannot be caught: the host must
 /// avoid panicking callbacks. This branch does not claim abort-mode recovery.
@@ -520,6 +547,62 @@ mod tests {
             unmap_calls.fetch_add(1, Ordering::SeqCst);
         });
         assert_eq!(unmap_calls.load(Ordering::SeqCst), 0);
+    }
+
+    /// A ticket on `me` whose callback stores what it was completed with.
+    fn recording_ticket(me: &Arc<Readbacks>) -> (Ticket, Arc<Mutex<Vec<Result<Vec<u8>, Error>>>>) {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let s = Arc::clone(&seen);
+        let ticket = me.start(move |r| s.lock().unwrap().push(r)).unwrap();
+        (ticket, seen)
+    }
+
+    #[test]
+    fn finish_map_reports_a_failed_map_and_never_unmaps() {
+        let me = Arc::new(Readbacks::default());
+        let (ticket, seen) = recording_ticket(&me);
+        let mapping = Mapping::new();
+        let unmaps = AtomicUsize::new(0);
+        finish_map(Err("device lost"), &mapping, ticket, || _ = unmaps.fetch_add(1, Ordering::SeqCst), || panic!("not mapped"));
+        assert_eq!(*seen.lock().unwrap(), vec![Err("GPU buffer mapping: device lost".to_string())]);
+        mapping.unmap(|| _ = unmaps.fetch_add(1, Ordering::SeqCst));
+        assert_eq!(unmaps.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn finish_map_leaves_a_map_a_timeout_already_cancelled() {
+        let me = Arc::new(Readbacks::default());
+        let (ticket, seen) = recording_ticket(&me);
+        let mapping = Mapping::new();
+        let unmaps = AtomicUsize::new(0);
+        // The waiter's timeout cancelled the pending map first.
+        mapping.unmap(|| _ = unmaps.fetch_add(1, Ordering::SeqCst));
+        finish_map(Ok::<(), Error>(()), &mapping, ticket, || _ = unmaps.fetch_add(1, Ordering::SeqCst), || panic!("cancelled"));
+        assert_eq!(unmaps.load(Ordering::SeqCst), 1);
+        assert!(seen.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn finish_map_unmaps_when_nobody_waits_any_more() {
+        let me = Arc::new(Readbacks::default());
+        let (ticket, seen) = recording_ticket(&me);
+        me.cancel_pending("cancelled".into());
+        let mapping = Mapping::new();
+        let unmaps = AtomicUsize::new(0);
+        finish_map(Ok::<(), Error>(()), &mapping, ticket, || _ = unmaps.fetch_add(1, Ordering::SeqCst), || panic!("nobody waits"));
+        assert_eq!(unmaps.load(Ordering::SeqCst), 1);
+        assert_eq!(seen.lock().unwrap().len(), 1, "only the cancellation completed the ticket");
+        mapping.unmap(|| _ = unmaps.fetch_add(1, Ordering::SeqCst));
+        assert_eq!(unmaps.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn finish_map_completes_with_the_mapped_result() {
+        let me = Arc::new(Readbacks::default());
+        let (ticket, seen) = recording_ticket(&me);
+        let mapping = Mapping::new();
+        finish_map(Ok::<(), Error>(()), &mapping, ticket, || panic!("on_mapped owns unmapping"), || Ok(vec![1, 2, 3]));
+        assert_eq!(*seen.lock().unwrap(), vec![Ok(vec![1, 2, 3])]);
     }
 
     #[test]

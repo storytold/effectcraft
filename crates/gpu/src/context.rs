@@ -1207,26 +1207,11 @@ impl GpuContext {
         if !ticket.active() {
             return;
         }
-        let mapping = Arc::new(crate::readback::Mapping::new());
-        let b = buffer.clone();
-        let callback_mapping = Arc::clone(&mapping);
-        buffer.map_async(wgpu::MapMode::Read, .., move |r| {
-            if let Err(e) = r {
-                callback_mapping.failed();
-                ticket.complete(Err(format!("GPU buffer mapping: {e}")));
-                return;
-            }
-            if !callback_mapping.mapped() {
-                return;
-            }
-            if !ticket.active() {
-                callback_mapping.unmap(|| b.unmap());
-                return;
-            }
+        map_for_read(buffer, ticket, move |b, mapping| {
             let result =
                 b.get_mapped_range(..).map_err(|e| format!("GPU mapped range: {e}")).and_then(|view| crate::readback::packed(&view, row, stride, height));
-            callback_mapping.unmap(|| b.unmap());
-            ticket.complete(result);
+            mapping.unmap(|| b.unmap());
+            result
         });
     }
 
@@ -1272,26 +1257,8 @@ impl GpuContext {
         if !ticket.active() {
             return Err("GPU readback cancelled".into());
         }
-        let mapping = Arc::new(crate::readback::Mapping::new());
-        let b = buffer.clone();
-        let callback_mapping = Arc::clone(&mapping);
-        buffer.map_async(wgpu::MapMode::Read, .., move |r| {
-            if let Err(e) = r {
-                callback_mapping.failed();
-                ticket.complete(Err(format!("GPU buffer mapping: {e}")));
-                return;
-            }
-            if !callback_mapping.mapped() {
-                return;
-            }
-            // Timed out or cancelled: nobody reads the mapping.
-            if !ticket.active() {
-                callback_mapping.unmap(|| b.unmap());
-                return;
-            }
-            // Mapped: the waiting thread reads the rows and unmaps (an empty vector = mapped).
-            ticket.complete(Ok(Vec::new()));
-        });
+        // Mapped: the waiting thread reads the rows and unmaps (an empty vector = mapped).
+        let mapping = map_for_read(buffer, ticket, |_, _| Ok(Vec::new()));
         // A timeout can cancel a pending map while its callback is being dispatched. The shared
         // guard makes sure the callback and waiter cannot both unmap the same buffer.
         let fail = |e: String| {
@@ -2418,6 +2385,25 @@ impl<'g> Enc<'g> {
 /// Mip levels of a full chain for a `w × h` texture (down to 1 × 1).
 pub(crate) fn mip_levels(w: u32, h: u32) -> u32 {
     u32::BITS - w.max(h).max(1).leading_zeros()
+}
+
+/// Map `buffer` for reading under `ticket`, sharing one [`crate::readback::Mapping`] guard
+/// between the callback and the caller. The callback completes the ticket with a failed map,
+/// gives up when a timeout already cancelled the map, unmaps when nobody waits any more, and
+/// otherwise completes the ticket with `on_mapped` (which owns unmapping from then on, through
+/// the guard it is given).
+fn map_for_read(
+    buffer: &wgpu::Buffer,
+    ticket: crate::readback::Ticket,
+    on_mapped: impl FnOnce(&wgpu::Buffer, &crate::readback::Mapping) -> Result<Vec<u8>, String> + wgpu::WasmNotSend + 'static,
+) -> Arc<crate::readback::Mapping> {
+    let mapping = Arc::new(crate::readback::Mapping::new());
+    let b = buffer.clone();
+    let callback_mapping = Arc::clone(&mapping);
+    buffer.map_async(wgpu::MapMode::Read, .., move |r| {
+        crate::readback::finish_map(r, &callback_mapping, ticket, || b.unmap(), || on_mapped(&b, &callback_mapping));
+    });
+    mapping
 }
 
 #[cfg(test)]
