@@ -848,7 +848,14 @@ fn mxf_start_timecode(tc: mxf::Timecode, rate: Option<FrameRate>) -> i64 {
         return tc.start;
     }
     let (tc_num, tc_den) = if tc.drop_frame { (i128::from(tc.rounded_base) * 1000, 1001i128) } else { (i128::from(tc.rounded_base), 1i128) };
-    let converted = (i128::from(tc.start) * tc_den * i128::from(rate.num)) / (tc_num * i128::from(rate.den));
+    let Some(numerator) = (i128::from(tc.start) * tc_den).checked_mul(i128::from(rate.num)) else {
+        return tc.start;
+    };
+    let denominator = tc_num * i128::from(rate.den);
+    // Match FilmCraft's nearest-frame rounding for recorded nonnegative labels.
+    // Keep the shared reader's existing truncation for negative counts.
+    let round_up = numerator >= 0 && numerator % denominator >= denominator - denominator / 2;
+    let converted = numerator / denominator + i128::from(round_up);
     i64::try_from(converted).unwrap_or(tc.start)
 }
 
@@ -2313,6 +2320,29 @@ mod tests {
         assert_eq!(mxf_start_timecode(df, Some(FrameRate::FPS_29_97)), 3000);
         assert_eq!(mxf_start_timecode(df, Some(FrameRate::new(60_000, 1001))), 6000);
         assert_eq!(mxf_start_timecode(df, None), 3000);
+    }
+
+    #[test]
+    fn mxf_start_timecode_rounds_fractional_recorded_frames() {
+        // Three frames at 25 fps fall at 3.6 frames on a 30 fps track.
+        let tc = mxf::Timecode { start: 3, rounded_base: 25, drop_frame: false };
+        assert_eq!(mxf_start_timecode(tc, Some(FrameRate::FPS_30)), 4);
+        // Two frames at 24 fps fall exactly halfway between frames 2 and 3.
+        let half = mxf::Timecode { start: 2, rounded_base: 24, ..tc };
+        assert_eq!(mxf_start_timecode(half, Some(FrameRate::FPS_30)), 3);
+        let integral = mxf::Timecode { start: 5, ..tc };
+        assert_eq!(mxf_start_timecode(integral, Some(FrameRate::FPS_30)), 6);
+
+        let negative = mxf::Timecode { start: -100, ..tc };
+        assert_eq!(mxf_start_timecode(negative, Some(FrameRate::FPS_30)), -120);
+        let negative_fraction = mxf::Timecode { start: -3, ..tc };
+        assert_eq!(mxf_start_timecode(negative_fraction, Some(FrameRate::FPS_30)), -3);
+        let fallback = mxf::Timecode { start: i64::MAX - 1, ..tc };
+        assert_eq!(mxf_start_timecode(fallback, Some(FrameRate::FPS_50)), i64::MAX - 1);
+        let too_large = mxf::Timecode { start: i64::MAX, ..tc };
+        assert_eq!(mxf_start_timecode(too_large, Some(FrameRate::FPS_50)), i64::MAX);
+        let extreme = mxf::Timecode { drop_frame: true, ..too_large };
+        assert_eq!(mxf_start_timecode(extreme, Some(FrameRate::new(i64::MAX, 1))), i64::MAX);
     }
 
     #[test]
