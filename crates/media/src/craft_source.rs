@@ -1280,6 +1280,45 @@ fn estimate_mpeg_frame_rate(units: &[mpegts::Unit]) -> FrameRate {
     estimate_mpeg_frame_rate_pts(units.iter().filter_map(|u| u.pts))
 }
 
+/// A timestamp is the start of a picture, not the end of its display interval.
+fn regular_ts_picture_end(units: &[mpegts::Unit], origin_pts: i64, rate: FrameRate) -> Option<Tick> {
+    let [first, second, rest @ ..] = units else { return None };
+    let first_pts = first.pts?;
+    // A complete index can still contain a unit the public reader refuses to allocate.
+    let readable = |unit: &mpegts::Unit| unit.size > 0 && unit.size <= mpegts::MAX_UNIT_BYTES;
+    if !first.key || first_pts != origin_pts || rate.num <= 0 || rate.den <= 0 || !readable(first) || !readable(second) {
+        return None;
+    }
+    let mut last = second.pts?;
+    let step = last.checked_sub(first_pts)?;
+    // Do not infer a tail from a snapped rate or extrapolate an irregular track.
+    if step <= 0 || i128::from(step) * i128::from(rate.num) != 90_000 * i128::from(rate.den) {
+        return None;
+    }
+    for unit in rest {
+        let pts = unit.pts?;
+        if pts.checked_sub(last)? != step || !readable(unit) {
+            return None;
+        }
+        last = pts;
+    }
+    let end = last.checked_add(step)?.checked_sub(origin_pts)?;
+    let ticks = i128::from(end) * i128::from(craft_time::TICKS_PER_SECOND) / 90_000;
+    Some(Tick(i64::try_from(ticks).ok()?))
+}
+
+fn clean_ts_packet_index<S: ByteSource + ?Sized>(file: &mpegts::File, source: &S) -> bool {
+    let mpegts::Format::Ts { packet_size, sync_offset } = file.format else { return false };
+    if !file.warnings.is_empty() || !matches!(packet_size, 188 | 192 | 204) || sync_offset >= packet_size || !source.len().is_multiple_of(packet_size as u64) {
+        return false;
+    }
+    // Unlike the scanner's recovery path, require the five sync bytes it uses to
+    // identify a TS to align from byte zero, with no ignored partial packet at EOF.
+    let mut head = [0u8; 5 * 204];
+    let Some(prefix) = head.get_mut(..5 * packet_size) else { return false };
+    source.read_at(0, prefix).is_ok() && (0..5).all(|i| prefix.get(i * packet_size + sync_offset) == Some(&0x47))
+}
+
 fn open_mpeg(name: &str, fmt: mpegts::Format, source: SharedBytes) -> Option<Result<SharedSource>> {
     let file = mpegts::open(&*source).ok()?;
     let origin_pts = file.streams.iter().filter_map(|s| s.pts_range().map(|(lo, _)| lo)).min().unwrap_or(0);
@@ -1321,7 +1360,13 @@ fn open_mpeg(name: &str, fmt: mpegts::Format, source: SharedBytes) -> Option<Res
             let _ = video_decoder.reset();
         }
         let frame_rate = estimate_mpeg_frame_rate(&video_stream.units);
-        let duration = video_stream.pts_range().map_or(Tick::ZERO, |(_, hi)| Tick::from_units(hi.saturating_sub(origin_pts), 90_000));
+        let indexed_span = || video_stream.pts_range().map_or(Tick::ZERO, |(_, hi)| Tick::from_units(hi.saturating_sub(origin_pts), 90_000));
+        let duration =
+            if file.streams.len() == 1 && video_params.codec == CodecId::H264 && video_stream.skipped_bytes == 0 && clean_ts_packet_index(&file, &*source) {
+                regular_ts_picture_end(&video_stream.units, origin_pts, frame_rate).unwrap_or_else(indexed_span)
+            } else {
+                indexed_span()
+            };
         let info = default_video_info(decoded_dims.0, decoded_dims.1, frame_rate, &video_params);
         let state = Mutex::new(VideoState { decoder: video_decoder, next_decode_idx: 0, gop_start_idx: 0, flushed: false, decoded: Vec::new() });
         (Some(ContainerVideoPart { track_idx: v_idx, info, state }), duration)
@@ -3430,6 +3475,118 @@ mod tests {
         assert_eq!(ts_container.pts_to_tick(0, 90_000), Tick::ZERO);
         let ts_src = open_bytes("test.ts", Arc::from(ts_bytes)).expect("recognized ts").expect("opened ts");
         assert_eq!(ts_src.info().container, "MPEG-2 TS");
+    }
+
+    fn generated_two_frame_ts() -> Vec<u8> {
+        use craft_video::h264::{Encoder, EncoderConfig, YuvFrame};
+        use mpegts::mux::{Codec, Config, Frame, Muxer, Stream};
+
+        let mut config = EncoderConfig::new(16, 16, 25, 1);
+        config.intra_only = true;
+        config.threads = 1;
+        let mut encoder = Encoder::new(config).unwrap();
+        let mut packets = Vec::new();
+        let uv = [128; 8 * 8];
+        for (pts, level) in [(90_000, 48), (93_600, 192)] {
+            let y = [level; 16 * 16];
+            packets.extend(encoder.encode(&YuvFrame { y: &y, u: &uv, v: &uv, y_stride: 16, uv_stride: 8 }, pts).unwrap());
+        }
+        packets.extend(encoder.flush());
+        assert_eq!(packets.len(), 2);
+        let mut mux = Muxer::new(Vec::new(), Config::default(), &[Stream::new(0x100, Codec::H264)]).unwrap();
+        for packet in packets {
+            assert!(packet.keyframe);
+            mux.write_frame(0, &Frame { data: &packet.data, pts: packet.pts, dts: Some(packet.dts), key: true }).unwrap();
+        }
+        mux.finish().unwrap()
+    }
+
+    #[test]
+    fn regular_video_only_h264_ts_duration_keeps_the_last_picture_playable() {
+        let bytes = generated_two_frame_ts();
+        let parsed = mpegts::open(bytes.as_slice()).unwrap();
+        assert_eq!(parsed.streams.len(), 1);
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        assert_eq!(parsed.streams[0].skipped_bytes, 0);
+        assert!(clean_ts_packet_index(&parsed, bytes.as_slice()));
+        let units = &parsed.streams[0].units;
+        assert_eq!(units.iter().map(|unit| unit.pts).collect::<Vec<_>>(), [Some(90_000), Some(93_600)]);
+
+        let bytes: Arc<[u8]> = bytes.into();
+        let opened = crate::stream::open_bytes("final-picture.ts", bytes.clone()).unwrap();
+        assert!(matches!(opened, crate::stream::MediaSource::Craft(_)));
+        let film = filmcraft_codecs::open_bytes("final-picture.ts", bytes.clone()).unwrap();
+        let rate = effectcraft_time::FrameRate::FPS_25;
+        assert_eq!(film.info().duration.0, rate.tick_of(2).0);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("final-picture.ts");
+        std::fs::write(&path, bytes.as_ref()).unwrap();
+        let footage = crate::probe(&path).unwrap();
+        let pool = crate::MediaPool::new();
+        let first = pool.frame_at(&footage, effectcraft_time::Tick::ZERO).unwrap();
+        let last = pool.frame_at(&footage, rate.tick_of(1)).unwrap();
+        assert!(last.get(8, 8)[0] > first.get(8, 8)[0] + 0.25, "the earlier duration clamped the last request to the first picture");
+        assert_eq!(footage.frame_rate, rate);
+        assert!(!footage.has_audio);
+        assert_eq!(footage.duration, rate.tick_of(2));
+    }
+
+    #[test]
+    fn ts_damaged_or_partial_tail_keeps_the_earlier_indexed_duration() {
+        let mut transport_error = [0xff; 188];
+        // A dropped error-marked packet does not alter the two indexed pictures.
+        transport_error[..4].copy_from_slice(&[0x47, 0x9f, 0xff, 0x10]);
+        for (tail, warned) in [(&transport_error[..], true), (&[0x47][..], false)] {
+            let mut bytes = generated_two_frame_ts();
+            bytes.extend_from_slice(tail);
+            let parsed = mpegts::open(bytes.as_slice()).unwrap();
+            assert_eq!(parsed.warnings.iter().any(|warning| warning.contains("transport error indicator")), warned);
+            assert_eq!(parsed.streams[0].units.len(), 2);
+            assert_eq!(regular_ts_picture_end(&parsed.streams[0].units, 90_000, FrameRate::FPS_25), Some(Tick(craft_time::TICKS_PER_SECOND * 2 / 25)));
+            assert!(!clean_ts_packet_index(&parsed, bytes.as_slice()));
+            // The same shared route still opens and retains its prior duration.
+            let source = crate::stream::open_bytes("damaged-tail.ts", bytes.into()).unwrap();
+            let crate::stream::MediaSource::Craft(source) = source else { panic!("existing shared route") };
+            assert_eq!(source.info().duration, Tick(craft_time::TICKS_PER_SECOND / 25));
+        }
+    }
+
+    #[test]
+    fn ts_picture_end_requires_complete_exact_regular_stamps() {
+        let bytes = generated_two_frame_ts();
+        let parsed = mpegts::open(bytes.as_slice()).unwrap();
+        let units = &parsed.streams[0].units;
+        let rate = FrameRate::FPS_25;
+        assert_eq!(regular_ts_picture_end(units, 90_000, rate), Some(Tick(craft_time::TICKS_PER_SECOND * 2 / 25)));
+        assert_eq!(regular_ts_picture_end(&units[..1], 90_000, rate), None);
+        assert_eq!(regular_ts_picture_end(units, 89_999, rate), None);
+        assert_eq!(regular_ts_picture_end(units, 90_000, FrameRate::FPS_30), None);
+
+        let mut nonkey = units.clone();
+        nonkey[0].key = false;
+        assert_eq!(regular_ts_picture_end(&nonkey, 90_000, rate), None);
+        let mut missing = units.clone();
+        missing[1].pts = None;
+        assert_eq!(regular_ts_picture_end(&missing, 90_000, rate), None);
+        let mut irregular = units.clone();
+        let mut third = units[1];
+        third.pts = Some(97_201);
+        irregular.push(third);
+        assert_eq!(regular_ts_picture_end(&irregular, 90_000, rate), None);
+
+        let mut oversized = units.clone();
+        oversized[1].size = mpegts::MAX_UNIT_BYTES + 1;
+        assert_eq!(regular_ts_picture_end(&oversized, 90_000, rate), None);
+        oversized[1].size = mpegts::MAX_UNIT_BYTES;
+        assert!(regular_ts_picture_end(&oversized, 90_000, rate).is_some());
+        oversized[1].size = 0;
+        assert_eq!(regular_ts_picture_end(&oversized, 90_000, rate), None);
+
+        let mut overflow = units.clone();
+        overflow[0].pts = Some(i64::MAX - 3_600);
+        overflow[1].pts = Some(i64::MAX);
+        assert_eq!(regular_ts_picture_end(&overflow, i64::MAX - 3_600, rate), None);
     }
 
     fn pcm_s16le_bytes(sample: i16, count: usize) -> Vec<u8> {
