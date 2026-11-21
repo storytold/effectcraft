@@ -321,11 +321,12 @@ pub fn upgrade_instance(spec: &EffectSpec, g: &mut PropGroup, ids: &mut Ids, lay
             // Companions of grouped layer parameters were once stored at top level: under the
             // grouped id, or under the bare one when the parameter itself was (a plug-in saved
             // before it grouped the parameter), which moves into the group with its parameter.
-            // Not when a declared parameter (in any group) has that bare id: the value is its own.
+            // Not when the top-level bare id may be a declared parameter's own (its last segment):
+            // declared there, or grouped but not stored in its group yet (still flat in the save).
             let bare = layer_source_id(leaf);
-            let declared = |id: &str| spec.params.iter().any(|q| q.id.rsplit('/').next() == Some(id));
+            let popup_owns_bare = spec.params.iter().any(|q| q.id.rsplit('/').next() == Some(bare.as_str()) && (q.id == bare || prop_at(g, q.id).is_none()));
             let src = take_prop(g, &sid)
-                .or_else(|| (path.is_some() && !spec.params.iter().any(|q| q.id == leaf) && !declared(&bare)).then(|| take_prop(g, &bare)).flatten())
+                .or_else(|| (path.is_some() && !spec.params.iter().any(|q| q.id == leaf) && !popup_owns_bare).then(|| take_prop(g, &bare)).flatten())
                 .map(|mut p| {
                     p.match_id = bare.clone();
                     p
@@ -735,6 +736,36 @@ mod tests {
         assert!(upgrade_instance(&grouped, &mut g, &mut Ids(&mut next), SIZE));
         assert_eq!(prop_at(&mut g, "controls/floorSource").unwrap().value, Value::Enum(1), "the popup keeps its value");
         assert_eq!(prop_at(&mut g, "physics/floorSource").unwrap().value, Value::Enum(2), "the companion is new");
+    }
+
+    /// A layer parameter saved flat keeps its saved Source choice when it moves into a group,
+    /// even though a declared popup ends in the companion's bare id: that popup was already
+    /// grouped in the save, so the top-level value is the companion's, not the popup's.
+    #[test]
+    fn upgrade_keeps_a_companion_when_the_popup_named_like_it_was_already_grouped() {
+        let render = find(crate::warp_stab::ID).unwrap().render;
+        let popup = || ParamUi::Popup { options: vec!["A".into(), "B".into()] };
+        let spec = |floor: &'static str| EffectSpec {
+            id: "org.test.grouped.layer",
+            name: "Grouped",
+            category: "Test",
+            params: vec![
+                ParamSpec { id: floor, name: "Floor", default: Value::Layer(None), ui: ParamUi::Layer },
+                ParamSpec { id: "controls/floorSource", name: "Floor Source", default: Value::Enum(0), ui: popup() },
+            ],
+            render,
+            gpu: false,
+            float: false,
+        };
+        let (flat, grouped) = (spec("floor"), spec("physics/floor"));
+        let mut next = 1;
+        let mut g = instantiate(&flat, &mut Ids(&mut next), "Grouped", SIZE);
+        g.get_mut("floorSource").unwrap().value = Value::Enum(0);
+        prop_at(&mut g, "controls/floorSource").unwrap().value = Value::Enum(1);
+        assert!(upgrade_instance(&grouped, &mut g, &mut Ids(&mut next), SIZE));
+        assert_eq!(prop_at(&mut g, "physics/floorSource").unwrap().value, Value::Enum(0), "the saved Source choice moved along");
+        assert_eq!(prop_at(&mut g, "controls/floorSource").unwrap().value, Value::Enum(1), "the popup keeps its value");
+        assert!(g.get("floorSource").is_none(), "nothing is left at the top level");
     }
 
     /// A saved parameter id maps to the parameter `upgrade_instance` moves it to.
