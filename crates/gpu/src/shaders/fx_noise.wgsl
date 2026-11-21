@@ -465,10 +465,13 @@ fn fxn_slice(ix: i32, iy: i32, iz: i32, tx: f32, ty: f32, seed: u32, nt: u32) ->
 }
 
 // noise3::typed_noise.
-fn fxn_typed_noise(x: f32, y: f32, z: f32, seed: u32, nt: u32) -> f32 {
+fn fxn_typed_noise(x_in: f32, y_in: f32, z_in: f32, seed: u32, nt: u32) -> f32 {
     if (nt == 2u) {
-        return soft_linear_noise(x, y, z, seed);
+        return soft_linear_noise(x_in, y_in, z_in, seed);
     }
+    let x = lattice_coordinate(x_in);
+    let y = lattice_coordinate(y_in);
+    let z = lattice_coordinate(z_in);
     let x0 = floor(x);
     let y0 = floor(y);
     let z0 = floor(z);
@@ -550,8 +553,8 @@ fn fxn_fractal(@builtin(global_invocation_id) gid: vec3<u32>) {
             u = u2;
         }
         let f = data[o + 4u];
-        u = u * f;
-        v = v * f;
+        u = scaled_lattice_coordinate(u, f);
+        v = scaled_lattice_coordinate(v, f);
         let z = data[o + 8u];
         let seed = P.u[0].w + oi;
         if (kind >= 4u && kind <= 6u) {
