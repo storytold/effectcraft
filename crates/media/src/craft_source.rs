@@ -1591,7 +1591,8 @@ mod tests {
         w.push_sound(0, &pcm).expect("snd0");
         w.push_picture(&[0x00, 0x00, 0x00, 0x01, 0x41], mxf::write::FrameInfo::intra()).expect("pic1");
         w.push_sound(0, &pcm).expect("snd1");
-        let mxf_bytes: SharedBytes = Arc::new(Arc::from(w.finish().expect("finish").into_inner()));
+        let raw_bytes = w.finish().expect("finish").into_inner();
+        let mxf_bytes: SharedBytes = Arc::new(Arc::from(raw_bytes.clone()));
         let mut file = mxf::open(&*mxf_bytes).expect("open mxf");
 
         // Exercise ContainerFile::Mxf video helpers and trimmed sound window.
@@ -1610,7 +1611,7 @@ mod tests {
         assert_eq!(container.pts_to_tick(0, 1), Tick::ZERO);
 
         // Exercise open_mxf video+sound path on valid Op1a Avc+PCM.
-        let opened = open_bytes("op1a.mxf", Arc::from(mxf_bytes.as_ref().to_vec()));
+        let opened = open_bytes("op1a.mxf", Arc::from(raw_bytes));
         assert!(opened.is_some());
         assert!(open_bytes("op1a.mxf", Arc::from(vec![0u8; 4])).is_none());
     }
