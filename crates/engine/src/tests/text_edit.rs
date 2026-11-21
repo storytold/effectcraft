@@ -1418,6 +1418,79 @@ fn duplicate_of_an_empty_type_tool_layer_ends_the_edit_and_copies_it() {
     assert_eq!(s.state.selected_layers, vec![LayerId(copy)], "and the copy is selected");
 }
 
+/// Two text layers and a solid, all selected, for `layer.setText {selected}` (#2862).
+fn two_selected() -> (Session, u64, u64, u64) {
+    let (mut s, a) = session("One");
+    let b = s.execute("layer.newText", json!({"text": "Two", "size": 40})).unwrap()["layer"].as_u64().unwrap();
+    let solid = s.execute("layer.newSolid", json!({"name": "Plate", "color": "#406080"})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.select", json!({"layers": [a, solid, b]})).unwrap();
+    (s, a, b, solid)
+}
+
+#[test]
+fn set_text_selected_reaches_every_selected_text_layer_in_one_undo_step() {
+    let (mut s, a, b, _) = two_selected();
+    let steps = undo_steps(&s);
+    // (the solid among them is left out, not an error)
+    s.execute_checked("layer.setText", json!({"layer": a, "selected": true, "size": 24, "justify": "center", "font": "Inter"})).unwrap();
+    for t in [a, b] {
+        assert_eq!((doc(&s, t).size, doc(&s, t).justify, doc(&s, t).font.as_str()), (24.0, Justify::Center, "Inter"));
+    }
+    assert_eq!(undo_steps(&s), steps + 1, "one undo step");
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!((doc(&s, a).size, doc(&s, b).size), (60.0, 40.0));
+    // Without `selected` only the named layer changes; a layer outside the selection stays alone.
+    s.execute("layer.setText", json!({"layer": b, "size": 30})).unwrap();
+    assert_eq!((doc(&s, a).size, doc(&s, b).size), (60.0, 30.0));
+    s.execute("layer.select", json!({"layers": [a]})).unwrap();
+    s.execute("layer.setText", json!({"layer": b, "selected": true, "size": 20})).unwrap();
+    assert_eq!((doc(&s, a).size, doc(&s, b).size), (60.0, 20.0));
+}
+
+#[test]
+fn set_text_selected_skips_locked_layers_and_changes_nothing_on_an_error() {
+    let (mut s, a, b, _) = two_selected();
+    let c = s.execute("layer.newText", json!({"text": "Three", "size": 33})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.select", json!({"layers": [c, a, b]})).unwrap();
+    s.execute("layer.setSwitch", json!({"layers": [c], "switch": "lock", "value": true})).unwrap();
+    // A locked layer named as the panels' target is left alone like the others.
+    s.execute("layer.setText", json!({"layer": c, "selected": true, "size": 24})).unwrap();
+    assert_eq!((doc(&s, a).size, doc(&s, b).size, doc(&s, c).size), (24.0, 24.0, 33.0));
+    // A bad value changes nothing on any layer.
+    assert!(s.execute("layer.setText", json!({"layer": a, "selected": true, "size": "big"})).is_err());
+    assert_eq!((doc(&s, a).size, doc(&s, b).size), (24.0, 24.0));
+}
+
+/// `selected` with nothing to change is a no-op, not a write to the named layer (#2862).
+#[test]
+fn set_text_selected_changes_nothing_when_no_selected_layer_qualifies() {
+    let (mut s, a, _, solid) = two_selected();
+    s.execute("layer.setSwitch", json!({"layers": [a], "switch": "lock", "value": true})).unwrap();
+    let recent = s.prefs.recent_fonts.clone();
+    let steps = undo_steps(&s);
+    // A lone locked layer, named or not, and a selection without text.
+    for (select, mut p) in [(a, json!({"layer": a})), (a, json!({})), (solid, json!({"layer": solid}))] {
+        s.execute("layer.select", json!({"layers": [select]})).unwrap();
+        p["selected"] = json!(true);
+        p["size"] = json!(24);
+        p["font"] = json!("No Such Font");
+        assert_eq!(s.execute_checked("layer.setText", p).unwrap(), serde_json::Value::Null);
+        assert_eq!(doc(&s, a).size, 60.0);
+        assert_eq!(undo_steps(&s), steps, "no undo step");
+        assert_eq!(s.prefs.recent_fonts, recent);
+    }
+}
+
+#[test]
+fn set_text_with_a_range_stays_on_the_edited_layer() {
+    let (mut s, a, b, _) = two_selected();
+    s.execute("layer.setText", json!({"layer": a, "selected": true, "range": [0, 1], "size": 24})).unwrap();
+    assert_eq!(doc(&s, a).style_at(0).size, 24.0);
+    assert_eq!(doc(&s, a).style_at(1).size, 60.0);
+    assert!(doc(&s, b).is_uniform());
+    assert_eq!(doc(&s, b).size, 40.0);
+}
+
 fn layer_name(s: &Session, t: u64) -> String {
     s.active_comp().unwrap().layer(effectcraft_project::LayerId(t)).unwrap().name.clone()
 }
