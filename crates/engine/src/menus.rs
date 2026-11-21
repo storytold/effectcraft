@@ -380,6 +380,7 @@ pub fn checked(s: &Session, command: &str, params: &Value) -> Option<bool> {
         "view.shareViewOptions" => Some(s.state.share_view_options),
         "view.extendedViewer" => Some(s.prefs.three_d.extended_viewer),
         "view.snapping" => Some(s.state.snapping),
+        "view.onionSkin" => Some(s.state.viewer.onion.enabled),
         "view.displayColorManagement" => Some(s.state.viewer.display_color_management),
         "view.customRgb" => Some(s.state.viewer.simulation.profile == crate::viewer::SimProfile::MyCustom),
         "view.simulateOutput" => {
@@ -1198,6 +1199,7 @@ View
   Show Grid | view.grid
   Snap to Grid | view.snapToGrid
   Snapping | view.snapping
+  Onion Skin | view.onionSkin
   ---
   View Options... | view.options
   Show Layer Controls | view.layerControls

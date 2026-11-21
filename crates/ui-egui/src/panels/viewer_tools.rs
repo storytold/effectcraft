@@ -788,6 +788,13 @@ fn exposure_field(app: &mut EffectcraftApp, ui: &mut egui::Ui, er: Rect, stops: 
 /// renderer/view and Extended Viewer, timecode and render-time indicators, running commands or
 /// toggling viewer UI state. Returns the width the row occupies, at least `bar.width()`, for the
 /// horizontal scroll area.
+fn onion_click(app: &mut EffectcraftApp, clicked: bool) {
+    if clicked {
+        let on = app.session.state.viewer.onion.enabled;
+        let _ = app.session.execute("view.onionSkin", json!({"value": !on}));
+    }
+}
+
 fn bottom_bar_contents(app: &mut EffectcraftApp, ui: &mut egui::Ui, bar: Rect, zoom: f32, time: Tick, comp: &Comp) -> f32 {
     let t = app.tokens;
     let p = ui.painter().clone();
@@ -852,6 +859,9 @@ fn bottom_bar_contents(app: &mut EffectcraftApp, ui: &mut egui::Ui, bar: Rect, z
     if let Some(i) = popup(app, ui, "vw-fast-pop", fr, &items, "fastPreviewsItem") {
         let _ = app.session.execute("view.fastPreviewMode", json!({"mode": FastPreviews::ALL[i].id()}));
     }
+    let onion_on = app.session.state.viewer.onion.enabled;
+    let (clicked, _) = tog(ui, &mut app.auto, &mut x, Icon::FrameBlend, onion_on, "onionSkin", "Onion Skin");
+    onion_click(app, clicked);
     if tog(ui, &mut app.auto, &mut x, Icon::Checker, app.ui.viewer.transparency_grid, "transparency", "Toggle Transparency Grid").0 {
         app.ui.viewer.transparency_grid = !app.ui.viewer.transparency_grid;
     }
