@@ -1653,7 +1653,7 @@ fn audio_only_isobmff_and_matroska_route_through_craft_audio() {
     }
 }
 
-fn read_audio_sequential(pool: &MediaPool, f: &FootageFile, total_frames: usize, chunk_frames: usize, rate: u32) -> Vec<f32> {
+fn read_audio_sequential(pool: &MediaPool, f: &Footage, total_frames: usize, chunk_frames: usize, rate: u32) -> Vec<f32> {
     let mut out = Vec::with_capacity(total_frames * 2);
     let mut pos = 0usize;
     while pos < total_frames {
@@ -1729,11 +1729,10 @@ fn build_gapped_aac_mkv(out_path: &Path, gap_at_pkt: usize, gap_ns: i64, start_o
         _ => return None,
     };
 
-    let mut spec = craft_media::matroska::mux::TrackSpec::new(craft_media::matroska::TrackKind::Audio, "A_AAC");
+    let mut spec = craft_media::matroska::TrackSpec::new(craft_media::matroska::TrackKind::Audio, "A_AAC");
     spec.codec_private = asc;
     spec.audio = Some((48_000.0, u64::from(track.audio().map_or(2, |a| a.channels)), None));
-    let mut writer =
-        craft_media::matroska::mux::MkvWriter::new(std::io::Cursor::new(Vec::new()), vec![spec], craft_media::matroska::mux::MuxOptions::default()).ok()?;
+    let mut writer = craft_media::matroska::MkvWriter::new(std::io::Cursor::new(Vec::new()), vec![spec], craft_media::matroska::MuxOptions::default()).ok()?;
 
     let pkt_count = track.samples.len().min(60);
     for i in 0..pkt_count {
