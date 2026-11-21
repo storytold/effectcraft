@@ -17,8 +17,11 @@
 //!     `Mp3`/`Mp2`/`Mp1` (with `CodecDelay` + `SeekPreRoll` timing).
 //!   - Fallback (`filmcraft-codecs`): `alpha_mode == 1` (`BlockAdditional` alpha), unreadable/zlib
 //!     encodings, `Mjpeg`/`Ffv1`/`Theora`/`Apv`, or unsupported audio (`Vorbis`/`Flac`/`Pcm`).
-//! - **Other containers (`MXF`, `AVI`, `MPEG-TS`/`PS`, `Ogg`, standalone `WAV`/`AIFF`/`FLAC`/`MP3`)**:
-//!   - Currently routed via `filmcraft-codecs` in `stream.rs` (pending subsequent cutover PRs).
+//! - **Other containers & standalone audio**:
+//!   - Shared (`craft_audio::Decoder` with `decode-native`): standalone `WAV`, `AIFF`, `MP3`/`MP2`/`MP1`,
+//!     `AAC` (ADTS), `AC-3`, and `Ogg` (`Opus`).
+//!   - Fallback (`filmcraft-codecs`): `MXF`, `AVI`, `MPEG-TS`/`PS`, `Ogg Vorbis`, `FLAC`, `CAF`, or
+//!     unsupported WAV/AIFF encodings.
 
 use std::sync::{Arc, Mutex};
 
@@ -44,6 +47,7 @@ const MAX_CACHED_FRAMES: usize = 32;
 
 /// Maximum audio lookahead packets inspected when initializing `craft_audio::TrackDecoder`.
 const AUDIO_LOOKAHEAD: usize = 8;
+const AUDIO_SEEK_BACKUP_PACKETS: usize = 2;
 
 /// Complete first-sample read cap for the ProRes alpha probe; larger samples use the legacy route.
 const MAX_PRORES_ALPHA_SAMPLE_BYTES: u32 = 32 * 1024 * 1024;
@@ -69,7 +73,7 @@ fn looks_like_matroska(head: &[u8]) -> bool {
     head.starts_with(&[0x1A, 0x45, 0xDF, 0xA3])
 }
 
-/// Open an in-place ISO-BMFF or Matroska/WebM source via `craft-media` / `craft-video`.
+/// Open an in-place ISO-BMFF, Matroska/WebM, or standalone audio source via `craft-media` / `craft-audio`.
 /// Returns `None` when the container/codec/audio combination should fall back to `filmcraft-codecs`.
 #[cfg(any(unix, windows))]
 pub(crate) fn open_reader(name: &str, head: &[u8], reader: &SharedBytes) -> Option<Result<SharedSource>> {
@@ -79,10 +83,10 @@ pub(crate) fn open_reader(name: &str, head: &[u8], reader: &SharedBytes) -> Opti
     if looks_like_matroska(head) {
         return open_matroska(name, reader.clone());
     }
-    None
+    open_standalone_audio(name, head, reader.clone())
 }
 
-/// Open an in-memory ISO-BMFF or Matroska/WebM source via `craft-media` / `craft-video`.
+/// Open an in-memory ISO-BMFF, Matroska/WebM, or standalone audio source via `craft-media` / `craft-audio`.
 pub(crate) fn open_bytes(name: &str, bytes: Arc<[u8]>) -> Option<Result<SharedSource>> {
     if looks_like_isobmff(&bytes) {
         return open_isobmff(name, Arc::new(bytes));
@@ -90,7 +94,16 @@ pub(crate) fn open_bytes(name: &str, bytes: Arc<[u8]>) -> Option<Result<SharedSo
     if looks_like_matroska(&bytes) {
         return open_matroska(name, Arc::new(bytes));
     }
-    None
+    #[cfg(any(unix, windows))]
+    {
+        let head_len = <[u8]>::len(&bytes).min(64);
+        let head = bytes[..head_len].to_vec();
+        open_standalone_audio(name, &head, Arc::new(bytes))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        None
+    }
 }
 
 enum ContainerFile {
@@ -169,7 +182,7 @@ impl ContainerFile {
     fn audio_seek_info(audio_starts: &[i64], seek_preroll_samples: i64, start: i64) -> (usize, i64) {
         let target = start.saturating_sub(seek_preroll_samples).max(0);
         let sample_idx = audio_starts.partition_point(|&s| s <= target).saturating_sub(1);
-        let seek_idx = sample_idx.saturating_sub(2);
+        let seek_idx = sample_idx.saturating_sub(AUDIO_SEEK_BACKUP_PACKETS);
         let decoded_pos = audio_starts.get(seek_idx).copied().unwrap_or(0);
         (seek_idx, decoded_pos)
     }
@@ -220,6 +233,7 @@ struct OpusPrefix {
     len: usize,
     next: Option<i64>,
     tolerance: u64,
+    min_pending_stamp: i64,
 }
 
 struct AudioStarts {
@@ -235,7 +249,9 @@ impl AudioStarts {
     }
 
     fn opus(positions: Vec<i64>, tolerance: i64) -> Self {
-        let opus = (!positions.is_empty()).then_some(OpusPrefix { len: 0, next: None, tolerance: tolerance.max(0).unsigned_abs() });
+        // Open resolves exactly the bounded lookahead before anyone can seek.
+        let min_pending_stamp = positions.iter().skip(AUDIO_LOOKAHEAD).copied().min().unwrap_or(i64::MIN);
+        let opus = (!positions.is_empty()).then_some(OpusPrefix { len: 0, next: None, tolerance: tolerance.max(0).unsigned_abs(), min_pending_stamp });
         Self { positions, opus }
     }
 
@@ -252,7 +268,7 @@ impl AudioStarts {
         })
     }
 
-    fn observe(&mut self, file: &ContainerFile, track: usize, idx: usize, packet: Option<&[u8]>) {
+    fn observe(&mut self, file: &ContainerFile, track: usize, idx: usize, packet: &[u8]) {
         let Some(prefix) = &mut self.opus else { return };
         if idx != prefix.len {
             return;
@@ -260,13 +276,25 @@ impl AudioStarts {
         let timing = PacketTime {
             stamp: self.positions[idx],
             stamped: file.audio_packet_is_stamped(track, idx),
-            samples: packet.and_then(opus_packet_samples).map(i64::from),
+            samples: opus_packet_samples(packet).map(i64::from),
         };
         self.positions[idx] = place_packet(timing, &mut prefix.next, prefix.tolerance);
         prefix.len += 1;
         if prefix.len == self.positions.len() {
             self.opus = None;
         }
+    }
+
+    fn seek_proves_first_packet(&self, target: i64) -> bool {
+        let Some(prefix) = &self.opus else { return false };
+        // A normal read that starts before the very first packet looks like a
+        // backward seek. It need not read the suffix if the ordinary seek
+        // would back up to packet 0 anyway. Stamped starts can only move by the
+        // timing tolerance; unstamped continuation moves forward from next.
+        prefix.min_pending_stamp > target
+            && prefix.min_pending_stamp.abs_diff(target) > prefix.tolerance
+            && prefix.next.is_none_or(|next| next > target)
+            && self.positions.get(AUDIO_SEEK_BACKUP_PACKETS + 1..prefix.len).is_some_and(|p| p.iter().all(|&start| start > target))
     }
 
     fn finish_for_seek(&mut self, file: &ContainerFile, source: &dyn ByteSource, track: usize) -> Result<()> {
@@ -277,8 +305,10 @@ impl AudioStarts {
             if filmcraft_media::cancel::cancelled() {
                 return Err(MediaError::Cancelled);
             }
-            let packet = file.read_sample(source, track, idx).ok();
-            self.observe(file, track, idx, packet.as_deref());
+            // Do not commit a guessed duration after an I/O error; the next
+            // request can retry this packet without re-reading the valid prefix.
+            let packet = file.read_sample(source, track, idx)?;
+            self.observe(file, track, idx, &packet);
         }
         Ok(())
     }
@@ -407,7 +437,7 @@ where
         let mut audio_starts = compute_audio_starts(container, idx, codec, native_rate, fixed_samples);
         if codec == CodecId::Opus {
             for (s_idx, pkt) in lookahead.iter().enumerate() {
-                audio_starts.observe(container, idx, s_idx, Some(pkt));
+                audio_starts.observe(container, idx, s_idx, pkt);
             }
         }
         let seek_preroll_samples = match container {
@@ -815,13 +845,7 @@ impl MediaSource for CraftMediaSource {
         }
 
         let native_rate = entry.native_rate;
-        let (native_start, native_frames) = if sample_rate == native_rate {
-            (start, frames)
-        } else {
-            let s0 = (i128::from(start) * i128::from(native_rate)) / i128::from(sample_rate);
-            let len = ((frames as u128 * u128::from(native_rate)).div_ceil(u128::from(sample_rate)) + 2) as usize;
-            (i64::try_from(s0).unwrap_or(0), len)
-        };
+        let (native_start, native_frames) = native_audio_window(start, frames, native_rate, sample_rate);
 
         let mut state = entry.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let decoded = decode_audio_range(
@@ -840,24 +864,210 @@ impl MediaSource for CraftMediaSource {
             return Ok(AudioBuffer { sample_rate, channels: decoded });
         }
 
-        let mut resampled = vec![vec![0.0f32; frames]; channels_count];
-        let ratio = f64::from(native_rate) / f64::from(sample_rate);
-        for (c, out_ch) in resampled.iter_mut().enumerate() {
-            let in_ch = &decoded[c];
-            if in_ch.is_empty() {
-                continue;
-            }
-            for (i, dst) in out_ch.iter_mut().enumerate() {
-                let pos = i as f64 * ratio;
-                let idx = pos.floor() as usize;
-                let frac = (pos - idx as f64) as f32;
-                let s0 = in_ch.get(idx).copied().unwrap_or(0.0);
-                let s1 = in_ch.get(idx + 1).copied().unwrap_or(s0);
-                *dst = s0 + (s1 - s0) * frac;
+        Ok(AudioBuffer { sample_rate, channels: resample_audio(&decoded, channels_count, native_rate, sample_rate, frames) })
+    }
+}
+
+#[cfg(any(unix, windows))]
+struct SharedBytesSource(SharedBytes);
+
+#[cfg(any(unix, windows))]
+impl ByteSource for SharedBytesSource {
+    fn len(&self) -> u64 {
+        self.0.len()
+    }
+
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<()> {
+        self.0.read_at(offset, buf)
+    }
+}
+
+#[cfg(any(unix, windows))]
+struct StandaloneAudioState {
+    decoder: craft_audio::Decoder<'static>,
+    decoded_pos: i64,
+    buf: Vec<Vec<f32>>,
+}
+
+#[cfg(any(unix, windows))]
+struct StandaloneAudioSource {
+    info: MediaInfo,
+    native_rate: u32,
+    state: Mutex<StandaloneAudioState>,
+}
+
+#[cfg(any(unix, windows))]
+impl MediaSource for StandaloneAudioSource {
+    fn info(&self) -> &MediaInfo {
+        &self.info
+    }
+
+    fn video_frame(&self, _req: FrameRequest) -> Result<Arc<VideoFrame>> {
+        Err(MediaError::NoStream("video"))
+    }
+
+    fn audio(&self, start: i64, frames: usize, sample_rate: u32) -> Result<AudioBuffer> {
+        self.audio_stream(0, start, frames, sample_rate)
+    }
+
+    fn audio_stream(&self, stream: usize, start: i64, frames: usize, sample_rate: u32) -> Result<AudioBuffer> {
+        if stream != 0 {
+            return Err(MediaError::NoStream("audio"));
+        }
+        let channels_count = self.info.audio_streams.first().map_or(2, |s| s.channels as usize);
+        if frames == 0 || sample_rate == 0 {
+            return Ok(AudioBuffer::new(sample_rate, channels_count as u16, frames));
+        }
+        let native_rate = self.native_rate;
+        let (native_start, native_frames) = native_audio_window(start, frames, native_rate, sample_rate);
+
+        let mut state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let decoded = decode_standalone_range(native_rate, channels_count, &mut state, native_start, native_frames)?;
+        if sample_rate == native_rate {
+            return Ok(AudioBuffer { sample_rate, channels: decoded });
+        }
+        Ok(AudioBuffer { sample_rate, channels: resample_audio(&decoded, channels_count, native_rate, sample_rate, frames) })
+    }
+}
+
+#[cfg(any(unix, windows))]
+fn decode_standalone_range(native_rate: u32, channels_count: usize, state: &mut StandaloneAudioState, start: i64, frames: usize) -> Result<Vec<Vec<f32>>> {
+    let end = start.saturating_add(frames as i64);
+    if end <= 0 {
+        return Ok(vec![vec![0.0f32; frames]; channels_count]);
+    }
+
+    let buf_len = state.buf.first().map_or(0, Vec::len) as i64;
+    let buf_end = state.decoded_pos.saturating_add(buf_len);
+    if start < state.decoded_pos || start > buf_end + i64::from(native_rate) * 2 {
+        let target = u64::try_from(start.max(0)).unwrap_or(0);
+        let actual = state.decoder.seek(target).map_err(|e| MediaError::Decode(e.to_string()))?;
+        state.decoded_pos = i64::try_from(actual).unwrap_or(i64::MAX);
+        for ch in &mut state.buf {
+            ch.clear();
+        }
+    }
+
+    if state.buf.len() != channels_count {
+        state.buf = vec![Vec::new(); channels_count];
+    }
+
+    while state.decoded_pos + state.buf.first().map_or(0, Vec::len) as i64 <= end {
+        if filmcraft_media::cancel::cancelled() {
+            return Err(MediaError::Cancelled);
+        }
+        let Some(block) = state.decoder.next_block().map_err(|e| MediaError::Decode(e.to_string()))? else {
+            break;
+        };
+        for (c, ch) in state.buf.iter_mut().enumerate() {
+            if let Some(src_ch) = block.channels.get(c) {
+                ch.extend_from_slice(src_ch);
             }
         }
-        Ok(AudioBuffer { sample_rate, channels: resampled })
     }
+
+    Ok(drain_audio_window(&mut state.buf, &mut state.decoded_pos, channels_count, start, frames))
+}
+
+fn native_audio_window(start: i64, frames: usize, native_rate: u32, sample_rate: u32) -> (i64, usize) {
+    if sample_rate == native_rate {
+        return (start, frames);
+    }
+    let s0 = (i128::from(start) * i128::from(native_rate)) / i128::from(sample_rate);
+    let len = ((frames as u128 * u128::from(native_rate)).div_ceil(u128::from(sample_rate)) + 2) as usize;
+    (i64::try_from(s0).unwrap_or(0), len)
+}
+
+fn drain_audio_window(buf: &mut [Vec<f32>], decoded_pos: &mut i64, channels_count: usize, start: i64, frames: usize) -> Vec<Vec<f32>> {
+    let mut out = vec![vec![0.0f32; frames]; channels_count];
+    let avail = buf.first().map_or(0, Vec::len);
+    for i in 0..frames {
+        let pos = start.saturating_add(i as i64);
+        if pos >= *decoded_pos {
+            let off = (pos - *decoded_pos) as usize;
+            if off < avail {
+                for (c, out_ch) in out.iter_mut().enumerate() {
+                    out_ch[i] = buf[c][off];
+                }
+            }
+        }
+    }
+    let end = start.saturating_add(frames as i64);
+    let drop_to = (end - *decoded_pos).max(0) as usize;
+    let trim = drop_to.min(avail);
+    if trim > 0 {
+        for ch in buf {
+            ch.drain(..trim);
+        }
+        *decoded_pos = decoded_pos.saturating_add(trim as i64);
+    }
+    out
+}
+
+fn resample_audio(decoded: &[Vec<f32>], channels_count: usize, native_rate: u32, sample_rate: u32, frames: usize) -> Vec<Vec<f32>> {
+    let mut resampled = vec![vec![0.0f32; frames]; channels_count];
+    let ratio = f64::from(native_rate) / f64::from(sample_rate);
+    for (c, out_ch) in resampled.iter_mut().enumerate() {
+        let in_ch = &decoded[c];
+        if in_ch.is_empty() {
+            continue;
+        }
+        for (i, dst) in out_ch.iter_mut().enumerate() {
+            let pos = i as f64 * ratio;
+            let idx = pos.floor() as usize;
+            let frac = (pos - idx as f64) as f32;
+            let s0 = in_ch.get(idx).copied().unwrap_or(0.0);
+            let s1 = in_ch.get(idx + 1).copied().unwrap_or(s0);
+            *dst = s0 + (s1 - s0) * frac;
+        }
+    }
+    resampled
+}
+
+#[cfg(any(unix, windows))]
+fn open_standalone_audio(name: &str, head: &[u8], source: SharedBytes) -> Option<Result<SharedSource>> {
+    let ext = std::path::Path::new(name).extension().and_then(|e| e.to_str());
+    let container = craft_audio::detect_container(head, ext)?;
+    let container_name = match container {
+        craft_audio::Container::Wav => "wav",
+        craft_audio::Container::Aiff => "aiff",
+        craft_audio::Container::MpegAudio => "mp3",
+        craft_audio::Container::Adts => "aac",
+        craft_audio::Container::Ac3 => "ac3",
+        craft_audio::Container::Ogg => "ogg",
+        _ => return None,
+    };
+
+    let dec = craft_audio::Decoder::open(SharedBytesSource(source.clone()), ext, &craft_audio::DecodeOptions::default()).ok()?;
+    let audio_info = if dec.length_known() {
+        dec.info().clone()
+    } else {
+        craft_audio::Decoder::open(SharedBytesSource(source.clone()), ext, &craft_audio::DecodeOptions::default()).ok()?.probe().ok()?
+    };
+
+    let native_rate = audio_info.sample_rate.max(1);
+    let channels = u32::from(audio_info.channels).max(1);
+    let duration = Tick::from_units(i64::try_from(audio_info.frames).unwrap_or(i64::MAX), i64::from(native_rate));
+    let bits_per_sample = match audio_info.sample_format {
+        craft_audio::SampleFormat::Int8 => Some(8),
+        craft_audio::SampleFormat::Int16 => Some(16),
+        craft_audio::SampleFormat::Int24 => Some(24),
+        craft_audio::SampleFormat::Int32 | craft_audio::SampleFormat::Float32 => Some(32),
+        craft_audio::SampleFormat::Float64 => Some(64),
+        craft_audio::SampleFormat::Compressed | _ => None,
+    };
+    let info = MediaInfo {
+        name: name.to_string(),
+        kind: MediaKind::AudioOnly,
+        duration,
+        video: None,
+        audio_streams: vec![AudioStreamInfo { sample_rate: native_rate, channels, codec: audio_info.codec.name().to_string(), bits_per_sample }],
+        container: container_name.to_string(),
+        start_timecode: None,
+        file_size: Some(source.len()),
+    };
+
+    Some(Ok(Arc::new(StandaloneAudioSource { info, native_rate, state: Mutex::new(StandaloneAudioState { decoder: dec, decoded_pos: 0, buf: Vec::new() }) })))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -872,17 +1082,22 @@ fn decode_audio_range(
     start: i64,
     frames: usize,
 ) -> Result<Vec<Vec<f32>>> {
-    let mut out = vec![vec![0.0f32; frames]; channels_count];
     let end = start.saturating_add(frames as i64);
     if end <= 0 {
-        return Ok(out);
+        return Ok(vec![vec![0.0f32; frames]; channels_count]);
     }
 
     let buf_len = state.buf.first().map_or(0, Vec::len) as i64;
     let buf_end = state.decoded_pos.saturating_add(buf_len);
-    if start < state.decoded_pos || start > buf_end + i64::from(native_rate) * 2 {
-        state.audio_starts.finish_for_seek(file, source, track_idx)?;
-        let (seek_idx, decoded_pos) = ContainerFile::audio_seek_info(&state.audio_starts.positions, seek_preroll_samples, start);
+    let moves_backward = start < state.decoded_pos;
+    if moves_backward || start > buf_end + i64::from(native_rate) * 2 {
+        let target = start.saturating_sub(seek_preroll_samples).max(0);
+        let (seek_idx, decoded_pos) = if moves_backward && state.next_sample == 0 && state.audio_starts.seek_proves_first_packet(target) {
+            (0, state.decoded_pos)
+        } else {
+            state.audio_starts.finish_for_seek(file, source, track_idx)?;
+            ContainerFile::audio_seek_info(&state.audio_starts.positions, seek_preroll_samples, start)
+        };
         state.decoder.reset();
         state.next_sample = seek_idx;
         state.decoded_pos = decoded_pos;
@@ -906,7 +1121,7 @@ fn decode_audio_range(
             break;
         }
         let pkt = file.read_sample(source, track_idx, idx)?;
-        state.audio_starts.observe(file, track_idx, idx, Some(&pkt));
+        state.audio_starts.observe(file, track_idx, idx, &pkt);
         state.next_sample = idx + 1;
         let block = state.decoder.decode(&pkt).map_err(|e| MediaError::Decode(e.to_string()))?;
         let buf_len = state.buf.first().map_or(0, Vec::len) as i64;
@@ -941,29 +1156,7 @@ fn decode_audio_range(
         }
     }
 
-    let avail = state.buf.first().map_or(0, Vec::len);
-    for i in 0..frames {
-        let pos = start.saturating_add(i as i64);
-        if pos >= state.decoded_pos {
-            let off = (pos - state.decoded_pos) as usize;
-            if off < avail {
-                for (c, out_ch) in out.iter_mut().enumerate() {
-                    out_ch[i] = state.buf[c][off];
-                }
-            }
-        }
-    }
-
-    let drop_to = (end - state.decoded_pos).max(0) as usize;
-    let trim = drop_to.min(avail);
-    if trim > 0 {
-        for ch in &mut state.buf {
-            ch.drain(..trim);
-        }
-        state.decoded_pos = state.decoded_pos.saturating_add(trim as i64);
-    }
-
-    Ok(out)
+    Ok(drain_audio_window(&mut state.buf, &mut state.decoded_pos, channels_count, start, frames))
 }
 
 fn push_decoded(
@@ -1371,6 +1564,7 @@ mod tests {
         bytes: Vec<u8>,
         offsets: Vec<u64>,
         packets: Mutex<Vec<usize>>,
+        fail_once_at: Mutex<Option<usize>>,
     }
 
     impl ByteSource for OpusPayloadReads {
@@ -1383,6 +1577,11 @@ mod tests {
                 && let Ok(index) = self.offsets.binary_search(&offset)
             {
                 self.packets.lock().unwrap().push(index);
+                let mut failure = self.fail_once_at.lock().unwrap();
+                if *failure == Some(index) {
+                    *failure = None;
+                    return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "test transient packet read"));
+                }
             }
             self.bytes.as_slice().read_at(offset, buf)
         }
@@ -1397,12 +1596,13 @@ mod tests {
         const PACKETS: usize = 192;
         const GAP_AT: usize = 96;
         const GAP: usize = 9_600;
+        const LEAD: usize = 4_800;
         const CODEC_DELAY_NS: i64 = 6_500_000;
         const CODEC_DELAY_FRAMES: i64 = 312;
 
         let opus = isobmff::OpusConfig { output_channels: 1, pre_skip: CODEC_DELAY_FRAMES as u16, input_sample_rate: RATE, ..Default::default() };
         assert_eq!(opus_packet_samples(OPUS_TONE), Some(FRAME as u32));
-        for matroska_file in [false, true] {
+        for (matroska_file, lead) in [(false, 0), (true, 0), (false, LEAD), (true, LEAD)] {
             let (bytes, file, offsets, params, delay) = if matroska_file {
                 let mut track = matroska::TrackSpec::new(matroska::TrackKind::Audio, "A_OPUS");
                 track.audio = Some((f64::from(RATE), 1, None));
@@ -1414,7 +1614,8 @@ mod tests {
                 for idx in 0..PACKETS {
                     let gap_ns = if idx >= GAP_AT { 200_000_000 } else { 0 };
                     let jitter = if idx % 2 == 0 { 0 } else { 1_000_000 };
-                    mux.write_frame(0, idx as i64 * 20_000_000 + gap_ns + jitter - CODEC_DELAY_NS, true, OPUS_TONE, None).unwrap();
+                    let lead_ns = if lead == 0 { 0 } else { 100_000_000 };
+                    mux.write_frame(0, idx as i64 * 20_000_000 + lead_ns + gap_ns + jitter - CODEC_DELAY_NS, true, OPUS_TONE, None).unwrap();
                 }
                 let bytes = mux.finish().unwrap().into_inner();
                 let file = matroska::open(bytes.as_slice()).unwrap();
@@ -1435,7 +1636,7 @@ mod tests {
                 mux.add_track(isobmff::TrackConfig::new(entry, RATE)).unwrap();
                 for idx in 0..PACKETS {
                     let duration = (if idx + 1 == GAP_AT { FRAME + GAP } else { FRAME }) as u32;
-                    mux.write_sample(0, isobmff::WriteSample { data: OPUS_TONE, duration, composition_offset: 0, is_sync: true }).unwrap();
+                    mux.write_sample(0, isobmff::WriteSample { data: OPUS_TONE, duration, composition_offset: lead as i32, is_sync: true }).unwrap();
                 }
                 let bytes = mux.finish().unwrap().into_inner();
                 let file = isobmff::open(bytes.as_slice()).unwrap();
@@ -1448,22 +1649,33 @@ mod tests {
             assert!(offsets.windows(2).all(|w| w[0] < w[1]));
             // Start counting after container metadata indexing. This isolates payload reads by the app
             // opener, independent of how the demuxer peeks at block headers or buffers the file.
-            let source = OpusPayloadReads { bytes, offsets, packets: Mutex::new(Vec::new()) };
+            let source = OpusPayloadReads { bytes, offsets, packets: Mutex::new(Vec::new()), fail_once_at: Mutex::new(None) };
             let (mut tracks, _) = open_audio_tracks(&file, &source, [(0, PACKETS, params.clone(), delay)]).unwrap();
             assert_eq!(*source.packets.lock().unwrap(), (0..AUDIO_LOOKAHEAD).collect::<Vec<_>>());
 
             // Independent eager placement oracle: fixed 20 ms packets, an explicit 200 ms gap,
             // no drift from alternating Matroska stamp jitter, and delay applied once.
             let delay_frames = if matroska_file { CODEC_DELAY_FRAMES } else { 0 };
-            let expected_positions: Vec<_> = (0..PACKETS).map(|i| (i * FRAME + if i >= GAP_AT { GAP } else { 0 }) as i64 - delay_frames).collect();
-            let (mut reference, _) = open_audio_tracks(&file, &source.bytes, [(0, PACKETS, params, delay)]).unwrap();
-            reference[0].state.get_mut().unwrap().audio_starts = AudioStarts::complete(expected_positions);
+            let expected_positions: Vec<_> = (0..PACKETS).map(|i| (lead + i * FRAME + if i >= GAP_AT { GAP } else { 0 }) as i64 - delay_frames).collect();
+            let first = expected_positions[0];
+            assert_eq!(tracks[0].state.get_mut().unwrap().decoded_pos, first);
+            let (mut reference, _) = open_audio_tracks(&file, &source.bytes, [(0, PACKETS, params.clone(), delay)]).unwrap();
+            reference[0].state.get_mut().unwrap().audio_starts = AudioStarts::complete(expected_positions.clone());
 
             let decode = |track: &mut AudioTrackEntry, src: &dyn ByteSource, start, frames| {
                 decode_audio_range(&file, src, 0, RATE, 1, track.seek_preroll_samples, track.state.get_mut().unwrap(), start, frames).unwrap()
             };
-            let early = decode(&mut tracks[0], &source, 0, 12 * FRAME);
-            assert_eq!(early, decode(&mut reference[0], &source.bytes, 0, 12 * FRAME));
+            // A first read before the initial packet can be ordinary leading silence
+            // or negative pre-roll. Neither should trigger the cold suffix scan.
+            let early_start = if lead == 0 { first - 128 } else { 0 };
+            let silent_frames = (first - early_start) as usize;
+            let silent = decode(&mut tracks[0], &source, early_start, silent_frames);
+            assert!(silent[0].iter().all(|&s| s == 0.0));
+            assert_eq!(*source.packets.lock().unwrap(), (0..AUDIO_LOOKAHEAD).collect::<Vec<_>>());
+            assert_eq!(silent, decode(&mut reference[0], &source.bytes, early_start, silent_frames));
+            let early_frames = silent_frames + 12 * FRAME;
+            let early = decode(&mut tracks[0], &source, early_start, early_frames);
+            assert_eq!(early, decode(&mut reference[0], &source.bytes, early_start, early_frames));
             assert!(early[0].iter().all(|s| s.is_finite()));
             assert!(early[0].iter().any(|s| s.abs() > 1e-5), "real Opus decoding, not a silent fallback");
             {
@@ -1472,13 +1684,35 @@ mod tests {
                 assert!(reads.iter().all(|&i| i < 14) && reads.len() <= AUDIO_LOOKAHEAD + 14, "{reads:?}");
             }
 
-            // The old exact eager index is still the oracle for a genuine discontinuous seek.
-            let start = (150 * FRAME + GAP) as i64 - delay_frames;
-            let cold = decode(&mut tracks[0], &source, start, 3 * FRAME);
-            assert_eq!(cold, decode(&mut reference[0], &source.bytes, start, 3 * FRAME));
-            assert!(cold[0].iter().any(|s| s.abs() > 1e-5));
+            // A backward read after real decode must still use the exact seek index.
+            let backward_start = first + 2 * FRAME as i64;
+            let backward = decode(&mut tracks[0], &source, backward_start, FRAME);
+            assert_eq!(backward, decode(&mut reference[0], &source.bytes, backward_start, FRAME));
             let state = tracks[0].state.get_mut().unwrap();
-            assert_eq!(state.audio_starts.positions, reference[0].state.get_mut().unwrap().audio_starts.positions);
+            assert_eq!(state.audio_starts.positions, expected_positions);
+            assert!(state.audio_starts.opus.is_none());
+
+            // A genuinely random first request is not the leading-silence shortcut.
+            let (mut fresh, _) = open_audio_tracks(&file, &source, [(0, PACKETS, params.clone(), delay)]).unwrap();
+            let (mut eager, _) = open_audio_tracks(&file, &source.bytes, [(0, PACKETS, params, delay)]).unwrap();
+            eager[0].state.get_mut().unwrap().audio_starts = AudioStarts::complete(expected_positions.clone());
+            let start = (lead + 150 * FRAME + GAP) as i64 - delay_frames;
+            let transient_packet = 64;
+            *source.fail_once_at.lock().unwrap() = Some(transient_packet);
+            {
+                let entry = &mut fresh[0];
+                let preroll = entry.seek_preroll_samples;
+                let state = entry.state.get_mut().unwrap();
+                let error = decode_audio_range(&file, &source, 0, RATE, 1, preroll, state, start, 3 * FRAME).unwrap_err();
+                assert!(matches!(error, MediaError::Io(_)));
+                assert_eq!(state.audio_starts.opus.as_ref().unwrap().len, transient_packet);
+                assert_eq!((state.next_sample, state.decoded_pos), (0, first));
+            }
+            let cold = decode(&mut fresh[0], &source, start, 3 * FRAME);
+            assert_eq!(cold, decode(&mut eager[0], &source.bytes, start, 3 * FRAME));
+            assert!(cold[0].iter().any(|s| s.abs() > 1e-5));
+            let state = fresh[0].state.get_mut().unwrap();
+            assert_eq!(state.audio_starts.positions, expected_positions);
             assert!(state.audio_starts.opus.is_none());
         }
     }
@@ -1683,6 +1917,49 @@ mod tests {
             let out = to_craft_frame(vf_with_sar, presentation, Tick::ZERO).ok();
             assert_eq!(out.map(|f| f.par), Some((3, 4)));
         }
+    }
+
+    #[test]
+    fn standalone_wav_opens_seeks_and_resamples_via_craft_audio() {
+        // Minimal 48 kHz stereo 16-bit PCM WAV with 4800 frames (0.1s).
+        let frames = 4800u32;
+        let data_bytes = frames * 4;
+        let mut wav = Vec::with_capacity(44 + data_bytes as usize);
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + data_bytes).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&48_000u32.to_le_bytes());
+        wav.extend_from_slice(&(48_000u32 * 4).to_le_bytes());
+        wav.extend_from_slice(&4u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&data_bytes.to_le_bytes());
+        for i in 0..frames * 2 {
+            let s = (((i as i32 * 257) % 16000) - 8000) as i16;
+            wav.extend_from_slice(&s.to_le_bytes());
+        }
+
+        let src = open_bytes("tone.wav", Arc::from(wav)).expect("recognized").expect("opened");
+        let info = src.info();
+        assert_eq!(info.container, "wav");
+        assert_eq!(info.kind, MediaKind::AudioOnly);
+        assert_eq!(info.audio_streams[0].sample_rate, 48_000);
+        assert_eq!(info.audio_streams[0].bits_per_sample, Some(16));
+
+        let head = src.audio(0, 512, 48_000).expect("head");
+        assert_eq!(head.channels[0].len(), 512);
+        let tail = src.audio(4000, 512, 48_000).expect("forward seek");
+        assert!(tail.channels[0].iter().any(|&v| v.abs() > 0.01));
+        let back = src.audio(0, 512, 48_000).expect("backward seek");
+        assert_eq!(head.channels[0], back.channels[0]);
+        let neg = src.audio(-50, 100, 48_000).expect("negative start");
+        assert!(neg.channels[0][..50].iter().all(|&v| v == 0.0));
+        let resampled = src.audio(0, 256, 44_100).expect("resampled");
+        assert_eq!(resampled.sample_rate, 44_100);
+        assert_eq!(resampled.channels[0].len(), 256);
     }
 
     /// 1024-sample frames at 48 kHz stamped to the nearest millisecond, then back in samples.
