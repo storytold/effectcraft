@@ -478,7 +478,7 @@ fn per_character_3d_projects_characters() {
     t.get_mut("perChar3d").unwrap().value = Value::Bool(true);
     let near = alpha_bbox(&crate::render_frame(&p, cid, Tick::ZERO, 1.0)).unwrap();
     assert!(near[2] - near[0] > (flat[2] - flat[0]) + 20, "{flat:?} {near:?}");
-    assert_eq!(per_char_planes(&ctx(&p, cid, 0.0), &p.comp(cid).unwrap().layers[0], 1.0).len(), 2);
+    assert_eq!(per_char_planes(&ctx(&p, cid, 0.0), &p.comp(cid).unwrap().layers[0], 1.0, false).len(), 2);
     // Y rotation 90° turns every character edge-on: nothing visible.
     let l = &mut p.comp_mut(cid).unwrap().layers[0];
     set(l, "text/animators/#1/properties/position", Value::Vec3([0.0; 3]));
