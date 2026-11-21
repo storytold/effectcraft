@@ -96,22 +96,23 @@ used, and layers that ran to the end of the footage keep doing so.
 | **Start Timecode** | *Use Source File Timecode* (0:00:00:00), or *Override Start*: the timecode the footage's first frame shows in the Footage panel. It relabels source time only; the frames stay the same. For a 1001–1250 render at 24 fps, Override Start 0:00:41:17 (frame 1001) makes source time count from the render's own frame numbers. |
 | Fields, pixel aspect, loop | As in After Effects. |
 | **Assign Profile**, **Interpret As Linear Light** | The colour profile the file's values are in (the working space converts from it), and whether they are linear light. |
-| **Preserve RGB** | The file's values enter the composition unconverted: no colour profile, linear light or working-space conversion, and float files (OpenEXR, float TIFF) keep their linear values instead of being sRGB-encoded. Use it to convert chosen layers yourself with an OCIO effect, or to read data passes (depth, mist, normals) as numbers. |
+| **Tone Map HDR to SDR** (Rec. 2100 HLG footage) | HLG video, as phones record HDR, is shown as an SDR display shows it: the BT.2100 OOTF for a 100 cd/m² display, with HLG 100% at SDR white and BT.2020 converted to the project's primaries, which matches how Apple's players and SDR exports render iPhone recordings. It applies whenever the output is SDR, with or without a working space; Rec. 2100 PQ and HLG output spaces keep HLG as scene light. Importing HLG footage turns it on. Off, HLG footage reads as before: its values as they are without a working space, and with one the BT.2408 reference white (75% HLG) at working-space white, which suits broadcast HLG and EffectCraft's own HLG renders. Footage saved before this setting existed reads with it off and keeps its look. |
+| **Preserve RGB** | The file's values enter the composition unconverted: no colour profile, linear light, HDR tone mapping or working-space conversion, and float files (OpenEXR, float TIFF) keep their linear values instead of being sRGB-encoded. Use it to convert chosen layers yourself with an OCIO effect, or to read data passes (depth, mist, normals) as numbers. |
 | **Cineon Settings** (DPX and Cineon files) | With *Logarithmic Conversion* on, the file's log code values are converted to the *Current Gamma* (1.7 by default; 1 gives linear light): the *10 Bit Black Point* (95) becomes the *Converted Black Point* (0), and with *Highlight Rolloff* at 0 the *10 Bit White Point* (685) becomes the *Converted White Point* (1023). *Highlight Rolloff* (20) bends the top 20% of the converted range into a curve, as the Cineon Converter effect does: the white point then converts to a level below the Converted White Point, and brighter code values stay below it. At 0, a 32 bpc project keeps over-range values. *Units* shows the converted points as 10-bit, 8-bit or float values. With Logarithmic Conversion off (the default), the code values are shown as stored. |
 
 Settings ▸ Import ▸ **Report Missing Frames** (on by default) lists the missing frame numbers
 when a sequence imports; Interpret Footage lists them too.
 
 **File ▸ Interpret Footage ▸ Remember Interpretation / Apply Interpretation** copy the alpha,
-fields, pixel aspect, loop and colour settings (Preserve RGB too, and Cineon Settings between
-DPX and Cineon files) to other footage.
+fields, pixel aspect, loop and colour settings (Preserve RGB and Tone Map HDR to SDR too, and
+Cineon Settings between DPX and Cineon files) to other footage.
 
 Agents: `file.interpretFootage {"items": [id], "frameRate": 24, "alpha": "premultiplied",
 "startTimecode": 1001, "preserveRgb": true}` (timecode or a frame number; `"overrideStart":
-false` goes back to Use Source File Timecode). Cineon Settings: `{"logConversion": true,
-"tenBitBlack": 95, "tenBitWhite": 685, "currentGamma": 1.7, "highlightRolloff": 20,
-"cineonUnits": "8bit", "convertedBlack": 0, "convertedWhite": 255}` (converted points in
-`cineonUnits`, else the footage's Units).
+false` goes back to Use Source File Timecode; `"toneMapHdr": false` turns Tone Map HDR to SDR
+off). Cineon Settings: `{"logConversion": true, "tenBitBlack": 95, "tenBitWhite": 685,
+"currentGamma": 1.7, "highlightRolloff": 20, "cineonUnits": "8bit", "convertedBlack": 0,
+"convertedWhite": 255}` (converted points in `cineonUnits`, else the footage's Units).
 
 ## Multi-layer OpenEXR
 

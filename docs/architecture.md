@@ -498,7 +498,11 @@ after every effect, and the comp after every layer (16 bpc uses 0..32768), so ov
 (Add, Screen, Exposure…) only survive in 32 bpc; blend modes without HDR support clamp their
 inputs in 32 bpc. With a working space (sRGB, Rec. 709, Rec. 2020, Display P3; matrices derived
 from the published primaries), footage is converted from its colour profile (stream metadata or
-Interpret Footage, else sRGB) and the top-level comp is converted to the sRGB display. Linearize
+Interpret Footage, else sRGB) and the top-level comp is converted to the sRGB display. Rec. 2100
+HLG footage with Interpret Footage ▸ Tone Map HDR to SDR (on for HLG imports) is converted as an
+SDR display shows it (`Conversion::hlg_to_sdr`: the BT.2100 OOTF for 100 cd/m², HLG 100% at SDR
+white) whenever the output is SDR, also without a working space (into the Working Gamma's
+encoding); HDR output spaces keep the BT.2408 scene-light mapping. Linearize
 Working Space runs everything in linear light; Blend Colors Using 1.0 Gamma linearises only for
 blending. Layer cache keys include these settings. Project Settings ▸ HDR (compand / tone
 mapping) is the last top-level step, for standard-dynamic-range displays and outputs; OpenEXR

@@ -950,6 +950,77 @@ fn quantization_preserves_cpu_levels_and_half_step_neighbors() {
         }
     }
 }
+
+/// The convert kernel's HLG → SDR stage (the BT.2100 OOTF between the decode and the matrix)
+/// gives the CPU conversion's pixels: greys over the whole signal range, colours, over-range
+/// signals, signals of negative luminance (mirrored, as 32 bpc keeps them) and partly
+/// transparent pixels, into each kind of target footage converts to.
+#[test]
+fn hlg_to_sdr_conversion_matches_the_cpu() {
+    let Some(g) = gpu() else { return };
+    let mut img = Image::new(64, 5);
+    for (i, p) in img.data.iter_mut().enumerate() {
+        let (x, row) = ((i % 64) as f32 / 63.0, i / 64);
+        let (c, a) = match row {
+            0 => ([x; 3], 1.0),
+            1 => ([x, 0.55 * x + 0.2, 1.0 - x], 1.0),
+            2 => ([x * 1.2, 0.0, 0.3], 1.0),
+            3 => ([-x, -0.5 * x, 0.1], 1.0),
+            _ => ([0.68, 0.55, 0.47], x),
+        };
+        *p = [c[0] * a, c[1] * a, c[2] * a, a];
+    }
+    let input = g.ctx.upload_image(&img).unwrap();
+    for (to, linear) in [
+        (ColorSpace::Srgb, false),
+        (ColorSpace::Rec709, false),
+        (ColorSpace::Rec2020, false),
+        (ColorSpace::DisplayP3, false),
+        (ColorSpace::AcesCg, true),
+        (ColorSpace::Srgb, true),
+    ] {
+        let c = effectcraft_color::Conversion::hlg_to_sdr(to, linear);
+        let mut cpu = img.clone();
+        effectcraft_render::color::convert(&mut cpu, &c);
+        let mut e = crate::context::Enc::new(&g.ctx);
+        let out = crate::ops::convert(&mut e, &input, &c);
+        let got = e.download(&out).expect("download");
+        let d = diff(&cpu, &got, 1e-4);
+        assert_eq!(d.over, 0, "{to:?} linear {linear}: max {:.6}, worst {:?}", d.max, d.worst);
+    }
+}
+
+/// HLG footage tone-mapped for SDR (Interpret Footage ▸ Tone Map HDR to SDR) renders on the GPU
+/// as on the CPU at every depth, with and without a working space, under other layers.
+#[test]
+fn hlg_footage_for_sdr_matches_the_cpu() {
+    for depth in [BitDepth::Bpc8, BitDepth::Bpc16, BitDepth::Bpc32] {
+        for ws in [None, Some(ColorSpace::Srgb), Some(ColorSpace::Rec709)] {
+            let mut s = Scene::new(depth);
+            s.p.settings.working_space = ws;
+            let l = s.footage(97, 61);
+            let LayerSource::Footage { item } = l.source.clone() else { panic!("footage") };
+            s.push(l);
+            let mut top = s.footage(60, 40);
+            top.blend_mode = BlendMode::Screen;
+            s.push(top);
+            if let Some(ItemKind::Footage(f)) = s.p.item_mut(item).map(|i| &mut i.kind) {
+                f.color_profile = Some(ColorSpace::Rec2100Hlg);
+                f.tone_map_hdr = true;
+            }
+            let label = format!("HLG footage {depth:?} {ws:?}");
+            // (the tone map is on: the frame differs from the one with it off)
+            let mut off = s.p.clone();
+            if let Some(ItemKind::Footage(f)) = off.item_mut(item).map(|i| &mut i.kind) {
+                f.tone_map_hdr = false;
+            }
+            let frame = |p: &Project| Renderer::new(p, &Pattern, RenderOpts { backend: Backend::Cpu, ..opts() }).comp_frame_cpu(s.cid, Tick::ZERO);
+            assert_ne!(frame(&s.p).data, frame(&off).data, "{label}");
+            check(&label, compare_at(&s, opts(), Tick::ZERO), 0.0);
+        }
+    }
+}
+
 #[test]
 fn backend_selection_and_display_frames() {
     let Some(g) = gpu() else { return };

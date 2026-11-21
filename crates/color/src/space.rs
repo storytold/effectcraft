@@ -20,6 +20,10 @@
 //! spaces whose white is not D65 (ACES) are adapted to D65 with the Bradford transform, so
 //! conversions between any two spaces are exact up to `f64` rounding. Transfer functions extend
 //! to over-range and negative values (32 bpc) by mirroring around zero.
+//!
+//! Rec. 2100 HLG converts to a standard-dynamic-range space either as scene light with the
+//! BT.2408 reference white at 1.0 ([`Conversion::new`]), or as an SDR display shows it, with the
+//! BT.2100 OOTF ([`Conversion::hlg_to_sdr`]).
 
 use serde::{Deserialize, Serialize};
 
@@ -89,6 +93,30 @@ pub fn hlg_encode(e: f64) -> f64 {
 pub fn hlg_decode(v: f64) -> f64 {
     let v = v.max(0.0);
     if v <= 0.5 { v * v / 3.0 } else { (((v - HLG_C) / HLG_A).exp() + HLG_B) / 12.0 }
+}
+
+/// Nominal peak luminance of a standard-dynamic-range display in cd/m² (the BT.1886 / BT.2035
+/// reference display).
+pub const SDR_PEAK: f64 = 100.0;
+
+/// The HLG system gamma for a display of nominal peak luminance `peak` cd/m²: the extended
+/// formula of ITU-R BT.2390, γ = 1.2 · 1.111^log2(peak / 1000), which reaches below BT.2100's
+/// 400 cd/m² (≈ 0.846 at 100 cd/m²).
+pub fn hlg_system_gamma(peak: f64) -> f64 {
+    1.2 * 1.111f64.powf((peak / 1000.0).log2())
+}
+
+/// The ITU-R BT.2100 HLG OOTF with system gamma `gamma`, scaled so that HLG 100% is display
+/// light 1.0: Fd = E · Ys^(γ−1), with E each channel's scene light (HLG 100% = 1) and Ys its
+/// BT.2020 luminance. `c` is scene light as [`Curve::Hlg`] decodes it, 1.0 at the BT.2408
+/// reference white, so it is rescaled to E first. Negative luminance mirrors around zero, as the
+/// transfer curves do; black stays black.
+#[inline]
+pub fn hlg_ootf(c: [f32; 3], gamma: f32) -> [f32; 3] {
+    let e = c.map(|v| v * HLG_REFERENCE as f32);
+    let ys = (0.2627 * e[0] + 0.6780 * e[1] + 0.0593 * e[2]).abs();
+    let k = if ys > 0.0 { ys.powf(gamma - 1.0) } else { 0.0 };
+    e.map(|v| v * k)
 }
 
 /// Transfer curves (see [`ColorSpace::curve`]).
@@ -315,40 +343,64 @@ pub fn mul_vec(m: &[[f64; 3]; 3], v: [f64; 3]) -> [f64; 3] {
 pub struct Conversion {
     /// Decode the input with this space's curve first.
     pub decode: Option<ColorSpace>,
+    /// Then the BT.2100 HLG OOTF with this system gamma ([`hlg_ootf`]), on the decoded HLG scene
+    /// light in its BT.2020 primaries ([`Conversion::hlg_to_sdr`]).
+    pub hlg_ootf: Option<f32>,
     /// Linear RGB matrix (None = identity primaries).
     pub matrix: Option<[[f32; 3]; 3]>,
     /// Encode the output with this space's curve last.
     pub encode: Option<ColorSpace>,
 }
 
+/// The linear RGB matrix from `from`'s primaries to `to`'s (`None` when they are the same).
+fn primaries_matrix(from: ColorSpace, to: ColorSpace) -> Option<[[f32; 3]; 3]> {
+    (from.primaries() != to.primaries()).then(|| {
+        let m = mul(&invert(&to.to_xyz()), &from.to_xyz());
+        m.map(|r| r.map(|v| v as f32))
+    })
+}
+
 impl Conversion {
     /// From `from` (linear when `from_linear`) to `to` (linear when `to_linear`). `None` when
     /// the conversion is the identity.
     pub fn new(from: ColorSpace, from_linear: bool, to: ColorSpace, to_linear: bool) -> Option<Conversion> {
-        let same_primaries = from.primaries() == to.primaries();
+        let matrix = primaries_matrix(from, to);
         let same_curve = from_linear == to_linear && (from_linear || from.curve() == to.curve());
-        if same_primaries && same_curve {
+        if matrix.is_none() && same_curve {
             return None;
         }
-        let matrix = (!same_primaries).then(|| {
-            let m = mul(&invert(&to.to_xyz()), &from.to_xyz());
-            m.map(|r| r.map(|v| v as f32))
-        });
         // Same primaries, both encoded with different curves (sRGB ↔ Rec. 709), or a matrix in
         // between: go through linear.
         let decode = (!from_linear).then_some(from);
         let encode = (!to_linear).then_some(to);
-        Some(Conversion { decode, matrix, encode })
+        Some(Conversion { decode, hlg_ootf: None, matrix, encode })
+    }
+
+    /// A Rec. 2100 HLG signal → standard-dynamic-range `to` (linear when `to_linear`), as an SDR
+    /// display shows it: the HLG inverse OETF, the BT.2100 OOTF on BT.2020 luminance with the
+    /// system gamma of a 100 cd/m² display, so HLG 100% is SDR white, then BT.2020 → `to`'s
+    /// primaries and `to`'s curve. This is how Apple's players and SDR exports render HLG video
+    /// (phone HDR recordings), to within a few 8-bit codes. [`Conversion::new`] instead maps the
+    /// BT.2408 reference white (HLG 75%) to 1.0, for HDR work, and clips everything above it in
+    /// an SDR space. `to` is meant to be an SDR space.
+    pub fn hlg_to_sdr(to: ColorSpace, to_linear: bool) -> Conversion {
+        let from = ColorSpace::Rec2100Hlg;
+        Conversion {
+            decode: Some(from),
+            hlg_ootf: Some(hlg_system_gamma(SDR_PEAK) as f32),
+            matrix: primaries_matrix(from, to),
+            encode: (!to_linear).then_some(to),
+        }
     }
 
     /// Decode only (encoded → linear in the same space).
     pub fn linearize(space: ColorSpace) -> Conversion {
-        Conversion { decode: Some(space), matrix: None, encode: None }
+        Conversion { decode: Some(space), hlg_ootf: None, matrix: None, encode: None }
     }
 
     /// Encode only (linear → encoded in the same space).
     pub fn delinearize(space: ColorSpace) -> Conversion {
-        Conversion { decode: None, matrix: None, encode: Some(space) }
+        Conversion { decode: None, hlg_ootf: None, matrix: None, encode: Some(space) }
     }
 
     #[inline]
@@ -356,6 +408,9 @@ impl Conversion {
         let mut c = c;
         if let Some(s) = self.decode {
             c = c.map(|v| s.decode(v));
+        }
+        if let Some(g) = self.hlg_ootf {
+            c = hlg_ootf(c, g);
         }
         if let Some(m) = &self.matrix {
             c = [0, 1, 2].map(|i| m[i][0] * c[0] + m[i][1] * c[1] + m[i][2] * c[2]);
@@ -474,5 +529,79 @@ mod tests {
             assert_eq!(ColorSpace::parse(cs.id()), Some(cs));
             assert_eq!(ColorSpace::parse(cs.label()), Some(cs), "{}", cs.label());
         }
+    }
+
+    /// HLG → SDR on the patches of an iPhone-style test clip (HLG R'G'B' signals) gives what the
+    /// BT.2100 OOTF with γ 0.846 gives in double precision, to one 8-bit code. Apple's SDR
+    /// rendering of the same patches is within 5 codes of these.
+    #[test]
+    fn hlg_to_sdr_is_the_bt2100_ootf_for_a_100_nit_display() {
+        assert!((hlg_system_gamma(SDR_PEAK) - 0.845_907).abs() < 1e-5, "{}", hlg_system_gamma(SDR_PEAK));
+        assert!((hlg_system_gamma(1000.0) - 1.2).abs() < 1e-12, "BT.2100's reference display");
+        let c = Conversion::hlg_to_sdr(ColorSpace::Srgb, false);
+        let patches: [([f32; 3], [i32; 3]); 8] = [
+            ([0.25; 3], [55; 3]),
+            ([0.50; 3], [98; 3]),
+            ([0.75; 3], [154; 3]),
+            ([1.00; 3], [255; 3]),
+            ([0.68, 0.55, 0.47], [157, 100, 87]),
+            ([0.40, 0.52, 0.30], [63, 105, 52]),
+            ([0.28, 0.31, 0.45], [51, 66, 98]),
+            ([0.76, 0.75, 0.71], [161, 154, 139]),
+        ];
+        for (signal, want) in patches {
+            let got = c.apply(signal).map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as i32);
+            assert!((0..3).all(|i| (got[i] - want[i]).abs() <= 1), "{signal:?}: {got:?}, the model gives {want:?}");
+        }
+        // The BT.2020 primaries in linear Rec. 709, unclipped (32 bpc keeps them): the OOTF
+        // weighs a colour by its BT.2020 luminance, and the 8-bit patches above stay within their
+        // one code with Rec. 709's weights.
+        let linear = Conversion::hlg_to_sdr(ColorSpace::Srgb, true);
+        for (signal, want) in [
+            ([1.0, 0.0, 0.0], [2.040_299, -0.153_039, -0.022_302]),
+            ([0.0, 1.0, 0.0], [-0.623_905, 1.202_813, -0.106_786]),
+            ([0.0, 0.0, 1.0], [-0.112_588, -0.012_904, 1.728_977]),
+        ] {
+            let got = linear.apply(signal);
+            assert!((0..3).all(|i| (got[i] - want[i]).abs() < 1e-4), "{signal:?}: {got:?}, the model gives {want:?}");
+        }
+        // HLG 100% is SDR white, black stays black, and white keeps its hue in every target.
+        for (to, linear) in
+            [(ColorSpace::Srgb, false), (ColorSpace::Rec709, false), (ColorSpace::Rec2020, false), (ColorSpace::AcesCg, true), (ColorSpace::Srgb, true)]
+        {
+            let c = Conversion::hlg_to_sdr(to, linear);
+            assert!(c.apply([1.0; 3]).iter().all(|v| (v - 1.0).abs() < 1e-4), "{to:?} {linear}: {:?}", c.apply([1.0; 3]));
+            assert_eq!(c.apply([0.0; 3]), [0.0; 3], "{to:?} {linear}");
+        }
+        // Linear targets have no curve; Rec. 2020 shares the BT.2020 primaries.
+        assert!(Conversion::hlg_to_sdr(ColorSpace::AcesCg, true).encode.is_none());
+        assert!(Conversion::hlg_to_sdr(ColorSpace::Rec2020, false).matrix.is_none());
+        // Scene-referred conversions keep the BT.2408 reference white: HLG 75% is 1.0.
+        let scene = Conversion::new(ColorSpace::Rec2100Hlg, false, ColorSpace::Srgb, false).unwrap();
+        assert!(scene.hlg_ootf.is_none() && scene.apply([0.75; 3]).iter().all(|v| (v - 1.0).abs() < 1e-4), "{:?}", scene.apply([0.75; 3]));
+    }
+
+    /// Hostile signals: over-range values stay finite and over-range (32 bpc keeps them), negative
+    /// ones mirror around zero like the curves, and NaN doesn't panic.
+    #[test]
+    fn hlg_to_sdr_takes_any_value() {
+        let c = Conversion::hlg_to_sdr(ColorSpace::Srgb, false);
+        for s in [[1.2f32, 1.1, 1.05], [4.0, 0.2, 0.0], [0.4, -0.1, 0.0], [0.001, 0.0, 0.0], [0.0, 0.0, 1e-20], [0.3, 0.9, -0.6]] {
+            let o = c.apply(s);
+            assert!(o.iter().all(|v| !v.is_nan()), "{s:?} → {o:?}");
+            assert_eq!(c.apply(s.map(|v| -v)), o.map(|v| -v), "{s:?}");
+        }
+        assert!(c.apply([1.2; 3]).iter().all(|v| *v > 1.0 && v.is_finite()), "{:?}", c.apply([1.2; 3]));
+        // A greyscale ramp stays grey and rises.
+        let mut last = -1.0;
+        for i in 0..=100 {
+            let o = c.apply([i as f32 / 100.0; 3]);
+            assert!(o[0] > last || i == 0, "{i}: {o:?}");
+            assert!((o[0] - o[1]).abs() < 1e-5 && (o[1] - o[2]).abs() < 1e-5, "{i}: {o:?}");
+            last = o[0];
+        }
+        let _ = c.apply([f32::NAN, 0.5, f32::INFINITY]);
+        let _ = c.apply([f32::MAX, f32::MIN, f32::MIN_POSITIVE]);
+        let _ = hlg_ootf([f32::NAN, f32::NEG_INFINITY, 1.0], f32::NAN);
     }
 }
