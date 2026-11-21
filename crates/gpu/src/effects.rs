@@ -536,7 +536,7 @@ fn pointwise(e: &mut Enc, id: &str, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
         }
         "ec.color.exposure" => {
             let s = effectcraft_effects::exposure_settings(ctx);
-            p.u[0] = [5, ctx.params.b("bypassLinearLight") as u32, 0, 0];
+            p.u[0] = [5, effectcraft_effects::exposure_bypass(ctx) as u32, 0, 0];
             for i in 0..3 {
                 p.f[0][i] = s[i].0;
                 p.f[1][i] = s[i].1;
