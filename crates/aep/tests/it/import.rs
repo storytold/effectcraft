@@ -9,6 +9,7 @@ mod blend_modes;
 mod bounds;
 mod cameras;
 mod cases;
+mod checkbox_keys;
 mod combined;
 mod cryptomatte;
 mod ease_round2;
