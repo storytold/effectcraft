@@ -1251,9 +1251,15 @@ fn open_avi(name: &str, source: SharedBytes) -> Option<Result<SharedSource>> {
     } else {
         let duration = audio_candidates
             .iter()
-            .map(|&(idx, _, _, _)| {
-                let s = &file.streams[idx];
-                Tick::from_units(i64::from(s.length).saturating_mul(i64::from(s.scale.max(1))), i64::from(s.rate.max(1)))
+            .map(|(idx, _, params, _)| {
+                let s = &file.streams[*idx];
+                let units = if params.codec == CodecId::Pcm && s.sample_size > 0 {
+                    // Playback counts complete blocks within each indexed chunk.
+                    s.chunks.iter().fold(0i64, |units, chunk| units.saturating_add(i64::from(chunk.size / s.sample_size)))
+                } else {
+                    i64::from(s.length)
+                };
+                Tick::from_units(units.saturating_mul(i64::from(s.scale.max(1))), i64::from(s.rate.max(1)))
             })
             .max()
             .unwrap_or(Tick::ZERO);
@@ -3590,6 +3596,33 @@ mod tests {
 
     fn pcm_s16le_bytes(sample: i16, count: usize) -> Vec<u8> {
         std::iter::repeat_n(sample.to_le_bytes(), count).flatten().collect()
+    }
+
+    #[test]
+    fn audio_only_avi_counts_complete_indexed_pcm_blocks() {
+        let stream = avi::StreamSpec::Audio(avi::AudioSpec::pcm(48_000, 1, 16));
+        let mut writer = avi::AviWriter::new(std::io::Cursor::new(Vec::new()), vec![stream], avi::MuxOptions::default()).expect("AVI writer");
+        writer.write_chunk(0, &pcm_s16le_bytes(8_192, 7), true).expect("first chunk");
+        writer.write_chunk(0, &pcm_s16le_bytes(16_384, 13), true).expect("second chunk");
+        let mut bytes = writer.finish().expect("finish AVI").into_inner();
+        // dwLength follows the AVI stream header's first 32 payload bytes.
+        let length_offset = bytes.windows(4).position(|tag| tag == b"strh").expect("stream header") + 8 + 32;
+        let mut durations = Vec::new();
+        for declared_length in [1u32, 20, 200] {
+            bytes[length_offset..length_offset + 4].copy_from_slice(&declared_length.to_le_bytes());
+            let stream = &avi::open(bytes.as_slice()).expect("demux fixture").streams[0];
+            assert_eq!(stream.length, declared_length);
+            assert_eq!(stream.chunks.len(), 2);
+            let input: Arc<[u8]> = Arc::from(bytes.as_slice());
+            let footage = crate::probe::probe_bytes("indexed-pcm.avi", input.clone()).expect("public probe");
+            assert!(footage.has_audio && !footage.has_video);
+            durations.push(footage.duration);
+
+            let source = open_bytes("indexed-pcm.avi", input).expect("recognized AVI").expect("shared AVI");
+            let tail = source.audio(19, 2, 48_000).expect("read final sample and EOF");
+            assert_eq!(tail.channels[0], [0.5, 0.0]);
+        }
+        assert_eq!(durations, [effectcraft_time::Tick::from_units(20, 48_000); 3]);
     }
 
     #[test]
