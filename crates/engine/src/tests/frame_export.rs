@@ -51,6 +51,33 @@ fn photoshop_layers_writes_one_psd_layer_per_comp_layer() {
 }
 
 #[test]
+fn photoshop_layers_write_evaluated_opacity_at_export_time() {
+    use effectcraft_keyframe::Value;
+    use effectcraft_project::{Layer, Property};
+    use effectcraft_render::{EvalCtx, ExprHost};
+
+    struct TimedOpacity;
+    impl ExprHost for TimedOpacity {
+        fn eval(&self, ctx: &EvalCtx, _: &Layer, _: &Property, value: &Value) -> Result<Value, String> {
+            Ok(Value::Scalar(ctx.time.seconds() * value.as_f64()))
+        }
+    }
+
+    let mut s = frame();
+    s.expr = Some(std::sync::Arc::new(TimedOpacity));
+    let blue = s.active_comp().unwrap().layers.iter().find(|layer| layer.name == "Blue.Box").unwrap().id;
+    s.execute("prop.setExpression", json!({"layer": blue.0, "path": "transform/opacity", "expression": "time * value"})).unwrap();
+
+    let dir = out_dir("frame-psd-opacity-expression");
+    let path = dir.join("frame.psd").to_string_lossy().to_string();
+    s.execute("comp.saveFrameAsPsd", json!({"path": path, "time": 0.5})).unwrap();
+    let psd = effectcraft_psd::Psd::parse(std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(psd.layers[1].opacity, 64);
+    let mid = psd.composite().unwrap().data[16 * 32 + 16];
+    assert!((mid[0] - 0.75).abs() < 0.02 && mid[2] < 0.05, "{mid:?}");
+}
+
+#[test]
 fn proexr_writes_layer_prefixed_channels_and_the_composite() {
     use exr::prelude::*;
     let mut s = frame();
