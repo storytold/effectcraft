@@ -720,6 +720,13 @@ fn open_matroska(name: &str, source: SharedBytes) -> Option<Result<SharedSource>
     })))
 }
 
+fn tick_to_rational_units(time: Tick, num: i64, den: i64) -> i64 {
+    if num <= 0 || den <= 0 || time.0 <= 0 {
+        return 0;
+    }
+    i64::try_from((i128::from(time.0) * i128::from(num)) / (i128::from(craft_time::TICKS_PER_SECOND) * i128::from(den))).unwrap_or(i64::MAX)
+}
+
 fn open_avi(name: &str, source: SharedBytes) -> Option<Result<SharedSource>> {
     let file = avi::open(&*source).ok()?;
     let video_idx = file.streams.iter().position(|s| s.kind == avi::StreamKind::Video && !s.chunks.is_empty() && s.rate > 0 && s.scale > 0);
@@ -843,7 +850,7 @@ fn open_mpeg(name: &str, fmt: mpegts::Format, source: SharedBytes) -> Option<Res
             Ok(d) => d,
             Err(e) => return Some(Err(MediaError::Decode(e.to_string()))),
         };
-        let mut decoded_dims = (video_params.width, video_params.height);
+        let mut decoded_dims = (video_params.width.unwrap_or(0), video_params.height.unwrap_or(0));
         if decoded_dims.0 == 0 || decoded_dims.1 == 0 {
             let start_u = video_stream.units.iter().position(|u| u.key).unwrap_or(0);
             for u_idx in start_u..video_stream.units.len().min(start_u + 16) {
