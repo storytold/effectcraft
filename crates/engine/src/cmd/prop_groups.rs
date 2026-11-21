@@ -1,6 +1,7 @@
 //! Generic edits of property-tree groups by uid: rename, enable, remove, duplicate and reorder an
 //! effect, mask, shape item or text animator (what scripting's `PropertyGroup.name`, `enabled`,
-//! `remove()`, `duplicate()` and `moveTo()` do, and what agents need without a UI selection).
+//! `remove()`, `duplicate()` and `moveTo()` do, and what agents need without a UI selection), and
+//! delete one property inside a text animator (#3963).
 
 use effectcraft_project::{ItemId, LayerId, LayerSource, Node, PropGroup, Uid};
 use serde_json::{Value, json};
@@ -66,6 +67,8 @@ fn remove_groups(s: &mut Session, cid: ItemId, groups: &[(LayerId, Uid)], label:
             }
         }
         st.selected_props.retain(|(_, u)| !groups.iter().any(|(_, g)| g == u));
+        // A deleted animator property's keyframes go with it (#3963).
+        st.selected_keys.retain(|k| !groups.iter().any(|(l, u)| k.layer == *l && k.prop == *u));
         Ok(())
     })
 }
@@ -74,13 +77,28 @@ fn remove_groups(s: &mut Session, cid: ItemId, groups: &[(LayerId, Uid)], label:
 /// removes those groups (not their layers) in one undo step. None when none are selected.
 pub(crate) fn remove_selected(s: &mut Session) -> Result<Option<Value>> {
     let (Some(cid), Some(c)) = (s.active_comp_id(), s.active_comp()) else { return Ok(None) };
-    let groups: Vec<(LayerId, Uid)> =
+    let mut groups: Vec<(LayerId, Uid)> =
         s.state.selected_props.iter().filter(|(lid, uid)| c.layer(*lid).and_then(|l| l.props.find_group(*uid)).is_some_and(is_instance)).copied().collect();
+    groups.extend(selected_animator_props(s));
     if groups.is_empty() {
         return Ok(None);
     }
     remove_groups(s, cid, &groups, "Delete")?;
     Ok(Some(json!(groups.len())))
+}
+
+/// Plain properties inside a text animator's Properties group (#3963): After Effects' Delete
+/// removes the selected one, leaving the animator, its other properties and the layer. Fixed
+/// properties (Transform ▸ Position, an effect's parameters) aren't removable.
+pub(crate) fn selected_animator_props(s: &Session) -> Vec<(LayerId, Uid)> {
+    let mut out = vec![];
+    let Some(c) = s.active_comp().filter(|_| !s.state.selected_props.is_empty()) else { return out };
+    for l in c.layers.iter().filter(|l| matches!(l.source, LayerSource::Text)) {
+        let Some(anims) = l.props.group("text/animators") else { continue };
+        let removable = |uid: Uid| anims.groups().any(|a| a.sub("properties").is_some_and(|p| p.children.iter().any(|n| n.uid() == uid)));
+        out.extend(s.state.selected_props.iter().filter(|(lid, _)| *lid == l.id).filter(|(_, uid)| removable(*uid)).copied());
+    }
+    out
 }
 
 /// Shape items (groups, paths, paints and path operations) selected in the Contents of the

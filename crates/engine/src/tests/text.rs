@@ -300,3 +300,24 @@ fn duplicate_copies_selected_text_selector_not_the_layer() {
     assert_eq!(s.active_comp().unwrap().layers.len(), 1);
     assert_eq!(anims(&s).groups().count(), 2, "the animator is copied");
 }
+
+/// Delete with one property selected inside a text animator removes only that property, as in
+/// After Effects (#3963): the animator, its other properties and the text layer stay.
+#[test]
+fn delete_removes_one_property_inside_an_animator() {
+    let (mut s, t) = session();
+    s.execute("layer.addTextAnimator", json!({"layer": t, "properties": ["position", "opacity"]})).unwrap();
+    let props = |s: &Session| {
+        let l = s.active_comp().unwrap().layer(LayerId(t)).expect("the text layer stays");
+        matches(l.props.group("text/animators/#1/properties").expect("the animator stays"))
+    };
+    assert_eq!(props(&s), ["position", "opacity"]);
+    // Select Position under Animator 1 and press Delete (Edit > Clear).
+    s.execute("prop.select", json!({"layer": t, "path": "text/animators/#1/properties/position", "selectKeys": false})).unwrap();
+    s.execute("edit.clear", json!({})).unwrap();
+    assert_eq!(props(&s), ["opacity"], "only the selected property goes");
+    assert!(s.active_comp().unwrap().layer(LayerId(t)).is_some(), "the text layer stays");
+    assert!(s.active_comp().unwrap().layer(LayerId(t)).unwrap().props.group("text/animators/#1").is_some(), "the animator stays");
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(props(&s), ["position", "opacity"]);
+}
