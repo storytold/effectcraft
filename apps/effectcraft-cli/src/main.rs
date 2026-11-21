@@ -525,7 +525,8 @@ fn script_cmd(args: &Args, json_out: bool) -> Result<(), Failure> {
     let _lock = project_lock::for_save(args)?;
     let mut b = backend(args, false)?;
     let r = b.exec("script.run", json!({"code": code, "name": name}))?;
-    let saved = maybe_save(&mut b, args)?;
+    let script_error = r.get("error").filter(|e| !e.is_null());
+    let saved = if script_error.is_none() { maybe_save(&mut b, args)? } else { None };
     if json_out {
         let mut o = r.clone();
         if let Some(p) = &saved {
@@ -536,14 +537,14 @@ fn script_cmd(args: &Args, json_out: bool) -> Result<(), Failure> {
         if let Some(out) = r["output"].as_str().filter(|o| !o.is_empty()) {
             say!("{out}");
         }
-        if !r["result"].is_null() && r["error"].is_null() {
+        if !r["result"].is_null() && script_error.is_none() {
             say!("{}", r["result"]);
         }
         if let Some(p) = saved {
             note!("saved {p}");
         }
     }
-    if let Some(e) = r.get("error").filter(|e| !e.is_null()) {
+    if let Some(e) = script_error {
         let pos = match (e["line"].as_u64(), e["column"].as_u64()) {
             (Some(l), Some(c)) => format!(":{l}:{c}"),
             (Some(l), None) => format!(":{l}"),

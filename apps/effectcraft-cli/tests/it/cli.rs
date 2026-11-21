@@ -571,6 +571,12 @@ fn script_file_and_eval() {
     let (code, v) = run_json(&["script", "--eval", "\nnope()"]);
     assert_eq!(code, 1);
     assert_eq!(v["error"]["line"], json!(2));
+    let failed_project = tmp("script-error.ecproj");
+    let script = "app.project.items.addComp('Partial', 160, 90, 1, 2, 24); nope()";
+    let (code, v) = run_json(&["script", "--eval", script, "--save-as", failed_project.to_str().unwrap()]);
+    assert_eq!(code, 1);
+    assert!(v["error"]["message"].as_str().is_some_and(|m| m.contains("nope")), "{v}");
+    assert!(v["saved"].is_null() && !failed_project.exists(), "{v}");
     // A compiled .jsxbin script is reported as unsupported, not as a SyntaxError (#176).
     let bin_script = tmp("compiled.jsxbin");
     std::fs::write(&bin_script, "@JSXBIN@ES@2.0@MyBbyBn0ABJAnAEjzFjBjMjFjSjUBfRBFeFjIjFjMjMjPff0DzACByB\n").unwrap();
