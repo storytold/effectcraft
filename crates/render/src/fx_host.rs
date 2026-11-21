@@ -1,6 +1,8 @@
 use super::frames::frame_blend_mode;
 use super::styles;
-use super::{Arc, Buf, EffectHost, EvalCtx, FrameBlend, Image, ItemKind, Layer, LayerPixels, LayerSource, Params, Renderer, Tick, frame_size, three_d};
+use super::{
+    Arc, Buf, EffectHost, EvalCtx, FrameBlend, Image, ItemKind, Layer, LayerPixels, LayerSource, Params, Quality, Renderer, Tick, frame_size, three_d,
+};
 
 /// Layer parameters and audio for effects (see [`effectcraft_effects::EffectHost`]). What it
 /// hands out is in effect space (see [`effect_bounds`]): the other layer's for its pixels, the
@@ -30,8 +32,8 @@ impl FxHost<'_, '_, '_> {
     /// `None` when this cannot be answered safely — a region of interest, a nested render past the
     /// effect-depth limit, an effect earlier in the same stack (the composite below is not what
     /// reaches the time effect then), or a layer below that needs more than its own content (a
-    /// mask, an effect, a layer style, 3D, a track matte). The caller then passes its input
-    /// through, which is what happened before.
+    /// mask, an effect, a layer style, 3D, a track matte, a wireframe outline). The caller then
+    /// passes its input through, which is what happened before.
     fn below_at(&self, t: f64) -> Option<Buf> {
         let decline = || {
             self.unsafe_sample.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -56,7 +58,7 @@ impl FxHost<'_, '_, '_> {
         let (w, h) = frame_size(ctx.comp.width, ctx.comp.height, self.r.opts.scale);
         // Only layers whose processed buffer is exactly their own content are composited here; the
         // rest would need the full compositor (masks, effects, styles, 3D, mattes, another
-        // adjustment or a collapsed precomp).
+        // adjustment, a collapsed precomp or a wireframe outline).
         let any_solo = ctx.comp.any_solo();
         let mut plain = Vec::new();
         for other in ctx.comp.layers.iter().rev() {
@@ -79,6 +81,7 @@ impl FxHost<'_, '_, '_> {
                 || other.preserve_transparency
                 || other.switches.adjustment
                 || other.switches.collapse
+                || self.r.quality(other) == Quality::Wireframe
                 || (other.switches.effects && other.effects().is_some_and(|fx| fx.groups().any(|g| g.enabled)))
             {
                 return decline();

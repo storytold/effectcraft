@@ -7,7 +7,7 @@ use effectcraft_color::Label;
 use effectcraft_effects::plugin::{EffectPlugin, PluginFrame, PluginManifest, PluginParams, register_plugin};
 use effectcraft_keyframe::{Keyframe, ShapePath, Value};
 use effectcraft_project::build::{self, Ids};
-use effectcraft_project::{Comp, Footage, FootageKind, ItemId, ItemKind, LayerSource, MaskMode, Project, Solid};
+use effectcraft_project::{Comp, Footage, FootageKind, ItemId, ItemKind, LayerSource, MaskMode, Project, Quality, Solid};
 use effectcraft_time::{FrameRate, Tick};
 
 use crate::{FootageSource, Image};
@@ -376,4 +376,35 @@ fn posterize_time_on_an_adjustment_layer_respects_solo() {
     let outside = img.get(5, 5);
     assert!((inside - (0.5 - 0.07)).abs() < 1e-6, "inside: {inside}");
     assert!(outside[3] == 0.0, "outside: {outside:?}");
+}
+
+/// A Wireframe-quality layer draws as a one-pixel outline in the comp, not as its filled content.
+/// The sampled composite must decline it, so the time effect passes the outline through instead of
+/// holding a filled frame the comp never shows.
+#[test]
+fn posterize_time_on_an_adjustment_layer_declines_wireframe_layers() {
+    let mut p = Project::default();
+    p.settings.bit_depth = effectcraft_project::BitDepth::Bpc32;
+    let comp = Comp::new(96, 54, FrameRate::FPS_30, Tick::from_seconds_f64(2.0));
+    let cid = p.add_item("Comp", Label::Sandstone, None, ItemKind::Comp(comp.clone().into()));
+    let sid = p.add_item("Solid", Label::Red, None, ItemKind::Solid(Solid { color: [1.0, 0.0, 0.0], width: 96, height: 54, pixel_aspect: 1.0 }));
+    let mut under = build::layer(&mut p, &comp, "Wire", LayerSource::Solid { item: sid }, (96, 54), None);
+    under.switches.quality = Quality::Wireframe;
+    let aid = p.add_item("AdjSolid", Label::Red, None, ItemKind::Solid(Solid { color: [1.0, 1.0, 1.0], width: 96, height: 54, pixel_aspect: 1.0 }));
+    let mut adj = build::layer(&mut p, &comp, "Adj", LayerSource::Solid { item: aid }, (96, 54), None);
+    adj.switches.adjustment = true;
+    let spec = effectcraft_effects::find("ec.time.posterizetime").unwrap();
+    let mut next = p.next_id;
+    let mut g = effectcraft_effects::instantiate(spec, &mut Ids(&mut next), spec.name, [96.0, 54.0]);
+    g.prop_mut("frameRate").unwrap().value = Value::Scalar(4.0);
+    p.next_id = next;
+    adj.props.sub_mut("effects").unwrap().children.push(g.into());
+    p.comp_mut(cid).unwrap().layers = vec![adj, under].into();
+    let r = crate::Renderer::new(&p, &crate::NoFootage, crate::RenderOpts::default());
+    let img = r.comp_frame(cid, Tick::from_seconds_f64(0.3));
+    // The compositor draws the wireframe layer as an outline: the centre stays unfilled.
+    // Compositing its filled content buffer here would show a held red frame instead.
+    let centre = img.get(48, 27);
+    assert_eq!(centre[3], 0.0, "centre must stay unfilled: {centre:?}");
+    assert_eq!(img.get(0, 0), [1.0, 1.0, 1.0, 1.0], "outline");
 }
