@@ -173,15 +173,19 @@ impl ContainerFile {
             }
             ContainerFile::Matroska(f) => {
                 let track = &f.tracks[track_idx];
+                // Indexed PTS already subtracts CodecDelay rounded to the container clock.
+                // Translate only that rounding difference, not the full delay a second time.
+                let tick_ns = i128::from(f.info.timestamp_scale.max(1));
                 let delay_ns = i128::from(track.codec_delay_ns);
+                let rounding_ns = ((delay_ns + tick_ns / 2) / tick_ns) * tick_ns - delay_ns;
                 let preroll_ns = i128::from(track.seek_pre_roll_ns.max(80_000_000));
-                let target_ns = (i128::from(start.max(0)) * 1_000_000_000) / i128::from(native_rate) + delay_ns;
-                let seek_ns = (target_ns - preroll_ns).max(0);
-                let t_track = track.ns_to_ticks(i64::try_from(seek_ns).unwrap_or(0));
+                let target_ns = (i128::from(start.max(0)) * 1_000_000_000) / i128::from(native_rate);
+                let seek_ns = (target_ns - preroll_ns - rounding_ns).max(0);
+                let t_track = track.ns_to_ticks(i64::try_from(seek_ns).unwrap_or(i64::MAX));
                 let sample_idx = track.sample_at_pts(t_track).unwrap_or(0);
                 let seek_idx = sample_idx.saturating_sub(2);
                 let sample_pts = track.samples.get(seek_idx).map_or(0, |s| s.pts);
-                let sample_ns = i128::from(track.ticks_to_ns(sample_pts)) - delay_ns;
+                let sample_ns = i128::from(track.ticks_to_ns(sample_pts)) + rounding_ns;
                 let decoded_pos = i64::try_from((sample_ns * i128::from(native_rate)) / 1_000_000_000).unwrap_or(0);
                 (seek_idx, decoded_pos)
             }
