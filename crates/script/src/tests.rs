@@ -882,6 +882,35 @@ fn frames_count_type_sets_the_project_frame_count() {
     assert_eq!(s.project.settings.frame_start, 0);
 }
 
+/// `CompItem.displayStartFrame` reads and writes the comp start time in frames.
+#[test]
+fn comp_display_start_frame_follows_the_frame_rate() {
+    let mut s = session();
+    let o = ok(
+        &mut s,
+        "var c = app.project.items.addComp('c', 64, 64, 1, 4, 25); var a = c.displayStartFrame; c.displayStartFrame = 100; [a, c.displayStartFrame, c.displayStartTime].join('|')",
+    );
+    assert_eq!(o.result, json!("0|100|4"));
+    // At 23 fps a frame boundary falls between ticks: the stored start must still be that frame.
+    let o = ok(&mut s, "var c = app.project.items.addComp('d', 64, 64, 1, 4, 23); c.displayStartFrame = 1; c.displayStartFrame");
+    assert_eq!(o.result, json!(1));
+    let comp = s.project.items.values().find_map(|i| match &i.kind {
+        effectcraft_project::ItemKind::Comp(c) if i.name == "d" => Some(c.clone()),
+        _ => None,
+    });
+    let comp = comp.expect("comp d");
+    assert_eq!(comp.frame_rate.frame_at(comp.display_start), 1, "the start is frame 1, not the frame before");
+    // The frame is counted at the rate the same command sets: 100 at 50 fps, not at the old 23 fps.
+    let id = s.project.items.iter().find_map(|(id, i)| (i.name == "d").then_some(id.0)).expect("comp d id");
+    s.execute("comp.settings", json!({"comp": id, "frameRate": 50, "startFrame": 100})).unwrap();
+    let comp = s.project.items.values().find_map(|i| match &i.kind {
+        effectcraft_project::ItemKind::Comp(c) if i.name == "d" => Some(c.clone()),
+        _ => None,
+    });
+    let comp = comp.expect("comp d");
+    assert_eq!(comp.frame_rate.frame_at(comp.display_start), 100, "frame 100 at the new rate");
+}
+
 #[test]
 fn console_keeps_variables() {
     let mut s = session();
