@@ -210,11 +210,12 @@ impl ContainerFile {
             }
             ContainerFile::Mxf(f) => {
                 let track = f.tracks.get(track_idx)?;
-                let offset = track.first_edit_unit();
+                let (offset, presented_len) = mxf_picture_window(track);
+                if presented_len == 0 {
+                    return None;
+                }
                 let d = tick_to_rational_units(time, i64::from(track.edit_rate.num), i64::from(track.edit_rate.den));
-                let presented_len = track.duration.unwrap_or_else(|| i64::try_from(track.display_order.len()).unwrap_or(0).saturating_sub(offset).max(0));
-                let max_rel = presented_len.saturating_sub(1).max(0);
-                let pos = offset.saturating_add(d.clamp(0, max_rel));
+                let pos = offset.saturating_add(d.clamp(0, presented_len - 1));
                 let idx = track.sample_at(pos)?;
                 Some((idx, track.samples[idx].pts))
             }
@@ -1039,8 +1040,19 @@ fn mxf_start_timecode(tc: mxf::Timecode, rate: Option<FrameRate>) -> i64 {
     i64::try_from(converted).unwrap_or(tc.start)
 }
 
+/// Material-package picture span, limited to indexed display pictures after the origin.
+fn mxf_picture_window(track: &mxf::EssenceTrack) -> (i64, i64) {
+    let start = track.first_edit_unit();
+    let available = i64::try_from(track.display_order.len()).unwrap_or(i64::MAX).saturating_sub(start).max(0);
+    (start, track.duration.unwrap_or(available).clamp(0, available))
+}
+
 fn open_mxf(name: &str, source: SharedBytes) -> Option<Result<SharedSource>> {
     let file = mxf::open(&*source).ok()?;
+    open_parsed_mxf(name, source, file)
+}
+
+fn open_parsed_mxf(name: &str, source: SharedBytes, file: mxf::MxfFile) -> Option<Result<SharedSource>> {
     let video_idx = file.tracks.iter().position(|t| t.kind == mxf::TrackKind::Picture && !t.samples.is_empty() && t.edit_rate.is_valid());
     let sound_indices: Vec<usize> =
         file.tracks.iter().enumerate().filter(|(_, t)| t.kind == mxf::TrackKind::Sound && !t.chunks.is_empty()).map(|(idx, _)| idx).collect();
@@ -1078,7 +1090,7 @@ fn open_mxf(name: &str, source: SharedBytes) -> Option<Result<SharedSource>> {
         let er = video_track.edit_rate;
         let fps = f64::from(er.num) / f64::from(er.den.max(1));
         let frame_rate = snap_common_fps(fps).unwrap_or_else(|| FrameRate::new(i64::from(er.num), i64::from(er.den)));
-        let dur_units = video_track.duration.unwrap_or_else(|| i64::try_from(video_track.display_order.len()).unwrap_or(0));
+        let (_, dur_units) = mxf_picture_window(video_track);
         let duration = Tick::from_units(dur_units.saturating_mul(i64::from(er.den)), i64::from(er.num.max(1)));
         let has_alpha = video_track.picture.as_ref().is_some_and(|p| p.alpha_depth > 0);
         let video_decoder = match TrackDecoder::with_options(&video_params, TrackDecoderOptions { threads: Some(worker_cap()), draft: false }) {
@@ -2860,6 +2872,25 @@ mod tests {
         file.tracks[1].duration = Some(1);
         let (win_start, win_len) = mxf_sound_window(&file.tracks[1]);
         assert_eq!((win_start, win_len), (1920, 1920));
+
+        // Reuse the demuxed writer fixture and vary just its material-picture metadata.
+        // The writer itself authors neither an overclaimed nor an absent duration here.
+        assert_eq!(file.tracks[0].display_order, [0, 1]);
+        let one_frame = Tick::from_units(40, 1_000);
+        let beyond = Tick::from_units(80, 1_000);
+        for (origin, declared, expected_duration, expected_target) in
+            [(1, Some(2), one_frame, Some((1, 1))), (1, None, one_frame, Some((1, 1))), (1, Some(0), Tick::ZERO, None), (2, Some(2), Tick::ZERO, None)]
+        {
+            let mut edited = file.clone();
+            edited.tracks[0].origin = origin;
+            edited.tracks[0].duration = declared;
+            assert_eq!(edited.tracks[0].first_edit_unit(), origin);
+            let source = open_parsed_mxf("op1a.mxf", mxf_bytes.clone(), edited.clone()).expect("shared MXF").expect("open parsed");
+            assert_eq!(source.info().duration, expected_duration, "origin {origin}, duration {declared:?}");
+            let container = ContainerFile::Mxf(Box::new(edited));
+            assert_eq!(container.target_sample(0, Tick::ZERO), expected_target);
+            assert_eq!(container.target_sample(0, beyond), expected_target);
+        }
 
         let container = ContainerFile::Mxf(Box::new(file));
         assert_eq!(container.sample_count(0), 2);
