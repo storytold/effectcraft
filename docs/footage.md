@@ -117,6 +117,14 @@ false` goes back to Use Source File Timecode). Cineon Settings: `{"logConversion
 
 Float OpenEXR renders hold linear light; EffectCraft sRGB-encodes them as they are read, like
 After Effects with Interpret As Linear Light for 32 bpc, unless the item preserves RGB (above).
+
+**ACES files.** A single-part file whose `chromaticities` attribute names the ACES primaries
+imports with that colour profile: AP0 as ACES2065-1, AP1 as ACEScg (Interpret Footage ▸ Assign
+Profile shows it, and you can change it). In a colour-managed project, float footage in either
+ACES profile is converted from its linear values into the working space, with Interpret As Linear
+Light on or off. Untagged files (Rec. 709 primaries, as OpenEXR assumes), other primaries, and
+multi-part, tiled or deep files keep the default interpretation; assign an ACES profile to those
+by hand. Without a working space the profile is ignored, as in After Effects.
 A multi-layer file shows its main picture, as in After Effects: the channels without a layer
 prefix, `R`, `G`, `B` (and `A`) of the first part that has all three, else the first part that
 has a `Y` (its `Y` and `A`) as grey. Renders that keep every pass in named layers (Blender's

@@ -3,6 +3,7 @@
 mod aac_layout;
 mod downmix;
 mod exif_orientation;
+mod exr_aces;
 mod exr_golden;
 mod file_timecode;
 mod footage;
