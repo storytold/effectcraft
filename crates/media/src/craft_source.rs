@@ -90,15 +90,7 @@ fn prores_has_alpha(packet_size: u32, read: impl FnOnce() -> Option<Vec<u8>>) ->
 fn supports_video_codec(codec: CodecId) -> bool {
     matches!(
         codec,
-        CodecId::H264
-            | CodecId::Hevc
-            | CodecId::Av1
-            | CodecId::Vp9
-            | CodecId::Vp8
-            | CodecId::ProRes
-            | CodecId::Dnxhd
-            | CodecId::Mpeg2Video
-            | CodecId::Ffv1
+        CodecId::H264 | CodecId::Hevc | CodecId::Av1 | CodecId::Vp9 | CodecId::Vp8 | CodecId::ProRes | CodecId::Dnxhd | CodecId::Mpeg2Video | CodecId::Ffv1
     )
 }
 
@@ -923,9 +915,7 @@ fn open_isobmff(name: &str, source: SharedBytes) -> Option<Result<SharedSource>>
         let (codec_name, pixel_format, bitrate) = if let Some(profile) = apv_profile {
             let format = if has_alpha { "YUVA 4:4:4:4 10-bit" } else { "YUV 4:2:2 10-bit" };
             let bytes: u128 = video_track.samples.iter().map(|sample| u128::from(sample.size)).sum();
-            let bitrate = (bytes * 8 * u128::from(video_track.timescale))
-                .checked_div(u128::from(video_track.duration))
-                .and_then(|b| u64::try_from(b).ok());
+            let bitrate = (bytes * 8 * u128::from(video_track.timescale)).checked_div(u128::from(video_track.duration)).and_then(|b| u64::try_from(b).ok());
             (profile.name().into(), format.into(), bitrate)
         } else {
             let bitrate = video_track.entries.first().and_then(|e| e.bitrate).map(|b| u64::from(b.avg_bitrate)).filter(|&b| b > 0);
@@ -951,9 +941,7 @@ fn open_isobmff(name: &str, source: SharedBytes) -> Option<Result<SharedSource>>
     };
 
     let start_timecode = video_idx.zip(video_info.as_ref()).and_then(|(idx, info)| isobmff_timecode_origin(&file, idx, info.frame_rate));
-    let apv_cache = video_idx
-        .is_some_and(|idx| matches!(file.tracks[idx].codec(), Some(isobmff::CodecConfig::Apv(_))))
-        .then(ApvFrameCache::default);
+    let apv_cache = video_idx.is_some_and(|idx| matches!(file.tracks[idx].codec(), Some(isobmff::CodecConfig::Apv(_)))).then(ApvFrameCache::default);
     let container = ContainerFile::Isobmff(file);
     let (audio_tracks, audio_infos) = open_audio_tracks(&container, &*source, audio_candidates)?;
     if video_info.is_none() && audio_tracks.is_empty() {
@@ -972,7 +960,16 @@ fn open_isobmff(name: &str, source: SharedBytes) -> Option<Result<SharedSource>>
         file_size: Some(source.len()),
     };
 
-    Some(Ok(Arc::new(CraftMediaSource { info, source, file: container, video_track_idx: video_idx, presentation, video: video_state, audio_tracks, apv_cache })))
+    Some(Ok(Arc::new(CraftMediaSource {
+        info,
+        source,
+        file: container,
+        video_track_idx: video_idx,
+        presentation,
+        video: video_state,
+        audio_tracks,
+        apv_cache,
+    })))
 }
 
 fn open_matroska(name: &str, source: SharedBytes) -> Option<Result<SharedSource>> {
@@ -1370,6 +1367,45 @@ fn estimate_mpeg_frame_rate(units: &[mpegts::Unit]) -> FrameRate {
     estimate_mpeg_frame_rate_pts(units.iter().filter_map(|u| u.pts))
 }
 
+/// A timestamp is the start of a picture, not the end of its display interval.
+fn regular_ts_picture_end(units: &[mpegts::Unit], origin_pts: i64, rate: FrameRate) -> Option<Tick> {
+    let [first, second, rest @ ..] = units else { return None };
+    let first_pts = first.pts?;
+    // A complete index can still contain a unit the public reader refuses to allocate.
+    let readable = |unit: &mpegts::Unit| unit.size > 0 && unit.size <= mpegts::MAX_UNIT_BYTES;
+    if !first.key || first_pts != origin_pts || rate.num <= 0 || rate.den <= 0 || !readable(first) || !readable(second) {
+        return None;
+    }
+    let mut last = second.pts?;
+    let step = last.checked_sub(first_pts)?;
+    // Do not infer a tail from a snapped rate or extrapolate an irregular track.
+    if step <= 0 || i128::from(step) * i128::from(rate.num) != 90_000 * i128::from(rate.den) {
+        return None;
+    }
+    for unit in rest {
+        let pts = unit.pts?;
+        if pts.checked_sub(last)? != step || !readable(unit) {
+            return None;
+        }
+        last = pts;
+    }
+    let end = last.checked_add(step)?.checked_sub(origin_pts)?;
+    let ticks = i128::from(end) * i128::from(craft_time::TICKS_PER_SECOND) / 90_000;
+    Some(Tick(i64::try_from(ticks).ok()?))
+}
+
+fn clean_ts_packet_index<S: ByteSource + ?Sized>(file: &mpegts::File, source: &S) -> bool {
+    let mpegts::Format::Ts { packet_size, sync_offset } = file.format else { return false };
+    if !file.warnings.is_empty() || !matches!(packet_size, 188 | 192 | 204) || sync_offset >= packet_size || !source.len().is_multiple_of(packet_size as u64) {
+        return false;
+    }
+    // Unlike the scanner's recovery path, require the five sync bytes it uses to
+    // identify a TS to align from byte zero, with no ignored partial packet at EOF.
+    let mut head = [0u8; 5 * 204];
+    let Some(prefix) = head.get_mut(..5 * packet_size) else { return false };
+    source.read_at(0, prefix).is_ok() && (0..5).all(|i| prefix.get(i * packet_size + sync_offset) == Some(&0x47))
+}
+
 fn open_mpeg(name: &str, fmt: mpegts::Format, source: SharedBytes) -> Option<Result<SharedSource>> {
     let file = mpegts::open(&*source).ok()?;
     let origin_pts = file.streams.iter().filter_map(|s| s.pts_range().map(|(lo, _)| lo)).min().unwrap_or(0);
@@ -1411,7 +1447,13 @@ fn open_mpeg(name: &str, fmt: mpegts::Format, source: SharedBytes) -> Option<Res
             let _ = video_decoder.reset();
         }
         let frame_rate = estimate_mpeg_frame_rate(&video_stream.units);
-        let duration = video_stream.pts_range().map_or(Tick::ZERO, |(_, hi)| Tick::from_units(hi.saturating_sub(origin_pts), 90_000));
+        let indexed_span = || video_stream.pts_range().map_or(Tick::ZERO, |(_, hi)| Tick::from_units(hi.saturating_sub(origin_pts), 90_000));
+        let duration =
+            if file.streams.len() == 1 && video_params.codec == CodecId::H264 && video_stream.skipped_bytes == 0 && clean_ts_packet_index(&file, &*source) {
+                regular_ts_picture_end(&video_stream.units, origin_pts, frame_rate).unwrap_or_else(indexed_span)
+            } else {
+                indexed_span()
+            };
         let info = default_video_info(decoded_dims.0, decoded_dims.1, frame_rate, &video_params);
         let state = Mutex::new(VideoState { decoder: video_decoder, next_decode_idx: 0, gop_start_idx: 0, flushed: false, decoded: Vec::new() });
         (Some(ContainerVideoPart { track_idx: v_idx, info, state }), duration)
@@ -1658,7 +1700,9 @@ impl MediaSource for CraftMediaSource {
 
         let audible_start = i64::try_from(i128::from(start) + edit_range.start as i128).unwrap_or(i64::MAX);
         let native_rate = entry.native_rate;
-        let (native_start, mut native_frames) = native_audio_window(audible_start, audible_frames, native_rate, sample_rate);
+        let Some((native_start, mut native_frames, phase)) = resampling_window(audible_start, audible_frames, native_rate, sample_rate) else {
+            return Ok(AudioBuffer::new(sample_rate, channels_count as u16, frames));
+        };
         if native_rate != sample_rate {
             // The resampler asks for lookahead. Do not interpolate with samples
             // that are stored in the track but lie beyond the edit.
@@ -1710,8 +1754,12 @@ impl MediaSource for CraftMediaSource {
             }
         };
 
-        let mut channels =
-            if sample_rate == native_rate { decoded } else { resample_audio(&decoded, channels_count, native_rate, sample_rate, audible_frames) };
+        let mut channels = if sample_rate == native_rate {
+            decoded
+        } else {
+            let first_output = if audible_start < 0 { usize::try_from(audible_start.unsigned_abs()).unwrap_or(audible_frames).min(audible_frames) } else { 0 };
+            resample_audio_with_phase(&decoded, native_rate, sample_rate, audible_frames, phase, first_output)
+        };
         if audible_frames < frames {
             for channel in &mut channels {
                 channel.resize(frames, 0.0);
@@ -1773,17 +1821,9 @@ impl MediaSource for StandaloneAudioSource {
             return Ok(AudioBuffer::new(sample_rate, channels_count as u16, frames));
         }
         let native_rate = self.native_rate;
-        let (native_start, native_frames, phase) = if sample_rate == native_rate {
-            (start, frames, 0)
-        } else {
-            let scaled = i128::from(start) * i128::from(native_rate);
-            let divisor = i128::from(sample_rate);
-            let Ok(origin) = i64::try_from(scaled.div_euclid(divisor)) else {
-                // An unrepresentable source position cannot address this stream.
-                return Ok(AudioBuffer::new(sample_rate, channels_count as u16, frames));
-            };
-            // Reuse the existing window size, but not its truncating start calculation.
-            (origin, native_audio_window(0, frames, native_rate, sample_rate).1, scaled.rem_euclid(divisor) as u64)
+        let Some((native_start, native_frames, phase)) = resampling_window(start, frames, native_rate, sample_rate) else {
+            // An unrepresentable source position cannot address this stream.
+            return Ok(AudioBuffer::new(sample_rate, channels_count as u16, frames));
         };
 
         let mut state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1793,14 +1833,13 @@ impl MediaSource for StandaloneAudioSource {
         }
         // Negative output positions are silence, not interpolation into frame zero.
         let first_output = if start < 0 { usize::try_from(start.unsigned_abs()).unwrap_or(frames).min(frames) } else { 0 };
-        Ok(AudioBuffer { sample_rate, channels: resample_standalone_audio(&decoded, native_rate, sample_rate, frames, phase, first_output) })
+        Ok(AudioBuffer { sample_rate, channels: resample_audio_with_phase(&decoded, native_rate, sample_rate, frames, phase, first_output) })
     }
 }
 
 /// Step the fractional input position as an exact integer quotient and remainder;
 /// rounding happens only when interpolating a sample, independent of the window.
-#[cfg(any(unix, windows))]
-fn resample_standalone_audio(decoded: &[Vec<f32>], native_rate: u32, sample_rate: u32, frames: usize, phase: u64, first_output: usize) -> Vec<Vec<f32>> {
+fn resample_audio_with_phase(decoded: &[Vec<f32>], native_rate: u32, sample_rate: u32, frames: usize, phase: u64, first_output: usize) -> Vec<Vec<f32>> {
     let mut out = vec![vec![0.0; frames]; decoded.len()];
     let divisor = u64::from(sample_rate);
     let first = first_output as u128 * u128::from(native_rate) + u128::from(phase);
@@ -1867,13 +1906,15 @@ fn decode_standalone_range(native_rate: u32, channels_count: usize, state: &mut 
     Ok(drain_audio_window(&mut state.buf, &mut state.decoded_pos, channels_count, start, frames))
 }
 
-fn native_audio_window(start: i64, frames: usize, native_rate: u32, sample_rate: u32) -> (i64, usize) {
+fn resampling_window(start: i64, frames: usize, native_rate: u32, sample_rate: u32) -> Option<(i64, usize, u64)> {
     if sample_rate == native_rate {
-        return (start, frames);
+        return Some((start, frames, 0));
     }
-    let s0 = (i128::from(start) * i128::from(native_rate)) / i128::from(sample_rate);
+    let scaled = i128::from(start) * i128::from(native_rate);
+    let divisor = i128::from(sample_rate);
+    let origin = i64::try_from(scaled.div_euclid(divisor)).ok()?;
     let len = ((frames as u128 * u128::from(native_rate)).div_ceil(u128::from(sample_rate)) + 2) as usize;
-    (i64::try_from(s0).unwrap_or(0), len)
+    Some((origin, len, scaled.rem_euclid(divisor) as u64))
 }
 
 fn drain_audio_window(buf: &mut [Vec<f32>], decoded_pos: &mut i64, channels_count: usize, start: i64, frames: usize) -> Vec<Vec<f32>> {
@@ -1900,26 +1941,6 @@ fn drain_audio_window(buf: &mut [Vec<f32>], decoded_pos: &mut i64, channels_coun
         *decoded_pos = decoded_pos.saturating_add(trim as i64);
     }
     out
-}
-
-fn resample_audio(decoded: &[Vec<f32>], channels_count: usize, native_rate: u32, sample_rate: u32, frames: usize) -> Vec<Vec<f32>> {
-    let mut resampled = vec![vec![0.0f32; frames]; channels_count];
-    let ratio = f64::from(native_rate) / f64::from(sample_rate);
-    for (c, out_ch) in resampled.iter_mut().enumerate() {
-        let in_ch = &decoded[c];
-        if in_ch.is_empty() {
-            continue;
-        }
-        for (i, dst) in out_ch.iter_mut().enumerate() {
-            let pos = i as f64 * ratio;
-            let idx = pos.floor() as usize;
-            let frac = (pos - idx as f64) as f32;
-            let s0 = in_ch.get(idx).copied().unwrap_or(0.0);
-            let s1 = in_ch.get(idx + 1).copied().unwrap_or(s0);
-            *dst = s0 + (s1 - s0) * frac;
-        }
-    }
-    resampled
 }
 
 #[cfg(any(unix, windows))]
@@ -2621,22 +2642,24 @@ mod tests {
             Err(MediaError::Cancelled)
         });
         assert!(matches!(failed, Err(MediaError::Cancelled)));
-        let frame = cache.get_or_decode(1, || {
-            assert!(cache.entries.try_lock().is_ok());
-            Ok(VideoFrame {
-                width: 1,
-                height: 1,
-                data: PixelData::Yuv16 {
-                    planes: [Arc::new(vec![200]), Arc::new(vec![512]), Arc::new(vec![512])],
-                    chroma: Chroma::C444,
-                    bits: 10,
-                    alpha: None,
-                },
-                color: ColorInfo::REC709,
-                par: (1, 1),
-                pts: Tick::ZERO,
+        let frame = cache
+            .get_or_decode(1, || {
+                assert!(cache.entries.try_lock().is_ok());
+                Ok(VideoFrame {
+                    width: 1,
+                    height: 1,
+                    data: PixelData::Yuv16 {
+                        planes: [Arc::new(vec![200]), Arc::new(vec![512]), Arc::new(vec![512])],
+                        chroma: Chroma::C444,
+                        bits: 10,
+                        alpha: None,
+                    },
+                    color: ColorInfo::REC709,
+                    par: (1, 1),
+                    pts: Tick::ZERO,
+                })
             })
-        }).unwrap();
+            .unwrap();
         let hit = cache.get_or_decode(1, || panic!("a cache hit must not decode again")).unwrap();
         assert!(Arc::ptr_eq(&frame, &hit));
     }
@@ -2708,9 +2731,37 @@ mod tests {
         ApvFixture { bytes: writer.finish().unwrap().into_inner().into(), y: expected_y, alpha: expected_alpha }
     }
 
+    fn assert_apv_seek_parity(shared: &crate::stream::MediaSource, film: &crate::stream::MediaSource, step: i64, y: &[Vec<u16>], alpha: &[Option<Vec<u16>>]) {
+        use crate::stream::DecodedFrame;
+
+        let boundary = step - craft_time::TICKS_PER_SECOND / 50_000;
+        for (at, i) in [(step, 1), (0, 0), (boundary - 1, 0), (boundary, 1), (step - 1, 1), (0, 0)] {
+            let time = effectcraft_time::Tick(at);
+            let DecodedFrame::Craft(new) = shared.video_frame(time, 1.0).unwrap() else { panic!("shared frame") };
+            let DecodedFrame::Film(old) = film.video_frame(time, 1.0).unwrap() else { panic!("legacy frame") };
+            assert_eq!(new.color, ColorInfo::REC709);
+            assert_eq!(old.color, filmcraft_color::ColorInfo::REC709);
+            // Film carries the presentation position in its cache key, not its APV pixel payload.
+            assert_eq!(old.pts.0, 0);
+            assert_eq!(new.pts.0, old.pts.0);
+            let PixelData::Yuv16 { planes: new_planes, bits, alpha: new_alpha, .. } = &new.data else { panic!("APV 10-bit YUV frame") };
+            let filmcraft_frame::PixelData::Yuv16 { planes: old_planes, bits: old_bits, alpha: old_alpha, .. } = &old.data else {
+                panic!("legacy APV 10-bit YUV frame")
+            };
+            assert_eq!(*bits, 10);
+            assert_eq!(bits, old_bits);
+            assert_eq!(new_planes[0].as_ref(), &y[i]);
+            for (new, old) in new_planes.iter().zip(old_planes) {
+                assert_eq!(new.as_ref(), old.as_ref());
+            }
+            assert_eq!(new_alpha.as_deref(), alpha[i].as_ref());
+            assert_eq!(new_alpha.as_deref(), old_alpha.as_deref());
+        }
+    }
+
     #[test]
     fn simple_apv_mp4_import_preserves_film_color_alpha_and_backward_seek() {
-        use crate::stream::{DecodedFrame, MediaSource as Opened};
+        use crate::stream::MediaSource as Opened;
         use effectcraft_project::{AlphaMode, ColorSpace};
 
         let step = craft_time::TICKS_PER_SECOND / 25;
@@ -2744,29 +2795,7 @@ mod tests {
             assert_eq!(shared_video.bitrate, film_video.bitrate);
 
             let film = Opened::Film(direct_film);
-            let boundary = step - craft_time::TICKS_PER_SECOND / 50_000;
-            for (at, i) in [(step, 1), (0, 0), (boundary - 1, 0), (boundary, 1), (step - 1, 1), (0, 0)] {
-                let time = effectcraft_time::Tick(at);
-                let DecodedFrame::Craft(new) = shared.video_frame(time, 1.0).unwrap() else { panic!("shared frame") };
-                let DecodedFrame::Film(old) = film.video_frame(time, 1.0).unwrap() else { panic!("legacy frame") };
-                assert_eq!(new.color, ColorInfo::REC709);
-                assert_eq!(old.color, filmcraft_color::ColorInfo::REC709);
-                // Film carries the presentation position in its cache key, not its APV pixel payload.
-                assert_eq!(old.pts.0, 0);
-                assert_eq!(new.pts.0, old.pts.0);
-                let PixelData::Yuv16 { planes: new_planes, bits, alpha: new_alpha, .. } = &new.data else { panic!("APV 10-bit YUV frame") };
-                let filmcraft_frame::PixelData::Yuv16 { planes: old_planes, bits: old_bits, alpha: old_alpha, .. } = &old.data else {
-                    panic!("legacy APV 10-bit YUV frame")
-                };
-                assert_eq!(*bits, 10);
-                assert_eq!(bits, old_bits);
-                assert_eq!(new_planes[0].as_ref(), &y[i]);
-                for (new, old) in new_planes.iter().zip(old_planes) {
-                    assert_eq!(new.as_ref(), old.as_ref());
-                }
-                assert_eq!(new_alpha.as_deref(), alpha[i].as_ref());
-                assert_eq!(new_alpha.as_deref(), old_alpha.as_deref());
-            }
+            assert_apv_seek_parity(&shared, &film, step, &y, &alpha);
         }
     }
 
@@ -3806,6 +3835,118 @@ mod tests {
         assert_eq!(ts_src.info().container, "MPEG-2 TS");
     }
 
+    fn generated_two_frame_ts() -> Vec<u8> {
+        use craft_video::h264::{Encoder, EncoderConfig, YuvFrame};
+        use mpegts::mux::{Codec, Config, Frame, Muxer, Stream};
+
+        let mut config = EncoderConfig::new(16, 16, 25, 1);
+        config.intra_only = true;
+        config.threads = 1;
+        let mut encoder = Encoder::new(config).unwrap();
+        let mut packets = Vec::new();
+        let uv = [128; 8 * 8];
+        for (pts, level) in [(90_000, 48), (93_600, 192)] {
+            let y = [level; 16 * 16];
+            packets.extend(encoder.encode(&YuvFrame { y: &y, u: &uv, v: &uv, y_stride: 16, uv_stride: 8 }, pts).unwrap());
+        }
+        packets.extend(encoder.flush());
+        assert_eq!(packets.len(), 2);
+        let mut mux = Muxer::new(Vec::new(), Config::default(), &[Stream::new(0x100, Codec::H264)]).unwrap();
+        for packet in packets {
+            assert!(packet.keyframe);
+            mux.write_frame(0, &Frame { data: &packet.data, pts: packet.pts, dts: Some(packet.dts), key: true }).unwrap();
+        }
+        mux.finish().unwrap()
+    }
+
+    #[test]
+    fn regular_video_only_h264_ts_duration_keeps_the_last_picture_playable() {
+        let bytes = generated_two_frame_ts();
+        let parsed = mpegts::open(bytes.as_slice()).unwrap();
+        assert_eq!(parsed.streams.len(), 1);
+        assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+        assert_eq!(parsed.streams[0].skipped_bytes, 0);
+        assert!(clean_ts_packet_index(&parsed, bytes.as_slice()));
+        let units = &parsed.streams[0].units;
+        assert_eq!(units.iter().map(|unit| unit.pts).collect::<Vec<_>>(), [Some(90_000), Some(93_600)]);
+
+        let bytes: Arc<[u8]> = bytes.into();
+        let opened = crate::stream::open_bytes("final-picture.ts", bytes.clone()).unwrap();
+        assert!(matches!(opened, crate::stream::MediaSource::Craft(_)));
+        let film = filmcraft_codecs::open_bytes("final-picture.ts", bytes.clone()).unwrap();
+        let rate = effectcraft_time::FrameRate::FPS_25;
+        assert_eq!(film.info().duration.0, rate.tick_of(2).0);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("final-picture.ts");
+        std::fs::write(&path, bytes.as_ref()).unwrap();
+        let footage = crate::probe(&path).unwrap();
+        let pool = crate::MediaPool::new();
+        let first = pool.frame_at(&footage, effectcraft_time::Tick::ZERO).unwrap();
+        let last = pool.frame_at(&footage, rate.tick_of(1)).unwrap();
+        assert!(last.get(8, 8)[0] > first.get(8, 8)[0] + 0.25, "the earlier duration clamped the last request to the first picture");
+        assert_eq!(footage.frame_rate, rate);
+        assert!(!footage.has_audio);
+        assert_eq!(footage.duration, rate.tick_of(2));
+    }
+
+    #[test]
+    fn ts_damaged_or_partial_tail_keeps_the_earlier_indexed_duration() {
+        let mut transport_error = [0xff; 188];
+        // A dropped error-marked packet does not alter the two indexed pictures.
+        transport_error[..4].copy_from_slice(&[0x47, 0x9f, 0xff, 0x10]);
+        for (tail, warned) in [(&transport_error[..], true), (&[0x47][..], false)] {
+            let mut bytes = generated_two_frame_ts();
+            bytes.extend_from_slice(tail);
+            let parsed = mpegts::open(bytes.as_slice()).unwrap();
+            assert_eq!(parsed.warnings.iter().any(|warning| warning.contains("transport error indicator")), warned);
+            assert_eq!(parsed.streams[0].units.len(), 2);
+            assert_eq!(regular_ts_picture_end(&parsed.streams[0].units, 90_000, FrameRate::FPS_25), Some(Tick(craft_time::TICKS_PER_SECOND * 2 / 25)));
+            assert!(!clean_ts_packet_index(&parsed, bytes.as_slice()));
+            // The same shared route still opens and retains its prior duration.
+            let source = crate::stream::open_bytes("damaged-tail.ts", bytes.into()).unwrap();
+            let crate::stream::MediaSource::Craft(source) = source else { panic!("existing shared route") };
+            assert_eq!(source.info().duration, Tick(craft_time::TICKS_PER_SECOND / 25));
+        }
+    }
+
+    #[test]
+    fn ts_picture_end_requires_complete_exact_regular_stamps() {
+        let bytes = generated_two_frame_ts();
+        let parsed = mpegts::open(bytes.as_slice()).unwrap();
+        let units = &parsed.streams[0].units;
+        let rate = FrameRate::FPS_25;
+        assert_eq!(regular_ts_picture_end(units, 90_000, rate), Some(Tick(craft_time::TICKS_PER_SECOND * 2 / 25)));
+        assert_eq!(regular_ts_picture_end(&units[..1], 90_000, rate), None);
+        assert_eq!(regular_ts_picture_end(units, 89_999, rate), None);
+        assert_eq!(regular_ts_picture_end(units, 90_000, FrameRate::FPS_30), None);
+
+        let mut nonkey = units.clone();
+        nonkey[0].key = false;
+        assert_eq!(regular_ts_picture_end(&nonkey, 90_000, rate), None);
+        let mut missing = units.clone();
+        missing[1].pts = None;
+        assert_eq!(regular_ts_picture_end(&missing, 90_000, rate), None);
+        let mut irregular = units.clone();
+        let mut third = units[1];
+        third.pts = Some(97_201);
+        irregular.push(third);
+        assert_eq!(regular_ts_picture_end(&irregular, 90_000, rate), None);
+
+        let mut oversized = units.clone();
+        oversized[1].size = mpegts::MAX_UNIT_BYTES + 1;
+        assert_eq!(regular_ts_picture_end(&oversized, 90_000, rate), None);
+        oversized[1].size = mpegts::MAX_UNIT_BYTES;
+        assert!(regular_ts_picture_end(&oversized, 90_000, rate).is_some());
+        oversized[1].size = 0;
+        assert_eq!(regular_ts_picture_end(&oversized, 90_000, rate), None);
+
+        let mut overflow = units.clone();
+        overflow[0].pts = Some(i64::MAX - 3_600);
+        overflow[1].pts = Some(i64::MAX);
+        assert_eq!(regular_ts_picture_end(&overflow, i64::MAX - 3_600, rate), None);
+    }
+
     fn pcm_s16le_bytes(sample: i16, count: usize) -> Vec<u8> {
         std::iter::repeat_n(sample.to_le_bytes(), count).flatten().collect()
     }
@@ -3904,6 +4045,74 @@ mod tests {
 
         let rewound = decode(&mut wide_tracks[0], 0, 600);
         assert_eq!(rewound[0], wide[0][..600]);
+    }
+
+    #[test]
+    fn container_audio_preserves_fractional_resampling_phase_across_seeks() {
+        let mut mux =
+            avi::AviWriter::new(std::io::Cursor::new(Vec::new()), vec![avi::StreamSpec::Audio(avi::AudioSpec::pcm(48_000, 1, 16))], avi::MuxOptions::default())
+                .unwrap();
+        let mut pcm = Vec::with_capacity(4800 * 2);
+        for i in 0..4800i32 {
+            // Frame 4000 is exactly 0 so output frame 3675 (at 44.1 kHz) lands on 0.0.
+            let sample = ((i - 4000) * 5).clamp(-32767, 32767) as i16;
+            pcm.extend_from_slice(&sample.to_le_bytes());
+        }
+        mux.write_chunk(0, &pcm, true).unwrap();
+        let bytes: Arc<[u8]> = Arc::from(mux.finish().unwrap().into_inner());
+
+        let src = open_bytes("ramp.avi", bytes.clone()).expect("recognized").expect("opened");
+        let resampled = src.audio(0, 256, 44_100).expect("resampled");
+
+        let cold = open_bytes("ramp.avi", bytes).expect("recognized").expect("opened");
+        let alone = cold.audio(1, 1, 44_100).expect("single output frame");
+        // Output frame 1 at 44.1 kHz is native frame 160/147 (between native 1 and 2: -19995 and -19990).
+        let expected = (-19995.0 + (13.0 / 147.0) * 5.0) / 32768.0;
+        assert!((alone.channels[0][0] - expected).abs() < 1e-7, "absolute fractional phase");
+        assert_eq!(alone.channels[0][0], resampled.channels[0][1], "single-frame seek matches block");
+
+        let pre_roll = cold.audio(-1, 3, 44_100).expect("negative output window");
+        assert_eq!(pre_roll.channels[0][0], 0.0, "silence before frame zero");
+        assert_eq!(&pre_roll.channels[0][1..], &resampled.channels[0][..2], "crossing frame zero preserves phase");
+
+        let crossing = cold.audio(3670, 6, 44_100).expect("cross zero sample");
+        let zero = cold.audio(3675, 1, 44_100).expect("zero sample alone");
+        assert_eq!(crossing.channels[0][5], 0.0);
+        assert_eq!(crossing.channels[0][5], zero.channels[0][0]);
+
+        let after_end = cold.audio(4410, 2, 44_100).expect("after EOF");
+        assert!(after_end.channels.iter().flatten().all(|&s| s == 0.0));
+        let out_of_range = cold.audio(i64::MAX / 2, 1, 1).expect("unreachable origin");
+        assert!(out_of_range.channels.iter().flatten().all(|&s| s == 0.0));
+
+        // 48->44.1 kHz MOV edit boundary: full read, split read, and fresh seek must all agree,
+        // sample 6,218 must not blend in the stored tail past the edit, and sample 6,219 must be silent.
+        const MOV_TRIM: usize = 9_600;
+        const MOV_EDIT_FRAMES: usize = 1_968;
+        let mov_samples: Vec<i16> = (0..12_000).map(|i| 1_000 + (i % 257) as i16 * 32).collect();
+        let last_in_edit = f32::from(mov_samples[MOV_TRIM + MOV_EDIT_FRAMES - 1]) / 32_768.0;
+        let mov_bytes: Arc<[u8]> = edited_pcm_mov(
+            48_000,
+            &mov_samples,
+            vec![
+                isobmff::Edit { segment_duration: 100, media_time: -1, media_rate: 0x0001_0000 },
+                isobmff::Edit { segment_duration: 41, media_time: MOV_TRIM as i64, media_rate: 0x0001_0000 },
+            ],
+        )
+        .into();
+        let full_mov = open_bytes("edited-pcm.mov", mov_bytes.clone()).expect("recognized").expect("opened");
+        let full_window = full_mov.audio(6_200, 25, 44_100).expect("full mov read").channels.remove(0);
+        assert_eq!(full_window[18], last_in_edit, "sample 6,218 must not blend in the tail past the edit");
+        assert_eq!(full_window[19], 0.0, "sample 6,219 must be silent");
+
+        let split_mov = open_bytes("edited-pcm.mov", mov_bytes.clone()).expect("recognized").expect("opened");
+        let mut split_window = split_mov.audio(6_200, 18, 44_100).expect("split part 1").channels.remove(0);
+        split_window.extend_from_slice(&split_mov.audio(6_218, 7, 44_100).expect("split part 2").channels[0]);
+        assert_eq!(split_window, full_window, "split read must match full read");
+
+        let seek_mov = open_bytes("edited-pcm.mov", mov_bytes).expect("recognized").expect("opened");
+        let seek_window = seek_mov.audio(6_218, 2, 44_100).expect("fresh seek").channels.remove(0);
+        assert_eq!(seek_window, full_window[18..20], "fresh seek must match full read");
     }
 
     #[test]
