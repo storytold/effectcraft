@@ -43,20 +43,31 @@ pub struct ExportJob<'a> {
     pub renderer: Option<&'a Mutex<Option<effectcraft_render::Backend>>>,
     /// Settings ▸ Memory & CPU ▸ GPU Frames Rendered at Once: 1 to 3, `None` for Auto.
     pub gpu_frames: Option<usize>,
+    /// What each of a one-off export's own two layer caches may hold
+    /// ([`Session::export_cache_budget`], #3941); `None`: the exporter's default.
+    pub cache_budget: Option<usize>,
 }
 
 /// What the jobs of one Render Queue run keep between them (#3335): a layer cache per
-/// compositor (a buffer an effect made on the GPU is not the CPU's), together at the budget
-/// each job's single cache had before.
+/// compositor (a buffer an effect made on the GPU is not the CPU's), each with the session's
+/// budget for an export's caches ([`Session::export_cache_budget`], #3941). Both are in the
+/// memory accountant's common budget (#3301): they give way with the other caches when it is
+/// full, so together they never hold more than it.
 pub struct RunCaches {
-    pub gpu: effectcraft_render::LayerCache,
-    pub cpu: effectcraft_render::LayerCache,
+    pub gpu: std::sync::Arc<effectcraft_render::LayerCache>,
+    pub cpu: std::sync::Arc<effectcraft_render::LayerCache>,
 }
 
-impl Default for RunCaches {
-    fn default() -> Self {
-        let half = effectcraft_render::LayerCache::default().budget() / 2;
-        RunCaches { gpu: effectcraft_render::LayerCache::new(half), cpu: effectcraft_render::LayerCache::new(half) }
+impl RunCaches {
+    /// The two caches, each with `budget` bytes, registered with the memory accountant.
+    pub fn new(budget: usize) -> Self {
+        let (gpu, cpu) = (std::sync::Arc::new(effectcraft_render::LayerCache::new(budget)), std::sync::Arc::new(effectcraft_render::LayerCache::new(budget)));
+        let accountant = effectcraft_render::memory::Accountant::global();
+        for cache in [&gpu, &cpu] {
+            let holder: std::sync::Arc<dyn effectcraft_render::memory::MemoryHolder> = cache.clone();
+            accountant.register(&holder);
+        }
+        RunCaches { gpu, cpu }
     }
 }
 
@@ -250,6 +261,8 @@ struct Work {
     nested_switches: bool,
     /// Settings ▸ Memory & CPU ▸ GPU Frames Rendered at Once.
     gpu_frames: Option<usize>,
+    /// What each of the run's two layer caches may hold ([`Session::export_cache_budget`]).
+    cache_budget: usize,
 }
 
 /// Where a relative render output goes when there is no default folder and the project is unsaved:
@@ -346,6 +359,7 @@ pub(crate) async fn run_items(
         items,
         nested_switches: s.prefs.general.switches_affect_nested_comps,
         gpu_frames: s.prefs.memory.gpu_frames(),
+        cache_budget: s.export_cache_budget(),
     };
     run_work(work, shared, notify).await;
 }
@@ -356,7 +370,7 @@ async fn run_work(w: Work, shared: &JobShared, notify: &mut dyn FnMut(&JobShared
         let mut s = lock(&shared.state);
         s.items_total = w.items.len();
     }
-    let caches = RunCaches::default();
+    let caches = RunCaches::new(w.cache_budget);
     let _run_end = RunEnd(w.accel.as_deref());
     for (k, modules) in w.items.iter().enumerate() {
         let Some((item, _)) = modules.first() else { continue };
@@ -395,6 +409,7 @@ async fn run_work(w: Work, shared: &JobShared, notify: &mut dyn FnMut(&JobShared
                 caches: Some(&caches),
                 renderer: Some(&renderer),
                 gpu_frames: w.gpu_frames,
+                cache_budget: Some(w.cache_budget),
             };
             let rr = w
                 .exporter
@@ -656,6 +671,7 @@ impl Session {
             items,
             nested_switches: self.prefs.general.switches_affect_nested_comps,
             gpu_frames: self.prefs.memory.gpu_frames(),
+            cache_budget: self.export_cache_budget(),
         };
         let shared = Arc::new(JobShared::default());
         if wait {

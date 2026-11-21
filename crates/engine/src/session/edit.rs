@@ -203,6 +203,9 @@ impl Session {
     /// the file names (`savedBy`), for the upgrades that depend on which version wrote it
     /// ([`upgrade_effects`]).
     pub fn replace_project_written_by(&mut self, mut p: Project, path: Option<String>, written_by: Option<&str>) {
+        // Work still running for the closed project stops reading it (see `project_closed`).
+        self.project_closed.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.project_closed = Arc::default();
         if self.stop_render()
             && let Some(mut job) = self.render_job.take()
         {
@@ -227,23 +230,33 @@ impl Session {
         self.drop_tasks();
         self.script_ui.project_epoch = self.script_ui.project_epoch.wrapping_add(1);
         p.fix_next_id();
-        upgrade_effects(&mut p, written_by);
-        // The media layer keys decoded frames by path: files of the new project may have changed
-        // since an earlier project decoded them (#1070).
-        for it in p.items.values() {
-            if let effectcraft_project::ItemKind::Footage(f) = &it.kind {
-                self.forget_decoded(f);
-            }
+        let lost = upgrade_effects(&mut p, written_by);
+        // Let go of what the closed project's footage and proxies decoded (frames, decoders,
+        // models), and of what the new project's files decoded under an earlier project: the
+        // media layer keys them by path, and the files may have changed since (#1070).
+        for f in super::render::project_footage(&self.project).chain(super::render::project_footage(&p)) {
+            super::render::forget_files(self.footage.as_ref(), f);
         }
+        self.drop_crypto_probe();
         self.layer_cache.clear();
         self.project = Arc::new(p);
         // The set of footage effects read the channels of is sent again, even when it is empty.
         self.aux_footage = None;
+        self.aux_needs = None;
         self.history = History::default();
         self.state = EditorState { snapping: true, view_layout: 1, ..Default::default() };
         self.path = path;
         self.bump();
         self.mark_saved();
+        // (channel selection can't be animated, as in After Effects: a document that animated it
+        // keeps its first value; said once, not as an error)
+        if !lost.is_empty() {
+            log::warn!("channel selection is static: keyframes or expressions dropped on {}", lost.join("; "));
+            self.toast(format!("Channel selection can't be animated: kept the first value of {}", lost.join(", ")));
+        }
+        // The viewers' RAM preview shows the closed project's frames, whose comp ids can collide
+        // with the new project's.
+        self.events.push(Event::PurgeCaches);
         let first = self.project.comps().next().map(|(id, _)| *id);
         if let Some(c) = first {
             self.open_comp(c);
@@ -257,12 +270,16 @@ impl Session {
 /// [`effectcraft_project::SCHEMA_EFFECT_SPACE`] into effect space
 /// ([`effectcraft_effects::migrate::to_effect_space`]). Shape path operations get the
 /// properties added since ([`effectcraft_project::build::upgrade_shape_contents`]). Stamps the
-/// current schema.
+/// current schema. Channel-selection parameters are made static
+/// ([`effectcraft_effects::migrate::static_channel_params`]); returns what lost its animation
+/// (`Layer: Effect: Parameter`).
 ///
 /// `written_by` is the `savedBy` version of the file the project came from, when it came from one
 /// ([`Session::replace_project_written_by`]); the upgrade that depends on the version that wrote it
 /// (`compositeWithOriginal`) only runs on evidence of an old project.
-pub fn upgrade_effects(p: &mut Project, written_by: Option<&str>) {
+#[must_use = "what lost its animation is reported to the user"]
+pub fn upgrade_effects(p: &mut Project, written_by: Option<&str>) -> Vec<String> {
+    let mut lost = vec![];
     let to_effect_space = p.schema < effectcraft_project::SCHEMA_EFFECT_SPACE;
     // v0.10.0 made the CC particle systems replace their layer; projects written before it
     // composited the particles over the layer, and must keep doing so (#1898).
@@ -293,12 +310,15 @@ pub fn upgrade_effects(p: &mut Project, written_by: Option<&str>) {
             let Some(fx) = l.props.sub_mut("effects") else { continue };
             for n in &mut fx.children {
                 let effectcraft_project::Node::Group(g) = n else { continue };
-                upgrade_effect(g, legacy_particles, to_effect_space, size, d, &clone_d, &mut next);
+                for name in upgrade_effect(g, legacy_particles, to_effect_space, size, d, &clone_d, &mut next) {
+                    lost.push(format!("{}: {}: {name}", l.name, g.name));
+                }
             }
         }
     }
     p.next_id = next;
     p.schema = effectcraft_project::SCHEMA_VERSION;
+    lost
 }
 
 /// The CC particle systems, which v0.10.0 made replace their layer instead of compositing the
@@ -318,9 +338,9 @@ fn upgrade_effect(
     d: [f64; 2],
     clone_d: &dyn Fn(Option<u64>) -> [f64; 2],
     next: &mut u64,
-) {
-    let effectcraft_project::GroupKind::Effect { effect } = &g.kind else { return };
-    let Some(spec) = effectcraft_effects::find(effect) else { return };
+) -> Vec<String> {
+    let effectcraft_project::GroupKind::Effect { effect } = &g.kind else { return vec![] };
+    let Some(spec) = effectcraft_effects::find(effect) else { return vec![] };
     // A property the instance already has is the artist's own choice; only an instance old enough
     // to predate it keeps the legacy behaviour.
     let composite = legacy_particles && LEGACY_COMPOSITE_EFFECTS.contains(&spec.id) && g.get(COMPOSITE_WITH_ORIGINAL).is_none();
@@ -331,6 +351,7 @@ fn upgrade_effect(
     if to_effect_space {
         effectcraft_effects::migrate::to_effect_space(spec, g, size, d, clone_d);
     }
+    effectcraft_effects::migrate::static_channel_params(spec, g)
 }
 
 /// Whether a file whose `savedBy` is `saved_by` predates `version` (`major.minor.patch`). A file

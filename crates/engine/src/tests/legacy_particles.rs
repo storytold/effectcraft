@@ -103,6 +103,9 @@ fn a_project_from_before_v0_10_0_keeps_the_artwork_under_its_particles() {
     assert!(controls(&imported, icid, ilid.0).iter().all(|v| *v == KV::Bool(true)), "{:?}", controls(&imported, icid, ilid.0));
     let imported_img = imported.render(icid, Tick::from_seconds_f64(0.5), RenderOpts::default());
     assert_eq!(imported_img.get(1, 1), [0.0, 1.0, 0.0, 1.0], "imported artwork shows too");
+    // Saving stamps today's writer, but must not lose the migrated choice on the next open.
+    assert_saved_round_trip(&mut opened, cid, lid, "opened", true);
+    assert_saved_round_trip(&mut imported, icid, ilid.0, "imported", true);
 }
 
 #[test]
@@ -156,15 +159,55 @@ fn only_a_writer_before_v0_10_0_gets_the_old_compositing() {
         (Some("0.9.2.1"), false),
     ] {
         let mut p = Project::from_json(&file_text(&s, version, false)).unwrap();
-        crate::upgrade_effects(&mut p, version);
+        assert!(crate::upgrade_effects(&mut p, version).is_empty());
         let fx = p.comp(cid).unwrap().layer(LayerId(lid)).unwrap().effects().unwrap();
         let got: Vec<_> = fx.groups().filter_map(|g| g.get(COMPOSITE).map(|p| p.value.clone())).collect();
         assert_eq!(got, vec![KV::Bool(legacy); PARTICLES.len()], "{version:?}");
     }
     // A control the file already holds is the artist's own choice, whatever wrote it.
     let mut explicit = Project::from_json(&file_text(&s, Some("0.6.0"), true)).unwrap();
-    crate::upgrade_effects(&mut explicit, Some("0.6.0"));
+    assert!(crate::upgrade_effects(&mut explicit, Some("0.6.0")).is_empty());
     let fx = explicit.comp(cid).unwrap().layer(LayerId(lid)).unwrap().effects().unwrap();
     let kept: Vec<_> = fx.groups().filter_map(|g| g.get(COMPOSITE).map(|p| p.value.clone())).collect();
     assert_eq!(kept, vec![KV::Bool(false); PARTICLES.len()], "an explicit choice wins, and both controls are still there");
+}
+
+/// Exercise the actual writer and reader, rather than a Project serialization alone.
+fn assert_saved_round_trip(s: &mut Session, cid: ItemId, lid: u64, name: &str, composite: bool) {
+    let path = tmp(&format!("{name}-roundtrip.ecproj")).to_string_lossy().to_string();
+    s.execute("file.saveAs", json!({"path": path})).unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(effectcraft_project::saved_by(&text).as_deref(), Some(effectcraft_project::APP_VERSION));
+    let mut reopened = Session::default();
+    reopened.execute("file.open", json!({"path": path})).unwrap();
+    assert_eq!(controls(&reopened, cid, lid), vec![KV::Bool(composite); PARTICLES.len()]);
+    let img = reopened.render(cid, Tick::from_seconds_f64(0.5), RenderOpts::default());
+    assert_eq!(img.get(1, 1), if composite { [0.0, 1.0, 0.0, 1.0] } else { [0.0; 4] });
+}
+
+/// Essential Graphics has its own archive reader, separate from file.open and file.importProject.
+/// It must pass the embedded project's writer to migration, and keep explicit choices.
+#[test]
+fn legacy_essential_templates_keep_migrated_and_explicit_particle_choices() {
+    for (name, choice, composite) in [("absent", None, true), ("off", Some(false), false), ("on", Some(true), true)] {
+        let (mut source, cid, lid) = particle_comp();
+        source.execute("essential.addProperty", json!({"layer": lid, "path": "transform/opacity"})).unwrap();
+        if let Some(value) = choice {
+            for index in 2..=3 {
+                source.execute("prop.set", json!({"layer": lid, "path": format!("effects/#{index}/{COMPOSITE}"), "value": value})).unwrap();
+            }
+        }
+        let path = tmp(&format!("legacy-{name}.ectemplate")).to_string_lossy().to_string();
+        source.execute("essential.exportTemplate", json!({"comp": cid.0, "path": path})).unwrap();
+        let mut entries = effectcraft_lottie::zip::read_stored(&std::fs::read(&path).unwrap());
+        let project = entries.iter_mut().find(|(name, _)| name == "project.ecproj").unwrap();
+        project.1 = file_text(&source, Some("0.6.0"), choice.is_some()).into_bytes();
+        std::fs::write(&path, effectcraft_lottie::zip::store(&entries)).unwrap();
+        let mut imported = Session::default();
+        let result = imported.execute("essential.importTemplate", json!({"path": path, "addToComp": false})).unwrap();
+        let icid = ItemId(result["comp"].as_u64().unwrap());
+        let ilid = imported.project.comp(icid).unwrap().layers.iter().next().unwrap().id.0;
+        assert_eq!(controls(&imported, icid, ilid), vec![KV::Bool(composite); PARTICLES.len()], "{name}");
+        assert_saved_round_trip(&mut imported, icid, ilid, &format!("template-{name}"), composite);
+    }
 }

@@ -1,7 +1,7 @@
 //! Footage import against ffmpeg as an external oracle.
 //!
-//! Fixtures are generated with ffmpeg into `target/fixtures/media` (never committed); every test
-//! skips (passes with a note) when ffmpeg is not installed. Decoded frames are compared with
+//! Oracle fixtures are generated with ffmpeg into `target/fixtures/media` (never committed);
+//! tests using them skip when ffmpeg is not installed. Decoded frames are compared with
 //! frames ffmpeg extracts to PNG (PSNR, premultiplied RGBA).
 
 use std::path::{Path, PathBuf};
@@ -459,6 +459,47 @@ fn prores_4444_with_alpha() {
     let mut g = f.clone();
     g.alpha = AlphaMode::Ignore;
     assert!(pool.frame_at(&g, Tick::ZERO).expect("frame").data.iter().all(|p| p[3] == 1.0));
+}
+
+/// The alpha mode follows the coded frame, even when a MOV writer signals an inconsistent depth.
+#[test]
+fn prores_alpha_uses_coded_frame_not_mov_depth() {
+    use craft_media::isobmff::{self, Brand, FourCc, Mp4Writer, SampleEntry, TrackConfig, WriteSample, WriterOptions};
+    use craft_video::prores::{ChromaFormat, Encoder, Frame, Profile};
+
+    let profile = Profile::P4444;
+    let mut encoder = Encoder::new(profile, 16, 16);
+    let mut frame = Frame::new(16, 16, ChromaFormat::Yuv444, 16, true).unwrap();
+    for row in frame.alpha.as_mut().unwrap().as_chunks_mut::<16>().0 {
+        row[..8].fill(0);
+    }
+    for (depth, mode) in [(24, AlphaMode::Straight), (32, AlphaMode::Ignore)] {
+        if mode == AlphaMode::Ignore {
+            frame.alpha = None;
+        }
+        let packet = encoder.encode(&frame).unwrap();
+        let mut entry = SampleEntry::prores(FourCc(profile.fourcc()), 16, 16);
+        entry.video.as_mut().unwrap().depth = depth;
+        let mut writer = Mp4Writer::new(std::io::Cursor::new(Vec::new()), WriterOptions::new(Brand::Mov)).unwrap();
+        let output_track = writer.add_track(TrackConfig::new(entry, 24)).unwrap();
+        writer.write_sample(output_track, WriteSample { data: &packet, duration: 1, composition_offset: 0, is_sync: true }).unwrap();
+        let bytes: Arc<[u8]> = writer.finish().unwrap().into_inner().into();
+
+        let mov = isobmff::open(bytes.as_ref()).unwrap();
+        assert_eq!(mov.tracks[0].video().unwrap().depth, depth);
+        let name = format!("prores4444_depth{depth}.mov");
+        let footage = probe_bytes(&name, bytes.clone()).expect("probe ProRes 4444");
+        assert_eq!(footage.codec, "ProRes", "must exercise the shared reader, not legacy fallback");
+        assert_eq!(footage.alpha, mode, "MOV depth {depth}");
+
+        let pool = MediaPool::new();
+        pool.add_bytes(&name, bytes);
+        let image = pool.frame_at(&footage, Tick::ZERO).expect("decode ProRes 4444");
+        assert_eq!((image.width, image.height), (16, 16));
+        let left_alpha = if mode == AlphaMode::Straight { 0.0 } else { 1.0 };
+        assert!((image.data[0][3] - left_alpha).abs() < 0.02);
+        assert!(image.data[15][3] > 0.97);
+    }
 }
 
 #[test]
@@ -1289,4 +1330,254 @@ fn the_h264_fixture_options_fit_the_picked_encoder() {
         assert!(!options.iter().any(|o| *o == "-preset" || *o == "-crf"), "{enc} rejects preset/crf: {options:?}");
         assert!(options.contains(&"-b:v"), "{enc} gets a bitrate: {options:?}");
     }
+}
+
+/// #781: software MP4/H.264 route on a B-frame fixture: backward seek across GOPs, cooperative
+/// cancellation, VUI/container color resolution, and draft mode for reduced-resolution playback.
+#[test]
+fn h264_bframe_route_backward_seek_cancel_color_and_draft() {
+    use std::sync::atomic::AtomicBool;
+    if h264_encoder() != Some("libx264") {
+        return;
+    }
+    let Some(p) = try_ffmpeg_fixture(
+        "h264_bframes_bt709.mp4",
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=320x180:rate=24:duration=1",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "fast",
+            "-bf",
+            "2",
+            "-g",
+            "12",
+            "-pix_fmt",
+            "yuv420p",
+            "-colorspace",
+            "bt709",
+            "-color_primaries",
+            "bt709",
+            "-color_trc",
+            "bt709",
+            "-color_range",
+            "tv",
+        ],
+    ) else {
+        return;
+    };
+    let f = probe(&p).expect("probe");
+    assert_eq!((f.width, f.height), (320, 180));
+    assert_eq!(f.color_profile, Some(effectcraft_project::ColorSpace::Rec709));
+
+    let pool = MediaPool::new();
+    // Forward decode into second GOP, then backward seek across GOP boundary and within GOP.
+    let f18 = pool.frame(ItemId(1), &f, t_of(f.frame_rate, 18)).expect("frame 18");
+    let f13 = pool.frame(ItemId(1), &f, t_of(f.frame_rate, 13)).expect("frame 13");
+    let f7 = pool.frame(ItemId(1), &f, t_of(f.frame_rate, 7)).expect("frame 7");
+    let f0 = pool.frame(ItemId(1), &f, t_of(f.frame_rate, 0)).expect("frame 0");
+    for img in [&f18, &f13, &f7, &f0] {
+        assert_eq!((img.width, img.height), (320, 180));
+    }
+    // Verify backward-seeked frame 7 matches a fresh pool decode of frame 7.
+    let fresh_f7 = MediaPool::new().frame(ItemId(1), &f, t_of(f.frame_rate, 7)).expect("fresh frame 7");
+    assert!(psnr(&f7, &fresh_f7) > 55.0, "backward seek frame 7 must match fresh decode");
+
+    // Draft mode at reduced resolution.
+    let draft = pool.frame_at_size(ItemId(1), &f, t_of(f.frame_rate, 5), 160, 90).expect("draft frame");
+    let full = pool.frame(ItemId(1), &f, t_of(f.frame_rate, 5)).expect("full frame");
+    assert_eq!((draft.width, draft.height), (160, 90));
+    assert!(psnr(&draft, &effectcraft_raster::resample(&full, 160, 90)) > 40.0, "draft frame matches resampled full frame");
+
+    // Cooperative cancellation.
+    let off = Arc::new(AtomicBool::new(true));
+    let mut cancelled = Some(Arc::clone(&f0));
+    pool.cancellable(&off, &mut || cancelled = pool.frame(ItemId(1), &f, t_of(f.frame_rate, 20)));
+    assert!(cancelled.is_none(), "cancelled read must not decode");
+    let on = Arc::new(AtomicBool::new(false));
+    let mut resumed = None;
+    pool.cancellable(&on, &mut || resumed = pool.frame(ItemId(1), &f, t_of(f.frame_rate, 20)));
+    assert_eq!(resumed.map(|i| (i.width, i.height)), Some((320, 180)));
+}
+
+fn assert_seek_draft_cancel_parity(p: &Path, expected_size: (u32, u32), expected_color: Option<effectcraft_project::ColorSpace>) {
+    use std::sync::atomic::AtomicBool;
+    let f = probe(p).expect("probe");
+    assert_eq!((f.width, f.height), expected_size);
+    if let Some(c) = expected_color {
+        assert_eq!(f.color_profile, Some(c));
+    }
+
+    let pool = MediaPool::new();
+    let f18 = pool.frame(ItemId(1), &f, t_of(f.frame_rate, 18)).expect("frame 18");
+    let f13 = pool.frame(ItemId(1), &f, t_of(f.frame_rate, 13)).expect("frame 13");
+    let f7 = pool.frame(ItemId(1), &f, t_of(f.frame_rate, 7)).expect("frame 7");
+    let f0 = pool.frame(ItemId(1), &f, t_of(f.frame_rate, 0)).expect("frame 0");
+    for img in [&f18, &f13, &f7, &f0] {
+        assert_eq!((img.width, img.height), expected_size);
+    }
+    let fresh_f7 = MediaPool::new().frame(ItemId(1), &f, t_of(f.frame_rate, 7)).expect("fresh frame 7");
+    assert!(psnr(&f7, &fresh_f7) > 55.0, "backward seek frame 7 must match fresh decode");
+
+    let (dw, dh) = (expected_size.0 / 2, expected_size.1 / 2);
+    let draft = pool.frame_at_size(ItemId(1), &f, t_of(f.frame_rate, 5), dw, dh).expect("draft frame");
+    let full = pool.frame(ItemId(1), &f, t_of(f.frame_rate, 5)).expect("full frame");
+    assert_eq!((draft.width, draft.height), (dw, dh));
+    assert!(psnr(&draft, &effectcraft_raster::resample(&full, dw, dh)) > 40.0, "draft frame matches resampled full frame");
+
+    let off = Arc::new(AtomicBool::new(true));
+    let mut cancelled = Some(Arc::clone(&f0));
+    pool.cancellable(&off, &mut || cancelled = pool.frame(ItemId(1), &f, t_of(f.frame_rate, 20)));
+    assert!(cancelled.is_none(), "cancelled read must not decode");
+    let on = Arc::new(AtomicBool::new(false));
+    let mut resumed = None;
+    pool.cancellable(&on, &mut || resumed = pool.frame(ItemId(1), &f, t_of(f.frame_rate, 20)));
+    assert_eq!(resumed.map(|i| (i.width, i.height)), Some(expected_size));
+}
+
+#[test]
+fn hevc_bframe_route_backward_seek_cancel_color_and_draft() {
+    let Some(p) = try_ffmpeg_fixture(
+        "hevc_bframes_bt709.mp4",
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=320x180:rate=24:duration=1",
+            "-c:v",
+            "libx265",
+            "-preset",
+            "fast",
+            "-x265-params",
+            "keyint=12:bframes=2:log-level=error",
+            "-pix_fmt",
+            "yuv420p",
+            "-colorspace",
+            "bt709",
+            "-color_primaries",
+            "bt709",
+            "-color_trc",
+            "bt709",
+            "-color_range",
+            "tv",
+        ],
+    ) else {
+        return;
+    };
+    assert_seek_draft_cancel_parity(&p, (320, 180), Some(effectcraft_project::ColorSpace::Rec709));
+}
+
+#[test]
+fn vp9_webm_route_backward_seek_cancel_and_draft() {
+    let Some(p) = vp9_webm() else { return };
+    assert_seek_draft_cancel_parity(&p, (640, 360), None);
+}
+
+#[test]
+fn draft_and_full_quality_cache_do_not_bleed() {
+    if h264_encoder() != Some("libx264") {
+        return;
+    }
+    let Some(p) = try_ffmpeg_fixture(
+        "h264_draft_full_cache.mp4",
+        &["-f", "lavfi", "-i", "testsrc2=size=320x180:rate=24:duration=1", "-c:v", "libx264", "-preset", "fast", "-bf", "2", "-g", "12", "-pix_fmt", "yuv420p"],
+    ) else {
+        return;
+    };
+    let f = probe(&p).expect("probe");
+    let pool = MediaPool::new();
+    let t = t_of(f.frame_rate, 7);
+    // Request draft at `t` first, then full quality at the exact same `t` and a neighbour in the same GOP.
+    let draft = pool.frame_at_size(ItemId(1), &f, t, 160, 90).expect("draft frame");
+    assert_eq!((draft.width, draft.height), (160, 90));
+    let full = pool.frame_at(&f, t).expect("full frame after draft");
+    let full_next = pool.frame_at(&f, t_of(f.frame_rate, 8)).expect("full neighbour after draft");
+    let fresh = MediaPool::new().frame_at(&f, t).expect("fresh full frame");
+    let fresh_next = MediaPool::new().frame_at(&f, t_of(f.frame_rate, 8)).expect("fresh full neighbour");
+    assert!(psnr(&full, &fresh) > 55.0, "full frame after draft must match fresh full decode");
+    assert!(psnr(&full_next, &fresh_next) > 55.0, "full GOP neighbour after draft must not reuse draft references");
+}
+
+#[test]
+fn rotated_mp4_matches_reference_orientation() {
+    if h264_encoder() != Some("libx264") {
+        return;
+    }
+    let Some(p) = try_ffmpeg_fixture(
+        "h264_rotate_90.mp4",
+        &["-f", "lavfi", "-i", "testsrc2=size=320x180:rate=24:duration=0.5", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-metadata:s:v:0", "rotate=90"],
+    ) else {
+        return;
+    };
+    let f = probe(&p).expect("probe rotated mp4");
+    assert_eq!((f.width, f.height), (180, 320), "90-degree rotated mp4 swaps width and height");
+    let pool = MediaPool::new();
+    let img = pool.frame_at(&f, Tick::ZERO).expect("rotated frame");
+    assert_eq!((img.width, img.height), (180, 320));
+    assert!(psnr(&img, &reference_frame(&p, 0)) > 35.0, "rotated frame pixels match ffmpeg auto-rotated reference");
+}
+
+#[test]
+fn webm_alpha_falls_back_to_filmcraft_preserving_alpha() {
+    let Some(p) = try_ffmpeg_fixture(
+        "vp9_alpha_fallback.webm",
+        &["-f", "lavfi", "-i", "format=rgba,geq=r='255':g='0':b='0':a='255*X/W':s=128x64:r=24", "-t", "0.25", "-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p"],
+    ) else {
+        return;
+    };
+    let f = probe(&p).expect("probe webm alpha");
+    assert_eq!(f.alpha, AlphaMode::Straight, "WebM alpha_mode=1 must preserve Straight alpha");
+    let pool = MediaPool::new();
+    let img = pool.frame_at(&f, Tick::ZERO).expect("webm alpha frame");
+    assert!(img.data[0][3] < 0.05 && img.data[127][3] > 0.95, "alpha ramp preserved via fallback");
+}
+
+#[test]
+fn filmcraft_fallback_handles_mjpeg_mov() {
+    let Some(p) = try_ffmpeg_fixture("mjpeg_fallback.mov", &["-f", "lavfi", "-i", "testsrc2=size=160x120:rate=24:duration=0.25", "-c:v", "mjpeg", "-q:v", "3"])
+    else {
+        return;
+    };
+    let f = probe(&p).expect("probe mjpeg fallback");
+    assert_eq!((f.width, f.height), (160, 120));
+    let pool = MediaPool::new();
+    let img = pool.frame_at(&f, Tick::ZERO).expect("mjpeg fallback frame");
+    assert_eq!((img.width, img.height), (160, 120));
+}
+
+#[test]
+fn matroska_opus_audio_timing_and_seek() {
+    let Some(p) = try_ffmpeg_fixture(
+        "vp9_opus_timing.webm",
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=160x120:rate=24:duration=1",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=48000:duration=1",
+            "-c:v",
+            "libvpx-vp9",
+            "-c:a",
+            "libopus",
+        ],
+    ) else {
+        return;
+    };
+    let f = probe(&p).expect("probe webm with opus");
+    assert!(f.has_audio, "opus audio stream detected");
+    let pool = MediaPool::new();
+    let start_audio = pool.audio_samples(&f, Tick::ZERO, 4800, 48_000);
+    assert_eq!(start_audio.len(), 9600);
+    let rms_start = (start_audio.iter().map(|v| v * v).sum::<f32>() / start_audio.len() as f32).sqrt();
+    assert!((rms_start - 0.0625).abs() < 0.02, "opus audio at t=0 rms {rms_start}");
+    let seek_audio = pool.audio_samples(&f, Tick(TICKS_PER_SECOND / 2), 4800, 48_000);
+    assert_eq!(seek_audio.len(), 9600);
+    let rms_seek = (seek_audio.iter().map(|v| v * v).sum::<f32>() / seek_audio.len() as f32).sqrt();
+    assert!((rms_seek - 0.0625).abs() < 0.02, "opus audio after seek rms {rms_seek}");
 }

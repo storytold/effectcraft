@@ -46,6 +46,138 @@ fn ball_action_draws_balls() {
     assert!(sum_diff(&a, &sc) > 1.0);
 }
 
+/// #3197: CC Ball Action has After Effects' controls (since 24.2), in its order, with its
+/// defaults: Coloring, Shading, Scatter Motion (formerly Instability State), Displace and
+/// Displace Property were missing.
+#[test]
+fn ball_action_has_after_effects_controls() {
+    let spec = crate::find("ec.sim.ccballaction").unwrap();
+    let names: Vec<&str> = spec.params.iter().map(|p| p.name).collect();
+    assert_eq!(
+        names,
+        [
+            "Grid Spacing",
+            "Ball Size",
+            "Coloring",
+            "Shading",
+            "Scatter",
+            "Scatter Motion",
+            "Displace",
+            "Displace Property",
+            "Twist Angle",
+            "Twist Property",
+            "Rotation Axis",
+            "Rotation"
+        ]
+    );
+    let sp = |id: &str| spec.params.iter().find(|p| p.id == id).unwrap_or_else(|| panic!("no {id}"));
+    assert_eq!(sp("gridSpacing").default, num(5.0));
+    assert_eq!(sp("ballSize").default, num(100.0));
+    assert_eq!(sp("coloring").default, Value::Enum(1));
+    assert_eq!(sp("coloring").ui, ParamUi::Popup { options: vec!["Crisp".into(), "Medium".into(), "Smooth".into()] });
+    assert_eq!(sp("shading").default, num(-75.0));
+    assert!(matches!(sp("shading").ui, ParamUi::Slider { min, max, .. } if min <= -100.0 && max >= 100.0));
+    assert_eq!(sp("scatterMotion").default, num(0.0));
+    assert_eq!(sp("scatterMotion").ui, ParamUi::Angle);
+    assert_eq!(sp("displace").default, num(0.0));
+    let ParamUi::Popup { options } = &sp("displaceProperty").ui else { panic!("Displace Property is a popup") };
+    let Value::Enum(d) = sp("displaceProperty").default else { panic!("Displace Property defaults to an option") };
+    assert_eq!(options.get(d as usize).map(String::as_str), Some("Brightness"));
+    // Old projects' Instability State becomes Scatter Motion through `PARAM_ID_ALIASES`; the
+    // engine test `opening_an_old_project_upgrades_effect_instances` covers every alias.
+}
+
+/// #3197: the new controls at After Effects' defaults draw exactly what CC Ball Action drew
+/// before (the lit sphere, a smooth colour sample, no displacement).
+#[test]
+fn ball_action_new_controls_at_defaults_keep_the_render() {
+    let base = [("ballSize", num(80.0)), ("scatter", num(6.0)), ("rotationAxis", Value::Enum(1)), ("rotation", num(25.0))];
+    let a = run("ec.sim.ccballaction", &base, ramp(32, 32), 0.0);
+    let mut explicit = base.to_vec();
+    explicit.extend([
+        ("coloring", Value::Enum(1)),
+        ("shading", num(-75.0)),
+        ("scatterMotion", num(0.0)),
+        ("displace", num(0.0)),
+        ("displaceProperty", Value::Enum(3)),
+    ]);
+    assert_eq!(a, run("ec.sim.ccballaction", &explicit, ramp(32, 32), 0.0));
+}
+
+/// #3197: Shading 0 removes the built-in light: every ball is the layer's flat colour. The
+/// default (-75) shades it; a smaller magnitude shades less, a positive value lights the balls
+/// from the other side.
+#[test]
+fn ball_action_shading_zero_is_flat() {
+    let c = [0.6, 0.3, 0.2, 1.0];
+    let shade = |v: f64| run("ec.sim.ccballaction", &[("ballSize", num(100.0)), ("gridSpacing", num(8.0)), ("shading", num(v))], Image::filled(32, 32, c), 0.0);
+    let flat = shade(0.0);
+    let covered: Vec<&[f32; 4]> = flat.data.iter().filter(|p| p[3] > 0.999).collect();
+    assert!(!covered.is_empty(), "balls drawn");
+    for p in &covered {
+        for k in 0..3 {
+            assert!((p[k] / p[3] - c[k]).abs() < 1e-4, "flat colour: {p:?}");
+        }
+    }
+    let lit = shade(-75.0);
+    assert!(lit.data.iter().any(|p| p[3] > 0.999 && (0..3).any(|k| (p[k] / p[3] - c[k]).abs() > 0.05)), "the default shading lights and darkens the balls");
+    let soft = shade(-30.0);
+    assert!(sum_diff(&flat, &soft) > 0.1 && sum_diff(&flat, &soft) < sum_diff(&flat, &lit), "less shading, closer to flat");
+    assert!(sum_diff(&shade(75.0), &lit) > 1.0, "the sign moves the light");
+}
+
+/// #3197: Coloring Crisp takes the pixel under each ball's cell centre; Medium samples
+/// smoothly between pixels. Grid Spacing 4 puts the cell centres on pixel corners (with the
+/// default 5 they fall on pixel centres, where Medium's sample equals Crisp's).
+#[test]
+fn ball_action_coloring_crisp_takes_the_pixel() {
+    let mut src = Image::new(32, 32);
+    for y in 0..32u32 {
+        for x in 0..32u32 {
+            src.set(x, y, [x as f32 / 32.0, y as f32 / 32.0, ((x * 7 + y * 3) % 5) as f32 / 4.0, 1.0]);
+        }
+    }
+    let col = |m: u32| {
+        let v = [("gridSpacing", num(4.0)), ("ballSize", num(100.0)), ("shading", num(0.0)), ("coloring", Value::Enum(m))];
+        run("ec.sim.ccballaction", &v, src.clone(), 0.0)
+    };
+    let crisp = col(0);
+    // Flat, opaque balls of radius 2 centred on (4i + 2, 4j + 2): the pixel to the lower right
+    // of each centre is fully covered by its ball alone.
+    for j in 0..8i64 {
+        for i in 0..8i64 {
+            let (x, y) = (4 * i + 2, 4 * j + 2);
+            let (got, want) = (crisp.get(x, y), src.get(x, y));
+            assert!((0..4).all(|k| (got[k] - want[k]).abs() < 1e-5), "ball ({i}, {j}): {got:?} vs the pixel {want:?}");
+        }
+    }
+    assert!(sum_diff(&crisp, &col(1)) > 1.0, "medium blends the pixels");
+}
+
+/// #3197: a huge Shading (typed or from an expression) is clamped, so the balls stay finite.
+#[test]
+fn ball_action_huge_shading_stays_finite() {
+    for v in [1e45, -1e45, f64::MAX] {
+        let o = run("ec.sim.ccballaction", &[("gridSpacing", num(8.0)), ("shading", num(v))], ramp(32, 32), 0.0);
+        assert!(o.data.iter().all(|p| p.iter().all(|c| c.is_finite())), "shading {v}");
+        assert!(o.data.iter().any(|p| p[3] > 0.0), "shading {v}: balls drawn");
+    }
+}
+
+/// #3197: Displace pushes the balls along z by the chosen property (Radius: the centre comes
+/// towards the camera and grows); 0 leaves them in the layer's plane.
+#[test]
+fn ball_action_displace_moves_balls_in_depth() {
+    let flat = run("ec.sim.ccballaction", &[("ballSize", num(80.0))], ramp(32, 32), 0.0);
+    let d = run("ec.sim.ccballaction", &[("ballSize", num(80.0)), ("displace", num(60.0)), ("displaceProperty", Value::Enum(6))], ramp(32, 32), 0.0);
+    assert_eq!(d, run("ec.sim.ccballaction", &[("ballSize", num(80.0)), ("displace", num(60.0)), ("displaceProperty", Value::Enum(6))], ramp(32, 32), 0.0));
+    assert!(sum_diff(&flat, &d) > 1.0);
+    for prop in 0..9 {
+        let o = run("ec.sim.ccballaction", &[("ballSize", num(80.0)), ("displace", num(400.0)), ("displaceProperty", Value::Enum(prop))], ramp(32, 32), 0.0);
+        assert!(o.data.iter().all(|p| p.iter().all(|v| v.is_finite())), "property {prop}");
+    }
+}
+
 #[test]
 fn pixel_polly_breaks_after_start() {
     let v = [("forceCenter", pt(16.0, 16.0)), ("gridSpacing", num(4.0))];

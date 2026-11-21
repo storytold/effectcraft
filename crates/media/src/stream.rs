@@ -2,17 +2,83 @@
 //!
 //! Reading a file whole before opening it made a clip cost its full size in memory (twice while
 //! probing: the file's bytes plus the demuxer's copy), so a 45-minute movie took gigabytes just to
-//! import. FilmCraft's reader openers (MP4/MOV, Matroska/WebM, MXF, Ogg, MPEG-PS/TS) open from a
-//! random-access [`ByteReader`]; [`FileReader`] serves them positional reads from the open file.
+//! import. Reader openers (MP4/MOV, Matroska/WebM, MXF, Ogg, MPEG-PS/TS) open from a random-access
+//! byte reader; [`FileReader`] serves them positional reads from the open file.
 //! Formats decoded in one go (stills, WAV, FLAC, MP3…) still read the whole file, as before.
 //! Builds without a native file system (wasm32) keep using in-memory bytes.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use effectcraft_render::reads::FileStamp;
-use filmcraft_media::SharedSource;
+use effectcraft_time::Tick;
 
-use crate::Result;
+use crate::{MediaError, Result};
+
+/// A decoded video frame from either `craft-media-source` or `filmcraft-media`.
+pub(crate) enum DecodedFrame {
+    Craft(Arc<craft_frame::VideoFrame>),
+    Film(Arc<filmcraft_frame::VideoFrame>),
+}
+
+impl DecodedFrame {
+    pub(crate) fn width(&self) -> u32 {
+        match self {
+            DecodedFrame::Craft(f) => f.width,
+            DecodedFrame::Film(f) => f.width,
+        }
+    }
+
+    pub(crate) fn height(&self) -> u32 {
+        match self {
+            DecodedFrame::Craft(f) => f.height,
+            DecodedFrame::Film(f) => f.height,
+        }
+    }
+}
+
+/// An opened movie/audio source, routed through `craft-media-source` for migrated formats
+/// (ISO-BMFF and Matroska/WebM with supported codecs) and `filmcraft-media` for remaining formats.
+#[derive(Clone)]
+pub(crate) enum MediaSource {
+    Craft(craft_media_source::SharedSource),
+    Film(filmcraft_media::SharedSource),
+}
+
+impl MediaSource {
+    pub(crate) fn video_frame(&self, time: Tick, scale: f32) -> Result<DecodedFrame> {
+        match self {
+            MediaSource::Craft(s) => {
+                s.video_frame(craft_media_source::FrameRequest { time: craft_time::Tick(time.0), scale }).map(DecodedFrame::Craft).map_err(MediaError::from)
+            }
+            MediaSource::Film(s) => {
+                s.video_frame(filmcraft_media::FrameRequest { time: filmcraft_time::Tick(time.0), scale }).map(DecodedFrame::Film).map_err(MediaError::from)
+            }
+        }
+    }
+
+    pub(crate) fn audio(&self, start: i64, frames: usize, rate: u32) -> std::result::Result<Vec<Vec<f32>>, String> {
+        match self {
+            MediaSource::Craft(s) => s.audio(start, frames, rate).map(|b| b.channels).map_err(|e| e.to_string()),
+            MediaSource::Film(s) => s.audio(start, frames, rate).map(|b| b.channels).map_err(|e| e.to_string()),
+        }
+    }
+
+    pub(crate) fn primary_audio(&self) -> Option<(u32, u32, String)> {
+        match self {
+            MediaSource::Craft(s) => s.info().audio().map(|a| (a.sample_rate, a.channels, a.codec.clone())),
+            MediaSource::Film(s) => s.info().audio().map(|a| (a.sample_rate, a.channels, a.codec.clone())),
+        }
+    }
+}
+
+/// Open an in-memory movie/audio source, trying migrated `craft-media-source` routes first.
+pub(crate) fn open_bytes(name: &str, bytes: Arc<[u8]>) -> Result<MediaSource> {
+    if let Some(res) = crate::craft_source::open_bytes(name, bytes.clone()) {
+        return res.map(MediaSource::Craft).map_err(MediaError::from);
+    }
+    filmcraft_codecs::open_bytes(name, bytes).map(MediaSource::Film).map_err(MediaError::from)
+}
 
 /// A file on disk read in place: it stays open and only the requested ranges are read.
 #[cfg(any(unix, windows))]
@@ -40,13 +106,13 @@ impl FileReader {
 }
 
 #[cfg(any(unix, windows))]
-impl filmcraft_media::ByteReader for FileReader {
-    fn len(&self) -> u64 {
+impl FileReader {
+    fn len_bytes(&self) -> u64 {
         self.len
     }
 
     /// Positional reads: threads decoding different parts of the file share no cursor.
-    fn read_at(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<()> {
+    fn read_exact_at(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<()> {
         #[cfg(unix)]
         {
             std::os::unix::fs::FileExt::read_exact_at(&self.file, buf, offset)
@@ -71,6 +137,28 @@ impl filmcraft_media::ByteReader for FileReader {
 }
 
 #[cfg(any(unix, windows))]
+impl filmcraft_media::ByteReader for FileReader {
+    fn len(&self) -> u64 {
+        self.len_bytes()
+    }
+
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<()> {
+        self.read_exact_at(offset, buf)
+    }
+}
+
+#[cfg(any(unix, windows))]
+impl craft_media::ByteSource for FileReader {
+    fn len(&self) -> u64 {
+        self.len_bytes()
+    }
+
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<()> {
+        self.read_exact_at(offset, buf)
+    }
+}
+
+#[cfg(any(unix, windows))]
 fn name_of(path: &Path) -> String {
     path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()
 }
@@ -80,17 +168,24 @@ fn name_of(path: &Path) -> String {
 /// when the file can't be opened in place (the caller reads it whole, which reports the error).
 /// With the file's identity as opened.
 #[cfg(any(unix, windows))]
-pub(crate) fn open_source(path: &Path) -> Option<(Result<SharedSource>, FileStamp)> {
-    let reader = FileReader::open(path).ok()?;
+pub(crate) fn open_source(path: &Path) -> Option<(Result<MediaSource>, FileStamp)> {
+    let reader = Arc::new(FileReader::open(path).ok()?);
     let stamp = reader.stamp;
-    let reader: filmcraft_media::SharedReader = std::sync::Arc::new(reader);
-    let opened = filmcraft_media::reader::open_reader(&name_of(path), reader, &filmcraft_codecs::reader_openers(), &filmcraft_codecs::openers());
-    Some((opened.map_err(Into::into), stamp))
+    let name = name_of(path);
+    let craft_reader: craft_media_source::SharedBytes = reader.clone();
+    if let Ok(head) = craft_media_source::read_range(&*craft_reader, 0, craft_media_source::HEAD_LEN)
+        && let Some(res) = crate::craft_source::open_reader(&name, &head, &craft_reader)
+    {
+        return Some((res.map(MediaSource::Craft).map_err(MediaError::from), stamp));
+    }
+    let fc_reader: filmcraft_media::SharedReader = reader;
+    let opened = filmcraft_media::reader::open_reader(&name, fc_reader, &filmcraft_codecs::reader_openers(), &filmcraft_codecs::openers());
+    Some((opened.map(MediaSource::Film).map_err(MediaError::from), stamp))
 }
 
 /// Without a native file system there is no in-place source: always `None`.
 #[cfg(not(any(unix, windows)))]
-pub(crate) fn open_source(_path: &Path) -> Option<(Result<SharedSource>, FileStamp)> {
+pub(crate) fn open_source(_path: &Path) -> Option<(Result<MediaSource>, FileStamp)> {
     None
 }
 
@@ -160,23 +255,27 @@ pub(crate) fn movie_header(_path: &Path) -> Option<Vec<u8>> {
 /// handles and nothing probed before containers (stills, layered and vector documents, 3D models)
 /// claims it. `None`: probe the whole file's bytes as before.
 #[cfg(any(unix, windows))]
-pub(crate) fn probe_source(path: &Path) -> Option<Result<SharedSource>> {
+pub(crate) fn probe_source(path: &Path) -> Option<Result<MediaSource>> {
     let ext = crate::ext_of(path);
     if crate::STILL_EXTENSIONS.contains(&ext.as_str()) || crate::MODEL_EXTENSIONS.contains(&ext.as_str()) {
         return None;
     }
-    let reader = FileReader::open(path).ok()?;
-    let reader: filmcraft_media::SharedReader = std::sync::Arc::new(reader);
+    let reader = Arc::new(FileReader::open(path).ok()?);
     let head = filmcraft_media::reader::read_range(&*reader, 0, filmcraft_media::reader::HEAD_LEN).ok()?;
     let name = path.to_string_lossy();
     if crate::layered::sniff(&name, &head) || image::guess_format(&head).is_ok() {
         return None;
     }
     let name = name_of(path);
-    filmcraft_codecs::reader_openers().into_iter().find_map(|open| open(&name, &head, &reader)).map(|r| r.map_err(Into::into))
+    let craft_reader: craft_media_source::SharedBytes = reader.clone();
+    if let Some(res) = crate::craft_source::open_reader(&name, &head, &craft_reader) {
+        return Some(res.map(MediaSource::Craft).map_err(MediaError::from));
+    }
+    let fc_reader: filmcraft_media::SharedReader = reader;
+    filmcraft_codecs::reader_openers().into_iter().find_map(|open| open(&name, &head, &fc_reader)).map(|r| r.map(MediaSource::Film).map_err(Into::into))
 }
 
 #[cfg(not(any(unix, windows)))]
-pub(crate) fn probe_source(_path: &Path) -> Option<Result<SharedSource>> {
+pub(crate) fn probe_source(_path: &Path) -> Option<Result<MediaSource>> {
     None
 }

@@ -11,6 +11,7 @@ workspace = true
 
 [dependencies]
 effectcraft-time = { workspace = true }
+effectcraft-effects = { workspace = true }
 effectcraft-geom = { workspace = true }
 effectcraft-keyframe = { workspace = true }
 serde_json = { workspace = true }
@@ -25,5 +26,4 @@ boa_engine = { workspace = true, features = ["js"] }
 
 [dev-dependencies]
 effectcraft-color = { workspace = true }
-effectcraft-effects = { workspace = true }
 effectcraft-text = { workspace = true }
