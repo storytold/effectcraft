@@ -1753,6 +1753,93 @@ mod tests {
         OpusFixture { bytes, file: ContainerFile::Isobmff(file), offsets, params, delay: 0 }
     }
 
+    fn assert_opus_early_and_backward(
+        file: &ContainerFile,
+        source: &OpusPayloadReads,
+        params: &CodecParams,
+        delay: u64,
+        expected_positions: &[i64],
+        lead: usize,
+    ) -> Vec<Vec<f32>> {
+        let (mut tracks, _) = open_audio_tracks(file, source, [(0, OPUS_PACKETS, params.clone(), delay)]).unwrap();
+        assert_eq!(*source.packets.lock().unwrap(), (0..AUDIO_LOOKAHEAD).collect::<Vec<_>>());
+
+        let first = expected_positions[0];
+        assert_eq!(tracks[0].state.get_mut().unwrap().decoded_pos, first);
+        let (mut reference, _) = open_audio_tracks(file, &source.bytes, [(0, OPUS_PACKETS, params.clone(), delay)]).unwrap();
+        reference[0].state.get_mut().unwrap().audio_starts = AudioStarts::complete(expected_positions.to_vec());
+
+        let decode = |track: &mut AudioTrackEntry, src: &dyn ByteSource, start, frames| {
+            decode_audio_range(file, src, 0, OPUS_RATE, 1, track.seek_preroll_samples, track.state.get_mut().unwrap(), start, frames).unwrap()
+        };
+        // A first read before the initial packet can be ordinary leading silence
+        // or negative pre-roll. Neither should trigger the cold suffix scan.
+        let early_start = if lead == 0 { first - 128 } else { 0 };
+        let silent_frames = (first - early_start) as usize;
+        let silent = decode(&mut tracks[0], source, early_start, silent_frames);
+        assert!(silent[0].iter().all(|&s| s == 0.0));
+        assert_eq!(*source.packets.lock().unwrap(), (0..AUDIO_LOOKAHEAD).collect::<Vec<_>>());
+        assert_eq!(silent, decode(&mut reference[0], &source.bytes, early_start, silent_frames));
+        let early_frames = silent_frames + 12 * OPUS_FRAME;
+        let early = decode(&mut tracks[0], source, early_start, early_frames);
+        assert_eq!(early, decode(&mut reference[0], &source.bytes, early_start, early_frames));
+        assert!(early[0].iter().all(|s| s.is_finite()));
+        assert!(early[0].iter().any(|s| s.abs() > 1e-5), "real Opus decoding, not a silent fallback");
+        {
+            let reads = source.packets.lock().unwrap();
+            assert!(reads.iter().any(|&i| i >= AUDIO_LOOKAHEAD), "exercise the incremental frontier");
+            assert!(reads.iter().all(|&i| i < 14) && reads.len() <= AUDIO_LOOKAHEAD + 14, "{reads:?}");
+        }
+
+        // A backward read after real decode must still use the exact seek index.
+        let backward_start = first + 2 * OPUS_FRAME as i64;
+        let backward = decode(&mut tracks[0], source, backward_start, OPUS_FRAME);
+        assert_eq!(backward, decode(&mut reference[0], &source.bytes, backward_start, OPUS_FRAME));
+        let state = tracks[0].state.get_mut().unwrap();
+        assert_eq!(state.audio_starts.positions.as_slice(), expected_positions);
+        assert!(state.audio_starts.opus.is_none());
+        early
+    }
+
+    fn assert_opus_first_cold_seek_and_retry(
+        file: &ContainerFile,
+        source: &OpusPayloadReads,
+        params: CodecParams,
+        delay: u64,
+        expected_positions: &[i64],
+        laced: bool,
+        start: i64,
+    ) {
+        let first = expected_positions[0];
+        let decode = |track: &mut AudioTrackEntry, src: &dyn ByteSource, start, frames| {
+            decode_audio_range(file, src, 0, OPUS_RATE, 1, track.seek_preroll_samples, track.state.get_mut().unwrap(), start, frames).unwrap()
+        };
+        // A genuinely random first request is not the leading-silence shortcut.
+        let (mut fresh, _) = open_audio_tracks(file, source, [(0, OPUS_PACKETS, params.clone(), delay)]).unwrap();
+        let (mut eager, _) = open_audio_tracks(file, &source.bytes, [(0, OPUS_PACKETS, params, delay)]).unwrap();
+        eager[0].state.get_mut().unwrap().audio_starts = AudioStarts::complete(expected_positions.to_vec());
+        if laced {
+            assert_eq!(file.audio_seek_info(0, expected_positions, fresh[0].seek_preroll_samples, start).0, 144);
+        }
+        let transient_packet = 64;
+        *source.fail_once_at.lock().unwrap() = Some(transient_packet);
+        {
+            let entry = &mut fresh[0];
+            let preroll = entry.seek_preroll_samples;
+            let state = entry.state.get_mut().unwrap();
+            let error = decode_audio_range(file, source, 0, OPUS_RATE, 1, preroll, state, start, 3 * OPUS_FRAME).unwrap_err();
+            assert!(matches!(error, MediaError::Io(_)));
+            assert_eq!(state.audio_starts.opus.as_ref().unwrap().len, transient_packet);
+            assert_eq!((state.next_sample, state.decoded_pos), (0, first));
+        }
+        let cold = decode(&mut fresh[0], source, start, 3 * OPUS_FRAME);
+        assert_eq!(cold, decode(&mut eager[0], &source.bytes, start, 3 * OPUS_FRAME));
+        assert!(cold[0].iter().any(|s| s.abs() > 1e-5));
+        let state = fresh[0].state.get_mut().unwrap();
+        assert_eq!(state.audio_starts.positions.as_slice(), expected_positions);
+        assert!(state.audio_starts.opus.is_none());
+    }
+
     #[test]
     fn opus_open_and_first_sequential_read_do_not_scan_tail_packets() {
         assert_eq!(opus_packet_samples(OPUS_TONE), Some(OPUS_FRAME as u32));
@@ -1766,9 +1853,6 @@ mod tests {
             // Start counting after container metadata indexing. This isolates payload reads by the app
             // opener, independent of how the demuxer peeks at block headers or buffers the file.
             let source = OpusPayloadReads { bytes, offsets, packets: Mutex::new(Vec::new()), fail_once_at: Mutex::new(None) };
-            let (mut tracks, _) = open_audio_tracks(&file, &source, [(0, OPUS_PACKETS, params.clone(), delay)]).unwrap();
-            assert_eq!(*source.packets.lock().unwrap(), (0..AUDIO_LOOKAHEAD).collect::<Vec<_>>());
-
             // Independent eager placement oracle: fixed 20 ms packets, an explicit 200 ms gap,
             // no drift from alternating Matroska stamp jitter, and delay applied once.
             let delay_frames = if matroska_file { OPUS_CODEC_DELAY_FRAMES } else { 0 };
@@ -1778,71 +1862,14 @@ mod tests {
                     (lead + i * OPUS_FRAME + gap) as i64 - delay_frames
                 })
                 .collect();
-            let first = expected_positions[0];
-            assert_eq!(tracks[0].state.get_mut().unwrap().decoded_pos, first);
-            let (mut reference, _) = open_audio_tracks(&file, &source.bytes, [(0, OPUS_PACKETS, params.clone(), delay)]).unwrap();
-            reference[0].state.get_mut().unwrap().audio_starts = AudioStarts::complete(expected_positions.clone());
-
-            let decode = |track: &mut AudioTrackEntry, src: &dyn ByteSource, start, frames| {
-                decode_audio_range(&file, src, 0, OPUS_RATE, 1, track.seek_preroll_samples, track.state.get_mut().unwrap(), start, frames).unwrap()
-            };
-            // A first read before the initial packet can be ordinary leading silence
-            // or negative pre-roll. Neither should trigger the cold suffix scan.
-            let early_start = if lead == 0 { first - 128 } else { 0 };
-            let silent_frames = (first - early_start) as usize;
-            let silent = decode(&mut tracks[0], &source, early_start, silent_frames);
-            assert!(silent[0].iter().all(|&s| s == 0.0));
-            assert_eq!(*source.packets.lock().unwrap(), (0..AUDIO_LOOKAHEAD).collect::<Vec<_>>());
-            assert_eq!(silent, decode(&mut reference[0], &source.bytes, early_start, silent_frames));
-            let early_frames = silent_frames + 12 * OPUS_FRAME;
-            let early = decode(&mut tracks[0], &source, early_start, early_frames);
-            assert_eq!(early, decode(&mut reference[0], &source.bytes, early_start, early_frames));
-            assert!(early[0].iter().all(|s| s.is_finite()));
-            assert!(early[0].iter().any(|s| s.abs() > 1e-5), "real Opus decoding, not a silent fallback");
+            let early = assert_opus_early_and_backward(&file, &source, &params, delay, &expected_positions, lead);
             if laced {
                 assert_eq!(&early, unlaced_matroska_audio.as_ref().unwrap(), "durationless laces must place the same real audio as stamped packets");
             } else if matroska_file && lead == OPUS_LEAD {
                 unlaced_matroska_audio = Some(early);
             }
-            {
-                let reads = source.packets.lock().unwrap();
-                assert!(reads.iter().any(|&i| i >= AUDIO_LOOKAHEAD), "exercise the incremental frontier");
-                assert!(reads.iter().all(|&i| i < 14) && reads.len() <= AUDIO_LOOKAHEAD + 14, "{reads:?}");
-            }
-
-            // A backward read after real decode must still use the exact seek index.
-            let backward_start = first + 2 * OPUS_FRAME as i64;
-            let backward = decode(&mut tracks[0], &source, backward_start, OPUS_FRAME);
-            assert_eq!(backward, decode(&mut reference[0], &source.bytes, backward_start, OPUS_FRAME));
-            let state = tracks[0].state.get_mut().unwrap();
-            assert_eq!(state.audio_starts.positions, expected_positions);
-            assert!(state.audio_starts.opus.is_none());
-
-            // A genuinely random first request is not the leading-silence shortcut.
-            let (mut fresh, _) = open_audio_tracks(&file, &source, [(0, OPUS_PACKETS, params.clone(), delay)]).unwrap();
-            let (mut eager, _) = open_audio_tracks(&file, &source.bytes, [(0, OPUS_PACKETS, params, delay)]).unwrap();
-            eager[0].state.get_mut().unwrap().audio_starts = AudioStarts::complete(expected_positions.clone());
             let start = (lead + 151 * OPUS_FRAME + OPUS_GAP) as i64 - delay_frames;
-            if laced {
-                assert_eq!(file.audio_seek_info(0, &expected_positions, fresh[0].seek_preroll_samples, start).0, 144);
-            }
-            let transient_packet = 64;
-            *source.fail_once_at.lock().unwrap() = Some(transient_packet);
-            {
-                let entry = &mut fresh[0];
-                let preroll = entry.seek_preroll_samples;
-                let state = entry.state.get_mut().unwrap();
-                let error = decode_audio_range(&file, &source, 0, OPUS_RATE, 1, preroll, state, start, 3 * OPUS_FRAME).unwrap_err();
-                assert!(matches!(error, MediaError::Io(_)));
-                assert_eq!(state.audio_starts.opus.as_ref().unwrap().len, transient_packet);
-                assert_eq!((state.next_sample, state.decoded_pos), (0, first));
-            }
-            let cold = decode(&mut fresh[0], &source, start, 3 * OPUS_FRAME);
-            assert_eq!(cold, decode(&mut eager[0], &source.bytes, start, 3 * OPUS_FRAME));
-            assert!(cold[0].iter().any(|s| s.abs() > 1e-5));
-            let state = fresh[0].state.get_mut().unwrap();
-            assert_eq!(state.audio_starts.positions, expected_positions);
-            assert!(state.audio_starts.opus.is_none());
+            assert_opus_first_cold_seek_and_retry(&file, &source, params, delay, &expected_positions, laced, start);
         }
     }
 
