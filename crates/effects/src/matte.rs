@@ -6,7 +6,7 @@ use effectcraft_project::ParamUi;
 use effectcraft_raster::gaussian_blur;
 use rayon::prelude::*;
 
-use crate::util::{Plane, gauss_plane, guided_filter, morph_frac, morph_plane, premul, set_alpha, unpremul};
+use crate::util::{FILL_REACH, Plane, gauss_plane, guided_filter, morph_frac, morph_plane, premul, set_alpha, set_alpha_fill, unpremul};
 use crate::{Buf, EffectCtx, EffectSpec, num, p, popup, slider};
 
 fn spec(id: &'static str, name: &'static str, params: Vec<crate::ParamSpec>, render: crate::RenderFn) -> EffectSpec {
@@ -28,7 +28,7 @@ fn simple_choker(ctx: &EffectCtx, mut b: Buf) -> Buf {
         }
         let a = Plane::alpha(&b.img);
         let na = if c > 0.0 { morph_frac(&a, c, false) } else { morph_frac(&a, -c, true) };
-        set_alpha(&mut b.img, &na);
+        set_alpha_fill(&mut b.img, &na, c < -FILL_REACH);
     }
     if ctx.params.e("view") == 1 {
         matte_view(&mut b);
@@ -347,6 +347,20 @@ mod tests {
 
     fn alpha_sum(img: &Image) -> f32 {
         img.data.iter().map(|p| p[3]).sum()
+    }
+
+    #[test]
+    fn simple_choker_far_growth_keeps_layer_colour() {
+        let mut img = Image::new(100, 100);
+        for y in 46..54 {
+            for x in 46..54 {
+                img.set(x, y, [0.8, 0.4, 0.2, 1.0]);
+            }
+        }
+        let grown = run("ec.matte.simplechoker", &[("chokeMatte", num(-30.0))], img);
+        // 25 px from the original edge, well beyond the colour-fill blur's reach.
+        let (c, a) = unpremul(grown.get(21, 50));
+        assert!(a > 0.99 && c[0] > 0.5, "{c:?} {a}");
     }
 
     #[test]
