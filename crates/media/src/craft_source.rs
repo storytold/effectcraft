@@ -1592,7 +1592,8 @@ mod tests {
         w.push_picture(&[0x00, 0x00, 0x00, 0x01, 0x41], mxf::write::FrameInfo::intra()).expect("pic1");
         w.push_sound(0, &pcm).expect("snd1");
         let raw_bytes = w.finish().expect("finish").into_inner();
-        let mxf_bytes: SharedBytes = Arc::new(Arc::from(raw_bytes.clone()));
+        let arc_bytes: Arc<[u8]> = Arc::from(raw_bytes.clone());
+        let mxf_bytes: SharedBytes = Arc::new(arc_bytes);
         let mut file = mxf::open(&*mxf_bytes).expect("open mxf");
 
         // Exercise ContainerFile::Mxf video helpers and trimmed sound window.
