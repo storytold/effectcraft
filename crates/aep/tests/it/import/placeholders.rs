@@ -3,7 +3,9 @@
 //! them keep working; it renders nothing and is still reported. Each effect is built into
 //! `synthetic.aep` (`fx_inject`) in place of its Glow, on the 8 x 8 sequence layer.
 
-use crate::import::fx_inject::{Default, Fx, bytes_with, import_bytes, losses, other, popup, run, slider, v};
+use crate::import::fx_inject::{
+    Default, Fx, bytes_with, bytes_with_effect, import_bytes, keyed_record, losses, other, popup, record, run, slider, sspc, v, with_effect_opacity,
+};
 use effectcraft_aep::import::LossCategory;
 use effectcraft_aep::{Body, Chunk, ParamKind as K, parse, write};
 use effectcraft_keyframe::Value;
@@ -312,4 +314,19 @@ fn edit(chunks: &mut [Chunk<'_>], in_efdg: bool, f: &mut dyn FnMut(&mut Chunk<'_
         f(c, inside);
         edit(c.children_mut(), inside, f);
     }
+}
+
+#[test]
+fn effect_opacity_on_a_placeholder_is_reported() {
+    let fx = third_party(vec![], vec![]);
+    let lost = |opacity: &dyn Fn(&Chunk<'_>) -> Chunk<'static>| {
+        let bytes = bytes_with_effect(fx.match_name, |t| with_effect_opacity(sspc(&fx, t), opacity(t)));
+        let (g, r) = import_bytes(&bytes, fx.match_name);
+        assert!(g.is_some(), "the placeholder still arrives");
+        losses(&r, LossCategory::Effects, fx.match_name).into_iter().filter(|d| d.contains("Effect Opacity")).count()
+    };
+    assert_eq!(lost(&|t| record(t, 37.0)), 1);
+    assert_eq!(lost(&|t| keyed_record(t, &[(0, 100.0), (25_600, 50.0)])), 1);
+    // 100 % loses nothing.
+    assert_eq!(lost(&|t| record(t, 100.0)), 0);
 }

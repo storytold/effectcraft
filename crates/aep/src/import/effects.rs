@@ -106,6 +106,7 @@ pub(crate) fn import_effects<'f, 'a>(
             // No counterpart: kept as a placeholder that renders nothing, for expressions (#3087).
             let mut group = crate::import::placeholder::placeholder(&fx, &params, cx, &shown, ids, refs, col);
             set_enabled(&fx, &mut group, cx, &shown, col);
+            report_placeholder_opacity(&fx, cx, &shown, col);
             col.lose_unmapped_effect(fx.match_name(), || format!("{}, kept without rendering", lost()));
             col.imported.placeholder_effects = col.imported.placeholder_effects.saturating_add(1);
             target.children.push(Node::Group(group));
@@ -114,6 +115,7 @@ pub(crate) fn import_effects<'f, 'a>(
         let size = [f64::from(cx.size.0), f64::from(cx.size.1)];
         let mut group = effectcraft_effects::instantiate(spec, ids, &shown, size);
         set_enabled(&fx, &mut group, cx, &shown, col);
+        import_effect_opacity(&fx, &mut group, cx, &shown, col);
         if map.extra == Extra::Lumetri {
             crate::import::lumetri::import_lumetri(&fx, &params, cx, &shown, ParamOut { group: &mut group, refs: &mut *refs, col: &mut *col });
         } else if map.extra == Extra::Cryptomatte {
@@ -144,6 +146,38 @@ fn set_enabled(fx: &AepEffect<'_, '_>, group: &mut PropGroup, cx: &LayerCtx<'_>,
         None => {
             col.lose_with(LossCategory::DamagedData, || format!("{}: '{}': the fx switch of '{shown}' is unreadable, imported switched on", cx.comp, cx.layer))
         }
+    }
+}
+
+/// After Effects' Compositing Options (the value group's `ADBE Effect Built In Params` group) blend
+/// an effect's result with its input by Effect Opacity: `ADBE Effect Mask Opacity` holds the
+/// percent (37 for 37 %, observed in After Effects 26.5 projects), with no record at the default
+/// 100. Its value, keys and expression go to the effect's Effect Opacity.
+pub(crate) fn import_effect_opacity(fx: &AepEffect<'_, '_>, group: &mut PropGroup, cx: &LayerCtx<'_>, shown: &str, col: &mut Collector) {
+    let Some(values) = fx.chunk().child_list(b"tdgp").and_then(crate::PropGroup::from_chunk) else { return };
+    let Some(crate::PropNode::Group(options)) = values.get("ADBE Effect Built In Params") else { return };
+    let Some(crate::PropNode::Property(opacity)) = options.get("ADBE Effect Mask Opacity") else { return };
+    let Some(prop) = group.prop_mut(effectcraft_effects::EFFECT_OPACITY) else { return };
+    let here = format!("{}: '{}' effect '{shown}' ({})", cx.comp, cx.layer, fx.match_name());
+    import_expression(&opacity, prop, col);
+    if opacity.is_animated() {
+        import_keys(&opacity, Kind::Number, cx.layer, &here, cx.tm, prop, col);
+    } else if let Some(v) = opacity.static_value().and_then(|v| v.first().copied()).filter(|v| v.is_finite()) {
+        prop.value = Value::Scalar(v.clamp(0.0, 100.0));
+    }
+}
+
+/// A placeholder (an effect without a counterpart) has no Effect Opacity: an Effect Opacity other
+/// than 100 %, keys or an expression on it are reported.
+fn report_placeholder_opacity(fx: &AepEffect<'_, '_>, cx: &LayerCtx<'_>, shown: &str, col: &mut Collector) {
+    let Some(values) = fx.chunk().child_list(b"tdgp").and_then(crate::PropGroup::from_chunk) else { return };
+    let Some(crate::PropNode::Group(options)) = values.get("ADBE Effect Built In Params") else { return };
+    let Some(crate::PropNode::Property(opacity)) = options.get("ADBE Effect Mask Opacity") else { return };
+    let partial = opacity.static_value().and_then(|v| v.first().copied()).is_some_and(|v| (v - 100.0).abs() > 1e-9);
+    if opacity.is_animated() || opacity.expression().is_some() || partial {
+        col.lose_with(LossCategory::Effects, || {
+            format!("{}: '{}' effect '{shown}' ({}): Effect Opacity is not kept on an effect without a counterpart", cx.comp, cx.layer, fx.match_name())
+        });
     }
 }
 

@@ -61,6 +61,7 @@ pub(crate) fn import_puppet<'f, 'a>(
         Some(on) => group.enabled = on,
         None => col.lose(LossCategory::DamagedData, format!("{}: '{}': the fx switch of '{shown}' is unreadable, imported switched on", cx.comp, cx.layer)),
     }
+    crate::import::effects::import_effect_opacity(fx, &mut group, cx, &shown, col);
     // The ordinary parameters (`parT`): none is mapped yet, so a stored one is reported.
     let params = defs.params(fx);
     for p in &params {
