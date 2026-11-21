@@ -333,7 +333,7 @@ fn basis(eye: [f64; 3], fwd: [f64; 3], down: [f64; 3]) -> [[f32; 4]; 3] {
 }
 
 /// Rasterise the shadow-casting triangles' light-space depth into `m`'s texels.
-fn shadow_raster(s: &Scene, m: &ShadowMap, casters: &[usize]) -> Vec<f32> {
+pub(crate) fn shadow_raster(s: &Scene, m: &ShadowMap, casters: &[usize]) -> Vec<f32> {
     let n = m.size as usize;
     let mut d = vec![f32::INFINITY; n * n];
     let c = n as f32 * 0.5;
@@ -341,7 +341,13 @@ fn shadow_raster(s: &Scene, m: &ShadowMap, casters: &[usize]) -> Vec<f32> {
     for &t in casters {
         let ids = [s.indices[3 * t] as usize, s.indices[3 * t + 1] as usize, s.indices[3 * t + 2] as usize];
         let mat = &s.materials[s.vertices[ids[0]].material as usize];
-        let alpha_tex = (mat.alpha_mode != 0 && mat.tex_base >= 0).then(|| &s.textures[mat.tex_base as usize]);
+        // Mask mode casts where the material's alpha passes its cutoff (as `shade` draws it);
+        // blend mode casts where its alpha times the layer's opacity reaches one half.
+        let (alpha_k, cutoff) = if mat.alpha_mode == 1 { (mat.base[3], mat.alpha_cutoff) } else { (mat.base[3] * mat.opacity, 0.5) };
+        let alpha_tex = if mat.alpha_mode != 0 && mat.tex_base >= 0 { s.textures.get(mat.tex_base as usize) } else { None };
+        if mat.alpha_mode == 1 && alpha_tex.is_none() && alpha_k < cutoff {
+            continue;
+        }
         // Light space, clipped against the near plane (perspective).
         let q: Vec<([f32; 3], [f32; 2])> = ids
             .iter()
@@ -416,7 +422,7 @@ fn shadow_raster(s: &Scene, m: &ShadowMap, casters: &[usize]) -> Vec<f32> {
                         continue;
                     }
                     if let Some(t) = alpha_tex
-                        && sample(t, &s.texels, uv[0], uv[1])[3] * mat.base[3] * mat.opacity < 0.5
+                        && sample(t, &s.texels, uv[0], uv[1])[3] * alpha_k < cutoff
                     {
                         continue;
                     }

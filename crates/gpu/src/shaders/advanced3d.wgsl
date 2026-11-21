@@ -471,15 +471,17 @@ fn fs(i: VOut, @builtin(front_facing) front: bool) -> FOut {
         base = base * sample_tex(tex_base, i.uv);
     }
     let opacity = m5.y;
-    var alpha = base.a * opacity;
-    if (alpha_mode == 1u && alpha < m2.w) {
+    // Mask mode tests the material's alpha against the cutoff, and a fragment that passes
+    // keeps only the layer's opacity. Blend mode multiplies the two.
+    if (alpha_mode == 1u && base.a < m2.w) {
         discard;
     }
-    if (alpha <= 1e-5 && alpha_mode != 0u) {
-        discard;
-    }
-    if (alpha_mode == 0u) {
-        alpha = opacity;
+    var alpha = opacity;
+    if (alpha_mode > 1u) {
+        alpha = base.a * opacity;
+        if (alpha <= 1e-5) {
+            discard;
+        }
     }
     let rgb = base.rgb;
     var emissive = m1.xyz;
