@@ -439,6 +439,75 @@ fn a_newer_viewer_frame_calls_off_the_one_rendering() {
     assert_eq!(f.inflight(), 0, "released");
 }
 
+/// Quitting while frames render: `main` returned with a worker still inside a frame's GPU work,
+/// and the process's exit handlers tore the device down under it (SIGSEGV or abort at exit).
+/// `shutdown` returns only once the running frame is done, and the queued ones never start.
+#[test]
+fn shutdown_waits_for_the_frames_rendering_and_drops_the_queued_ones() {
+    use effectcraft_engine::Session;
+    use effectcraft_engine::project::{Footage, FootageKind};
+    use effectcraft_engine::render::Image;
+    use effectcraft_engine::time::FrameRate;
+    use serde_json::json;
+    use std::sync::atomic::AtomicUsize;
+    /// A movie whose frames each take a while and can't be called off (like a GPU readback).
+    #[derive(Default)]
+    struct Slow {
+        started: AtomicUsize,
+        finished: AtomicUsize,
+    }
+    impl FootageSource for Slow {
+        fn frame(&self, _: ItemId, _: &Footage, _: Tick) -> Option<Arc<Image>> {
+            self.started.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            self.finished.fetch_add(1, Ordering::SeqCst);
+            Some(Arc::new(Image::new(4, 4)))
+        }
+    }
+    let mut s = Session::default();
+    let cid = ItemId(s.execute("comp.new", json!({"name": "A", "width": 8, "height": 8, "duration": 10})).unwrap()["comp"].as_u64().unwrap());
+    let clip = Footage {
+        kind: FootageKind::Video,
+        width: 4,
+        height: 4,
+        has_video: true,
+        frame_rate: FrameRate::FPS_30,
+        duration: Tick::from_seconds_f64(10.0),
+        ..Default::default()
+    };
+    let item = Arc::make_mut(&mut s.project).add_item("clip.mov", Default::default(), None, ItemKind::Footage(clip));
+    s.execute("layer.addItem", json!({"item": item.0})).unwrap();
+    let footage = Arc::new(Slow::default());
+    let src = RenderSource {
+        project: s.project.clone(),
+        footage: footage.clone(),
+        expr: None,
+        layer_cache: Arc::default(),
+        gpu: None,
+        gpu_display: false,
+        disk: None,
+    };
+    let f = Frames::default();
+    let content = f.content_of(&s.project, s.revision, cid);
+    let key = |frame| FrameKey { revision: s.revision, content, comp: cid.0, frame, scale: 1000, view: 0, opts: 0 };
+    for frame in 0..64 {
+        f.request(&src, key(frame), cid, FrameRate::FPS_30.tick_of(frame), RenderOpts::default());
+    }
+    for _ in 0..1000 {
+        if footage.started.load(Ordering::SeqCst) > 0 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    assert!(footage.started.load(Ordering::SeqCst) > 0, "a frame started rendering");
+    assert!(f.shutdown(std::time::Duration::from_secs(10)), "the workers stopped in time");
+    let started = footage.started.load(Ordering::SeqCst);
+    assert_eq!(footage.finished.load(Ordering::SeqCst), started, "no frame is still rendering once shutdown returns");
+    assert!(started < 64, "the queued frames were dropped ({started} of 64 started)");
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    assert_eq!(footage.started.load(Ordering::SeqCst), started, "no frame starts after shutdown");
+}
+
 /// #284: scrubbing asks for a viewer frame at every step; a newer one drops the comp's viewer
 /// frames still waiting (they would all render first), but not prefetch frames or another
 /// comp's viewer frame.
@@ -3508,11 +3577,12 @@ fn gpu_preview_lane_waits_for_admission_and_resets_its_marker() {
     let pool = rayon::ThreadPoolBuilder::new().num_threads(LANE_WIDTH).build().unwrap();
     let (started, ready) = std::sync::mpsc::channel();
     let (tx, rx) = std::sync::mpsc::channel();
+    let drains = std::sync::atomic::AtomicUsize::new(0);
     let (early, admitted, helper) = std::thread::scope(|scope| {
         scope.spawn(|| {
             pool.install(|| {
-                let _drain = Draining::enter(Some(0)).unwrap();
-                assert!(Draining::enter(None).is_none(), "a lane cannot start a nested drain");
+                let _drain = Draining::enter(Some(0), &drains).unwrap();
+                assert!(Draining::enter(None, &drains).is_none(), "a lane cannot start a nested drain");
                 assert!(DRAINING_LANE.get(), "nested rejection must not clear the lane marker");
                 started.send(()).unwrap();
                 tx.send(slots.for_render(2).is_some()).unwrap();
@@ -3536,10 +3606,11 @@ fn gpu_preview_lane_waits_for_admission_and_resets_its_marker() {
         assert!(!DRAINING.get());
         assert!(!DRAINING_LANE.get());
         let panic = std::panic::catch_unwind(|| {
-            let _drain = Draining::enter(Some(0)).unwrap();
+            let _drain = Draining::enter(Some(0), &drains).unwrap();
             panic!("synthetic lane failure");
         });
         assert!(panic.is_err());
+        assert_eq!(drains.load(Ordering::SeqCst), 0, "a panicking drain leaves the count");
         assert!(!DRAINING.get());
         assert!(!DRAINING_LANE.get());
     });
