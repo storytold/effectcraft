@@ -84,8 +84,10 @@ fn fg2_segs(@builtin(global_invocation_id) gid: vec3<u32>) {
             if (tr < -1e-4 || tr > 1.0001) {
                 continue;
             }
-            d = abs((px - ax) * dy - (py - ay) * dx) / sqrt(l2);
-            r = mix(r, data[at + 6u], clamp(tr, 0.0, 1.0));
+            let rb = data[at + 6u];
+            let slant = sqrt(1.0 + (rb - r) * (rb - r) / l2);
+            r = mix(r, rb, clamp(tr, 0.0, 1.0));
+            d = r + (abs((px - ax) * dy - (py - ay) * dx) / sqrt(l2) - r) / slant;
         } else {
             var t = 0.0;
             if (l2 > 1e-12) {

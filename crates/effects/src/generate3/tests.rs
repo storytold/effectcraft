@@ -205,18 +205,25 @@ fn stroke_taper_keeps_the_body_whole() {
 /// stroke does not end in a round cap reaching back over it.
 #[test]
 fn stroke_short_taper_comes_to_a_point() {
-    let masks = vec![MaskShape { name: "Mask 1".into(), points: vec![[8.0, 32.0], [56.0, 32.0]], closed: false, inverted: false }];
-    let env = EffectEnv { masks: &masks, ..Default::default() };
-    // Coverage before the stroke's start at x = 8, where an untapered brush ends in its round cap.
-    let tip = |set: &[(&str, Value)]| {
-        let mut all = vec![("brushSize", num(12.0)), ("brushHardness", num(100.0)), ("paintStyle", Value::Enum(1))];
-        all.extend(set.iter().cloned());
-        alpha_sum(&run_env("ec.generate.stroke", &all, Image::new(64, 64), 0.0, env).img, 0, 0, 8, 64)
-    };
-    let round = tip(&[]);
-    for shape in 0..3 {
-        let short = tip(&[("strokeTaper/startLength", num(1.0)), ("strokeTaper/startShape", Value::Enum(shape))]);
-        assert!(short < 1.0 && short < round * 0.1, "shape {shape}: {short} before the tip, untapered {round}");
+    // The same line as two points and as a dense polyline (as a curved mask arrives), whose
+    // corners get round dabs.
+    let line = vec![[8.0, 32.0], [56.0, 32.0]];
+    let dense: Vec<[f64; 2]> = (8..=56).map(|x| [x as f64, 32.0]).collect();
+    for points in [line, dense] {
+        let n = points.len();
+        let masks = vec![MaskShape { name: "Mask 1".into(), points, closed: false, inverted: false }];
+        let env = EffectEnv { masks: &masks, ..Default::default() };
+        // Coverage before the stroke's start at x = 8, where an untapered brush ends in its round cap.
+        let tip = |set: &[(&str, Value)]| {
+            let mut all = vec![("brushSize", num(12.0)), ("brushHardness", num(100.0)), ("paintStyle", Value::Enum(1))];
+            all.extend(set.iter().cloned());
+            alpha_sum(&run_env("ec.generate.stroke", &all, Image::new(64, 64), 0.0, env).img, 0, 0, 8, 64)
+        };
+        let round = tip(&[]);
+        for shape in 0..3 {
+            let short = tip(&[("strokeTaper/startLength", num(1.0)), ("strokeTaper/startShape", Value::Enum(shape))]);
+            assert!(short < 1.0 && short < round * 0.1, "{n} points, shape {shape}: {short} before the tip, untapered {round}");
+        }
     }
 }
 

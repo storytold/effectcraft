@@ -329,21 +329,43 @@ fn tapered_segs(pts: &[[f64; 2]], r: f64, taper: &StrokeTaper, segs: &mut Vec<Se
     }
     let (ls, le) = taper.lengths(len);
     let radius = |s: f64| r * taper.factor(s, len);
-    // Pieces about a pixel long, at least eight per taper (never more than 100 000 in all).
-    let piece = |zone: f64| (r * 0.5).clamp(0.5, 2.0).min(zone / 8.0).max(len / 100_000.0).max(1e-3);
+    // Pieces about a pixel long, at least eight per taper but no shorter than a quarter pixel
+    // (finer pieces change nothing visible, and the GPU's f32 slopes lose precision on them),
+    // never more than 100 000 in all.
+    let piece = |zone: f64| (r * 0.5).clamp(0.5, 2.0).min(zone / 8.0).max(0.25).max(len / 100_000.0);
     // (from, to, piece length or 0 for one full-width ribbon) along the drawn stroke.
     let zones = [(0.0, ls, piece(ls)), (ls, len - le, 0.0), (len - le, len, piece(le))];
     let dab = |q: [f64; 2], r: f64| Seg { a: q, b: q, r, v: 1.0 };
+    // `x` limited to the distance from `s` to a tapered tip, so nothing drawn at a corner
+    // reaches back past the point.
+    let tip_room = |s: f64, mut x: f64| {
+        if ls > 0.0 {
+            x = x.min(s);
+        }
+        if le > 0.0 {
+            x = x.min(len - s);
+        }
+        x
+    };
+    // Unit directions of the non-empty edges.
+    let dirs: Vec<Option<[f64; 2]>> = pts.windows(2).zip(&lens).map(|(w, &l)| (l > 0.0).then(|| [(w[1][0] - w[0][0]) / l, (w[1][1] - w[0][1]) / l])).collect();
+    // How far the pieces meeting at a corner at `s` reach past it to close the outer side of
+    // the bend (a miter, for turns up to 60°; sharper corners rely on the corner dab).
+    let reach = |s: f64, d0: [f64; 2], d1: [f64; 2]| {
+        let turn = (d0[0] * d1[0] + d0[1] * d1[1]).clamp(-1.0, 1.0).acos().min(std::f64::consts::FRAC_PI_3);
+        tip_room(s, radius(s) * (turn * 0.5).tan())
+    };
     if ls <= 0.0 {
         segs.push(dab(pts[0], r));
     }
     let mut acc = 0.0;
-    for (w, &l) in pts.windows(2).zip(&lens) {
-        if l <= 0.0 {
-            continue;
-        }
-        if acc > 0.0 {
-            segs.push(dab(w[0], radius(acc)));
+    for (k, (w, &l)) in pts.windows(2).zip(&lens).enumerate() {
+        let Some(d) = dirs[k] else { continue };
+        let prev = dirs[..k].iter().rev().flatten().next().copied();
+        let next = dirs[k + 1..].iter().flatten().next().copied();
+        let (back, ahead) = (prev.map_or(0.0, |p| reach(acc, p, d)), next.map_or(0.0, |n| reach(acc + l, d, n)));
+        if prev.is_some() {
+            segs.push(dab(w[0], tip_room(acc, radius(acc))));
         }
         let at = |s: f64| {
             let t = ((s - acc) / l).clamp(0.0, 1.0);
@@ -357,7 +379,14 @@ fn tapered_segs(pts: &[[f64; 2]], r: f64, taper: &StrokeTaper, segs: &mut Vec<Se
             let n = if step > 0.0 { ((b - a) / step).ceil().max(1.0) as usize } else { 1 };
             for i in 0..n {
                 let (s0, s1) = (a + (b - a) * i as f64 / n as f64, a + (b - a) * (i + 1) as f64 / n as f64);
-                ribbons.push(Ribbon { a: at(s0), b: at(s1), ra: radius(s0), rb: radius(s1) });
+                let (mut p0, mut p1) = (at(s0), at(s1));
+                if s0 <= acc {
+                    p0 = [p0[0] - d[0] * back, p0[1] - d[1] * back];
+                }
+                if s1 >= acc + l {
+                    p1 = [p1[0] + d[0] * ahead, p1[1] + d[1] * ahead];
+                }
+                ribbons.push(Ribbon { a: p0, b: p1, ra: radius(s0), rb: radius(s1) });
             }
         }
         acc += l;
