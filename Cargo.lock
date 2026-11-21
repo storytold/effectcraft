@@ -2064,6 +2064,7 @@ dependencies = [
  "effectcraft-automation",
  "effectcraft-engine",
  "effectcraft-gpu",
+ "effectcraft-helper-host",
  "effectcraft-host",
  "effectcraft-render",
  "effectcraft-sam2",
@@ -2073,6 +2074,7 @@ dependencies = [
  "effectcraft-ui-egui",
  "image",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
