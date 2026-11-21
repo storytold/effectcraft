@@ -250,6 +250,82 @@ pub(super) fn stroke(ctx: &EffectCtx, mut b: Buf) -> Buf {
     b
 }
 
+/// Items of the Stroke effect's Taper ▸ Start Shape / End Shape popups.
+pub(super) const TAPER_SHAPES: [&str; 3] = ["Linear", "Convex", "Concave"];
+
+/// The Stroke effect's taper: the brush narrows to a point over the first and last part of
+/// the drawn stroke. Lengths are fractions of the drawn length; shapes index [`TAPER_SHAPES`].
+#[derive(Clone, Copy)]
+struct StrokeTaper {
+    start: f64,
+    end: f64,
+    start_shape: u32,
+    end_shape: u32,
+}
+
+impl StrokeTaper {
+    fn is_active(&self) -> bool {
+        self.start > 0.0 || self.end > 0.0
+    }
+
+    /// Ramp from the tip (`u = 0`) to full width (`u = 1`): straight, bulging outwards
+    /// (convex: a quarter circle, full width early and a rounded tip) or bending inwards
+    /// (concave: a parabola, thin near the tip and widening steadily). The concave ramp is not
+    /// the mirrored quarter circle, which rises vertically into full width and leaves a step
+    /// where the taper meets the rest of the stroke.
+    fn ramp(u: f64, shape: u32) -> f64 {
+        let u = u.clamp(0.0, 1.0);
+        match shape {
+            1 => (1.0 - (1.0 - u) * (1.0 - u)).sqrt(),
+            2 => u * u,
+            _ => u,
+        }
+    }
+
+    /// Brush radius factor (0–1) at distance `s` along a drawn stroke `len` long.
+    fn factor(&self, s: f64, len: f64) -> f64 {
+        let (mut ls, mut le) = (self.start * len, self.end * len);
+        // Tapers longer than the stroke together share it in proportion.
+        if ls + le > len && ls + le > 0.0 {
+            let f = len / (ls + le);
+            ls *= f;
+            le *= f;
+        }
+        let mut k: f64 = 1.0;
+        if ls > 0.0 && s < ls {
+            k = k.min(Self::ramp(s / ls, self.start_shape));
+        }
+        if le > 0.0 && s > len - le {
+            k = k.min(Self::ramp((len - s) / le, self.end_shape));
+        }
+        k
+    }
+}
+
+/// Segments along a polyline with the brush radius `r` narrowed by `taper`: each segment is
+/// cut into short pieces whose radius follows the taper, so the width changes smoothly.
+fn tapered_segs(pts: &[[f64; 2]], r: f64, taper: &StrokeTaper, out: &mut Vec<Seg>) {
+    let lens: Vec<f64> = pts.windows(2).map(|w| ((w[1][0] - w[0][0]).powi(2) + (w[1][1] - w[0][1]).powi(2)).sqrt()).collect();
+    let len: f64 = lens.iter().sum();
+    if len <= 0.0 {
+        poly_segs(pts, false, r, 1.0, out);
+        return;
+    }
+    // Pieces about a pixel long (never more than 100 000 of them for one stroke).
+    let step = (r * 0.5).clamp(0.5, 2.0).max(len / 100_000.0);
+    let mut acc = 0.0;
+    for (w, &l) in pts.windows(2).zip(&lens) {
+        let n = (l / step).ceil().max(1.0) as usize;
+        for i in 0..n {
+            let (t0, t1) = (i as f64 / n as f64, (i + 1) as f64 / n as f64);
+            let at = |t: f64| [w[0][0] + (w[1][0] - w[0][0]) * t, w[0][1] + (w[1][1] - w[0][1]) * t];
+            let mid = acc + l * (t0 + t1) * 0.5;
+            out.push(Seg { a: at(t0), b: at(t1), r: r * taper.factor(mid, len), v: 1.0 });
+        }
+        acc += l;
+    }
+}
+
 fn stroke_plan(ctx: &EffectCtx, b: &Buf) -> PaintPlan {
     let pr = ctx.params;
     let all = pr.b("allMasks");
@@ -262,6 +338,12 @@ fn stroke_plan(ctx: &EffectCtx, b: &Buf) -> PaintPlan {
     let end = pr.f("end").clamp(0.0, 100.0) / 100.0;
     let spacing = pr.f("spacing") / 100.0;
     let sequential = pr.b("strokeSequentially");
+    let taper = StrokeTaper {
+        start: pr.f("strokeTaper/startLength").clamp(0.0, 100.0) / 100.0,
+        end: pr.f("strokeTaper/endLength").clamp(0.0, 100.0) / 100.0,
+        start_shape: pr.e("strokeTaper/startShape"),
+        end_shape: pr.e("strokeTaper/endShape"),
+    };
     let lens: Vec<f64> = polys.iter().map(|(p, c, _)| poly_length(p, *c)).collect();
     let total: f64 = lens.iter().sum();
     let mut segs = Vec::new();
@@ -279,13 +361,17 @@ fn stroke_plan(ctx: &EffectCtx, b: &Buf) -> PaintPlan {
         }
         if spacing <= 0.5 {
             let part = trim_poly(pts, *closed, s0, s1);
-            poly_segs(&part, false, r, 1.0, &mut segs);
+            if taper.is_active() {
+                tapered_segs(&part, r, &taper, &mut segs);
+            } else {
+                poly_segs(&part, false, r, 1.0, &mut segs);
+            }
         } else {
             let step = (size * spacing).max(0.5);
             let mut s = s0;
             while s <= s1 + 1e-9 && segs.len() < 200_000 {
                 let (q, _) = crate::util::poly_point_at(pts, *closed, s);
-                segs.push(Seg { a: q, b: q, r, v: 1.0 });
+                segs.push(Seg { a: q, b: q, r: r * taper.factor(s - s0, s1 - s0), v: 1.0 });
                 s += step;
             }
         }

@@ -150,6 +150,35 @@ fn stroke_draws_along_mask() {
     assert_eq!(run("ec.generate.stroke", &[], src.clone()).img.data, src.data);
 }
 
+/// The Stroke effect's Taper narrows the brush to a point at each end, straight (Linear),
+/// rounded (Convex) or pinched (Concave), on solid strokes and on spaced dabs.
+#[test]
+fn stroke_taper_narrows_each_end_by_shape() {
+    let masks = vec![MaskShape { name: "Mask 1".into(), points: vec![[8.0, 32.0], [56.0, 32.0]], closed: false, inverted: false }];
+    let env = EffectEnv { masks: &masks, ..Default::default() };
+    // Width at x = 14: a quarter of the way along a 24 px start taper.
+    let width_at = |x: usize, set: &[(&str, Value)]| {
+        let mut all = vec![("brushSize", num(12.0)), ("brushHardness", num(100.0)), ("paintStyle", Value::Enum(1))];
+        all.extend(set.iter().cloned());
+        let out = run_env("ec.generate.stroke", &all, Image::new(64, 64), 0.0, env);
+        alpha_sum(&out.img, x, 0, x + 1, 64)
+    };
+    let full = width_at(14, &[]);
+    let start = |shape: u32| width_at(14, &[("strokeTaper/startLength", num(50.0)), ("strokeTaper/startShape", Value::Enum(shape))]);
+    let (linear, convex, concave) = (start(0), start(1), start(2));
+    assert!(concave < linear && linear < convex && convex < full, "concave {concave} < linear {linear} < convex {convex} < full {full}");
+    // The end taper narrows the other end and leaves the start alone.
+    let end = [("strokeTaper/endLength", num(50.0))];
+    assert!(width_at(50, &end) < width_at(50, &[]) * 0.5 && (width_at(14, &end) - full).abs() < 0.5);
+    // Spaced dabs shrink along the taper too.
+    let dabs = |set: &[(&str, Value)]| {
+        let mut all = vec![("brushSize", num(8.0)), ("spacing", num(300.0)), ("paintStyle", Value::Enum(1))];
+        all.extend(set.iter().cloned());
+        alpha_sum(&run_env("ec.generate.stroke", &all, Image::new(64, 64), 0.0, env).img, 0, 0, 64, 64)
+    };
+    assert!(dabs(&[("strokeTaper/startLength", num(100.0))]) < dabs(&[]));
+}
+
 #[test]
 fn vegas_traces_contours() {
     let mut img = Image::new(64, 64);

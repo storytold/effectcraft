@@ -1126,6 +1126,7 @@ pub const PARAM_GROUPS: &[(&str, &str)] = &[
     ("highQualitySettings", "High Quality Settings"),
     ("edgeOptions", "Edge Options"),
     ("strokeOptions", "Stroke Options"),
+    ("strokeTaper", "Taper"),
 ];
 
 /// Display names of nested parameter groups by match id.
