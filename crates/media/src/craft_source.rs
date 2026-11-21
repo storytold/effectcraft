@@ -1529,7 +1529,9 @@ impl MediaSource for CraftMediaSource {
 
         let audible_start = i64::try_from(i128::from(start) + edit_range.start as i128).unwrap_or(i64::MAX);
         let native_rate = entry.native_rate;
-        let (native_start, mut native_frames) = native_audio_window(audible_start, audible_frames, native_rate, sample_rate);
+        let Some((native_start, mut native_frames, phase)) = resampling_window(audible_start, audible_frames, native_rate, sample_rate) else {
+            return Ok(AudioBuffer::new(sample_rate, channels_count as u16, frames));
+        };
         if native_rate != sample_rate {
             // The resampler asks for lookahead. Do not interpolate with samples
             // that are stored in the track but lie beyond the edit.
@@ -1581,8 +1583,12 @@ impl MediaSource for CraftMediaSource {
             }
         };
 
-        let mut channels =
-            if sample_rate == native_rate { decoded } else { resample_audio(&decoded, channels_count, native_rate, sample_rate, audible_frames) };
+        let mut channels = if sample_rate == native_rate {
+            decoded
+        } else {
+            let first_output = if audible_start < 0 { usize::try_from(audible_start.unsigned_abs()).unwrap_or(audible_frames).min(audible_frames) } else { 0 };
+            resample_audio_with_phase(&decoded, native_rate, sample_rate, audible_frames, phase, first_output)
+        };
         if audible_frames < frames {
             for channel in &mut channels {
                 channel.resize(frames, 0.0);
@@ -1644,17 +1650,9 @@ impl MediaSource for StandaloneAudioSource {
             return Ok(AudioBuffer::new(sample_rate, channels_count as u16, frames));
         }
         let native_rate = self.native_rate;
-        let (native_start, native_frames, phase) = if sample_rate == native_rate {
-            (start, frames, 0)
-        } else {
-            let scaled = i128::from(start) * i128::from(native_rate);
-            let divisor = i128::from(sample_rate);
-            let Ok(origin) = i64::try_from(scaled.div_euclid(divisor)) else {
-                // An unrepresentable source position cannot address this stream.
-                return Ok(AudioBuffer::new(sample_rate, channels_count as u16, frames));
-            };
-            // Reuse the existing window size, but not its truncating start calculation.
-            (origin, native_audio_window(0, frames, native_rate, sample_rate).1, scaled.rem_euclid(divisor) as u64)
+        let Some((native_start, native_frames, phase)) = resampling_window(start, frames, native_rate, sample_rate) else {
+            // An unrepresentable source position cannot address this stream.
+            return Ok(AudioBuffer::new(sample_rate, channels_count as u16, frames));
         };
 
         let mut state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1664,14 +1662,13 @@ impl MediaSource for StandaloneAudioSource {
         }
         // Negative output positions are silence, not interpolation into frame zero.
         let first_output = if start < 0 { usize::try_from(start.unsigned_abs()).unwrap_or(frames).min(frames) } else { 0 };
-        Ok(AudioBuffer { sample_rate, channels: resample_standalone_audio(&decoded, native_rate, sample_rate, frames, phase, first_output) })
+        Ok(AudioBuffer { sample_rate, channels: resample_audio_with_phase(&decoded, native_rate, sample_rate, frames, phase, first_output) })
     }
 }
 
 /// Step the fractional input position as an exact integer quotient and remainder;
 /// rounding happens only when interpolating a sample, independent of the window.
-#[cfg(any(unix, windows))]
-fn resample_standalone_audio(decoded: &[Vec<f32>], native_rate: u32, sample_rate: u32, frames: usize, phase: u64, first_output: usize) -> Vec<Vec<f32>> {
+fn resample_audio_with_phase(decoded: &[Vec<f32>], native_rate: u32, sample_rate: u32, frames: usize, phase: u64, first_output: usize) -> Vec<Vec<f32>> {
     let mut out = vec![vec![0.0; frames]; decoded.len()];
     let divisor = u64::from(sample_rate);
     let first = first_output as u128 * u128::from(native_rate) + u128::from(phase);
@@ -1738,13 +1735,15 @@ fn decode_standalone_range(native_rate: u32, channels_count: usize, state: &mut 
     Ok(drain_audio_window(&mut state.buf, &mut state.decoded_pos, channels_count, start, frames))
 }
 
-fn native_audio_window(start: i64, frames: usize, native_rate: u32, sample_rate: u32) -> (i64, usize) {
+fn resampling_window(start: i64, frames: usize, native_rate: u32, sample_rate: u32) -> Option<(i64, usize, u64)> {
     if sample_rate == native_rate {
-        return (start, frames);
+        return Some((start, frames, 0));
     }
-    let s0 = (i128::from(start) * i128::from(native_rate)) / i128::from(sample_rate);
+    let scaled = i128::from(start) * i128::from(native_rate);
+    let divisor = i128::from(sample_rate);
+    let origin = i64::try_from(scaled.div_euclid(divisor)).ok()?;
     let len = ((frames as u128 * u128::from(native_rate)).div_ceil(u128::from(sample_rate)) + 2) as usize;
-    (i64::try_from(s0).unwrap_or(0), len)
+    Some((origin, len, scaled.rem_euclid(divisor) as u64))
 }
 
 fn drain_audio_window(buf: &mut [Vec<f32>], decoded_pos: &mut i64, channels_count: usize, start: i64, frames: usize) -> Vec<Vec<f32>> {
@@ -1771,26 +1770,6 @@ fn drain_audio_window(buf: &mut [Vec<f32>], decoded_pos: &mut i64, channels_coun
         *decoded_pos = decoded_pos.saturating_add(trim as i64);
     }
     out
-}
-
-fn resample_audio(decoded: &[Vec<f32>], channels_count: usize, native_rate: u32, sample_rate: u32, frames: usize) -> Vec<Vec<f32>> {
-    let mut resampled = vec![vec![0.0f32; frames]; channels_count];
-    let ratio = f64::from(native_rate) / f64::from(sample_rate);
-    for (c, out_ch) in resampled.iter_mut().enumerate() {
-        let in_ch = &decoded[c];
-        if in_ch.is_empty() {
-            continue;
-        }
-        for (i, dst) in out_ch.iter_mut().enumerate() {
-            let pos = i as f64 * ratio;
-            let idx = pos.floor() as usize;
-            let frac = (pos - idx as f64) as f32;
-            let s0 = in_ch.get(idx).copied().unwrap_or(0.0);
-            let s1 = in_ch.get(idx + 1).copied().unwrap_or(s0);
-            *dst = s0 + (s1 - s0) * frac;
-        }
-    }
-    resampled
 }
 
 #[cfg(any(unix, windows))]
@@ -3686,6 +3665,74 @@ mod tests {
 
         let rewound = decode(&mut wide_tracks[0], 0, 600);
         assert_eq!(rewound[0], wide[0][..600]);
+    }
+
+    #[test]
+    fn container_audio_preserves_fractional_resampling_phase_across_seeks() {
+        let mut mux =
+            avi::AviWriter::new(std::io::Cursor::new(Vec::new()), vec![avi::StreamSpec::Audio(avi::AudioSpec::pcm(48_000, 1, 16))], avi::MuxOptions::default())
+                .unwrap();
+        let mut pcm = Vec::with_capacity(4800 * 2);
+        for i in 0..4800i32 {
+            // Frame 4000 is exactly 0 so output frame 3675 (at 44.1 kHz) lands on 0.0.
+            let sample = ((i - 4000) * 5).clamp(-32767, 32767) as i16;
+            pcm.extend_from_slice(&sample.to_le_bytes());
+        }
+        mux.write_chunk(0, &pcm, true).unwrap();
+        let bytes: Arc<[u8]> = Arc::from(mux.finish().unwrap().into_inner());
+
+        let src = open_bytes("ramp.avi", bytes.clone()).expect("recognized").expect("opened");
+        let resampled = src.audio(0, 256, 44_100).expect("resampled");
+
+        let cold = open_bytes("ramp.avi", bytes).expect("recognized").expect("opened");
+        let alone = cold.audio(1, 1, 44_100).expect("single output frame");
+        // Output frame 1 at 44.1 kHz is native frame 160/147 (between native 1 and 2: -19995 and -19990).
+        let expected = (-19995.0 + (13.0 / 147.0) * 5.0) / 32768.0;
+        assert!((alone.channels[0][0] - expected).abs() < 1e-7, "absolute fractional phase");
+        assert_eq!(alone.channels[0][0], resampled.channels[0][1], "single-frame seek matches block");
+
+        let pre_roll = cold.audio(-1, 3, 44_100).expect("negative output window");
+        assert_eq!(pre_roll.channels[0][0], 0.0, "silence before frame zero");
+        assert_eq!(&pre_roll.channels[0][1..], &resampled.channels[0][..2], "crossing frame zero preserves phase");
+
+        let crossing = cold.audio(3670, 6, 44_100).expect("cross zero sample");
+        let zero = cold.audio(3675, 1, 44_100).expect("zero sample alone");
+        assert_eq!(crossing.channels[0][5], 0.0);
+        assert_eq!(crossing.channels[0][5], zero.channels[0][0]);
+
+        let after_end = cold.audio(4410, 2, 44_100).expect("after EOF");
+        assert!(after_end.channels.iter().flatten().all(|&s| s == 0.0));
+        let out_of_range = cold.audio(i64::MAX / 2, 1, 1).expect("unreachable origin");
+        assert!(out_of_range.channels.iter().flatten().all(|&s| s == 0.0));
+
+        // 48->44.1 kHz MOV edit boundary: full read, split read, and fresh seek must all agree,
+        // sample 6,218 must not blend in the stored tail past the edit, and sample 6,219 must be silent.
+        const MOV_TRIM: usize = 9_600;
+        const MOV_EDIT_FRAMES: usize = 1_968;
+        let mov_samples: Vec<i16> = (0..12_000).map(|i| 1_000 + (i % 257) as i16 * 32).collect();
+        let last_in_edit = f32::from(mov_samples[MOV_TRIM + MOV_EDIT_FRAMES - 1]) / 32_768.0;
+        let mov_bytes: Arc<[u8]> = edited_pcm_mov(
+            48_000,
+            &mov_samples,
+            vec![
+                isobmff::Edit { segment_duration: 100, media_time: -1, media_rate: 0x0001_0000 },
+                isobmff::Edit { segment_duration: 41, media_time: MOV_TRIM as i64, media_rate: 0x0001_0000 },
+            ],
+        )
+        .into();
+        let full_mov = open_bytes("edited-pcm.mov", mov_bytes.clone()).expect("recognized").expect("opened");
+        let full_window = full_mov.audio(6_200, 25, 44_100).expect("full mov read").channels.remove(0);
+        assert_eq!(full_window[18], last_in_edit, "sample 6,218 must not blend in the tail past the edit");
+        assert_eq!(full_window[19], 0.0, "sample 6,219 must be silent");
+
+        let split_mov = open_bytes("edited-pcm.mov", mov_bytes.clone()).expect("recognized").expect("opened");
+        let mut split_window = split_mov.audio(6_200, 18, 44_100).expect("split part 1").channels.remove(0);
+        split_window.extend_from_slice(&split_mov.audio(6_218, 7, 44_100).expect("split part 2").channels[0]);
+        assert_eq!(split_window, full_window, "split read must match full read");
+
+        let seek_mov = open_bytes("edited-pcm.mov", mov_bytes).expect("recognized").expect("opened");
+        let seek_window = seek_mov.audio(6_218, 2, 44_100).expect("fresh seek").channels.remove(0);
+        assert_eq!(seek_window, full_window[18..20], "fresh seek must match full read");
     }
 
     #[test]
