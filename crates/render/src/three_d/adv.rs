@@ -52,6 +52,13 @@ pub fn rasterize(s: &Scene) -> Result<Target, RenderError> {
     craft_raster3d::try_render(s, &limits())
 }
 
+/// Whether `craft_raster3d::try_shadow_maps` gives light `l` six maps from its mark (one per
+/// major axis of the light → point direction) instead of one: a point light, or a spot light
+/// whose outer cone's half angle plus 0.05 radians is over 1.45 radians.
+pub fn cube_shadow_maps(l: &Light) -> bool {
+    l.kind == 2 || (l.kind == 1 && f64::from(l.cos_outer.clamp(-1.0, 1.0).acos()) + 0.05 > 1.45)
+}
+
 /// Box-filter a supersampled target down by `k`: (premultiplied colour, mean depth of the
 /// covered subsamples, ∞ where none).
 pub fn resolve(t: &Target, k: u32) -> Result<(Image, Vec<f32>), RenderError> {

@@ -13,7 +13,7 @@
 //! Wireframe-quality layers draw their outlines here too ([`wireframe`]).
 
 use effectcraft_render::three_d::Dof;
-use effectcraft_render::three_d::adv::{Prepared, Rendered, Scene, Target};
+use effectcraft_render::three_d::adv::{Prepared, Rendered, Scene, Target, cube_shadow_maps};
 use effectcraft_render::three_d::bokeh;
 
 use crate::context::{Enc, GpuContext, GpuImage};
@@ -392,7 +392,8 @@ fn pack(s: &Scene) -> [Vec<u8>; 7] {
             l.falloff_distance,
             l.shadow as f32,
             l.shadow_darkness,
-            0.0,
+            // Six maps from `shadow` (the shader's `light_shadow` picks the cube face).
+            cube_shadow_maps(l) as u32 as f32,
             0.0,
             0.0,
         ]

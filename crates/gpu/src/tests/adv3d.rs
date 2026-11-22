@@ -198,6 +198,18 @@ fn gpu_matches_cpu_shadow_catcher() {
 }
 
 #[test]
+fn gpu_matches_cpu_wide_spot_light_shadows() {
+    // A 170° cone is wider than one map covers: the spot light's shadow has six maps, and the
+    // shader picks the face as it does for a point light.
+    let Some(g) = gpu() else { return };
+    let (mut p, cid) = scene_project();
+    set(&mut p.comp_mut(cid).unwrap().layers[1], "lightOptions/coneAngle", Value::Scalar(170.0));
+    let s = scene(&p, cid);
+    assert!(s.lights.iter().any(|l| l.kind == 1 && l.shadow >= 0 && adv::cube_shadow_maps(l)), "the spot light has six maps");
+    compare(&s, &g);
+}
+
+#[test]
 fn gpu_masked_surfaces_cover_fully_where_they_pass_the_cutoff() {
     // Every material in mask mode with alpha 0.6 at the default cutoff of 0.5: each sample is
     // either fully covered or empty, as on the CPU.

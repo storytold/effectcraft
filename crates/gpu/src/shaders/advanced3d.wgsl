@@ -321,12 +321,14 @@ fn shadow_factor(m: u32, p: vec3<f32>, ng: vec3<f32>, n_l: f32) -> f32 {
     return lit / f32(n * n);
 }
 
-fn light_shadow(li: u32, kind: u32, lpos: vec3<f32>, shadow: i32, darkness: f32, p: vec3<f32>, ng: vec3<f32>, n_l: f32) -> f32 {
+// `cube`: the light has six maps from `shadow` (a point light, or a spot light wider than one
+// map; lights[..].l4.y), picked by the major axis of the light → point direction.
+fn light_shadow(li: u32, cube: bool, lpos: vec3<f32>, shadow: i32, darkness: f32, p: vec3<f32>, ng: vec3<f32>, n_l: f32) -> f32 {
     if (shadow < 0) {
         return 1.0;
     }
     var face = 0u;
-    if (kind == 2u) {
+    if (cube) {
         let d = p - lpos;
         let a = abs(d);
         if (a.x >= a.y && a.x >= a.z) {
@@ -437,7 +439,7 @@ fn shadow_only_amount(unlit: bool, normal: vec3<f32>, front: bool, pos: vec3<f32
         if (n_l <= 0.0) {
             continue;
         }
-        amount = max(amount, 1.0 - light_shadow(li, kind, l0.xyz, i32(l3.w), l4.x, pos, n, n_l));
+        amount = max(amount, 1.0 - light_shadow(li, l4.y > 0.5, l0.xyz, i32(l3.w), l4.x, pos, n, n_l));
     }
     // The Environment light's shadow counts too (it reaches every surface: no falloff).
     if (g.ambient.w > 0.5) {
@@ -561,7 +563,7 @@ fn fs(i: VOut, @builtin(front_facing) front: bool) -> FOut {
         }
         var sh = 1.0;
         if (receives_shadows) {
-            sh = light_shadow(li, kind, l0.xyz, i32(l3.w), l4.x, i.pos, ng, n_l);
+            sh = light_shadow(li, l4.y > 0.5, l0.xyz, i32(l3.w), l4.x, i.pos, ng, n_l);
         }
         let b = brdf(rgb, metallic, rough, spec_k, diff_k, n, v, to_l);
         acc = acc + b * l2.xyz * k * sh;

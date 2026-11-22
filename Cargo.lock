@@ -1533,7 +1533,7 @@ dependencies = [
 [[package]]
 name = "craft-raster3d"
 version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=47fb47a664859a800c814a41dd6f43d6b31866a2#47fb47a664859a800c814a41dd6f43d6b31866a2"
+source = "git+https://github.com/storytold/craft-libs?rev=6275beb15cd6a088d1df53217067a3587b30d5e5#6275beb15cd6a088d1df53217067a3587b30d5e5"
 dependencies = [
  "rayon",
  "thiserror 2.0.21",

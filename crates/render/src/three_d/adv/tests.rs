@@ -310,6 +310,37 @@ fn masked_casters_shadow_where_they_pass_their_cutoff() {
 }
 
 #[test]
+fn cube_shadow_maps_names_the_lights_that_get_six_maps() {
+    // The GPU shader picks a cube face for these lights, so the rule must give the map count
+    // craft_raster3d assigns: a point light, and a spot light whose half angle plus 0.05 is
+    // over 1.45 radians.
+    let mut s = quad_scene(8, 8, &[([-2.0, -2.0, 2.0, 2.0], 10.0, [1.0; 4])]);
+    s.materials[0].casts_shadows = true;
+    for (kind, half, cube) in [(0u32, 0.0f64, false), (2, 0.0, true), (1, 0.6, false), (1, 1.39, false), (1, 1.41, true), (1, 1.5, true)] {
+        let c = half.cos() as f32;
+        let l = Light {
+            kind,
+            pos: [0.0, 0.0, -10.0],
+            dir: [0.0, 0.0, 1.0],
+            color: [1.0; 3],
+            cos_inner: c,
+            cos_outer: c,
+            falloff: 0,
+            radius: 0.0,
+            falloff_distance: 0.0,
+            shadow: 0,
+            shadow_darkness: 1.0,
+            shadow_diffusion: 0.0,
+        };
+        assert_eq!(cube_shadow_maps(&l), cube, "kind {kind}, half angle {half}");
+        let mut s = s.clone();
+        s.lights = vec![l];
+        craft_raster3d::try_shadow_maps(&mut s, false, &limits()).unwrap();
+        assert_eq!(s.shadows.len(), if cube { 6 } else { 1 }, "kind {kind}, half angle {half}");
+    }
+}
+
+#[test]
 fn textures_sample_bilinear_with_wrap_modes() {
     let t = TexInfo { offset: 0, width: 2, height: 1, wrap_u: 0, wrap_v: 1 };
     let texels = vec![[0.0, 0.0, 0.0, 1.0], [1.0, 1.0, 1.0, 1.0]];
