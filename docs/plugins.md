@@ -350,7 +350,11 @@ effects can be registered.
   opaque plug-in data). `text` / `hidden` take no slot in `flat`; their strings are in
   `PluginParams::texts`, one per such parameter in declaration order, read with
   `PluginParams::text(id)`. `slider` gains `"integer": true` (shown with 0 decimals) and every
-  parameter an optional `"group"` path (`"Advanced/Edges"`; informational). WebAssembly modules
+  parameter an optional `"group"` path (`"Advanced/Edges"`). A grouped parameter nests in a
+  twirl-down group like a built-in effect's: its spec / property id becomes `pg_<group>/<id>`
+  (each path segment slugified and `pg_`-prefixed, so it never collides with a built-in group key)
+  and Effect Controls shows the manifest's words as the group's name. Parameters without a group
+  keep their plain id, so existing plug-ins and saved projects are unaffected. WebAssembly modules
   can't use `point3`, `layer`, `text` or `hidden`.
 * **`PluginFrame`** also carries `origin` (buffer pixels of layer pixel (0, 0); padding shifts it)
   and `layer_size` (layer pixels).

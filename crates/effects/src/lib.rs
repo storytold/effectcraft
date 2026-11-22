@@ -1128,8 +1128,12 @@ pub const PARAM_GROUPS: &[(&str, &str)] = &[
     ("strokeOptions", "Stroke Options"),
 ];
 
-/// Display names of nested parameter groups by match id.
+/// Display names of nested parameter groups by match id (built-in tables and plug-in manifests).
 fn group_name(m: &str) -> &str {
+    // Groups declared by plug-in manifests (`group` field).
+    if let Some(n) = plugin::plugin_group_name(m) {
+        return n;
+    }
     warp_stab::GROUPS
         .iter()
         .chain(roto::GROUPS)
