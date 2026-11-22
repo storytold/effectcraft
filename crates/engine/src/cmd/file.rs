@@ -688,7 +688,8 @@ fn ocio_config_setting(
             Value::String(t) if t.contains(['\n', '\r']) => return Err(bad(cmd, "ocioConfig: a path to an .ocio file")),
             // The stored value sent back (the form sends every field): kept as it is, also one the
             // stored-path rules refused when the project opened.
-            Value::String(t) if proj.settings.ocio_config.as_deref() == Some(t.trim()) => proj.settings.ocio_config.clone(),
+            // (Compared as sent first: a stored value with spaces around it is the same value.)
+            Value::String(t) if proj.settings.ocio_config.as_deref().is_some_and(|c| c == t || c == t.trim()) => proj.settings.ocio_config.clone(),
             // Stored absolute, so Save As elsewhere keeps the same file.
             Value::String(t) if std::path::Path::new(t.trim()).is_absolute() => Some(t.trim().to_string()),
             Value::String(t) => match doc {

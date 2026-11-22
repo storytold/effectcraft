@@ -299,14 +299,16 @@ fn a_refused_stored_path_sent_back_unchanged_does_not_block_other_settings() {
     s.execute("file.projectSettings", json!({"ocioConfig": cfg})).unwrap();
     let path = d.join("p.ecproj");
     s.execute("file.saveAs", json!({"path": path.to_string_lossy()})).unwrap();
-    let url = "https://example.com/studio.ocio";
-    let text = std::fs::read_to_string(&path).unwrap().replace(&serde_json::to_string(&cfg).unwrap(), &serde_json::to_string(url).unwrap());
-    std::fs::write(&path, text).unwrap();
-    let mut o = Session::default();
-    let r = o.execute("file.open", json!({"path": path.to_string_lossy()})).unwrap();
-    assert_eq!((o.project.settings.ocio_config.as_deref(), &r["ocio"]["loaded"]), (Some(url), &json!(false)));
-    o.execute("file.projectSettings", json!({"ocioConfig": url, "bitDepth": 16})).unwrap();
-    assert_eq!(o.project.settings.bit_depth, effectcraft_project::BitDepth::Bpc16);
+    let saved = std::fs::read_to_string(&path).unwrap();
+    // Also with spaces around it: the form sends the stored value exactly.
+    for url in ["https://example.com/studio.ocio", " https://example.com/studio.ocio "] {
+        std::fs::write(&path, saved.replace(&serde_json::to_string(&cfg).unwrap(), &serde_json::to_string(url).unwrap())).unwrap();
+        let mut o = Session::default();
+        let r = o.execute("file.open", json!({"path": path.to_string_lossy()})).unwrap();
+        assert_eq!((o.project.settings.ocio_config.as_deref(), &r["ocio"]["loaded"]), (Some(url), &json!(false)));
+        o.execute("file.projectSettings", json!({"ocioConfig": url, "bitDepth": 16})).unwrap();
+        assert_eq!(o.project.settings.bit_depth, effectcraft_project::BitDepth::Bpc16, "{url:?}");
+    }
     let _ = std::fs::remove_dir_all(d);
 }
 

@@ -476,3 +476,27 @@ fn check_lut_files_notices_a_configs_lut() {
     assert!(cached_files(&src).is_none(), "a config whose LUT changed is read again");
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// The files a confined session checks before loading a config are every file the loader can
+/// open: a FileTransform nested in a long GroupTransform chain, still inside the parser's limit, is
+/// listed too.
+#[test]
+fn file_candidates_reach_every_file_transform_the_loader_parses() {
+    let leaf = if cfg!(windows) { r"C:\nonexistent-ec\leaf.spi1d" } else { "/nonexistent-ec/leaf.spi1d" };
+    let groups = 25;
+    let mut body = String::new();
+    let mut ind = 4;
+    for _ in 0..groups {
+        body.push_str(&format!("{}- !<GroupTransform>\n{}  children:\n", " ".repeat(ind), " ".repeat(ind)));
+        ind += 4;
+    }
+    body.push_str(&format!("{}- !<FileTransform> {{src: \"{}\"}}\n", " ".repeat(ind), leaf.replace('\\', "\\\\")));
+    let text = format!(
+        "ocio_profile_version: 2\nroles:\n  scene_linear: a\ncolorspaces:\n  - !<ColorSpace>\n    name: a\n    to_scene_reference: !<GroupTransform>\n      children:\n{}",
+        body.lines().map(|l| format!("    {l}\n")).collect::<String>()
+    );
+    let cfg = Config::parse(&text, Path::new("/")).unwrap();
+    assert!(cfg.unsupported().iter().any(|u| u.contains("leaf.spi1d")), "the loader reaches the leaf: {:?}", cfg.unsupported());
+    let found = file_candidates(&text, Path::new("/"));
+    assert!(found.iter().any(|p| p == Path::new(leaf)), "{found:?}");
+}

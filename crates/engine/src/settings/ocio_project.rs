@@ -160,7 +160,9 @@ pub enum Resolved {
 /// Whether the session may read a config file, and why not: the file exists and the session's
 /// [`crate::Services`] may read it (an agent confined to its folders can't), and the path wasn't
 /// refused when the project was opened ([`resolve_stored`]).
-pub type Readable<'a> = &'a dyn Fn(&str) -> Result<(), String>;
+/// A session confined to some folders returns the config text it checked (`Some`), which is the
+/// text loaded, so the file can't be swapped between the check and the load.
+pub type Readable<'a> = &'a dyn Fn(&str) -> Result<Option<String>, String>;
 
 /// What the active config depends on besides the project: the `OCIO` environment variable, the
 /// studio default and which files can be read.
@@ -182,21 +184,34 @@ pub struct Notice {
 /// Why the config at `p` isn't read: a relative path (resolved against the project's folder when
 /// it is chosen or opened, [`resolve_stored`], so one left over has no folder), or one the
 /// session can't read.
-fn gate(p: &str, readable: Readable) -> Result<(), String> {
+fn gate(p: &str, readable: Readable) -> Result<Option<String>, String> {
     if !std::path::Path::new(p).is_absolute() {
         return Err(format!("{p}: a relative path, and the project has no folder to take it from"));
     }
     readable(p)
 }
 
+/// The config at `p`: from the text a confined session checked, else read (and cached) by
+/// [`load_config`].
+fn load_checked(p: &str, checked: Option<String>) -> Result<std::sync::Arc<Config>, String> {
+    match checked {
+        Some(text) => {
+            let dir = std::path::Path::new(p).parent().unwrap_or(std::path::Path::new("."));
+            Config::parse(&text, dir).map(std::sync::Arc::new)
+        }
+        None => load_config(p),
+    }
+}
+
 /// Resolve the config at `path` (`None`: built-in). Only an absolute path is read: a relative
 /// one is resolved against the project's folder when it is chosen or opened ([`resolve_stored`]).
 pub fn resolve(path: Option<&str>, readable: Readable) -> Resolved {
     let Some(p) = some_path(path) else { return Resolved::BuiltIn };
-    if let Err(e) = gate(p, readable) {
-        return Resolved::Unreadable(e);
-    }
-    match load_config(p) {
+    let checked = match gate(p, readable) {
+        Ok(t) => t,
+        Err(e) => return Resolved::Unreadable(e),
+    };
+    match load_checked(p, checked) {
         Err(e) => Resolved::Unreadable(e),
         Ok(cfg) => match resolve_working_space(&cfg) {
             Ok((_, ws)) => Resolved::Space(ws),
@@ -263,10 +278,11 @@ pub fn status(ctx: Ctx, st: &ProjectSettings) -> Value {
         out["fallback"] = json!("builtIn");
         out
     };
-    if let Err(e) = gate(path, ctx.readable) {
-        return fail(out, e);
-    }
-    let cfg = match load_config(path) {
+    let checked = match gate(path, ctx.readable) {
+        Ok(t) => t,
+        Err(e) => return fail(out, e),
+    };
+    let cfg = match load_checked(path, checked) {
         Ok(c) => c,
         Err(e) => return fail(out, e),
     };
@@ -366,7 +382,7 @@ pub fn resolve_stored(st: &mut ProjectSettings, doc: Option<&str>) -> Option<(St
 impl crate::Session {
     /// [`Readable`] for this session: the path wasn't refused when the project opened, and the
     /// session's services can see the file.
-    pub fn ocio_readable(&self) -> impl Fn(&str) -> Result<(), String> + use<> {
+    pub fn ocio_readable(&self) -> impl Fn(&str) -> Result<Option<String>, String> + use<> {
         let services = self.services.clone();
         let refused = self.ocio_refused.clone();
         move |p: &str| {
@@ -380,7 +396,7 @@ impl crate::Session {
             // open are read outside the services, so each one is checked before loading it.
             if services.read_restricted() {
                 let text = services.read_file(p).map_err(|e| format!("{p}: {e}"))?;
-                let text = String::from_utf8_lossy(&text);
+                let text = String::from_utf8(text).map_err(|_| format!("{p}: not a text file"))?;
                 let dir = std::path::Path::new(p).parent().unwrap_or(std::path::Path::new("."));
                 for c in effectcraft_effects::ocio_config::file_candidates(&text, dir) {
                     let c = c.to_string_lossy();
@@ -389,8 +405,9 @@ impl crate::Session {
                         return Err(format!("{p}: a FileTransform of the config reads {c}, outside the folders this session may read"));
                     }
                 }
+                return Ok(Some(text));
             }
-            Ok(())
+            Ok(None)
         }
     }
 

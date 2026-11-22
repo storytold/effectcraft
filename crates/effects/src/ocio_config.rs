@@ -914,24 +914,26 @@ fn search_path_of(y: &Yaml) -> Vec<String> {
 /// found before any is touched (a session confined to some folders checks them first). It looks
 /// at every `FileTransform` node of the document, also ones the parser doesn't use.
 pub fn file_candidates(text: &str, dir: &Path) -> Vec<PathBuf> {
-    fn walk(y: &Yaml, depth: usize, f: &mut dyn FnMut(&str)) {
-        if depth > MAX_YAML_DEPTH {
-            return;
-        }
-        if y.tag() == Some("FileTransform") {
-            f(y.text("src"));
-        }
-        match y {
-            Yaml::Seq(v) => v.iter().for_each(|c| walk(c, depth + 1, f)),
-            Yaml::Map(m) => m.iter().for_each(|(_, c)| walk(c, depth + 1, f)),
-            Yaml::Tagged(_, c) => walk(c, depth + 1, f),
-            _ => {}
+    // Every node, with no depth limit of its own (an explicit stack: the parser already bounds the
+    // tree), so no FileTransform the loader parses is missed however it is nested.
+    fn walk(root: &Yaml, f: &mut dyn FnMut(&str)) {
+        let mut stack = vec![root];
+        while let Some(y) = stack.pop() {
+            if y.tag() == Some("FileTransform") {
+                f(y.text("src"));
+            }
+            match y {
+                Yaml::Seq(v) => stack.extend(v),
+                Yaml::Map(m) => stack.extend(m.iter().map(|(_, c)| c)),
+                Yaml::Tagged(_, c) => stack.push(c),
+                _ => {}
+            }
         }
     }
     let y = parse_yaml(text);
     let search = search_path_of(&y);
     let mut out = vec![];
-    walk(&y, 0, &mut |src| {
+    walk(&y, &mut |src| {
         if src.trim().is_empty() {
             return;
         }

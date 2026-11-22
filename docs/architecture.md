@@ -521,7 +521,7 @@ Default OCIO Config is never stored on a new project (with `OCIO` set, the varia
 file services can see it: an agent confined to its automation roots (`--automation-read-root`)
 gets the built-in config for a config elsewhere, and while confined `ocioConfig` must be an
 absolute path inside the roots. A confined session also checks every file the config's FileTransforms
-could open (each search-path candidate, before any is touched; a `..` in one counts as outside)
+could open (each search-path candidate of every FileTransform however deeply nested, before any is touched; a `..` in one counts as outside; the config text checked is the text loaded)
 and doesn't load a config that reaches outside the roots, saying which file. (The OCIO effects'
 own config and LUT parameters are not covered by this.) The active
 config is, in order: the `OCIO` environment variable (read once by the host into
