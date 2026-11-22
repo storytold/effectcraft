@@ -54,6 +54,7 @@ fn draw_children(app: &mut EffectcraftApp, ui: &mut egui::Ui, origin: egui::Pos2
             let hr = Rect::from_min_size(pos2(x, r.min.y), vec2(tw, 22.0));
             let active = i == w.active_tab;
             let resp = ui.interact(hr, egui::Id::unique(("sui-tab", win, tab.id)), Sense::click());
+            scroll_to_focus(&resp);
             ui.painter().rect_filled(
                 hr,
                 3.0,
@@ -97,9 +98,7 @@ fn draw_widget(app: &mut EffectcraftApp, ui: &mut egui::Ui, origin: egui::Pos2, 
     // A control the keyboard moves to is scrolled into view (a docked panel taller than its dock
     // scrolls), and shows its help tip on hover.
     let tip = |r: egui::Response| {
-        if r.gained_focus() {
-            r.scroll_to_me(None);
-        }
+        scroll_to_focus(&r);
         if w.help_tip.is_empty() { r } else { r.on_hover_text(&w.help_tip) }
     };
     // onDraw: the script paints the control. Without drawOSControl() its paint replaces the
@@ -223,7 +222,7 @@ fn draw_widget(app: &mut EffectcraftApp, ui: &mut egui::Ui, origin: egui::Pos2, 
             let mut pick: Option<usize> = None;
             ui.add_enabled_ui(w.enabled, |ui| {
                 ui.scope_builder(UiBuilder::new().max_rect(rect), |ui| {
-                    craft_ui::ComboBox::from_id_salt(id).selected_text(cur).width(rect.width() - 8.0).show_ui(ui, |ui| {
+                    let r = craft_ui::ComboBox::from_id_salt(id).selected_text(cur).width(rect.width() - 8.0).show_ui(ui, |ui| {
                         for (i, it) in w.items.iter().enumerate() {
                             if it == "-" {
                                 ui.separator();
@@ -232,6 +231,7 @@ fn draw_widget(app: &mut EffectcraftApp, ui: &mut egui::Ui, origin: egui::Pos2, 
                             }
                         }
                     });
+                    tip(r.response);
                 });
             });
             if let Some(i) = pick
@@ -248,7 +248,9 @@ fn draw_widget(app: &mut EffectcraftApp, ui: &mut egui::Ui, origin: egui::Pos2, 
                     egui::ScrollArea::vertical().id_salt(id).max_height(rect.height() - 4.0).show(ui, |ui| {
                         ui.set_width(rect.width() - 8.0);
                         for (i, it) in w.items.iter().enumerate() {
-                            if ui.selectable_label(w.selection.contains(&i), it).clicked() {
+                            let r = ui.selectable_label(w.selection.contains(&i), it);
+                            scroll_to_focus(&r);
+                            if r.clicked() {
                                 pick = Some(i);
                             }
                         }
@@ -750,13 +752,29 @@ fn panel_scroll<R>(
     })
 }
 
+/// A control the keyboard moves to is scrolled into view (a docked panel taller than its dock
+/// scrolls, as does a list box).
+fn scroll_to_focus(r: &egui::Response) {
+    if r.gained_focus() {
+        r.scroll_to_me(None);
+    }
+}
+
 /// The size a docked panel's `window` (its laid-out [width, height]) fills in `dock`: at least the
-/// dock, but a window taller than its dock (which scrolls down like a page) fills only the width
-/// its vertical scroll bar, `bar` wide, leaves, so the bar doesn't add a horizontal one.
+/// dock. A window taller than its dock (which scrolls down like a page) and no wider than it
+/// fills only the width its vertical scroll bar, `bar` wide, leaves, so the bar doesn't add a
+/// horizontal one; a window wider than its dock keeps its width and scrolls both ways.
 fn panel_fill(dock: egui::Vec2, window: [f64; 2], bar: f32) -> [f64; 2] {
     let tall = window[1] > f64::from(dock.y.ceil());
-    let width = f64::from(if tall { (dock.x - bar).max(1.0) } else { dock.x });
-    [width.max(window[0]), f64::from(dock.y).max(window[1])]
+    let wide = window[0] > f64::from(dock.x.ceil());
+    let width = if wide {
+        window[0]
+    } else if tall {
+        f64::from((dock.x - bar).max(1.0))
+    } else {
+        f64::from(dock.x).max(window[0])
+    };
+    [width, f64::from(dock.y).max(window[1])]
 }
 
 /// Whether a docked panel's scroll bars may show: never while its window fits the dock.
@@ -854,11 +872,17 @@ mod tests {
     #[test]
     fn a_tall_panel_scrolls_only_down() {
         let bar = egui::style::ScrollStyle::solid().allocated_width();
-        let fill = panel_fill(DOCK, [f64::from(DOCK.x) - 20.0, 500.0], bar);
-        let window = vec2(fill[0] as f32, fill[1] as f32);
-        let (viewport, content) = panel_frames(DOCK, window, window);
-        assert_eq!(viewport.height(), DOCK.y, "no horizontal bar takes height");
-        assert!(viewport.width() < DOCK.x && content.y > DOCK.y, "a vertical bar scrolls the page ({viewport:?}, {content:?})");
+        // A window narrower than the dock and one exactly as wide (the size a script is told).
+        for width in [f64::from(DOCK.x) - 20.0, f64::from(DOCK.x)] {
+            let fill = panel_fill(DOCK, [width, 500.0], bar);
+            let window = vec2(fill[0] as f32, fill[1] as f32);
+            let (viewport, content) = panel_frames(DOCK, window, window);
+            assert_eq!(viewport.height(), DOCK.y, "no horizontal bar takes height (window {width} wide)");
+            assert!(viewport.width() < DOCK.x && content.y > DOCK.y, "a vertical bar scrolls the page ({viewport:?}, {content:?})");
+        }
+        // A window wider than its dock keeps its width, and scrolls both ways.
+        let wide = panel_fill(DOCK, [f64::from(DOCK.x) + 50.0, 500.0], bar);
+        assert_eq!(wide[0], f64::from(DOCK.x) + 50.0);
         // A window that fits fills the whole dock, as before.
         assert_eq!(panel_fill(DOCK, [100.0, 100.0], bar), [f64::from(DOCK.x), f64::from(DOCK.y)]);
     }

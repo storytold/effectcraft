@@ -562,8 +562,8 @@ fn a_docked_panel_button_opens_the_file_dialog() {
 }
 
 /// A docked panel taller than its dock scrolls down like a page: Tab to a control below the
-/// visible part scrolls the dock to it (the panel's window stays as tall as its content, as a
-/// panel listing many items sizes itself in onResize).
+/// visible part scrolls the dock to it (the panel's window stays as wide as its dock and as tall
+/// as its content, as a panel listing many items sizes itself in onResize).
 #[test]
 fn tab_to_a_control_below_a_tall_panels_dock_scrolls_to_it() {
     use effectcraft_engine::config::{ConfigStore, MemoryConfig};
@@ -577,8 +577,7 @@ fn tab_to_a_control_below_a_tall_panels_dock_scrolls_to_it() {
       p.alignChildren = ["left", "top"];
       for (var i = 1; i <= 40; i++) p.add("button", undefined, "Item " + i, { name: "item" + i });
       p.onResize = function () {
-        var w = p.size.width;
-        p.size = [w - 16, 40 * 35 + 20];
+        p.size = [p.size.width, 40 * 35 + 20];
         p.layout.layout(true);
       };
     "#;
