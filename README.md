@@ -20,7 +20,7 @@
 
 <p align="center">
   A free, open-source compositor: compositions, layers,
-  keyframes, 308 effects, layer styles, expressions, 3D cameras and lights, and a render queue, native on macOS,
+  keyframes, 309 effects, layer styles, expressions, 3D cameras and lights, and a render queue, native on macOS,
   Windows and Linux, and in the browser. Young, moving fast, and already usable.
 </p>
 
@@ -127,7 +127,7 @@ or into the Timeline, between layers and at the time you point to.
 
 ## Effects
 
-308 built-in effects across its categories, each with its parameter names, order and
+309 built-in effects across its categories, each with its parameter names, order and
 defaults: blur and sharpen, channel, color correction (Curves, Levels, Hue/Saturation, a full
 color-grading panel…), distort (Warp, Bulge, Turbulent Displace, Perspective Pin…), generate (Fractal Noise,
 Gradient Ramp, Stroke, Write-on, Audio Spectrum…), keying, matte, noise and grain, perspective,
@@ -227,7 +227,7 @@ tests, layering, asset attribution and the WebAssembly build). See [CONTRIBUTING
 ## Where it stands
 
 EffectCraft is young: its first commit was on 1 October 2026. A comprehensive feature set
-exists, including 308 effects, but breadth is not the same as full maturity across every edge
+exists, including 309 effects, but breadth is not the same as full maturity across every edge
 case. Today it's a good place to try things and to tell us what breaks. It isn't yet recommended
 for production client work. In particular:
 

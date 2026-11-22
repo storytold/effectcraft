@@ -3,11 +3,11 @@
 <!-- Generated from the effect registry (crates/effects/src/catalog.rs); do not edit by hand.
      Regenerate: UPDATE_DOCS=1 cargo test -p effectcraft-effects --lib effects_doc_is_current -->
 
-EffectCraft ships 308 effects with 2992 parameters in total, grouped into the same categories as the Effects & Presets panel. Every effect is our own implementation, written from public behaviour descriptions and standard image-processing literature. Parameter names, order, popup options, units, defaults and ranges follow the reference application so that projects, expressions and muscle memory carry over.
+EffectCraft ships 309 effects with 3002 parameters in total, grouped into the same categories as the Effects & Presets panel. Every effect is our own implementation, written from public behaviour descriptions and standard image-processing literature. Parameter names, order, popup options, units, defaults and ranges follow the reference application so that projects, expressions and muscle memory carry over.
 
 - **GPU**: 280 effects also run on the GPU compositor with identical results.
-- **32**: 308 effects process 32-bit float (HDR, overbright) pixels without clamping.
-- **Status**: 308 implemented in full, 0 partial (what is missing is listed).
+- **32**: 309 effects process 32-bit float (HDR, overbright) pixels without clamping.
+- **Status**: 309 implemented in full, 0 partial (what is missing is listed).
 
 Effects are addressed by id (`ec.<category>.<name>`) or display name in commands, scripts and the control channel, and every parameter by its id (`effects/#1/blurriness`). A parameter that was renamed keeps its old name working in expressions of older projects: `effect("CC Ball Action")("Instability State")` still reads Scatter Motion.
 
@@ -362,6 +362,7 @@ Effects are addressed by id (`ec.<category>.<name>`) or display name in commands
 | Posterize | `ec.stylize.posterize` | 1 | GPU | 32 | Implemented |
 | RGB Threshold | `ec.stylize.ccthresholdrgb` | 7 | GPU | 32 | Implemented |
 | Roughen Edges | `ec.stylize.roughenedges` | 13 | GPU | 32 | Implemented |
+| Rounded Corners | `ec.stylize.roundedcorners` | 10 |  | 32 | Implemented |
 | Scatter | `ec.stylize.scatter` | 3 | GPU | 32 | Implemented |
 | Strobe Light | `ec.stylize.strobe` | 7 | GPU | 32 | Implemented |
 | Texturize | `ec.stylize.texturize` | 4 | GPU | 32 | Implemented |
