@@ -560,3 +560,48 @@ fn a_docked_panel_button_opens_the_file_dialog() {
     let status = h.state().session.script_ui.window(panel).and_then(|w| w.root.lookup(&json!("status"))).map(|w| w.text.clone()).unwrap_or_default();
     assert_eq!(status, "Episode 1.srt");
 }
+
+/// A docked panel taller than its dock scrolls down like a page: Tab to a control below the
+/// visible part scrolls the dock to it (the panel's window stays as tall as its content, as a
+/// panel listing many items sizes itself in onResize).
+#[test]
+fn tab_to_a_control_below_a_tall_panels_dock_scrolls_to_it() {
+    use effectcraft_engine::config::{ConfigStore, MemoryConfig};
+    use egui::Key;
+    use egui::accesskit::Role;
+    use egui_kittest::kittest::Queryable;
+    let store = std::sync::Arc::new(MemoryConfig::default());
+    let panel = r#"
+      var p = this;
+      p.orientation = "column";
+      p.alignChildren = ["left", "top"];
+      for (var i = 1; i <= 40; i++) p.add("button", undefined, "Item " + i, { name: "item" + i });
+      p.onResize = function () {
+        var w = p.size.width;
+        p.size = [w - 16, 40 * 35 + 20];
+        p.layout.layout(true);
+      };
+    "#;
+    store.write("Scripts/ScriptUI Panels/Tall Panel.jsx", panel).unwrap();
+    let mut s = effectcraft_host::session();
+    s.config = Some(store.clone());
+    s.execute("window.scriptPanel", json!({"name": "Tall Panel.jsx"})).unwrap();
+    let mut h = Harness::builder().with_size(egui::vec2(380.0, 600.0)).build_eframe(|_| EffectcraftApp::new(s));
+    h.run_steps(3);
+    let panel = h.state().session.script_ui.windows.iter().find(|w| w.script == "Tall Panel.jsx").expect("the panel's window").id;
+    h.state_mut().ui.maximized = Some(PanelKind::ScriptPanel(panel));
+    h.run_steps(6);
+    let screen = h.ctx.content_rect();
+    assert!(h.get_by_role_and_label(Role::Button, "Item 40").rect().min.y > screen.max.y, "the last item starts below the dock");
+    h.get_by_role_and_label(Role::Button, "Item 39").focus();
+    h.run_steps(3);
+    for pressed in [true, false] {
+        h.input_mut().events.push(Event::Key { key: Key::Tab, physical_key: None, pressed, repeat: false, modifiers: Default::default() });
+        h.step();
+    }
+    h.run_steps(6);
+    let last = h.get_by_role_and_label(Role::Button, "Item 40");
+    assert!(last.is_focused(), "Tab moves to the last item");
+    let r = last.rect();
+    assert!(r.min.y >= screen.min.y && r.max.y <= screen.max.y, "the dock scrolled it into view: {r:?}");
+}

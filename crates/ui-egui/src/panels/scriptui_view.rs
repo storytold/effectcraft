@@ -94,7 +94,14 @@ fn draw_widget(app: &mut EffectcraftApp, ui: &mut egui::Ui, origin: egui::Pos2, 
     let rect = rect_of(origin, w.bounds);
     register(app, win, w, rect);
     let id = egui::Id::unique(("sui", win, w.id));
-    let tip = |r: egui::Response| if w.help_tip.is_empty() { r } else { r.on_hover_text(&w.help_tip) };
+    // A control the keyboard moves to is scrolled into view (a docked panel taller than its dock
+    // scrolls), and shows its help tip on hover.
+    let tip = |r: egui::Response| {
+        if r.gained_focus() {
+            r.scroll_to_me(None);
+        }
+        if w.help_tip.is_empty() { r } else { r.on_hover_text(&w.help_tip) }
+    };
     // onDraw: the script paints the control. Without drawOSControl() its paint replaces the
     // default look (buttons and toggles still respond to clicks); with it, it goes on top.
     let custom = w.handlers.iter().any(|h| h == "onDraw");
@@ -703,8 +710,8 @@ pub fn panel(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect, id: u32) {
         return;
     };
     // Docked panels fill their frame (ScriptUI lays them out at the panel's size).
-    let (pw, ph) = (rect.width() as f64, rect.height() as f64);
-    w.root.fixed_bounds = Some([0.0, 0.0, pw.max(w.root.bounds[2]), ph.max(w.root.bounds[3])]);
+    let fill = panel_fill(rect.size(), [w.root.bounds[2], w.root.bounds[3]], ui.spacing().scroll.allocated_width());
+    w.root.fixed_bounds = Some([0.0, 0.0, fill[0], fill[1]]);
     layout(&mut w);
     // A modal script dialog blocks the panels too.
     let modal = app.session.script_ui.windows.iter().any(|w| w.modal);
@@ -741,6 +748,15 @@ fn panel_scroll<R>(
         let (r, _) = ui.allocate_exact_size(window, Sense::hover());
         body(ui, r)
     })
+}
+
+/// The size a docked panel's `window` (its laid-out [width, height]) fills in `dock`: at least the
+/// dock, but a window taller than its dock (which scrolls down like a page) fills only the width
+/// its vertical scroll bar, `bar` wide, leaves, so the bar doesn't add a horizontal one.
+fn panel_fill(dock: egui::Vec2, window: [f64; 2], bar: f32) -> [f64; 2] {
+    let tall = window[1] > f64::from(dock.y.ceil());
+    let width = f64::from(if tall { (dock.x - bar).max(1.0) } else { dock.x });
+    [width.max(window[0]), f64::from(dock.y).max(window[1])]
 }
 
 /// Whether a docked panel's scroll bars may show: never while its window fits the dock.
@@ -831,6 +847,20 @@ mod tests {
         let bar = egui::style::ScrollStyle::solid().allocated_width();
         assert_eq!(viewport.size(), DOCK - vec2(bar, bar), "solid bars on both axes");
         assert_eq!(content, big, "the whole window is scrollable");
+    }
+
+    /// A window taller than its dock but no wider (a panel that scrolls down like a page) fills
+    /// the width left by its vertical bar, so it doesn't also get a horizontal one.
+    #[test]
+    fn a_tall_panel_scrolls_only_down() {
+        let bar = egui::style::ScrollStyle::solid().allocated_width();
+        let fill = panel_fill(DOCK, [f64::from(DOCK.x) - 20.0, 500.0], bar);
+        let window = vec2(fill[0] as f32, fill[1] as f32);
+        let (viewport, content) = panel_frames(DOCK, window, window);
+        assert_eq!(viewport.height(), DOCK.y, "no horizontal bar takes height");
+        assert!(viewport.width() < DOCK.x && content.y > DOCK.y, "a vertical bar scrolls the page ({viewport:?}, {content:?})");
+        // A window that fits fills the whole dock, as before.
+        assert_eq!(panel_fill(DOCK, [100.0, 100.0], bar), [f64::from(DOCK.x), f64::from(DOCK.y)]);
     }
 
     #[test]
