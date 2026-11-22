@@ -592,7 +592,8 @@ fn tab_to_a_control_below_a_tall_panels_dock_scrolls_to_it() {
     let panel = h.state().session.script_ui.windows.iter().find(|w| w.script == "Tall Panel.jsx").expect("the panel's window").id;
     h.state_mut().ui.maximized = Some(PanelKind::ScriptPanel(panel));
     h.run_steps(6);
-    let screen = h.ctx.content_rect();
+    // The dock's body, where the panel scrolls.
+    let screen = rect(&h, &format!("scriptui.{panel}"));
     assert!(h.get_by_role_and_label(Role::Button, "Item 40").rect().min.y > screen.max.y, "the last item starts below the dock");
     h.get_by_role_and_label(Role::Button, "Item 39").focus();
     h.run_steps(3);
@@ -655,7 +656,8 @@ fn tab_to_an_item_far_down_a_tall_list_box_scrolls_the_dock_to_it() {
     let panel = h.state().session.script_ui.windows.iter().find(|w| w.script == "Two Lists.jsx").expect("the panel's window").id;
     h.state_mut().ui.maximized = Some(PanelKind::ScriptPanel(panel));
     h.run_steps(6);
-    let screen = h.ctx.content_rect();
+    // The dock's body, where the panel scrolls.
+    let screen = rect(&h, &format!("scriptui.{panel}"));
     assert!(h.get_by_label("Row 50").rect().min.y > screen.max.y, "row 50 starts below the dock");
     h.get_by_label("Row 49").focus();
     h.run_steps(3);
@@ -701,7 +703,8 @@ fn a_focused_item_of_a_scrolled_tall_list_moves_into_the_dock_once() {
     let panel = h.state().session.script_ui.windows.iter().find(|w| w.script == "Long List.jsx").expect("the panel's window").id;
     h.state_mut().ui.maximized = Some(PanelKind::ScriptPanel(panel));
     h.run_steps(6);
-    let screen = h.ctx.content_rect();
+    // The dock's body, where the panel scrolls.
+    let screen = rect(&h, &format!("scriptui.{panel}"));
     let tab_to = |h: &mut Harness<'_, EffectcraftApp>, from: &str, to: &str| {
         h.get_by_label(from).focus();
         h.run_steps(3);

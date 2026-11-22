@@ -288,10 +288,10 @@ fn draw_widget(app: &mut EffectcraftApp, ui: &mut egui::Ui, origin: egui::Pos2, 
                 } else {
                     now
                 };
-                if to != now {
-                    ui.data_mut(|d| d.insert_temp(pending, to));
-                    ui.ctx().request_repaint();
-                }
+                // Set even when unchanged: an offset given to the scroll area also stops any
+                // momentum the list still has, which would carry the item away again.
+                ui.data_mut(|d| d.insert_temp(pending, to));
+                ui.ctx().request_repaint();
                 let shown = Rect::from_min_size(pos2(r.min.x, view.min.y + top - to), r.size());
                 ui.scroll_to_rect(shown, None);
             }
