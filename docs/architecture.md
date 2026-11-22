@@ -174,9 +174,9 @@ origin, as in After Effects. The renderer moves the layer buffer into effect spa
 stack (`Buf::rebase`, on the CPU and the GPU alike) and hands effects everything else in it too:
 masks, other layers' pixels for layer parameters (each in its own effect space; with Sampling
 Space set to Comp, resampled from where the layer appears in the comp into this one's effect
-space, `EffectHost::to_comp_space`), the layer's own frames at other times
-(`Renderer::layer_input`, also what Puppet, Roto Brush and the Layer panel read) and the comp
-camera. Effect point handles, Puppet pins and the Layer panel map effect space
+space on the grid of the effect's input, `EffectHost::to_comp_space`), the layer's own frames
+at other times (`Renderer::layer_input`, also what Puppet, Roto Brush and the Layer panel read)
+and the comp camera. Effect point handles, Puppet pins and the Layer panel map effect space
 to the comp with `EvalCtx::effect_to_comp`. Adjustment layers run their effects on the comp below
 as it is.
 

@@ -275,9 +275,22 @@ pub struct Buf {
     pub scale: f64,
 }
 
+/// A [`Buf`]'s pixel grid without its pixels: its size in pixels and where points sit on it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BufGrid {
+    pub width: u32,
+    pub height: u32,
+    pub offset: [f64; 2],
+    pub scale: f64,
+}
+
 impl Buf {
     pub fn to_px(&self, p: [f64; 2]) -> (f64, f64) {
         (p[0] * self.scale + self.offset[0], p[1] * self.scale + self.offset[1])
+    }
+    /// The buffer's pixel grid.
+    pub fn grid(&self) -> BufGrid {
+        BufGrid { width: self.img.width, height: self.img.height, offset: self.offset, scale: self.scale }
     }
     /// Grow the buffer so it covers a `size`-layer-pixel region starting at its offset (see
     /// [`cover_plan`]): the whole layer rectangle a sized source's buffer already is. Content
@@ -539,9 +552,11 @@ pub trait EffectHost: Sync {
     /// `px`, layer `id`'s pixels as returned above (in its own effect space), resampled to where
     /// the layer appears in the comp and brought into the running layer's effect space, so the
     /// two line up wherever either sits (a layer parameter's "Comp" Sampling Space, the way a
-    /// track matte lines up). A host that resamples returns the running layer's size; the
-    /// default, with no comp to place the layers in, returns `px` as is.
-    fn to_comp_space(&self, _id: u64, px: LayerPixels) -> LayerPixels {
+    /// track matte lines up). `input` is the grid of the buffer the effect was handed, when
+    /// known: the result covers it, so what earlier effects added around the layer is read too.
+    /// A host that resamples returns the running layer's size; the default, with no comp to
+    /// place the layers in, returns `px` as is.
+    fn to_comp_space(&self, _id: u64, px: LayerPixels, _input: Option<BufGrid>) -> LayerPixels {
         px
     }
     /// The effect's own layer at another **layer time** `layer_time` (seconds): its source with
@@ -620,6 +635,8 @@ pub struct EffectEnv<'a> {
     /// source has no duration (stills, solids, text, shapes) or the renderer does not know it.
     /// Retimers clamp their source requests to it.
     pub layer_span: Option<(f64, f64)>,
+    /// The grid of the buffer the effect was handed ([`apply`] fills it in).
+    pub input: Option<BufGrid>,
 }
 
 /// What an effect gets to render with.
@@ -651,7 +668,7 @@ impl EffectCtx<'_> {
             None => host.layer(lid, masks_and_effects),
         }?;
         Some(match self.params.get(&layer_space_id(id)).map(Value::as_enum) {
-            Some(1) => host.to_comp_space(lid, px),
+            Some(1) => host.to_comp_space(lid, px, self.env.input),
             _ => px,
         })
     }
@@ -1593,7 +1610,8 @@ pub fn reads_param_history(id: &str) -> bool {
 
 /// Run an effect on a buffer.
 pub fn apply(spec: &EffectSpec, ctx: &EffectCtx, buf: Buf) -> Buf {
-    (spec.render)(ctx, buf)
+    let ctx = EffectCtx { env: EffectEnv { input: Some(buf.grid()), ..ctx.env }, ..*ctx };
+    (spec.render)(&ctx, buf)
 }
 
 /// Test helper: run effect `id` on `img` (scale 1, layer size = image size) with its defaults
@@ -1847,7 +1865,7 @@ mod tests {
         fn audio(&self, _: u64, _: f64, _: usize, _: u32) -> Option<Vec<f32>> {
             None
         }
-        fn to_comp_space(&self, _: u64, mut px: LayerPixels) -> LayerPixels {
+        fn to_comp_space(&self, _: u64, mut px: LayerPixels, _: Option<BufGrid>) -> LayerPixels {
             px.buf.img.data.iter_mut().for_each(|p| p[1] = 1.0);
             px
         }

@@ -81,6 +81,8 @@ struct PropCx<'a> {
     layer: &'a Layer,
     group: &'a PropGroup,
     prop: &'a Property,
+    /// The comp at the current time: what the render evaluates parameters with.
+    ectx: &'a EvalCtx<'a>,
     r: Rect,
     vx: f32,
     cy: f32,
@@ -227,7 +229,7 @@ fn prop_row(
     app.auto.add(&format!("effectControls.prop.{uid}.name"), name_clip, &prop.name);
     // With several layers selected the edit applies to the same effect property of each (#491).
     let scrub = ui.ctx().dragged_id().is_some() && ui.input(|i| i.pointer.is_decidedly_dragging());
-    let cx = PropCx { p, layer, group, prop, r, vx, cy, swr, t, uid, scrub };
+    let cx = PropCx { p, layer, group, prop, ectx, r, vx, cy, swr, t, uid, scrub };
     match &value {
         Value::Scalar(_) if matches!(prop.ui, ParamUi::Mask) => value_mask(app, ui, &cx, &value, actions),
         Value::Scalar(_) if matches!(prop.ui, ParamUi::Angle) => value_angle(app, ui, &cx, &value, actions),
@@ -486,7 +488,8 @@ fn value_layer_ref(app: &mut EffectcraftApp, ui: &mut egui::Ui, cx: &PropCx, val
 
 /// The popup of a layer parameter's companion parameters (automation id
 /// `effectControls.prop.<uid>.source`) at `at`, as wide as its text up to `max_w`: its source
-/// choice, then its Sampling Space, each section checked at its value. It reads as the source
+/// choice, then its Sampling Space, each section checked at its value at the current time (what
+/// the render reads: a companion can carry keys or an expression). It reads as the source
 /// choice, with the space appended when it is Comp.
 #[allow(clippy::too_many_arguments)]
 fn companion_popup(
@@ -500,9 +503,9 @@ fn companion_popup(
     actions: &mut Actions,
 ) {
     use effectcraft_engine::effects::{LAYER_SOURCE_OPTIONS, LAYER_SPACE_OPTIONS};
-    let PropCx { t, uid, layer, p, .. } = *cx;
-    let si = src.map(|p| p.value.as_enum() as usize);
-    let pi = space.map(|p| p.value.as_enum() as usize);
+    let PropCx { t, uid, layer, p, ectx, .. } = *cx;
+    let si = src.map(|p| ectx.value(layer, p).as_enum() as usize);
+    let pi = space.map(|p| ectx.value(layer, p).as_enum() as usize);
     let text = [si.and_then(|i| LAYER_SOURCE_OPTIONS.get(i)), pi.filter(|i| *i != 0).and_then(|i| LAYER_SPACE_OPTIONS.get(i))]
         .into_iter()
         .flatten()

@@ -462,7 +462,7 @@ fn particle_world_reads_a_hold_cut_at_its_exact_layer_time_under_any_stretch() {
         let l = &c.layers[0];
         let ctx = crate::eval::EvalCtx::new(&p, cid, c, Tick::ZERO);
         let renderer = Renderer::new(&p, &NoFootage, RenderOpts::default());
-        let host = FxHost { r: &renderer, ctx: &ctx, layer: l, origin: [0.0; 2], index: Default::default(), original: None };
+        let host = FxHost { r: &renderer, ctx: &ctx, layer: l, origin: [0.0; 2], adjustment: false, index: Default::default(), original: None };
         let rate = |t: f64| host.param_at(0, "birthRate", t).unwrap().as_f64();
         assert_eq!((rate(0.5 - 1.0 / 60.0), rate(0.5)), (3.0, 0.0), "stretch {stretch} %");
         assert!(!host.param_is_static(0, "birthRate"));
@@ -1388,7 +1388,7 @@ fn self_inputs_share_source_semantics_across_effects_and_times() {
     let c = p.comp(cid).unwrap();
     let ctx = crate::eval::EvalCtx::new(&p, cid, c, Tick::ZERO);
     let renderer = Renderer::new(&p, &NoFootage, RenderOpts::default());
-    let host = FxHost { r: &renderer, ctx: &ctx, layer: &l, origin: [0.0; 2], index: Default::default(), original: None };
+    let host = FxHost { r: &renderer, ctx: &ctx, layer: &l, origin: [0.0; 2], adjustment: false, index: Default::default(), original: None };
     assert_eq!(host.layer(l.id.0, false).unwrap().buf.img.get(150, 50)[3], 1.0);
     assert_eq!(host.layer_masks(l.id.0).unwrap().buf.img.get(150, 50)[3], 0.0);
     assert_eq!(host.layer_at(l.id.0, 0.5, false).unwrap().buf.img.get(150, 50)[3], 1.0);
@@ -1426,7 +1426,7 @@ fn timed_source_reads_preserve_other_layer_masks() {
     p.comp_mut(cid).unwrap().layers = vec![owner.clone(), other.clone()].into();
     let ctx = crate::EvalCtx::new(&p, cid, p.comp(cid).unwrap(), Tick::ZERO);
     let renderer = crate::Renderer::new(&p, &crate::NoFootage, crate::RenderOpts::default());
-    let host = crate::FxHost { r: &renderer, ctx: &ctx, layer: &owner, origin: [0.0; 2], index: Default::default(), original: None };
+    let host = crate::FxHost { r: &renderer, ctx: &ctx, layer: &owner, origin: [0.0; 2], adjustment: false, index: Default::default(), original: None };
     // Current Source and timed Source had different contracts before this fix. Keep
     // the existing timed read (used by Clone/Time effects) masked for other layers.
     assert_eq!(host.layer(other.id.0, false).unwrap().buf.img.get(150, 50)[3], 1.0);
@@ -2117,10 +2117,10 @@ fn layer_parameter_comp_sampling_space_lines_up_with_the_comp() {
     let ctx = crate::eval::EvalCtx::new(&p, cid, c, Tick::ZERO);
     let renderer = Renderer::new(&p, &NoFootage, RenderOpts::default());
     let l = c.layers.iter().find(|l| l.id.0 == lid).unwrap();
-    let host = FxHost { r: &renderer, ctx: &ctx, layer: l, origin: [0.0; 2], index: Default::default(), original: None };
+    let host = FxHost { r: &renderer, ctx: &ctx, layer: l, origin: [0.0; 2], adjustment: false, index: Default::default(), original: None };
     let own = host.layer(mid, false).unwrap();
     assert_eq!(own.size, [40.0, 40.0]);
-    let comp_space = host.to_comp_space(mid, own);
+    let comp_space = host.to_comp_space(mid, own, None);
     assert_eq!(comp_space.size, [200.0, 100.0]);
     assert_eq!((comp_space.buf.img.width, comp_space.buf.img.height), (200, 100));
 }
@@ -2254,8 +2254,8 @@ fn comp_sampling_space_keeps_a_subpixel_layers_grid() {
     let ctx = crate::eval::EvalCtx::new(&p, cid, c, Tick::ZERO);
     let renderer = Renderer::new(&p, &NoFootage, RenderOpts { scale: 0.5, ..RenderOpts::default() });
     let l = c.layer(lid).unwrap();
-    let host = FxHost { r: &renderer, ctx: &ctx, layer: l, origin: [0.0; 2], index: Default::default(), original: None };
-    let px = host.to_comp_space(mid, host.layer(mid, false).unwrap());
+    let host = FxHost { r: &renderer, ctx: &ctx, layer: l, origin: [0.0; 2], adjustment: false, index: Default::default(), original: None };
+    let px = host.to_comp_space(mid, host.layer(mid, false).unwrap(), None);
     assert_eq!(px.size, [1.0, 1.0]);
     assert_eq!((px.buf.img.width, px.buf.img.height, px.buf.offset, px.buf.scale), (1, 1, [0.0; 2], 0.5));
 }
@@ -2275,9 +2275,9 @@ fn comp_sampling_space_of_a_layer_placed_like_the_owner_keeps_the_read() {
     let c = p.comp(cid).unwrap();
     let ctx = crate::eval::EvalCtx::new(&p, cid, c, Tick::ZERO);
     let renderer = Renderer::new(&p, &NoFootage, RenderOpts::default());
-    let host = FxHost { r: &renderer, ctx: &ctx, layer: c.layer(lid).unwrap(), origin: [0.0; 2], index: Default::default(), original: None };
+    let host = FxHost { r: &renderer, ctx: &ctx, layer: c.layer(lid).unwrap(), origin: [0.0; 2], adjustment: false, index: Default::default(), original: None };
     let read = effectcraft_effects::LayerPixels { buf: Buf { img: Image::new(3, 3), offset: [5.0, 5.0], scale: 1.0 }, size: [200.0, 100.0] };
-    let px = host.to_comp_space(oid, read);
+    let px = host.to_comp_space(oid, read, None);
     assert_eq!((px.buf.img.width, px.buf.offset, px.size), (3, [5.0, 5.0], [200.0, 100.0]));
 }
 
@@ -2322,4 +2322,113 @@ fn comp_sampling_space_on_an_adjustment_layer_lines_up_with_the_comp() {
     // corner, left of the footprint.
     let img = render(0);
     assert!(img.get(150, 50)[3] < 0.01);
+}
+
+/// An adjustment layer read by another effect (Effects & Masks) runs its stack on its own
+/// source, like any layer: Comp space is then measured from where the layer sits, not from the
+/// comp's corner as when the stack runs on the comp below.
+#[test]
+fn comp_sampling_space_in_an_adjustment_layers_own_content_follows_the_layer() {
+    use crate::{NoFootage, RenderOpts, Renderer};
+    let (mut p, cid, comp) = setup();
+    let mut matte = solid(&mut p, &comp, [1.0, 1.0, 1.0], 40, 40);
+    matte.props.prop_mut("transform/position").unwrap().value = Value::Vec3([150.0, 50.0, 0.0]);
+    matte.switches.video = false;
+    // The right half of the comp: the matte (comp 130..170) is at 30..70 of its layer.
+    let mut adj = solid(&mut p, &comp, [1.0, 1.0, 1.0], 100, 100);
+    adj.props.prop_mut("transform/position").unwrap().value = Value::Vec3([150.0, 50.0, 0.0]);
+    adj.switches.adjustment = true;
+    add_effect(
+        &mut p,
+        &mut adj,
+        "ec.channel.setmatte",
+        [100.0, 100.0],
+        &[
+            ("takeMatteFromLayer", Value::Layer(Some(matte.id.0))),
+            ("takeMatteFromLayerSource", Value::Enum(0)),
+            ("takeMatteFromLayerSpace", Value::Enum(1)),
+            ("stretchMatteToFit", Value::Bool(false)),
+            ("compositeMatteWithOriginal", Value::Bool(false)),
+        ],
+    );
+    let aid = adj.id;
+    let c = p.comp_mut(cid).unwrap();
+    c.layers.push(matte);
+    c.layers.push(adj);
+    let c = p.comp(cid).unwrap();
+    let ctx = crate::eval::EvalCtx::new(&p, cid, c, Tick::ZERO);
+    let renderer = Renderer::new(&p, &NoFootage, RenderOpts::default());
+    let content = renderer.content_buf(&ctx, c.layer(aid).unwrap()).unwrap();
+    let alpha = |x: f64, y: f64| {
+        let (px, py) = content.to_px([x, y]);
+        content.img.sample_bilinear(px, py)[3]
+    };
+    assert!(alpha(50.0, 50.0) > 0.99, "under the matte layer");
+    assert!(alpha(15.0, 50.0) < 0.01 && alpha(85.0, 50.0) < 0.01, "beside it");
+}
+
+/// What an earlier effect adds around the layer (a blur's spread) is under a Comp-space matte
+/// that covers it in the comp: the read reaches past the layer's own rectangle.
+#[test]
+fn comp_sampling_space_reaches_what_earlier_effects_add_around_the_layer() {
+    let render = |matte_on: bool| {
+        let (mut p, cid, comp) = setup();
+        // A 20x20 layer at comp 90..110, 40..60 under a 100x100 matte layer.
+        let mut l = solid(&mut p, &comp, [1.0, 0.0, 0.0], 20, 20);
+        let mut matte = solid(&mut p, &comp, [1.0, 1.0, 1.0], 100, 100);
+        matte.switches.video = false;
+        add_effect(&mut p, &mut l, "ec.blur.gaussian", [20.0, 20.0], &[("blurriness", Value::Scalar(8.0))]);
+        if matte_on {
+            add_effect(
+                &mut p,
+                &mut l,
+                "ec.channel.setmatte",
+                [20.0, 20.0],
+                &[
+                    ("takeMatteFromLayer", Value::Layer(Some(matte.id.0))),
+                    ("takeMatteFromLayerSource", Value::Enum(0)),
+                    ("takeMatteFromLayerSpace", Value::Enum(1)),
+                    ("stretchMatteToFit", Value::Bool(false)),
+                    ("compositeMatteWithOriginal", Value::Bool(false)),
+                ],
+            );
+        }
+        let c = p.comp_mut(cid).unwrap();
+        c.layers.push(l);
+        c.layers.push(matte);
+        render_frame(&p, cid, Tick::ZERO, 1.0)
+    };
+    let (blurred, matted) = (render(false), render(true));
+    // 4 px left of the layer's edge: on the blur's spread and under the matte layer, whose
+    // alpha Set Matte gives the pixel.
+    assert!(blurred.get(86, 50)[3] > 0.02, "the blur spreads past the layer");
+    assert!(matted.get(86, 50)[3] > 0.99, "the matte covers the spread: {}", matted.get(86, 50)[3]);
+}
+
+/// The grid a Comp-space read is resampled onto: the effect's input when it covers the layer's
+/// rectangle, grown to cover it otherwise, and never more pixels than a solid's buffer for a
+/// rectangle the renderer holds no buffer of.
+#[test]
+fn comp_sampling_space_grid_covers_the_input_within_the_pixel_cap() {
+    use crate::fx_host::comp_space_grid;
+    use effectcraft_effects::BufGrid;
+    let pixels = |g: &BufGrid| f64::from(g.width) * f64::from(g.height);
+    // A 30000x30000 layer read at full scale (900 million pixels): the scale is lowered and
+    // the rectangle still spans the grid.
+    let g = comp_space_grid([30000.0; 2], None, 1.0).unwrap();
+    assert!(g.scale < 1.0 && pixels(&g) <= 16.0e6, "{g:?}");
+    assert!((30000.0 * g.scale - f64::from(g.width)).abs() <= 1.0, "{g:?}");
+    // An input with a blur's padding around the rectangle is the grid as it is.
+    let padded = BufGrid { width: 60, height: 60, offset: [20.0; 2], scale: 1.0 };
+    assert_eq!(comp_space_grid([20.0; 2], Some(padded), 0.25), Some(padded));
+    // An input inside the rectangle (painted content only) grows by whole pixels to cover it.
+    let inner = BufGrid { width: 10, height: 10, offset: [-5.5; 2], scale: 1.0 };
+    let g = comp_space_grid([20.0; 2], Some(inner), 0.25).unwrap();
+    let shift = g.offset[0] - inner.offset[0];
+    assert!(g.scale == inner.scale && shift.fract() == 0.0, "the input's pixels keep their phase: {g:?}");
+    assert!(g.offset[0] >= 0.0 && g.offset[0] + 20.0 <= f64::from(g.width), "the rectangle is covered: {g:?}");
+    assert!(shift >= 0.0 && shift + 10.0 <= f64::from(g.width), "the input is covered: {g:?}");
+    // Nothing finite to cover.
+    assert_eq!(comp_space_grid([f64::NAN, 20.0], None, 1.0), None);
+    assert_eq!(comp_space_grid([20.0; 2], None, 0.0), None);
 }
