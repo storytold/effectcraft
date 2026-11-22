@@ -18,6 +18,7 @@ craft-video = { workspace = true }
 craft-audio = { workspace = true }
 craft-media = { workspace = true }
 craft-gif = { workspace = true }
+craft-png = { git = "https://github.com/storytold/craft-libs", rev = "c42c34bfa127b095fb0a8d5ccaba0c168c254062" }
 craft-exr = { workspace = true, features = ["decode"] }
 image = { workspace = true, features = ["png", "jpeg", "tiff", "exr", "tga"] }
 rayon = { workspace = true }

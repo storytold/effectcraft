@@ -404,7 +404,16 @@ fn write_still<W: std::io::Write + std::io::Seek>(cx: &Cx, file: &mut W, img: &I
                 .write_image(&rgb, w, h, ExtendedColorType::Rgb8)
                 .map_err(|e| ExportError::Encode(e.to_string()))
         }
-        OutputFormat::PngSequence | OutputFormat::TiffSequence | OutputFormat::TargaSequence => {
+        OutputFormat::PngSequence => {
+            let px = cx.pixels(img, comp, channels, w, h);
+            let (data, layout) = match channels {
+                Channels::Rgba => (px, craft_png::Layout::Rgba),
+                Channels::Alpha => (px.as_chunks::<4>().0.iter().map(|p| p[0]).collect(), craft_png::Layout::Gray),
+                Channels::Rgb => (px.as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect(), craft_png::Layout::Rgb),
+            };
+            craft_png::write_8bit(file, w, h, layout, &data).map_err(|e| ExportError::Encode(e.to_string()))
+        }
+        OutputFormat::TiffSequence | OutputFormat::TargaSequence => {
             let px = cx.pixels(img, comp, channels, w, h);
             let (data, ct) = match channels {
                 Channels::Rgba => (px, ExtendedColorType::Rgba8),
@@ -412,7 +421,6 @@ fn write_still<W: std::io::Write + std::io::Seek>(cx: &Cx, file: &mut W, img: &I
                 Channels::Rgb => (px.as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect(), ExtendedColorType::Rgb8),
             };
             match fmt {
-                OutputFormat::PngSequence => image::codecs::png::PngEncoder::new(file).write_image(&data, w, h, ct),
                 // Uncompressed (the encoder's run-length compression is off), top-left origin, the
                 // alpha bits in the image descriptor: 8 for RGB + Alpha, 0 otherwise.
                 OutputFormat::TargaSequence => image::codecs::tga::TgaEncoder::new(file).disable_rle().write_image(&data, w, h, ct),
