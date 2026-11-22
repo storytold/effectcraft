@@ -38,7 +38,7 @@ impl DecodedFrame {
 }
 
 /// An opened movie/audio source, routed through `craft-media-source` for migrated formats
-/// (ISO-BMFF and Matroska/WebM with supported codecs) and `filmcraft-media` for remaining formats.
+/// (the route matrix in `craft_source`) and `filmcraft-media` for remaining formats.
 #[derive(Clone)]
 pub(crate) enum MediaSource {
     Craft(craft_media_source::SharedSource),
