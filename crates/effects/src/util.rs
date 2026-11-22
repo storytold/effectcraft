@@ -479,7 +479,22 @@ pub fn painted_bounds(img: &Image) -> Option<(u32, u32, u32, u32)> {
             }
         }
     }
-    any.then_some((x0, y0, x1 - x0, y1 - y0))
+    // The tuple is built before `then_some` runs, so a fully transparent image would subtract
+    // the sentinels (`x1`/`y0` zero) and overflow in debug builds; return early instead.
+    if !any {
+        return None;
+    }
+    Some((x0, y0, x1 - x0, y1 - y0))
+}
+
+/// Whether a buffer `width` × `height` pixels already spans its whole layer rectangle
+/// (`rect_w` × `rect_h` buffer pixels). Sized sources (solids, footage, precomps) render to
+/// exactly that rectangle; an authored shape or text layer's buffer surrounds only its painted
+/// content, which can be smaller **or larger** than the comp-sized layer bounds (#3866). A buffer
+/// that differs must have its content measured, at any size.
+#[inline]
+pub fn buffer_is_layer_rect(width: u32, height: u32, rect_w: f64, rect_h: f64) -> bool {
+    (f64::from(width) - rect_w).abs() <= 0.5 && (f64::from(height) - rect_h).abs() <= 0.5
 }
 
 /// Layer rectangle in buffer pixels: (x0, y0, width, height).
@@ -846,6 +861,32 @@ pub fn poly_point_at(pts: &[[f64; 2]], closed: bool, s: f64) -> ([f64; 2], [f64;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A fully transparent buffer has no painted content. The bounds must be `None`, not a
+    /// subtraction of the sentinels (`x1 - x0` with `x1 == 0`), which overflows in debug builds.
+    #[test]
+    fn painted_bounds_of_a_fully_transparent_image_is_none() {
+        let img = Image::new(8, 6);
+        assert_eq!(painted_bounds(&img), None);
+    }
+
+    #[test]
+    fn painted_bounds_spans_the_opaque_pixels() {
+        let mut img = Image::new(8, 6);
+        img.set(3, 2, [1.0; 4]);
+        img.set(4, 4, [1.0; 4]);
+        assert_eq!(painted_bounds(&img), Some((3, 2, 2, 3)));
+    }
+
+    /// A sized source's buffer spans its whole layer rectangle; an authored layer's content-sized
+    /// buffer does not, at any size (#3866).
+    #[test]
+    fn buffer_is_layer_rect_matches_the_whole_rectangle_only() {
+        assert!(buffer_is_layer_rect(500, 800, 500.0, 800.0));
+        assert!(buffer_is_layer_rect(250, 400, 250.0, 400.0));
+        assert!(!buffer_is_layer_rect(500, 800, 400.0, 300.0));
+        assert!(!buffer_is_layer_rect(499, 800, 500.0, 800.0));
+    }
 
     #[test]
     fn sim_cache_is_seek_consistent() {

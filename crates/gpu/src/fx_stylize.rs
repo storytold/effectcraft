@@ -666,12 +666,12 @@ fn repetile(e: &mut Enc, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
     }
     // stylize2::repetile: the copies repeat the layer's painted content, not its comp-sized
     // rectangle (#3866). The renderer measured that content in effect space
-    // (`EffectEnv::content`); a content-sized buffer without the measurement (the effect is not
-    // the stack's first) falls back to the CPU, which measures its own input.
+    // (`EffectEnv::content`); a buffer that does not span the layer rectangle (a later repeat, or
+    // an unmeasured authored layer) falls back to the CPU, which measures its own input.
     let (lx0, ly0, lw, lh) = layer_rect(ctx, &b);
     let (tx0, ty0, w, h) = match ctx.env.content {
         Some([cx0, cy0, cx1, cy1]) => (cx0 * s + b.offset[0], cy0 * s + b.offset[1], (cx1 - cx0) * s, (cy1 - cy0) * s),
-        None if f64::from(b.img.width) < lw || f64::from(b.img.height) < lh => return None,
+        None if !effectcraft_effects::util::buffer_is_layer_rect(b.img.width, b.img.height, lw, lh) => return None,
         None => (lx0, ly0, lw, lh),
     };
     if w < 1.0 || h < 1.0 {

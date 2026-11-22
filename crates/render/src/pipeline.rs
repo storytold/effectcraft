@@ -79,6 +79,19 @@ pub(crate) fn solid_size(width: u32, height: u32, mut scale: f64) -> (f64, u32, 
     (scale, w, h)
 }
 
+/// Edge Tile Repeat (CC RepeTile), the effect that repeats a layer's painted content (#3866).
+const REPETILE: &str = "ec.stylize.ccrepetile";
+
+/// The painted content of a buffer in effect space (`x0, y0, x1, y1`), when anything is painted.
+/// Edge Tile Repeat tiles exactly this rectangle, not the comp-sized layer rectangle (#3866).
+fn painted_content(b: &Buf) -> Option<[f64; 4]> {
+    effectcraft_effects::util::painted_bounds(&b.img).map(|(x, y, w, h)| {
+        let x0 = (f64::from(x) - b.offset[0]) / b.scale;
+        let y0 = (f64::from(y) - b.offset[1]) / b.scale;
+        [x0, y0, x0 + f64::from(w) / b.scale, y0 + f64::from(h) / b.scale]
+    })
+}
+
 impl MediaOverride {
     /// A Media Replacement of `layer`'s footage by `item`.
     pub fn new(layer: LayerId, item: ItemId) -> Self {
@@ -833,26 +846,11 @@ impl<'a> Renderer<'a> {
             }
         }
         // Edge Tile Repeat repeats a shape or text layer's painted content, not its comp-sized
-        // layer rectangle (#3866). When it opens a stack whose effects all grow their own buffer
-        // (so the renderer left the buffer content-sized), measure that content once here; the
-        // effect reads it in effect space from `EffectEnv::content`.
-        let content = if !adjustment && video().next().is_some_and(|s| s.id == "ec.stylize.ccrepetile") && video().all(|s| s.skips_cover()) {
-            let mut measured = None;
-            target.cpu(&mut |b| {
-                let sized = f64::from(b.img.width) < layer_size[0] * b.scale || f64::from(b.img.height) < layer_size[1] * b.scale;
-                if sized {
-                    measured = effectcraft_effects::util::painted_bounds(&b.img).map(|(x, y, w, h)| {
-                        let x0 = (f64::from(x) - b.offset[0]) / b.scale;
-                        let y0 = (f64::from(y) - b.offset[1]) / b.scale;
-                        [x0, y0, x0 + f64::from(w) / b.scale, y0 + f64::from(h) / b.scale]
-                    });
-                }
-                b
-            });
-            measured
-        } else {
-            None
-        };
+        // layer rectangle (#3866). Those layers' buffers span only their painted content, so the
+        // renderer measures that content in effect space and hands it to the effect. A sized
+        // source (solid, footage, precomp) keeps tiling its layer rectangle, as before.
+        let authored = matches!(layer.source, LayerSource::Shape | LayerSource::Text);
+        let content_ready = authored && !adjustment && video().all(|s| s.skips_cover());
         let mut mask_shapes = masks::shapes(ctx, layer);
         if origin != [0.0; 2] {
             for q in mask_shapes.iter_mut().flat_map(|m| m.points.iter_mut()) {
@@ -882,7 +880,7 @@ impl<'a> Renderer<'a> {
             float_depth: self.pipe.levels.is_none(),
             shutter: self.mb_on(ctx, layer).then_some((ctx.comp.shutter_angle, ctx.comp.shutter_phase, ctx.comp.motion_blur_samples)),
             layer_span: crate::eval::layer_span(self.project, layer),
-            content,
+            content: None,
         };
         // Video effects in stack order (index, group, spec); disabled and audio effects skipped.
         let stack: Vec<(usize, &effectcraft_project::PropGroup, &'static effectcraft_effects::EffectSpec)> = fx
@@ -905,14 +903,35 @@ impl<'a> Renderer<'a> {
                 && spec.gpu
                 && a.supports_effect(spec.id)
             {
-                let run: Vec<_> = stack[k..].iter().take_while(|(_, _, s)| s.gpu && a.supports_effect(s.id)).collect();
+                // A run of GPU effects goes to the accelerator in one go. It stops before an Edge
+                // Tile Repeat that is not its first step: that effect would need its own input
+                // measured, which the accelerator cannot read back, so the CPU path runs it (#3866).
+                let run: Vec<_> = stack[k..]
+                    .iter()
+                    .enumerate()
+                    .take_while(|(j, (_, _, s))| s.gpu && a.supports_effect(s.id) && (*j == 0 || s.id != REPETILE))
+                    .map(|(_, step)| step)
+                    .collect();
                 let params: Vec<Params> = run.iter().map(|(_, g, _)| self.effect_params(ctx, layer, g)).collect();
+                // The first step's input is the buffer as it reaches the run; that is the stack's
+                // own input only when the run opens the stack.
+                let content = if content_ready && run[0].2.id == REPETILE {
+                    let mut measured = None;
+                    target.cpu(&mut |b| {
+                        measured = painted_content(&b);
+                        b
+                    });
+                    measured
+                } else {
+                    None
+                };
                 let hosts: Vec<_> = run.iter().map(|(i, _, _)| FxHost { index: *i, ..host }).collect();
                 let steps: Vec<FxStep> = run
                     .iter()
                     .zip(&params)
                     .zip(&hosts)
-                    .map(|(((i, g, s), params), host)| FxStep {
+                    .enumerate()
+                    .map(|(j, (((i, g, s), params), host))| FxStep {
                         spec: s,
                         ctx: EffectCtx {
                             params,
@@ -920,7 +939,7 @@ impl<'a> Renderer<'a> {
                             layer_size,
                             seed: g.uid as u32,
                             adjustment,
-                            env: EffectEnv { host: Some(host), effect_index: *i, ..env },
+                            env: EffectEnv { host: Some(host), effect_index: *i, content: if j == 0 { content } else { None }, ..env },
                         },
                     })
                     .collect();
@@ -937,7 +956,20 @@ impl<'a> Renderer<'a> {
             k += 1;
             let params = self.effect_params(ctx, layer, g);
             let host = FxHost { index: i, ..host };
-            let env = EffectEnv { host: Some(&host), effect_index: i, ..env };
+            // Edge Tile Repeat tiles the painted content of its own input, so measure the buffer
+            // as it reaches this effect: a second one repeats the first one's output, not the
+            // stack's original input (#3866).
+            let content = if content_ready && spec.id == REPETILE {
+                let mut measured = None;
+                target.cpu(&mut |b| {
+                    measured = painted_content(&b);
+                    b
+                });
+                measured
+            } else {
+                None
+            };
+            let env = EffectEnv { host: Some(&host), effect_index: i, content, ..env };
             let ectx = EffectCtx { params: &params, time: lt.seconds(), layer_size, seed: g.uid as u32, adjustment, env };
             let t0 = web_time::Instant::now();
             target.cpu(&mut |buf| {
