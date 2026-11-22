@@ -1268,7 +1268,7 @@ fn diffusion_does_not_lift_a_deep_shadow() {
 #[test]
 fn receivers_far_off_a_shadow_map_with_a_huge_focal_are_unshadowed() {
     // Every texel occludes (depth 10 in front of the receiver at 13.5). A receiver 100 units
-    // off the map's centre with a focal length that puts its map coordinate near `f32::MAX`
+    // off the map's center with a focal length that puts its map coordinate near `f32::MAX`
     // (finite at `f32::MAX / 400`, infinite at `f32::MAX`) reads only texels outside the map.
     let texels = vec![10.0f32; 16 * 16];
     // At focal 1 the reach is two texels: half a texel off the map's left edge (u = −0.5) the

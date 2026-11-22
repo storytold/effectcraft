@@ -214,6 +214,23 @@ fn gpu_matches_cpu_with_receivers_far_off_the_shadow_maps() {
         assert!(gt.color.iter().flatten().all(|v| v.is_finite()), "focal {focal}: every GPU pixel is finite");
         compare(&s, &g);
     }
+    // Every map's view moved 100 units along its x at focal `f32::MAX / 400`: on an
+    // orthographic map some receivers' map coordinates then lie between `f32::MAX / 8` and
+    // `f32::MAX`, finite while 8 times them, the jitter lattice, is not.
+    let mut s = scene(&p, cid);
+    for m in &mut s.shadows {
+        m.view[0][3] += 100.0;
+        m.focal = f32::MAX / 400.0;
+    }
+    let lattice_overflows = s
+        .shadows
+        .iter()
+        .filter(|m| m.ortho)
+        .any(|m| s.vertices.iter().filter_map(|vx| adv::shade::shadow_coord(m, vx.pos)).any(|(u, _, _)| u.is_finite() && !(u * 8.0).is_finite()));
+    assert!(lattice_overflows, "a receiver's map coordinate is finite and its jitter lattice is not");
+    let gt = g.raster_3d(&s).expect("gpu raster");
+    assert!(gt.color.iter().flatten().all(|v| v.is_finite()), "light-space x 100: every GPU pixel is finite");
+    compare(&s, &g);
 }
 
 #[test]
