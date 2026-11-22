@@ -300,6 +300,13 @@ fn mpeg_aac_mixes_by_the_stream_played() {
         }
         let p = write(&format!("latm-first-{latm_first}.ts"), &ts.out);
         check(label, case.content, &mix(&MediaPool::new(), &probe(&p).expect("probe")));
+
+        let path = format!("/mem/latm-first-{latm_first}.ts");
+        let bytes: Arc<[u8]> = ts.out.into();
+        let pool = MediaPool::new();
+        pool.add_bytes(&path, bytes.clone());
+        let footage = probe_bytes(&path, bytes).expect("probe registered MPEG bytes");
+        check(&format!("{label} in memory"), case.content, &mix(&pool, &footage));
     }
 }
 
