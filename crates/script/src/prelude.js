@@ -1528,6 +1528,7 @@ ItemCollection.prototype = {
     var r = __call("comp.new", {
       name: String(name), width: Math.round(__num(width, "width")), height: Math.round(__num(height, "height")),
       pixelAspect: __num(pixelAspect, "pixelAspect"), duration: __num(duration, "duration"), frameRate: __num(frameRate, "frameRate"), open: false,
+      unique: false,
     });
     return this.__place(r.comp);
   },

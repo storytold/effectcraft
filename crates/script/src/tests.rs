@@ -48,6 +48,32 @@ fn layer<'a>(c: &'a Comp, name: &str) -> &'a Layer {
     c.layers.iter().find(|l| l.name == name).unwrap_or_else(|| panic!("no layer {name}"))
 }
 
+/// #3757: a script that names its composition gets that name, as After Effects keeps it; the New
+/// Composition command still gives a taken name the next free number.
+#[test]
+fn add_comp_keeps_a_taken_name() {
+    let mut s = session();
+    let o = ok(
+        &mut s,
+        r#"
+        var a = app.project.items.addComp("Main", 100, 100, 1, 2, 25);
+        var b = app.project.items.addComp("Main", 200, 100, 1, 3, 25);
+        [a.name, b.name, a.id !== b.id, app.project.items.length]
+        "#,
+    );
+    assert_eq!(o.result, json!(["Main", "Main", true, 2]));
+}
+
+#[test]
+fn comp_new_still_numbers_a_taken_name() {
+    let mut s = session();
+    s.execute("comp.new", json!({ "name": "Main" })).unwrap();
+    s.execute("comp.new", json!({ "name": "Main" })).unwrap();
+    let mut names: Vec<String> = s.project.items.values().filter(|i| i.as_comp().is_some()).map(|i| i.name.clone()).collect();
+    names.sort();
+    assert_eq!(names, vec!["Main".to_string(), "Main 2".to_string()]);
+}
+
 /// #1063 (item 8): Source Text retains CR while sourceRectAtTime sees both lines.
 #[test]
 fn carriage_return_source_text_has_multiline_script_bounds() {
