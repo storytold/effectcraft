@@ -356,7 +356,7 @@ fn compare_run(p: &Project, cid: ItemId, g: &Gpu, what: &str) {
     // CPU reference: CPU raster and post.
     let cpu_r = Renderer::new(p, &NoFootage, RenderOpts::default());
     let prep = adv::Prepared::new(&cpu_r, &ctx, &run, out);
-    let (cimg, cdepth) = adv::render_prepared(&prep).expect("cpu drew");
+    let (cimg, cdepth) = adv::render_prepared(&prep).expect("cpu rendered").expect("cpu drew");
     // The GPU: everything on the device.
     let (gimg, gdepth) = g.render_3d(&prep).expect("gpu handled").expect("gpu drew");
     let (share, max) = off_share(&cimg.data, &gimg.data);
@@ -368,7 +368,7 @@ fn compare_run(p: &Project, cid: ItemId, g: &Gpu, what: &str) {
     let mut gr = Renderer::new(p, &NoFootage, RenderOpts { backend: effectcraft_render::Backend::Gpu, ..Default::default() });
     gr.accel = Some(g);
     let prep = adv::Prepared::new(&gr, &ctx, &run, out);
-    let (himg, _) = adv::render_prepared(&prep).expect("cpu post drew");
+    let (himg, _) = adv::render_prepared(&prep).expect("cpu post rendered").expect("cpu post drew");
     let (share, max) = off_share(&himg.data, &gimg.data);
     eprintln!("{what}: gpu post vs cpu post on the gpu raster: {:.4} % beyond 1/255 (max {max:.4})", share * 100.0);
     assert!(share <= 0.001, "{what}: post kernels differ on {:.3} % of pixels", share * 100.0);

@@ -460,6 +460,31 @@ fn lit_cube_renders_with_depth_and_shading() {
 }
 
 #[test]
+fn a_rejected_scene_is_an_error_and_an_empty_run_draws_nothing() {
+    let (mut p, cid) = project(64, 64);
+    add(&mut p, cid, LayerSource::Primitive { kind: PrimitiveKind::Cube }, |l| set(l, "geometryOptions/width", Value::Scalar(30.0)));
+    let r = Renderer::new(&p, &NoFootage, RenderOpts::default());
+    let ctx = EvalCtx {
+        project: &p,
+        comp_id: cid,
+        comp: p.comp(cid).unwrap(),
+        time: Tick::ZERO,
+        expr: None,
+        footage: None,
+        property_overrides: &[],
+        media_overrides: &[],
+        reads: None,
+    };
+    let run: Vec<&effectcraft_project::Layer> = ctx.comp.layers.iter().collect();
+    assert!(matches!(render_prepared(&Prepared::new(&r, &ctx, &run, (64, 64))), Ok(Some(_))), "the cube is drawn");
+    // A raster over `limits().max_pixels` (twice MAX_SIZE on each side) is rejected before any
+    // memory is reserved.
+    let side = effectcraft_project::limits::MAX_SIZE * 2 + 1;
+    assert_eq!(render_prepared(&Prepared::new(&r, &ctx, &run, (side, side))).err(), Some(RenderError::TooLarge(side, side)));
+    assert!(matches!(render_prepared(&Prepared::new(&r, &ctx, &[], (64, 64))), Ok(None)), "an empty run draws nothing");
+}
+
+#[test]
 fn shadows_darken_the_receiver() {
     let (mut p, cid) = project(200, 150);
     // A floor plane facing the camera, a sphere in front of it, a spot light behind the camera.

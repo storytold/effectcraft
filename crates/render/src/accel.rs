@@ -86,7 +86,9 @@ pub trait Accelerator: Send + Sync {
     }
     /// Render a whole prepared Advanced 3D run (every motion-blur sub-sample rasterised and
     /// resolved, averaged, depth of field, encoding) with [`three_d::adv::render_prepared`]'s
-    /// semantics. `None` = not handled (the CPU path runs, using [`Self::raster_3d`]).
+    /// semantics. `None` = not handled, including a run the accelerator cannot render (the CPU
+    /// path runs, using [`Self::raster_3d`], and logs an error from
+    /// [`three_d::adv::render_prepared`] as a warning).
     fn render_3d(&self, _run: &three_d::adv::Prepared) -> Option<three_d::adv::Rendered> {
         None
     }

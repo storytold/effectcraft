@@ -6,7 +6,8 @@
 //! depth buffer on the GPU when an [`crate::Accelerator`] implements
 //! [`crate::Accelerator::raster_3d`], otherwise by `craft_raster3d`'s software rasterizer
 //! ([`rasterize`]), at 2×2 supersampling. A scene that `craft_raster3d` rejects (a value out of
-//! range, or memory it cannot reserve) draws nothing, and the reason is logged as a warning. The resolve (box filter), depth of field (a gather blur by each pixel's
+//! range, or memory it cannot reserve) is an error from [`render_prepared`]; in a frame the run
+//! then draws nothing, and the reason is logged as a warning. The resolve (box filter), depth of field (a gather blur by each pixel's
 //! circle of confusion, shaped by the camera's iris: [`dof`]) and the conversion back to the working encoding run on the CPU for
 //! both paths, and the result is composited over the layers below the run. An accelerator's
 //! compositor runs all of it on the device: [`Prepared`] for whole runs, [`SplitRun`] for runs
@@ -174,16 +175,10 @@ pub type Rendered = Option<(Image, Vec<f32>)>;
 
 /// Render a prepared run on the CPU compositor (each scene rasterised by the accelerator's
 /// [`crate::Accelerator::raster_3d`] when there is one): the reference for
-/// [`crate::Accelerator::render_3d`]. A scene that cannot be rendered draws nothing, and the
-/// reason is logged as a warning.
-pub fn render_prepared(p: &Prepared) -> Rendered {
-    try_render_prepared(p).unwrap_or_else(|e| {
-        log::warn!("Advanced 3D: the run was not drawn: {e}");
-        None
-    })
-}
-
-fn try_render_prepared(p: &Prepared) -> Result<Rendered, RenderError> {
+/// [`crate::Accelerator::render_3d`]. `Ok(None)` when nothing was drawn; an error when
+/// `craft_raster3d` rejects a scene (a value out of range, a raster over [`limits`], or memory
+/// it cannot reserve).
+pub fn render_prepared(p: &Prepared) -> Result<Rendered, RenderError> {
     let (r, n, out) = (p.r, p.samples, p.out);
     let (mut img, depth) = if n <= 1 {
         let s = p.scene(0);
@@ -228,7 +223,8 @@ fn try_render_prepared(p: &Prepared) -> Result<Rendered, RenderError> {
 /// the camera depth of each pixel (∞ where nothing was drawn). With motion blur the scene is
 /// rendered at sub-samples spread over the comp's shutter (angle and phase) and averaged; the
 /// depth is the nearest over the samples. The whole run goes to the accelerator when it
-/// implements [`crate::Accelerator::render_3d`].
+/// implements [`crate::Accelerator::render_3d`]. When [`render_prepared`] returns an error,
+/// the run draws nothing and the error is logged as a warning.
 pub(crate) fn render_layers(r: &Renderer, ctx: &EvalCtx, layers: &[&Layer], out: (u32, u32)) -> Option<(Image, Vec<f32>)> {
     let p = Prepared::new(r, ctx, layers, out);
     if let Some(a) = r.active_accel()
@@ -236,7 +232,10 @@ pub(crate) fn render_layers(r: &Renderer, ctx: &EvalCtx, layers: &[&Layer], out:
     {
         return res;
     }
-    render_prepared(&p)
+    render_prepared(&p).unwrap_or_else(|e| {
+        log::warn!("Advanced 3D: the run was not drawn: {e}");
+        None
+    })
 }
 
 /// The run as one prepared scene for an accelerator's compositor when it can be composited

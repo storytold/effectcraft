@@ -69,7 +69,7 @@ fn advanced_3d_resolves_in_passes() {
     let out = (ctx.comp.width, ctx.comp.height);
     let r = Renderer::new(&p, &NoFootage, RenderOpts::default());
     let prep = adv::Prepared::new(&r, &ctx, &run, out);
-    let (cimg, _) = adv::render_prepared(&prep).expect("cpu drew");
+    let (cimg, _) = adv::render_prepared(&prep).expect("cpu rendered").expect("cpu drew");
     g.frame_begin();
     g.pass_begin();
     assert!(matches!(g.render_3d(&prep), Some(None)) && g.pass_missed(), "nothing drawn yet: a placeholder");
