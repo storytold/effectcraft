@@ -11,6 +11,10 @@
 //!
 //! Settings ▸ Project ▸ Default OCIO Config only seeds new projects' `ocio_config`.
 //!
+//! A relative `ocio_config` is taken from the project file's folder ([`resolve_stored`]) and kept
+//! absolute; a config is read only when the session's services can see it ([`Readable`]). A
+//! notice that the `OCIO` variable's config can't be used is shown once a session ([`Notice`]).
+//!
 //! A config is read with [`effectcraft_effects::ocio_config::load_config`]. Its `scene_linear`
 //! role (else `compositing_linear`, else `reference`) is identified as one of the working spaces
 //! numerically: test colours are converted through the config from that space to its
@@ -66,7 +70,9 @@ fn some_path(p: Option<&str>) -> Option<&str> {
 /// file).
 pub fn active(env: Option<&str>, st: &ProjectSettings, studio: Option<&str>) -> Active {
     if let Some(e) = some_path(env) {
-        return Active { source: Source::Env, path: Some(e.to_string()) };
+        // A relative `OCIO` is taken from the working directory, as OpenColorIO does.
+        let e = std::path::absolute(e).map_or_else(|_| e.to_string(), |p| p.to_string_lossy().into_owned());
+        return Active { source: Source::Env, path: Some(e) };
     }
     match some_path(st.ocio_config.as_deref()) {
         Some(p) => {
@@ -151,9 +157,45 @@ pub enum Resolved {
     Space(ColorSpace),
 }
 
-/// Resolve the config at `path` (`None`: built-in).
-pub fn resolve(path: Option<&str>) -> Resolved {
+/// Whether the session may read a config file, and why not: the file exists and the session's
+/// [`crate::Services`] may read it (an agent confined to its folders can't), and the path wasn't
+/// refused when the project was opened ([`resolve_stored`]).
+pub type Readable<'a> = &'a dyn Fn(&str) -> Result<(), String>;
+
+/// What the active config depends on besides the project: the `OCIO` environment variable, the
+/// studio default and which files can be read.
+#[derive(Clone, Copy)]
+pub struct Ctx<'a> {
+    pub env: Option<&'a str>,
+    pub studio: Option<&'a str>,
+    pub readable: Readable<'a>,
+}
+
+/// A notice about the active config; `once`: the `OCIO` environment variable's config can't be
+/// used, which a session says only once (every project has the same problem).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Notice {
+    pub text: String,
+    pub once: bool,
+}
+
+/// Why the config at `p` isn't read: a relative path (resolved against the project's folder when
+/// it is chosen or opened, [`resolve_stored`], so one left over has no folder), or one the
+/// session can't read.
+fn gate(p: &str, readable: Readable) -> Result<(), String> {
+    if !std::path::Path::new(p).is_absolute() {
+        return Err(format!("{p}: a relative path, and the project has no folder to take it from"));
+    }
+    readable(p)
+}
+
+/// Resolve the config at `path` (`None`: built-in). Only an absolute path is read: a relative
+/// one is resolved against the project's folder when it is chosen or opened ([`resolve_stored`]).
+pub fn resolve(path: Option<&str>, readable: Readable) -> Resolved {
     let Some(p) = some_path(path) else { return Resolved::BuiltIn };
+    if let Err(e) = gate(p, readable) {
+        return Resolved::Unreadable(e);
+    }
     match load_config(p) {
         Err(e) => Resolved::Unreadable(e),
         Ok(cfg) => match resolve_working_space(&cfg) {
@@ -164,27 +206,32 @@ pub fn resolve(path: Option<&str>) -> Resolved {
 }
 
 /// A notice for a project whose active config can't be used as saved (a missing file, a config
-/// that no longer gives its working space), for the open and new-project toasts.
-pub fn notice(env: Option<&str>, st: &ProjectSettings, studio: Option<&str>) -> Option<String> {
+/// that no longer gives its working space), for the open toast.
+pub fn notice(ctx: Ctx, st: &ProjectSettings) -> Option<Notice> {
     if st.color_engine != ColorEngine::Ocio {
         return None;
     }
-    let a = active(env, st, studio);
+    let a = active(ctx.env, st, ctx.studio);
     let path = a.path.as_deref()?;
-    let (from, from_cap) = if a.source == Source::Env {
+    let env = a.source == Source::Env;
+    let (from, from_cap) = if env {
         ("the OCIO environment variable's config", "The OCIO environment variable's config")
     } else {
         ("the project's OCIO config", "The project's OCIO config")
     };
-    match resolve(Some(path)) {
-        Resolved::Unreadable(e) => Some(format!("Can't read {from} ({e}); using the built-in ACES config instead.")),
-        Resolved::Refused(e) => Some(format!("{from_cap} can't set the working space ({e}); the project keeps its working space.")),
-        Resolved::Space(ws) if st.working_space != Some(ws) => Some(format!(
-            "{from_cap} works in {}, but the project's working space is {}; choose {} in Project Settings to match.",
-            ws.label(),
-            st.working_space.map_or("None", ColorSpace::label),
-            ws.label()
-        )),
+    let n = |text: String, once: bool| Some(Notice { text, once });
+    match resolve(Some(path), ctx.readable) {
+        Resolved::Unreadable(e) => n(format!("Can't read {from} ({e}); using the built-in ACES config instead."), env),
+        Resolved::Refused(e) => n(format!("{from_cap} can't set the working space ({e}); the project keeps its working space."), env),
+        Resolved::Space(ws) if st.working_space != Some(ws) => n(
+            format!(
+                "{from_cap} works in {}, but the project's working space is {}; choose {} in Project Settings to match.",
+                ws.label(),
+                st.working_space.map_or("None", ColorSpace::label),
+                ws.label()
+            ),
+            false,
+        ),
         _ => None,
     }
 }
@@ -192,14 +239,14 @@ pub fn notice(env: Option<&str>, st: &ProjectSettings, studio: Option<&str>) -> 
 /// The active config, for command results and Project Settings: its source and path, whether it
 /// could be read, the working space it gives, and its displays, views, looks and colour spaces,
 /// which are listed for information only (not applied yet).
-pub fn status(env: Option<&str>, st: &ProjectSettings, studio: Option<&str>) -> Value {
-    let a = active(env, st, studio);
+pub fn status(ctx: Ctx, st: &ProjectSettings) -> Value {
+    let a = active(ctx.env, st, ctx.studio);
     let mut out = json!({
         "source": a.source.id(),
         "path": a.path,
         "projectConfig": st.ocio_config,
-        "envConfig": some_path(env),
-        "studioDefault": some_path(studio),
+        "envConfig": some_path(ctx.env),
+        "studioDefault": some_path(ctx.studio),
         "colorEngine": if st.color_engine == ColorEngine::Ocio { "ocio" } else { "adobe" },
         // The config only matters to OCIO-managed projects.
         "inUse": st.color_engine == ColorEngine::Ocio,
@@ -210,14 +257,18 @@ pub fn status(env: Option<&str>, st: &ProjectSettings, studio: Option<&str>) -> 
         out["name"] = json!("built-in ACES config");
         return out;
     };
+    let fail = |mut out: Value, e: String| {
+        out["loaded"] = json!(false);
+        out["error"] = json!(e);
+        out["fallback"] = json!("builtIn");
+        out
+    };
+    if let Err(e) = gate(path, ctx.readable) {
+        return fail(out, e);
+    }
     let cfg = match load_config(path) {
         Ok(c) => c,
-        Err(e) => {
-            out["loaded"] = json!(false);
-            out["error"] = json!(e);
-            out["fallback"] = json!("builtIn");
-            return out;
-        }
+        Err(e) => return fail(out, e),
     };
     out["loaded"] = json!(true);
     out["name"] = json!(cfg.name);
@@ -250,9 +301,9 @@ pub fn status(env: Option<&str>, st: &ProjectSettings, studio: Option<&str>) -> 
 /// Config, or with the `OCIO` environment variable's config, and the working space of the
 /// active config's scene_linear role. A default that can't be used leaves the project as it
 /// is and says why. (A template keeps its own settings.)
-pub fn seed_new_project(env: Option<&str>, studio: &str, st: &mut ProjectSettings) -> Option<String> {
-    let studio = studio.trim();
-    let env = some_path(env);
+pub fn seed_new_project(ctx: Ctx, st: &mut ProjectSettings) -> Option<Notice> {
+    let studio = ctx.studio.unwrap_or("").trim();
+    let env = some_path(ctx.env);
     if studio.is_empty() && env.is_none() {
         return None;
     }
@@ -261,26 +312,87 @@ pub fn seed_new_project(env: Option<&str>, studio: &str, st: &mut ProjectSetting
     next.color_engine = ColorEngine::Ocio;
     next.hdr = HdrMode::ToneMap;
     let active = active(env, &next, Some(studio));
-    let from = if active.source == Source::Env { "The OCIO environment variable's config" } else { "The default OCIO config" };
-    match resolve(active.path.as_deref()) {
+    let from_env = active.source == Source::Env;
+    let from = if from_env { "The OCIO environment variable's config" } else { "The default OCIO config" };
+    // A new project has no folder: the default must be an absolute path.
+    if !from_env && !std::path::Path::new(studio).is_absolute() {
+        return Some(Notice { text: format!("{from} ({studio}) is a relative path: give an absolute path in Settings ▸ Project."), once: false });
+    }
+    match resolve(active.path.as_deref(), ctx.readable) {
         Resolved::Space(ws) => next.working_space = Some(ws),
         // A missing file (a studio share not mounted yet) keeps the choice, on the built-in config.
         Resolved::Unreadable(e) => {
             next.working_space = Some(ColorSpace::AcesCg);
             *st = next;
-            return Some(format!("{from} can't be read ({e}); the new project uses the built-in ACES config until it can."));
+            return Some(Notice { text: format!("{from} can't be read ({e}); the new project uses the built-in ACES config until it can."), once: from_env });
         }
-        Resolved::Refused(e) => return Some(format!("{from} can't be used for new projects: {e}.")),
+        Resolved::Refused(e) => return Some(Notice { text: format!("{from} can't be used for new projects: {e}."), once: from_env }),
         Resolved::BuiltIn => next.working_space = Some(ColorSpace::AcesCg),
     }
     *st = next;
     None
 }
 
+/// A project's stored config path as the document saved at `doc` names it (a project file or a
+/// template): a relative path is taken from the document's folder and stored as the absolute
+/// path, so Save As elsewhere keeps the same file, and a path the stored-path rules don't follow
+/// (another computer's share, a URL; see [`crate::doc_path`]) is kept but not read. Returns that
+/// path and why.
+pub fn resolve_stored(st: &mut ProjectSettings, doc: Option<&str>) -> Option<(String, String)> {
+    let stored = some_path(st.ocio_config.as_deref())?.to_string();
+    match crate::doc_path::resolve(&stored, doc) {
+        Ok(p) => {
+            st.ocio_config = Some(p.to_string_lossy().into_owned());
+            None
+        }
+        Err(why) => Some((stored.clone(), crate::doc_path::refusal(&stored, why))),
+    }
+}
+
 impl crate::Session {
+    /// [`Readable`] for this session: the path wasn't refused when the project opened, and the
+    /// session's services can see the file.
+    pub fn ocio_readable(&self) -> impl Fn(&str) -> Result<(), String> + use<> {
+        let services = self.services.clone();
+        let refused = self.ocio_refused.clone();
+        move |p: &str| {
+            if let Some((_, why)) = refused.as_ref().filter(|(r, _)| r == p) {
+                return Err(why.clone());
+            }
+            match services.stamp(p) {
+                Some(_) => Ok(()),
+                None => Err(format!("{p}: not found, or outside the folders this session may read")),
+            }
+        }
+    }
+
     /// The project's active OCIO config ([`status`]).
     pub fn ocio_status(&self) -> Value {
-        status(self.ocio_env.as_deref(), &self.project.settings, Some(&self.prefs.project.default_ocio_config))
+        let readable = self.ocio_readable();
+        let ctx = Ctx { env: self.ocio_env.as_deref(), studio: Some(&self.prefs.project.default_ocio_config), readable: &readable };
+        status(ctx, &self.project.settings)
+    }
+
+    /// Toast a notice; one about the `OCIO` environment variable's config only the first time.
+    pub fn ocio_notify(&mut self, n: &Notice) {
+        if n.once && std::mem::replace(&mut self.ocio_env_noticed, true) {
+            return;
+        }
+        self.toast(n.text.clone());
+    }
+
+    /// [`seed_new_project`] for this session's environment and settings.
+    pub fn seed_new_project_color(&self, st: &mut ProjectSettings) -> Option<Notice> {
+        let readable = self.ocio_readable();
+        let ctx = Ctx { env: self.ocio_env.as_deref(), studio: Some(&self.prefs.project.default_ocio_config), readable: &readable };
+        seed_new_project(ctx, st)
+    }
+
+    /// [`notice`] for the open project.
+    pub fn ocio_notice(&self) -> Option<Notice> {
+        let readable = self.ocio_readable();
+        let ctx = Ctx { env: self.ocio_env.as_deref(), studio: Some(&self.prefs.project.default_ocio_config), readable: &readable };
+        notice(ctx, &self.project.settings)
     }
 
     /// [`seed_new_project`] for the untitled project a session starts with, once the settings
@@ -291,13 +403,13 @@ impl crate::Session {
             return;
         }
         let mut st = self.project.settings.clone();
-        let notice = seed_new_project(self.ocio_env.as_deref(), &self.prefs.project.default_ocio_config, &mut st);
+        let notice = self.seed_new_project_color(&mut st);
         if st != self.project.settings {
             std::sync::Arc::make_mut(&mut self.project).settings = st;
             self.mark_saved();
         }
         if let Some(n) = notice {
-            self.toast(n);
+            self.ocio_notify(&n);
         }
     }
 }

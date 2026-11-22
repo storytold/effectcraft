@@ -212,3 +212,81 @@ fn a_missing_config_falls_back_without_failing() {
     assert_eq!(r["ocio"]["loaded"], Value::Bool(false));
     let _ = std::fs::remove_dir_all(d);
 }
+
+#[test]
+fn an_unusable_environment_config_is_said_once_per_session_and_reported_every_time() {
+    let d = tmp("env-once");
+    let env_cfg = write_config(&d, "linear709.ocio", ColorSpace::Rec709);
+    let mut s = Session { ocio_env: Some(env_cfg), ..Default::default() };
+    let mut said = 0;
+    for _ in 0..3 {
+        let r = s.execute("file.newProject", json!({})).unwrap();
+        assert!(r["ocioNotice"].is_string(), "each result reports it: {r}");
+        said += toasts(&mut s).len();
+    }
+    assert_eq!(said, 1, "one notice for the session");
+    let _ = std::fs::remove_dir_all(d);
+}
+
+#[test]
+fn relative_paths_are_the_project_folders_and_survive_save_as_elsewhere() {
+    let d = tmp("relative");
+    std::fs::create_dir_all(d.join("configs")).unwrap();
+    let cfg = write_config(&d.join("configs"), "studio.ocio", ColorSpace::AcesCg);
+    let mut s = session();
+    // Unsaved: nothing to take it from, so refused and nothing changes.
+    let before = s.project.settings.clone();
+    let e = s.execute("file.projectSettings", json!({"ocioConfig": "configs/studio.ocio"})).unwrap_err().to_string();
+    assert!(e.contains("save"), "{e}");
+    assert_eq!(s.project.settings, before);
+    let first = d.join("p.ecproj");
+    s.execute("file.saveAs", json!({"path": first.to_string_lossy()})).unwrap();
+    let r = s.execute("file.projectSettings", json!({"ocioConfig": "configs/studio.ocio"})).unwrap();
+    assert_eq!(r["ocio"]["loaded"], true, "{r}");
+    let stored = s.project.settings.ocio_config.clone().unwrap();
+    assert!(Path::new(&stored).is_absolute() && std::fs::canonicalize(&stored).unwrap() == std::fs::canonicalize(&cfg).unwrap());
+    // Save As in another folder still names the same file.
+    std::fs::create_dir_all(d.join("elsewhere")).unwrap();
+    let second = d.join("elsewhere/p.ecproj");
+    s.execute("file.saveAs", json!({"path": second.to_string_lossy()})).unwrap();
+    let mut o = Session::default();
+    let r = o.execute("file.open", json!({"path": second.to_string_lossy()})).unwrap();
+    assert_eq!((o.project.settings.ocio_config.as_deref(), &r["ocio"]["loaded"]), (Some(stored.as_str()), &json!(true)));
+    // A file written with a relative path opens with it taken from its own folder.
+    s.execute("file.saveAs", json!({"path": first.to_string_lossy()})).unwrap();
+    let text = std::fs::read_to_string(&first).unwrap().replace(&serde_json::to_string(&stored).unwrap(), "\"configs/studio.ocio\"");
+    assert!(text.contains("\"configs/studio.ocio\""));
+    std::fs::write(&first, text).unwrap();
+    let r = o.execute("file.open", json!({"path": first.to_string_lossy()})).unwrap();
+    assert_eq!(r["ocio"]["loaded"], true, "{r}");
+    let _ = std::fs::remove_dir_all(d);
+}
+
+/// Services that can't see one file (an agent's confinement, a missing share).
+struct Hiding(String);
+impl crate::Services for Hiding {
+    fn read_file(&self, path: &str) -> std::io::Result<Vec<u8>> {
+        crate::FsServices.read_file(path)
+    }
+    fn write_file(&self, path: &str, data: &[u8]) -> std::io::Result<()> {
+        crate::FsServices.write_file(path, data)
+    }
+    fn stamp(&self, path: &str) -> Option<(u64, u128)> {
+        if path == self.0 { None } else { crate::FsServices.stamp(path) }
+    }
+}
+
+#[test]
+fn a_config_the_session_may_not_read_is_not_loaded() {
+    let d = tmp("hidden");
+    let cfg = write_config(&d, "studio.ocio", ColorSpace::AcesCg);
+    let mut s = session();
+    s.execute("file.projectSettings", json!({"ocioConfig": cfg})).unwrap();
+    let path = d.join("p.ecproj");
+    s.execute("file.saveAs", json!({"path": path.to_string_lossy()})).unwrap();
+    let mut o = Session { services: std::sync::Arc::new(Hiding(cfg)), ..Default::default() };
+    let r = o.execute("file.open", json!({"path": path.to_string_lossy()})).unwrap();
+    assert_eq!((&r["ocio"]["loaded"], &r["ocio"]["fallback"]), (&json!(false), &json!("builtIn")), "{r}");
+    assert!(r["ocio"]["looks"].is_null(), "nothing of the file is shown");
+    let _ = std::fs::remove_dir_all(d);
+}

@@ -20,20 +20,22 @@ fn new_project(s: &mut Session, _: &Value) -> Result<Value> {
         let text = String::from_utf8(bytes).map_err(|_| EngineError::Other("the new project template is not a project file".into()))?;
         let mut proj = Project::from_json(&text)?;
         crate::doc_path::resolve_footage(&mut proj, Some(&tpl));
+        let ocio_refused = crate::ocio_project::resolve_stored(&mut proj.settings, Some(&tpl));
         s.replace_project(proj, None);
+        s.ocio_refused = ocio_refused;
         s.stored_paths.add(&s.project, Some(&tpl));
         s.update_sentinel();
         return Ok(json!({"template": tpl}));
     }
     let mut proj = Project::default();
-    let notice = crate::ocio_project::seed_new_project(s.ocio_env.as_deref(), &s.prefs.project.default_ocio_config, &mut proj.settings);
+    let notice = s.seed_new_project_color(&mut proj.settings);
     s.replace_project(proj, None);
     s.update_sentinel();
     if let Some(n) = &notice {
-        s.toast(n.clone());
+        s.ocio_notify(n);
     }
     if s.project.settings.color_engine == effectcraft_project::ColorEngine::Ocio || notice.is_some() {
-        return Ok(json!({"ocio": s.ocio_status(), "ocioNotice": notice}));
+        return Ok(json!({"ocio": s.ocio_status(), "ocioNotice": notice.map(|n| n.text)}));
     }
     Ok(Value::Null)
 }
@@ -60,7 +62,10 @@ pub(crate) fn open(s: &mut Session, p: &Value) -> Result<Value> {
     // written by hand) is found next to the project file, as After Effects looks for footage
     // relative to the project (#652).
     let refused = crate::doc_path::resolve_footage(&mut proj, Some(path));
+    // A relative OCIO config path is the project folder's, as footage paths are.
+    let ocio_refused = crate::ocio_project::resolve_stored(&mut proj.settings, Some(path));
     s.replace_project(proj, Some(path.to_string()));
+    s.ocio_refused = ocio_refused;
     s.stored_paths.add(&s.project, Some(path));
     s.restore_view(&effectcraft_project::saved_view(&text));
     s.note_project_path(path);
@@ -84,10 +89,11 @@ pub(crate) fn open(s: &mut Session, p: &Value) -> Result<Value> {
         ));
     }
     // The OCIO config is read, never changed: a missing one falls back to the built-in config.
-    let ocio_notice = crate::ocio_project::notice(s.ocio_env.as_deref(), &s.project.settings, Some(&s.prefs.project.default_ocio_config));
+    let ocio_notice = s.ocio_notice();
     if let Some(n) = &ocio_notice {
-        s.toast(n.clone());
+        s.ocio_notify(n);
     }
+    let ocio_notice = ocio_notice.map(|n| n.text);
     // Lazy open: footage is checked in the background (Progress panel), not before the
     // project shows.
     if s.check_footage_on_open {
@@ -656,14 +662,16 @@ pub(crate) fn data_footage(services: &dyn crate::Services, path: &str) -> Option
 
 /// `file.projectSettings` ▸ `ocioConfig`, and the working space the active OCIO config allows
 /// (`before`: whether the project was OCIO-managed and its working space before this call).
+/// `doc` is the project file (a relative `ocioConfig` is taken from its folder).
 fn ocio_config_setting(
     proj: &mut Project,
     p: &Value,
-    env: Option<&str>,
+    (env, doc): (Option<&str>, Option<&str>),
+    readable: crate::ocio_project::Readable,
     before: (bool, Option<effectcraft_project::ColorSpace>),
-    notes: &mut Vec<String>,
+    notes: &mut Vec<crate::ocio_project::Notice>,
 ) -> Result<()> {
-    use crate::ocio_project::{self, Resolved};
+    use crate::ocio_project::{self, Notice, Resolved};
     use effectcraft_project::{ColorEngine, ColorSpace, HdrMode};
     let cmd = "file.projectSettings";
     let (was_ocio, ws_before) = before;
@@ -674,7 +682,25 @@ fn ocio_config_setting(
             Value::Null => None,
             Value::String(t) if t.trim().is_empty() => None,
             Value::String(t) if t.contains(['\n', '\r']) => return Err(bad(cmd, "ocioConfig: a path to an .ocio file")),
-            Value::String(t) => Some(t.trim().to_string()),
+            // Stored absolute, so Save As elsewhere keeps the same file.
+            Value::String(t) if std::path::Path::new(t.trim()).is_absolute() => Some(t.trim().to_string()),
+            Value::String(t) => match doc {
+                None => {
+                    return Err(bad(
+                        cmd,
+                        format!(
+                            "ocioConfig: `{}` is relative and the project has not been saved: give an absolute path, or save the project first (a relative path is taken from the project's folder)",
+                            t.trim()
+                        ),
+                    ));
+                }
+                Some(d) => Some(
+                    crate::doc_path::resolve(t.trim(), Some(d))
+                        .map_err(|why| bad(cmd, format!("ocioConfig: {}", crate::doc_path::refusal(t.trim(), why))))?
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+            },
             _ => return Err(bad(cmd, "ocioConfig: a path to an .ocio file, or null to use the built-in config")),
         };
         if new != proj.settings.ocio_config {
@@ -700,7 +726,9 @@ fn ocio_config_setting(
         let active = ocio_project::active(env, &proj.settings, None);
         let ws_given = proj.settings.working_space != ws_before;
         let aces_only = |proj: &effectcraft_project::Project| proj.settings.working_space.is_some_and(|w| w.is_linear());
-        match ocio_project::resolve(active.path.as_deref()) {
+        let from_env = active.source == ocio_project::Source::Env;
+        let note = |text: String, once: bool| Notice { text, once };
+        match ocio_project::resolve(active.path.as_deref(), readable) {
             Resolved::BuiltIn => {
                 if switched && !aces_only(proj) {
                     proj.settings.working_space = Some(ColorSpace::AcesCg);
@@ -714,7 +742,7 @@ fn ocio_config_setting(
                 if !aces_only(proj) {
                     proj.settings.working_space = Some(ColorSpace::AcesCg);
                 }
-                notes.push(format!("Can't read the OCIO config ({e}); using the built-in ACES config instead."));
+                notes.push(note(format!("Can't read the OCIO config ({e}); using the built-in ACES config instead."), from_env));
             }
             Resolved::Refused(e) => {
                 if switched {
@@ -723,7 +751,7 @@ fn ocio_config_setting(
                 if !aces_only(proj) {
                     return Err(bad(cmd, "the OCIO built-in config's working spaces are acescg and aces2065"));
                 }
-                notes.push(format!("The OCIO config can't set the working space ({e}); the project keeps its working space."));
+                notes.push(note(format!("The OCIO config can't set the working space ({e}); the project keeps its working space."), from_env));
             }
             Resolved::Space(ws) => {
                 if switched {
@@ -732,10 +760,13 @@ fn ocio_config_setting(
                     if ws_given {
                         return Err(bad(cmd, format!("the OCIO config's scene_linear space is {}: workingSpace must be {}", ws.label(), ws.id())));
                     }
-                    notes.push(format!(
-                        "The OCIO config works in {}, but the project's working space is {}.",
-                        ws.label(),
-                        proj.settings.working_space.map_or("None", ColorSpace::label)
+                    notes.push(note(
+                        format!(
+                            "The OCIO config works in {}, but the project's working space is {}.",
+                            ws.label(),
+                            proj.settings.working_space.map_or("None", ColorSpace::label)
+                        ),
+                        false,
                     ));
                 }
             }
@@ -746,7 +777,9 @@ fn ocio_config_setting(
 
 fn project_settings(s: &mut Session, p: &Value) -> Result<Value> {
     let env = s.ocio_env.clone();
-    let mut notes: Vec<String> = vec![];
+    let doc = s.path.clone();
+    let readable = s.ocio_readable();
+    let mut notes: Vec<crate::ocio_project::Notice> = vec![];
     s.edit("Project Settings", None, |proj, _| {
         if let Some(b) = str_p(p, "bitDepth") {
             proj.settings.bit_depth = match b {
@@ -807,7 +840,7 @@ fn project_settings(s: &mut Session, p: &Value) -> Result<Value> {
                 _ => return Err(bad(cmd, format!("workingGamma: 2.2|2.4, not `{g}`"))),
             };
         }
-        ocio_config_setting(proj, p, env.as_deref(), (was_ocio, ws_before), &mut notes)?;
+        ocio_config_setting(proj, p, (env.as_deref(), doc.as_deref()), &readable, (was_ocio, ws_before), &mut notes)?;
         if let Some(h) = str_p(p, "hdr") {
             proj.settings.hdr = match h.to_ascii_lowercase().replace([' ', '-', '_'], "").as_str() {
                 "clip" | "off" | "none" => HdrMode::Clip,
@@ -849,11 +882,11 @@ fn project_settings(s: &mut Session, p: &Value) -> Result<Value> {
         Ok(())
     })?;
     for n in &notes {
-        s.toast(n.clone());
+        s.ocio_notify(n);
     }
     let mut out = serde_json::to_value(&s.project.settings).unwrap_or_default();
     out["ocio"] = s.ocio_status();
-    out["notes"] = json!(notes);
+    out["notes"] = json!(notes.iter().map(|n| n.text.as_str()).collect::<Vec<_>>());
     Ok(out)
 }
 

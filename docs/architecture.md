@@ -511,9 +511,17 @@ and for unmanaged projects, Rec. 2100 PQ and HLG as BT.2020, the ACES spaces wit
 
 <a id="project-ocio-config"></a>**Project OCIO config** (`crates/engine/src/settings/ocio_project.rs`). Project Settings ▸ Color ▸
 OCIO Config (`file.projectSettings {ocioConfig}`, saved as `ocio_config`, left out of files without
-one) names the `.ocio` file of an OCIO-managed project; none is the built-in ACES config. The path is
-used as given: a relative one resolves against the working directory, not the project file, so
-use absolute paths (an agent confined to automation roots must). The active
+one) names the `.ocio` file of an OCIO-managed project; none is the built-in ACES config. A relative path
+is taken from the project file's folder, as footage paths are (`doc_path`): when it is chosen, and
+when a project or New Project template that stores one is opened. It is then kept as the absolute
+path, so Save As to another folder still names the same file. An unsaved project has no folder, so
+a relative path is refused there until the project is saved (an absolute one works); a relative
+Default OCIO Config is not used, with a notice. A stored path the stored-path rules refuse
+(another computer's share, a URL) is kept but not read. A config is only read when the session's
+file services can see it: an agent confined to its automation roots (`--automation-read-root`)
+gets the built-in config for a config elsewhere, and while confined `ocioConfig` must be an
+absolute path inside the roots. (The LUT files a config's FileTransforms name are read like the
+OCIO effects' are, without that check.) The active
 config is, in order: the `OCIO` environment variable (read once by the host into
 `Session::ocio_env`), the project's config, the built-in one. The variable overrides the project's
 choice without changing it, and the choice can't be changed while it is set, as Nuke's user guide
@@ -528,7 +536,10 @@ compared with each working space's own conversion, so ACES configs that name the
 differently resolve alike. Only ACEScg and ACES2065-1 are accepted (the OCIO engine's working
 spaces); a config without `aces_interchange`, or whose `scene_linear` is another space (linear
 Rec. 709 in Blender's configs) is refused with the reason. A config that can't be read never stops a
-project opening: the built-in config stands in, and the open result and a notice say so. Opening
+project opening: the built-in config stands in, and the open result and a notice say so. When
+the `OCIO` variable's config can't be used (unreadable or refused), every project has the same
+problem, so a session shows that notice once; each command result still reports it (`ocio.error`,
+`ocioNotice`, `notes`). Opening
 never rewrites a project's colour settings; a saved working space that differs from the active
 config's is reported. **Not applied yet:** the config's displays, views, view transforms, looks,
 input colour spaces and ACES output transforms are listed in the result's `ocio` object

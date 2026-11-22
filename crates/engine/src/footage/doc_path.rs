@@ -172,7 +172,7 @@ pub(crate) fn resolve_footage_of(p: &mut Project, pick: impl Fn(ItemId) -> bool,
 }
 
 /// The message for footage whose stored path is not followed.
-pub(crate) fn refusal(stored: &str, why: NotFollowed) -> String {
+pub fn refusal(stored: &str, why: NotFollowed) -> String {
     format!("the footage file {stored} is not opened: {why}")
 }
 

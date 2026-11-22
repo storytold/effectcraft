@@ -269,6 +269,12 @@ pub struct Session {
     /// never reads the environment, so tests can set it): when set, the OCIO config of every
     /// OCIO-managed project ([`ocio_project`]).
     pub ocio_env: Option<String>,
+    /// A notice that the `OCIO` environment variable's config can't be used was shown: a session
+    /// says it once ([`ocio_project::Notice::once`]); command results still report it.
+    pub ocio_env_noticed: bool,
+    /// The open project's OCIO config path when the stored-path rules refused it as the project
+    /// opened, and why ([`ocio_project::resolve_stored`]): it is not read.
+    pub ocio_refused: Option<(String, String)>,
     /// Footage paths that came from a document, with that document ([`doc_path`]).
     pub stored_paths: doc_path::StoredPaths,
     /// Each footage file's size and modification time when last seen (Settings ▸ Import ▸
@@ -411,6 +417,8 @@ impl Default for Session {
             learn: None,
             check_footage_on_open: false,
             ocio_env: None,
+            ocio_env_noticed: false,
+            ocio_refused: None,
             stored_paths: Default::default(),
             footage_stamps: Default::default(),
             footage_reloads: Default::default(),
