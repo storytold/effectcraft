@@ -745,8 +745,11 @@ pub struct Frames {
     /// None if the OS refused the threads: jobs then go to rayon's global pool.
     pool: Option<rayon::ThreadPool>,
     #[cfg(not(target_arch = "wasm32"))]
-    /// Independent pools for foreground frames that may call external helpers.
-    foreground: Vec<rayon::ThreadPool>,
+    /// Independent pools, started only when a foreground frame may call a helper.
+    foreground: std::sync::OnceLock<Vec<rayon::ThreadPool>>,
+    #[cfg(not(target_arch = "wasm32"))]
+    /// The maximum number of foreground pools and the number of workers per pool.
+    foreground_shape: (usize, usize),
     #[cfg(not(target_arch = "wasm32"))]
     /// Cached isolation classification for the most recent immutable project snapshot.
     isolated_project: Mutex<Option<(std::sync::Weak<Project>, bool)>>,
@@ -847,25 +850,7 @@ impl Frames {
             })
             .collect();
         #[cfg(not(target_arch = "wasm32"))]
-        let foreground: Vec<rayon::ThreadPool> = (0..(threads / width).min(8))
-            .map_while(|i| {
-                rayon::ThreadPoolBuilder::new()
-                    .num_threads(width.max(2))
-                    .thread_name(move |worker| format!("ec-viewer-{i}-{worker}"))
-                    .panic_handler(|_| log::error!("a viewer frame render panicked; that frame was skipped"))
-                    .build()
-                    .ok()
-            })
-            .collect();
-        #[cfg(not(target_arch = "wasm32"))]
-        let queue = Queue {
-            idle_foreground: (0..foreground.len().max(1)).collect(),
-            isolate_shared: foreground.is_empty(),
-            idle_lanes: (0..lanes.len()).collect(),
-            lanes: lanes.len(),
-            gpu_limit: 1,
-            ..Default::default()
-        };
+        let queue = Queue { idle_lanes: (0..lanes.len()).collect(), lanes: lanes.len(), gpu_limit: 1, ..Default::default() };
         #[cfg(target_arch = "wasm32")]
         let queue = Queue::default();
         let cache = Arc::new(Mutex::new(Cache {
@@ -899,7 +884,9 @@ impl Frames {
             #[cfg(not(target_arch = "wasm32"))]
             lanes,
             #[cfg(not(target_arch = "wasm32"))]
-            foreground,
+            foreground: std::sync::OnceLock::new(),
+            #[cfg(not(target_arch = "wasm32"))]
+            foreground_shape: ((threads / width).min(8), width.max(2)),
             #[cfg(not(target_arch = "wasm32"))]
             isolated_project: Mutex::new(None),
             ctx: None,
@@ -1562,10 +1549,17 @@ impl Frames {
         #[cfg(not(target_arch = "wasm32"))]
         if moved {
             self.start_lanes(&mut q, usize::MAX);
-            let pool_jobs = q.jobs.iter().filter(|j| !q.on_lane(j)).count().min(self.parallelism());
-            drop(q);
-            for _ in 0..pool_jobs {
-                self.start_pool();
+            let (shared, isolated) = q
+                .jobs
+                .iter()
+                .filter(|j| !q.on_lane(j))
+                .fold((0, 0), |(shared, isolated), job| if job.isolate { (shared, isolated + 1) } else { (shared + 1, isolated) });
+            let parallelism = self.parallelism();
+            for _ in 0..isolated.min(parallelism) {
+                self.start_pool(&mut q, true);
+            }
+            for _ in 0..shared.min(parallelism) {
+                self.start_pool(&mut q, false);
             }
         }
     }
@@ -1588,27 +1582,32 @@ impl Frames {
     /// Keep ordinary frames on the shared pool. A helper frame gets its own pool, so
     /// its parallel work cannot steal a competing frame that waits for the helper.
     #[cfg(not(target_arch = "wasm32"))]
-    fn start_pool(&self) {
+    fn start_pool(&self, q: &mut Queue, isolate: bool) {
         if self.remote.is_some() {
             return;
         }
-        let Ok(mut q) = self.queue.lock() else { return };
-        let mut shared = false;
-        let mut isolated = false;
-        for job in q.jobs.iter().filter(|j| !q.on_lane(j)) {
-            if q.isolated(job) {
-                isolated = true;
-            } else {
-                shared = true;
-            }
-        }
-        let lane = if isolated { q.idle_foreground.pop() } else { None };
-        drop(q);
-        if shared {
+        if !isolate && !q.isolate_shared {
             self.spawn_drain(RenderLane::Shared, self.pool.as_ref());
+            return;
         }
-        if let Some(lane) = lane {
-            let pool = self.foreground.get(lane).or(self.pool.as_ref());
+        let foreground = self.foreground.get_or_init(|| {
+            let (count, width) = self.foreground_shape;
+            let pools: Vec<_> = (0..count)
+                .map_while(|i| {
+                    rayon::ThreadPoolBuilder::new()
+                        .num_threads(width)
+                        .thread_name(move |worker| format!("ec-viewer-{i}-{worker}"))
+                        .panic_handler(|_| log::error!("a viewer frame render panicked; that frame was skipped"))
+                        .build()
+                        .ok()
+                })
+                .collect();
+            q.isolate_shared = pools.is_empty();
+            q.idle_foreground.extend(0..pools.len().max(1));
+            pools
+        });
+        if let Some(lane) = q.idle_foreground.pop() {
+            let pool = foreground.get(lane).or(self.pool.as_ref());
             self.spawn_drain(RenderLane::Foreground(lane), pool);
         }
     }
@@ -1625,9 +1624,8 @@ impl Frames {
 
     #[cfg(not(target_arch = "wasm32"))]
     fn project_needs_isolated_frames(&self, project: &Arc<Project>) -> bool {
-        let weak = Arc::downgrade(project);
         let mut cached = self.isolated_project.lock().ok();
-        if let Some((_, isolated)) = cached.as_deref().and_then(Option::as_ref).filter(|(p, _)| p.ptr_eq(&weak)) {
+        if let Some((_, isolated)) = cached.as_deref().and_then(Option::as_ref).filter(|(p, _)| p.as_ptr() == Arc::as_ptr(project)) {
             return *isolated;
         }
         // Expressions may sample layers outside the viewer's precomp tree. Look at the
@@ -1645,7 +1643,7 @@ impl Frames {
             })
         });
         if let Some(cached) = cached.as_deref_mut() {
-            *cached = Some((weak, isolated));
+            *cached = Some((Arc::downgrade(project), isolated));
         }
         isolated
     }
@@ -1728,36 +1726,37 @@ impl Frames {
             }
         }
         if !inf.insert(key) {
-            // A queued viewer frame from another comp may have become prefetch.
-            #[cfg(not(target_arch = "wasm32"))]
-            if urgent {
-                self.start_lanes(&mut q, 1);
-            }
             drop(inf);
-            drop(q);
-            // Queued for a lane and now the viewer's frame: it is the pool's.
             #[cfg(not(target_arch = "wasm32"))]
             if urgent {
-                self.start_pool();
+                // A queued viewer frame from another comp may have become prefetch.
+                if isolate {
+                    self.start_lanes(&mut q, 1);
+                }
+                // If it is queued for a lane, the viewer request moves it to a pool.
+                if !isolate || q.jobs.iter().any(|j| j.key == key) {
+                    self.start_pool(&mut q, isolate);
+                }
             }
             return;
         }
         q.seq += 1;
         let seq = q.seq;
         let job = Job { key, src: src.clone(), comp, t, opts, urgent, background: want == Want::Background, isolate, seq, cancel: Arc::default() };
-        // A lane's frame: a busy lane takes the next job when it is done, an idle one starts now.
         #[cfg(not(target_arch = "wasm32"))]
         let on_lane = q.on_lane(&job);
         q.jobs.push(job);
-        #[cfg(not(target_arch = "wasm32"))]
-        self.start_lanes(&mut q, 1);
         drop(inf);
-        drop(q);
-        // Wake the viewer's drain only if this job belongs to the pool.
         #[cfg(not(target_arch = "wasm32"))]
-        if !on_lane {
-            self.start_pool();
+        {
+            if on_lane || (urgent && isolate) {
+                self.start_lanes(&mut q, 1);
+            }
+            if !on_lane {
+                self.start_pool(&mut q, isolate);
+            }
         }
+        drop(q);
         #[cfg(target_arch = "wasm32")]
         if let Some(ctx) = &self.ctx {
             // rendered by `pump` after this UI frame

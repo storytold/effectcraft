@@ -26,6 +26,47 @@ fn frames_without_the_hdr_step_have_keys_of_their_own() {
     assert_ne!(opts_hash(&opts), opts_hash(&RenderOpts { skip_hdr_step: true, ..opts }));
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn ordinary_viewer_frames_do_not_start_helper_pools() {
+    use effectcraft_engine::Session;
+    use serde_json::json;
+
+    let frames = Frames::default();
+    assert!(frames.foreground.get().is_none(), "startup must leave helper pools dormant");
+    let mut session = Session::default();
+    session.execute("comp.new", json!({"width": 8, "height": 8, "duration": 1})).unwrap();
+    let comp = session.active_comp_id().unwrap();
+    let opts = RenderOpts::default();
+
+    let check = |session: &Session| {
+        let src = RenderSource {
+            project: session.project.clone(),
+            footage: session.footage.clone(),
+            expr: None,
+            layer_cache: Arc::default(),
+            gpu: None,
+            gpu_display: false,
+            disk: None,
+        };
+        let key = FrameKey {
+            revision: session.revision,
+            content: frames.content_of(&src.project, session.revision, comp),
+            comp: comp.0,
+            ..key(0, 0, opts_hash(&opts))
+        };
+        frames.request_urgent(&src, key, comp, Tick::ZERO, opts);
+        wait_for_renders(&frames);
+        assert!(frames.get(&key).is_some());
+        assert!(frames.foreground.get().is_none(), "ordinary work must stay on the existing pool");
+    };
+
+    check(&session);
+    let layer = session.execute("layer.newSolid", json!({"color": "#ff0000"})).unwrap()["layer"].as_u64().unwrap();
+    session.execute("effect.apply", json!({"layers": [layer], "effect": "Exposure"})).unwrap();
+    check(&session);
+}
+
 struct ProbeDisk {
     keys: Mutex<HashSet<u128>>,
     probes: std::sync::atomic::AtomicUsize,
