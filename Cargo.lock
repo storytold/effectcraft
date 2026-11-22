@@ -2546,6 +2546,7 @@ dependencies = [
  "effectcraft-engine",
  "effectcraft-geom",
  "effectcraft-gpu",
+ "effectcraft-helper-host",
  "effectcraft-host",
  "effectcraft-keyframe",
  "effectcraft-media",

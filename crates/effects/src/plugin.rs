@@ -397,6 +397,10 @@ pub trait EffectPlugin: Send + Sync {
     fn source(&self) -> String {
         "built-in".into()
     }
+    /// Whether a render waits for an external process that can call back into the renderer.
+    fn uses_external_helper(&self) -> bool {
+        false
+    }
     /// API 2: transparent pixels to add on every side of the buffer before rendering (glows,
     /// blurs, regions of definition larger than the input), in buffer pixels. `layer_size` is
     /// the layer's size in layer pixels (the frame's [`PluginFrame::layer_size`]; 0 when unknown)
@@ -457,6 +461,13 @@ fn set_plugin_error(id: &str, error: Option<String>) {
 /// The plug-in behind a registered effect id.
 pub fn plugin(id: &str) -> Option<Arc<dyn EffectPlugin>> {
     SLOTS.iter().filter_map(|s| s.get()).find(|p| p.manifest().id == id).cloned()
+}
+
+/// External helper effects need an isolated frame scheduler. An unresolved effect also
+/// needs isolation because it might be registered as a helper after a project is opened.
+pub fn needs_isolated_frame(id: &str) -> bool {
+    !crate::registry().iter().any(|s| s.id == id)
+        && SLOTS.iter().filter_map(|s| s.get()).find(|p| p.manifest().id == id).is_none_or(|p| p.uses_external_helper())
 }
 
 /// Whether the registered plug-in `id` reads the layer at other times (its neighbouring frames),
