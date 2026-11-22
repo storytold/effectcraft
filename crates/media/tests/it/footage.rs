@@ -1628,10 +1628,8 @@ fn rotated_mp4_matches_reference_orientation() {
     ) else {
         return;
     };
-    let Some(p) = try_ffmpeg_fixture(
-        "h264_rotate_matrix_90.mp4",
-        &["-i", base.to_str().expect("fixture path"), "-c", "copy", "-metadata:s:v:0", "rotate=90"],
-    ) else {
+    let Some(p) = try_ffmpeg_fixture("h264_rotate_matrix_90.mp4", &["-i", base.to_str().expect("fixture path"), "-c", "copy", "-metadata:s:v:0", "rotate=90"])
+    else {
         return;
     };
     let f = probe(&p).expect("probe rotated mp4");
@@ -1644,9 +1642,22 @@ fn rotated_mp4_matches_reference_orientation() {
 
 #[test]
 fn webm_alpha_falls_back_to_filmcraft_preserving_alpha() {
-    let Some(p) = try_ffmpeg_fixture(
-        "vp9_alpha_fallback.webm",
-        &["-f", "lavfi", "-i", "format=rgba,geq=r='255':g='0':b='0':a='255*X/W':s=128x64:r=24", "-t", "0.25", "-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p"],
+    // Original synthetic red/alpha ramp. Size and rate belong to the source, not geq.
+    // VP9 is already a required oracle encoder for vp9_webm: invalid filters must fail too.
+    let Some(p) = ffmpeg_fixture(
+        "vp9_alpha_ramp.webm",
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "color=red:s=128x64:r=24,format=rgba,geq=r='255':g='0':b='0':a='255*X/W'",
+            "-t",
+            "0.25",
+            "-c:v",
+            "libvpx-vp9",
+            "-pix_fmt",
+            "yuva420p",
+        ],
     ) else {
         return;
     };
