@@ -562,8 +562,9 @@ fn a_docked_panel_button_opens_the_file_dialog() {
 }
 
 /// A docked panel taller than its dock scrolls down like a page: Tab to a control below the
-/// visible part scrolls the dock to it (the panel's window stays as wide as its dock and as tall
-/// as its content, as a panel listing many items sizes itself in onResize).
+/// visible part, a button or a list box's item, scrolls the dock to it (the panel's window stays
+/// as wide as its dock and as tall as its content, as a panel listing many items sizes itself in
+/// onResize).
 #[test]
 fn tab_to_a_control_below_a_tall_panels_dock_scrolls_to_it() {
     use effectcraft_engine::config::{ConfigStore, MemoryConfig};
@@ -576,8 +577,9 @@ fn tab_to_a_control_below_a_tall_panels_dock_scrolls_to_it() {
       p.orientation = "column";
       p.alignChildren = ["left", "top"];
       for (var i = 1; i <= 40; i++) p.add("button", undefined, "Item " + i, { name: "item" + i });
+      p.add("listbox", undefined, ["Alpha", "Beta", "Gamma"], { name: "list" });
       p.onResize = function () {
-        p.size = [p.size.width, 40 * 35 + 20];
+        p.size = [p.size.width, 40 * 35 + 120];
         p.layout.layout(true);
       };
     "#;
@@ -603,4 +605,20 @@ fn tab_to_a_control_below_a_tall_panels_dock_scrolls_to_it() {
     assert!(last.is_focused(), "Tab moves to the last item");
     let r = last.rect();
     assert!(r.min.y >= screen.min.y && r.max.y <= screen.max.y, "the dock scrolled it into view: {r:?}");
+    // The list box under the last button, from the top of the panel again: its scroll area keeps
+    // the item's request, and the dock still scrolls to the list.
+    h.get_by_role_and_label(Role::Button, "Item 1").focus();
+    h.run_steps(6);
+    assert!(h.get_by_label("Alpha").rect().min.y > screen.max.y, "the list starts below the dock");
+    h.get_by_role_and_label(Role::Button, "Item 40").focus();
+    h.run_steps(3);
+    for pressed in [true, false] {
+        h.input_mut().events.push(Event::Key { key: Key::Tab, physical_key: None, pressed, repeat: false, modifiers: Default::default() });
+        h.step();
+    }
+    h.run_steps(6);
+    let item = h.get_by_label("Alpha");
+    assert!(item.is_focused(), "Tab moves to the list's first item");
+    let r = item.rect();
+    assert!(r.min.y >= screen.min.y && r.max.y <= screen.max.y, "the dock scrolled the list into view: {r:?}");
 }

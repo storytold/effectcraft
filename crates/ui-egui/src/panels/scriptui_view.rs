@@ -242,6 +242,7 @@ fn draw_widget(app: &mut EffectcraftApp, ui: &mut egui::Ui, origin: egui::Pos2, 
         }
         WidgetKind::ListBox => {
             let mut pick: Option<usize> = None;
+            let mut focused = false;
             ui.painter().rect_filled(rect, 2.0, t.field_bg);
             ui.add_enabled_ui(w.enabled, |ui| {
                 ui.scope_builder(UiBuilder::new().max_rect(rect.shrink(2.0)), |ui| {
@@ -249,7 +250,9 @@ fn draw_widget(app: &mut EffectcraftApp, ui: &mut egui::Ui, origin: egui::Pos2, 
                         ui.set_width(rect.width() - 8.0);
                         for (i, it) in w.items.iter().enumerate() {
                             let r = ui.selectable_label(w.selection.contains(&i), it);
+                            // Scrolls the list to the item (its own scroll area takes this).
                             scroll_to_focus(&r);
+                            focused |= r.gained_focus();
                             if r.clicked() {
                                 pick = Some(i);
                             }
@@ -257,6 +260,10 @@ fn draw_widget(app: &mut EffectcraftApp, ui: &mut egui::Ui, origin: egui::Pos2, 
                     });
                 });
             });
+            // The list's scroll area kept the item's request, so the dock scrolls to the list.
+            if focused {
+                ui.scroll_to_rect(rect, None);
+            }
             if let Some(i) = pick {
                 acts.push(Act::Set(win, w.id, json!(i)));
             }
