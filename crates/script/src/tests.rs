@@ -24,6 +24,7 @@ mod services;
 mod startup;
 mod tasks;
 mod ui;
+mod ui_metrics;
 mod ui_more;
 mod ui_mouse;
 
