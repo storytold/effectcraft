@@ -287,6 +287,13 @@ fn shadow_factor(m: u32, p: vec3<f32>, ng: vec3<f32>, n_l: f32) -> f32 {
     if (!(reach < 1e30)) {
         reach = 1.0;
     }
+    // A receiver more than `reach + 1` texels outside the map reads only texels outside
+    // it, so it is unshadowed; returning here keeps the jitter lattice finite.
+    let lo = -(reach + 1.0);
+    let hi = f32(size) + reach + 1.0;
+    if (!(u >= lo && u <= hi && v >= lo && v <= hi)) {
+        return 1.0;
+    }
     let n = clamp(i32(ceil(reach)) + 1, 5, PCF_MAX_TAPS);
     let step = reach / f32(n - 1);
     let half = f32(n - 1) * 0.5;

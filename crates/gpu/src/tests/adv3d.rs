@@ -198,6 +198,25 @@ fn gpu_matches_cpu_shadow_catcher() {
 }
 
 #[test]
+fn gpu_matches_cpu_with_receivers_far_off_the_shadow_maps() {
+    // Every shadow map's view moved far off the scene with a focal length that puts the
+    // receivers' map coordinates near `f32::MAX`: both backends shade them unshadowed.
+    let Some(g) = gpu() else { return };
+    let (p, cid) = scene_project();
+    for focal in [f32::MAX / 400.0, f32::MAX] {
+        let mut s = scene(&p, cid);
+        assert!(!s.shadows.is_empty());
+        for m in &mut s.shadows {
+            m.view[0][3] += 1.0e5;
+            m.focal = focal;
+        }
+        let gt = g.raster_3d(&s).expect("gpu raster");
+        assert!(gt.color.iter().flatten().all(|v| v.is_finite()), "focal {focal}: every GPU pixel is finite");
+        compare(&s, &g);
+    }
+}
+
+#[test]
 fn gpu_matches_cpu_wide_penumbrae() {
     // Both lights cast with wide Shadow Diffusion. Penumbrae cover much of the frame, so a
     // backend drift in the PCF (jitter hash, tap grid, receiver-plane compare) would hide
