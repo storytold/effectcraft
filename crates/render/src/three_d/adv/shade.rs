@@ -508,7 +508,10 @@ pub fn shade(s: &Scene, f: &Frag) -> Option<[f32; 4]> {
     let ng = n;
     if let Some(t) = tex(m.tex_normal) {
         let tn = [(t[0] * 2.0 - 1.0) * m.normal_scale, (t[1] * 2.0 - 1.0) * m.normal_scale, t[2] * 2.0 - 1.0];
+        // A back face reverses the whole tangent frame (tangent, bitangent and normal), so its
+        // mapped normal is the front one reversed.
         let tg = [f.tangent[0], f.tangent[1], f.tangent[2]];
+        let tg = if f.front { tg } else { scale(tg, -1.0) };
         // Gram-Schmidt against the shading normal.
         let tg = norm(sub(tg, scale(n, dot(n, tg))));
         let sign = if f.front { f.tangent[3] } else { -f.tangent[3] };
