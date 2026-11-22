@@ -89,6 +89,11 @@ pub struct Widget {
     pub checked: bool,
     /// Drop-down list / list box items.
     pub items: Vec<String>,
+    /// Separator flags captured from the script's original `items` before [`Widget::translate_display`]
+    /// replaces labels, so a translation pack cannot turn a separator into a selectable item or
+    /// turn an option into a separator.
+    #[serde(skip)]
+    pub item_separators: Vec<bool>,
     /// Selected item indices.
     pub selection: Vec<usize>,
     /// `column` (default for windows and panels), `row` (groups) or `stack`.
@@ -384,19 +389,37 @@ impl Widget {
             c.walk(out);
         }
     }
-    /// Replace display labels with exact-match translations. Editable text is script data, not a
-    /// label, so it keeps its value (and so do ids, names and event handlers).
-    fn translate_display(&mut self, translations: &BTreeMap<String, String>) {
+    /// Whether `items[index]` is a dropdown separator (`"-"` in the script's original items).
+    pub fn is_item_separator(&self, index: usize) -> bool {
+        self.item_separators.get(index).copied().unwrap_or_else(|| self.items.get(index).is_some_and(|item| item == "-"))
+    }
+    /// Replace display labels with exact-match translations, returning whether any label changed.
+    /// Editable text is script data, not a label, so it keeps its value (and so do ids, names and
+    /// event handlers).
+    fn translate_display(&mut self, translations: &BTreeMap<String, String>) -> bool {
+        let mut changed = false;
         if self.kind != WidgetKind::EditText {
-            self.text = translate_exact(translations, &self.text);
+            changed |= translate_in_place(translations, &mut self.text);
         }
-        self.help_tip = translate_exact(translations, &self.help_tip);
-        for item in &mut self.items {
-            *item = translate_exact(translations, item);
+        changed |= translate_in_place(translations, &mut self.help_tip);
+        if self.kind == WidgetKind::DropDownList && !self.items.is_empty() {
+            if self.item_separators.is_empty() {
+                self.item_separators = self.items.iter().map(|item| item == "-").collect();
+            }
+            for (item, &is_sep) in self.items.iter_mut().zip(&self.item_separators) {
+                if !is_sep {
+                    changed |= translate_in_place(translations, item);
+                }
+            }
+        } else {
+            for item in &mut self.items {
+                changed |= translate_in_place(translations, item);
+            }
         }
         for child in &mut self.children {
-            child.translate_display(translations);
+            changed |= child.translate_display(translations);
         }
+        changed
     }
     /// A control by id (number or `"#12"`), `properties.name` or text.
     pub fn lookup(&self, key: &Value) -> Option<&Widget> {
@@ -436,13 +459,15 @@ pub struct ScriptWindow {
 }
 
 impl ScriptWindow {
-    /// Replace display strings using an exact-match translation table.
+    /// Replace display strings using an exact-match translation table, returning whether any
+    /// string changed.
     ///
     /// Frontends call this on the copy they draw, not on the live script state, so automation
     /// ids, control names, values, handlers and `EditText` contents stay unchanged.
-    pub fn translate_display(&mut self, translations: &BTreeMap<String, String>) {
-        self.title = translate_exact(translations, &self.title);
-        self.root.translate_display(translations);
+    pub fn translate_display(&mut self, translations: &BTreeMap<String, String>) -> bool {
+        let title_changed = translate_in_place(translations, &mut self.title);
+        let root_changed = self.root.translate_display(translations);
+        title_changed || root_changed
     }
 
     /// The title a frontend should show: the script's title, translated when the pack has it, or
@@ -450,6 +475,20 @@ impl ScriptWindow {
     pub fn display_title(&self, translations: &BTreeMap<String, String>) -> String {
         if self.title.is_empty() { self.script.clone() } else { translate_exact(translations, &self.title) }
     }
+}
+
+/// Replace `slot` in place when `translations` maps it to a different non-empty string.
+fn translate_in_place(translations: &BTreeMap<String, String>, slot: &mut String) -> bool {
+    if slot.is_empty() {
+        return false;
+    }
+    if let Some(translated) = translations.get(slot.as_str()).filter(|translated| !translated.is_empty())
+        && translated != slot
+    {
+        *slot = translated.clone();
+        return true;
+    }
+    false
 }
 
 /// Translate a display string when the table has exactly this source string; otherwise keep it.
@@ -1131,5 +1170,30 @@ mod tests {
         assert_eq!(window.script, "panel.jsx");
         assert_eq!(window.root.find(2).unwrap().id, 2);
         assert_eq!(translate_exact(&BTreeMap::new(), "Missing"), "Missing");
+    }
+
+    #[test]
+    fn translation_pack_preserves_dropdown_separator_identity() {
+        let mut list = w(WidgetKind::DropDownList, "");
+        list.id = 2;
+        list.items = vec!["None".into(), "-".into(), "Alpha".into()];
+        let mut root = w(WidgetKind::Window, "");
+        root.id = 1;
+        root.children = vec![list];
+        let mut window = ScriptWindow { id: 1, title: "Menu".into(), script: "panel.jsx".into(), root, ..Default::default() };
+
+        assert!(!window.translate_display(&BTreeMap::new()));
+        let changed = window.translate_display(&BTreeMap::from([
+            ("None".to_string(), "-".to_string()),
+            ("-".to_string(), "—".to_string()),
+            ("Alpha".to_string(), "甲".to_string()),
+        ]));
+        assert!(changed);
+
+        let list = window.root.find(2).unwrap();
+        assert_eq!(list.items, ["-".to_string(), "-".to_string(), "甲".to_string()]);
+        assert!(!list.is_item_separator(0), "a translated option must stay selectable");
+        assert!(list.is_item_separator(1), "an original separator must stay a separator");
+        assert!(!list.is_item_separator(2));
     }
 }

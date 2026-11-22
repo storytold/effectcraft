@@ -218,7 +218,7 @@ fn draw_widget(app: &mut EffectcraftApp, ui: &mut egui::Ui, origin: egui::Pos2, 
                 ui.scope_builder(UiBuilder::new().max_rect(rect), |ui| {
                     craft_ui::ComboBox::from_id_salt(id).selected_text(cur).width(rect.width() - 8.0).show_ui(ui, |ui| {
                         for (i, it) in w.items.iter().enumerate() {
-                            if it == "-" {
+                            if w.is_item_separator(i) {
                                 ui.separator();
                             } else if ui.selectable_label(w.selection.contains(&i), it).clicked() {
                                 pick = Some(i);
@@ -542,6 +542,9 @@ fn perform(app: &mut EffectcraftApp, ctx: &egui::Context, acts: Vec<Act>) {
 
 /// The floating script windows (dialogs, palettes, windows), drawn over the app.
 pub fn show_windows(app: &mut EffectcraftApp, ctx: &egui::Context) {
+    if !app.session.script_ui.windows.iter().any(|w| w.kind != WindowKind::Panel) {
+        return;
+    }
     let translations = app.scriptui_translations.for_language(crate::i18n::language(app), app.session.config.as_deref());
     let windows: Vec<ScriptWindow> = app
         .session
@@ -551,16 +554,14 @@ pub fn show_windows(app: &mut EffectcraftApp, ctx: &egui::Context) {
         .filter(|w| w.kind != WindowKind::Panel)
         .cloned()
         .map(|mut w| {
-            w.translate_display(&translations);
             // Translated strings can be wider than the script's: lay the display copy out again
-            // before `show_windows` sizes and draws it (script `fixedBounds` still wins).
-            layout(&mut w);
+            // only when a label actually changed (script `fixedBounds` still wins).
+            if !translations.is_empty() && w.translate_display(&translations) {
+                layout(&mut w);
+            }
             w
         })
         .collect();
-    if windows.is_empty() {
-        return;
-    }
     let t = app.tokens;
     let mut acts = vec![];
     let screen = ctx.content_rect();
@@ -609,7 +610,9 @@ pub fn panel(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect, id: u32) {
         return;
     };
     let translations = app.scriptui_translations.for_language(crate::i18n::language(app), app.session.config.as_deref());
-    w.translate_display(&translations);
+    if !translations.is_empty() {
+        w.translate_display(&translations);
+    }
     // Docked panels fill their frame (ScriptUI lays them out at the panel's size).
     let (pw, ph) = (rect.width() as f64, rect.height() as f64);
     w.root.fixed_bounds = Some([0.0, 0.0, pw.max(w.root.bounds[2]), ph.max(w.root.bounds[3])]);
@@ -667,8 +670,12 @@ fn panel_bars(dock: egui::Vec2, window: egui::Vec2) -> egui::scroll_area::Scroll
 
 /// Tab title of a script panel.
 pub fn panel_title(app: &EffectcraftApp, id: u32) -> Option<String> {
+    let w = app.session.script_ui.window(id)?;
+    if w.title.is_empty() {
+        return Some(w.script.clone());
+    }
     let translations = app.scriptui_translations.for_language(crate::i18n::language(app), app.session.config.as_deref());
-    app.session.script_ui.window(id).map(|w| w.display_title(&translations))
+    Some(w.display_title(&translations))
 }
 
 /// Close the dock panels whose script window has gone (the script closed it, or a saved
