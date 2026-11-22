@@ -403,7 +403,9 @@ fn repetile(ctx: &EffectCtx, b: Buf) -> Buf {
         },
         None => (lx0, ly0, lw, lh),
     };
-    if w < 1.0 || h < 1.0 {
+    if w < 1.0 - 1e-6 || h < 1.0 - 1e-6 {
+        // The width is rebuilt from two rounded effect-space endpoints, so a one-pixel region can
+        // come out a rounding error under 1; only a genuinely sub-pixel region is skipped.
         return b;
     }
     let (nw, nh) = ((w + l + r).round().max(1.0) as u32, (h + u + d).round().max(1.0) as u32);
@@ -933,6 +935,22 @@ mod tests {
         lv.sort();
         lv.dedup();
         assert!(lv.len() <= 6, "{lv:?}");
+    }
+
+    /// A one-pixel painted region must not be skipped because rebuilding its width from two
+    /// rounded effect-space endpoints lands a rounding error under one pixel (#3866).
+    #[test]
+    fn repetile_repeats_a_single_pixel_region() {
+        let img = Image::filled(8, 8, [1.0; 4]);
+        let s = crate::find("ec.stylize.ccrepetile").unwrap();
+        let params = Params {
+            values: [("expandRight".into(), num(1.0)), ("expandLeft".into(), num(1.0)), ("expandUp".into(), num(1.0)), ("expandDown".into(), num(1.0))].into(),
+        };
+        // Effect-space endpoints whose rebuilt width is one pixel minus a rounding error.
+        let env = crate::EffectEnv { content: Some([4.0 / 3.0, 4.0 / 3.0, 1.6666666666666665, 1.6666666666666665]), ..Default::default() };
+        let ctx = EffectCtx { params: &params, time: 0.0, layer_size: [8.0, 8.0], seed: 1, adjustment: false, env };
+        let out = crate::apply(s, &ctx, Buf { img, offset: [-4.0, -4.0], scale: 3.0 });
+        assert_eq!((out.img.width, out.img.height), (7, 7));
     }
 
     /// A host whose every layer is `img`.

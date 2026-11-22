@@ -847,10 +847,11 @@ impl<'a> Renderer<'a> {
         }
         // Edge Tile Repeat repeats a shape or text layer's painted content, not its comp-sized
         // layer rectangle (#3866). Those layers' buffers span only their painted content, so the
-        // renderer measures that content in effect space and hands it to the effect. A sized
-        // source (solid, footage, precomp) keeps tiling its layer rectangle, as before.
+        // renderer measures that content in effect space and hands it to the effect. A cover that
+        // a non-skipping effect forces pads the buffer around the content without clipping it, so
+        // the measurement stays valid; a sized source keeps tiling its layer rectangle, as before.
         let authored = matches!(layer.source, LayerSource::Shape | LayerSource::Text);
-        let content_ready = authored && !adjustment && video().all(|s| s.skips_cover());
+        let content_ready = authored && !adjustment;
         let mut mask_shapes = masks::shapes(ctx, layer);
         if origin != [0.0; 2] {
             for q in mask_shapes.iter_mut().flat_map(|m| m.points.iter_mut()) {

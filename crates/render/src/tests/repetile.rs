@@ -9,8 +9,8 @@ use crate::render_frame;
 
 /// A comp `comp` big with a `rect`-sized red rectangle centred at `pos`, as a shape (`shape`) or
 /// a solid, with one Edge Tile Repeat per entry in `expands`, each expanding that many px on
-/// every side.
-fn scene(comp: (u32, u32), rect: (f64, f64), pos: (f64, f64), shape: bool, expands: &[f64]) -> (Project, ItemId) {
+/// every side. `extra` adds one more effect after them.
+fn scene(comp: (u32, u32), rect: (f64, f64), pos: (f64, f64), shape: bool, expands: &[f64], extra: Option<&str>) -> (Project, ItemId) {
     let mut p = Project::default();
     p.settings.bit_depth = effectcraft_project::BitDepth::Bpc32;
     let c = Comp::new(comp.0, comp.1, FrameRate::FPS_30, Tick::from_seconds_f64(1.0));
@@ -50,6 +50,9 @@ fn scene(comp: (u32, u32), rect: (f64, f64), pos: (f64, f64), shape: bool, expan
                 ("expandUp", Value::Scalar(expand)),
             ],
         );
+    }
+    if let Some(id) = extra {
+        add_effect(&mut p, &mut l, id, [f64::from(comp.0), f64::from(comp.1)], &[]);
     }
     p.comp_mut(cid).unwrap().layers.push(l);
     (p, cid)
@@ -92,9 +95,9 @@ fn assert_expanded(plain: &crate::Image, tiled: &crate::Image, expand: i64) {
 
 #[test]
 fn repetile_repeats_a_shape_layers_content_around_itself() {
-    let (p, cid) = scene((1920, 1080), (500.0, 800.0), (960.0, 540.0), true, &[]);
+    let (p, cid) = scene((1920, 1080), (500.0, 800.0), (960.0, 540.0), true, &[], None);
     let plain = render_frame(&p, cid, Tick::ZERO, 1.0);
-    let (q, cid) = scene((1920, 1080), (500.0, 800.0), (960.0, 540.0), true, &[100.0]);
+    let (q, cid) = scene((1920, 1080), (500.0, 800.0), (960.0, 540.0), true, &[100.0], None);
     let tiled = render_frame(&q, cid, Tick::ZERO, 1.0);
     assert_expanded(&plain, &tiled, 100);
 }
@@ -102,9 +105,9 @@ fn repetile_repeats_a_shape_layers_content_around_itself() {
 /// A sized source already tiled from its own bounds; the content-bounds fix must not change it.
 #[test]
 fn repetile_still_tiles_a_solid_around_its_source_bounds() {
-    let (p, cid) = scene((1920, 1080), (500.0, 800.0), (960.0, 540.0), false, &[]);
+    let (p, cid) = scene((1920, 1080), (500.0, 800.0), (960.0, 540.0), false, &[], None);
     let plain = render_frame(&p, cid, Tick::ZERO, 1.0);
-    let (q, cid) = scene((1920, 1080), (500.0, 800.0), (960.0, 540.0), false, &[100.0]);
+    let (q, cid) = scene((1920, 1080), (500.0, 800.0), (960.0, 540.0), false, &[100.0], None);
     let tiled = render_frame(&q, cid, Tick::ZERO, 1.0);
     assert_expanded(&plain, &tiled, 100);
 }
@@ -116,9 +119,9 @@ fn repetile_still_tiles_a_solid_around_its_source_bounds() {
 /// wrong part of the buffer and the rectangle moved.
 #[test]
 fn repetile_keeps_a_shape_larger_than_the_comp_visible() {
-    let (p, cid) = scene((400, 300), (500.0, 800.0), (450.0, 150.0), true, &[]);
+    let (p, cid) = scene((400, 300), (500.0, 800.0), (450.0, 150.0), true, &[], None);
     let plain = render_frame(&p, cid, Tick::ZERO, 1.0);
-    let (q, cid) = scene((400, 300), (500.0, 800.0), (450.0, 150.0), true, &[100.0]);
+    let (q, cid) = scene((400, 300), (500.0, 800.0), (450.0, 150.0), true, &[100.0], None);
     let tiled = render_frame(&q, cid, Tick::ZERO, 1.0);
     let (x0, y0, x1, y1) = bbox(&plain);
     assert!(x1 > x0 && y1 > y0, "the plain rectangle is painted: {x0}..{x1} / {y0}..{y1}");
@@ -143,9 +146,21 @@ fn repetile_keeps_a_shape_larger_than_the_comp_visible() {
 #[test]
 fn repetile_stacks_by_repeating_the_previous_output() {
     // A 500×700 rectangle keeps both expansions (300 px in total) inside the 1920×1080 frame.
-    let (p, cid) = scene((1920, 1080), (500.0, 700.0), (960.0, 540.0), true, &[]);
+    let (p, cid) = scene((1920, 1080), (500.0, 700.0), (960.0, 540.0), true, &[], None);
     let plain = render_frame(&p, cid, Tick::ZERO, 1.0);
-    let (q, cid) = scene((1920, 1080), (500.0, 700.0), (960.0, 540.0), true, &[100.0, 50.0]);
+    let (q, cid) = scene((1920, 1080), (500.0, 700.0), (960.0, 540.0), true, &[100.0, 50.0], None);
     let tiled = render_frame(&q, cid, Tick::ZERO, 1.0);
     assert_expanded(&plain, &tiled, 150);
+}
+
+/// A non-skipping effect elsewhere in the stack forces the renderer's cover; Edge Tile Repeat
+/// must still repeat the painted content, not the covered comp-sized layer rectangle (#3866).
+#[test]
+fn repetile_measures_content_when_another_effect_covers_the_layer() {
+    let extra = Some("ec.channel.invert");
+    let (p, cid) = scene((1920, 1080), (500.0, 800.0), (960.0, 540.0), true, &[], extra);
+    let plain = render_frame(&p, cid, Tick::ZERO, 1.0);
+    let (q, cid) = scene((1920, 1080), (500.0, 800.0), (960.0, 540.0), true, &[100.0], extra);
+    let tiled = render_frame(&q, cid, Tick::ZERO, 1.0);
+    assert_expanded(&plain, &tiled, 100);
 }

@@ -674,7 +674,9 @@ fn repetile(e: &mut Enc, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
         None if !effectcraft_effects::util::buffer_is_layer_rect(b.img.width, b.img.height, lw, lh) => return None,
         None => (lx0, ly0, lw, lh),
     };
-    if w < 1.0 || h < 1.0 {
+    if w < 1.0 - 1e-6 || h < 1.0 - 1e-6 {
+        // The width is rebuilt from two rounded effect-space endpoints, so a one-pixel region can
+        // come out a rounding error under 1; only a genuinely sub-pixel region is skipped.
         return Some(b);
     }
     let (nw, nh) = ((w + l + r).round().max(1.0) as u32, (h + u + d).round().max(1.0) as u32);

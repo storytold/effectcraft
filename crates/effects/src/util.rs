@@ -494,7 +494,9 @@ pub fn painted_bounds(img: &Image) -> Option<(u32, u32, u32, u32)> {
 /// that differs must have its content measured, at any size.
 #[inline]
 pub fn buffer_is_layer_rect(width: u32, height: u32, rect_w: f64, rect_h: f64) -> bool {
-    (f64::from(width) - rect_w).abs() <= 0.5 && (f64::from(height) - rect_h).abs() <= 0.5
+    // Sized sources round their buffer up to whole pixels (`solid_size`), so accept any buffer
+    // within one pixel of the fractional layer rectangle.
+    (f64::from(width) - rect_w).abs() < 1.0 && (f64::from(height) - rect_h).abs() < 1.0
 }
 
 /// Layer rectangle in buffer pixels: (x0, y0, width, height).
@@ -884,6 +886,9 @@ mod tests {
     fn buffer_is_layer_rect_matches_the_whole_rectangle_only() {
         assert!(buffer_is_layer_rect(500, 800, 500.0, 800.0));
         assert!(buffer_is_layer_rect(250, 400, 250.0, 400.0));
+        // `solid_size` rounds a solid's buffer up: 201 px at 0.25 is a 50.25 rect in a 51 buffer.
+        assert!(buffer_is_layer_rect(51, 80, 50.25, 80.0));
+        assert!(!buffer_is_layer_rect(52, 80, 50.25, 80.0));
         assert!(!buffer_is_layer_rect(500, 800, 400.0, 300.0));
         assert!(!buffer_is_layer_rect(499, 800, 500.0, 800.0));
     }
