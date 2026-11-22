@@ -19,7 +19,7 @@ use crate::three_d::camera::Dof;
 const MAX_RADIUS: f32 = 48.0;
 
 /// Depth of field of a resolved Advanced 3D image (premultiplied) with camera depth per pixel
-/// (∞ where nothing was drawn: blurred as far away).
+/// (∞ where nothing was drawn: blurred as far away). A blurred pixel's alpha is at most 1.
 pub fn depth_of_field(img: &Image, depth: &[f32], dof: &Dof, scale: f64) -> Image {
     let radius: Vec<f32> = depth
         .iter()
@@ -43,7 +43,17 @@ pub fn depth_of_field(img: &Image, depth: &[f32], dof: &Dof, scale: f64) -> Imag
             }
         });
     }
-    progressive_blur(&src, &dof.iris, &radius)
+    let mut out = progressive_blur(&src, &dof.iris, &radius);
+    // The gather's f32 prefix sums round, so a blurred opaque pixel on a wide row can come out
+    // with alpha a little over 1 (1.00017 on an 8192 px row at a radius of 0.7 px), which the
+    // encode rejects. Such a pixel is scaled to alpha 1, and its color by the same factor.
+    out.data.par_iter_mut().for_each(|p| {
+        if p[3] > 1.0 {
+            let k = 1.0 / p[3];
+            *p = [p[0] * k, p[1] * k, p[2] * k, 1.0];
+        }
+    });
+    out
 }
 
 #[cfg(test)]
@@ -119,5 +129,22 @@ mod tests {
         d.highlight = Highlight { gain: 0.5, threshold: 0.5, saturation: 0.0 };
         let bright = depth_of_field(&dot(81), &depth, &d, 1.0);
         assert!(bright.data[40 * 81 + 40][0] > plain.data[40 * 81 + 40][0] * 1.5);
+    }
+
+    #[test]
+    fn a_wide_opaque_image_stays_within_alpha_one_and_encodes() {
+        // The gather's f32 prefix sums round along a row wider than 4096 px.
+        let (w, h) = (8192u32, 3u32);
+        let mut img = Image::new(w, h);
+        img.data.fill([1.0; 4]);
+        let (d, _) = dof(0.7, Iris { sides: 6, ..Default::default() });
+        let depth = vec![2000.0f32; (w * h) as usize];
+        let out = depth_of_field(&img, &depth, &d, 1.0);
+        let encoded = super::super::encode(&mut out.clone());
+        assert!(encoded.is_ok(), "{encoded:?}");
+        let a = out.data.iter().fold(0.0f32, |m, p| m.max(p[3]));
+        assert!(a <= 1.0, "alpha {a}");
+        let row = &out.data[w as usize + 2..2 * w as usize - 2];
+        assert!(row.iter().all(|p| p.iter().all(|&c| (c - 1.0).abs() < 1e-3)), "the middle row stays opaque white");
     }
 }
