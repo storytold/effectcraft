@@ -317,6 +317,40 @@ pub fn group(layer: &Layer) -> Option<&PropGroup> {
     layer.props.sub(GROUP)
 }
 
+/// The instance property that owns this Source Text control's style base. A mirror shares
+/// its source control's base.
+pub fn text_base_owner(project: &Project, layer: &Layer, uid: Uid) -> Option<Uid> {
+    let LayerSource::Comp { item } = layer.source else { return None };
+    let g = group(layer)?;
+    let p = g.find(uid)?;
+    if !matches!(&p.value, Value::Text(_)) {
+        return None;
+    }
+    let control = control_of(&p.match_id)?;
+    let owner = project.comp(item)?.essential.as_ref()?.resolve(control)?;
+    find_prop(&g.children, &match_id(owner.id)).map(|p| p.uid)
+}
+
+/// Carry the evaluated Source Text key's style base into the static override when the
+/// stopwatch is turned off. Equal text values can have different style ownership.
+pub fn preserve_text_key_base(layer: &mut Layer, uid: Uid, time: Tick) {
+    let Some(g) = layer.props.sub_mut(GROUP) else { return };
+    let Some(p) = g.find(uid) else { return };
+    let active = p.keys.iter().filter(|k| !k.muted);
+    let Some(first) = active.clone().next() else { return };
+    let key = if time <= first.time { first } else { active.take_while(|k| k.time <= time).last().unwrap_or(first) };
+    if !matches!(&key.value, Value::Text(_)) {
+        return;
+    }
+    let key_time = key.time;
+    let GroupKind::Essential { bases, .. } = &mut g.kind else { return };
+    let Some(base) = bases.iter_mut().find(|b| b.prop == uid) else { return };
+    if let Some(key_base) = base.keys.iter().find(|b| b.time == key_time) {
+        base.doc = key_base.doc.clone();
+        base.keys.clear();
+    }
+}
+
 /// Uids of the overridden master properties of a layer.
 pub fn overridden(layer: &Layer) -> Vec<Uid> {
     match group(layer).map(|g| &g.kind) {
@@ -650,6 +684,10 @@ fn mark_overrides(before: &Project, after: &mut Project) {
             let Some(g) = group(l) else { continue };
             let Some(ol) = old_comp.layer(l.id) else { continue };
             let Some(og) = group(ol) else { continue };
+            let copied_key_base = |uid| {
+                let (GroupKind::Essential { bases: was, .. }, GroupKind::Essential { bases: now, .. }) = (&og.kind, &g.kind) else { return false };
+                was.iter().any(|b| b.prop == uid && !b.keys.is_empty()) && now.iter().any(|b| b.prop == uid && b.keys.is_empty())
+            };
             // Properties overridden before this edit stay as the edit left them (Revert and
             // Push to Comp clear overrides by editing them).
             let now_over = overridden(l);
@@ -661,6 +699,8 @@ fn mark_overrides(before: &Project, after: &mut Project) {
                 if over.contains(&p.uid) {
                     if now_over.contains(&p.uid)
                         && let Some(op) = og.find(p.uid)
+                        // Freezing animation copies an evaluated key, rather than editing its style.
+                        && (op.keys.is_empty() || !p.keys.is_empty() || !copied_key_base(p.uid))
                         && let (Value::Text(was), Value::Text(now)) = (&op.value, &p.value)
                         && was != now
                     {

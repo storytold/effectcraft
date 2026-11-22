@@ -302,6 +302,51 @@ fn a_moved_key_keeps_its_own_fill_through_master_restyles() {
     assert_eq!((moved.text.as_str(), moved.fill), ("Mine", red), "the moved key stays red");
 }
 
+#[test]
+fn turning_off_the_stopwatch_keeps_the_sampled_keys_own_fill() {
+    check_stopwatch_fill(false);
+}
+
+#[test]
+fn turning_off_the_mirror_stopwatch_keeps_the_sampled_keys_own_fill() {
+    check_stopwatch_fill(true);
+}
+
+fn check_stopwatch_fill(use_mirror: bool) {
+    let red = [1.0, 0.0, 0.0, 1.0];
+    let (mut s, bubble, text, body, main, inst, uid) = two_keys(|doc| doc, |doc| TextDoc { fill: red, ..doc });
+    let control =
+        if use_mirror { s.execute("essential.addMirror", json!({"comp": bubble.0, "control": body})).unwrap()["control"].as_u64().unwrap() } else { body };
+    let stopwatch = child_uid(essential::group(s.project.comp(main).unwrap().layer(LayerId(inst)).unwrap()).unwrap(), control);
+
+    // Once the master turns red, these keys look identical. Only the second owns its fill.
+    s.execute("layer.setText", json!({"comp": bubble.0, "layer": text, "fill": "#ff0000"})).unwrap();
+    let property = |s: &Session| s.project.comp(main).unwrap().layer(LayerId(inst)).unwrap().props.find(uid).unwrap().clone();
+    let pr = property(&s);
+    assert_eq!(pr.keys[0].value, pr.keys[1].value);
+
+    // 0.25 s in the comp samples 0.75 s on the instance layer and holds the second key.
+    s.edit("Offset instance", None, |p, _| {
+        p.comp_mut(main).unwrap().layer_mut(LayerId(inst)).unwrap().start_time = effectcraft_time::Tick::from_seconds_f64(-0.5);
+        Ok(())
+    })
+    .unwrap();
+    s.execute("time.set", json!({"time": 0.25})).unwrap();
+    s.execute("prop.toggleAnimation", json!({"layer": inst, "prop": stopwatch})).unwrap();
+    assert!(property(&s).keys.is_empty());
+    assert_eq!(instance_value(&s, main, inst, body).0.fill, red);
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(property(&s).keys, pr.keys);
+    s.execute("edit.redo", json!({})).unwrap();
+    assert!(property(&s).keys.is_empty());
+
+    s.execute("layer.setText", json!({"comp": bubble.0, "layer": text, "fill": "#00ff00", "size": 70})).unwrap();
+    let (doc, overridden) = instance_value(&s, main, inst, body);
+    assert!(overridden);
+    assert_eq!((doc.fill, doc.size), (red, 70.0));
+    assert_eq!(instance_value(&s, main, inst, control), (doc, true));
+}
+
 /// Two keys on an override at 0 s and 0.5 s: (session, bubble, text layer, control, main,
 /// instance, property uid). `first` is the value of the first key, `second` of the second.
 fn two_keys(first: impl FnOnce(TextDoc) -> TextDoc, second: impl FnOnce(TextDoc) -> TextDoc) -> (Session, ItemId, u64, u64, ItemId, u64, u64) {
