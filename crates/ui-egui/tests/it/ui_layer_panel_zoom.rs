@@ -206,3 +206,34 @@ fn trackpad_scroll_pans_and_pinch_zooms_around_the_pointer() {
     let still = zoomed.min + zoomed.size() * 0.25;
     assert!(still.distance(at) < 2.0, "the point under the pointer stays put: {at:?} vs {still:?}");
 }
+
+/// The magnification list's rows take a click anywhere along the row, not only on the words, and a
+/// middle click on the magnification box goes back to Fit without opening the list.
+#[test]
+fn magnification_rows_take_the_whole_row_and_a_middle_click_fits() {
+    let mut h = harness();
+    let mag = rect(&h, "layerPanel.magnification");
+    click(&mut h, mag.center());
+    h.run_steps(2);
+    let row = |h: &Harness<'_, EffectcraftApp>, label: &str| {
+        (0..15)
+            .find_map(|i| h.state().auto.find(&format!("viewer.layerMagnification.{i}")).filter(|e| e.label == label))
+            .map(|e| Rect::from_min_size(pos2(e.rect[0], e.rect[1]), vec2(e.rect[2], e.rect[3])))
+    };
+    let (short, widest) = (row(&h, "200%").expect("the list has 200%"), row(&h, "Fit up to 100%").expect("and Fit up to 100%"));
+    assert_eq!(short.width(), widest.width(), "a short row is as wide as the widest one");
+    // A click at the far end of the short row, well past its words.
+    click(&mut h, pos2(short.right() - 4.0, short.center().y));
+    let ppp = h.ctx.pixels_per_point();
+    assert!(h.state().ui.layer_zoom.is_some_and(|z| z * ppp > 1.5), "200% was chosen from the end of its row: {:?}", h.state().ui.layer_zoom);
+    // A middle click on the box: Fit, and no list.
+    let mag = rect(&h, "layerPanel.magnification");
+    h.input_mut().events.push(Event::PointerMoved(mag.center()));
+    h.step();
+    press(&mut h, mag.center(), egui::PointerButton::Middle, true);
+    h.step();
+    press(&mut h, mag.center(), egui::PointerButton::Middle, false);
+    h.run_steps(3);
+    assert_eq!(h.state().ui.layer_zoom, None, "a middle click fits");
+    assert!(row(&h, "200%").is_none(), "and opens no list");
+}

@@ -634,19 +634,23 @@ fn popup(app: &mut EffectcraftApp, ui: &mut egui::Ui, id: &str, anchor: Rect, it
     widgets::popup_list(ui, pid, anchor.left_top() - vec2(0.0, h + 4.0), anchor, items.len().saturating_sub(seps), seps, |ui| {
         ui.set_min_width(170.0);
         let mut chosen = None;
-        for (i, (label, on)) in items.iter().enumerate() {
-            if label == "-" {
-                ui.separator();
-                continue;
+        // Justified: each row spans the popup, so a press anywhere along it takes the entry, not
+        // only a press on its words.
+        ui.with_layout(egui::Layout::top_down_justified(egui::Align::LEFT), |ui| {
+            for (i, (label, on)) in items.iter().enumerate() {
+                if label == "-" {
+                    ui.separator();
+                    continue;
+                }
+                // The item is the English source: the drawn text is looked up in the catalog, while
+                // the automation label stays English for scripts and tests.
+                let r = ui.selectable_label(*on, crate::i18n::tr(label));
+                app.auto.add(&format!("viewer.{auto}.{i}"), r.rect, label);
+                if r.clicked() {
+                    chosen = Some(i);
+                }
             }
-            // The item is the English source: the drawn text is looked up in the catalog, while
-            // the automation label stays English for scripts and tests.
-            let r = ui.selectable_label(*on, crate::i18n::tr(label));
-            app.auto.add(&format!("viewer.{auto}.{i}"), r.rect, label);
-            if r.clicked() {
-                chosen = Some(i);
-            }
-        }
+        });
         chosen
     })
 }
@@ -676,12 +680,19 @@ pub(crate) fn magnification_menu(
     let t = app.tokens;
     let ppp = ui.ctx().pixels_per_point();
     let pop = format!("{id}-pop");
-    let response = widgets::dropdown(ui, r, &magnification_label(zoom * ppp * 100.0), &t, egui::Id::unique(id))
-        .on_hover_text(crate::i18n::tr("Magnification ratio popup"));
+    let response = widgets::dropdown(ui, r, &magnification_label(zoom * ppp * 100.0), &t, egui::Id::unique(id)).on_hover_text(format!(
+        "{}\n{}",
+        crate::i18n::tr("Magnification ratio popup"),
+        crate::i18n::tr("Middle click: Fit")
+    ));
+    app.auto.add_response(auto_id, &response, "Magnification");
+    // A middle click goes straight back to Fit (keeping Fit up to 100% when that is on).
+    if response.clicked_by(egui::PointerButton::Middle) {
+        return Some((None, fit_up));
+    }
     if response.clicked() {
         toggle_popup(ui, &pop);
     }
-    app.auto.add_response(auto_id, &response, "Magnification");
     const MAGS: [&str; 15] = ["Fit", "Fit up to 100%", "-", "1.5%", "3.1%", "6.25%", "12.5%", "25%", "33.3%", "50%", "100%", "200%", "400%", "800%", "1600%"];
     let cur = (zoom * ppp * 100.0 * 10.0).round() / 10.0;
     let items: Vec<(String, bool)> = MAGS
