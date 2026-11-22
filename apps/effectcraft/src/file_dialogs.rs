@@ -88,7 +88,11 @@ struct Errors {
 /// Run blocking dialog `what`; one that can't open sends why to `errors` and counts as
 /// cancelled (the blocking hooks can't return an error).
 fn blocking<T>(errors: &Errors, what: &str, open: impl FnOnce() -> Option<T>) -> Option<T> {
-    guarded(what, open).unwrap_or_else(|e| {
+    blocking_on(errors, what, on_main_thread(), open)
+}
+
+fn blocking_on<T>(errors: &Errors, what: &str, main_thread: bool, open: impl FnOnce() -> Option<T>) -> Option<T> {
+    guarded_on(main_thread, what, open).unwrap_or_else(|e| {
         let _ = errors.tx.send(e);
         errors.ctx.request_repaint();
         None
@@ -175,8 +179,12 @@ fn title(dialog: &FileDialog) -> &'static str {
 /// Open `dialog` with `open` through [`guarded`] and wait for its answer on a worker thread.
 /// `done` always gets an answer: the paths, or why the dialog couldn't open or answer.
 fn show(dialog: FileDialog, done: DialogDone, ctx: egui::Context, open: impl FnOnce(FileDialog) -> Answer) {
+    show_on(dialog, done, ctx, on_main_thread(), open);
+}
+
+fn show_on(dialog: FileDialog, done: DialogDone, ctx: egui::Context, main_thread: bool, open: impl FnOnce(FileDialog) -> Answer) {
     let what = title(&dialog);
-    let answer = match guarded(what, || open(dialog)) {
+    let answer = match guarded_on(main_thread, what, || open(dialog)) {
         Ok(answer) => answer,
         Err(e) => {
             done(Err(e));
@@ -282,7 +290,7 @@ mod tests {
 
     fn answered(dialog: FileDialog, open: impl FnOnce(FileDialog) -> Answer) -> Result<Vec<String>, String> {
         let (tx, rx) = channel();
-        show(dialog, Box::new(move |r| tx.send(r).unwrap()), egui::Context::default(), open);
+        show_on(dialog, Box::new(move |r| tx.send(r).unwrap()), egui::Context::default(), true, open);
         rx.recv_timeout(Duration::from_secs(10)).expect("the dialog answers")
     }
 
@@ -328,10 +336,12 @@ mod tests {
     fn a_blocking_picker_that_cannot_open_reports_why() {
         let (tx, rx) = channel();
         let tx = Errors { tx, ctx: egui::Context::default() };
-        assert_eq!(blocking(&tx, "Open", || -> Option<u8> { panic!("{NIL_PANEL}") }), None);
+        assert_eq!(blocking_on(&tx, "Open", true, || -> Option<u8> { panic!("{NIL_PANEL}") }), None);
         assert!(rx.try_recv().is_ok_and(|e| e.contains(NIL_PANEL)));
-        assert_eq!(blocking(&tx, "Open", || Some(3)), Some(3));
+        assert_eq!(blocking_on(&tx, "Open", true, || Some(3)), Some(3));
         assert!(rx.try_recv().is_err(), "nothing to report");
+        assert_eq!(blocking_on(&tx, "Open", false, || Some(5)), None);
+        assert!(rx.try_recv().is_ok_and(|e| e.contains("off the main thread")));
     }
 
     /// #3084: every rfd dialog in the desktop app goes through this module (and so through

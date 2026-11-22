@@ -482,6 +482,14 @@ impl FootageSource for ConfinedFootage {
     fn frame_with(&self, item: ItemId, footage: &Footage, t: Tick, size: Option<(u32, u32)>, float: FloatCurve) -> Option<Arc<Image>> {
         self.readable(footage).then(|| self.inner.frame_with(item, footage, t, size, float)).flatten()
     }
+    /// Some rows of the frame, or `None` when the footage lies outside the allowed roots.
+    fn frame_rows(&self, item: ItemId, footage: &Footage, t: Tick, size: Option<(u32, u32)>, float: FloatCurve, rows: (i64, i64)) -> Option<Arc<Image>> {
+        self.readable(footage).then(|| self.inner.frame_rows(item, footage, t, size, float, rows)).flatten()
+    }
+    /// Whether the inner source reads only the rows asked for (footage outside the roots: no).
+    fn reads_rows(&self, footage: &Footage, t: Tick) -> bool {
+        self.readable(footage) && self.inner.reads_rows(footage, t)
+    }
     /// The frame as 8-bit levels, or `None` when the footage lies outside the allowed roots.
     fn frame8(&self, item: ItemId, footage: &Footage, t: Tick, float: FloatCurve) -> Option<Arc<effectcraft_engine::render::disk_cache::Frame8>> {
         self.readable(footage).then(|| self.inner.frame8(item, footage, t, float)).flatten()
@@ -494,9 +502,33 @@ impl FootageSource for ConfinedFootage {
     fn aux(&self, item: ItemId, footage: &Footage, t: Tick) -> Option<Arc<AuxChannels>> {
         self.readable(footage).then(|| self.inner.aux(item, footage, t)).flatten()
     }
+    /// The channels `need` reads of the footage frame, or `None` when the footage lies outside the allowed roots.
+    fn aux_for(&self, item: ItemId, footage: &Footage, t: Tick, need: &effectcraft_engine::raster::channels3d::AuxNeed) -> Option<Arc<AuxChannels>> {
+        self.readable(footage).then(|| self.inner.aux_for(item, footage, t, need)).flatten()
+    }
+    /// The channel names of the footage frame, or `None` when the footage lies outside the allowed roots.
+    fn aux_names(&self, item: ItemId, footage: &Footage, t: Tick) -> Option<Arc<AuxChannels>> {
+        self.readable(footage).then(|| self.inner.aux_names(item, footage, t)).flatten()
+    }
     /// Forwards the auxiliary footage paths to the inner source.
     fn set_aux_footage(&self, paths: &[String]) {
         self.inner.set_aux_footage(paths)
+    }
+    /// Forwards the localizer settings to the inner source.
+    fn set_localizer(&self, config: Option<effectcraft_engine::render::LocalizeConfig>) {
+        self.inner.set_localizer(config)
+    }
+    /// The inner source's localizer state.
+    fn localize_status(&self) -> Option<effectcraft_engine::render::LocalizeReport> {
+        self.inner.localize_status()
+    }
+    /// Forwards the disk cache to the inner source.
+    fn set_disk_cache(&self, cache: Option<Arc<effectcraft_engine::render::disk_cache::DiskCache>>) {
+        self.inner.set_disk_cache(cache)
+    }
+    /// Forwards what effects read of each auxiliary footage to the inner source.
+    fn set_aux_needs(&self, needs: &[(String, effectcraft_engine::raster::channels3d::AuxNeed)]) {
+        self.inner.set_aux_needs(needs)
     }
     /// The 3D model for the footage, or `None` when the footage lies outside the allowed roots.
     fn model(&self, item: ItemId, footage: &Footage) -> Option<Arc<effectcraft_model::Model>> {

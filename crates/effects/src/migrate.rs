@@ -44,6 +44,9 @@ pub const PARAM_ID_ALIASES: &[(&str, &str, &str)] = &[
     ("ec.key.innerouter", "additionalBackground", "additionalBackground/background1"),
     // Generate: Radio Waves' growth speed was called Velocity; Velocity now moves the wave.
     ("ec.generate.radiowaves", "velocity", "waveMotion/expansion"),
+    // Simulation: CC Ball Action's Instability State is treated as the control After Effects
+    // 24.2 calls Scatter Motion (#3197; an assumption: 24.2 shows no Instability State).
+    ("ec.sim.ccballaction", "instabilityState", "scatterMotion"),
 ];
 
 /// Popup option labels renamed since they were first saved:
@@ -165,6 +168,9 @@ pub fn legacy_default(effect: &str, param: &str) -> Option<Value> {
         ("ec.transition.linearwipe", "legacyFeather") => Value::Bool(true),
         // 3D Channel: Cryptomatte's Matte Only put the matte in alpha too (#3127).
         ("ec.3d.cryptomatte", crate::channel3d::MATTE_ONLY_IN_ALPHA) => Value::Bool(true),
+        // Utility: Cineon Converter version 1, where Gamma 1.7 gave linear output
+        // (`crate::utility::cineon_gamma`).
+        ("ec.utility.cineon", "version") => Value::Scalar(1.0),
         _ => return None,
     })
 }
@@ -186,6 +192,14 @@ fn take_at(g: &mut PropGroup, id: &str) -> Option<Property> {
     match id.split_once('/') {
         None => take_prop(g, id),
         Some((first, rest)) => take_at(g.sub_mut(first)?, rest),
+    }
+}
+
+/// The position of the property at spec id `id` (`a/b/param`) among its siblings.
+fn index_at(g: &PropGroup, id: &str) -> Option<usize> {
+    match id.split_once('/') {
+        None => g.children.iter().position(|c| matches!(c, Node::Prop(p) if p.match_id == id)),
+        Some((first, rest)) => index_at(g.sub(first)?, rest),
     }
 }
 
@@ -276,6 +290,12 @@ pub fn upgrade_instance(spec: &EffectSpec, g: &mut PropGroup, ids: &mut Ids, lay
         // before it moved into a twirl-down group.
         let found = prop_at(g, ps.id).is_some();
         if !found {
+            // A parameter renamed within its group keeps its place, so expressions that address
+            // it by index still read it.
+            let slot = PARAM_ID_ALIASES
+                .iter()
+                .filter(|(e, old, new)| *e == spec.id && *new == ps.id && old.rsplit_once('/').map(|(p, _)| p) == new.rsplit_once('/').map(|(p, _)| p))
+                .find_map(|(_, old, _)| index_at(g, old));
             let moved = PARAM_ID_ALIASES.iter().filter(|(e, _, new)| *e == spec.id && *new == ps.id).find_map(|(_, old, _)| take_at(g, old)).or_else(|| {
                 let leaf = ps.id.rsplit('/').next().unwrap_or(ps.id);
                 // Not when the top-level leaf is an old id of another parameter (Radio
@@ -297,9 +317,13 @@ pub fn upgrade_instance(spec: &EffectSpec, g: &mut PropGroup, ids: &mut Ids, lay
                     pr
                 }
             };
+            let at = |sub: &mut PropGroup| match slot {
+                Some(i) if i <= sub.children.len() => sub.children.insert(i, pr.into()),
+                _ => sub.children.push(pr.into()),
+            };
             match path.and_then(|path| group_at(g, ids, path)) {
-                Some(sub) => sub.children.push(pr.into()),
-                None => g.children.push(pr.into()),
+                Some(sub) => at(sub),
+                None => at(g),
             }
         }
         if let Some(pr) = prop_at(g, ps.id) {
@@ -346,6 +370,29 @@ pub fn upgrade_instance(spec: &EffectSpec, g: &mut PropGroup, ids: &mut Ids, lay
         names(g);
     }
     *g != before
+}
+
+/// Make the channel-selection parameters of the saved instance `g` of `spec` static
+/// ([`crate::channel3d::selects_channels`]: not animatable, as in After Effects). Keyframes or an
+/// expression on one (a project from before, or an import) are dropped: it keeps the value of
+/// its first keyframe (else its static value). Returns the names of the parameters that lost
+/// their animation.
+pub fn static_channel_params(spec: &EffectSpec, g: &mut PropGroup) -> Vec<String> {
+    let mut lost = vec![];
+    for ps in spec.params.iter().filter(|ps| crate::channel3d::selects_channels(spec.id, ps.id)) {
+        let Some(pr) = prop_at(g, ps.id) else { continue };
+        pr.static_only = true;
+        if pr.keys.is_empty() && pr.expr.is_none() {
+            continue;
+        }
+        if let Some(first) = pr.keys.first() {
+            pr.value = first.value.clone();
+        }
+        pr.keys.clear();
+        pr.expr = None;
+        lost.push(pr.name.clone());
+    }
+    lost
 }
 
 /// The spec id of the parameter that an instance of `spec` saved at `id` (`a/b/param`) is now:
@@ -484,6 +531,30 @@ mod tests {
     use super::*;
     use crate::{find, instantiate};
 
+    /// #3271: an import or an older document with a keyed or scripted channel selection
+    /// (Cryptomatte's Layer) keeps the first key's value, static, and names what it lost.
+    #[test]
+    fn channel_selection_becomes_static() {
+        let spec = find("ec.3d.cryptomatte").unwrap();
+        let mut next = 1;
+        let mut g = instantiate(spec, &mut Ids(&mut next), "Cryptomatte", [100.0, 50.0]);
+        assert!(static_channel_params(spec, &mut g).is_empty(), "a fresh instance loses nothing");
+        let pr = g.get_mut("layer").unwrap();
+        assert!(pr.static_only, "no stopwatch");
+        pr.static_only = false;
+        // (keys at 0 s and 1 s)
+        let first = effectcraft_keyframe::Keyframe::new(Default::default(), Value::Enum(2));
+        let mut second = effectcraft_keyframe::Keyframe::new(Default::default(), Value::Enum(0));
+        second.time.0 = 254_016_000_000;
+        pr.keys = vec![first, second];
+        g.get_mut("layerName").unwrap().expr = Some(effectcraft_project::Expression { text: "'CryptoObject'".into(), enabled: true });
+        assert_eq!(static_channel_params(spec, &mut g), ["Layer", "Layer Name"]);
+        let pr = g.get_mut("layer").unwrap();
+        assert!(pr.static_only && pr.keys.is_empty());
+        assert_eq!(pr.value, Value::Enum(2));
+        assert!(g.get_mut("layerName").unwrap().expr.is_none());
+    }
+
     #[test]
     fn upgrade_is_a_no_op_on_fresh_instances() {
         let mut next = 1;
@@ -579,6 +650,27 @@ mod tests {
         assert!(upgrade_instance(spec, &mut g, &mut Ids(&mut next), [100.0, 100.0]));
         let pr = g.get("distortionMeshOffset").unwrap();
         assert_eq!((&pr.ui, &pr.value), (&ParamUi::Point, &Value::Vec2([20.0, -5.0])));
+    }
+
+    /// #3197 review: an old CC Ball Action saved Instability State as its 8th property; renamed to
+    /// Scatter Motion it keeps that place, so an expression that reads `effect(..)(8)` still gets
+    /// the same control (new controls are appended after it).
+    #[test]
+    fn upgrade_renames_a_param_in_place_and_keeps_its_index() {
+        let spec = find("ec.sim.ccballaction").unwrap();
+        let mut next = 1;
+        let mut g = instantiate(spec, &mut Ids(&mut next), "Ball Grid", [100.0, 50.0]);
+        // The layout an earlier version saved: eight parameters, Instability State last.
+        let old = ["scatter", "rotationAxis", "rotation", "twistProperty", "twistAngle", "gridSpacing", "ballSize", "scatterMotion"];
+        let mut kept: Vec<Property> = old.iter().map(|id| take_prop(&mut g, id).unwrap()).collect();
+        g.children.clear();
+        kept[7].match_id = "instabilityState".into();
+        kept[7].value = Value::Scalar(33.0);
+        g.children.extend(kept.into_iter().map(Node::from));
+        assert!(upgrade_instance(spec, &mut g, &mut Ids(&mut next), [100.0, 50.0]));
+        let ids: Vec<&str> = g.children.iter().take(8).map(|c| c.match_id()).collect();
+        assert_eq!(ids, ["scatter", "rotationAxis", "rotation", "twistProperty", "twistAngle", "gridSpacing", "ballSize", "scatterMotion"]);
+        assert_eq!(g.get("scatterMotion").unwrap().value, Value::Scalar(33.0));
     }
 
     #[test]
@@ -818,5 +910,31 @@ not a stroke",
         let before = twirl.clone();
         to_effect_space(spec, &mut twirl, SIZE, [0.0; 2], &|_| [0.0; 2]);
         assert_eq!(twirl, before);
+    }
+
+    #[test]
+    fn cineon_converter_saved_before_its_version_upgrades_to_version_1() {
+        let spec = find("ec.utility.cineon").unwrap();
+        let mut next = 1;
+        let fresh = instantiate(spec, &mut Ids(&mut next), "Cineon Converter", [100.0, 50.0]);
+        assert_eq!(fresh.get("version").unwrap().value, Value::Scalar(2.0));
+        assert_eq!(fresh.get("gamma").unwrap().value, Value::Scalar(1.7));
+        // Gamma, its keyframes and its expression are kept as saved.
+        let mut g = fresh.clone();
+        take_prop(&mut g, "version");
+        let gamma = g.get_mut("gamma").unwrap();
+        gamma.value = Value::Scalar(2.2);
+        gamma.keys = vec![effectcraft_keyframe::Keyframe::new(Default::default(), Value::Scalar(3.4))];
+        gamma.expr = Some(effectcraft_project::Expression { text: "value * 2".into(), enabled: true });
+        let saved = gamma.clone();
+        assert!(upgrade_instance(spec, &mut g, &mut Ids(&mut next), [100.0, 50.0]));
+        assert_eq!(g.get("version").unwrap().value, Value::Scalar(1.0));
+        assert_eq!(g.get("gamma"), Some(&saved));
+        // Saved without Gamma too: it takes version 1's default, which gave linear output.
+        let mut g = fresh.clone();
+        take_prop(&mut g, "version");
+        take_prop(&mut g, "gamma");
+        assert!(upgrade_instance(spec, &mut g, &mut Ids(&mut next), [100.0, 50.0]));
+        assert_eq!(g.get("gamma").unwrap().value, Value::Scalar(1.7));
     }
 }

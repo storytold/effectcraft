@@ -8,6 +8,7 @@ mod groups;
 mod import;
 mod reader;
 mod shading;
+mod vectorcraft;
 
 const CONTENT: &str = "/OC /MC0 BDC\n0 1 0 rg 0 0 200 100 re f\nEMC\n\
 /OC /MC1 BDC\nq 10 10 80 80 re W n\n1 0 0 rg 0 0 50 100 re f\nQ\n\
@@ -83,6 +84,28 @@ fn pdf_paths_clip_gradient_and_layers() {
 }
 
 #[test]
+fn pdf_actual_text_is_exposed_as_a_logical_group() {
+    let content = "/Span << /ActualText (Logical text) >> BDC\n1 0 0 rg 10 10 20 20 re f\nEMC";
+    let objs = vec![
+        (1, "<< /Type /Catalog /Pages 2 0 R >>".to_string(), None),
+        (2, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(), None),
+        (3, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Resources << >> /Contents 4 0 R >>".to_string(), None),
+        (4, "<< >>".to_string(), Some(content.as_bytes().to_vec())),
+    ];
+
+    let doc = parse(&pdf(&objs, 1)).unwrap();
+
+    assert_eq!(shape_names(&doc), vec!["Text: Logical text"]);
+}
+
+#[test]
+fn pdf_actual_text_without_a_bom_is_pdfdocencoding_in_the_label() {
+    // 0x80 is a bullet in PDFDocEncoding, 0x92 a trade mark sign, not C1 control characters.
+    let data = page_pdf("/Span << /ActualText <80204192> >> BDC 1 0 0 rg 10 10 20 20 re f EMC", "", vec![]);
+    assert_eq!(shape_names(&parse(&data).unwrap()), vec!["Text: \u{2022} A\u{2122}"]);
+}
+
+#[test]
 fn pdf_forms_rotation_cmyk_and_alpha() {
     let content = "q 2 0 0 2 0 0 cm /Fm0 Do Q\n/GS0 gs 0 0 0 1 k 0 0 10 10 re f\n";
     let form = "0 1 1 0 k 0 0 20 20 re f";
@@ -106,7 +129,7 @@ fn pdf_forms_rotation_cmyk_and_alpha() {
     // The form (CMYK red, clipped to its 10×10 box, scaled ×2) covers PDF (0..20, 0..20); the
     // half-transparent black square covers PDF (0..10, 0..10). /Rotate 90: PDF (x, y) → (y, x).
     let red = img.get(15, 15);
-    assert!(red[0] > 0.99 && red[1] < 0.01 && red[3] > 0.99, "{red:?}");
+    assert!(red[0] > 0.99 && (red[1] - 0.1424).abs() < 0.01 && (red[2] - 0.0305).abs() < 0.01, "CMYK 0 1 1 0, as After Effects shows it: {red:?}");
     let dark = img.get(5, 5);
     assert!((dark[0] - 0.5).abs() < 0.02 && dark[3] > 0.99, "{dark:?}");
     assert_eq!(img.get(30, 30)[3], 0.0, "form clipped to its bounding box");
@@ -229,6 +252,12 @@ fn eps_postscript_subset() {
     assert_eq!(codec("art.eps", &dos), Some("EPS"));
     assert_eq!(codec("art.ai", &sample_pdf(false)), Some("AI"));
     assert_eq!(parse(b"hello"), Err(Error::NotVector));
+}
+
+#[test]
+fn eps_without_a_bounding_box_keeps_the_public_error_variant() {
+    let eps = b"%!PS-Adobe-3.0 EPSF-3.0\n%%EndComments\n0 0 10 10 rectfill\n";
+    assert_eq!(parse(eps), Err(Error::NoBoundingBox));
 }
 
 #[test]
@@ -450,6 +479,9 @@ pub(crate) fn shape_names(doc: &Doc) -> Vec<String> {
     fn walk(g: &effectcraft_svg::Group, out: &mut Vec<String>) {
         for c in &g.children {
             match c {
+                // Marked text from the shared PostScript adapter is a logical text object whose
+                // outlined glyph paths remain children for rendering and editing.
+                Node::Group(s) if s.name.starts_with("Text: ") => out.push(s.name.clone()),
                 Node::Group(s) => walk(s, out),
                 Node::Shape(s) => out.push(s.name.clone()),
                 Node::Image(i) => out.push(i.name.clone()),
@@ -1333,4 +1365,73 @@ fn clip_groups_nested_without_end_are_capped() {
     assert!(skipped.iter().any(|s| s.contains("nesting limit")), "{skipped:?}");
     assert!(inside[2] > 0.99 && inside[3] > 0.99, "the artwork draws inside the clips: {inside:?}");
     assert!(outside[3] < 0.01, "and is clipped: {outside:?}");
+}
+
+#[test]
+fn actual_text_named_properties_and_fallback_weights() {
+    let data =
+        page_pdf("/Span /P BDC 1 0 0 rg 10 10 20 20 re f EMC", "/Properties << /P 10 0 R >>", vec![(10, "<< /ActualText (Logical text) >>".into(), None)]);
+    assert_eq!(shape_names(&parse(&data).unwrap()), vec!["Text: Logical text"]);
+    use effectcraft_text::fonts::{INTER_BOLD, INTER_SEMIBOLD};
+    for name in [b"Inter-Semibold".as_slice(), b"Inter-Demi"] {
+        assert_eq!(eps_fallback_font(name), Some(INTER_SEMIBOLD));
+    }
+    for name in [b"Inter-Bold".as_slice(), b"Inter-Black", b"Inter-Heavy"] {
+        assert_eq!(eps_fallback_font(name), Some(INTER_BOLD));
+    }
+}
+
+#[test]
+fn actual_text_does_not_change_graphics_state_or_compositing() {
+    let resources = "/ExtGState << /M << /BM /Multiply >> /N << /BM /Normal >> >>";
+    // Compare every pixel to the same operators without marked content. In particular,
+    // Multiply and the clip survive EMC, and a later graphics-state change still works.
+    for (marked, plain) in [
+        (
+            "/Span << /ActualText (A) >> BDC /M gs 0 1 1 rg 0 0 60 100 re f EMC 50 0 60 100 re f /N gs 0 0 1 rg 150 0 50 100 re f",
+            "/M gs 0 1 1 rg 0 0 60 100 re f 50 0 60 100 re f /N gs 0 0 1 rg 150 0 50 100 re f",
+        ),
+        (
+            "/Span << /ActualText (A) >> BDC 0 0 100 100 re W n /M gs 0 1 1 rg 0 0 60 100 re f EMC 50 0 150 100 re f",
+            "0 0 100 100 re W n /M gs 0 1 1 rg 0 0 60 100 re f 50 0 150 100 re f",
+        ),
+        (
+            "/Span << /ActualText (A) >> BDC q /M gs 0 1 1 rg 0 0 60 100 re f Q EMC 0 0 1 rg 100 0 100 100 re f",
+            "q /M gs 0 1 1 rg 0 0 60 100 re f Q 0 0 1 rg 100 0 100 100 re f",
+        ),
+    ] {
+        let draw = |ops| render(&parse(&page_pdf(&format!("1 1 0 rg 0 0 200 100 re f {ops}"), resources, vec![])).unwrap());
+        let (a, b) = (draw(marked), draw(plain));
+        for y in 0..100 {
+            for x in 0..200 {
+                assert_eq!(a.get(x, y), b.get(x, y), "pixel {x},{y}");
+            }
+        }
+    }
+}
+
+#[test]
+fn logical_text_cannot_extend_finished_node_depth_limit() {
+    use crate::build::Builder;
+    use effectcraft_svg::Group;
+    let mut b = Builder::new();
+    assert!(b.begin_text("label"));
+    assert!(!b.nested(0).has_room(254));
+    let mut node = Node::Group(Group::new("leaf"));
+    for _ in 1..255 {
+        let mut parent = Group::new("nested");
+        parent.children.push(node);
+        node = Node::Group(parent);
+    }
+    b.push(node);
+    b.end_text();
+    let (nodes, _, skipped) = b.finish();
+    assert!(skipped.iter().any(|s| s == "group nesting limit"));
+    let mut current = nodes.first();
+    let mut depth = 1;
+    while let Some(Node::Group(g)) = current {
+        depth += 1;
+        current = g.children.first();
+    }
+    assert_eq!(depth, 256);
 }

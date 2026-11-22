@@ -14,6 +14,8 @@ mod raster;
 use std::{collections::HashMap, sync::Arc};
 
 pub use color::parse_color;
+use craft_svg::doc_style::{self, PaintRef, ResolvedPaint, Style, UrlPaint, viewbox, viewbox_transform};
+pub use craft_svg::doc_style::{Cap, FillRule, Join};
 pub use kurbo::{Affine, BezPath};
 pub use pathdata::parse_path_data;
 pub use raster::{RasterError, blend_pixel, rasterize, rasterize_with, try_rasterize, try_rasterize_with};
@@ -38,29 +40,6 @@ impl std::error::Error for Error {}
 /// Quick sniff: the first element is `<svg` (`craft_svg::sniff::is_svg`).
 pub fn looks_like_svg(bytes: &[u8]) -> bool {
     craft_svg::sniff::is_svg(bytes)
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum FillRule {
-    #[default]
-    NonZero,
-    EvenOdd,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Cap {
-    #[default]
-    Butt,
-    Round,
-    Square,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Join {
-    #[default]
-    Miter,
-    Round,
-    Bevel,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -378,256 +357,13 @@ impl Doc {
 
 // ---------------------------------------------------------------- styles
 
-/// Inherited style state.
-#[derive(Clone, Debug)]
-struct Style {
-    fill: Option<PaintRef>,
-    fill_opacity: f64,
-    fill_rule: FillRule,
-    stroke: Option<PaintRef>,
-    stroke_opacity: f64,
-    stroke_width: f64,
-    cap: Cap,
-    join: Join,
-    miter: f64,
-    dash: Option<Vec<f64>>,
-    dash_offset: f64,
-    color: [f64; 4],
-    visible: bool,
-    font_size: f64,
+#[cfg(test)]
+use craft_svg::simple_css::{MAX_CSS_DECLARATIONS, MAX_CSS_SELECTORS};
+use craft_svg::simple_css::{MAX_CSS_WORK, StyleSheet};
+
+fn parse_css(text: &str, sheet: &mut StyleSheet) -> Result<(), Error> {
+    craft_svg::simple_css::parse(text, sheet).map_err(|error| Error::Xml(error.to_string()))
 }
-
-impl Default for Style {
-    fn default() -> Self {
-        Style {
-            fill: Some(PaintRef::Color([0.0, 0.0, 0.0, 1.0])),
-            fill_opacity: 1.0,
-            fill_rule: FillRule::NonZero,
-            stroke: None,
-            stroke_opacity: 1.0,
-            stroke_width: 1.0,
-            cap: Cap::Butt,
-            join: Join::Miter,
-            miter: 4.0,
-            dash: None,
-            dash_offset: 0.0,
-            color: [0.0, 0.0, 0.0, 1.0],
-            visible: true,
-            font_size: 16.0,
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-enum PaintRef {
-    Color([f64; 4]),
-    Url(String, Option<[f64; 4]>),
-    Current,
-}
-
-/// The most selectors (each entry of a comma list counts) the `<style>` sheets of a document may
-/// hold (#2140).
-const MAX_CSS_SELECTORS: usize = 20_000;
-/// The most declarations the `<style>` sheets of a document may hold, each block counted once.
-const MAX_CSS_DECLARATIONS: usize = 50_000;
-
-/// The most matching work (candidate rules checked plus declarations applied) the elements of a
-/// document may cost, `<use>` copies included: a bound on elements x rules x declarations.
-const MAX_CSS_WORK: usize = 50_000_000;
-
-/// A CSS rule: selector (type, class, id; `*`) with its specificity and declaration block.
-#[derive(Clone, Debug)]
-struct Rule {
-    tag: Option<String>,
-    classes: Vec<String>,
-    id: Option<String>,
-    specificity: u32,
-    order: usize,
-    /// Index into [`StyleSheet::blocks`]: every selector of a comma list shares one block.
-    block: usize,
-}
-
-/// The rules of a document's `<style>` sheets, indexed by the part of the selector an element
-/// must have (id, else first class, else type) so an element only checks rules that can match.
-#[derive(Default, Debug)]
-struct StyleSheet {
-    /// Distinct selector rules in source order.
-    rules: Vec<Rule>,
-    /// Declaration blocks; comma-list selectors share one block.
-    blocks: Vec<Vec<(String, String)>>,
-    /// Declarations over all blocks.
-    decls: usize,
-    /// Rules keyed by their id selector.
-    by_id: HashMap<String, Vec<usize>>,
-    /// Rules keyed by their first class selector.
-    by_class: HashMap<String, Vec<usize>>,
-    /// Rules keyed by their type selector.
-    by_tag: HashMap<String, Vec<usize>>,
-    /// Rules with no id, class or type to index on.
-    universal: Vec<usize>,
-}
-
-impl StyleSheet {
-    /// Build the id, class, tag and universal lookup buckets from `rules`.
-    fn index(&mut self) {
-        for (i, r) in self.rules.iter().enumerate() {
-            let bucket = if let Some(id) = &r.id {
-                self.by_id.entry(id.clone()).or_default()
-            } else if let Some(c) = r.classes.first() {
-                self.by_class.entry(c.clone()).or_default()
-            } else if let Some(t) = &r.tag {
-                self.by_tag.entry(t.clone()).or_default()
-            } else {
-                &mut self.universal
-            };
-            bucket.push(i);
-        }
-    }
-}
-
-fn parse_decls(s: &str) -> Vec<(String, String)> {
-    s.split(';')
-        .filter_map(|d| {
-            let (k, v) = d.split_once(':')?;
-            let v = v.trim().trim_end_matches("!important").trim();
-            Some((k.trim().to_ascii_lowercase(), v.to_string()))
-        })
-        .filter(|(k, _)| !k.is_empty())
-        .collect()
-}
-
-fn strip_comments(s: &str) -> String {
-    let mut out = String::new();
-    let mut rest = s;
-    while let Some(i) = rest.find("/*") {
-        out.push_str(&rest[..i]);
-        match rest[i + 2..].find("*/") {
-            Some(j) => rest = &rest[i + 2 + j + 2..],
-            None => return out,
-        }
-    }
-    out.push_str(rest);
-    out
-}
-
-/// Splits one simple selector (`tag.class#id`) into its tag, classes and id.
-fn parse_compound(one: &str) -> (Option<String>, Vec<String>, Option<String>) {
-    let mut tag = None;
-    let mut classes = vec![];
-    let mut id = None;
-    let mut cur = String::new();
-    let mut kind = 't';
-    let flush = |kind: char, cur: &mut String, tag: &mut Option<String>, classes: &mut Vec<String>, id: &mut Option<String>| {
-        if !cur.is_empty() {
-            match kind {
-                '.' => classes.push(std::mem::take(cur)),
-                '#' => *id = Some(std::mem::take(cur)),
-                _ => {
-                    if cur != "*" {
-                        *tag = Some(std::mem::take(cur));
-                    }
-                    cur.clear();
-                }
-            }
-        }
-    };
-    for c in one.chars() {
-        if c == '.' || c == '#' {
-            flush(kind, &mut cur, &mut tag, &mut classes, &mut id);
-            kind = c;
-        } else {
-            cur.push(c);
-        }
-    }
-    flush(kind, &mut cur, &mut tag, &mut classes, &mut id);
-    (tag, classes, id)
-}
-
-/// Add the rules of one `<style>` sheet. Errs once the sheets exceed [`MAX_CSS_SELECTORS`] or
-/// [`MAX_CSS_DECLARATIONS`] (#2140).
-fn parse_css(css: &str, sheet: &mut StyleSheet) -> Result<(), Error> {
-    let css = strip_comments(css);
-    let mut rest = css.as_str();
-    while let Some(open) = rest.find('{') {
-        let sel = rest[..open].trim();
-        if sel.starts_with('@') {
-            // Skip the whole at-rule block, matching nested braces by depth.
-            let mut depth = 0usize;
-            let mut end = None;
-            for (i, c) in rest[open..].char_indices() {
-                match c {
-                    '{' => depth = depth.saturating_add(1),
-                    '}' => {
-                        depth = depth.saturating_sub(1);
-                        if depth == 0 {
-                            end = Some(open + i + 1);
-                            break;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            let Some(end) = end else { break };
-            rest = &rest[end..];
-            continue;
-        }
-        let Some(close) = rest[open..].find('}') else { break };
-        let body = &rest[open + 1..open + close];
-        rest = &rest[open + close + 1..];
-        let mut decls = parse_decls(body);
-        sheet.decls = sheet.decls.saturating_add(decls.len());
-        if sheet.decls > MAX_CSS_DECLARATIONS {
-            return Err(Error::Xml(format!("its <style> sheets hold more than {MAX_CSS_DECLARATIONS} declarations")));
-        }
-        // Stored with the rule's first accepted selector: a rule of unsupported selectors only
-        // (`a b{}`, repeated) adds no block.
-        let mut block = None;
-        for one in sel.split(',') {
-            let one = one.trim();
-            // Only simple selectors (no combinators / pseudo-classes / attributes).
-            if one.is_empty() || one.contains([' ', '>', '+', '~', ':', '[']) {
-                continue;
-            }
-            if sheet.rules.len() >= MAX_CSS_SELECTORS {
-                return Err(Error::Xml(format!("its <style> sheets hold more than {MAX_CSS_SELECTORS} selectors")));
-            }
-            let block = *block.get_or_insert_with(|| {
-                let i = sheet.blocks.len();
-                sheet.blocks.push(std::mem::take(&mut decls));
-                i
-            });
-            let (tag, classes, id) = parse_compound(one);
-            let specificity = (id.is_some() as u32 * 100)
-                .saturating_add(u32::try_from(classes.len()).unwrap_or(u32::MAX).saturating_mul(10))
-                .saturating_add(tag.is_some() as u32);
-            let order = sheet.rules.len();
-            sheet.rules.push(Rule { tag, classes, id, specificity, order, block });
-        }
-    }
-    Ok(())
-}
-
-const PROPS: &[&str] = &[
-    "fill",
-    "fill-opacity",
-    "fill-rule",
-    "stroke",
-    "stroke-width",
-    "stroke-opacity",
-    "stroke-linecap",
-    "stroke-linejoin",
-    "stroke-miterlimit",
-    "stroke-dasharray",
-    "stroke-dashoffset",
-    "opacity",
-    "display",
-    "visibility",
-    "color",
-    "font-size",
-    "transform",
-    "stop-color",
-    "stop-opacity",
-];
 
 struct Parser<'a, 'i> {
     ids: HashMap<String, roxmltree::Node<'a, 'i>>,
@@ -687,19 +423,7 @@ impl<'a, 'i> Parser<'a, 'i> {
     /// The declared properties of an element: presentation attributes, then CSS rules (by
     /// specificity), then the `style` attribute.
     fn declared(&self, n: roxmltree::Node) -> HashMap<String, String> {
-        let mut out = HashMap::new();
-        for a in n.attributes() {
-            if PROPS.contains(&a.name()) && a.name() != "transform" {
-                out.insert(a.name().to_string(), a.value().to_string());
-            }
-        }
-        self.apply_rules(n, &mut out);
-        if let Some(st) = n.attribute("style") {
-            for (k, v) in parse_decls(st) {
-                out.insert(k, v);
-            }
-        }
-        out
+        doc_style::declared(n, &self.css, |work| self.charge_css(work))
     }
 
     /// Charge `n` kept path elements or gradient stops; false once [`MAX_RETAINED`] is passed.
@@ -763,180 +487,17 @@ impl<'a, 'i> Parser<'a, 'i> {
         self.charge_pattern_work(bytes.saturating_add(1))
     }
 
-    /// Apply the matching `<style>` rules to `out`, by specificity then source order.
-    fn apply_rules(&self, n: roxmltree::Node, out: &mut HashMap<String, String>) {
-        let css = &self.css;
-        if css.rules.is_empty() {
-            return;
-        }
-        // Splitting and sorting the class list is work too: charge its length first.
-        let class = n.attribute("class").unwrap_or_default();
-        if !self.charge_css(class.len()) {
-            return;
-        }
-        let tag = n.tag_name().name();
-        let mut classes: Vec<&str> = class.split_whitespace().collect();
-        classes.sort_unstable();
-        classes.dedup();
-        let id = n.attribute("id");
-        // Each rule sits in exactly one bucket and the classes are distinct: no rule twice.
-        let mut buckets: Vec<&Vec<usize>> = vec![&css.universal];
-        buckets.extend(id.and_then(|i| css.by_id.get(i)));
-        buckets.extend(classes.iter().filter_map(|c| css.by_class.get(*c)));
-        buckets.extend(css.by_tag.get(tag));
-        if !self.charge_css(buckets.iter().map(|b| b.len()).fold(0, usize::saturating_add)) {
-            return;
-        }
-        let candidates = || buckets.iter().flat_map(|b| b.iter()).filter_map(|&i| css.rules.get(i));
-        // A selector like `.z.z.z…` checks each of its classes: charge them too.
-        if !self.charge_css(candidates().map(|r| r.classes.len()).fold(0, usize::saturating_add)) {
-            return;
-        }
-        let mut matching: Vec<&Rule> = candidates()
-            .filter(|r| {
-                r.tag.as_deref().is_none_or(|t| t == tag)
-                    && r.id.as_deref().is_none_or(|i| Some(i) == id)
-                    && r.classes.iter().all(|c| classes.binary_search(&c.as_str()).is_ok())
-            })
-            .collect();
-        matching.sort_by_key(|r| (r.specificity, r.order));
-        let blocks: Vec<&Vec<(String, String)>> = matching.iter().filter_map(|r| css.blocks.get(r.block)).collect();
-        if !self.charge_css(blocks.iter().map(|b| b.len()).fold(0, usize::saturating_add)) {
-            return;
-        }
-        for (k, v) in blocks.into_iter().flatten() {
-            out.insert(k.clone(), v.clone());
-        }
-    }
-
     fn length(&self, s: &str, axis: char, font: f64) -> Option<f64> {
-        let s = s.trim();
-        let num_end = s.find(|c: char| !(c.is_ascii_digit() || matches!(c, '.' | '-' | '+' | 'e' | 'E'))).unwrap_or(s.len());
-        // "e" also starts "em"/"ex": back off if the number does not parse.
-        let (mut num, mut unit) = (&s[..num_end], &s[num_end..]);
-        if num.parse::<f64>().is_err() && (num.ends_with('e') || num.ends_with('E')) {
-            num = &s[..num_end - 1];
-            unit = &s[num_end - 1..];
-        }
-        let v: f64 = num.parse().ok()?;
-        let value = match unit.trim() {
-            "" | "px" => v,
-            "pt" => v * 4.0 / 3.0,
-            "pc" => v * 16.0,
-            "mm" => v * 96.0 / 25.4,
-            "cm" => v * 96.0 / 2.54,
-            "in" => v * 96.0,
-            "em" => v * font,
-            "ex" => v * font / 2.0,
-            "%" => {
-                let base = match axis {
-                    'x' => self.vw,
-                    'y' => self.vh,
-                    _ => ((self.vw * self.vw + self.vh * self.vh) / 2.0).sqrt(),
-                };
-                v / 100.0 * base
-            }
-            _ => v,
-        };
-        value.is_finite().then_some(value)
+        doc_style::length(s, axis, font, self.vw, self.vh)
     }
 
     fn attr_len(&self, n: roxmltree::Node, name: &str, axis: char, st: &Style) -> f64 {
-        n.attribute(name).and_then(|v| self.length(v, axis, st.font_size)).unwrap_or(0.0)
-    }
-
-    fn paint_ref(&self, v: &str) -> Option<Option<PaintRef>> {
-        let v = v.trim();
-        if v == "none" {
-            return Some(None);
-        }
-        if v == "currentColor" || v == "currentcolor" {
-            return Some(Some(PaintRef::Current));
-        }
-        if let Some(rest) = v.strip_prefix("url(") {
-            let (url, fallback) = rest.split_once(')').unwrap_or((rest, ""));
-            let url = url.trim().trim_matches(['"', '\'']);
-            let id = url.strip_prefix('#').filter(|id| !id.is_empty()).unwrap_or_default().to_string();
-            let fb = fallback.trim();
-            let fb = if fb.is_empty() || fb == "none" { None } else { parse_color(fb) };
-            return Some(Some(PaintRef::Url(id, fb)));
-        }
-        if v == "inherit" {
-            return None;
-        }
-        parse_color(v).map(|c| Some(PaintRef::Color(c)))
+        doc_style::attr_len(n, name, axis, st, self.vw, self.vh)
     }
 
     /// Apply an element's declared inherited properties to `st`. Returns (opacity, display).
     fn cascade(&self, n: roxmltree::Node, st: &mut Style) -> (f64, bool) {
-        let d = self.declared(n);
-        let num = |k: &str| {
-            d.get(k)
-                .and_then(|v| v.trim().trim_end_matches('%').parse::<f64>().ok().map(|x| if v.trim().ends_with('%') { x / 100.0 } else { x }))
-                .filter(|x| x.is_finite())
-        };
-        if let Some(c) = d.get("color").and_then(|v| parse_color(v)) {
-            st.color = c;
-        }
-        let font_size = d.get("font-size").and_then(|v| match v.trim().strip_suffix('%') {
-            Some(p) => p.trim().parse::<f64>().ok().map(|p| p / 100.0 * st.font_size),
-            None => self.length(v, 'o', st.font_size),
-        });
-        if let Some(v) = font_size.filter(|v| v.is_finite()) {
-            st.font_size = v;
-        }
-        if let Some(p) = d.get("fill").and_then(|v| self.paint_ref(v)) {
-            st.fill = p;
-        }
-        if let Some(p) = d.get("stroke").and_then(|v| self.paint_ref(v)) {
-            st.stroke = p;
-        }
-        if let Some(v) = num("fill-opacity") {
-            st.fill_opacity = v.clamp(0.0, 1.0);
-        }
-        if let Some(v) = num("stroke-opacity") {
-            st.stroke_opacity = v.clamp(0.0, 1.0);
-        }
-        if let Some(v) = d.get("stroke-width").and_then(|v| self.length(v, 'o', st.font_size)) {
-            st.stroke_width = v.max(0.0);
-        }
-        if let Some(v) = num("stroke-miterlimit") {
-            st.miter = v.max(1.0);
-        }
-        if let Some(v) = d.get("fill-rule") {
-            st.fill_rule = if v.trim() == "evenodd" { FillRule::EvenOdd } else { FillRule::NonZero };
-        }
-        if let Some(v) = d.get("stroke-linecap") {
-            st.cap = match v.trim() {
-                "round" => Cap::Round,
-                "square" => Cap::Square,
-                _ => Cap::Butt,
-            };
-        }
-        if let Some(v) = d.get("stroke-linejoin") {
-            st.join = match v.trim() {
-                "round" => Join::Round,
-                "bevel" => Join::Bevel,
-                _ => Join::Miter,
-            };
-        }
-        if let Some(v) = d.get("stroke-dasharray") {
-            st.dash = if v.trim() == "none" {
-                None
-            } else {
-                let a: Vec<f64> =
-                    v.split(|c: char| c == ',' || c.is_whitespace()).filter(|t| !t.is_empty()).filter_map(|t| self.length(t, 'o', st.font_size)).collect();
-                if a.iter().all(|x| *x >= 0.0) && a.iter().any(|x| *x > 0.0) { Some(a) } else { None }
-            };
-        }
-        if let Some(v) = d.get("stroke-dashoffset").and_then(|v| self.length(v, 'o', st.font_size)) {
-            st.dash_offset = v;
-        }
-        if let Some(v) = d.get("visibility") {
-            st.visible = !matches!(v.trim(), "hidden" | "collapse");
-        }
-        let display = d.get("display").is_none_or(|v| v.trim() != "none");
-        (num("opacity").unwrap_or(1.0).clamp(0.0, 1.0), display)
+        doc_style::cascade(n, &self.css, st, self.vw, self.vh, |work| self.charge_css(work))
     }
 
     /// Resolve a paint reference, retaining a per-reference fallback for patterns.
@@ -945,25 +506,25 @@ impl<'a, 'i> Parser<'a, 'i> {
             self.invalid_pattern_content = true;
             return None;
         }
-        match p {
-            PaintRef::Color(c) => Some((Paint::Color([c[0], c[1], c[2]]), c[3])),
-            PaintRef::Current => Some((Paint::Color([st.color[0], st.color[1], st.color[2]]), st.color[3])),
-            PaintRef::Url(id, fallback) => match self.gradient(id, 0) {
-                Some(g) if g.stops.len() == 1 => {
-                    let (_, c) = g.stops.first()?;
-                    Some((Paint::Color([c[0], c[1], c[2]]), c[3]))
-                }
-                Some(g) if !g.stops.is_empty() => Some((Paint::Gradient(g), 1.0)),
-                Some(_) => None,
-                None => match self.pattern(id) {
-                    Some(mut pattern) => {
-                        pattern.fallback = *fallback;
-                        Some((Paint::Pattern(pattern), 1.0))
-                    }
-                    None => fallback.map(|c| (Paint::Color([c[0], c[1], c[2]]), c[3])),
-                },
+        let resolved = doc_style::resolve_paint(p, st, |id, fallback| match self.gradient(id, 0) {
+            Some(g) if g.stops.len() == 1 => match g.stops.first() {
+                Some((_, c)) => UrlPaint::Color(*c),
+                None => UrlPaint::None,
             },
-        }
+            Some(g) if !g.stops.is_empty() => UrlPaint::Server(Paint::Gradient(g)),
+            Some(_) => UrlPaint::None,
+            None => match self.pattern(id) {
+                Some(mut pattern) => {
+                    pattern.fallback = fallback;
+                    UrlPaint::Server(Paint::Pattern(pattern))
+                }
+                None => UrlPaint::Fallback,
+            },
+        })?;
+        Some(match resolved {
+            ResolvedPaint::Color(c, a) => (Paint::Color(c), a),
+            ResolvedPaint::Server(paint) => (paint, 1.0),
+        })
     }
 
     /// Read a local `href` or namespaced `xlink:href` value from an SVG element.
@@ -1624,83 +1185,9 @@ fn pattern_render_complexity(nodes: &[Node]) -> usize {
     })
 }
 
-fn viewbox(n: roxmltree::Node) -> Option<([f64; 2], f64, f64)> {
-    let (v, exceeded) = pathdata::numbers_bounded(n.attribute("viewBox")?, 5);
-    if exceeded || !v.iter().all(|x| x.is_finite()) {
-        return None;
-    }
-    let [x, y, width, height] = v.as_slice() else { return None };
-    (*width > 0.0 && *height > 0.0).then_some(([*x, *y], *width, *height))
-}
-
-/// The viewBox → viewport transform (`preserveAspectRatio`, default `xMidYMid meet`).
-fn viewbox_transform(n: roxmltree::Node, w: f64, h: f64) -> Affine {
-    let Some(([x, y], vw, vh)) = viewbox(n) else { return Affine::IDENTITY };
-    let par = n.attribute("preserveAspectRatio").unwrap_or("xMidYMid meet");
-    let mut parts = par.split_whitespace();
-    let mut align = parts.next().unwrap_or("xMidYMid");
-    if align == "defer" {
-        align = parts.next().unwrap_or("xMidYMid");
-    }
-    let slice = parts.next() == Some("slice");
-    let (sx, sy) = (w / vw, h / vh);
-    if align == "none" {
-        return Affine::scale_non_uniform(sx, sy) * Affine::translate((-x, -y));
-    }
-    let s = if slice { sx.max(sy) } else { sx.min(sy) };
-    let fx = if align.contains("xMid") {
-        0.5
-    } else if align.contains("xMax") {
-        1.0
-    } else {
-        0.0
-    };
-    let fy = if align.contains("YMid") {
-        0.5
-    } else if align.contains("YMax") {
-        1.0
-    } else {
-        0.0
-    };
-    let tx = (w - vw * s) * fx;
-    let ty = (h - vh * s) * fy;
-    Affine::translate((tx, ty)) * Affine::scale(s) * Affine::translate((-x, -y))
-}
-
 /// Parse a `transform` list.
-pub fn parse_transform(s: &str) -> Affine {
-    let mut m = Affine::IDENTITY;
-    let mut rest = s;
-    while let Some(open) = rest.find('(') {
-        let name = rest[..open].trim().trim_start_matches(',').trim();
-        let Some(close) = rest[open..].find(')') else { break };
-        let (a, too_many) = pathdata::numbers_bounded(&rest[open + 1..open + close], 6);
-        rest = &rest[open + close + 1..];
-        let t = if too_many {
-            Affine::IDENTITY
-        } else {
-            match (name, a.as_slice()) {
-                ("matrix", [a0, a1, a2, a3, a4, a5]) => Affine::new([*a0, *a1, *a2, *a3, *a4, *a5]),
-                ("translate", [x]) => Affine::translate((*x, 0.0)),
-                ("translate", [x, y]) => Affine::translate((*x, *y)),
-                ("scale", [scale]) => Affine::scale(*scale),
-                ("scale", [x, y]) => Affine::scale_non_uniform(*x, *y),
-                ("rotate", [angle]) => Affine::rotate(angle.to_radians()),
-                ("rotate", [angle, x, y]) => Affine::translate((*x, *y)) * Affine::rotate(angle.to_radians()) * Affine::translate((-*x, -*y)),
-                ("skewX", [angle]) => Affine::new([1.0, 0.0, angle.to_radians().tan(), 1.0, 0.0, 0.0]),
-                ("skewY", [angle]) => Affine::new([1.0, angle.to_radians().tan(), 0.0, 1.0, 0.0, 0.0]),
-                _ => Affine::IDENTITY,
-            }
-        };
-        m *= t;
-    }
-    m
-}
+pub use craft_svg::transform_compat::parse_transform;
 
-/// The deepest element nesting accepted. The XML parser recurses per level and overflowed a
-/// 2 MiB thread's stack (aborting the app) at a few thousand levels; real documents stay far
-/// below this.
-const MAX_XML_DEPTH: usize = 256;
 /// The most elements an import converts, `<use>` copies included, unless the file itself has
 /// more than half as many (#1236).
 const MAX_EXPANDED_ELEMENTS: usize = 500_000;
@@ -1724,20 +1211,12 @@ const MIN_PATTERN_WORK_BYTES: usize = 8 * 1024 * 1024;
 /// Bound viewport-specific pattern results; uncached resolutions remain covered by the work budget.
 const MAX_PATTERN_CACHE_ENTRIES: usize = 256;
 
-/// Nodes a document may expand to: a few kilobytes of nested internal entities
-/// (`<!ENTITY b "&a;&a;…">`) otherwise expand to millions and exhaust memory.
-const MAX_XML_NODES: u32 = 4_000_000;
-
 /// Parse an SVG document.
 pub fn parse(bytes: &[u8]) -> Result<Doc, Error> {
     let text = String::from_utf8_lossy(bytes);
     let text = text.trim_start_matches('\u{feff}');
-    if craft_svg::guard::deeper_than(text, MAX_XML_DEPTH) {
-        return Err(Error::Xml(format!("elements nested more than {MAX_XML_DEPTH} levels deep")));
-    }
-    // DTDs stay allowed (Illustrator's SVGs declare entities), but expansion is bounded (#2129).
-    let opts = roxmltree::ParsingOptions { allow_dtd: true, nodes_limit: MAX_XML_NODES, ..Default::default() };
-    let xml = roxmltree::Document::parse_with_options(text, opts).map_err(|e| Error::Xml(e.to_string()))?;
+    // Shared preflight: entity expansion, attribute work, nesting depth, and bounded DTD/node parsing (#2129).
+    let xml = craft_svg::preflight::parse_text(text, &craft_svg::preflight::Limits::default()).map_err(|e| Error::Xml(e.to_string()))?;
     let root = xml.root_element();
     if root.tag_name().name() != "svg" {
         return Err(Error::NotSvg);

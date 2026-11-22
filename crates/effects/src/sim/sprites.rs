@@ -93,6 +93,10 @@ pub enum Shape {
     Disc,
     /// Lit sphere (upper-left light, specular).
     Sphere,
+    /// CC Ball Action's ball: [`Shape::Sphere`]'s light and shine scaled by `|shade|` (1 is the
+    /// sphere's look, 0 a flat disc; callers keep it finite, the GPU draws the same); a negative
+    /// `shade` mirrors the light's direction (lit from the lower right).
+    Ball { shade: f32 },
     /// Disc fading linearly to its rim.
     Faded,
     /// Thin ring with a highlight.
@@ -274,6 +278,24 @@ fn sprite_shade(s: &Sprite, x: f32, y: f32) -> Option<Px> {
             let rz = 2.0 * diff * nz - lz;
             let spec = rz.max(0.0).powi(20) * 0.6;
             let k = 0.2 + 0.8 * diff;
+            rgb = [rgb[0] * k + spec, rgb[1] * k + spec, rgb[2] * k + spec];
+            cv
+        }
+        Shape::Ball { shade } => {
+            let d = (dx * dx + dy * dy).sqrt();
+            let cv = aa(r - d);
+            if cv <= 0.0 {
+                return None;
+            }
+            let (nx, ny) = (dx / r, dy / r);
+            let nz = (1.0 - nx * nx - ny * ny).max(0.0).sqrt();
+            let m = if shade < 0.0 { -1.0 } else { 1.0 };
+            let (lx, ly, lz) = (-0.48 * m, -0.58 * m, 0.66);
+            let diff = (nx * lx + ny * ly + nz * lz).max(0.0);
+            let rz = 2.0 * diff * nz - lz;
+            let st = shade.abs();
+            let spec = rz.max(0.0).powi(20) * 0.6 * st;
+            let k = (1.0 - st * 0.8 * (1.0 - diff)).max(0.0);
             rgb = [rgb[0] * k + spec, rgb[1] * k + spec, rgb[2] * k + spec];
             cv
         }

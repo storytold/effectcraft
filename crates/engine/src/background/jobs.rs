@@ -187,7 +187,8 @@ impl Session {
             "cancelled" => format!("{} cancelled", t.label),
             _ => format!("{} failed: {message}", t.label),
         };
-        self.events.push(crate::Event::Toast { message: toast, error: status == "failed" });
+        let has_errors = rec.result["errors"].as_array().is_some_and(|errors| !errors.is_empty());
+        self.events.push(crate::Event::Toast { message: toast, error: status == "failed" || has_errors });
         self.job_log.push(rec.clone());
         if self.job_log.len() > 50 {
             self.job_log.remove(0);

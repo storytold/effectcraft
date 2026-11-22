@@ -103,6 +103,17 @@ pub(crate) fn check_box(r: &Response, label: &str, checked: bool, enabled: bool)
     });
 }
 
+/// A push button that is one of a set of choices (a view-layout button): `pressed` is whether it is
+/// the current one, exposed as the toggled state. `description` says what the set is.
+pub(crate) fn choice_button(r: &Response, label: &str, description: &str, pressed: bool) {
+    node(r, |n| {
+        n.set_role(Role::Button);
+        n.set_label(label);
+        n.set_description(description);
+        n.set_toggled(if pressed { Toggled::True } else { Toggled::False });
+    });
+}
+
 /// A drop-down: `label` says what it sets and `value` is what it is set to.
 pub(crate) fn combo_box(r: &Response, label: &str, value: &str, enabled: bool) {
     node(r, |n| {
