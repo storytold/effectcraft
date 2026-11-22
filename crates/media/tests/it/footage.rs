@@ -347,10 +347,14 @@ fn aac_44k_mp4() -> Option<PathBuf> {
 
 /// `src`'s audio decoded by ffmpeg as interleaved stereo `f32` at `rate` Hz (external oracle).
 fn ffmpeg_audio(src: &Path, rate: u32) -> Vec<f32> {
+    ffmpeg_audio_channels(src, rate, 2)
+}
+
+fn ffmpeg_audio_channels(src: &Path, rate: u32, channels: u32) -> Vec<f32> {
     let out = Command::new("ffmpeg")
         .args(["-hide_banner", "-loglevel", "error", "-i"])
         .arg(src)
-        .args(["-f", "f32le", "-ac", "2", "-ar", &rate.to_string(), "-"])
+        .args(["-f", "f32le", "-ac", &channels.to_string(), "-ar", &rate.to_string(), "-"])
         .output()
         .expect("ffmpeg");
     assert!(out.status.success(), "ffmpeg failed to decode {}", src.display());
@@ -1737,6 +1741,18 @@ fn assert_matroska_cold_seek_codec_delay(delay_ns: i64) {
     assert_eq!(seek, sequential, "cold seek must not shift the signal boundary");
 }
 
+/// Mono footage is duplicated at unity, unlike ffmpeg's default -3 dB mono-to-stereo
+/// conversion. Compare each side to independently decoded mono PCM, not a stereo fixture's RMS.
+fn assert_mono_level(stereo: &[f32], mono: &[f32], context: &str) {
+    assert_eq!(stereo.len(), mono.len() * 2, "{context}: stereo/mono window length");
+    let expected = slice_rms(mono);
+    assert!(expected > 0.04, "{context}: oracle must contain the generated tone");
+    for side in 0..2 {
+        let rms = (stereo.iter().skip(side).step_by(2).map(|v| v * v).sum::<f32>() / mono.len() as f32).sqrt();
+        assert!((rms - expected).abs() < 0.02, "{context}: side {side} RMS {rms}, mono oracle {expected}");
+    }
+}
+
 #[test]
 fn matroska_opus_audio_timing_and_seek() {
     let Some(p) = try_ffmpeg_fixture(
@@ -1763,12 +1779,12 @@ fn matroska_opus_audio_timing_and_seek() {
     let pool = MediaPool::new();
     let start_audio = pool.audio_samples(&f, Tick::ZERO, 4800, 48_000);
     assert_eq!(start_audio.len(), 9600);
-    let rms_start = (start_audio.iter().map(|v| v * v).sum::<f32>() / start_audio.len() as f32).sqrt();
-    assert!((rms_start - 0.0625).abs() < 0.02, "opus audio at t=0 rms {rms_start}");
+    let mono = ffmpeg_audio_channels(&p, 48_000, 1);
+    assert!(mono.len() >= 28_800, "mono oracle covers both read windows");
+    assert_mono_level(&start_audio, &mono[..4800], "opus audio at t=0");
     let seek_audio = pool.audio_samples(&f, Tick(TICKS_PER_SECOND / 2), 4800, 48_000);
     assert_eq!(seek_audio.len(), 9600);
-    let rms_seek = (seek_audio.iter().map(|v| v * v).sum::<f32>() / seek_audio.len() as f32).sqrt();
-    assert!((rms_seek - 0.0625).abs() < 0.02, "opus audio after seek rms {rms_seek}");
+    assert_mono_level(&seek_audio, &mono[24_000..28_800], "opus audio after seek");
 }
 
 #[test]
@@ -1793,8 +1809,10 @@ fn audio_only_isobmff_and_matroska_route_through_craft_audio() {
         let seek = pool.audio_samples(&f, Tick(TICKS_PER_SECOND / 2), 4800, 48_000);
         assert_eq!(start.len(), 9600);
         assert_eq!(seek.len(), 9600);
-        let rms_seek = (seek.iter().map(|v| v * v).sum::<f32>() / seek.len() as f32).sqrt();
-        assert!((rms_seek - 0.0625).abs() < 0.02, "{file} seek rms {rms_seek}");
+        let mono = ffmpeg_audio_channels(&p, 48_000, 1);
+        assert!(mono.len() >= 28_800, "{file}: mono oracle covers both read windows");
+        assert_mono_level(&start, &mono[..4800], &format!("{file} start"));
+        assert_mono_level(&seek, &mono[24_000..28_800], &format!("{file} seek"));
     }
 }
 
