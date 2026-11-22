@@ -166,6 +166,28 @@ fn equirect_round_trip_and_env_brdf() {
     assert!(a >= 0.0 && b > -0.01 && a + b < 1.0);
 }
 
+#[test]
+fn encode_applies_the_srgb_curve_to_unpremultiplied_color() {
+    // IEC 61966-2-1: 12.92·C through 0.0031308, 1.055·C^(1/2.4) − 0.055 above it. Negative
+    // values stay on the linear segment and values above 1 continue the power curve.
+    let curve = |c: f64| if c <= 0.003_130_8 { c * 12.92 } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 };
+    let pixels: [([f32; 3], f32); 3] = [([0.003_130_8, 0.002, 0.004], 0.5), ([0.18, 1.0, 2.0], 0.25), ([-0.25, -0.001, 0.0], 1.0)];
+    let mut img = Image::new(pixels.len() as u32, 1);
+    for (p, (rgb, a)) in img.data.iter_mut().zip(pixels) {
+        *p = [rgb[0] * a, rgb[1] * a, rgb[2] * a, a];
+    }
+    encode(&mut img);
+    for (p, (rgb, a)) in img.data.iter().zip(pixels) {
+        assert_eq!(p[3], a, "alpha is unchanged");
+        for c in 0..3 {
+            let want = curve(rgb[c] as f64) * a as f64;
+            assert!((p[c] as f64 - want).abs() < 1e-5, "linear {} at alpha {a}: {} vs {want}", rgb[c], p[c]);
+        }
+    }
+    // The power segment starts where the linear one ends: 12.92 × 0.0031308 ≈ 0.04045.
+    assert!((img.data[0][0] / 0.5 - 0.040_45).abs() < 1e-5);
+}
+
 // ---------------------------------------------------------------- rasteriser
 
 /// A scene of axis-aligned quads (z = camera depth) seen by an orthographic identity camera

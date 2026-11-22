@@ -71,7 +71,7 @@ pub fn encode(img: &mut Image) {
         let a = p[3];
         if a > 1e-6 {
             for c in 0..3 {
-                p[c] = shade::linear_to_srgb(p[c] / a) * a;
+                p[c] = craft_texture::linear_to_srgb(p[c] / a) * a;
             }
         }
     });
