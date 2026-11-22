@@ -1620,18 +1620,24 @@ fn rotated_mp4_matches_reference_orientation() {
     if h264_encoder() != Some("libx264") {
         return;
     }
-    // Original lavfi fixture: modern FFmpeg writes the display matrix on stream-copy remux,
-    // not when rotate metadata is supplied to the encoder. A fresh name avoids stale fixtures.
+    // Original lavfi pixels and an authored quarter-turn track matrix. FFmpeg builds differ
+    // in whether rotate metadata survives encode/remux; use the existing matrix fixture writer.
     let Some(base) = try_ffmpeg_fixture(
         "h264_rotate_source.mp4",
         &["-f", "lavfi", "-i", "testsrc2=size=320x180:rate=24:duration=0.5", "-c:v", "libx264", "-pix_fmt", "yuv420p"],
     ) else {
         return;
     };
-    let Some(p) = try_ffmpeg_fixture("h264_rotate_matrix_90.mp4", &["-i", base.to_str().expect("fixture path"), "-c", "copy", "-metadata:s:v:0", "rotate=90"])
-    else {
-        return;
-    };
+    let p = fixtures().join("h264_authored_matrix_90.mp4");
+    if !p.exists() {
+        let bytes = turned_mp4(&base, [0, 0x1_0000, -0x1_0000, 0]);
+        let tmp = p.with_file_name(format!("tmp-rotation-{}.mp4", std::process::id()));
+        std::fs::write(&tmp, bytes.as_ref()).expect("write rotated fixture");
+        if std::fs::rename(&tmp, &p).is_err() {
+            let _ = std::fs::remove_file(&tmp);
+            assert!(p.exists(), "publish rotated fixture");
+        }
+    }
     let f = probe(&p).expect("probe rotated mp4");
     assert_eq!((f.width, f.height), (180, 320), "90-degree rotated mp4 swaps width and height");
     let pool = MediaPool::new();
