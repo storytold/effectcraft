@@ -55,6 +55,15 @@ pub trait Services: Send + Sync {
     fn full_path(&self, path: &str) -> Option<String> {
         std::path::absolute(path).ok().map(|p| p.to_string_lossy().into_owned())
     }
+    /// Reading is limited to some folders (an agent's automation roots): files read outside these
+    /// services (an OCIO config's LUTs) are checked with [`Services::may_read`] first.
+    fn read_restricted(&self) -> bool {
+        false
+    }
+    /// Whether these services would read `path` at all (whether or not it exists).
+    fn may_read(&self, _path: &str) -> bool {
+        true
+    }
 }
 
 /// Native filesystem.

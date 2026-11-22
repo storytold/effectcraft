@@ -900,6 +900,54 @@ fn resolve(src: &str, dir: &Path, search: &[String]) -> Option<PathBuf> {
     dirs.into_iter().map(|d| d.join(src)).find_map(found)
 }
 
+/// A config's `search_path` (a `:`-separated string or a list).
+fn search_path_of(y: &Yaml) -> Vec<String> {
+    match y.get("search_path") {
+        Some(Yaml::Seq(v)) => v.iter().filter_map(|s| s.str().map(str::to_string)).collect(),
+        Some(s) => s.str().map(|s| s.split(':').map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect()).unwrap_or_default(),
+        None => vec![],
+    }
+}
+
+/// Every file the `FileTransform`s of config text `text` (read from folder `dir`) may look at or
+/// open when it is loaded: each candidate on the search path, as [`Config::parse`] tries them,
+/// found before any is touched (a session confined to some folders checks them first). It looks
+/// at every `FileTransform` node of the document, also ones the parser doesn't use.
+pub fn file_candidates(text: &str, dir: &Path) -> Vec<PathBuf> {
+    fn walk(y: &Yaml, depth: usize, f: &mut dyn FnMut(&str)) {
+        if depth > MAX_YAML_DEPTH {
+            return;
+        }
+        if y.tag() == Some("FileTransform") {
+            f(y.text("src"));
+        }
+        match y {
+            Yaml::Seq(v) => v.iter().for_each(|c| walk(c, depth + 1, f)),
+            Yaml::Map(m) => m.iter().for_each(|(_, c)| walk(c, depth + 1, f)),
+            Yaml::Tagged(_, c) => walk(c, depth + 1, f),
+            _ => {}
+        }
+    }
+    let y = parse_yaml(text);
+    let search = search_path_of(&y);
+    let mut out = vec![];
+    walk(&y, 0, &mut |src| {
+        if src.trim().is_empty() {
+            return;
+        }
+        let p = Path::new(src);
+        if p.is_absolute() {
+            out.push(p.to_path_buf());
+            return;
+        }
+        out.extend(search.iter().map(|s| dir.join(s).join(src)));
+        out.push(dir.join(src));
+    });
+    out.sort();
+    out.dedup();
+    out
+}
+
 // ---------------------------------------------------------------- the config
 
 /// A colour space of a config.
@@ -972,11 +1020,7 @@ impl Config {
         if !matches!(y, Yaml::Map(_)) {
             return Err("not an OCIO config (expected a YAML mapping)".into());
         }
-        let search_path: Vec<String> = match y.get("search_path") {
-            Some(Yaml::Seq(v)) => v.iter().filter_map(|s| s.str().map(str::to_string)).collect(),
-            Some(s) => s.str().map(|s| s.split(':').map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect()).unwrap_or_default(),
-            None => vec![],
-        };
+        let search_path = search_path_of(&y);
         let roles = match y.get("roles") {
             Some(Yaml::Map(m)) => m.iter().filter_map(|(k, v)| v.str().map(|s| (k.clone(), s.to_string()))).collect(),
             _ => vec![],

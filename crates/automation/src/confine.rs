@@ -335,6 +335,10 @@ impl Confinement {
         let mut gave_a_file = false;
         for key in named {
             let Some(v) = params.get(*key).filter(|v| !v.is_null()) else { continue };
+            // An empty OCIO config clears it: no file.
+            if id == "file.projectSettings" && v.as_str().is_some_and(|s| s.trim().is_empty()) {
+                continue;
+            }
             given = true;
             let paths: Vec<&Value> = match v {
                 Value::Array(a) => a.iter().collect(),
@@ -628,6 +632,12 @@ impl Services for ConfinedServices {
     fn full_path(&self, path: &str) -> Option<String> {
         self.inner.full_path(path)
     }
+    fn read_restricted(&self) -> bool {
+        true
+    }
+    fn may_read(&self, path: &str) -> bool {
+        self.inside(path)
+    }
 }
 
 /// Whether a `prefs.set` key reaches the Scripting page. `Prefs::set` turns the key into a JSON
@@ -860,6 +870,11 @@ mod tests {
             }
             assert!(c.check_command(id, &serde_json::json!({key: p(&read, "t.ectemplate")})).is_ok(), "{id} in a read root");
         }
+        // An empty OCIO config clears it: not a path to check.
+        assert!(c.check_command("file.projectSettings", &serde_json::json!({"ocioConfig": ""})).is_ok());
+        // What the engine checks an OCIO config's LUT files with before loading it.
+        let services = ConfinedServices::new(Arc::new(effectcraft_engine::FsServices), c.clone());
+        assert!(services.read_restricted() && services.may_read(&p(&read, "a.cube")) && !services.may_read(&p(&outside, "a.cube")));
         // Batched too.
         let steps = serde_json::json!({"steps": [{"command": "essential.templateInfo", "params": {"path": "t.ectemplate"}}]});
         assert!(c.check_command("engine.batch", &steps).is_err());

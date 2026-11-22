@@ -290,3 +290,112 @@ fn a_config_the_session_may_not_read_is_not_loaded() {
     assert!(r["ocio"]["looks"].is_null(), "nothing of the file is shown");
     let _ = std::fs::remove_dir_all(d);
 }
+
+#[test]
+fn a_refused_stored_path_sent_back_unchanged_does_not_block_other_settings() {
+    let d = tmp("refused-kept");
+    let cfg = write_config(&d, "studio.ocio", ColorSpace::AcesCg);
+    let mut s = session();
+    s.execute("file.projectSettings", json!({"ocioConfig": cfg})).unwrap();
+    let path = d.join("p.ecproj");
+    s.execute("file.saveAs", json!({"path": path.to_string_lossy()})).unwrap();
+    let url = "https://example.com/studio.ocio";
+    let text = std::fs::read_to_string(&path).unwrap().replace(&serde_json::to_string(&cfg).unwrap(), &serde_json::to_string(url).unwrap());
+    std::fs::write(&path, text).unwrap();
+    let mut o = Session::default();
+    let r = o.execute("file.open", json!({"path": path.to_string_lossy()})).unwrap();
+    assert_eq!((o.project.settings.ocio_config.as_deref(), &r["ocio"]["loaded"]), (Some(url), &json!(false)));
+    o.execute("file.projectSettings", json!({"ocioConfig": url, "bitDepth": 16})).unwrap();
+    assert_eq!(o.project.settings.bit_depth, effectcraft_project::BitDepth::Bpc16);
+    let _ = std::fs::remove_dir_all(d);
+}
+
+/// Services confined to one folder, like an agent's automation roots.
+struct Rooted(PathBuf);
+impl crate::Services for Rooted {
+    fn read_file(&self, path: &str) -> std::io::Result<Vec<u8>> {
+        if !self.may_read(path) {
+            return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "outside"));
+        }
+        crate::FsServices.read_file(path)
+    }
+    fn write_file(&self, path: &str, data: &[u8]) -> std::io::Result<()> {
+        crate::FsServices.write_file(path, data)
+    }
+    fn stamp(&self, path: &str) -> Option<(u64, u128)> {
+        if self.may_read(path) { crate::FsServices.stamp(path) } else { None }
+    }
+    fn read_restricted(&self) -> bool {
+        true
+    }
+    fn may_read(&self, path: &str) -> bool {
+        Path::new(path).starts_with(&self.0)
+    }
+}
+
+#[test]
+fn a_confined_session_does_not_load_a_config_whose_luts_are_outside_its_folders() {
+    let d = tmp("confined");
+    let (root, outside) = (d.join("root"), d.join("outside"));
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    let lut = |dir: &Path| {
+        let p = dir.join("grade.spi1d");
+        std::fs::write(&p, "Version 1\nFrom 0.0 1.0\nLength 2\nComponents 1\n{\n0.0\n1.0\n}\n").unwrap();
+        p.to_string_lossy().into_owned()
+    };
+    let with_lut = |src: &str| {
+        format!(
+            "{}  - !<Look>\n    name: Graded\n    process_space: Studio Working\n    transform: !<FileTransform> {{src: \"{src}\"}}\n",
+            config_text(ColorSpace::AcesCg, true)
+        )
+    };
+    let inside_cfg = root.join("inside.ocio");
+    std::fs::write(&inside_cfg, with_lut(&lut(&root))).unwrap();
+    let outside_cfg = root.join("reaches-out.ocio");
+    std::fs::write(&outside_cfg, with_lut(&lut(&outside))).unwrap();
+    let mut s = Session { services: std::sync::Arc::new(Rooted(root.clone())), ..Default::default() };
+    s.execute("comp.new", json!({"width": 8, "height": 8, "duration": 1})).unwrap();
+    let r = s.execute("file.projectSettings", json!({"ocioConfig": inside_cfg.to_string_lossy()})).unwrap();
+    assert_eq!(r["ocio"]["loaded"], true, "LUTs inside the folders load: {r}");
+    let r = s.execute("file.projectSettings", json!({"ocioConfig": outside_cfg.to_string_lossy()})).unwrap();
+    assert_eq!(r["ocio"]["loaded"], false, "{r}");
+    assert!(r["ocio"]["error"].as_str().is_some_and(|e| e.contains("FileTransform")), "{r}");
+    // Unconfined sessions load it as before.
+    let mut u = session();
+    let r = u.execute("file.projectSettings", json!({"ocioConfig": outside_cfg.to_string_lossy()})).unwrap();
+    assert_eq!(r["ocio"]["loaded"], true, "{r}");
+    let _ = std::fs::remove_dir_all(d);
+}
+
+#[test]
+fn a_template_reports_its_ocio_config_and_resolves_it_from_its_folder() {
+    let d = tmp("template");
+    write_config(&d, "studio.ocio", ColorSpace::AcesCg);
+    let tpl = d.join("tpl.ecproj");
+    let mut a = session();
+    a.execute("file.saveAs", json!({"path": tpl.to_string_lossy()})).unwrap();
+    a.execute("file.projectSettings", json!({"ocioConfig": "studio.ocio"})).unwrap();
+    a.execute("file.save", json!({})).unwrap();
+    let stored = a.project.settings.ocio_config.clone().unwrap();
+    let text = std::fs::read_to_string(&tpl).unwrap().replace(&serde_json::to_string(&stored).unwrap(), "\"studio.ocio\"");
+    std::fs::write(&tpl, text).unwrap();
+    let mut s = Session::default();
+    s.execute("prefs.set", json!({"values": {"project.useTemplate": true, "project.templatePath": tpl.to_string_lossy()}})).unwrap();
+    let r = s.execute("file.newProject", json!({})).unwrap();
+    assert_eq!((&r["ocio"]["source"], &r["ocio"]["loaded"]), (&json!("project"), &json!(true)), "{r}");
+    let _ = std::fs::remove_dir_all(d);
+}
+
+#[test]
+fn a_relative_studio_default_is_never_stored_even_with_the_variable_set() {
+    let d = tmp("relative-default");
+    let env_cfg = write_config(&d, "env.ocio", ColorSpace::AcesCg);
+    let mut s = Session { ocio_env: Some(env_cfg), ..Default::default() };
+    s.execute("prefs.set", json!({"key": "project.defaultOcioConfig", "value": "configs/studio.ocio"})).unwrap();
+    let r = s.execute("file.newProject", json!({})).unwrap();
+    assert!(s.project.settings.ocio_config.is_none(), "{r}");
+    assert_eq!(s.project.settings.color_engine, ColorEngine::Ocio, "the variable's config still applies");
+    assert!(r["ocioNotice"].as_str().is_some_and(|n| n.contains("relative")), "{r}");
+    let _ = std::fs::remove_dir_all(d);
+}

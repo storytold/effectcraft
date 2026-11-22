@@ -314,11 +314,25 @@ pub fn seed_new_project(ctx: Ctx, st: &mut ProjectSettings) -> Option<Notice> {
     let active = active(env, &next, Some(studio));
     let from_env = active.source == Source::Env;
     let from = if from_env { "The OCIO environment variable's config" } else { "The default OCIO config" };
-    // A new project has no folder: the default must be an absolute path.
-    if !from_env && !std::path::Path::new(studio).is_absolute() {
-        return Some(Notice { text: format!("{from} ({studio}) is a relative path: give an absolute path in Settings ▸ Project."), once: false });
+    // A new project has no folder: a default that isn't an absolute path is not stored (with
+    // the OCIO variable set, the project still uses its config).
+    if !studio.is_empty() && !std::path::Path::new(studio).is_absolute() {
+        let bad =
+            Notice { text: format!("The default OCIO config ({studio}) is a relative path: give an absolute path in Settings ▸ Project."), once: false };
+        if !from_env {
+            return Some(bad);
+        }
+        next.ocio_config = None;
+        return seed_from(ctx.readable, &active, next, st, from).or(Some(bad));
     }
-    match resolve(active.path.as_deref(), ctx.readable) {
+    seed_from(ctx.readable, &active, next, st, from)
+}
+
+/// The end of [`seed_new_project`]: `next`, with the working space of the active config, becomes
+/// the project's settings, or the reason it can't.
+fn seed_from(readable: Readable, active: &Active, mut next: ProjectSettings, st: &mut ProjectSettings, from: &str) -> Option<Notice> {
+    let from_env = active.source == Source::Env;
+    match resolve(active.path.as_deref(), readable) {
         Resolved::Space(ws) => next.working_space = Some(ws),
         // A missing file (a studio share not mounted yet) keeps the choice, on the built-in config.
         Resolved::Unreadable(e) => {
@@ -359,10 +373,24 @@ impl crate::Session {
             if let Some((_, why)) = refused.as_ref().filter(|(r, _)| r == p) {
                 return Err(why.clone());
             }
-            match services.stamp(p) {
-                Some(_) => Ok(()),
-                None => Err(format!("{p}: not found, or outside the folders this session may read")),
+            if services.stamp(p).is_none() {
+                return Err(format!("{p}: not found, or outside the folders this session may read"));
             }
+            // Confined (an agent's automation roots): the files the config's FileTransforms may
+            // open are read outside the services, so each one is checked before loading it.
+            if services.read_restricted() {
+                let text = services.read_file(p).map_err(|e| format!("{p}: {e}"))?;
+                let text = String::from_utf8_lossy(&text);
+                let dir = std::path::Path::new(p).parent().unwrap_or(std::path::Path::new("."));
+                for c in effectcraft_effects::ocio_config::file_candidates(&text, dir) {
+                    let c = c.to_string_lossy();
+                    let up = std::path::Path::new(c.as_ref()).components().any(|x| matches!(x, std::path::Component::ParentDir));
+                    if up || !services.may_read(&c) {
+                        return Err(format!("{p}: a FileTransform of the config reads {c}, outside the folders this session may read"));
+                    }
+                }
+            }
+            Ok(())
         }
     }
 

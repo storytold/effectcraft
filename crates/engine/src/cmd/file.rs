@@ -25,7 +25,11 @@ fn new_project(s: &mut Session, _: &Value) -> Result<Value> {
         s.ocio_refused = ocio_refused;
         s.stored_paths.add(&s.project, Some(&tpl));
         s.update_sentinel();
-        return Ok(json!({"template": tpl}));
+        let notice = s.ocio_notice();
+        if let Some(n) = &notice {
+            s.ocio_notify(n);
+        }
+        return Ok(json!({"template": tpl, "ocio": s.ocio_status(), "ocioNotice": notice.map(|n| n.text)}));
     }
     let mut proj = Project::default();
     let notice = s.seed_new_project_color(&mut proj.settings);
@@ -682,6 +686,9 @@ fn ocio_config_setting(
             Value::Null => None,
             Value::String(t) if t.trim().is_empty() => None,
             Value::String(t) if t.contains(['\n', '\r']) => return Err(bad(cmd, "ocioConfig: a path to an .ocio file")),
+            // The stored value sent back (the form sends every field): kept as it is, also one the
+            // stored-path rules refused when the project opened.
+            Value::String(t) if proj.settings.ocio_config.as_deref() == Some(t.trim()) => proj.settings.ocio_config.clone(),
             // Stored absolute, so Save As elsewhere keeps the same file.
             Value::String(t) if std::path::Path::new(t.trim()).is_absolute() => Some(t.trim().to_string()),
             Value::String(t) => match doc {

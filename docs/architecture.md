@@ -516,12 +516,14 @@ is taken from the project file's folder, as footage paths are (`doc_path`): when
 when a project or New Project template that stores one is opened. It is then kept as the absolute
 path, so Save As to another folder still names the same file. An unsaved project has no folder, so
 a relative path is refused there until the project is saved (an absolute one works); a relative
-Default OCIO Config is not used, with a notice. A stored path the stored-path rules refuse
+Default OCIO Config is never stored on a new project (with `OCIO` set, the variable's config still applies), with a notice. Sending the stored value back unchanged (the Project Settings form sends every field) keeps it as it is. A stored path the stored-path rules refuse
 (another computer's share, a URL) is kept but not read. A config is only read when the session's
 file services can see it: an agent confined to its automation roots (`--automation-read-root`)
 gets the built-in config for a config elsewhere, and while confined `ocioConfig` must be an
-absolute path inside the roots. (The LUT files a config's FileTransforms name are read like the
-OCIO effects' are, without that check.) The active
+absolute path inside the roots. A confined session also checks every file the config's FileTransforms
+could open (each search-path candidate, before any is touched; a `..` in one counts as outside)
+and doesn't load a config that reaches outside the roots, saying which file. (The OCIO effects'
+own config and LUT parameters are not covered by this.) The active
 config is, in order: the `OCIO` environment variable (read once by the host into
 `Session::ocio_env`), the project's config, the built-in one. The variable overrides the project's
 choice without changing it, and the choice can't be changed while it is set, as Nuke's user guide
