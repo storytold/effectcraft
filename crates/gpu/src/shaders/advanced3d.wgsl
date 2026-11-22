@@ -1,6 +1,6 @@
 // Advanced 3D: rasterised meshes with physically based shading. A step-for-step port of
-// `effectcraft_render::three_d::adv::shade` (Cook–Torrance GGX + Lambert, image-based light
-// from an equirectangular environment, PCF shadow maps); the CPU rasteriser is the reference.
+// `craft_raster3d`'s `shade` (Cook–Torrance GGX + Lambert, image-based light from an
+// equirectangular environment, PCF shadow maps); the CPU rasterizer is the reference.
 
 struct Globals {
     clip: mat4x4<f32>,
@@ -341,7 +341,7 @@ fn light_shadow(li: u32, kind: u32, lpos: vec3<f32>, shadow: i32, darkness: f32,
     return 1.0 - darkness * (1.0 - f);
 }
 
-// The Environment light's shadow from its dominant direction (shade::env_shadow). Only the
+// The Environment light's shadow from its dominant direction (craft_raster3d's env_shadow). Only the
 // image's key fraction (g.env_sun.w) of the light is occluded — the fill keeps shining — so
 // the shadow stays partial the way After Effects renders an area-light shadow.
 fn env_shadow(p: vec3<f32>, ng: vec3<f32>, n: vec3<f32>) -> f32 {
@@ -395,7 +395,7 @@ struct FOut {
     @location(1) depth: u32,
 };
 
-// shade::to_light: unit direction to the light (xyz) and its distance (w).
+// craft_raster3d's to_light: unit direction to the light (xyz) and its distance (w).
 fn to_light(kind: u32, lpos: vec3<f32>, ldir: vec3<f32>, pos: vec3<f32>) -> vec4<f32> {
     if (kind == 0u) {
         return vec4<f32>(-ldir, 1e30);
@@ -408,7 +408,7 @@ fn to_light(kind: u32, lpos: vec3<f32>, ldir: vec3<f32>, pos: vec3<f32>) -> vec4
     return vec4<f32>(d / len, len);
 }
 
-// shade::shadow_only: the strongest shadow any light casts on the fragment.
+// craft_raster3d's shadow_only: the strongest shadow any light casts on the fragment.
 fn shadow_only_amount(unlit: bool, normal: vec3<f32>, front: bool, pos: vec3<f32>) -> f32 {
     var amount = 0.0;
     if (unlit) {

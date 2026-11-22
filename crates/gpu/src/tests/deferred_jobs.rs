@@ -53,7 +53,7 @@ fn advanced_3d_resolves_in_passes() {
     let (p, cid) = scene_project();
     // One scene rasterised (the CPU compositor's per-scene path).
     let s = scene(&p, cid);
-    let cpu = adv::raster::render(&s);
+    let cpu = adv::rasterize(&s).expect("cpu raster");
     g.frame_begin();
     g.pass_begin();
     let t = g.raster_3d(&s).expect("handled");

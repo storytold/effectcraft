@@ -130,7 +130,7 @@ pub(crate) fn scene(p: &Project, cid: ItemId) -> Scene {
 }
 
 fn compare(s: &Scene, g: &Gpu) {
-    let cpu = adv::raster::render(s);
+    let cpu = adv::rasterize(s).expect("cpu raster");
     let gt = g.raster_3d(s).expect("gpu raster");
     assert_eq!((gt.width, gt.height), (cpu.width, cpu.height));
     let n = cpu.color.len();
@@ -210,11 +210,11 @@ fn gpu_matches_cpu_wide_penumbrae() {
     set(&mut comp.layers[0], "lightOptions/castsShadows", Value::Bool(true));
     set(&mut comp.layers[0], "lightOptions/shadowDiffusion", Value::Scalar(30.0));
     let s = scene(&p, cid);
-    let (cpu, gt) = (adv::raster::render(&s), g.raster_3d(&s).expect("gpu raster"));
+    let (cpu, gt) = (adv::rasterize(&s).expect("cpu raster"), g.raster_3d(&s).expect("gpu raster"));
     for l in p.comp_mut(cid).unwrap().layers.iter_mut().take(2) {
         set(l, "lightOptions/castsShadows", Value::Bool(false));
     }
-    let unshadowed = adv::raster::render(&scene(&p, cid));
+    let unshadowed = adv::rasterize(&scene(&p, cid)).expect("cpu raster");
     let w = cpu.width as usize;
     let luma = |c: &[f32; 4]| (c[0] + c[1] + c[2]) / 3.0;
     // Off a silhouette: the pixel and its four neighbours see one continuous surface.
@@ -241,7 +241,7 @@ fn gpu_raster_perf_smoke() {
     let (p, cid) = scene_project();
     let s = scene(&p, cid);
     let t0 = std::time::Instant::now();
-    let _ = adv::raster::render(&s);
+    let _ = adv::rasterize(&s);
     let cpu = t0.elapsed();
     // First use compiles the pipelines.
     let _ = g.raster_3d(&s);

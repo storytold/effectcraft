@@ -80,7 +80,7 @@ pub trait Accelerator: Send + Sync {
     fn effects(&self, chain: &[FxStep], buf: &Buf, levels: Option<f32>) -> Option<Buf>;
     /// Rasterise and shade an Advanced 3D scene at its raster size (depth buffer, PBR, image
     /// based light, shadow maps), with the CPU rasteriser's semantics
-    /// ([`three_d::adv::raster::render`]). `None` = not handled (the CPU renders it).
+    /// ([`three_d::adv::rasterize`]). `None` = not handled (the CPU renders it).
     fn raster_3d(&self, _scene: &three_d::adv::Scene) -> Option<three_d::adv::Target> {
         None
     }

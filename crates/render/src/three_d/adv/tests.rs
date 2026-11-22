@@ -200,7 +200,7 @@ fn depth_buffer_keeps_the_nearest_surface() {
     let blue = [0.0, 0.0, 1.0, 1.0];
     // Blue is listed first but is farther away.
     let s = quad_scene(40, 30, &[([0.0, 0.0, 30.0, 20.0], 500.0, blue), ([10.0, 10.0, 40.0, 30.0], 100.0, red)]);
-    let t = raster::render(&s);
+    let t = rasterize(&s).unwrap();
     let px = |x: usize, y: usize| t.color[y * 40 + x];
     assert_eq!(px(5, 5), blue);
     assert_eq!(px(15, 15), red, "overlap: the nearer quad wins");
@@ -214,14 +214,14 @@ fn depth_buffer_keeps_the_nearest_surface() {
 fn coverage_is_exact_for_pixel_aligned_quads() {
     // Shared diagonal edges are filled once (top-left rule): exact pixel counts.
     let s = quad_scene(32, 32, &[([4.0, 4.0, 20.0, 12.0], 10.0, [1.0, 1.0, 1.0, 0.5])]);
-    let t = raster::render(&s);
+    let t = rasterize(&s).unwrap();
     let covered = t.color.iter().filter(|c| c[3] > 0.0).count();
     assert_eq!(covered, 16 * 8);
     // Blended once (no double coverage along the diagonal).
     assert!(t.color.iter().all(|c| c[3] == 0.0 || (c[3] - 0.5).abs() < 1e-6));
     // Two transparent layers composite in order.
     let s = quad_scene(8, 8, &[([0.0, 0.0, 8.0, 8.0], 100.0, [1.0, 0.0, 0.0, 0.5]), ([0.0, 0.0, 8.0, 8.0], 50.0, [0.0, 0.0, 1.0, 0.5])]);
-    let c = raster::render(&s).color[0];
+    let c = rasterize(&s).unwrap().color[0];
     assert!((c[0] - 0.25).abs() < 1e-6 && (c[2] - 0.5).abs() < 1e-6 && (c[3] - 0.75).abs() < 1e-6, "{c:?}");
 }
 
@@ -235,6 +235,61 @@ fn textures_sample_bilinear_with_wrap_modes() {
     assert!((shade::sample(&t, &texels, 1.0, 0.5)[0] - 0.5).abs() < 1e-6);
     let c = TexInfo { wrap_u: 1, ..t };
     assert_eq!(shade::sample(&c, &texels, 1.0, 0.5)[0], 1.0);
+}
+
+#[test]
+fn texels_and_materials_out_of_range_are_brought_into_range() {
+    // A texel that is not finite or has alpha over 1, and a material outside 0..1, would make
+    // the rasterizer reject the whole scene.
+    assert_eq!(scene::texel_in_range([f32::NAN, 0.5, f32::INFINITY, 1.5]), [0.0, 0.5, 0.0, 1.0]);
+    assert_eq!(scene::texel_in_range([0.25, 2.0, -0.5, 0.75]), [0.25, 2.0, -0.5, 0.75]);
+    let m = scene::material_in_range(Material {
+        base: [1.0, f32::NAN, 1.0, 1.0],
+        metallic: 1.5,
+        roughness: f32::NAN,
+        opacity: -0.2,
+        emissive: [f32::INFINITY, 0.0, 0.0],
+        ..Material::default()
+    });
+    assert_eq!((m.base, m.metallic, m.roughness, m.opacity, m.emissive), ([1.0; 4], 1.0, 0.5, 0.0, [0.0; 3]));
+    let mut s = quad_scene(4, 4, &[([0.0, 0.0, 4.0, 4.0], 100.0, [1.0; 4])]);
+    s.materials[0] = scene::material_in_range(Material { metallic: 1.5, roughness: f32::NAN, opacity: 1.2, tex_base: 0, ..s.materials[0] });
+    s.texels = vec![scene::texel_in_range([f32::NAN, 0.5, f32::INFINITY, 1.5])];
+    s.textures = vec![TexInfo { offset: 0, width: 1, height: 1, wrap_u: 0, wrap_v: 0 }];
+    let t = rasterize(&s).unwrap();
+    assert!(t.color.iter().all(|c| *c == [0.0, 0.5, 0.0, 1.0]), "{:?}", t.color[0]);
+}
+
+#[test]
+fn resolve_and_encode_reject_bad_input_and_keep_the_image() {
+    let s = quad_scene(4, 4, &[([0.0, 0.0, 4.0, 4.0], 100.0, [0.5, 0.25, 1.0, 1.0])]);
+    let t = rasterize(&s).unwrap();
+    assert_eq!(resolve(&t, 3).err(), Some(RenderError::BadFactor { k: 3, width: 4, height: 4 }));
+    assert_eq!(resolve(&t, 0).err(), Some(RenderError::BadFactor { k: 0, width: 4, height: 4 }));
+    let (mut img, depth) = resolve(&t, 2).unwrap();
+    assert_eq!((img.width, img.height, depth), (2, 2, vec![100.0; 4]));
+    // The sRGB curve on unpremultiplied color, alpha unchanged.
+    encode(&mut img).unwrap();
+    assert!((img.data[0][0] - 0.735_356_6).abs() < 1e-5 && (img.data[0][2] - 1.0).abs() < 1e-6 && img.data[0][3] == 1.0, "{:?}", img.data[0]);
+    // Alpha of 1e-6 or less (here the slightly negative alpha depth of field leaves) is kept.
+    let edge = [-8.9e-13, 5.8e-10, -1.9e-9, -3.6e-9];
+    let clear = [f32::INFINITY, 0.0, 0.0, 0.0];
+    img.data[1] = edge;
+    img.data[2] = clear;
+    let before = img.data.clone();
+    encode(&mut img).unwrap();
+    assert_eq!((img.data[1], img.data[2]), (edge, clear));
+    assert!(img.data[0][0] > before[0][0], "the other pixels are encoded: {:?}", img.data[0]);
+    img.data = before.clone();
+    img.data[3] = [f32::NAN, 0.0, 0.0, 1.0];
+    assert_eq!(encode(&mut img), Err(RenderError::BadPixel(3)));
+    assert!(img.data.len() == 4 && img.data[..3] == before[..3] && img.data[3][0].is_nan(), "the image is left as it was");
+    let mut short = Image { width: 2, height: 2, data: vec![[0.0; 4]; 3] };
+    assert_eq!(encode(&mut short), Err(RenderError::BadDataLength { expected: 4, found: 3 }));
+    assert_eq!(short.data.len(), 3);
+    let mut bad_index = quad_scene(4, 4, &[([0.0, 0.0, 4.0, 4.0], 100.0, [1.0; 4])]);
+    bad_index.indices[0] = 99;
+    assert_eq!(render_cpu(&bad_index).err(), Some(RenderError::BadIndex { position: 0, index: 99 }));
 }
 
 // ---------------------------------------------------------------- full renderer
@@ -1167,8 +1222,8 @@ fn stroke_regions_are_rings() {
 
 // ---------------------------------------------------------------- shadow quality
 
-use super::raster::{MAX_SHADOW_TEXELS, shadow_map_size, shadow_point_face_size, shadow_sizes};
 use super::scene::ShadowMap;
+use craft_raster3d::{MAX_SHADOW_TEXELS, shadow_map_size, shadow_point_face_size, shadow_sizes};
 
 /// Geometric normal of a receiver squarely facing a `flat_map` light (which looks along +z).
 const FACING: [f32; 3] = [0.0, 0.0, -1.0];
