@@ -1620,9 +1620,17 @@ fn rotated_mp4_matches_reference_orientation() {
     if h264_encoder() != Some("libx264") {
         return;
     }
+    // Original lavfi fixture: modern FFmpeg writes the display matrix on stream-copy remux,
+    // not when rotate metadata is supplied to the encoder. A fresh name avoids stale fixtures.
+    let Some(base) = try_ffmpeg_fixture(
+        "h264_rotate_source.mp4",
+        &["-f", "lavfi", "-i", "testsrc2=size=320x180:rate=24:duration=0.5", "-c:v", "libx264", "-pix_fmt", "yuv420p"],
+    ) else {
+        return;
+    };
     let Some(p) = try_ffmpeg_fixture(
-        "h264_rotate_90.mp4",
-        &["-f", "lavfi", "-i", "testsrc2=size=320x180:rate=24:duration=0.5", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-metadata:s:v:0", "rotate=90"],
+        "h264_rotate_matrix_90.mp4",
+        &["-i", base.to_str().expect("fixture path"), "-c", "copy", "-metadata:s:v:0", "rotate=90"],
     ) else {
         return;
     };
