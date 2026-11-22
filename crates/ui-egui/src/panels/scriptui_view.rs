@@ -243,31 +243,57 @@ fn draw_widget(app: &mut EffectcraftApp, ui: &mut egui::Ui, origin: egui::Pos2, 
         WidgetKind::ListBox => {
             let mut pick: Option<usize> = None;
             let mut focused: Option<Rect> = None;
+            // Where the list's content starts on screen this frame (its top less its offset).
+            let mut content_top = rect.min.y;
+            // The list's own scroll offset to apply this frame (set when an item gained focus).
+            let pending = id.with("scroll-to-focus");
+            let offset = ui.data_mut(|d| d.remove_temp::<f32>(pending));
             ui.painter().rect_filled(rect, 2.0, t.field_bg);
-            ui.add_enabled_ui(w.enabled, |ui| {
-                ui.scope_builder(UiBuilder::new().max_rect(rect.shrink(2.0)), |ui| {
-                    egui::ScrollArea::vertical().id_salt(id).max_height(rect.height() - 4.0).show(ui, |ui| {
-                        ui.set_width(rect.width() - 8.0);
-                        for (i, it) in w.items.iter().enumerate() {
-                            let r = ui.selectable_label(w.selection.contains(&i), it);
-                            // Scrolls the list to the item (its own scroll area takes this).
-                            scroll_to_focus(&r);
-                            if r.gained_focus() {
-                                focused = Some(r.rect);
-                            }
-                            if r.clicked() {
-                                pick = Some(i);
-                            }
+            let out = ui
+                .add_enabled_ui(w.enabled, |ui| {
+                    ui.scope_builder(UiBuilder::new().max_rect(rect.shrink(2.0)), |ui| {
+                        let mut area = egui::ScrollArea::vertical().id_salt(id).max_height(rect.height() - 4.0);
+                        if let Some(y) = offset {
+                            area = area.vertical_scroll_offset(y);
                         }
-                    });
-                });
-            });
-            // The list's scroll area kept the item's request, so the dock scrolls to where the
-            // item shows once the list has scrolled to it: inside the list's rect (which may be
-            // taller than the dock).
+                        area.show(ui, |ui| {
+                            content_top = ui.min_rect().min.y;
+                            ui.set_width(rect.width() - 8.0);
+                            for (i, it) in w.items.iter().enumerate() {
+                                let r = ui.selectable_label(w.selection.contains(&i), it);
+                                if r.gained_focus() {
+                                    focused = Some(r.rect);
+                                }
+                                if r.clicked() {
+                                    pick = Some(i);
+                                }
+                            }
+                        })
+                    })
+                    .inner
+                })
+                .inner;
+            // A focused item scrolls into view once: the list scrolls just enough to show it
+            // within the list's whole rect (next frame), and the dock scrolls to where the item
+            // then is. Scrolling to the item in the list's scroll area would also move it within
+            // the part of the list on screen, and the dock would move it a second time.
             if let Some(r) = focused {
-                let y = r.min.y.clamp(rect.min.y, (rect.max.y - r.height()).max(rect.min.y));
-                ui.scroll_to_rect(Rect::from_min_size(pos2(r.min.x, y), r.size()), None);
+                let view = out.inner_rect;
+                let now = view.min.y - content_top;
+                let top = r.min.y - content_top;
+                let to = if top < now {
+                    top
+                } else if top + r.height() > now + view.height() {
+                    top + r.height() - view.height()
+                } else {
+                    now
+                };
+                if to != now {
+                    ui.data_mut(|d| d.insert_temp(pending, to));
+                    ui.ctx().request_repaint();
+                }
+                let shown = Rect::from_min_size(pos2(r.min.x, view.min.y + top - to), r.size());
+                ui.scroll_to_rect(shown, None);
             }
             if let Some(i) = pick {
                 acts.push(Act::Set(win, w.id, json!(i)));
