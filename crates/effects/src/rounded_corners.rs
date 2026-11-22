@@ -59,23 +59,38 @@ fn content_box(b: &Buf) -> Option<[f64; 4]> {
 }
 
 /// Corner radii (top left, top right, bottom right, bottom left) for a `w`×`h` rectangle, in
-/// buffer pixels: scaled down together when two neighbours don't fit along a side, then each
-/// capped at half the shorter side.
+/// buffer pixels: scaled down together when two neighbours don't fit along a side. Each radius
+/// then fits both of its sides, but may pass the middle of one (`[80, 0, 0, 0]` on 100×100).
 fn fit_radii(r: [f64; 4], w: f64, h: f64) -> [f64; 4] {
     let r = r.map(|v| if v.is_finite() { v.max(0.0) } else { 0.0 });
     let [tl, tr, br, bl] = r;
     let ratio = |side: f64, sum: f64| if sum > side { side / sum } else { 1.0 };
     let k = ratio(w, tl + tr).min(ratio(w, bl + br)).min(ratio(h, tl + bl)).min(ratio(h, tr + br));
-    let cap = w.min(h) * 0.5;
-    r.map(|v| (v * k).min(cap))
+    r.map(|v| v * k)
 }
 
-/// Signed distance from `(x, y)` to a rectangle centred on `c` with half size `half` whose
-/// corner nearest the point has radius `r` (`r` ≤ the smaller half size): negative inside.
-fn rounded_box_distance(x: f64, y: f64, c: [f64; 2], half: [f64; 2], r: f64) -> f64 {
-    let qx = (x - c[0]).abs() - half[0] + r;
-    let qy = (y - c[1]).abs() - half[1] + r;
-    qx.max(qy).min(0.0) + qx.max(0.0).hypot(qy.max(0.0)) - r
+/// Signed distance from `(x, y)` to the rectangle `[x0, y0, x1, y1]` with corner radii `r`
+/// (top left, top right, bottom right, bottom left, as [`fit_radii`] gives them): negative
+/// inside. The shape is the rectangle minus, at each corner, what lies outside that corner's
+/// arc within its `r`×`r` square, so a large radius on one corner is drawn in full.
+fn rounded_rect_distance(x: f64, y: f64, rect: [f64; 4], r: [f64; 4]) -> f64 {
+    let [x0, y0, x1, y1] = rect;
+    let qx = (x - (x0 + x1) * 0.5).abs() - (x1 - x0) * 0.5;
+    let qy = (y - (y0 + y1) * 0.5).abs() - (y1 - y0) * 0.5;
+    let mut d = qx.max(qy).min(0.0) + qx.max(0.0).hypot(qy.max(0.0));
+    let [tl, tr, br, bl] = r;
+    let arcs = [
+        (tl, x0 + tl, y0 + tl, x < x0 + tl && y < y0 + tl),
+        (tr, x1 - tr, y0 + tr, x > x1 - tr && y < y0 + tr),
+        (br, x1 - br, y1 - br, x > x1 - br && y > y1 - br),
+        (bl, x0 + bl, y1 - bl, x < x0 + bl && y > y1 - bl),
+    ];
+    for (radius, cx, cy, inside_square) in arcs {
+        if radius > 0.0 && inside_square {
+            d = d.max((x - cx).hypot(y - cy) - radius);
+        }
+    }
+    d
 }
 
 fn rounded_corners(ctx: &EffectCtx, mut b: Buf) -> Buf {
@@ -108,22 +123,14 @@ fn rounded_corners(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let radii = if pr.b("individualCorners") { CORNERS.map(radius) } else { [radius("radius"); 4] };
     // Pixels are layer pixels at the buffer's scale; percent is of the shorter side.
     let unit = if pr.e("units") == 1 { w.min(h) / 100.0 } else { b.scale };
-    let [tl, tr, br, bl] = fit_radii(radii.map(|r| r * unit), w, h);
+    let radii = fit_radii(radii.map(|r| r * unit), w, h);
     // At least one pixel wide, so a hard edge is still anti-aliased.
     let soft = (clamped(ctx, "feather", 0.0, MAX_FEATHER) * b.scale).max(1.0);
-    let c = [(x0 + x1) * 0.5, (y0 + y1) * 0.5];
-    let half = [w * 0.5, h * 0.5];
     b.img.rows_mut().for_each(|(y, row)| {
         let py = y as f64 + 0.5;
         for (x, px) in row.iter_mut().enumerate() {
-            let px_x = x as f64 + 0.5;
-            let r = match (px_x < c[0], py < c[1]) {
-                (true, true) => tl,
-                (false, true) => tr,
-                (false, false) => br,
-                (true, false) => bl,
-            };
-            let cover = (0.5 - rounded_box_distance(px_x, py, c, half, r) / soft).clamp(0.0, 1.0) as f32;
+            let d = rounded_rect_distance(x as f64 + 0.5, py, [x0, y0, x1, y1], radii);
+            let cover = (0.5 - d / soft).clamp(0.0, 1.0) as f32;
             if cover <= 0.0 {
                 // Written outright: an infinite HDR value times 0 would be NaN.
                 *px = [0.0; 4];
@@ -212,6 +219,20 @@ mod tests {
         let o = run(&vals, solid(48, 32));
         assert_eq!(alpha(&o, 0, 0), 0.0);
         for (x, y) in [(47, 0), (47, 31), (0, 31)] {
+            assert_eq!(alpha(&o, x, y), 1.0, "square corner {x},{y}");
+        }
+    }
+
+    #[test]
+    fn one_large_corner_keeps_its_full_radius() {
+        // Top left 80 fits a 100×100 square (80 + 0 per side), so it isn't cut to half the side.
+        let vals =
+            [("individualCorners", Value::Bool(true)), ("topLeft", num(80.0)), ("topRight", num(0.0)), ("bottomRight", num(0.0)), ("bottomLeft", num(0.0))];
+        let o = run(&vals, solid(100, 100));
+        // Inside a radius-50 arc but outside the radius-80 one.
+        assert_eq!(alpha(&o, 20, 20), 0.0);
+        assert_eq!(alpha(&o, 50, 50), 1.0);
+        for (x, y) in [(99, 0), (99, 99), (0, 99)] {
             assert_eq!(alpha(&o, x, y), 1.0, "square corner {x},{y}");
         }
     }
