@@ -544,3 +544,43 @@ fn canvas_on_an_unselected_tab_waits_until_it_is_shown() {
     assert_eq!(cv.draw.len(), 1, "repainted without repaint(): {:?}", cv.draw);
     s.execute("scriptui.close", json!({})).unwrap();
 }
+
+const CANVAS_RESIZE: &str = r#"
+var w = new Window("palette", "Canvas resize");
+var cv = w.add("canvas", undefined, undefined, { name: "plot" });
+cv.preferredSize = [100, 60];
+cv.onDraw = function () {
+  var g = this.graphics;
+  g.newPath();
+  g.rectPath(0, 0, this.size.width, this.size.height);
+  g.fillPath(g.newBrush(g.BrushType.SOLID_COLOR, [0.2, 0.3, 0.4, 1]));
+};
+var grow = w.add("button", undefined, "Grow", { name: "grow" });
+grow.onClick = function () {
+  cv.preferredSize = [240, 110];
+  cv.repaint();
+};
+var nudge = w.add("button", undefined, "Nudge", { name: "nudge" });
+nudge.onClick = function () {
+  cv.preferredSize[0] = 300;
+};
+w.show();
+"#;
+
+#[test]
+fn canvas_preferred_size_change_refreshes_layout_and_repaints() {
+    let mut s = session();
+    let o = run_code(&mut s, CANVAS_RESIZE, "canvas-resize.jsx");
+    assert!(o.error.is_none(), "{:?}", o.error);
+    let cv = s.script_ui.windows[0].root.lookup(&json!("plot")).unwrap();
+    assert_eq!(cv.draw[0], DrawOp::Fill { color: Some([0.2, 0.3, 0.4, 1.0]), path: vec![PathSeg::R { x: 0.0, y: 0.0, w: 100.0, h: 60.0 }] });
+    // Reassigning preferredSize invalidates the cached layout and repaints at the new size.
+    s.execute("scriptui.click", json!({"widget": "grow"})).unwrap();
+    let cv = s.script_ui.windows[0].root.lookup(&json!("plot")).unwrap();
+    assert_eq!(cv.draw[0], DrawOp::Fill { color: Some([0.2, 0.3, 0.4, 1.0]), path: vec![PathSeg::R { x: 0.0, y: 0.0, w: 240.0, h: 110.0 }] });
+    // Even an in-place preferredSize[0] mutation without repaint() triggers layout and redraw.
+    s.execute("scriptui.click", json!({"widget": "nudge"})).unwrap();
+    let cv = s.script_ui.windows[0].root.lookup(&json!("plot")).unwrap();
+    assert_eq!(cv.draw[0], DrawOp::Fill { color: Some([0.2, 0.3, 0.4, 1.0]), path: vec![PathSeg::R { x: 0.0, y: 0.0, w: 300.0, h: 110.0 }] });
+    s.execute("scriptui.close", json!({})).unwrap();
+}

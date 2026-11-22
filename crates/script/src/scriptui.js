@@ -425,11 +425,21 @@ function __uiRunDraws(win) {
     for (var i = 0; i < (c.children || []).length; i++) walk(c.children[i]);
   })(win);
   if (!drawn.length) return;
+  // Catch in-place edits such as `cv.preferredSize[0] = 300` that bypass the property setter.
+  if (win.__laidOut) {
+    for (const elem of drawn) {
+      var ps = __uiSize(elem.preferredSize);
+      var prev = elem.__laidPs || null;
+      if ((ps === null) !== (prev === null) || (ps && (ps[0] !== prev[0] || ps[1] !== prev[1]))) {
+        win.__laidOut = false;
+        break;
+      }
+    }
+  }
   // Laying out the whole window costs a full JSON round trip; a draw pass only needs it once
-  // (or after the tree changed), since the controls' sizes cannot change just by being redrawn.
+  // (or after the tree or a layout property changed), not on every canvas repaint.
   if (!win.__laidOut) {
     __uiLayout(win);
-    win.__laidOut = true;
   }
   for (const elem of drawn) {
     var c = elem;
@@ -471,12 +481,12 @@ function __uiInit(o, type, win, parent, bounds, text, props) {
   }
   o.text = text === undefined || text === null ? "" : String(text);
   o.enabled = true;
-  o.visible = true;
+  o.__vis = true;
   o.helpTip = "";
   o.children = [];
   o.__ub = __toBounds(bounds);
   o.__lb = [0, 0, 0, 0];
-  o.preferredSize = __dim(-1, -1);
+  o.__ps = __dim(-1, -1);
   o.minimumSize = __dim(0, 0);
   o.maximumSize = __dim(10000, 10000);
   o.alignment = null;
@@ -577,12 +587,14 @@ function __uiProto() {
         for (var k = 0; k < this.items.length; k++) this.items[k].index = k;
         this.__sel = this.__sel.filter(function (s) { return s !== i; }).map(function (s) { return s > i ? s - 1 : s; });
       }
+      if (this.window) this.window.__laidOut = false;
     },
     removeAll: function () {
       if (this.items) {
         this.items = [];
         this.__sel = [];
       } else this.children = [];
+      if (this.window) this.window.__laidOut = false;
     },
     find: function (text) {
       var list = this.items || this.children;
@@ -686,7 +698,7 @@ function __uiProto() {
     for (var k in p) C.prototype[k] = p[k];
     Object.defineProperty(C.prototype, "bounds", {
       get: function () { var b = this.__ub || this.__lb; return __bounds4(b[0], b[1], b[2], b[3]); },
-      set: function (v) { this.__ub = __toBounds(v); },
+      set: function (v) { this.__ub = __toBounds(v); if (this.window) this.window.__laidOut = false; },
       configurable: true
     });
     Object.defineProperty(C.prototype, "size", {
@@ -695,6 +707,7 @@ function __uiProto() {
         var b = this.bounds;
         var w = v.width !== undefined ? v.width : v[0], h = v.height !== undefined ? v.height : v[1];
         this.__ub = [b[0], b[1], b[0] + __num(w), b[1] + __num(h)];
+        if (this.window) this.window.__laidOut = false;
       },
       configurable: true
     });
@@ -704,6 +717,23 @@ function __uiProto() {
         var b = this.bounds;
         var x = v.x !== undefined ? v.x : v[0], y = v.y !== undefined ? v.y : v[1];
         this.__ub = [__num(x), __num(y), __num(x) + b[2] - b[0], __num(y) + b[3] - b[1]];
+        if (this.window) this.window.__laidOut = false;
+      },
+      configurable: true
+    });
+    Object.defineProperty(C.prototype, "preferredSize", {
+      get: function () { return this.__ps; },
+      set: function (v) { this.__ps = v; if (this.window) this.window.__laidOut = false; },
+      configurable: true
+    });
+    Object.defineProperty(C.prototype, "visible", {
+      get: function () { return this.__vis !== false; },
+      set: function (v) {
+        var next = !!v;
+        if (this.__vis !== next) {
+          this.__vis = next;
+          if (this.window) this.window.__laidOut = false;
+        }
       },
       configurable: true
     });
@@ -945,8 +975,10 @@ function __uiLayout(win) {
     var r = b[c.__id];
     if (!r) return;
     c.__lb = [r[0] - ox, r[1] - oy, r[0] - ox + r[2], r[1] - oy + r[3]];
+    c.__laidPs = __uiSize(c.preferredSize);
     for (var i = 0; i < (c.children || []).length; i++) apply(c.children[i], r[0], r[1]);
   })(win, 0, 0);
+  win.__laidOut = true;
 }
 
 // A user action from the frontend.

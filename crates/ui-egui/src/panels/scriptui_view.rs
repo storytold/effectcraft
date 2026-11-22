@@ -280,7 +280,12 @@ fn draw_color(c: &Option<[f32; 4]>, theme: Color32) -> Color32 {
 
 /// Cached paint output of one control's `onDraw` list: tessellating a curve editor's paths costs
 /// milliseconds, and the same list is repainted by every frame of a drag or a window move. Keyed
-/// by window and control; rebuilt when the list, its position or the theme colours change.
+/// by window and control; rebuilt when the list or the theme colours change, and translated in
+/// place when the control moves.
+///
+/// Text ops are stored as lightweight parameters instead of baked `egui::Shape::Text` galleys so
+/// they go through egui's own layout cache each frame — staying valid across font atlas resets and
+/// DPI changes while preserving exact draw order.
 #[derive(Default, Clone)]
 struct DrawCache {
     map: HashMap<(u32, u32), CachedDraw>,
@@ -289,48 +294,74 @@ struct DrawCache {
 #[derive(Clone)]
 struct CachedDraw {
     hash: u64,
-    shapes: Vec<egui::Shape>,
+    origin: egui::Pos2,
+    items: Vec<CachedItem>,
+}
+
+#[derive(Clone)]
+enum CachedItem {
+    Shape(egui::Shape),
+    Text { text: String, offset: egui::Vec2, size: f32, color: Color32 },
 }
 
 fn draw_cache_id() -> egui::Id {
     egui::Id::unique("scriptui-draw-cache")
 }
 
-/// Paint an onDraw draw list in `rect` (control coordinates → screen), reusing the shapes built the
-/// last time this control painted the same list in the same place.
+/// Paint an onDraw draw list in `rect` (control coordinates → screen), reusing the tessellated
+/// geometry built the last time this control painted the same list.
 fn paint_draw(ui: &egui::Ui, rect: Rect, ops: &[DrawOp], t: &Tokens, services: &dyn Services, win: u32, widget: u32) {
     if ops.is_empty() {
         return;
     }
     let key = (win, widget);
-    let hash = draw_hash(ops, rect, t);
+    let hash = draw_hash(ops, t);
     let cached = ui.ctx().data_mut(|d| {
         let cache = d.get_temp_mut_or_default::<DrawCache>(draw_cache_id());
-        cache.map.get(&key).filter(|c| c.hash == hash).map(|c| c.shapes.clone())
+        let entry = cache.map.get_mut(&key).filter(|c| c.hash == hash)?;
+        if entry.origin != rect.min {
+            let delta = rect.min - entry.origin;
+            for item in &mut entry.items {
+                if let CachedItem::Shape(shape) = item {
+                    shape.translate(delta);
+                }
+            }
+            entry.origin = rect.min;
+        }
+        Some(entry.items.clone())
     });
-    let shapes = match cached {
-        Some(shapes) => shapes,
+    let items = match cached {
+        Some(items) => items,
         None => {
-            let shapes = build_shapes(ui, rect, ops, t, services);
+            let items = build_cached_items(ui, rect, ops, t, services);
             ui.ctx().data_mut(|d| {
                 let cache = d.get_temp_mut_or_default::<DrawCache>(draw_cache_id());
                 if cache.map.len() >= 256 {
                     cache.map.clear();
                 }
-                cache.map.insert(key, CachedDraw { hash, shapes: shapes.clone() });
+                cache.map.insert(key, CachedDraw { hash, origin: rect.min, items: items.clone() });
             });
-            shapes
+            items
         }
     };
-    ui.painter().with_clip_rect(rect.intersect(ui.clip_rect())).extend(shapes);
+    let p = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
+    let mut shapes = Vec::with_capacity(items.len());
+    for item in items {
+        match item {
+            CachedItem::Shape(shape) => shapes.push(shape),
+            CachedItem::Text { text, offset, size, color } => {
+                let galley = p.layout_no_wrap(text, Tokens::ui(size), color);
+                shapes.push(egui::Shape::Text(egui::epaint::TextShape::new(rect.min + offset, galley, color)));
+            }
+        }
+    }
+    p.extend(shapes);
 }
 
-/// Hash everything [`build_shapes`] reads: the ops, where they are painted and the theme colours
-/// that `None` colours resolve to.
-fn draw_hash(ops: &[DrawOp], rect: Rect, t: &Tokens) -> u64 {
+/// Hash everything [`build_cached_items`] reads except `rect.min` (handled by translating cached
+/// shapes when the control moves): the ops and the theme colours that `None` colours resolve to.
+fn draw_hash(ops: &[DrawOp], t: &Tokens) -> u64 {
     let mut hs = std::collections::hash_map::DefaultHasher::new();
-    rect.min.x.to_bits().hash(&mut hs);
-    rect.min.y.to_bits().hash(&mut hs);
     ops.len().hash(&mut hs);
     for op in ops {
         match op {
@@ -404,10 +435,11 @@ fn path_hash(path: &[PathSeg], hs: &mut impl Hasher) {
     }
 }
 
-/// Turn a draw list into egui shapes (tessellating every fill and polyline).
-fn build_shapes(ui: &egui::Ui, rect: Rect, ops: &[DrawOp], t: &Tokens, services: &dyn Services) -> Vec<egui::Shape> {
+/// Turn a draw list into cached items (tessellating every fill and polyline, while keeping text
+/// ops light so their galleys come from egui's layout cache on every frame).
+fn build_cached_items(ui: &egui::Ui, rect: Rect, ops: &[DrawOp], t: &Tokens, services: &dyn Services) -> Vec<CachedItem> {
     let at = |x: f64, y: f64| rect.min + vec2(x as f32, y as f32);
-    let mut shapes = Vec::with_capacity(ops.len());
+    let mut items = Vec::with_capacity(ops.len());
     for op in ops {
         match op {
             DrawOp::Fill { color, path } => {
@@ -421,20 +453,18 @@ fn build_shapes(ui: &egui::Ui, rect: Rect, ops: &[DrawOp], t: &Tokens, services:
                     mesh.add_triangle(base, base + 1, base + 2);
                 }
                 if !mesh.is_empty() {
-                    shapes.push(egui::Shape::mesh(mesh));
+                    items.push(CachedItem::Shape(egui::Shape::mesh(mesh)));
                 }
             }
             DrawOp::Stroke { color, width, path } => {
                 let s = Stroke::new(*width as f32, draw_color(color, t.text));
                 for (pts, closed) in PathSeg::polylines(path, 48) {
                     let pts: Vec<egui::Pos2> = pts.iter().map(|q| at(q[0], q[1])).collect();
-                    shapes.push(if closed { egui::Shape::closed_line(pts, s) } else { egui::Shape::line(pts, s) });
+                    items.push(CachedItem::Shape(if closed { egui::Shape::closed_line(pts, s) } else { egui::Shape::line(pts, s) }));
                 }
             }
             DrawOp::Text { text, color, x, y, size, .. } => {
-                let col = draw_color(color, t.text);
-                let galley = ui.painter().layout_no_wrap(text.clone(), Tokens::ui(*size as f32), col);
-                shapes.push(egui::Shape::Text(egui::epaint::TextShape::new(at(*x, *y), galley, col)));
+                items.push(CachedItem::Text { text: text.clone(), offset: vec2(*x as f32, *y as f32), size: *size as f32, color: draw_color(color, t.text) });
             }
             DrawOp::Image { image, x, y, w, h } => {
                 let tex = image.as_ref().and_then(|i| image_texture(ui.ctx(), i, services));
@@ -444,14 +474,16 @@ fn build_shapes(ui: &egui::Ui, rect: Rect, ops: &[DrawOp], t: &Tokens, services:
                 };
                 let r = Rect::from_min_size(at(*x, *y), size);
                 match tex {
-                    Some(tx) => shapes.push(egui::Shape::image(tx.id(), r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE)),
-                    None => shapes.push(egui::Shape::rect_stroke(r, 0.0, Stroke::new(1.0, t.field_border), StrokeKind::Inside)),
+                    Some(tx) => {
+                        items.push(CachedItem::Shape(egui::Shape::image(tx.id(), r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE)))
+                    }
+                    None => items.push(CachedItem::Shape(egui::Shape::rect_stroke(r, 0.0, Stroke::new(1.0, t.field_border), StrokeKind::Inside))),
                 }
             }
             DrawOp::Os => {}
         }
     }
-    shapes
+    items
 }
 
 /// A ScriptUIImage as a texture (decoded once and kept; `None` when it can't be read or
@@ -963,5 +995,74 @@ mod tests {
         assert!(first.vertices.iter().all(|v| v.color == Color32::from_rgb(255, 0, 0)));
         let blue = mesh(&paint(Some([0.0, 0.0, 1.0, 1.0])));
         assert!(blue.vertices.iter().all(|v| v.color == Color32::from_rgb(0, 0, 255)), "a changed colour must rebuild the shapes");
+    }
+
+    /// Font atlas resets invalidate old galleys: text draw ops must refresh through egui's layout
+    /// cache while tessellated geometry stays cached (CodeRabbit finding on #3748).
+    #[test]
+    fn paint_draw_refreshes_text_after_font_atlas_reset() {
+        let ctx = egui::Context::default();
+        let t = Tokens::for_kind(crate::theme::ThemeKind::Dark);
+        let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(80.0, 30.0));
+        let ops = [
+            DrawOp::Fill { color: Some([0.2, 0.2, 0.2, 1.0]), path: vec![PathSeg::R { x: 0.0, y: 0.0, w: 80.0, h: 30.0 }] },
+            DrawOp::Text { text: "hello".into(), color: Some([1.0, 1.0, 1.0, 1.0]), x: 4.0, y: 4.0, size: 12.0, style: String::new() },
+        ];
+        let paint = || -> (std::sync::Arc<egui::Mesh>, std::sync::Arc<egui::Galley>) {
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+                paint_draw(ui, rect, &ops, &t, &effectcraft_engine::FsServices, 9, 1);
+            });
+            out.textures_delta.clear();
+            let mut mesh = None;
+            let mut galley = None;
+            for clipped in out.shapes {
+                match clipped.shape {
+                    egui::Shape::Mesh(m) => mesh = Some(m),
+                    egui::Shape::Text(ts) => galley = Some(ts.galley),
+                    _ => {}
+                }
+            }
+            (mesh.expect("fill mesh"), galley.expect("text galley"))
+        };
+        let (mesh_before, galley_before) = paint();
+        // Replace font definitions with a distinct tweak so egui rebuilds its font atlas and
+        // drops its galley cache, just as it does on an atlas reset.
+        let mut fonts = egui::FontDefinitions::default();
+        if let Some(data) = fonts.font_data.values_mut().next() {
+            let mut updated = (**data).clone();
+            updated.tweak.y_offset_factor += 0.01;
+            *data = std::sync::Arc::new(updated);
+        }
+        ctx.set_fonts(fonts);
+        let (mesh_after, galley_after) = paint();
+        assert!(std::sync::Arc::ptr_eq(&mesh_before, &mesh_after), "geometry cache should survive an atlas reset");
+        assert!(!std::sync::Arc::ptr_eq(&galley_before, &galley_after), "text galley must refresh after an atlas reset");
+    }
+
+    /// Moving a floating window translates cached shapes instead of re-tessellating them.
+    #[test]
+    fn paint_draw_translates_cached_geometry_when_moved() {
+        let ctx = egui::Context::default();
+        let t = Tokens::for_kind(crate::theme::ThemeKind::Dark);
+        let ops = [DrawOp::Fill { color: Some([1.0, 0.0, 0.0, 1.0]), path: vec![PathSeg::R { x: 0.0, y: 0.0, w: 10.0, h: 10.0 }] }];
+        let paint_at = |min: egui::Pos2| -> std::sync::Arc<egui::Mesh> {
+            let rect = Rect::from_min_size(min, vec2(20.0, 20.0));
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+                paint_draw(ui, rect, &ops, &t, &effectcraft_engine::FsServices, 11, 2);
+            });
+            out.textures_delta.clear();
+            match out.shapes.into_iter().map(|s| s.shape).collect::<Vec<_>>().as_slice() {
+                [egui::Shape::Mesh(m)] => m.clone(),
+                other => panic!("expected one mesh, got {}", other.len()),
+            }
+        };
+        let at_origin = paint_at(pos2(0.0, 0.0));
+        let moved = paint_at(pos2(25.0, 40.0));
+        let min_x = moved.vertices.iter().map(|v| v.pos.x).fold(f32::INFINITY, f32::min);
+        let min_y = moved.vertices.iter().map(|v| v.pos.y).fold(f32::INFINITY, f32::min);
+        assert!((min_x - 25.0).abs() < 1e-3 && (min_y - 40.0).abs() < 1e-3, "moved mesh bounds ({min_x}, {min_y})");
+        assert_eq!(at_origin.vertices.len(), moved.vertices.len());
+        let moved_again = paint_at(pos2(25.0, 40.0));
+        assert!(std::sync::Arc::ptr_eq(&moved, &moved_again), "settled moved shapes should be reused without cloning");
     }
 }
