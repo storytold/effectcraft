@@ -224,6 +224,60 @@ fn workspace_layout_autosave_writes_on_a_hidden_tick() {
     assert_eq!(app.ui_passes(), 0);
 }
 
+/// Whether a frame running `f` asked the root window to close.
+#[cfg(not(target_arch = "wasm32"))]
+fn asks_to_close(ctx: &egui::Context, mut f: impl FnMut(&egui::Context)) -> bool {
+    let mut out = ctx.run_ui(raw(egui::vec2(800.0, 480.0)), |ui| f(ui.ctx()));
+    out.textures_delta.clear();
+    out.viewport_output.get(&egui::ViewportId::ROOT).is_some_and(|v| v.commands.contains(&egui::ViewportCommand::Close))
+}
+
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn restart_to_update_with_unsaved_changes_opens_the_unsaved_changes_prompt() {
+    let ctx = egui::Context::default();
+    let frame = eframe::Frame::_new_kittest();
+    let mut app = app_with_comp();
+    assert!(app.session.is_dirty(), "creating a comp and a layer leaves unsaved changes");
+    app.updates_rt.manual_window_open = true;
+    assert!(asks_to_close(&ctx, |ctx| updates_ui::restart_to_update(&mut app.updates_rt, ctx, false)), "the window is asked to close");
+    assert!(!app.updates_rt.manual_window_open, "the modal result dialog closes");
+    let mut raw = raw(egui::vec2(800.0, 480.0));
+    raw.viewports.insert(egui::ViewportId::ROOT, egui::ViewportInfo { events: vec![egui::ViewportEvent::Close], ..Default::default() });
+    let out = tick_with(&mut app, &ctx, &frame, &raw);
+    assert!(app.dialog.is_some(), "the close opens the unsaved-changes prompt");
+    assert!(out.viewport_commands.values().flatten().any(|c| matches!(c, egui::ViewportCommand::CancelClose)));
+}
+
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn restart_to_update_with_nothing_unsaved_leaves_the_close_to_the_updater() {
+    let ctx = egui::Context::default();
+    let mut app = app_with_comp();
+    app.updates_rt.manual_window_open = true;
+    assert!(!asks_to_close(&ctx, |ctx| updates_ui::restart_to_update(&mut app.updates_rt, ctx, true)));
+    assert!(app.updates_rt.manual_window_open, "the result dialog stays until the updater closes the app");
+}
+
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn restart_to_update_with_the_startup_prompt_open_leaves_the_window_open() {
+    let ctx = egui::Context::default();
+    let mut app = app_with_comp();
+    app.updates_rt.updater.offer(craft_update::Release {
+        tag: "v99.0.0".into(),
+        version: craft_update::parse_version("99.0.0"),
+        name: "EffectCraft 99.0.0".into(),
+        html_url: "https://github.com/storytold/effectcraft/releases/tag/v99.0.0".into(),
+        ..Default::default()
+    });
+    assert!(app.updates_rt.updater.prompt_open());
+    app.updates_rt.manual_window_open = true;
+    assert!(!asks_to_close(&ctx, |ctx| updates_ui::restart_to_update(&mut app.updates_rt, ctx, false)), "the prompt carries the restart");
+    assert!(!app.updates_rt.manual_window_open, "the result dialog closes");
+    assert!(app.updates_rt.updater.prompt_open(), "the prompt stays");
+}
+
 #[test]
 fn the_close_guard_answers_a_close_request_without_a_pass() {
     let ctx = egui::Context::default();
@@ -237,6 +291,29 @@ fn the_close_guard_answers_a_close_request_without_a_pass() {
     let cancel = out.viewport_commands.values().flatten().any(|c| matches!(c, egui::ViewportCommand::CancelClose));
     assert!(cancel, "the window stays open while the prompt is asking");
     assert_eq!(app.ui_passes(), 0);
+}
+
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn the_update_result_dialog_shows_every_status_but_idle() {
+    use craft_update::updater::Status;
+    let shown = [
+        Status::Checking,
+        Status::UpToDate,
+        Status::Failed("offline".into()),
+        Status::Installing,
+        Status::Ready,
+        Status::Managed,
+        Status::Updated("1.2.3".into()),
+        Status::InstallFailed("access denied".into()),
+    ];
+    for status in &shown {
+        assert!(updates_ui::result_window_open(false, status, false), "{status:?} opens the dialog without a requested check");
+    }
+    assert!(!updates_ui::result_window_open(false, &Status::Idle, false));
+    assert!(!updates_ui::result_window_open(true, &Status::Idle, false), "a check that found a release closes it");
+    assert!(updates_ui::result_window_open(true, &Status::Idle, true), "a queued check keeps it open");
+    assert!(!updates_ui::result_window_open(false, &Status::Idle, true), "a queued check does not open it");
 }
 
 // ---------------------------------------------------------------- screenshots
@@ -277,6 +354,39 @@ fn issue_shot_at(app: &mut EffectcraftApp, ctx: &egui::Context, frame: &eframe::
 
 fn image(width: usize, height: usize) -> Arc<egui::ColorImage> {
     Arc::new(egui::ColorImage::new([width, height], vec![egui::Color32::from_rgb(10, 20, 30); width.checked_mul(height).unwrap()]))
+}
+
+/// #3253 review: a script waits on a file dialog while the window is hidden. File dialogs are
+/// served in a UI pass, so the app asks for one until the dialog is shown; a hidden window with
+/// nothing waiting stays quiet.
+#[test]
+fn a_script_file_dialog_asks_for_a_pass_while_the_window_is_hidden() {
+    use effectcraft_engine::scriptui::{FileDialogKind, ScriptFileDialog};
+    let ctx = egui::Context::default();
+    let frame = eframe::Frame::_new_kittest();
+    let mut app = app_with_comp();
+    ready(&mut app, &ctx, &frame);
+    let asks =
+        |out: &egui::LogicOutput| out.viewport_commands.values().flatten().filter(|c| matches!(c, egui::ViewportCommand::RequestPaintWhileHidden)).count();
+    let size = egui::vec2(800.0, 480.0);
+    assert_eq!(asks(&tick_with(&mut app, &ctx, &frame, &raw(size))), 0, "nothing waits: a hidden window stays quiet");
+    app.session.script_ui.file_dialogs.push(ScriptFileDialog {
+        id: 1,
+        host: 1,
+        kind: FileDialogKind::Open,
+        prompt: String::new(),
+        exts: vec![],
+        label: String::new(),
+        any: true,
+        many: false,
+        start: String::new(),
+        shown: false,
+    });
+    assert_eq!(asks(&tick_with(&mut app, &ctx, &frame, &raw(size))), 1, "a script waits for its dialog: the hidden window paints");
+    if let Some(d) = app.session.script_ui.file_dialogs.first_mut() {
+        d.shown = true;
+    }
+    assert_eq!(asks(&tick_with(&mut app, &ctx, &frame, &raw(size))), 0, "the dialog is shown: no more passes asked for");
 }
 
 #[test]

@@ -18,7 +18,6 @@ cpal or muda. Everything in L0 to L4, the egui UI and the web app also build for
 | L0 | `time` | `Tick` (254 016 000 000 per second), rational frame rates incl. NTSC, SMPTE and drop-frame timecode |
 | L0 | `geom` | Vectors, matrices, quaternions, the layer transform (anchor, position, scale, orientation, rotation) |
 | L0 | `color` | sRGB and linear, HSL/HSV, luminance, the 38 blend modes, label colors |
-| L0 | `opusenc` | Opus encoder: RFC 6716 SILK (NB/MB/WB), hybrid (SWB/FB) and CELT (FB) modes chosen by bitrate and application (audio / voice), 48 kHz 20 ms packets, mono/stereo, and the RFC 7845 `OpusHead`, for WebM export audio |
 | L1 | `raster` | Premultiplied float images, sampling, affine and projective warps, blurs, compositing (parallel with rayon) |
 | L1 | `keyframe` | Animated values, keyframes with temporal ease and spatial Bezier, roving, hold, velocity |
 | L1 | `segment` | Swappable trained models for Roto Brush and face tracking: the `MaskModel` and `FaceModel` interfaces, a registry of open-licensed models (authors, licence, URL, size, SHA-256), PyTorch checkpoint and TensorFlow Lite readers (with an interpreter), SHA-256, MobileSAM (TinyViT + Segment Anything decoder) and MediaPipe Face Landmarker (BlazeFace + Face Mesh V2) on rayon and ndarray's safe GEMM |
@@ -243,8 +242,9 @@ and undo can reuse earlier content. During rapid edits at the same time and view
 shows the newest completed revision while the exact requested revision renders; out-of-order
 completions cannot move it backwards. This avoids freezing until a slider or layer drag stops.
 Frames at other times or with other render options are never substituted. Obsolete queued jobs
-are dropped; running jobs finish into the cache. When the budget (Settings ▸ Memory & CPU) is
-full the least recently shown frames go first. The timeline's green bar counts cached frames
+are dropped; running jobs finish into the cache. The frames share one memory budget with
+the other big caches (Settings ▸ Memory & CPU); when it is full the memory accountant frees the
+least valuable data first, by cost to make again per byte and time since last use. The timeline's green bar counts cached frames
 of the current content and viewer settings.
 Resolution Auto renders the pixels the magnification needs, as in After Effects (Full above
 50 %, Half down to 33.3 %, Third down to 25 %, then Quarter). The Resolution is the comp's

@@ -19,14 +19,22 @@ fn harness(width: f32, kind: ThemeKind) -> Harness<'static, EffectcraftApp> {
 fn harness_at_scale(width: f32, kind: ThemeKind, scale: f32) -> Harness<'static, EffectcraftApp> {
     let mut session = Session::default();
     session.execute("comp.new", json!({"name":"Geometry validation", "width":640, "height":360, "duration":4})).unwrap();
-    let mut h = Harness::builder().with_size(vec2(width, 360.0)).with_pixels_per_point(scale).build_ui_state(
-        |ui, app: &mut EffectcraftApp| {
-            app.auto.begin_frame();
-            *app.frames.last_ms.lock().unwrap() = 0.0;
-            viewer::show(app, ui, ui.max_rect());
-        },
-        EffectcraftApp::new(session),
-    );
+    let app = EffectcraftApp::new(session);
+    // Install the fonts the real app installs at startup *before* the harness's first pass: the control
+    // row draws `widgets::text_button` text in the "medium" family, which has no fonts until then.
+    let tokens = app.tokens;
+    let mut h = Harness::builder()
+        .with_size(vec2(width, 360.0))
+        .with_pixels_per_point(scale)
+        .with_context_setup(move |ctx| theme::install(ctx, &tokens, "en"))
+        .build_ui_state(
+            |ui, app: &mut EffectcraftApp| {
+                app.auto.begin_frame();
+                *app.frames.last_ms.lock().unwrap() = 0.0;
+                viewer::show(app, ui, ui.max_rect());
+            },
+            app,
+        );
     let ctx = h.ctx.clone();
     h.state_mut().set_theme(&ctx, kind);
     theme::install(&ctx, &h.state().tokens, "en");
@@ -107,7 +115,24 @@ fn compact_control_row_scrolls_and_preserves_interactions() {
     let timecode = rect(&h, "viewer.timecode");
     let row = rect(&h, "viewer.controls");
     assert!(timecode.left() >= row.left() && timecode.right() <= row.right(), "last viewer control must scroll into view: {timecode:?}");
+    // The Views switch (#3391) widened the row, so the exposure reset is no longer in view at the far
+    // end: scroll back until it is, then check the scrolled controls as before.
+    for _ in 0..40 {
+        let e = rect(&h, "viewer.resetExposure");
+        if e.left() >= row.left() && e.right() <= row.right() {
+            break;
+        }
+        h.event(Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: vec2(40.0, 0.0),
+            modifiers: Default::default(),
+            phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Wheel,
+        });
+        h.run_steps(4);
+    }
     let exposure = rect(&h, "viewer.resetExposure");
+    // The convergence check for the scroll-back loop above: it must have brought the control into view.
     assert!(exposure.left() >= row.left() && exposure.right() <= row.right());
     h.state_mut().session.execute("view.exposure", json!({"stops":2.0})).unwrap();
     h.run_steps(2);

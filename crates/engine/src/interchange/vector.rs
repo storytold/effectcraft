@@ -764,4 +764,60 @@ mod tests {
         assert_eq!(got, want);
         assert!(segs.iter().all(|d| d.root.name == "root" && d.width == 10.0));
     }
+
+    #[test]
+    fn svg_contents_preserves_viewbox_cascade_units_transforms_and_gradients() {
+        let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="80" height="40" viewBox="10 10 40 20">
+            <style>
+                .box { fill: #ff0000; }
+                #hole { fill: #00ff00; fill-rule: evenodd; }
+            </style>
+            <defs>
+                <linearGradient id="g" x1="0%" y1="0%" x2="100%" y2="0%">
+                    <stop offset="0" stop-color="#ff0000"/>
+                    <stop offset="1" stop-color="#0000ff"/>
+                </linearGradient>
+            </defs>
+            <g id="layer" opacity="0.5" transform="translate(10, 10)" font-size="10">
+                <rect id="rect-a" class="box" x="0" y="0" width="1em" height="1em"/>
+                <path id="hole" d="M12 0 H20 V8 H12 Z M14 2 V6 H18 V2 Z"/>
+                <rect id="grad" x="22" y="0" width="8" height="8" fill="url(#g)"/>
+                <rect id="fallback" x="32" y="0" width="4" height="4" fill="url(#missing) #0000ff"/>
+            </g>
+        </svg>"##;
+        let doc = effectcraft_svg::parse(svg).unwrap();
+        let mut next_id = 1u64;
+        let mut ids = Ids(&mut next_id);
+        let items = svg_contents(&mut ids, &doc);
+        assert_eq!(items.len(), 1);
+        let layer = &items[0];
+        assert_eq!(layer.name, "layer");
+        assert!((layer.prop("transform/opacity").unwrap().value.as_f64() - 50.0).abs() < 1e-9);
+
+        // Paint order is reversed (top of paint order first).
+        let children: Vec<_> = layer.sub("contents").unwrap().groups().collect();
+        let names: Vec<_> = children.iter().map(|g| g.name.as_str()).collect();
+        assert_eq!(names, vec!["fallback", "grad", "hole", "rect-a"]);
+
+        // rect-a: viewBox (10, 10, 40, 20) -> (80, 40) scales by 2x; translate(10, 10) lands at (0, 0) in comp space,
+        // and 1em = 10 -> 20x20 rect centered at (10, 10).
+        let rect_a: Vec<_> = children[3].sub("contents").unwrap().groups().collect();
+        assert_eq!(rect_a[0].get("size").unwrap().value.as_vec2(), [20.0, 20.0]);
+        assert_eq!(rect_a[0].get("position").unwrap().value.as_vec2(), [10.0, 10.0]);
+        assert_eq!(rect_a[1].get("color").unwrap().value, Value::Color([1.0, 0.0, 0.0, 1.0]));
+
+        // hole: EvenOdd fill rule preserved.
+        let hole: Vec<_> = children[2].sub("contents").unwrap().groups().collect();
+        let hole_fill = hole.iter().find(|g| g.match_id == "fill").unwrap();
+        assert_eq!(hole_fill.get("rule").unwrap().value, Value::Enum(1));
+
+        // grad: gradient fill mapped with both stops.
+        let grad: Vec<_> = children[1].sub("contents").unwrap().groups().collect();
+        assert!(grad.iter().any(|g| g.match_id == "gfill"));
+
+        // fallback: missing paint server keeps fallback solid color.
+        let fb: Vec<_> = children[0].sub("contents").unwrap().groups().collect();
+        let fb_fill = fb.iter().find(|g| g.match_id == "fill").unwrap();
+        assert_eq!(fb_fill.get("color").unwrap().value, Value::Color([0.0, 0.0, 1.0, 1.0]));
+    }
 }

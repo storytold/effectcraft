@@ -220,7 +220,7 @@ cargo xtask web --serve 8765                # the browser build on http://127.0.
 New to it? [docs/footage.md](docs/footage.md) covers importing footage and image sequences and
 Interpret Footage.
 
-To work on it: `cargo test --workspace`, and `cargo xtask ci` before every commit (format, lints,
+To work on it: `cargo test --workspace`, and the checks for the crates you changed (`cargo xtask ci --affected`; the full `cargo xtask ci` covers format, lints,
 tests, layering, asset attribution and the WebAssembly build). See [CONTRIBUTING.md](CONTRIBUTING.md),
 [docs/architecture.md](docs/architecture.md) and [docs/testing.md](docs/testing.md).
 
