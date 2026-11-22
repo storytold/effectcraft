@@ -2,7 +2,7 @@ use effectcraft_keyframe::Value;
 use effectcraft_project::{Comp, ItemId, ItemKind, LayerSource, LightKind, PrimitiveKind, Project, Renderer as R3, build};
 use effectcraft_time::{FrameRate, Tick};
 
-use super::scene::{Material, Scene, TexInfo, Vertex, dominant_direction, irradiance_map};
+use super::scene::{Light, Material, Scene, TexInfo, Vertex, dominant_direction, irradiance_map};
 use super::shade::{self, PI};
 use super::*;
 use crate::{NoFootage, RenderOpts, Renderer};
@@ -223,6 +223,90 @@ fn coverage_is_exact_for_pixel_aligned_quads() {
     let s = quad_scene(8, 8, &[([0.0, 0.0, 8.0, 8.0], 100.0, [1.0, 0.0, 0.0, 0.5]), ([0.0, 0.0, 8.0, 8.0], 50.0, [0.0, 0.0, 1.0, 0.5])]);
     let c = rasterize(&s).unwrap().color[0];
     assert!((c[0] - 0.25).abs() < 1e-6 && (c[2] - 0.5).abs() < 1e-6 && (c[3] - 0.75).abs() < 1e-6, "{c:?}");
+}
+
+const GREEN: [f32; 4] = [0.0, 1.0, 0.0, 1.0];
+const BLUE: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
+
+/// A blue quad at depth 500 behind two green quads at depth 100 (left and right half), with
+/// the green quads' materials (1 and 2) in mask mode.
+fn masked_pair() -> Scene {
+    let mut s = quad_scene(8, 4, &[([0.0, 0.0, 8.0, 4.0], 500.0, BLUE), ([0.0, 0.0, 4.0, 4.0], 100.0, GREEN), ([4.0, 0.0, 8.0, 4.0], 100.0, GREEN)]);
+    for m in &mut s.materials[1..] {
+        m.alpha_mode = 1;
+    }
+    s
+}
+
+#[test]
+fn masked_surfaces_cover_fully_where_they_pass_the_cutoff() {
+    // Texel alpha 0.6 on the left, 0.4 on the right, against the default cutoff of 0.5.
+    let mut s = masked_pair();
+    s.texels = vec![[1.0, 1.0, 1.0, 0.6], [1.0, 1.0, 1.0, 0.4]];
+    s.textures = vec![TexInfo { offset: 0, width: 1, height: 1, wrap_u: 0, wrap_v: 0 }, TexInfo { offset: 1, width: 1, height: 1, wrap_u: 0, wrap_v: 0 }];
+    s.materials[1].tex_base = 0;
+    s.materials[2].tex_base = 1;
+    let t = rasterize(&s).unwrap();
+    assert_eq!(t.color[8 + 1], GREEN, "a passing texel draws the surface fully opaque");
+    assert_eq!(t.depth[8 + 1], 100.0);
+    assert_eq!(t.color[8 + 6], BLUE, "a failing texel shows the surface behind");
+    assert_eq!(t.depth[8 + 6], 500.0);
+}
+
+#[test]
+fn the_mask_cutoff_is_inclusive_and_ignores_layer_opacity() {
+    // Material alpha equal to the cutoff passes, a zero cutoff included.
+    let mut s = masked_pair();
+    (s.materials[1].base[3], s.materials[1].alpha_cutoff) = (0.5, 0.5);
+    (s.materials[2].base[3], s.materials[2].alpha_cutoff) = (0.0, 0.0);
+    let t = rasterize(&s).unwrap();
+    assert_eq!(t.color[8 + 1], GREEN);
+    assert_eq!(t.color[8 + 6], GREEN);
+    // At half layer opacity, material alpha 0.6 still passes the 0.5 cutoff, and the surface
+    // fades by the layer opacity alone.
+    let mut s = quad_scene(8, 4, &[([0.0, 0.0, 8.0, 4.0], 500.0, BLUE), ([0.0, 0.0, 8.0, 4.0], 100.0, [0.0, 1.0, 0.0, 0.6])]);
+    (s.materials[1].alpha_mode, s.materials[1].opacity) = (1, 0.5);
+    let c = rasterize(&s).unwrap().color[8 + 1];
+    assert!([0.0, 0.5, 0.5, 1.0].iter().zip(c).all(|(a, b)| (a - b).abs() < 1e-6), "{c:?}");
+}
+
+#[test]
+fn masked_casters_shadow_where_they_pass_their_cutoff() {
+    // A parallel light travelling along +z: the quad casts when a texel of its map holds a depth.
+    let casts = |s: &Scene| {
+        let mut s = s.clone();
+        craft_raster3d::try_shadow_maps(&mut s, false, &limits()).unwrap();
+        s.shadow_texels.iter().any(|d| d.is_finite())
+    };
+    let mut s = quad_scene(8, 8, &[([-2.0, -2.0, 2.0, 2.0], 10.0, [1.0, 1.0, 1.0, 0.6])]);
+    (s.materials[0].alpha_mode, s.materials[0].casts_shadows) = (1, true);
+    s.lights = vec![Light {
+        kind: 0,
+        pos: [0.0; 3],
+        dir: [0.0, 0.0, 1.0],
+        color: [1.0; 3],
+        cos_inner: 1.0,
+        cos_outer: 1.0,
+        falloff: 0,
+        radius: 0.0,
+        falloff_distance: 0.0,
+        shadow: 0,
+        shadow_darkness: 1.0,
+        shadow_diffusion: 0.0,
+    }];
+    // Without a texture, the material's own alpha meets the cutoff.
+    s.materials[0].alpha_cutoff = 0.7;
+    assert!(!casts(&s));
+    s.materials[0].alpha_cutoff = 0.6;
+    assert!(casts(&s));
+    // With a texture, the material's cutoff applies, and the layer opacity does not move it.
+    (s.materials[0].base[3], s.materials[0].tex_base) = (1.0, 0);
+    s.texels = vec![[1.0, 1.0, 1.0, 0.6]];
+    s.textures = vec![TexInfo { offset: 0, width: 1, height: 1, wrap_u: 0, wrap_v: 0 }];
+    s.materials[0].alpha_cutoff = 0.7;
+    assert!(!casts(&s));
+    (s.materials[0].alpha_cutoff, s.materials[0].opacity) = (0.5, 0.5);
+    assert!(casts(&s));
 }
 
 #[test]
