@@ -2029,10 +2029,30 @@ fn describe_problem(codec: &str, e: &MediaError) -> String {
         MediaError::Cancelled => "the decode was called off",
     };
     let mut unsupported = matches!(e, MediaError::Unsupported(_));
-    while let Some(rest) = ["decode error: ", "unsupported media: ", "unsupported: ", "I/O error: "].iter().find_map(|p| detail.strip_prefix(p)) {
-        unsupported |= detail.starts_with("unsupported");
-        detail = rest;
+    loop {
+        if let Some(rest) = ["decode error: ", "unsupported media: ", "unsupported video: ", "malformed video: ", "unsupported: ", "I/O error: "]
+            .iter()
+            .find_map(|p| detail.strip_prefix(p))
+        {
+            unsupported |= detail.starts_with("unsupported");
+            detail = rest;
+        } else if !codec.is_empty()
+            && let Some(rest) = detail.strip_prefix(codec).and_then(|s| s.strip_prefix(": "))
+        {
+            detail = rest;
+        } else {
+            break;
+        }
     }
+    // Present the stream's chroma sampling, not the shared decoder's H.264 syntax-field number.
+    let detail = if codec == "H.264" {
+        [("chroma_format_idc 0 ", "monochrome "), ("chroma_format_idc 2 ", "4:2:2 chroma "), ("chroma_format_idc 3 ", "4:4:4 chroma ")]
+            .into_iter()
+            .find_map(|(syntax, label)| detail.strip_prefix(syntax).map(|rest| format!("{label}{rest}")))
+            .unwrap_or_else(|| detail.to_owned())
+    } else {
+        detail.to_owned()
+    };
     let what = if codec.is_empty() { "This video" } else { codec };
     if unsupported { format!("{what} isn't supported by the built-in decoder: {detail}") } else { format!("{what} can't be decoded: {detail}") }
 }
