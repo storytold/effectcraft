@@ -18,7 +18,7 @@ use effectcraft_keyframe::Value;
 use effectcraft_project::build::Ids;
 use effectcraft_project::{Node, ParamUi, PropGroup, Property};
 
-use crate::{EffectSpec, ParamSpec, default_value, group_name, layer_source_id};
+use crate::{EffectSpec, ParamSpec, default_value, explicit_source, group_name, layer_source_id};
 
 /// Parameter ids renamed since they were first saved: `(effect id, old id, new id)`. The new id
 /// is a spec id (it may include twirl-down group segments, `group/param`).
@@ -210,17 +210,17 @@ fn prop_at<'a>(g: &'a mut PropGroup, id: &str) -> Option<&'a mut Property> {
     }
 }
 
-fn group_at<'a>(g: &'a mut PropGroup, ids: &mut Ids, path: &str) -> Option<&'a mut PropGroup> {
+fn group_at<'a>(g: &'a mut PropGroup, ids: &mut Ids, path: &str, owner: &str) -> Option<&'a mut PropGroup> {
     let (first, rest) = match path.split_once('/') {
         Some((a, b)) => (a, Some(b)),
         None => (path, None),
     };
     if g.sub(first).is_none() {
-        g.children.push(ids.group(first, group_name(first)).into());
+        g.children.push(ids.group(first, group_name(owner, first)).into());
     }
     let sub = g.sub_mut(first)?;
     match rest {
-        Some(r) => group_at(sub, ids, r),
+        Some(r) => group_at(sub, ids, r, owner),
         None => Some(sub),
     }
 }
@@ -321,7 +321,7 @@ pub fn upgrade_instance(spec: &EffectSpec, g: &mut PropGroup, ids: &mut Ids, lay
                 Some(i) if i <= sub.children.len() => sub.children.insert(i, pr.into()),
                 _ => sub.children.push(pr.into()),
             };
-            match path.and_then(|path| group_at(g, ids, path)) {
+            match path.and_then(|path| group_at(g, ids, path, spec.id)) {
                 Some(sub) => at(sub),
                 None => at(g),
             }
@@ -330,12 +330,14 @@ pub fn upgrade_instance(spec: &EffectSpec, g: &mut PropGroup, ids: &mut Ids, lay
             refresh(pr, ps, spec);
         }
         // Layer parameters' source companions.
+        let (path, leaf) = ps.id.rsplit_once('/').map(|(p, l)| (Some(p), l)).unwrap_or((None, ps.id));
         let sid = layer_source_id(ps.id);
-        if matches!(ps.ui, ParamUi::Layer) && !spec.params.iter().any(|q| q.id == sid) && prop_at(g, &sid).is_none() {
-            let (path, leaf) = ps.id.rsplit_once('/').map(|(p, l)| (Some(p), l)).unwrap_or((None, ps.id));
-            // Companions of grouped layer parameters were once stored at top level.
-            let src = take_prop(g, &sid).map(|mut p| {
-                p.match_id = layer_source_id(leaf);
+        let leaf_sid = layer_source_id(leaf);
+        // An explicitly declared companion (in any group) is used as it is; otherwise a hidden one
+        // is made. Companions of grouped layer parameters were once stored at top level.
+        if matches!(ps.ui, ParamUi::Layer) && explicit_source(spec, leaf).is_none() && prop_at(g, &sid).is_none() {
+            let src = take_prop(g, &leaf_sid).map(|mut p| {
+                p.match_id = leaf_sid.to_string();
                 p
             });
             let src = src.unwrap_or_else(|| {
@@ -343,7 +345,7 @@ pub fn upgrade_instance(spec: &EffectSpec, g: &mut PropGroup, ids: &mut Ids, lay
                 src.hold_only = true;
                 src
             });
-            match path.and_then(|path| group_at(g, ids, path)) {
+            match path.and_then(|path| group_at(g, ids, path, spec.id)) {
                 Some(sub) => sub.children.push(src.into()),
                 None => g.children.push(src.into()),
             }
@@ -355,19 +357,19 @@ pub fn upgrade_instance(spec: &EffectSpec, g: &mut PropGroup, ids: &mut Ids, lay
         pr.value = Value::Bool(on);
     }
     // Refresh twirl-down group names.
-    fn names(g: &mut PropGroup) {
+    fn names(g: &mut PropGroup, owner: &str) {
         for c in &mut g.children {
             if let Node::Group(sg) = c {
-                let n = group_name(&sg.match_id);
+                let n = group_name(owner, &sg.match_id);
                 if n != sg.match_id {
                     sg.name = n.to_string();
                 }
-                names(sg);
+                names(sg, owner);
             }
         }
     }
     if !USER_EDITED_CATEGORIES.contains(&spec.category) && spec.params.iter().any(|p| p.id.contains('/')) {
-        names(g);
+        names(g, spec.id);
     }
     *g != before
 }
