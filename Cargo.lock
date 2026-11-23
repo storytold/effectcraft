@@ -2082,6 +2082,7 @@ dependencies = [
  "craft-exr 0.1.0 (git+https://github.com/storytold/craft-libs?rev=3b8e426a260695af840a2cd79a064d40778f939e)",
  "craft-gif",
  "craft-media 0.1.0 (git+https://github.com/storytold/craft-libs?rev=33be35625e252cc4f06aa375b3b428521faea37d)",
+ "craft-tga",
  "craft-video",
  "effectcraft-color",
  "effectcraft-effects",
