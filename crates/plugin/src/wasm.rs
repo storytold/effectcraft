@@ -1,8 +1,10 @@
-//! The wasmi-backed [`EffectPlugin`] (WebAssembly ABI v1 and v2, see the crate docs).
+//! The wasmtime-backed (Cranelift compiled) [`EffectPlugin`] (WebAssembly ABI v1 and v2, plus
+//! optional multi-core row-band rendering via `ec_render_rows`; #3206).
 
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
-use wasmi::{Config, Engine, Instance, Linker, Memory, Module, Store, StoreLimits, StoreLimitsBuilder, TypedFunc, WasmParams, WasmResults};
+use rayon::prelude::*;
+use wasmtime::{Config, Engine, Instance, Linker, Memory, Module, Store, StoreLimits, StoreLimitsBuilder, TypedFunc, WasmParams, WasmResults};
 
 use crate::{EffectPlugin, MIN_WASM_API_VERSION, PluginFrame, PluginManifest, PluginParams, WASM_API_VERSION};
 use effectcraft_effects::plugin::{PluginHost, PluginImage};
@@ -17,11 +19,19 @@ const MAX_MEMORY: usize = 1 << 30;
 const MAX_TABLE_ELEMENTS: usize = 1 << 16;
 /// The longest manifest read.
 const MAX_MANIFEST: i32 = 1 << 20;
+/// Minimum rows per band when splitting a frame across cores (`ec_render_rows`).
+const MIN_ROWS_PER_BAND: u32 = 32;
 
 /// ABI 1: one buffer.
 type RenderFn = TypedFunc<(i32, i32, i32, i32, i32, f64, f64), i32>;
 /// ABI 2: the same call plus the previous and next frame buffers and their layer times.
 type Render2Fn = TypedFunc<(i32, i32, i32, i32, i32, f64, f64, i32, f64, i32, f64, i32), i32>;
+/// Optional tiled row-band entry point (#3206):
+/// `ec_render_rows(pixels_ptr, width, band_height, params_ptr, nparams, time, scale, y0, y1) -> i32`
+/// where `pixels_ptr` holds rows `[band_start..band_end)` (`band_height` rows including overlap
+/// `margin`) and `[y0..y1)` are the output rows within `pixels_ptr` (relative to `band_start`)
+/// that this worker owns.
+type RenderRowsFn = TypedFunc<(i32, i32, i32, i32, i32, f64, f64, i32, i32), i32>;
 
 enum Renderer {
     V1(RenderFn),
@@ -34,6 +44,7 @@ struct Inst {
     memory: Memory,
     alloc: TypedFunc<i32, i32>,
     render: Renderer,
+    render_rows: Option<RenderRowsFn>,
 }
 
 /// An instance whose ABI version (and so its render export) is not selected yet.
@@ -46,19 +57,37 @@ struct Pending {
 
 impl Pending {
     /// A typed export by name, reporting a missing or mistyped export like [`missing`].
-    fn func<P: WasmParams, R: WasmResults>(&self, name: &str) -> Result<TypedFunc<P, R>, String> {
-        self.instance.get_typed_func::<P, R>(&self.store, name).map_err(|_| missing(name))
+    fn func<P: WasmParams, R: WasmResults>(&mut self, name: &str) -> Result<TypedFunc<P, R>, String> {
+        self.instance.get_typed_func::<P, R>(&mut self.store, name).map_err(|_| missing(name))
     }
 
-    /// Select the render export for `abi`.
-    fn finish(self, abi: u32) -> Result<Inst, String> {
+    /// Select the render export for `abi` (and the optional `ec_render_rows` export).
+    fn finish(mut self, abi: u32) -> Result<Inst, String> {
         let render = match abi {
-            1 => Renderer::V1(self.instance.get_typed_func::<_, i32>(&self.store, "ec_render").map_err(|_| missing("ec_render"))?),
-            2 => Renderer::V2(self.instance.get_typed_func::<_, i32>(&self.store, "ec_render2").map_err(|_| missing("ec_render2"))?),
+            1 => Renderer::V1(self.instance.get_typed_func::<_, i32>(&mut self.store, "ec_render").map_err(|_| missing("ec_render"))?),
+            2 => Renderer::V2(self.instance.get_typed_func::<_, i32>(&mut self.store, "ec_render2").map_err(|_| missing("ec_render2"))?),
             v => return Err(unsupported(v as i32)),
         };
-        Ok(Inst { store: self.store, memory: self.memory, alloc: self.alloc, render })
+        let render_rows = self.instance.get_typed_func::<_, i32>(&mut self.store, "ec_render_rows").ok();
+        Ok(Inst { store: self.store, memory: self.memory, alloc: self.alloc, render, render_rows })
     }
+}
+
+/// One shared Cranelift engine for all WebAssembly effect plug-ins, configured with fuel
+/// metering, SIMD (`v128`), and deterministic NaN canonicalisation (#3206).
+fn shared_engine() -> Result<&'static Engine, String> {
+    static ENGINE: OnceLock<Result<Engine, String>> = OnceLock::new();
+    ENGINE
+        .get_or_init(|| {
+            let mut config = Config::new();
+            config.consume_fuel(true);
+            config.cranelift_nan_canonicalization(true);
+            config.wasm_simd(true);
+            config.wasm_relaxed_simd(false);
+            Engine::new(&config).map_err(err)
+        })
+        .as_ref()
+        .map_err(Clone::clone)
 }
 
 /// The error for a missing or mistyped export.
@@ -79,7 +108,7 @@ fn abi_of(v: i32) -> Result<u32, String> {
     }
 }
 
-/// The error for a wasmi or trap failure.
+/// The error for a wasmtime or trap failure.
 fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
 }
@@ -93,9 +122,9 @@ fn begin(engine: &Engine, module: &Module) -> Result<Pending, String> {
     store.limiter(|l| l);
     store.set_fuel(FUEL_BASE).map_err(err)?;
     let linker = Linker::<StoreLimits>::new(engine);
-    let instance = linker.instantiate_and_start(&mut store, module).map_err(|e| format!("instantiation failed: {e}"))?;
-    let memory = instance.get_memory(&store, "memory").ok_or("the module exports no `memory`")?;
-    let alloc = instance.get_typed_func::<i32, i32>(&store, "ec_alloc").map_err(|_| missing("ec_alloc"))?;
+    let instance = linker.instantiate(&mut store, module).map_err(|e| format!("instantiation failed: {e}"))?;
+    let memory = instance.get_memory(&mut store, "memory").ok_or("the module exports no `memory`")?;
+    let alloc = instance.get_typed_func::<i32, i32>(&mut store, "ec_alloc").map_err(|_| missing("ec_alloc"))?;
     Ok(Pending { store, instance, memory, alloc })
 }
 
@@ -110,7 +139,9 @@ pub struct WasmPlugin {
     source: String,
     /// The WebAssembly ABI the module implements (`ec_api_version`).
     abi: u32,
-    engine: Engine,
+    /// Whether the module exports `ec_render_rows` for parallel row-band rendering (#3206).
+    has_render_rows: bool,
+    engine: &'static Engine,
     module: Module,
     /// Idle instances.
     pool: Mutex<Vec<Inst>>,
@@ -119,18 +150,18 @@ pub struct WasmPlugin {
 impl WasmPlugin {
     /// Load `bytes` and its manifest; errors on imports, a bad manifest or a missing export.
     pub fn new(bytes: &[u8], source: &str) -> Result<WasmPlugin, String> {
-        let mut config = Config::default();
-        config.consume_fuel(true);
-        let engine = Engine::new(&config);
-        let module = Module::new(&engine, bytes).map_err(|e| format!("not a valid WebAssembly module: {e}"))?;
+        let engine = shared_engine()?;
+        let module = Module::new(engine, bytes).map_err(|e| format!("not a valid WebAssembly module: {e}"))?;
         if let Some(i) = module.imports().next() {
             return Err(format!("plug-ins can't import anything (the module imports `{}.{}`)", i.module(), i.name()));
         }
-        let mut pending = begin(&engine, &module)?;
+        let mut pending = begin(engine, &module)?;
         let version = pending.func::<(), i32>("ec_api_version")?;
         let abi = abi_of(version.call(&mut pending.store, ()).map_err(err)?)?;
-        let ptr = pending.func::<(), i32>("ec_manifest_ptr")?.call(&mut pending.store, ()).map_err(err)?;
-        let len = pending.func::<(), i32>("ec_manifest_len")?.call(&mut pending.store, ()).map_err(err)?;
+        let ptr_fn = pending.func::<(), i32>("ec_manifest_ptr")?;
+        let ptr = ptr_fn.call(&mut pending.store, ()).map_err(err)?;
+        let len_fn = pending.func::<(), i32>("ec_manifest_len")?;
+        let len = len_fn.call(&mut pending.store, ()).map_err(err)?;
         if !(0..=MAX_MANIFEST).contains(&len) {
             return Err(format!("bad manifest length {len}"));
         }
@@ -142,7 +173,8 @@ impl WasmPlugin {
             return Err(format!("parameter `{}`: WebAssembly plug-ins use plug-in API 1 parameter types (no point3, layer, text or hidden)", p.id));
         }
         let inst = pending.finish(abi)?;
-        Ok(WasmPlugin { manifest, source: source.to_string(), abi, engine, module, pool: Mutex::new(vec![inst]) })
+        let has_render_rows = inst.render_rows.is_some();
+        Ok(WasmPlugin { manifest, source: source.to_string(), abi, has_render_rows, engine, module, pool: Mutex::new(vec![inst]) })
     }
 
     /// An idle instance, or a fresh one when the pool is empty.
@@ -150,7 +182,7 @@ impl WasmPlugin {
         if let Some(i) = self.pool.lock().ok().and_then(|mut p| p.pop()) {
             return Ok(i);
         }
-        instantiate(&self.engine, &self.module, self.abi)
+        instantiate(self.engine, &self.module, self.abi)
     }
 
     /// Return a working instance to the pool.
@@ -160,8 +192,96 @@ impl WasmPlugin {
         }
     }
 
-    /// ABI 1: parameters, then the pixels; `ec_render`.
+    /// Parallel tiled row-band render for ABI 1 plug-ins exporting `ec_render_rows` (#3206).
+    fn render_rows_parallel(&self, frame: &mut PluginFrame, params: &PluginParams, time: f64) -> Result<(), String> {
+        let w = frame.width as usize;
+        let h = frame.height;
+        let threads = rayon::current_num_threads().max(1);
+        let bands = threads.min((h / MIN_ROWS_PER_BAND).max(1) as usize);
+        if bands <= 1 {
+            return self.render_v1_single(frame, params, time);
+        }
+        let margin = self.manifest.margin.min(h);
+        let src: Vec<[f32; 4]> = frame.pixels.to_vec();
+        let rows_per = h.div_ceil(bands as u32);
+        let ranges: Vec<(u32, u32)> = (0..bands)
+            .map(|b| {
+                let y0 = b as u32 * rows_per;
+                let y1 = ((b as u32 + 1) * rows_per).min(h);
+                (y0, y1)
+            })
+            .filter(|(y0, y1)| y0 < y1)
+            .collect();
+        let params_bytes = params.flat.len() * 8;
+        let mut pbytes = Vec::with_capacity(params_bytes);
+        for v in params.flat {
+            pbytes.extend_from_slice(&v.to_le_bytes());
+        }
+        let scale = frame.scale;
+        let results: Result<Vec<(u32, Vec<[f32; 4]>)>, String> = ranges
+            .into_par_iter()
+            .map(|(out_y0, out_y1)| {
+                let band_start = out_y0.saturating_sub(margin);
+                let band_end = (out_y1 + margin).min(h);
+                let band_h = band_end - band_start;
+                let band_px = w * band_h as usize;
+                let total = params_bytes + band_px * 16;
+                if total > i32::MAX as usize {
+                    return Err("frame band too large for a 32-bit plug-in".into());
+                }
+                let mut inst = self.take()?;
+                let Some(ref rows_fn) = inst.render_rows else {
+                    self.give_back(inst);
+                    return Err("missing ec_render_rows export".into());
+                };
+                inst.store.set_fuel(FUEL_BASE + FUEL_PER_PIXEL * band_px as u64).map_err(err)?;
+                let base = inst.alloc.call(&mut inst.store, total as i32).map_err(err)? as u32 as usize;
+                let mut buf = Vec::with_capacity(total);
+                buf.extend_from_slice(&pbytes);
+                push_pixels(&mut buf, &src[band_start as usize * w..band_end as usize * w]);
+                inst.memory.write(&mut inst.store, base, &buf).map_err(|e| format!("ec_alloc returned a buffer out of bounds: {e}"))?;
+                let px_ptr = (base + params_bytes) as i32;
+                let local_y0 = (out_y0 - band_start) as i32;
+                let local_y1 = (out_y1 - band_start) as i32;
+                let r = rows_fn
+                    .call(&mut inst.store, (px_ptr, w as i32, band_h as i32, base as i32, params.flat.len() as i32, time, scale, local_y0, local_y1))
+                    .map_err(|e| format!("ec_render_rows trapped: {e}"));
+                let out = match r {
+                    Ok(0) => {
+                        let out_rows = (out_y1 - out_y0) as usize;
+                        let out_off = base + params_bytes + local_y0 as usize * w * 16;
+                        let mut raw = vec![0u8; out_rows * w * 16];
+                        inst.memory.read(&inst.store, out_off, &mut raw).map_err(err)?;
+                        let mut band_out = vec![[0.0f32; 4]; out_rows * w];
+                        read_pixels(&raw, &mut band_out);
+                        Ok((out_y0, band_out))
+                    }
+                    Ok(code) => Err(format!("ec_render_rows returned error {code}")),
+                    Err(e) => Err(e),
+                };
+                if out.is_ok() {
+                    self.give_back(inst);
+                }
+                out
+            })
+            .collect();
+        for (y0, band_out) in results? {
+            let start = y0 as usize * w;
+            frame.pixels[start..start + band_out.len()].copy_from_slice(&band_out);
+        }
+        Ok(())
+    }
+
+    /// ABI 1: parameters, then the pixels; `ec_render` (or parallel `ec_render_rows` when exported).
     fn render_v1(&self, frame: &mut PluginFrame, params: &PluginParams, time: f64) -> Result<(), String> {
+        if self.has_render_rows && frame.height >= MIN_ROWS_PER_BAND * 2 {
+            return self.render_rows_parallel(frame, params, time);
+        }
+        self.render_v1_single(frame, params, time)
+    }
+
+    /// Single-instance ABI 1 render via `ec_render`.
+    fn render_v1_single(&self, frame: &mut PluginFrame, params: &PluginParams, time: f64) -> Result<(), String> {
         let n = frame.pixels.len();
         let params_bytes = params.flat.len() * 8;
         let total = params_bytes + n * 16;

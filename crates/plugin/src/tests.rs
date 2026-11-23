@@ -486,3 +486,217 @@ fn abi_v2_without_a_host_gets_zeroed_neighbours() {
     assert!(!effectcraft_effects::is_time_dependent("org.test.neighbours.v1"));
     assert!(gain.id.starts_with("org.test."));
 }
+
+/// #3206: WebAssembly SIMD (`v128`) modules compile and execute under wasmtime, and modules
+/// exporting `ec_render_rows` render frames in parallel row bands with overlap `margin` matching
+/// single-pass output pixel for pixel.
+#[test]
+fn wasm_simd_and_parallel_row_bands_render_accurately() {
+    // 1. A module using v128.load / f32x4.mul / v128.store scales every pixel by 0.5.
+    let simd_manifest = r#"{"api":1,"id":"org.test.simd","name":"SIMD Half","category":"Test Plug-ins","params":[]}"#;
+    let m_len = simd_manifest.len();
+    let m_esc = simd_manifest.replace('"', "\\\"");
+    let simd_wat = format!(
+        r#"(module
+  (memory (export "memory") 4)
+  (data (i32.const 16) "{m_esc}")
+  (func (export "ec_api_version") (result i32) i32.const 1)
+  (func (export "ec_manifest_ptr") (result i32) i32.const 16)
+  (func (export "ec_manifest_len") (result i32) i32.const {m_len})
+  (func (export "ec_alloc") (param i32) (result i32) i32.const 65536)
+  (func (export "ec_render") (param $px i32) (param $w i32) (param $h i32) (param i32) (param i32) (param f64) (param f64) (result i32)
+    (local $i i32) (local $end i32)
+    local.get $px
+    local.get $w
+    local.get $h
+    i32.mul
+    i32.const 16
+    i32.mul
+    i32.add
+    local.set $end
+    local.get $px
+    local.set $i
+    block $done
+      loop $l
+        local.get $i
+        local.get $end
+        i32.ge_u
+        br_if $done
+        local.get $i
+        local.get $i
+        v128.load
+        v128.const f32x4 0.5 0.5 0.5 1.0
+        f32x4.mul
+        v128.store
+        local.get $i
+        i32.const 16
+        i32.add
+        local.set $i
+        br $l
+      end
+    end
+    i32.const 0))"#
+    );
+    let simd_spec = load_wasm(simd_wat.as_bytes(), "simd.wat").unwrap();
+    let mut next_id = 1;
+    let g = effectcraft_effects::instantiate(simd_spec, &mut Ids(&mut next_id), simd_spec.name, [4.0, 2.0]);
+    let params = effectcraft_effects::flatten_params(&g, &mut |p| p.value.clone());
+    let ctx = EffectCtx { params: &params, time: 0.0, layer_size: [4.0, 2.0], seed: 1, adjustment: false, env: EffectEnv::default() };
+    let buf = Buf { img: Image::filled(4, 2, [0.8, 0.4, 0.2, 1.0]), offset: [0.0; 2], scale: 1.0 };
+    let out = (simd_spec.render)(&ctx, buf).img;
+    assert_eq!(out.get(0, 0), [0.4, 0.2, 0.1, 1.0]);
+
+    // 2. A module exporting `ec_render_rows` with `margin: 1` averages each pixel with its
+    // vertical neighbours (3-tap box blur). Test on a 16×128 frame (multiple bands).
+    let rows_manifest = r#"{"api":1,"id":"org.test.rows","name":"Rows Blur","category":"Test Plug-ins","margin":1,"params":[]}"#;
+    let r_len = rows_manifest.len();
+    let r_esc = rows_manifest.replace('"', "\\\"");
+    let rows_wat = format!(
+        r#"(module
+  (memory (export "memory") 8)
+  (data (i32.const 16) "{r_esc}")
+  (func (export "ec_api_version") (result i32) i32.const 1)
+  (func (export "ec_manifest_ptr") (result i32) i32.const 16)
+  (func (export "ec_manifest_len") (result i32) i32.const {r_len})
+  (func (export "ec_alloc") (param $n i32) (result i32)
+    (local $need i32)
+    local.get $n
+    i32.const 131071
+    i32.add
+    i32.const 16
+    i32.shr_u
+    memory.size
+    i32.sub
+    local.tee $need
+    i32.const 0
+    i32.gt_s
+    if
+      local.get $need
+      memory.grow
+      drop
+    end
+    i32.const 65536)
+  (func (export "ec_render") (param $px i32) (param $w i32) (param $h i32) (param $p i32) (param $np i32) (param $t f64) (param $s f64) (result i32)
+    local.get $px
+    local.get $w
+    local.get $h
+    local.get $p
+    local.get $np
+    local.get $t
+    local.get $s
+    i32.const 0
+    local.get $h
+    call $rows)
+  (func $rows (export "ec_render_rows") (param $px i32) (param $w i32) (param $h i32) (param $p i32) (param $np i32) (param $t f64) (param $s f64) (param $y0 i32) (param $y1 i32) (result i32)
+    ;; Compute each row's red channel as 0.5 * prev_row_g + 0.5 * next_row_g (reads from green, writes to red).
+    (local $y i32) (local $x i32) (local $up i32) (local $dn i32) (local $dst i32)
+    local.get $y0
+    local.set $y
+    block $done_y
+      loop $ly
+        local.get $y
+        local.get $y1
+        i32.ge_s
+        br_if $done_y
+        ;; up = max(0, y - 1), dn = min(h - 1, y + 1)
+        local.get $y
+        i32.const 1
+        i32.sub
+        local.tee $up
+        i32.const 0
+        i32.lt_s
+        if
+          i32.const 0
+          local.set $up
+        end
+        local.get $y
+        i32.const 1
+        i32.add
+        local.tee $dn
+        local.get $h
+        i32.ge_s
+        if
+          local.get $h
+          i32.const 1
+          i32.sub
+          local.set $dn
+        end
+        i32.const 0
+        local.set $x
+        block $done_x
+          loop $lx
+            local.get $x
+            local.get $w
+            i32.ge_s
+            br_if $done_x
+            local.get $px
+            local.get $y
+            local.get $w
+            i32.mul
+            local.get $x
+            i32.add
+            i32.const 16
+            i32.mul
+            i32.add
+            local.set $dst
+            local.get $dst
+            ;; read green (offset 4) from row $up and row $dn
+            local.get $px
+            local.get $up
+            local.get $w
+            i32.mul
+            local.get $x
+            i32.add
+            i32.const 16
+            i32.mul
+            i32.add
+            f32.load offset=4
+            local.get $px
+            local.get $dn
+            local.get $w
+            i32.mul
+            local.get $x
+            i32.add
+            i32.const 16
+            i32.mul
+            i32.add
+            f32.load offset=4
+            f32.add
+            f32.const 0.5
+            f32.mul
+            f32.store
+            local.get $x
+            i32.const 1
+            i32.add
+            local.set $x
+            br $lx
+          end
+        end
+        local.get $y
+        i32.const 1
+        i32.add
+        local.set $y
+        br $ly
+      end
+    end
+    i32.const 0))"#
+    );
+    let rows_spec = load_wasm(rows_wat.as_bytes(), "rows.wat").unwrap();
+    let g2 = effectcraft_effects::instantiate(rows_spec, &mut Ids(&mut next_id), rows_spec.name, [16.0, 128.0]);
+    let params2 = effectcraft_effects::flatten_params(&g2, &mut |p| p.value.clone());
+    let ctx2 = EffectCtx { params: &params2, time: 0.0, layer_size: [16.0, 128.0], seed: 1, adjustment: false, env: EffectEnv::default() };
+    let mut img = Image::filled(16, 128, [0.0, 0.0, 0.0, 1.0]);
+    for y in 0..128u32 {
+        let gval = y as f32 / 127.0;
+        for x in 0..16u32 {
+            img.set(x, y, [0.0, gval, 0.0, 1.0]);
+        }
+    }
+    let out2 = (rows_spec.render)(&ctx2, Buf { img, offset: [0.0; 2], scale: 1.0 }).img;
+    // Every interior row (including across band boundaries) must equal the exact average of y-1 and y+1.
+    for y in 1..127u32 {
+        let want = ((y - 1) as f32 / 127.0 + (y + 1) as f32 / 127.0) * 0.5;
+        let got = out2.get(8, i64::from(y))[0];
+        assert!((got - want).abs() < 1e-6, "row {y}: got {got}, want {want}");
+    }
+}

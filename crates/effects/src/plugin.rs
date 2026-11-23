@@ -184,6 +184,11 @@ pub struct PluginManifest {
     pub author: String,
     #[serde(default)]
     pub description: String,
+    /// Optional row-band overlap margin (in pixels) for multi-core tiled rendering via
+    /// `ec_render_rows(..., y0, y1)` (#3206). Ignored when the module does not export
+    /// `ec_render_rows`.
+    #[serde(default)]
+    pub margin: u32,
     #[serde(default)]
     pub params: Vec<PluginParam>,
 }
