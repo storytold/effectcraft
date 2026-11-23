@@ -163,10 +163,6 @@ impl Interp {
             return Ok(());
         };
         let from_file = p.sources.iter().any(reads_file);
-        // The one whitespace character that ended the operator's name.
-        if from_file && src.d.get(src.pos).copied().is_some_and(is_white) {
-            src.pos += if src.d[src.pos..].starts_with(b"\r\n") { 2 } else { 1 };
-        }
         match self.decode_image(&p, src)? {
             Some(rgba) => self.b.push(Node::Image(SvgImage {
                 name: "Image".into(),
@@ -282,8 +278,13 @@ fn sample(data: &[u8], row: usize, index: usize, bits: usize) -> u32 {
 /// know where its data ends in the file.
 fn decode_chain(names: &[String], src: &mut Src) -> Option<Vec<u8>> {
     let first = names.first()?;
-    while src.d.get(src.pos).copied().is_some_and(is_white) {
-        src.pos += 1;
+    src.take_delimiter();
+    // Text filters ignore whitespace; a binary one's first byte is data (a run-length header can
+    // be 0x09 or 0x00).
+    if matches!(first.as_str(), "ASCII85Decode" | "ASCIIHexDecode") {
+        while src.d.get(src.pos).copied().is_some_and(is_white) {
+            src.pos += 1;
+        }
     }
     let rest = src.d.get(src.pos..)?;
     let find = |needle: &[u8]| rest.windows(needle.len()).position(|w| w == needle).map(|p| p + needle.len());

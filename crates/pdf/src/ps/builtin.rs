@@ -616,7 +616,7 @@ impl Interp {
                 V::Str(s) => {
                     // Executable string: tokenize it as a procedure.
                     let bytes = s.borrow().clone();
-                    let mut sub = Src { d: &bytes, pos: 0 };
+                    let mut sub = Src { d: &bytes, pos: 0, after: usize::MAX };
                     let mut body = vec![];
                     while let Some(t) = sub.token(0) {
                         body.push(t);

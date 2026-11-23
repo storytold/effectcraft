@@ -5,6 +5,9 @@ use super::{Rc, RefCell, ascii85, is_white, parse_num};
 pub(super) struct Src<'a> {
     pub(super) d: &'a [u8],
     pub(crate) pos: usize,
+    /// Where the last token the program ran ended: the one whitespace character there ends that
+    /// token, and data read from the file starts after it ([`Src::take_delimiter`]).
+    pub(super) after: usize,
 }
 
 impl Src<'_> {
@@ -50,8 +53,19 @@ impl Src<'_> {
         matches!(&rest[s..e], b"image" | b"colorimage" | b"imagemask" | b"img")
     }
 
+    /// Steps over the whitespace character (CR LF counts as one) that ended the operator now
+    /// reading data from the file, however the file was reached (`currentfile`, a name bound to
+    /// it, a filter on it). Only that one character: the next may already be data.
+    pub(super) fn take_delimiter(&mut self) {
+        if self.pos == self.after && self.d.get(self.pos).copied().is_some_and(is_white) {
+            self.pos += if self.d.get(self.pos..).is_some_and(|r| r.starts_with(b"\r\n")) { 2 } else { 1 };
+        }
+        self.after = usize::MAX;
+    }
+
     /// Up to `want` bytes of raw data from the file.
     pub(super) fn read_bytes(&mut self, want: usize) -> Vec<u8> {
+        self.take_delimiter();
         let start = self.pos.min(self.d.len());
         let end = start.saturating_add(want).min(self.d.len());
         self.pos = end;
@@ -61,6 +75,7 @@ impl Src<'_> {
     /// Up to `want` bytes of hexadecimal data from the file (other characters are ignored; `>`
     /// ends the data).
     pub(super) fn read_hex(&mut self, want: usize) -> Vec<u8> {
+        self.take_delimiter();
         let mut out = Vec::with_capacity(want.min(1 << 16));
         let mut high = None;
         while out.len() < want {

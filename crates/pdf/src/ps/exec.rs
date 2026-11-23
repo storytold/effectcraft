@@ -49,8 +49,9 @@ impl Interp {
     pub fn run(&mut self, data: &[u8]) {
         self.embedded = embedded_fonts(data);
         self.budget = op_budget(data.len());
-        let mut src = Src { d: data, pos: 0 };
+        let mut src = Src { d: data, pos: 0, after: usize::MAX };
         while let Some(t) = src.token(0) {
+            src.after = src.pos;
             if let Err(Flow::Quit) = self.exec_token(t, &mut src) {
                 break;
             }

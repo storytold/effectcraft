@@ -717,3 +717,33 @@ fn a_self_referencing_indexed_colour_space_does_not_overflow_the_stack() {
     let doc = eps_soon("[/Indexed /DeviceRGB 0 (abc)] dup dup 1 exch put setcolorspace 0 0 10 10 rectfill\n");
     assert_eq!(shape_names(&doc).len(), 1);
 }
+
+/// The grey of the ten image columns across the middle of a 200 × 100 page.
+fn columns(doc: &Doc) -> Vec<f32> {
+    let img = render(doc);
+    (0..10).map(|i| img.get(i * 20 + 10, 50)[0]).collect()
+}
+
+#[test]
+fn image_data_read_through_a_name_starts_after_the_operator() {
+    // The procedure reaches the file through a name: the newline after `image` ends the operator
+    // and is not the first sample (it read as a dark grey 0x0A).
+    let mut body = b"/f currentfile def 200 100 scale 10 1 8 [10 0 0 -1 0 1] { f 10 string readstring pop } image\n".to_vec();
+    body.extend_from_slice(&[0xFF, 0, 0xFF, 0, 0xFF, 0, 0xFF, 0, 0xFF, 0]);
+    body.extend_from_slice(b"\n");
+    let grey = columns(&eps(&body));
+    assert!(grey[0] > 0.9 && grey[1] < 0.1 && grey[8] > 0.9 && grey[9] < 0.1, "{grey:?}");
+}
+
+#[test]
+fn run_length_image_data_keeps_a_whitespace_packet_header() {
+    // Run-length data whose first packet header is a whitespace byte (0x09: ten literal bytes)
+    // keeps it: black, then nine white samples.
+    let mut body = b"gsave 200 100 scale 10 1 8 [10 0 0 -1 0 1] currentfile /RunLengthDecode filter image\n".to_vec();
+    body.extend_from_slice(&[0x09, 0, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x80]);
+    body.extend_from_slice(b"\ngrestore 0 0 1 setrgbcolor 0 0 1 1 rectfill\n");
+    let doc = eps(&body);
+    let grey = columns(&doc);
+    assert!(grey[0] < 0.1 && grey[1..].iter().all(|g| *g > 0.9), "{grey:?}");
+    assert_eq!(shape_names(&doc).len(), 2, "the image, and the program goes on after its data");
+}
