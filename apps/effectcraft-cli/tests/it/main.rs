@@ -1,6 +1,7 @@
 //! The crate's integration tests, one binary (each module is a former `tests/<name>.rs`).
 
 mod cli;
+mod linked_compositions;
 mod qa_template;
 
 /// Nextest archives relocate binaries; plain Cargo keeps the compile-time path valid.

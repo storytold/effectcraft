@@ -19,6 +19,120 @@ fn project_with_layer() -> (Project, crate::ItemId) {
     (p, cid)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn stable_identities_are_distinct_across_processes() {
+    const CHILD: &str = "EFFECTCRAFT_IDENTITY_TEST_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        for _ in 0..32 {
+            println!("stable-identity:{}", crate::try_new_identity().unwrap());
+        }
+        return;
+    }
+    let mut identities = std::collections::BTreeSet::new();
+    for _ in 0..4 {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "tests::stable_identities_are_distinct_across_processes", "--nocapture"])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let text = String::from_utf8(output.stdout).unwrap();
+        let child: Vec<_> = text.lines().filter_map(|line| line.strip_prefix("stable-identity:")).collect();
+        assert!(!child.is_empty(), "the child process must return generated identities");
+        for id in child {
+            assert!(identities.insert(id.to_owned()), "new independently authored identities must not collide across processes");
+        }
+    }
+}
+
+#[test]
+fn saving_refuses_missing_or_duplicate_stable_identities() {
+    let (mut project, comp) = project_with_layer();
+    project.project_id.clear();
+    assert!(project.to_file_json().is_err());
+    project.project_id = crate::try_new_identity().unwrap();
+    project.item_mut(comp).unwrap().stable_id.clear();
+    assert!(project.to_file_json().is_err());
+    let first = project.items.values().find(|item| item.id != comp).unwrap().stable_id.clone();
+    project.item_mut(comp).unwrap().stable_id = first;
+    assert!(project.to_file_json().is_err());
+}
+
+#[test]
+fn linked_composition_saves_reference_without_source_items() {
+    let (mut source, comp) = project_with_layer();
+    source.project_id = "source-project".into();
+    source.item_mut(comp).unwrap().stable_id = "opening-comp".into();
+    source.item_mut(comp).unwrap().name = "Private source timeline".into();
+    source.settings.color_engine = crate::ColorEngine::Ocio;
+    source.settings.working_space = Some(crate::ColorSpace::AcesCg);
+    source.settings.output_space = Some(crate::ColorSpace::Rec709);
+    source.settings.hdr = crate::HdrMode::ToneMap;
+    let source_color = source.settings.linked_color_space();
+    let mut destination = Project { project_id: "destination-project".into(), ..Project::default() };
+    let item = destination.add_item(
+        "Opening",
+        effectcraft_color::Label::Sandstone,
+        None,
+        ItemKind::Footage(crate::Footage {
+            path: "Titles.ecproj".into(),
+            kind: crate::FootageKind::LinkedComposition,
+            linked_comp: Some(crate::LinkedComposition {
+                source_project_id: source.project_id.clone(),
+                composition_id: source.item(comp).unwrap().stable_id.clone(),
+                last_known_name: "Opening".into(),
+                source_color: Some(source_color),
+                resolved: Some(source.into()),
+                resolved_comp: Some(comp),
+                generation: 1,
+                ..Default::default()
+            }),
+            has_video: true,
+            color_profile: Some(crate::ColorSpace::DisplayP3),
+            width: 1920,
+            height: 1080,
+            ..Default::default()
+        }),
+    );
+    assert!(destination.comp(item).is_none(), "a linked source exposes no destination timeline");
+    let saved = destination.to_file_json().unwrap();
+    assert!(!saved.contains("Private source timeline"), "source contents remain outside the destination file");
+    let loaded = Project::from_json(&saved).unwrap();
+    assert_eq!(loaded.items.len(), destination.items.len());
+    let ItemKind::Footage(footage) = &loaded.item(item).unwrap().kind else { panic!("linked footage") };
+    let link = footage.linked_comp.as_ref().unwrap();
+    assert_eq!(link.source_project_id, "source-project");
+    assert_eq!(link.composition_id, "opening-comp");
+    assert!(link.resolved.is_none(), "opening resolves a fresh saved source generation");
+    assert_eq!(link.source_color, Some(source_color), "automatic source metadata survives the reference-only save");
+    assert_eq!(
+        footage.linked_color_space(),
+        Some(crate::LinkedColorSpace { space: crate::ColorSpace::DisplayP3, linear: false }),
+        "the destination's assigned profile survives saving and takes precedence"
+    );
+    let mut automatic = footage.clone();
+    automatic.color_profile = None;
+    let automatic = automatic.linked_color_space().unwrap();
+    assert_eq!(automatic.space, crate::ColorSpace::AcesCg, "automatic follows working pixels rather than the Rec.709 output/view");
+    assert!(automatic.linear);
+
+    // The same boundary must keep the source for workers without adding its items to the
+    // destination's inventory or allowing a transport snapshot to change the link's identity.
+    let worker = Project::from_render_json(&destination.to_render_json().unwrap()).unwrap();
+    assert_eq!(worker, destination);
+    let mut stale = destination.clone();
+    let ItemKind::Footage(f) = &mut stale.item_mut(item).unwrap().kind else { panic!("linked footage") };
+    f.linked_comp.as_mut().unwrap().source_color = Some(crate::LinkedColorSpace { space: crate::ColorSpace::Srgb, linear: false });
+    let restored = Project::from_render_json(&stale.to_render_json().unwrap()).unwrap();
+    let ItemKind::Footage(f) = &restored.item(item).unwrap().kind else { panic!("linked footage") };
+    assert_eq!(f.linked_comp.as_ref().unwrap().source_color, Some(source_color), "worker metadata follows its actual resolved snapshot");
+    assert_eq!(f.color_profile, footage.color_profile, "repairing automatic metadata keeps the destination override");
+    let mut wrong = destination.render_json_value().unwrap();
+    wrong["__linkedTransport"]["sources"][0]["project_id"] = "a-different-project".into();
+    assert!(Project::from_render_json(&wrong.to_string()).is_err());
+}
+
 #[test]
 fn paths_resolve() {
     let (p, cid) = project_with_layer();

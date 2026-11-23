@@ -275,6 +275,7 @@ impl Text {
     fn footage(&mut self, f: &Footage) {
         let Footage {
             path,
+            linked_comp,
             kind,
             width,
             height,
@@ -309,6 +310,15 @@ impl Text {
             placed_page,
         } = f;
         self.word("footage");
+        if let Some(link) = linked_comp {
+            self.field("linkedSource", &link.source_project_id);
+            self.field("linkedComp", &link.composition_id);
+            self.field("linkedGeneration", link.generation);
+            self.opt("linkedColor", link.source_color.as_ref(), |t, tag| {
+                t.word(color_space(tag.space));
+                t.field("linear", tag.linear);
+            });
+        }
         self.str("path", path);
         self.field(
             "kind",
@@ -319,6 +329,7 @@ impl Text {
                 FootageKind::Audio => "audio",
                 FootageKind::Model => "model",
                 FootageKind::Data => "data",
+                FootageKind::LinkedComposition => "linkedComposition",
             },
         );
         self.field("w", width);

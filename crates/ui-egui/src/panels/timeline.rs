@@ -1422,6 +1422,7 @@ fn layer_icon(l: &Layer, project: &effectcraft_engine::project::Project) -> Icon
             }
         }
         LayerSource::Footage { item } => match project.item(*item).map(|i| i.type_name()) {
+            Some("Linked Composition") => Icon::LinkedComp,
             Some("Image") | Some("Image Sequence") => Icon::Image,
             Some("Audio") => Icon::Audio,
             _ => Icon::Footage,

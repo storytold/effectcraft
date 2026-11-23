@@ -48,6 +48,14 @@ fn summary(s: &mut Session, _: &Value) -> Result<Value> {
             }
             // Include offline originals and unused proxies in the inventory reported to agents.
             o["missing"] = json!(i.has_missing_footage());
+            if let ItemKind::Footage(f) = &i.kind
+                && let Some(link) = &f.linked_comp
+            {
+                o["linkedComposition"] = json!({"path": f.path, "sourceProjectId": link.source_project_id,
+                    "compositionId": link.composition_id, "name": link.last_known_name,
+                    "sourceColor": link.source_color, "effectiveColor": f.linked_color_space(), "colorProfileOverride": f.color_profile,
+                    "generation": link.generation, "error": link.error, "ready": link.resolved.is_some() && link.error.is_none()});
+            }
             if let Some(why) = s.footage.item_problem(i).or_else(|| crate::render::missing_item_problem(i)) {
                 o["problem"] = json!(why);
             }

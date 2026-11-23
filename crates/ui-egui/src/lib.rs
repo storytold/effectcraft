@@ -124,6 +124,8 @@ pub enum Dialog {
     Shortcuts,
     /// A generic parameter form for a command (`dialog_state.form`).
     Form,
+    /// Import saved compositions as linked footage sources.
+    LinkedImport,
     /// A message (`dialog_state.info`).
     Info,
     /// View ▸ View Options.

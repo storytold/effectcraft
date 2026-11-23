@@ -90,6 +90,7 @@ mod doc_state;
 mod error;
 mod event;
 mod fonts;
+mod linked_compositions;
 mod services;
 mod session;
 

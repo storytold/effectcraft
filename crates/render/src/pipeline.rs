@@ -164,6 +164,16 @@ fn collapsed_instance(ctx: &EvalCtx, layer: &Layer, item: ItemId) -> Option<(Vec
 }
 
 impl<'a> Renderer<'a> {
+    /// Linked source snapshots are deliberately uncached in the sandbox prototype. Their
+    /// source-project and transitive file generations do not yet participate in disk keys.
+    fn mark_linked_reads(&self, comp: ItemId) {
+        if let Some(log) = self.reads
+            && crate::cache::comp_has_linked_dependencies(self.project, comp)
+        {
+            log.mark_unkeyed();
+        }
+    }
+
     /// A renderer over `project` and `footage` with the given options.
     pub fn new(project: &'a Project, footage: &'a dyn FootageSource, opts: RenderOpts) -> Renderer<'a> {
         Renderer {
@@ -622,6 +632,7 @@ impl<'a> Renderer<'a> {
     }
 
     fn comp_frame_with<E>(&self, comp_id: ItemId, t: Tick, scoped: bool, scope: impl FnOnce(&dyn Accelerator) -> Result<Option<Image>, E>) -> Result<Image, E> {
+        self.mark_linked_reads(comp_id);
         let cpu = if scoped { self.with_accel(None) } else { self.with_accel(self.accel) };
         // Classic 3D runs composite on the GPU too (M12.7), so Auto sends 3D comps there as well;
         // Auto renders each comp on whichever compositor measured faster ([`AutoPick`]).
@@ -663,6 +674,7 @@ impl<'a> Renderer<'a> {
 
     /// [`Self::comp_frame`] on the CPU compositor only.
     pub fn comp_frame_cpu(&self, comp_id: ItemId, t: Tick) -> Image {
+        self.mark_linked_reads(comp_id);
         let Some(comp) = self.project.comp(comp_id) else { return Image::new(1, 1) };
         let s = self.opts.scale;
         let (w, h) = frame_size(comp.width, comp.height, s);
@@ -707,21 +719,29 @@ impl<'a> Renderer<'a> {
             color::convert(&mut canvas, &c);
             self.pipe.quantize(&mut canvas);
         }
-        // The top-level comp leaves the working space for the (sRGB) display / output.
-        let out = self.output_pipe();
-        if self.depth == 0
-            && let Some(c) = out.output()
-        {
-            color::convert(&mut canvas, &c);
-            self.pipe.quantize(&mut canvas);
-        }
-        if self.depth == 0
-            && let Some((lin, mode, enc)) = out.output_hdr()
-        {
-            color::output_hdr(&mut canvas, lin, mode, enc);
-            self.pipe.quantize(&mut canvas);
+        if self.depth == 0 {
+            self.output_frame(&mut canvas);
         }
         canvas
+    }
+
+    /// Render composition working pixels, keeping its output profile and display/HDR view
+    /// transform out of an external source or other scene-referred consumer.
+    pub fn comp_frame_working(&self, comp_id: ItemId, t: Tick) -> Image {
+        Renderer { depth: self.depth.max(1), ..*self }.comp_frame(comp_id, t)
+    }
+
+    /// Convert working pixels to this project's display/output, once at its outer boundary.
+    fn output_frame(&self, canvas: &mut Image) {
+        let out = self.output_pipe();
+        if let Some(c) = out.output() {
+            color::convert(canvas, &c);
+            self.pipe.quantize(canvas);
+        }
+        if let Some((lin, mode, enc)) = out.output_hdr() {
+            color::output_hdr(canvas, lin, mode, enc);
+            self.pipe.quantize(canvas);
+        }
     }
 
     /// Draw a comp's layers (bottom to top) into `canvas` (blending space).
@@ -1061,6 +1081,8 @@ impl<'a> Renderer<'a> {
     /// `quantized`: also clamp and quantise it to the project depth, as [`Renderer::masked_source`]
     /// would (fused with the copy of the cached frame: one pass over it instead of three).
     fn footage_buf(&self, img: &Image, f: &Footage, w: u32, h: u32, quantized: bool) -> Buf {
+        // Linked working pixels carry their source's automatic tag or the destination's
+        // assigned interpretation, just as decoded footage carries its profile.
         let c = self.pipe.media_in(f);
         match self.footage_layout(img, w, h) {
             FootageLayout::Native { scale } => {
@@ -1098,6 +1120,9 @@ impl<'a> Renderer<'a> {
     // frame; derive one from the other in the pool if a comp like that turns out common.
     #[allow(clippy::too_many_arguments)]
     fn footage_buf8(&self, ctx: &EvalCtx, layer: &Layer, item: ItemId, pf: &Footage, f: &Footage, t: Tick) -> Option<Buf> {
+        if pf.kind == FootageKind::LinkedComposition {
+            return None;
+        }
         let plain = self.pipe.levels == Some(255.0)
             && Self::prequantized_footage(layer)
             && self.reduced_size(f.width, f.height).is_none()
@@ -1297,6 +1322,9 @@ impl<'a> Renderer<'a> {
         size: Option<(u32, u32)>,
         rows: Option<(i64, i64)>,
     ) -> Option<Arc<Image>> {
+        if f.kind == FootageKind::LinkedComposition {
+            return self.linked_frame(ctx, layer, f, t);
+        }
         // Interpret Footage ▸ Separate Fields: each field is a frame at twice the rate.
         if f.fields != effectcraft_project::FieldOrder::Off && matches!(f.kind, FootageKind::Video | FootageKind::Sequence) {
             let field_rate = FrameRate::new(f.frame_rate.num * 2, f.frame_rate.den);
@@ -1316,6 +1344,68 @@ impl<'a> Renderer<'a> {
             None => self.footage_frame_raw(ctx, layer, item, f, t, size)?,
         };
         if per_pixel { Some(Arc::new(interpret_pixels(&img, f, self.pipe.linear_footage_space(f)))) } else { Some(img) }
+    }
+
+    fn linked_renderer<'b>(&'b self, f: &'b Footage, scale: f64) -> Option<(Renderer<'b>, ItemId)> {
+        if f.missing || self.depth >= 16 {
+            return None;
+        }
+        let link = f.linked_comp.as_ref()?;
+        if link.error.is_some() {
+            return None;
+        }
+        let source = link.resolved.as_deref()?;
+        let id = link.resolved_comp?;
+        source.comp(id)?;
+        if let Some(log) = self.reads {
+            log.mark_unkeyed();
+        }
+        let mut sub = Renderer::new(source, self.footage, RenderOpts { scale, guides: false, roi: None, view: None, ..self.opts });
+        sub.expr = self.expr;
+        sub.reads = self.reads;
+        sub.accel = self.accel;
+        sub.depth = self.depth + 1;
+        Some((sub, id))
+    }
+
+    /// A linked item's own preview: source working pixels → destination interpretation and
+    /// working space → destination display/output. Source view transforms are never baked in.
+    pub fn linked_footage_preview(&self, f: &Footage, time: Tick) -> Option<Image> {
+        if f.kind != FootageKind::LinkedComposition {
+            return None;
+        }
+        let (sub, id) = self.linked_renderer(f, self.opts.scale)?;
+        if !sub.project.comp(id)?.covers(time) {
+            return None;
+        }
+        let mut image = sub.comp_frame(id, time);
+        if let Some(conversion) = self.pipe.media_in(f) {
+            color::convert(&mut image, &conversion);
+        }
+        self.pipe.quantize(&mut image);
+        self.output_frame(&mut image);
+        Some(image)
+    }
+
+    /// Render a saved source snapshot in its own expression and id namespace. The result
+    /// crosses the project boundary as working pixels, interpreted by [`Self::footage_buf`].
+    fn linked_frame(&self, ctx: &EvalCtx, layer: &Layer, f: &Footage, time: Tick) -> Option<Arc<Image>> {
+        let (sub, id) = self.linked_renderer(f, 1.0)?;
+        let comp = sub.project.comp(id)?;
+        if !comp.covers(time) {
+            return None;
+        }
+        let mode = frame_blend_mode(ctx, layer);
+        let (frame, weight) = frame_position(time, comp.frame_rate);
+        let time = if comp.preserve_frame_rate { comp.frame_rate.tick_of(frame) } else { time };
+        let image = if mode != FrameBlend::Off && weight > 1e-6 {
+            let a = sub.comp_frame(id, comp.frame_rate.tick_of(frame));
+            let b = sub.comp_frame(id, comp.frame_rate.tick_of(frame + 1));
+            blend_frames(mode, &a, &b, weight as f32)
+        } else {
+            sub.comp_frame(id, time)
+        };
+        Some(Arc::new(image))
     }
 
     /// The footage frame at source time `t` after frame blending: the average of the source frames one comp frame spans, else a blend of the two neighbouring frames, else the plain frame.

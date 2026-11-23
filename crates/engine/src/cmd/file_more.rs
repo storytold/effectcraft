@@ -859,12 +859,12 @@ impl Interpretation {
             Some(f) => Some(effectcraft_project::FieldOrder::parse(f).ok_or_else(|| bad(cmd, "fields: off|upper|lower"))?),
             None => None,
         };
-        // Color ▸ Assign Profile: a colour space id, or "auto"/"none" for the file's own (sRGB).
+        // Color ▸ Assign Profile: a colour space id, or "auto"/"none" for the source tag.
         it.profile = match str_p(p, "colorProfile") {
             Some("auto" | "none" | "") => Some(None),
             Some(c) => match effectcraft_project::ColorSpace::parse(c) {
                 Some(cs) => Some(Some(cs)),
-                None => return Err(bad(cmd, format!("colorProfile: srgb|rec709|rec2020|p3|auto, not `{c}`"))),
+                None => return Err(bad(cmd, format!("colorProfile: srgb|rec709|rec2020|p3|acescg|aces2065|auto, not `{c}`"))),
             },
             None => None,
         };
@@ -920,6 +920,31 @@ impl Interpretation {
     }
 
     fn apply_settings(&self, f: &mut Footage, guessed: Option<(AlphaMode, [f32; 3])>) {
+        if f.kind == FootageKind::LinkedComposition {
+            let current = f.linked_color_space();
+            match self.profile {
+                Some(None) => {
+                    // Returning to Auto follows both the source space and its encoding.
+                    f.color_profile = None;
+                    f.linear_light = false;
+                }
+                Some(Some(profile)) => {
+                    f.color_profile = Some(profile);
+                    f.linear_light = self.linear.unwrap_or_else(|| current.is_some_and(|c| c.linear));
+                }
+                None if self.linear.is_some() => {
+                    if let Some(tag) = current {
+                        f.color_profile = Some(tag.space);
+                        f.linear_light = self.linear.unwrap_or(tag.linear);
+                    }
+                }
+                None => {}
+            }
+            if let Some(value) = self.preserve_rgb {
+                f.preserve_rgb = value;
+            }
+            return;
+        }
         if self.native {
             if let Some(n) = f.native_rate.take() {
                 f.frame_rate = n;
@@ -1010,7 +1035,21 @@ fn interpret(s: &mut Session, p: &Value) -> Result<Value> {
     if items.is_empty() {
         return Err(bad("file.interpretFootage", "select footage"));
     }
+    if items.iter().any(|id| matches!(s.project.item(*id).map(|i| &i.kind), Some(ItemKind::Footage(f)) if f.kind == FootageKind::LinkedComposition))
+        && let Some(params) = p.as_object()
+        && let Some(key) = params.keys().find(|key| !matches!(key.as_str(), "item" | "items" | "colorProfile" | "linearLight" | "preserveRgb"))
+    {
+        return Err(bad(
+            "file.interpretFootage",
+            format!("Linked sources support color profile, linear-light interpretation and Preserve RGB only; `{key}` is not supported"),
+        ));
+    }
     let it = Interpretation::parse(p, "file.interpretFootage")?;
+    if it.profile.is_none() && it.linear.is_some()
+        && items.iter().any(|id| matches!(s.project.item(*id).map(|i| &i.kind), Some(ItemKind::Footage(f)) if f.kind == FootageKind::LinkedComposition && f.linked_color_space().is_none()))
+    {
+        return Err(bad("file.interpretFootage", "The linked source color space is unknown; refresh it or assign a colorProfile explicitly before changing its encoding"));
+    }
     let footage = items.iter().filter_map(|i| match s.project.item(*i).map(|x| &x.kind) {
         Some(ItemKind::Footage(f)) => Some(f),
         _ => None,
@@ -1051,6 +1090,10 @@ fn interpret(s: &mut Session, p: &Value) -> Result<Value> {
                 "item": i.0, "alpha": format!("{:?}", f.alpha), "matteColor": f.premul_color, "invertAlpha": f.invert_alpha,
                 "fields": f.fields.label(), "pixelAspect": f.pixel_aspect, "loop": f.loop_count, "frameRate": f.frame_rate.as_f64(),
                 "linearLight": f.linear_light, "preserveRgb": f.preserve_rgb, "startTimecode": f.timecode(0), "overrideStart": f.start_timecode.is_some(),
+                "colorProfile": f.color_profile.map(|p| p.id()),
+                "sourceColor": f.linked_comp.as_ref().and_then(|l| l.source_color),
+                "effectiveColor": f.linked_color_space(),
+                "profileMode": if f.color_profile.is_some() { "manual" } else { "auto" },
                 "frames": f.sequence_frames(), "cineon": cineon_json(f),
             })),
             _ => None,
@@ -1218,6 +1261,11 @@ fn replace_with_solid(s: &mut Session, p: &Value) -> Result<Value> {
 
 fn reload(s: &mut Session, p: &Value) -> Result<Value> {
     let items = items_p(s, p);
+    if !b_p(p, "resolveLinks").unwrap_or(true)
+        && items.iter().any(|id| matches!(s.project.item(*id).map(|i| &i.kind), Some(ItemKind::Footage(f)) if f.kind == FootageKind::LinkedComposition))
+    {
+        return Err(bad("file.reloadFootage", "Reloading linked compositions through a confined desktop bridge is not supported; use headless automation"));
+    }
     let n = crate::footage_reload::reload_items(s, &items)?;
     Ok(json!({"reloaded": n}))
 }
@@ -1328,7 +1376,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Main...",
             ["File", "Interpret Footage"],
             Some("Cmd+Alt+G"),
-            "{items?|item?, frameRate?: fps|\"file\", alpha?: straight|premultiplied|ignore|guess, guessAlpha?, matteColor?|premulColor?, invertAlpha?, loop?, pixelAspect?, fields?: off|upper|lower, colorProfile?: srgb|rec709|rec2020|p3|auto, linearLight?, preserveRgb? (the file's values unconverted), overrideStart?: bool (false: Use Source File Timecode), startTimecode?: timecode|frame (Override Start), logConversion? (Cineon Settings of DPX and Cineon files), cineonUnits?: 10bit|8bit|float, convertedBlack?, convertedWhite?, pointUnits?: 10bit|8bit|float (the units of convertedBlack and convertedWhite; default cineonUnits, else the footage's Units), tenBitBlack?, tenBitWhite? (0..1023), currentGamma? (0.1..10), highlightRolloff? (0..100)}",
+            "{items?|item?, frameRate?: fps|\"file\", alpha?: straight|premultiplied|ignore|guess, guessAlpha?, matteColor?|premulColor?, invertAlpha?, loop?, pixelAspect?, fields?: off|upper|lower, colorProfile?: srgb|rec709|rec2020|p3|acescg|aces2065|auto, linearLight?, preserveRgb? (the file's values unconverted; linked compositions support these three color options only), overrideStart?: bool (false: Use Source File Timecode), startTimecode?: timecode|frame (Override Start), logConversion? (Cineon Settings of DPX and Cineon files), cineonUnits?: 10bit|8bit|float, convertedBlack?, convertedWhite?, pointUnits?: 10bit|8bit|float (the units of convertedBlack and convertedWhite; default cineonUnits, else the footage's Units), tenBitBlack?, tenBitWhite? (0..1023), currentGamma? (0.1..10), highlightRolloff? (0..100)}",
             has_footage_selection,
             interpret
         ),
@@ -1377,7 +1425,15 @@ pub fn specs() -> Vec<CommandSpec> {
             has_footage_selection,
             replace_with_solid
         ),
-        cmd!("file.reloadFootage", "Reload Footage", ["File"], Some("Cmd+Alt+L"), "{items?|item?}", has_footage_selection, reload),
+        cmd!(
+            "file.reloadFootage",
+            "Reload Footage",
+            ["File"],
+            Some("Cmd+Alt+L"),
+            "{items?|item?, resolveLinks?: bool (default true; false refuses linked sources)}",
+            has_footage_selection,
+            reload
+        ),
         cmd!("file.revealInFinder", "Reveal in Finder", ["File"], None, "{item?}", has_footage_selection, reveal_in_finder),
     ]
 }

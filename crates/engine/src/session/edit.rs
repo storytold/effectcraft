@@ -122,6 +122,7 @@ impl Session {
     /// Keep what lives outside the undo history (each comp's Resolution) as it is in `from`, the
     /// project before undo, redo or a history jump restored another state.
     pub(crate) fn keep_view_settings(&mut self, from: &Project) {
+        self.keep_linked_generations(from);
         let keep: Vec<(ItemId, effectcraft_project::Resolution)> =
             self.project.comps().filter_map(|(id, c)| from.comp(*id).map(|f| (*id, f.resolution)).filter(|(_, r)| *r != c.resolution)).collect();
         if keep.is_empty() {
@@ -132,6 +133,111 @@ impl Session {
             if let Some(c) = p.comp_mut(id) {
                 c.resolution = r;
             }
+        }
+    }
+
+    /// Undo edits the destination, while refreshed source generations remain external state.
+    fn keep_linked_generations(&mut self, from: &Project) {
+        use effectcraft_project::{FootageKind, ItemKind};
+
+        let path_key = |path: &str| {
+            if cfg!(windows) { path.replace('\\', "/").to_lowercase() } else { path.to_string() }
+        };
+        let saved = Arc::ptr_eq(&self.project, &self.saved_project);
+        let updates: Vec<_> = self
+            .project
+            .items
+            .values()
+            .filter_map(|item| {
+                let ItemKind::Footage(old) = &item.kind else { return None };
+                let old_link = old.linked_comp.as_ref()?;
+                if old.kind != FootageKind::LinkedComposition {
+                    return None;
+                }
+                let key = path_key(&old.path);
+                // A restored composition may have no current destination item of its own.
+                // Any other link to its source still carries that source's latest generation.
+                let current = from
+                    .items
+                    .values()
+                    .filter_map(|other| match &other.kind {
+                        ItemKind::Footage(f) if f.kind == FootageKind::LinkedComposition => Some(f),
+                        _ => None,
+                    })
+                    .filter(|f| path_key(&f.path) == key && f.linked_comp.as_ref().is_some_and(|link| link.source_project_id == old_link.source_project_id))
+                    .max_by_key(|f| {
+                        f.linked_comp.as_ref().map_or((0, false), |link| (link.generation, link.resolved.is_some() && link.error.is_none() && !f.missing))
+                    })?;
+                let current_link = current.linked_comp.as_ref()?;
+                let resolution: std::result::Result<_, String> = (|| {
+                    if let Some(error) = &current_link.error {
+                        return Err(error.clone());
+                    }
+                    let source = current_link.resolved.as_ref().ok_or_else(|| "Linked composition is offline; refresh it".to_string())?;
+                    if source.project_id != old_link.source_project_id {
+                        return Err("The file is a different source project".into());
+                    }
+                    let mut matches = source.items.values().filter(|item| item.stable_id == old_link.composition_id && item.as_comp().is_some());
+                    let comp = match (matches.next(), matches.next()) {
+                        (Some(item), None) => item.id,
+                        _ => return Err(format!("Source composition is missing or has ambiguous identity: {}", old_link.last_known_name)),
+                    };
+                    crate::linked_compositions::validate_comp(source, comp)?;
+                    Ok((source.clone(), comp))
+                })();
+                let mut refreshed = old.clone();
+                let link = refreshed.linked_comp.as_mut()?;
+                link.generation = current_link.generation;
+                let guard_source = current_link
+                    .last_known_source
+                    .clone()
+                    .or_else(|| current_link.resolved.clone())
+                    .or_else(|| link.last_known_source.clone())
+                    .or_else(|| link.resolved.clone());
+                match resolution {
+                    Ok((source, comp)) => {
+                        link.source_color = Some(source.settings.linked_color_space());
+                        if let Some(c) = source.comp(comp) {
+                            refreshed.width = c.width;
+                            refreshed.height = c.height;
+                            refreshed.duration = c.duration;
+                            refreshed.frame_rate = c.frame_rate;
+                            refreshed.pixel_aspect = c.pixel_aspect;
+                        }
+                        if let Some(item) = source.item(comp) {
+                            link.last_known_name.clone_from(&item.name);
+                        }
+                        link.resolved = Some(source);
+                        link.last_known_source = None;
+                        link.resolved_comp = Some(comp);
+                        link.error = None;
+                        refreshed.missing = false;
+                    }
+                    Err(error) => {
+                        link.resolved = None;
+                        link.last_known_source = guard_source;
+                        link.resolved_comp = None;
+                        link.error = Some(error);
+                        refreshed.missing = true;
+                    }
+                }
+                (refreshed != *old).then_some((item.id, refreshed))
+            })
+            .collect();
+        if updates.is_empty() {
+            return;
+        }
+        let p = Arc::make_mut(&mut self.project);
+        for (id, f) in updates {
+            if let Some(item) = p.item_mut(id) {
+                if let Some(link) = &f.linked_comp {
+                    item.name.clone_from(&link.last_known_name);
+                }
+                item.kind = ItemKind::Footage(f);
+            }
+        }
+        if saved {
+            self.saved_project = self.project.clone();
         }
     }
 

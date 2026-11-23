@@ -21,11 +21,17 @@ use crate::reads;
 use crate::stream::MediaSource;
 use crate::{MediaError, Result};
 
+#[cfg(not(target_arch = "wasm32"))]
+mod movie_jobs;
+
 /// Default frame-cache budget: 1 GiB of decoded frames.
 pub const DEFAULT_BUDGET: usize = 1 << 30;
 
 /// The cache path of a missing image-sequence frame (no file can have this name).
 const PLACEHOLDER: &str = "\0missing frame";
+
+/// Linked compositions are rendered from resolved project snapshots by the compositor.
+const LINKED_SOURCE: &str = "Linked compositions require the project renderer; they cannot be decoded as media files";
 
 /// What a missing image-sequence frame shows: 75 % colour bars (white, yellow, cyan, green,
 /// magenta, red, blue), the usual "no picture here" frame.
@@ -591,6 +597,10 @@ type GifSlot = Arc<OnceLock<(std::result::Result<Arc<Anim>, String>, ReadFile)>>
 struct Inner {
     /// Opened movie/audio sources by path, at most [`MAX_OPEN_SOURCES`].
     sources: Mutex<Sources>,
+    /// Only one frame job per movie enters the decode pool at once. A codec may use rayon
+    /// while holding its decoder lock; another job for that movie must not be stolen there.
+    #[cfg(not(target_arch = "wasm32"))]
+    movie_jobs: Arc<movie_jobs::MovieJobs>,
     /// Files opened into `sources` (see [`PoolStats::opened`]).
     opened: AtomicU64,
     /// In-memory files registered with `add_bytes` (web builds, tests).
@@ -771,6 +781,8 @@ impl MediaPool {
         Self {
             inner: Arc::new(Inner {
                 sources: Mutex::default(),
+                #[cfg(not(target_arch = "wasm32"))]
+                movie_jobs: Arc::default(),
                 files: Mutex::default(),
                 models: Mutex::default(),
                 gifs: Mutex::default(),
@@ -1031,7 +1043,7 @@ impl MediaPool {
     /// sources are downmixed to stereo ([`crate::downmix`]). Silence where there is no audio (or before the media starts).
     /// With a conformed audio folder, reads come from the conformed file once it is written.
     pub fn audio_samples(&self, footage: &Footage, start: Tick, frames: usize, rate: u32) -> Vec<f32> {
-        if !footage.has_audio || footage.missing || rate == 0 || frames == 0 {
+        if !footage.has_audio || footage.missing || footage.kind == FootageKind::LinkedComposition || rate == 0 || frames == 0 {
             return vec![0.0; frames * 2];
         }
         #[cfg(not(target_arch = "wasm32"))]
@@ -1070,6 +1082,9 @@ impl MediaPool {
 
     /// [`MediaPool::decode_audio`], failing when the source can't be opened or read.
     fn try_decode_audio(&self, footage: &Footage, start: Tick, frames: usize, rate: u32) -> std::result::Result<Vec<f32>, String> {
+        if footage.kind == FootageKind::LinkedComposition {
+            return Err(LINKED_SOURCE.into());
+        }
         let path: Arc<str> = footage.path.as_str().into();
         let Opened { src, order, .. } = self.inner.opened(&path).ok_or("the file can't be opened")?;
         let s0 = start.to_units_floor(rate as i64);
@@ -1279,7 +1294,7 @@ impl Inner {
 
     /// Where the frame of `footage` at `t` comes from (file, frame or media time) and its cache
     /// key, at the footage's own size.
-    fn locate(footage: &Footage, t: Tick, float: FloatCurve) -> Loc {
+    fn locate(footage: &Footage, t: Tick, float: FloatCurve) -> Result<Loc> {
         let alpha = match footage.alpha {
             AlphaMode::Straight => 0,
             AlphaMode::Premultiplied => 1,
@@ -1295,7 +1310,8 @@ impl Inner {
             | (u8::from(footage.placed_page) << 4);
         let matte = if footage.alpha == AlphaMode::Premultiplied { footage.premul_color.map(f32::to_bits) } else { [0; 3] };
         let key = |path: &str, frame| Key { path: path.into(), frame, interp, matte, size: (0, 0), nominal: (0, 0), rows: None, q8: false };
-        match footage.kind {
+        Ok(match footage.kind {
+            FootageKind::LinkedComposition => return Err(MediaError::Unsupported(LINKED_SOURCE.into())),
             FootageKind::Sequence if !footage.sequence.is_empty() => {
                 let i = Self::frame_index(footage.frame_rate, t, footage.sequence_frames(), footage.loop_count);
                 match footage.sequence_file_held(i) {
@@ -1324,7 +1340,7 @@ impl Inner {
                 let mt = native.tick_of(i) + Tick(native.frame_duration().0 / 4);
                 Loc { key: key(&footage.path, i), media_t: Some(mt), float }
             }
-        }
+        })
     }
 
     /// The frame of `footage` at `t`, resampled to `size` (see [`FootageSource::frame_at_size`]):
@@ -1342,7 +1358,7 @@ impl Inner {
     /// Whether a request for some rows of `footage` at `t` reads only those: an OpenEXR frame
     /// (not a movie) whose channels no effect reads.
     fn reads_rows(&self, footage: &Footage, t: Tick) -> bool {
-        let loc = Self::locate(footage, t, FloatCurve::Srgb);
+        let Ok(loc) = Self::locate(footage, t, FloatCurve::Srgb) else { return false };
         loc.media_t.is_none() && crate::exr_planes::is_exr(&loc.key.path) && lock(&self.aux_footage).plan(&footage.path).is_none()
     }
 
@@ -1384,7 +1400,7 @@ impl Inner {
         if !footage.has_video {
             return Err(MediaError::Unsupported(format!("{}: no video", footage.path)));
         }
-        let mut loc = Self::locate(footage, t, float);
+        let mut loc = Self::locate(footage, t, float)?;
         loc.key.q8 = q8;
         let movie = loc.media_t.is_some();
         loc.key.rows = rows.filter(|_| self.reads_rows(footage, t));
@@ -1591,7 +1607,7 @@ impl Inner {
         let prev = c.last.insert(loc.key.path.clone(), loc.key.frame);
         if prev == Some(loc.key.frame - 1) && self.read_ahead.load(Ordering::Relaxed) {
             let next_t = t + footage.frame_rate.frame_duration();
-            let mut next = Self::locate(footage, next_t, float);
+            let Ok(mut next) = Self::locate(footage, next_t, float) else { return };
             next.key.size = loc.key.size;
             next.key.q8 = loc.key.q8;
             if next.key != loc.key && !c.lru.map.contains_key(&next.key) && !c.inflight.contains_key(&next.key) {
@@ -1642,14 +1658,20 @@ impl Inner {
             let (me, at, f) = (self.clone(), loc.clone(), footage.clone());
             // The request's cancel flag and decoding hints go with it (#329).
             let hints = filmcraft_media::cancel::Context::current();
-            threads.spawn(move || {
+            let decode = move || {
+                let run = || hints.run(|| if filmcraft_media::cancel::cancelled() { Err(MediaError::Cancelled) } else { me.decode_source(&at, &f) });
                 #[cfg(not(test))]
-                let decoded = reads::captured(|| hints.run(|| me.decode_source(&at, &f)));
+                let decoded = reads::captured(run);
                 // (the decodes counted on that thread are this thread's)
                 #[cfg(test)]
-                let decoded = crate::exr_channels::counting(|| reads::captured(|| hints.run(|| me.decode_source(&at, &f))));
+                let decoded = crate::exr_channels::counting(|| reads::captured(run));
                 let _ = tx.send(decoded);
-            });
+            };
+            if loc.media_t.is_some() {
+                self.movie_jobs.spawn(threads, loc.key.path.clone(), decode);
+            } else {
+                threads.spawn(decode);
+            }
             // A plain block: this thread runs nothing else meanwhile.
             return match rx.recv() {
                 #[cfg(not(test))]
@@ -1842,7 +1864,7 @@ impl MediaPool {
         if footage.missing || !footage.has_video {
             return None;
         }
-        let loc = Inner::locate(footage, t, FloatCurve::Srgb);
+        let loc = Inner::locate(footage, t, FloatCurve::Srgb).ok()?;
         if loc.media_t.is_some() || !crate::exr_planes::is_exr(&loc.key.path) {
             return None;
         }
@@ -1914,6 +1936,9 @@ impl FootageSource for MediaPool {
     }
 
     fn problem(&self, footage: &Footage) -> Option<String> {
+        if footage.kind == FootageKind::LinkedComposition {
+            return Some(LINKED_SOURCE.into());
+        }
         if footage.missing || (footage.kind != FootageKind::Video && !effectcraft_render::is_vector_footage(footage)) {
             return None;
         }
@@ -1921,7 +1946,7 @@ impl FootageSource for MediaPool {
     }
 
     fn vector_frame(&self, _item: ItemId, footage: &Footage, scale: f64) -> Option<Arc<Image>> {
-        if footage.missing || !effectcraft_render::is_vector_footage(footage) {
+        if footage.missing || footage.kind == FootageKind::LinkedComposition || !effectcraft_render::is_vector_footage(footage) {
             return None;
         }
         let bytes = self.inner.read(&footage.path).ok()?;
@@ -1999,7 +2024,7 @@ impl FootageSource for MediaPool {
     }
 
     fn audio(&self, _item: ItemId, footage: &Footage, t: Tick, frames: usize, rate: u32) -> Option<Vec<f32>> {
-        if !footage.has_audio || footage.missing {
+        if !footage.has_audio || footage.missing || footage.kind == FootageKind::LinkedComposition {
             return None;
         }
         Some(self.audio_samples(footage, t, frames, rate))
@@ -2633,6 +2658,79 @@ mod tests {
         assert_eq!(pool.stats().decodes, 1);
     }
 
+    /// Requests waiting for one movie do not occupy codec workers. Cancellation and a
+    /// decoder panic must leave subsequent seeks able to run, including other movies.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn queued_movie_seeks_skip_cancelled_work_and_advance_after_a_decoder_panics() {
+        let pool = MediaPool::new();
+        pool.set_read_ahead(false);
+        let movie = Footage {
+            path: "/queued-movie.mov".into(),
+            kind: FootageKind::Video,
+            has_video: true,
+            width: 16,
+            height: 16,
+            duration: Tick::from_seconds_f64(2.0),
+            ..Footage::default()
+        };
+        let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        let release_rx = Mutex::new(release_rx);
+        let calls = Arc::new(AtomicU64::new(0));
+        let counted = calls.clone();
+        *lock(&pool.inner.gate) = Some(Arc::new(move || {
+            match counted.fetch_add(1, Ordering::SeqCst) {
+                0 => {
+                    entered_tx.send(()).unwrap();
+                    lock(&release_rx).recv_timeout(std::time::Duration::from_secs(20)).unwrap();
+                }
+                2 => panic!("simulated movie decoder failure"),
+                _ => {}
+            }
+            Some(Ok(Image::new(16, 16)))
+        }));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let request = |tag, footage: Footage, frame, cancel: Arc<AtomicBool>| {
+            let (pool, tx) = (pool.clone(), tx.clone());
+            std::thread::spawn(move || {
+                let result = filmcraft_media::cancel::with_cancel(&cancel, || pool.frame_at(&footage, footage.frame_rate.tick_of(frame)));
+                tx.send((tag, result)).unwrap();
+            })
+        };
+        let active = request("active", movie.clone(), 0, Arc::default());
+        entered_rx.recv_timeout(std::time::Duration::from_secs(20)).unwrap();
+        let wait_for_queue = |count| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            while pool.inner.movie_jobs.queued(&movie.path) < count && std::time::Instant::now() < deadline {
+                std::thread::yield_now();
+            }
+            assert!(pool.inner.movie_jobs.queued(&movie.path) >= count, "movie request did not enter the waiting queue");
+        };
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancelled = request("cancelled", movie.clone(), 1, cancel.clone());
+        wait_for_queue(1);
+        cancel.store(true, Ordering::Relaxed);
+        let failed = request("failed", movie.clone(), 2, Arc::default());
+        wait_for_queue(2);
+        let recovered = request("recovered", movie.clone(), 3, Arc::default());
+        wait_for_queue(3);
+        let other = request("other", Footage { path: "/other-movie.mov".into(), ..movie }, 0, Arc::default());
+        let (tag, result) = rx.recv_timeout(std::time::Duration::from_secs(20)).unwrap();
+        assert_eq!(tag, "other", "another movie can finish while the first movie is blocked");
+        assert!(result.is_ok());
+        release_tx.send(()).unwrap();
+        let results: HashMap<_, _> = (0..4).map(|_| rx.recv_timeout(std::time::Duration::from_secs(20)).unwrap()).collect();
+        assert!(results["active"].is_ok());
+        assert!(matches!(&results["cancelled"], Err(MediaError::Cancelled)));
+        assert!(results["failed"].as_ref().unwrap_err().to_string().contains("the decode stopped"));
+        assert!(results["recovered"].is_ok(), "a panic cannot strand the next seek");
+        assert_eq!(calls.load(Ordering::SeqCst), 4, "the cancelled request never entered the decoder");
+        for worker in [active, cancelled, failed, recovered, other] {
+            worker.join().unwrap();
+        }
+    }
+
     /// Where a thread decodes a picture itself (no decode threads), a request that comes to it
     /// meanwhile (a rayon worker runs other jobs while its decode waits on its parallel work)
     /// doesn't wait for a picture being decoded: that could be its own decode further down the
@@ -2642,7 +2740,7 @@ mod tests {
         let pool = MediaPool::new();
         let f = plate(&pool, "/plate.exr");
         let flight = current_flight(&pool);
-        lock(&pool.inner.cache).inflight.insert(Key { size: (0, 0), nominal: (0, 0), ..Inner::locate(&f, Tick::ZERO, FloatCurve::Srgb).key }, flight);
+        lock(&pool.inner.cache).inflight.insert(Key { size: (0, 0), nominal: (0, 0), ..Inner::locate(&f, Tick::ZERO, FloatCurve::Srgb).unwrap().key }, flight);
         let decoding = Decoding::new();
         let started = std::time::Instant::now();
         assert!(pool.frame_at(&f, Tick::ZERO).is_ok());
@@ -2657,7 +2755,7 @@ mod tests {
         let pool = MediaPool::new();
         let f = plate(&pool, "/plate.exr");
         let flight = current_flight(&pool);
-        lock(&pool.inner.cache).inflight.insert(Key { size: (0, 0), nominal: (0, 0), ..Inner::locate(&f, Tick::ZERO, FloatCurve::Srgb).key }, flight);
+        lock(&pool.inner.cache).inflight.insert(Key { size: (0, 0), nominal: (0, 0), ..Inner::locate(&f, Tick::ZERO, FloatCurve::Srgb).unwrap().key }, flight);
         let cancel = Arc::new(AtomicBool::new(false));
         let started = std::time::Instant::now();
         std::thread::scope(|s| {

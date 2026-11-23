@@ -7,5 +7,6 @@ mod exif_orientation;
 mod exr_golden;
 mod file_timecode;
 mod footage;
+mod movie_scrubbing;
 mod open_in_place;
 mod tga;

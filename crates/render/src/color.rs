@@ -20,7 +20,7 @@
 //!   ([`Pipe::float_curve`]).
 
 use effectcraft_color::{ColorSpace, Conversion};
-use effectcraft_project::{Footage, HdrMode, ProjectSettings};
+use effectcraft_project::{Footage, FootageKind, HdrMode, ProjectSettings};
 use effectcraft_raster::{Image, quantize_px};
 use rayon::prelude::*;
 
@@ -87,6 +87,13 @@ impl Pipe {
     /// Footage `f` from its colour profile (`None` = sRGB) → working space; nothing for
     /// Preserve RGB, whose values enter the working space as the file stores them.
     pub fn media_in(&self, f: &Footage) -> Option<Conversion> {
+        if f.kind == FootageKind::LinkedComposition {
+            if f.preserve_rgb {
+                return None;
+            }
+            let source = f.linked_color_space()?;
+            return Conversion::new(source.space, source.linear, self.curve(), self.linear);
+        }
         let ws = self.space.filter(|_| !f.preserve_rgb)?;
         Conversion::new(f.color_profile.unwrap_or(ColorSpace::Srgb), false, ws, self.linear)
     }

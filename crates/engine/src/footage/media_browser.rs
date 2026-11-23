@@ -312,6 +312,7 @@ fn kind_name(k: FootageKind) -> &'static str {
         FootageKind::Audio => "audio",
         FootageKind::Model => "model",
         FootageKind::Data => "data",
+        FootageKind::LinkedComposition => "linkedComposition",
     }
 }
 

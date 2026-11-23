@@ -17,4 +17,5 @@ effectcraft-keyframe = { workspace = true }
 craft-ecproj-format = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+getrandom = { workspace = true }
 thiserror = { workspace = true }

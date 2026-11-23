@@ -234,6 +234,8 @@ fn escape_dialog(app: &mut EffectcraftApp, ctx: &egui::Context) {
         crate::panels::gradient_editor::finish(app, false, ctx);
     } else if app.dialog == Some(crate::Dialog::Info) {
         crate::panels::forms::close_info(app);
+    } else if app.dialog == Some(crate::Dialog::LinkedImport) {
+        crate::panels::linked_import::close(app, ctx);
     } else {
         if app.dialog == Some(crate::Dialog::Settings)
             && let Some(p) = app.dialog_state.prefs_snapshot.take()
@@ -262,6 +264,10 @@ fn cancel_dialog(app: &mut EffectcraftApp, ctx: &egui::Context) {
     }
     if app.dialog == Some(crate::Dialog::GradientEditor) {
         crate::panels::gradient_editor::finish(app, false, ctx);
+        return;
+    }
+    if app.dialog == Some(crate::Dialog::LinkedImport) {
+        crate::panels::linked_import::close(app, ctx);
         return;
     }
     // Escape in Settings is Cancel: restore the settings from when it opened.

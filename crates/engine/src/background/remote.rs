@@ -231,7 +231,12 @@ impl Mirror {
         if self.revision() == Some(revision) {
             return None;
         }
-        let v = serde_json::to_value(project).unwrap_or(Value::Null);
+        let v = project.render_json_value().unwrap_or_else(|error| {
+            log::error!("cannot serialize render project: {error}");
+            // A failed serialization must reach the server as an invalid project, which
+            // requests a resync instead of rendering the preceding source generation.
+            Value::Null
+        });
         let msg = match self.sent.take() {
             Some((from, old)) => FrameMsg::Patch { from, revision, ops: diff(&old, &v) },
             None => FrameMsg::Project { revision, project: v.to_string() },
@@ -360,7 +365,7 @@ impl FrameServer {
     }
 
     fn load(&mut self, revision: u64) -> Result<(), String> {
-        let p = Project::from_json(&self.doc.to_string()).map_err(|e| e.to_string())?;
+        let p = Project::from_render_value(&self.doc).map_err(|e| e.to_string())?;
         self.project = Some(Arc::new(p));
         self.revision = Some(revision);
         Ok(())
@@ -371,9 +376,14 @@ impl FrameServer {
     pub fn handle(&mut self, msg: FrameMsg) -> Vec<(FrameReply, Option<Vec<u8>>)> {
         match msg {
             FrameMsg::Project { revision, project } => {
-                let r = serde_json::from_str(&project).map_err(|e| e.to_string()).and_then(|v| {
+                // Validate byte/count budgets and snapshot references before allocating a
+                // structured replica of the entire message.
+                let r = Project::from_render_json(&project).map_err(|e| e.to_string()).and_then(|p| {
+                    let v = serde_json::from_str(&project).map_err(|e| e.to_string())?;
                     self.doc = v;
-                    self.load(revision)
+                    self.project = Some(Arc::new(p));
+                    self.revision = Some(revision);
+                    Ok(())
                 });
                 match r {
                     Ok(()) => vec![],
@@ -497,6 +507,91 @@ impl FrameServer {
         self.revision = None;
         vec![(FrameReply::Resync { error }, None)]
     }
+}
+
+#[cfg(test)]
+#[test]
+fn linked_sources_reach_workers_without_entering_the_destination_inventory() -> Result<(), Box<dyn std::error::Error>> {
+    use effectcraft_project::{Footage, FootageKind, ItemKind, LinkedComposition, Proxy};
+    use serde_json::json;
+
+    let mut source = crate::Session::default();
+    source.execute("comp.new", json!({"name":"Opening", "width":16, "height":16, "duration":1}))?;
+    source.execute("layer.newSolid", json!({"color":"#ff0000"}))?;
+    let comp = source.active_comp_id().ok_or("no source comp")?;
+    let project = Arc::make_mut(&mut source.project);
+    project.project_id = "worker-source-project".into();
+    project.item_mut(comp).ok_or("no source item")?.stable_id = "worker-source-comp".into();
+    let plate =
+        project.add_item("Private plate", Default::default(), None, ItemKind::Footage(Footage { path: "/private/plate.png".into(), ..Default::default() }));
+    project.item_mut(plate).ok_or("no source plate")?.proxy =
+        Some(Box::new(Proxy { footage: Footage { path: "/private/proxy.png".into(), ..Default::default() }, enabled: false }));
+
+    let mut destination = crate::Session::default();
+    destination.execute("comp.new", json!({"name":"Show", "width":16, "height":16, "duration":1}))?;
+    let show = destination.active_comp_id().ok_or("no destination comp")?;
+    let item = Arc::make_mut(&mut destination.project).add_item(
+        "Opening",
+        Default::default(),
+        None,
+        ItemKind::Footage(Footage {
+            path: "/library/Titles.ecproj".into(),
+            kind: FootageKind::LinkedComposition,
+            width: 16,
+            height: 16,
+            has_video: true,
+            duration: Tick::from_seconds_f64(1.0),
+            linked_comp: Some(LinkedComposition {
+                source_project_id: source.project.project_id.clone(),
+                composition_id: "worker-source-comp".into(),
+                last_known_name: "Opening".into(),
+                resolved: Some(source.project.clone()),
+                resolved_comp: Some(comp),
+                generation: 1,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+    );
+    destination.execute("layer.addItem", json!({"item":item.0}))?;
+    let paths = super::offload::footage_files(&destination.project);
+    assert!(paths.iter().any(|path| path == "/private/plate.png"));
+    assert!(paths.iter().any(|path| path == "/private/proxy.png"));
+    assert!(!paths.iter().any(|path| path.ends_with(".ecproj")), "project snapshots bypass footage decoders");
+
+    let mut mirror = Mirror::default();
+    let mut worker = FrameServer::new(destination.footage.clone(), None);
+    assert!(worker.handle(mirror.sync(destination.revision, &destination.project).ok_or("no initial sync")?).is_empty());
+    assert_eq!(worker.project().ok_or("no worker project")?.items.len(), destination.project.items.len());
+    let render = |worker: &mut FrameServer, revision| -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        worker
+            .handle(FrameMsg::Render {
+                id: revision,
+                revision,
+                comp: show,
+                time: Tick::ZERO,
+                opts: Box::new(RenderOpts::default()),
+                disk: None,
+                layers: false,
+                prefetch: vec![],
+            })
+            .into_iter()
+            .find_map(|(_, pixels)| pixels)
+            .ok_or_else(|| "worker returned no frame".into())
+    };
+    let first = render(&mut worker, destination.revision)?;
+    assert!(first.as_chunks::<4>().0.iter().any(|pixel| pixel[3] > 0), "worker renders the hidden source contents");
+    source.execute("layer.newSolid", json!({"color":"#00ff00"}))?;
+    let Some(ItemKind::Footage(f)) = Arc::make_mut(&mut destination.project).item_mut(item).map(|item| &mut item.kind) else {
+        return Err("linked item vanished".into());
+    };
+    let link = f.linked_comp.as_mut().ok_or("linked reference vanished")?;
+    link.resolved = Some(source.project.clone());
+    link.generation += 1;
+    destination.bump();
+    assert!(worker.handle(mirror.sync(destination.revision, &destination.project).ok_or("no refresh sync")?).is_empty());
+    assert_ne!(render(&mut worker, destination.revision)?, first, "the patched source generation changes worker pixels");
+    Ok(())
 }
 
 #[cfg(test)]

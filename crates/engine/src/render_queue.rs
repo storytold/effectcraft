@@ -565,6 +565,9 @@ impl Session {
     /// Segment Sequences / Segment Movie Files, per segment. `formats`: the ones that can be
     /// written (`None`: all). Fails with the status the item gets instead.
     pub(crate) fn outputs_of(&self, it: &RenderQueueItem, formats: Option<&[OutputFormat]>) -> Result<Vec<(RenderQueueItem, String)>, RenderStatus> {
+        if let Some(why) = crate::linked_compositions::render_problem(&self.project, it.comp) {
+            return Err(RenderStatus::Failed(why));
+        }
         let mut modules = vec![];
         for om in it.output_modules() {
             let mut m = it.clone();
@@ -650,7 +653,7 @@ impl Session {
             let inbox = Arc::new(crate::offload::Inbox::default());
             let req = crate::offload::WorkerRequest {
                 id,
-                project: self.project.to_json(),
+                project: self.project.to_render_json().map_err(|e| e.to_string())?,
                 files: crate::offload::footage_files(&self.project),
                 job: crate::offload::WorkerJob::Render { items },
             };

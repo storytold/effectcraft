@@ -59,6 +59,9 @@ pub fn timecode(item: Option<&effectcraft_project::Item>, fr: effectcraft_time::
 /// The frame the Footage panel shows: footage `f` at source time `t`, with its Cineon Settings
 /// applied.
 pub fn frame(s: &Session, item: ItemId, f: &effectcraft_project::Footage, t: Tick) -> Option<std::sync::Arc<effectcraft_raster::Image>> {
+    if f.kind == effectcraft_project::FootageKind::LinkedComposition {
+        return s.renderer(Default::default()).linked_footage_preview(f, t).map(std::sync::Arc::new);
+    }
     s.footage.frame(item, f, t).map(|img| effectcraft_render::cineon_frame(img, f))
 }
 

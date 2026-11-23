@@ -46,7 +46,7 @@ fn entries(s: &Session) -> impl Iterator<Item = (ItemId, bool, &Footage)> {
             .map(|f| (false, f))
             .into_iter()
             .chain(item.proxy.as_ref().map(|p| (true, &p.footage)))
-            .filter(|(_, f)| f.kind != FootageKind::Data && !f.path.is_empty())
+            .filter(|(_, f)| !matches!(f.kind, FootageKind::Data | FootageKind::LinkedComposition) && !f.path.is_empty())
             .map(move |(proxy, f)| (item.id, proxy, f))
     })
 }
