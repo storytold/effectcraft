@@ -869,6 +869,30 @@ fn a_path_with_non_numeric_points_is_an_error() {
 }
 
 #[test]
+fn path_rigs_read_properties_the_paths_own_closed_flag_and_the_layer_surface() {
+    // #4098: After Effects path rigs build a path from other properties, keep the path's own
+    // closed flag, and bring comp points onto the layer with `fromCompToSurface`.
+    let f = fx();
+    let path = |text: &str| match f.ev(f.a, "masks/#1/path", text, 0.0) {
+        Ok(Value::Path(p)) => p,
+        other => panic!("{text}: {other:?}"),
+    };
+    // Layer A's Position is [50, 40]: a property in a list stands for its value.
+    let plain = path("createPath([[0, 0], [50, 40]], [[0, 0], [50, 40]], [[50, 40], [0, 0]], false)");
+    let props = path("createPath([[0, 0], transform.position], [[0, 0], transform.position], [transform.position, [0, 0]], false)");
+    assert_eq!(props.vertices, plain.vertices);
+    assert_eq!(props.in_tangents, plain.in_tangents);
+    assert_eq!(props.out_tangents, plain.out_tangents);
+    // The mask is closed; its own expression can ask, and so can another property's.
+    assert!(path("createPath([[0, 0], [50, 50]], [], [], thisProperty.isClosed())").closed);
+    assert!(!path("createPath([[0, 0], [50, 50]], [], [], !thisProperty.isClosed())").closed);
+    assert_eq!(path("createPath(thisProperty.points(), value.inTangents(), thisProperty.outTangents(), false)").vertices, path("value").vertices);
+    // A layer's surface is where `fromComp` already lands, for 2D and 3D layers alike.
+    assert_eq!(f.pos("fromCompToSurface([50, 40])", 0.0), f.pos("fromComp([50, 40])", 0.0));
+    assert_eq!(f.pos("thisComp.layer(\"B\").fromCompToSurface([50, 40], 0.5)", 0.0), f.pos("thisComp.layer(\"B\").fromComp([50, 40], 0.5)", 0.0));
+}
+
+#[test]
 fn errors_and_property_reads_keep_the_runtime_usable() {
     // Errors thrown inside helpers, and the aborts every property read makes until the host
     // answers, must not use up the thread's runtime (it used to fail every expression after a
