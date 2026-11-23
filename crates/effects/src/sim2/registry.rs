@@ -1,5 +1,7 @@
 use super::foam::{FOAM_TEXTURES, foam};
-use super::pixels::{ball_action, pixel_polly, scatterize};
+use super::pixels::{
+    BALL_COLORING, BALL_COLORING_MEDIUM, BALL_DISPLACE_BRIGHTNESS, BALL_DISPLACE_PROPERTIES, BALL_SHADING_DEFAULT, ball_action, pixel_polly, scatterize,
+};
 use super::shatter::{CD_PROPS, CD_SOURCES, SHATTER_PATTERNS, SHATTER_TEXTURE_MODES, card_dance, shatter};
 use super::surfaces::{caustics, wave_world};
 use super::{EffectSpec, ParamUi, Value, col, num, p, pct, popup, pt, slider, spec};
@@ -80,15 +82,22 @@ pub fn specs() -> Vec<EffectSpec> {
         spec(
             "ec.sim.ccballaction",
             "Ball Grid",
+            // After Effects' order and defaults since 24.2 (#3197). Scatter Motion is treated as
+            // the renamed Instability State (an assumption, `migrate::PARAM_ID_ALIASES`). The
+            // Shading range is not published; -100..100 is an assumption.
             vec![
+                p("gridSpacing", "Grid Spacing", num(5.0), slider(1.0, 200.0, 1.0, 50.0, 0)),
+                p("ballSize", "Ball Size", num(100.0), slider(0.0, 400.0, 0.0, 200.0, 1)),
+                p("coloring", "Coloring", Value::Enum(BALL_COLORING_MEDIUM), popup(BALL_COLORING)),
+                p("shading", "Shading", num(BALL_SHADING_DEFAULT), slider(-100.0, 100.0, -100.0, 100.0, 1)),
                 p("scatter", "Scatter", num(0.0), slider(0.0, 2000.0, 0.0, 300.0, 1)),
+                p("scatterMotion", "Scatter Motion", num(0.0), ParamUi::Angle),
+                p("displace", "Displace", num(0.0), slider(-1000.0, 1000.0, 0.0, 100.0, 1)),
+                p("displaceProperty", "Displace Property", Value::Enum(BALL_DISPLACE_BRIGHTNESS), popup(BALL_DISPLACE_PROPERTIES)),
+                p("twistAngle", "Twist Angle", num(0.0), ParamUi::Angle),
+                p("twistProperty", "Twist Property", Value::Enum(0), popup(&["X Axis", "Y Axis", "Radius", "Brightness"])),
                 p("rotationAxis", "Rotation Axis", Value::Enum(0), popup(&["X Axis", "Y Axis", "Z Axis", "XY Axis", "XZ Axis", "YZ Axis", "XYZ Axis"])),
                 p("rotation", "Rotation", num(0.0), ParamUi::Angle),
-                p("twistProperty", "Twist Property", Value::Enum(0), popup(&["X Axis", "Y Axis", "Radius", "Brightness"])),
-                p("twistAngle", "Twist Angle", num(0.0), ParamUi::Angle),
-                p("gridSpacing", "Grid Spacing", num(4.0), slider(1.0, 200.0, 1.0, 50.0, 0)),
-                p("ballSize", "Ball Size", num(40.0), slider(0.0, 400.0, 0.0, 200.0, 1)),
-                p("instabilityState", "Instability State", num(0.0), ParamUi::Angle),
             ],
             ball_action,
         ),

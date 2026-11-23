@@ -340,8 +340,9 @@ build real projects through these interfaces; they are worked examples of everyt
 * **OCIO effects**: with Configuration ▸ Custom, `configFile` is a `.ocio` path or the config's
   text; `effect.warning {layer, effect}` says what Effect Controls warns about (a config it
   can't read, a colour space it lacks, transforms that pass colours through) or `null`.
-* **Multi-layer OpenEXR**: the footage shows the beauty pass (an unnamed RGBA layer, else
-  Combined / Beauty / Image / RGBA…, never Cryptomatte or depth). `layer.channels {layer}`
+* **Multi-layer OpenEXR**: the footage shows the main picture as After Effects does (the
+  unprefixed `R`, `G`, `B` (`A`) of the first part with them, else `Y` as grey; a file of named
+  layers only, such as Blender's `ViewLayer.Combined.R`, is black). `layer.channels {layer}`
   lists a footage layer's EXR layers and
   channels (`{"layers":[{"name":"diffuse","rgba":["diffuse.R","diffuse.G","diffuse.B",""]}]}`);
   EXtractoR shows them when its `red` / `green` / `blue` / `alpha` are set to those names
@@ -687,7 +688,15 @@ Scripts that build ScriptUI windows publish them to the session; agents drive th
 
 A dialog's `show()` waits for the user: the `script.run` / `file.runScript` reply carries
 `"waiting": true`, and the script continues (its final output arrives in the reply of the click
-that closes the dialog). File ▸ Scripts: `file.scripts.list`, `file.runScript {"name": …}`,
+that closes the dialog). A script's file dialog (`File.openDialog`, `File.saveDialog`,
+`Folder.selectDialog`, `openDlg` / `saveDlg` / `selectDlg`, as a Browse… button calls them) waits
+the same way in the app, which shows it. `scriptui.fileDialogs` lists the dialogs scripts wait on
+(`{id, host, kind: open|save|folder, prompt, exts, label, any, many, start, shown}`; `shown`: the
+app has shown it) and `scriptui.fileDialog {"id": …, "paths": […]}` (or `null`: cancelled) answers
+one. On Windows the system dialog blocks the app's window until a person closes it, so an agent
+can't answer it there; on macOS and Linux it doesn't block. The script's windows refuse events
+meanwhile, except `scriptui.close`, which cancels the file dialog first. Without the app (headless
+runs), in the Script Console and in Shutdown scripts these return `null` at once. File ▸ Scripts: `file.scripts.list`, `file.runScript {"name": …}`,
 `file.installScript` / `file.installScriptUIPanel {"path": …}`, `window.scriptPanel {"name": …}`,
 `window.restoreScriptPanels` (the panels open when the app last quit), `file.runStartupScripts` and
 `file.runShutdownScripts` (the scripts in `Scripts/Startup` and `Scripts/Shutdown`; the second closes

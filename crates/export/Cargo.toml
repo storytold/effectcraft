@@ -18,14 +18,16 @@ craft-video = { workspace = true }
 craft-audio = { workspace = true }
 craft-media = { workspace = true }
 craft-gif = { workspace = true }
+craft-tga = { workspace = true }
+craft-exr = { workspace = true, features = ["decode"] }
 image = { workspace = true, features = ["png", "jpeg", "tiff", "exr", "tga"] }
-exr = { workspace = true }
 rayon = { workspace = true }
 web-time = { workspace = true }
 thiserror = { workspace = true }
 log = { workspace = true }
 
 [dev-dependencies]
+exr = { workspace = true }
 gif = { workspace = true }
 tempfile = { workspace = true }
 effectcraft-media = { workspace = true }

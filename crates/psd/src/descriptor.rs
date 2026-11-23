@@ -42,8 +42,14 @@ pub enum RefItem {
     Class(String),
     Enum(String, String, String),
     Offset(String, i32),
+    /// Identifier with the legacy unnamed `null` class.
     Identifier(i32),
+    /// Index with the legacy unnamed `null` class.
     Index(i32),
+    /// Identifier retaining the original class and its encoding.
+    IdentifierWithClass(craft_psd::descriptor::Class, i32),
+    /// Index retaining the original class and its encoding.
+    IndexWithClass(craft_psd::descriptor::Class, i32),
     Name(String, String),
 }
 
@@ -108,142 +114,90 @@ impl Descriptor {
     }
 }
 
-/// A key or class id: length-prefixed string, or a 4-character code when the length is 0.
-pub(crate) fn read_id(r: &mut Reader) -> Result<String> {
-    let n = r.u32()? as usize;
-    let n = if n == 0 { 4 } else { n };
-    let b = r.bytes(n)?;
-    Ok(String::from_utf8_lossy(b).into_owned())
-}
+/// Preserve the application parser's per-container limits in the shared parser.
+pub(crate) const PARSE_LIMITS: craft_psd::descriptor::ParseLimits =
+    craft_psd::descriptor::ParseLimits { max_descriptor_items: 100_000, max_list_items: 1_000_000 };
 
-pub(crate) fn read_unicode(r: &mut Reader) -> Result<String> {
-    let n = r.u32()? as usize;
-    let mut v = Vec::with_capacity(n.min(r.remaining() / 2));
-    for _ in 0..n {
-        v.push(r.u16()?);
-    }
-    while v.last() == Some(&0) {
-        v.pop();
-    }
-    Ok(String::from_utf16_lossy(&v))
-}
-
-/// Read a descriptor (after its version field).
+/// Read a descriptor (after its version field) with [`craft_psd::descriptor::Descriptor::parse_prefix`].
+/// The public [`Descriptor`] / [`DValue`] types stay this crate's (engine interchange uses them).
 pub fn read_descriptor(r: &mut Reader) -> Result<Descriptor> {
-    read_descriptor_at(r, 0)
+    let rest = r.data.get(r.pos..).unwrap_or(&[]);
+    let (d, used) = craft_psd::descriptor::Descriptor::parse_prefix_with_limits(rest, PARSE_LIMITS).map_err(desc_err)?;
+    r.skip(used)?;
+    Ok(from_craft_descriptor(d))
 }
 
-/// [`read_descriptor`] nested `depth` values deep: the limit in [`read_value`] counts nested
-/// descriptors too, so a file can't recurse until the stack overflows.
-fn read_descriptor_at(r: &mut Reader, depth: usize) -> Result<Descriptor> {
-    let class_name = read_unicode(r)?;
-    let class_id = read_id(r)?;
-    let n = r.u32()? as usize;
-    if n > 100_000 {
-        return Err(Error::Invalid("descriptor item count".into()));
+pub(crate) fn desc_err(e: craft_psd::PsdError) -> Error {
+    match e {
+        craft_psd::PsdError::UnexpectedEof { .. } => Error::Truncated,
+        craft_psd::PsdError::Unsupported(s) => Error::Unsupported(s),
+        other => Error::Invalid(other.to_string()),
     }
-    let mut items = Vec::with_capacity(n.min(64));
-    for _ in 0..n {
-        let key = read_id(r)?;
-        let ty = r.tag()?;
-        let v = read_value(r, &ty, depth)?;
-        items.push((key, v));
-    }
-    Ok(Descriptor { class_name, class_id, items })
 }
 
-fn read_value(r: &mut Reader, ty: &[u8; 4], depth: usize) -> Result<DValue> {
-    if depth > 64 {
-        return Err(Error::Invalid("descriptor nesting".into()));
+fn id_str(id: &craft_psd::descriptor::Id) -> String {
+    String::from_utf8_lossy(id.as_bytes()).into_owned()
+}
+
+fn unit_str(u: &[u8; 4]) -> String {
+    String::from_utf8_lossy(u).into_owned()
+}
+
+pub(crate) fn from_craft_descriptor(d: craft_psd::descriptor::Descriptor) -> Descriptor {
+    Descriptor {
+        class_name: d.name.to_string_lossy(),
+        class_id: id_str(&d.class_id),
+        items: d.items.into_iter().map(|(k, v)| (id_str(&k), from_craft_value(v))).collect(),
     }
-    Ok(match ty {
-        b"Objc" | b"GlbO" => DValue::Descriptor(read_descriptor_at(r, depth + 1)?),
-        b"VlLs" => {
-            let n = r.u32()? as usize;
-            if n > 1_000_000 {
-                return Err(Error::Invalid("descriptor list length".into()));
+}
+
+fn from_craft_value(v: craft_psd::descriptor::Value) -> DValue {
+    use craft_psd::descriptor::Value;
+    match v {
+        Value::Descriptor(d) | Value::GlobalObject(d) => DValue::Descriptor(from_craft_descriptor(d)),
+        Value::List(l) => DValue::List(l.into_iter().map(from_craft_value).collect()),
+        Value::Double(x) => DValue::Double(if x.is_finite() { x } else { 0.0 }),
+        Value::UnitFloat { unit, value } => DValue::UnitFloat(unit_str(&unit), if value.is_finite() { value } else { 0.0 }),
+        Value::UnitFloats { unit, values } => DValue::UnitFloats(unit_str(&unit), values.into_iter().map(|x| if x.is_finite() { x } else { 0.0 }).collect()),
+        Value::Text(s) => DValue::Text(s.to_string_lossy()),
+        Value::Enumerated { type_id, value } => DValue::Enum(id_str(&type_id), id_str(&value)),
+        Value::Integer(i) => DValue::Integer(i),
+        Value::LargeInteger(i) => DValue::LargeInteger(i),
+        Value::Boolean(b) => DValue::Bool(b),
+        Value::Class(c) | Value::GlobalClass(c) => DValue::Class(c.name.to_string_lossy(), id_str(&c.class_id)),
+        Value::Alias(b) | Value::Path(b) | Value::RawData(b) => DValue::Raw(b),
+        Value::ObjectArray(o) => DValue::ObjectArray(o.prefix, from_craft_descriptor(o.body)),
+        Value::Reference(items) => DValue::Reference(items.into_iter().map(from_craft_ref).collect()),
+    }
+}
+
+fn legacy_reference_class(class: &craft_psd::descriptor::Class) -> bool {
+    class.name.0 == [0] && class.class_id == craft_psd::descriptor::Id::Code(*b"null")
+}
+
+fn from_craft_ref(it: craft_psd::descriptor::ReferenceItem) -> RefItem {
+    use craft_psd::descriptor::ReferenceItem;
+    match it {
+        ReferenceItem::Property { class, key } => RefItem::Property(id_str(&class.class_id), id_str(&key)),
+        ReferenceItem::Class(c) => RefItem::Class(id_str(&c.class_id)),
+        ReferenceItem::Enumerated { class, type_id, value } => RefItem::Enum(id_str(&class.class_id), id_str(&type_id), id_str(&value)),
+        ReferenceItem::Offset { class, offset } => RefItem::Offset(id_str(&class.class_id), offset),
+        ReferenceItem::Identifier { class, id } => {
+            if legacy_reference_class(&class) {
+                RefItem::Identifier(id as i32)
+            } else {
+                RefItem::IdentifierWithClass(class, id as i32)
             }
-            let mut v = Vec::with_capacity(n.min(256));
-            for _ in 0..n {
-                let t = r.tag()?;
-                v.push(read_value(r, &t, depth + 1)?);
+        }
+        ReferenceItem::Index { class, index } => {
+            if legacy_reference_class(&class) {
+                RefItem::Index(index as i32)
+            } else {
+                RefItem::IndexWithClass(class, index as i32)
             }
-            DValue::List(v)
         }
-        b"ObAr" => {
-            let n = r.u32()?;
-            DValue::ObjectArray(n, read_descriptor_at(r, depth + 1)?)
-        }
-        b"doub" => DValue::Double(r.f64_finite()?),
-        b"UntF" => {
-            let unit = String::from_utf8_lossy(&r.tag()?).into_owned();
-            DValue::UnitFloat(unit, r.f64_finite()?)
-        }
-        b"UnFl" => {
-            let unit = String::from_utf8_lossy(&r.tag()?).into_owned();
-            let n = r.u32()? as usize;
-            let mut v = Vec::with_capacity(n.min(1024));
-            for _ in 0..n {
-                v.push(r.f64_finite()?);
-            }
-            DValue::UnitFloats(unit, v)
-        }
-        b"TEXT" => DValue::Text(read_unicode(r)?),
-        b"enum" => {
-            let t = read_id(r)?;
-            DValue::Enum(t, read_id(r)?)
-        }
-        b"long" => DValue::Integer(r.u32()? as i32),
-        b"comp" => DValue::LargeInteger(r.u64()? as i64),
-        b"bool" => DValue::Bool(r.u8()? != 0),
-        b"type" | b"GlbC" => {
-            let name = read_unicode(r)?;
-            DValue::Class(name, read_id(r)?)
-        }
-        b"alis" | b"tdta" | b"Pth " => {
-            let n = r.u32()? as usize;
-            DValue::Raw(r.bytes(n)?.to_vec())
-        }
-        b"obj " => {
-            let n = r.u32()? as usize;
-            let mut items = Vec::with_capacity(n.min(16));
-            for _ in 0..n {
-                let t = r.tag()?;
-                items.push(match &t {
-                    b"prop" => {
-                        let _name = read_unicode(r)?;
-                        let class = read_id(r)?;
-                        RefItem::Property(class, read_id(r)?)
-                    }
-                    b"Clss" => {
-                        let _name = read_unicode(r)?;
-                        RefItem::Class(read_id(r)?)
-                    }
-                    b"Enmr" => {
-                        let _name = read_unicode(r)?;
-                        let class = read_id(r)?;
-                        let ty = read_id(r)?;
-                        RefItem::Enum(class, ty, read_id(r)?)
-                    }
-                    b"rele" => {
-                        let _name = read_unicode(r)?;
-                        let class = read_id(r)?;
-                        RefItem::Offset(class, r.u32()? as i32)
-                    }
-                    b"Idnt" => RefItem::Identifier(r.u32()? as i32),
-                    b"indx" => RefItem::Index(r.u32()? as i32),
-                    b"name" => {
-                        let _name = read_unicode(r)?;
-                        let class = read_id(r)?;
-                        RefItem::Name(class, read_unicode(r)?)
-                    }
-                    other => return Err(Error::Invalid(format!("reference item `{}`", String::from_utf8_lossy(other)))),
-                });
-            }
-            DValue::Reference(items)
-        }
-        other => return Err(Error::Invalid(format!("descriptor type `{}`", String::from_utf8_lossy(other)))),
-    })
+        ReferenceItem::Name { class, name } => RefItem::Name(id_str(&class.class_id), name.to_string_lossy()),
+    }
 }
 
 // ---------------------------------------------------------------- writing
@@ -256,15 +210,6 @@ pub(crate) fn put_u32(out: &mut Vec<u8>, v: u32) {
     out.extend_from_slice(&v.to_be_bytes());
 }
 
-fn put_id(out: &mut Vec<u8>, id: &str) {
-    if id.len() == 4 {
-        put_u32(out, 0);
-    } else {
-        put_u32(out, id.len() as u32);
-    }
-    out.extend_from_slice(id.as_bytes());
-}
-
 /// A length-prefixed UTF-16BE string (the length counts code units, including the NUL when
 /// `terminated`).
 pub(crate) fn put_utf16(out: &mut Vec<u8>, s: &str, terminated: bool) {
@@ -275,135 +220,80 @@ pub(crate) fn put_utf16(out: &mut Vec<u8>, s: &str, terminated: bool) {
     }
 }
 
-/// A descriptor Unicode string: NUL-terminated.
-pub(crate) fn put_unicode(out: &mut Vec<u8>, s: &str) {
-    put_utf16(out, s, true);
+use craft_psd::descriptor::borrowed::{ClassRef, DescriptorView, IdRef, ReferenceRef, ReferencesView, UnicodeRef, ValueRef, ValuesView};
+
+fn borrowed_id(id: &str) -> IdRef<'_> {
+    match id.as_bytes() {
+        [a, b, c, d] => IdRef::Code([*a, *b, *c, *d]),
+        bytes => IdRef::String(bytes),
+    }
+}
+fn borrowed_class<'a>(name: &'a str, id: &'a str) -> ClassRef<'a> {
+    ClassRef { name: UnicodeRef::Text(name, true), id: borrowed_id(id) }
+}
+fn preserved_class(class: &craft_psd::descriptor::Class) -> ClassRef<'_> {
+    ClassRef {
+        name: UnicodeRef::Units(&class.name.0),
+        id: match &class.class_id {
+            craft_psd::descriptor::Id::Code(code) => IdRef::Code(*code),
+            craft_psd::descriptor::Id::Str(bytes) => IdRef::String(bytes),
+        },
+    }
+}
+impl DescriptorView for Descriptor {
+    fn class(&self) -> ClassRef<'_> {
+        borrowed_class(&self.class_name, &self.class_id)
+    }
+    fn item(&self, index: usize) -> Option<(IdRef<'_>, ValueRef<'_>)> {
+        self.items.get(index).map(|(k, v)| (borrowed_id(k), borrowed_value(v)))
+    }
+}
+impl ValuesView for DValue {
+    fn value(&self, index: usize) -> Option<ValueRef<'_>> {
+        match self {
+            DValue::List(items) => items.get(index).map(borrowed_value),
+            _ => None,
+        }
+    }
+}
+impl ReferencesView for DValue {
+    fn reference(&self, index: usize) -> Option<ReferenceRef<'_>> {
+        let DValue::Reference(items) = self else { return None };
+        Some(match items.get(index)? {
+            RefItem::Property(c, k) => ReferenceRef::Property(borrowed_class("", c), borrowed_id(k)),
+            RefItem::Class(c) => ReferenceRef::Class(borrowed_class("", c)),
+            RefItem::Enum(c, t, v) => ReferenceRef::Enumerated(borrowed_class("", c), borrowed_id(t), borrowed_id(v)),
+            RefItem::Offset(c, n) => ReferenceRef::Offset(borrowed_class("", c), *n),
+            RefItem::Identifier(n) => ReferenceRef::Identifier(borrowed_class("", "null"), *n),
+            RefItem::Index(n) => ReferenceRef::Index(borrowed_class("", "null"), *n),
+            RefItem::IdentifierWithClass(c, n) => ReferenceRef::Identifier(preserved_class(c), *n),
+            RefItem::IndexWithClass(c, n) => ReferenceRef::Index(preserved_class(c), *n),
+            RefItem::Name(c, n) => ReferenceRef::Name(borrowed_class("", c), UnicodeRef::Text(n, true)),
+        })
+    }
+}
+fn borrowed_value(value: &DValue) -> ValueRef<'_> {
+    match value {
+        DValue::Descriptor(d) => ValueRef::Descriptor(d),
+        DValue::List(_) => ValueRef::List(value),
+        DValue::ObjectArray(n, d) => ValueRef::ObjectArray(*n, d),
+        DValue::Double(n) => ValueRef::Double(*n),
+        DValue::UnitFloat(u, n) => ValueRef::UnitFloat(tag4(u), *n),
+        DValue::UnitFloats(u, ns) => ValueRef::UnitFloats(tag4(u), ns),
+        DValue::Text(s) => ValueRef::Text(UnicodeRef::Text(s, true)),
+        DValue::Enum(t, v) => ValueRef::Enumerated(borrowed_id(t), borrowed_id(v)),
+        DValue::Integer(n) => ValueRef::Integer(*n),
+        DValue::LargeInteger(n) => ValueRef::LargeInteger(*n),
+        DValue::Bool(b) => ValueRef::Boolean(*b),
+        DValue::Class(n, c) => ValueRef::Class(borrowed_class(n, c)),
+        DValue::Raw(b) => ValueRef::RawData(b),
+        DValue::Reference(_) => ValueRef::Reference(value),
+    }
 }
 
-/// Serialise a descriptor (without the version field).
+/// Serialise a descriptor (without the version field), appending to out.
 pub fn write_descriptor(out: &mut Vec<u8>, d: &Descriptor) {
-    put_unicode(out, &d.class_name);
-    put_id(out, &d.class_id);
-    put_u32(out, d.items.len() as u32);
-    for (k, v) in &d.items {
-        put_id(out, k);
-        write_value(out, v);
-    }
-}
-
-fn write_value(out: &mut Vec<u8>, v: &DValue) {
-    match v {
-        DValue::Descriptor(d) => {
-            out.extend_from_slice(b"Objc");
-            write_descriptor(out, d);
-        }
-        DValue::List(l) => {
-            out.extend_from_slice(b"VlLs");
-            put_u32(out, l.len() as u32);
-            for x in l {
-                write_value(out, x);
-            }
-        }
-        DValue::ObjectArray(n, d) => {
-            out.extend_from_slice(b"ObAr");
-            put_u32(out, *n);
-            write_descriptor(out, d);
-        }
-        DValue::Double(x) => {
-            out.extend_from_slice(b"doub");
-            out.extend_from_slice(&x.to_be_bytes());
-        }
-        DValue::UnitFloat(u, x) => {
-            out.extend_from_slice(b"UntF");
-            out.extend_from_slice(&tag4(u));
-            out.extend_from_slice(&x.to_be_bytes());
-        }
-        DValue::UnitFloats(u, xs) => {
-            out.extend_from_slice(b"UnFl");
-            out.extend_from_slice(&tag4(u));
-            put_u32(out, xs.len() as u32);
-            for x in xs {
-                out.extend_from_slice(&x.to_be_bytes());
-            }
-        }
-        DValue::Text(s) => {
-            out.extend_from_slice(b"TEXT");
-            put_unicode(out, s);
-        }
-        DValue::Enum(t, e) => {
-            out.extend_from_slice(b"enum");
-            put_id(out, t);
-            put_id(out, e);
-        }
-        DValue::Integer(i) => {
-            out.extend_from_slice(b"long");
-            out.extend_from_slice(&i.to_be_bytes());
-        }
-        DValue::LargeInteger(i) => {
-            out.extend_from_slice(b"comp");
-            out.extend_from_slice(&i.to_be_bytes());
-        }
-        DValue::Bool(b) => {
-            out.extend_from_slice(b"bool");
-            out.push(*b as u8);
-        }
-        DValue::Class(n, c) => {
-            out.extend_from_slice(b"type");
-            put_unicode(out, n);
-            put_id(out, c);
-        }
-        DValue::Raw(b) => {
-            out.extend_from_slice(b"tdta");
-            put_u32(out, b.len() as u32);
-            out.extend_from_slice(b);
-        }
-        DValue::Reference(items) => {
-            out.extend_from_slice(b"obj ");
-            put_u32(out, items.len() as u32);
-            for it in items {
-                match it {
-                    RefItem::Property(c, k) => {
-                        out.extend_from_slice(b"prop");
-                        put_unicode(out, "");
-                        put_id(out, c);
-                        put_id(out, k);
-                    }
-                    RefItem::Class(c) => {
-                        out.extend_from_slice(b"Clss");
-                        put_unicode(out, "");
-                        put_id(out, c);
-                    }
-                    RefItem::Enum(c, t, e) => {
-                        out.extend_from_slice(b"Enmr");
-                        put_unicode(out, "");
-                        put_id(out, c);
-                        put_id(out, t);
-                        put_id(out, e);
-                    }
-                    RefItem::Offset(c, o) => {
-                        out.extend_from_slice(b"rele");
-                        put_unicode(out, "");
-                        put_id(out, c);
-                        out.extend_from_slice(&o.to_be_bytes());
-                    }
-                    RefItem::Identifier(i) => {
-                        out.extend_from_slice(b"Idnt");
-                        out.extend_from_slice(&i.to_be_bytes());
-                    }
-                    RefItem::Index(i) => {
-                        out.extend_from_slice(b"indx");
-                        out.extend_from_slice(&i.to_be_bytes());
-                    }
-                    RefItem::Name(c, n) => {
-                        out.extend_from_slice(b"name");
-                        put_unicode(out, "");
-                        put_id(out, c);
-                        put_unicode(out, n);
-                    }
-                }
-            }
-        }
-    }
+    craft_psd::descriptor::borrowed::append_descriptor(out, d);
 }
 
 fn tag4(s: &str) -> [u8; 4] {
@@ -465,5 +355,143 @@ mod tests {
         assert_eq!(back.bool("enab"), Some(true));
         assert_eq!(back.raw("EngineData"), Some(&b"<< >>"[..]));
         assert_eq!(back, d);
+    }
+}
+
+#[cfg(test)]
+mod writer_wire_tests {
+    use super::*;
+    fn hex(s: &str) -> Vec<u8> {
+        s.split_whitespace().map(|b| u8::from_str_radix(b, 16).unwrap()).collect()
+    }
+    fn check(value: DValue, payload: Vec<u8>) {
+        let d = Descriptor::new("warp").with("time", value);
+        let mut got = vec![0xaa, 0xbb];
+        write_descriptor(&mut got, &d);
+        // Empty name plus one NUL, Code(warp), one item, Code(time).
+        let mut want = hex("aa bb 00 00 00 01 00 00 00 00 00 00 77 61 72 70 00 00 00 01 00 00 00 00 74 69 6d 65");
+        want.extend(payload);
+        assert_eq!(got, want);
+    }
+    #[test]
+    fn all_scalar_wire_tags_keep_raw_bits_ids_and_unicode() {
+        for (v, bytes) in [
+            (DValue::Double(f64::from_bits(0x7ff8_1234_5678_9abc)), "64 6f 75 62 7f f8 12 34 56 78 9a bc"),
+            (DValue::Double(-0.0), "64 6f 75 62 80 00 00 00 00 00 00 00"),
+            (DValue::UnitFloat("x".into(), f64::INFINITY), "55 6e 74 46 78 20 20 20 7f f0 00 00 00 00 00 00"),
+            (DValue::UnitFloats("abcde".into(), vec![-0.0, 1.0]), "55 6e 46 6c 61 62 63 64 00 00 00 02 80 00 00 00 00 00 00 00 3f f0 00 00 00 00 00 00"),
+            (DValue::Text("A\0\0".into()), "54 45 58 54 00 00 00 04 00 41 00 00 00 00 00 00"),
+            (DValue::Enum("list".into(), "".into()), "65 6e 75 6d 00 00 00 00 6c 69 73 74 00 00 00 00"),
+            (DValue::Integer(i32::MIN), "6c 6f 6e 67 80 00 00 00"),
+            (DValue::LargeInteger(i64::MIN), "63 6f 6d 70 80 00 00 00 00 00 00 00"),
+            (DValue::Bool(true), "62 6f 6f 6c 01"),
+            (DValue::Class("A".into(), "longer".into()), "74 79 70 65 00 00 00 02 00 41 00 00 00 00 00 06 6c 6f 6e 67 65 72"),
+            (DValue::Raw(vec![0, 255, 3]), "74 64 74 61 00 00 00 03 00 ff 03"),
+        ] {
+            check(v, hex(bytes));
+        }
+    }
+    #[test]
+    fn children_and_object_array_prefix_keep_their_own_counts() {
+        let empty = Descriptor::new("null");
+        let body = hex("00 00 00 01 00 00 00 00 00 00 6e 75 6c 6c 00 00 00 00");
+        let mut object = b"Objc".to_vec();
+        object.extend(&body);
+        check(DValue::Descriptor(empty.clone()), object);
+        let mut array = hex("4f 62 41 72 12 34 56 78");
+        array.extend(&body);
+        check(DValue::ObjectArray(0x1234_5678, empty), array);
+        check(DValue::List(vec![DValue::List(vec![]), DValue::Bool(false)]), hex("56 6c 4c 73 00 00 00 02 56 6c 4c 73 00 00 00 00 62 6f 6f 6c 00"));
+    }
+    #[test]
+    fn reference_variants_preserve_class_encoding_and_signed_fields() {
+        let class = hex("00 00 00 01 00 00 00 00 00 00 6e 75 6c 6c");
+        for (r, tag, tail) in [
+            (RefItem::Property("null".into(), "warp".into()), "prop", hex("00 00 00 00 77 61 72 70")),
+            (RefItem::Class("null".into()), "Clss", vec![]),
+            (RefItem::Enum("null".into(), "time".into(), "list".into()), "Enmr", hex("00 00 00 00 74 69 6d 65 00 00 00 00 6c 69 73 74")),
+            (RefItem::Offset("null".into(), -1), "rele", vec![255; 4]),
+            (RefItem::Identifier(-1), "Idnt", vec![255; 4]),
+            (RefItem::Index(-1), "indx", vec![255; 4]),
+            (RefItem::Name("null".into(), "A\0".into()), "name", hex("00 00 00 03 00 41 00 00 00 00")),
+        ] {
+            let mut payload = hex("6f 62 6a 20 00 00 00 01");
+            payload.extend(tag.as_bytes());
+            payload.extend(&class);
+            payload.extend(tail);
+            check(DValue::Reference(vec![r]), payload);
+        }
+        let raw = craft_psd::descriptor::Class {
+            name: craft_psd::descriptor::UnicodeString(vec![0xd800, 0, 0]),
+            class_id: craft_psd::descriptor::Id::Str(b"warp".to_vec()),
+        };
+        for (r, tag) in [(RefItem::IdentifierWithClass(raw.clone(), 7), "Idnt"), (RefItem::IndexWithClass(raw, 7), "indx")] {
+            let mut payload = hex("6f 62 6a 20 00 00 00 01");
+            payload.extend(tag.as_bytes());
+            payload.extend(hex("00 00 00 03 d8 00 00 00 00 00 00 00 00 04 77 61 72 70 00 00 00 07"));
+            check(DValue::Reference(vec![r]), payload);
+        }
+    }
+    #[test]
+    fn borrowed_large_payload_and_duplicate_items_remain_in_order() {
+        let raw = vec![0x65; 1024 * 1024];
+        let d = Descriptor::new("null").with("same", DValue::Raw(raw)).with("same", DValue::Integer(9));
+        let Some((_, ValueRef::RawData(bytes))) = d.item(0) else {
+            panic!("raw");
+        };
+        let DValue::Raw(original) = &d.items[0].1 else {
+            panic!("raw");
+        };
+        assert_eq!(bytes.as_ptr(), original.as_ptr());
+        let mut out = vec![];
+        write_descriptor(&mut out, &d);
+        assert_eq!(&out[out.len() - 12..], &hex("73 61 6d 65 6c 6f 6e 67 00 00 00 09"));
+    }
+
+    #[test]
+    fn unicode_byte_ids_and_split_unit_tags_are_literal() {
+        check(DValue::Text("\u{1f600}".into()), hex("54 45 58 54 00 00 00 03 d8 3d de 00 00 00"));
+        check(DValue::UnitFloat("abc\u{e9}".into(), 1.0), hex("55 6e 74 46 61 62 63 c3 3f f0 00 00 00 00 00 00"));
+        let d = Descriptor::new("\u{e9}\u{e9}").with("\u{1f600}", DValue::Bool(false));
+        let mut out = vec![0xa5];
+        write_descriptor(&mut out, &d);
+        assert_eq!(out, hex("a5 00 00 00 01 00 00 00 00 00 00 c3 a9 c3 a9 00 00 00 01 00 00 00 00 f0 9f 98 80 62 6f 6f 6c 00"));
+    }
+
+    #[test]
+    fn nonempty_children_resume_each_parent_after_the_child() {
+        let child = || Descriptor::new("null").with("leaf", DValue::Integer(7)).with("done", DValue::Bool(true));
+        check(
+            DValue::List(vec![DValue::Descriptor(child()), DValue::ObjectArray(0x1234_5678, child()), DValue::Bool(false)]),
+            hex("56 6c 4c 73 00 00 00 03
+                 4f 62 6a 63 00 00 00 01 00 00 00 00 00 00 6e 75 6c 6c 00 00 00 02
+                 00 00 00 00 6c 65 61 66 6c 6f 6e 67 00 00 00 07
+                 00 00 00 00 64 6f 6e 65 62 6f 6f 6c 01
+                 4f 62 41 72 12 34 56 78 00 00 00 01 00 00 00 00 00 00 6e 75 6c 6c 00 00 00 02
+                 00 00 00 00 6c 65 61 66 6c 6f 6e 67 00 00 00 07
+                 00 00 00 00 64 6f 6e 65 62 6f 6f 6c 01
+                 62 6f 6f 6c 00"),
+        );
+    }
+
+    #[test]
+    fn large_lists_and_unit_float_slices_are_borrowed() {
+        let values = DValue::List((0..65536).map(DValue::Integer).collect());
+        let ValueRef::List(view) = borrowed_value(&values) else { panic!("list") };
+        assert_eq!(view as *const dyn ValuesView as *const (), &values as *const DValue as *const ());
+        assert!(matches!(view.value(65535), Some(ValueRef::Integer(65535))));
+        assert!(view.value(65536).is_none());
+        let units = DValue::UnitFloats("#Pxl".into(), vec![-0.0; 65536]);
+        let ValueRef::UnitFloats(_, slice) = borrowed_value(&units) else { panic!("units") };
+        let DValue::UnitFloats(_, original) = &units else { panic!("units") };
+        assert_eq!(slice.as_ptr(), original.as_ptr());
+        let d = Descriptor::new("null").with("list", values).with("unit", units);
+        let mut out = vec![];
+        write_descriptor(&mut out, &d);
+        // Header18 + list key/tag/count16, 65536 scalar tag/value pairs,
+        // unit key/tag/unit/count20, 65536 raw doubles.
+        assert_eq!(out.len(), 18 + 16 + 65536 * 8 + 20 + 65536 * 8);
+        assert_eq!(&out[30..34], &[0, 1, 0, 0]);
+        assert_eq!(&out[out.len() - 8..], &[128, 0, 0, 0, 0, 0, 0, 0]);
     }
 }

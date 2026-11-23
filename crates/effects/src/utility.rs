@@ -216,8 +216,16 @@ pub struct Lut {
     pub dmax: [f32; 3],
 }
 
+// Cube LUT Specification 1.0 §§6–7 permits at most 65,536 1D rows and a 256³
+// lattice. Allow their sum for combined shaper + 3D files, regardless of header order.
+const MAX_CUBE_ROWS: usize = 65_536 + 256 * 256 * 256;
+
 /// Parse `.cube` text (TITLE, LUT_1D_SIZE, LUT_3D_SIZE, DOMAIN_MIN/MAX, data red-fastest).
 pub fn parse_cube(text: &str) -> Option<Lut> {
+    parse_cube_limited(text, MAX_CUBE_ROWS)
+}
+
+fn parse_cube_limited(text: &str, max_rows: usize) -> Option<Lut> {
     let mut lut = Lut { n1: 0, d1: vec![], n3: 0, d3: vec![], dmin: [0.0; 3], dmax: [1.0; 3] };
     let mut rows: Vec<[f32; 3]> = Vec::new();
     let three = |it: &mut std::str::SplitWhitespace| -> Option<[f32; 3]> {
@@ -259,16 +267,27 @@ pub fn parse_cube(text: &str) -> Option<Lut> {
                 lut.dmax = [hi; 3];
             }
             k if k.starts_with(|c: char| c.is_ascii_alphabetic()) => continue,
-            _ => rows.push(three(&mut it)?),
+            _ => {
+                if rows.len() == max_rows {
+                    return None;
+                }
+                let row = three(&mut it)?;
+                // Make buffer growth fallible before push can allocate.
+                rows.try_reserve(1).ok()?;
+                rows.push(row);
+            }
         }
+    }
+    if lut.n3 > 256 {
+        return None;
     }
     let need1 = lut.n1;
     let need3 = lut.n3 * lut.n3 * lut.n3;
-    if (lut.n1 == 0 && lut.n3 == 0) || lut.n1 == 1 || lut.n3 == 1 || rows.len() != need1 + need3 || lut.n3 > 256 {
+    if (lut.n1 == 0 && lut.n3 == 0) || lut.n1 == 1 || lut.n3 == 1 || Some(rows.len()) != need1.checked_add(need3) {
         return None;
     }
-    lut.d1 = rows[..need1].to_vec();
-    lut.d3 = rows[need1..].to_vec();
+    lut.d1 = rows.get(..need1)?.to_vec();
+    lut.d3 = rows.get(need1..)?.to_vec();
     Some(lut)
 }
 
@@ -571,6 +590,10 @@ mod tests {
     fn bad_cube_is_passthrough() {
         assert!(parse_cube("LUT_3D_SIZE 2\n0 0 0\n1 1 1\n").is_none());
         assert!(parse_cube("LUT_3D_SIZE 2\n0 0 zz\n").is_none());
+        // A hostile size must be rejected, not overflow `n3^3` or `n1 + n3^3`.
+        assert!(parse_cube("LUT_3D_SIZE 4294967296\n0 0 0\n").is_none());
+        assert!(parse_cube(&format!("LUT_3D_SIZE {}\n0 0 0\n", usize::MAX)).is_none());
+        assert!(parse_cube(&format!("LUT_1D_SIZE {}\nLUT_3D_SIZE 2\n{}", usize::MAX, "0 0 0\n".repeat(7))).is_none());
         let img = test_img();
         let out = run("ec.utility.applylut", &[("lut", Value::Str("LUT_3D_SIZE 3\n0 0 0\n".into()))], img.clone());
         assert_eq!(out.img, img);
@@ -684,6 +707,28 @@ mod tests {
         crate::check_lut_files();
         assert_eq!(file_cache::followed_stamp(&src), Some(file_cache::file_stamp(&src)), "the change was noticed");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn cube_accepts_maximum_1d_shaper_with_3d_table() {
+        let text = format!("LUT_1D_SIZE 65536\nLUT_3D_SIZE 2\n{}", "0 0 0\n".repeat(65_536 + 8));
+        let lut = parse_cube(&text).unwrap();
+        assert_eq!(lut.d1.len(), 65_536);
+        assert_eq!(lut.d3.len(), 8);
+        // Keep the parser's existing tolerance for headers following data.
+        let text = format!("{}LUT_1D_SIZE 2\nLUT_3D_SIZE 2\n", "0 0 0\n".repeat(10));
+        let lut = parse_cube(&text).unwrap();
+        assert_eq!(lut.d1, vec![[0.0; 3]; 2]);
+        assert_eq!(lut.d3, vec![[0.0; 3]; 8]);
+    }
+
+    #[test]
+    fn cube_row_collection_is_bounded() {
+        assert_eq!(MAX_CUBE_ROWS, 65_536 + 256 * 256 * 256);
+        let text = "LUT_1D_SIZE 2\n0 0 0\n1 1 1\n";
+        let lut = parse_cube_limited(text, 2).unwrap();
+        assert_eq!(lut.d1, vec![[0.0; 3], [1.0; 3]]);
+        assert!(parse_cube_limited("LUT_1D_SIZE 3\n0 0 0\n0.5 0.5 0.5\n1 1 1\n", 2).is_none());
     }
 
     #[test]
