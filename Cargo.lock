@@ -1421,6 +1421,7 @@ dependencies = [
  "craft-frame",
  "craft-media 0.1.0 (git+https://github.com/storytold/craft-libs?rev=33be35625e252cc4f06aa375b3b428521faea37d)",
  "craft-time 0.1.0 (git+https://github.com/storytold/craft-libs?rev=33be35625e252cc4f06aa375b3b428521faea37d)",
+ "craft-y4m",
  "serde",
  "thiserror 2.0.21",
 ]

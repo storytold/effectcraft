@@ -1,39 +1,33 @@
-//! ISO-BMFF (MP4/MOV/M4A) and Matroska/WebM (MKV/MKA/WebM) media-reader routes backed by
-//! `craft-media`, `craft-video`, `craft-audio`, and `craft-media-source`.
+//! ISO-BMFF (MP4/MOV/M4A), Matroska/WebM (MKV/MKA/WebM), MXF, AVI, MPEG-TS/PS, YUV4MPEG2 and
+//! standalone audio media-reader routes backed by `craft-media`, `craft-video`, `craft-audio`, and
+//! `craft-media-source`.
 //!
 //! Preserves sync-sample backward seek, B-frame reordering, cooperative cancellation, VUI +
 //! container colour resolution, draft mode for reduced-resolution playback, and bounded worker
 //! threads, while falling back to `filmcraft-codecs` for unsupported codecs or audio streams.
 //!
 //! ## Route Matrix (`crates/media`)
-//! - **ISO-BMFF (`MP4`/`MOV`/`M4A`, video+audio & audio-only)**:
-//!   - Shared (`craft-media::isobmff` + `craft-video` + `craft-audio`): `H264`, `Hevc`, `Av1`,
-//!     `Vp9`, `Vp8`, `ProRes` (coded alpha via `craft_video::prores::probe`, #3999), `Dnxhd`,
-//!     `Mpeg2Video`, and strictly admitted video-only `Apv` MP4;
-//!     audio `Aac`, `Alac`, `Flac`, `Opus`, `Ac3`, `Mp3`/`Mp2`/`Mp1`.
-//!   - Fallback (`filmcraft-codecs`): `Mjpeg`, `Mpeg4Video`, `Ffv1`, other `Apv`, or unsupported audio.
-//! - **Matroska / WebM (`MKV`/`MKA`/`WebM`, video+audio & audio-only)**:
-//!   - Shared (`craft-media::matroska` + `craft-video` + `craft-audio`): `H264`, `Hevc`, `Av1`,
-//!     `Vp9`, `Vp8`, `ProRes`, `Dnxhd`, `Mpeg2Video`; audio `Aac`, `Alac`, `Flac`, `Opus`, `Ac3`,
-//!     `Mp3`/`Mp2`/`Mp1` (with `CodecDelay` + `SeekPreRoll` timing).
-//!   - Fallback (`filmcraft-codecs`): `alpha_mode == 1` (`BlockAdditional` alpha), unreadable/zlib
-//!     encodings, `Mjpeg`/`Ffv1`/`Theora`/`Apv`, or unsupported audio (`Vorbis`/`Pcm`).
-//! - **MXF (`MXF`, video+audio & audio-only OP1a/OP-Atom)**:
-//!   - Shared (`craft-media::mxf` + `craft-video` + `MxfFile::read_pcm`): `H264`, `Hevc`, `Av1`,
-//!     `Vp9`, `Vp8`, `ProRes`, `Dnxhd`, `Mpeg2Video`; sound `Pcm` and `Aes3` (D-10).
-//!   - Fallback (`filmcraft-codecs`): compressed MXF sound or unsupported video codecs.
-//! - **AVI / MPEG-TS / MPEG-PS**:
-//!   - Shared (`craft-media::avi`, `craft-media::mpegts` + `craft-video` + `craft-audio`):
-//!     `H264`, `Hevc`, `Mpeg2Video`, `Av1`, `Vp9`, `Vp8`, `ProRes`, `Dnxhd`; audio `Aac`,
-//!     `Ac3`/`Eac3`, `Mp3`/`Mp2`/`Mp1`, `Pcm`. AVI also accepts complete 24/32-bit `BI_RGB` streams.
-//!   - Fallback (`filmcraft-codecs`): unsupported codecs (`Mjpeg`, `Mpeg4Video`, `Ffv1`, `Theora`,
-//!     `Apv`, other raw AVI layouts) or unsupported audio.
-//! - **Other containers & standalone audio**:
-//!   - Shared (`craft_audio::Decoder` with `decode-native`): standalone `WAV`, `AIFF`, `MP3`/`MP2`/`MP1`,
-//!     `AAC` (ADTS), `AC-3`, and `Ogg` (`Opus`). Bounded standalone FLAC uses the shared native
-//!     FLAC decoder and the same resampling policy.
-//!   - Fallback (`filmcraft-codecs`): `Ogg Vorbis`, `CAF`, or FLAC and WAV/AIFF input the shared
-//!     readers decline.
+//! Video codecs admitted by [`supports_video_codec`] in every container: `H264`, `Hevc`, `Av1`,
+//! `Vp9`, `Vp8`, `ProRes`, `Dnxhd`, `Mpeg2Video` and `Ffv1`. Audio goes through
+//! `craft_audio::TrackDecoder` whenever it accepts the track (including `Pcm`); a track it declines
+//! sends the whole file to `filmcraft-codecs`.
+//! - **ISO-BMFF (`MP4`/`MOV`/`M4A`)**: shared, plus strictly admitted video-only `Apv` MP4.
+//!   Fallback: `Mjpeg`, `Mpeg4Video`, other `Apv`, or declined audio.
+//! - **Matroska / WebM (`MKV`/`MKA`/`WebM`)**: shared, with `CodecDelay` + `SeekPreRoll` timing.
+//!   Fallback: `alpha_mode == 1` (`BlockAdditional` alpha), unreadable or compressed frame
+//!   encodings, `V_FFV1` without `CodecPrivate`, `Mjpeg`/`Theora`/`Apv`, or declined audio
+//!   (for example `Vorbis`).
+//! - **MXF (OP1a/OP-Atom)**: shared, with sound `Pcm` and `Aes3` (D-10) read by
+//!   `MxfFile::read_pcm`. Fallback: compressed sound, video that needs reordering, or other codecs.
+//! - **AVI / MPEG-TS / MPEG-PS**: shared; AVI also accepts complete 24/32-bit `BI_RGB` streams.
+//!   Fallback: other codecs (`Mjpeg`, `Mpeg4Video`, `Theora`, `Apv`), other raw AVI layouts, or
+//!   declined audio.
+//! - **YUV4MPEG2 (`Y4M`)**: `craft_media_source::y4m`. Fallback: files it reports as unsupported
+//!   (for example a frame above the shared media buffer limit).
+//! - **Standalone audio**: `craft_audio::Decoder` with `decode-native` for `WAV`, `AIFF`,
+//!   `MP3`/`MP2`/`MP1`, `AAC` (ADTS), `AC-3` and `Ogg` (`Opus`); bounded FLAC uses the shared
+//!   native FLAC decoder. Fallback: `Ogg Vorbis`, `CAF`, or FLAC and WAV/AIFF input the shared
+//!   readers decline.
 
 use std::sync::{Arc, Mutex};
 
@@ -138,6 +132,9 @@ pub(crate) fn open_reader(name: &str, head: &[u8], reader: &SharedBytes) -> Opti
     if let Some(fmt) = mpegts::sniff(usual_head) {
         return open_mpeg(name, fmt, reader.clone());
     }
+    if craft_media_source::y4m::sniff(usual_head) {
+        return open_y4m(name, reader.clone());
+    }
     if let Some(source) = standalone_flac::open_reader(name, usual_head, reader) {
         return Some(Ok(source));
     }
@@ -161,6 +158,9 @@ pub(crate) fn open_bytes(name: &str, bytes: Arc<[u8]>) -> Option<Result<SharedSo
     if let Some(fmt) = mpegts::sniff(&bytes) {
         return open_mpeg(name, fmt, Arc::new(bytes));
     }
+    if craft_media_source::y4m::sniff(&bytes) {
+        return open_y4m(name, Arc::new(bytes));
+    }
     if let Some(source) = standalone_flac::open_bytes(name, &bytes) {
         return Some(Ok(source));
     }
@@ -173,6 +173,16 @@ pub(crate) fn open_bytes(name: &str, bytes: Arc<[u8]>) -> Option<Result<SharedSo
     #[cfg(not(any(unix, windows)))]
     {
         None
+    }
+}
+
+/// Open a YUV4MPEG2 stream through the shared indexed source. A stream the shared source reports
+/// as unsupported keeps the FilmCraft route, so a file that opened before still opens.
+fn open_y4m(name: &str, source: SharedBytes) -> Option<Result<SharedSource>> {
+    match craft_media_source::y4m::Y4mSource::open(name, source) {
+        Ok(y4m) => Some(Ok(Arc::new(y4m))),
+        Err(MediaError::Unsupported(_)) => None,
+        Err(e) => Some(Err(e)),
     }
 }
 
@@ -3083,6 +3093,82 @@ mod tests {
             }
             assert_eq!(new_alpha.as_deref(), alpha[i].as_ref());
             assert_eq!(new_alpha.as_deref(), old_alpha.as_deref());
+        }
+    }
+
+    /// Two distinct self-generated pictures of `colour` (`W4 H2`), 16-bit little-endian above 8 bits.
+    fn generated_y4m(colour: &str, bits: u8, planes: usize, chroma_len: usize) -> Arc<[u8]> {
+        let mut out = format!("YUV4MPEG2 W4 H2 F25:1 Ip A2:1 C{colour} XCOLORRANGE=FULL\n").into_bytes();
+        for frame in 0..2u16 {
+            out.extend_from_slice(b"FRAME\n");
+            for plane in 0..planes {
+                let len = if plane == 0 || plane == 3 { 8 } else { chroma_len };
+                for i in 0..len as u16 {
+                    let v = (frame * 97 + plane as u16 * 31 + i * 13) % (1 << bits.min(10));
+                    if bits > 8 {
+                        out.extend_from_slice(&v.to_le_bytes());
+                    } else {
+                        out.push(v as u8);
+                    }
+                }
+            }
+        }
+        out.into()
+    }
+
+    #[test]
+    fn y4m_import_uses_the_shared_source_with_film_parity() {
+        use crate::stream::{DecodedFrame, MediaSource as Opened};
+
+        fn planes(frame: DecodedFrame) -> (Vec<Vec<u16>>, Option<Vec<u16>>, u32) {
+            let wide = |p: &[u8]| p.iter().map(|&v| u16::from(v)).collect::<Vec<_>>();
+            match frame {
+                DecodedFrame::Craft(f) => match &f.data {
+                    PixelData::Yuv8 { planes, alpha, .. } => (planes.iter().map(|p| wide(p)).collect(), alpha.as_ref().map(|a| wide(a)), 8u32),
+                    PixelData::Yuv16 { planes, alpha, bits, .. } => (planes.iter().map(|p| p.to_vec()).collect(), alpha.as_ref().map(|a| a.to_vec()), *bits),
+                    _ => panic!("shared Y4M frame is planar YUV"),
+                },
+                DecodedFrame::Film(f) => match &f.data {
+                    filmcraft_frame::PixelData::Yuv8 { planes, alpha, .. } => (planes.iter().map(|p| wide(p)).collect(), alpha.as_ref().map(|a| wide(a)), 8u32),
+                    filmcraft_frame::PixelData::Yuv16 { planes, alpha, bits, .. } => {
+                        (planes.iter().map(|p| p.to_vec()).collect(), alpha.as_ref().map(|a| a.to_vec()), *bits)
+                    }
+                    _ => panic!("legacy Y4M frame is planar YUV"),
+                },
+            }
+        }
+
+        let step = craft_time::TICKS_PER_SECOND / 25;
+        for (colour, bits, plane_count, chroma_len) in
+            [("420jpeg", 8, 3, 2), ("444alpha", 8, 4, 8), ("mono", 8, 1, 0), ("420p10", 10, 3, 2), ("422p12", 12, 3, 4)]
+        {
+            let bytes = generated_y4m(colour, bits, plane_count, chroma_len);
+            let path = "generated.y4m";
+            let shared = crate::stream::open_bytes(path, bytes.clone()).unwrap();
+            assert!(matches!(shared, Opened::Craft(_)), "{colour}: Y4M must use the shared source");
+            let direct = filmcraft_codecs::open_bytes(path, bytes.clone()).unwrap();
+            let old = crate::probe::footage_from_info(path, direct.info());
+            let film = Opened::Film(direct);
+            let footage = crate::probe_bytes(path, bytes.clone()).unwrap();
+            assert_eq!((footage.width, footage.height), (4, 2), "{colour}");
+            assert_eq!(footage.frame_rate, old.frame_rate, "{colour}");
+            assert_eq!(footage.duration, old.duration, "{colour}");
+            assert_eq!(footage.duration.0, step * 2, "{colour}");
+            assert_eq!(footage.pixel_aspect, old.pixel_aspect, "{colour}");
+            assert_eq!(footage.alpha, old.alpha, "{colour}");
+            assert_eq!(footage.color_profile, old.color_profile, "{colour}");
+            assert_eq!(footage.codec, old.codec, "{colour}");
+            let mut seen = Vec::new();
+            for at in [step, 0, step - 1, step, 0] {
+                let time = effectcraft_time::Tick(at);
+                let new = planes(shared.video_frame(time, 1.0).unwrap());
+                let legacy = planes(film.video_frame(time, 1.0).unwrap());
+                assert_eq!(new, legacy, "{colour} at {at}");
+                assert_eq!(new.2, u32::from(bits), "{colour}");
+                assert_eq!(new.1.is_some(), colour == "444alpha", "{colour}");
+                seen.push(new.0);
+            }
+            assert_ne!(seen[0], seen[1], "{colour}: the two pictures differ");
         }
     }
 
