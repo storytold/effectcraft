@@ -168,6 +168,101 @@ pub struct PluginParam {
     pub kind: PluginParamKind,
 }
 
+/// A single drawing primitive returned by a plug-in's optional viewer overlay callback (#3741).
+/// Coordinates are in the layer's effect space (`[x, y]` in layer pixels), matching point
+/// parameters; colours are display sRGB `[r, g, b, a]` in `0.0..=1.0`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum OverlayOp {
+    /// A polyline through `points` (closed loop when `closed` is true).
+    Polyline {
+        points: Vec<[f64; 2]>,
+        #[serde(default = "default_overlay_color")]
+        color: [f32; 4],
+        #[serde(default = "default_overlay_width")]
+        width: f32,
+        #[serde(default)]
+        dashed: bool,
+        #[serde(default)]
+        closed: bool,
+    },
+    /// A circle / handle centred at `center` with screen-space `radius` in logical pixels.
+    Circle {
+        center: [f64; 2],
+        #[serde(default = "default_overlay_radius")]
+        radius: f32,
+        #[serde(default = "default_overlay_color")]
+        color: [f32; 4],
+        #[serde(default)]
+        fill: bool,
+        #[serde(default = "default_overlay_width")]
+        width: f32,
+    },
+    /// A short text label anchored at `at`.
+    Label {
+        at: [f64; 2],
+        text: String,
+        #[serde(default = "default_overlay_color")]
+        color: [f32; 4],
+    },
+}
+
+fn default_overlay_color() -> [f32; 4] {
+    [1.0, 1.0, 1.0, 0.85]
+}
+fn default_overlay_width() -> f32 {
+    1.25
+}
+fn default_overlay_radius() -> f32 {
+    5.0
+}
+
+/// Maximum number of overlay primitives a plug-in may emit per frame.
+pub const MAX_OVERLAY_OPS: usize = 512;
+/// Maximum number of vertices in a single [`OverlayOp::Polyline`].
+pub const MAX_OVERLAY_POINTS: usize = 2048;
+
+/// Clamp and bound untrusted overlay operations returned by a plug-in.
+pub fn sanitize_overlay_ops(ops: Vec<OverlayOp>) -> Vec<OverlayOp> {
+    ops.into_iter()
+        .take(MAX_OVERLAY_OPS)
+        .filter_map(|op| match op {
+            OverlayOp::Polyline { points, color, width, dashed, closed } => {
+                let pts: Vec<[f64; 2]> = points.into_iter().take(MAX_OVERLAY_POINTS).filter(|p| p[0].is_finite() && p[1].is_finite()).collect();
+                if pts.len() < 2 {
+                    return None;
+                }
+                Some(OverlayOp::Polyline {
+                    points: pts,
+                    color: color.map(|c| if c.is_finite() { c.clamp(0.0, 1.0) } else { 1.0 }),
+                    width: if width.is_finite() { width.clamp(0.5, 16.0) } else { 1.25 },
+                    dashed,
+                    closed,
+                })
+            }
+            OverlayOp::Circle { center, radius, color, fill, width } => {
+                if !center[0].is_finite() || !center[1].is_finite() {
+                    return None;
+                }
+                Some(OverlayOp::Circle {
+                    center,
+                    radius: if radius.is_finite() { radius.clamp(1.0, 128.0) } else { 5.0 },
+                    color: color.map(|c| if c.is_finite() { c.clamp(0.0, 1.0) } else { 1.0 }),
+                    fill,
+                    width: if width.is_finite() { width.clamp(0.5, 16.0) } else { 1.25 },
+                })
+            }
+            OverlayOp::Label { at, text, color } => {
+                if !at[0].is_finite() || !at[1].is_finite() || text.is_empty() {
+                    return None;
+                }
+                let text: String = text.chars().take(128).collect();
+                Some(OverlayOp::Label { at, text, color: color.map(|c| if c.is_finite() { c.clamp(0.0, 1.0) } else { 1.0 }) })
+            }
+        })
+        .collect()
+}
+
 /// What a plug-in declares about itself.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PluginManifest {
@@ -184,6 +279,9 @@ pub struct PluginManifest {
     pub author: String,
     #[serde(default)]
     pub description: String,
+    /// Opt-in flag: the plug-in emits on-canvas viewer overlay primitives (#3741).
+    #[serde(default)]
+    pub overlay: bool,
     #[serde(default)]
     pub params: Vec<PluginParam>,
 }
@@ -414,6 +512,12 @@ pub trait EffectPlugin: Send + Sync {
     /// ABI 2 plug-ins return true.
     fn reads_other_times(&self) -> bool {
         false
+    }
+    /// Optional on-canvas viewer overlay primitives in layer effect space (#3741). Only called
+    /// while the effect is selected in the Composition viewer and [`PluginManifest::overlay`] is
+    /// true.
+    fn overlay(&self, _params: &PluginParams, _time: f64, _layer_size: [f64; 2]) -> Result<Vec<OverlayOp>, String> {
+        Ok(Vec::new())
     }
 }
 
