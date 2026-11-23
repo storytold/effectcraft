@@ -229,11 +229,16 @@ A module with **no imports** exports:
 | `ec_alloc` | `(bytes: i32) -> i32` | a buffer of at least `bytes` bytes, 8-byte aligned; it may reuse the previous one |
 | `ec_render` (ABI 1) | `(pixels: i32, width: i32, height: i32, params: i32, nparams: i32, time: f64, scale: f64) -> i32` | process the pixels in place; return 0 on success |
 | `ec_render2` (ABI 2) | `ec_render`'s arguments, then `prev: i32, prev_time: f64, next: i32, next_time: f64, flags: i32` | the same, with the neighbouring frames; return 0 on success |
+| `ec_set_masks` (optional) | `(masks_ptr: i32, masks_len: i32) -> ()` | receives the layer's flattened mask paths in buffer pixels right before `ec_render` / `ec_render2` |
 
 For each frame the host calls `ec_alloc` once for a buffer holding the parameters (`nparams`
 little-endian `f64`s) followed by the pixels (`width × height × 4` little-endian `f32`s,
 premultiplied RGBA, row-major), fills it, calls the module's render export, and reads the pixels
-back. An ABI 2 module gets two more pixel buffers after the current frame: the previous and next
+back. When the module exports `ec_set_masks`, the host appends the layer's enabled mask paths
+(including masks whose mode is `None`, so path-driven effects can use a mask without clipping
+the layer) as little-endian `f64`s (`[mask_count, (closed_0_or_1, inverted_0_or_1, point_count,
+x0, y0, x1, y1, …), …]` in buffer pixels) to that same allocation and calls `ec_set_masks`
+before `ec_render` / `ec_render2`. An ABI 2 module gets two more pixel buffers after the current frame: the previous and next
 frames, resampled onto the current buffer's grid. At a frame boundary they are the frames before
 and after it (`time ± 1/fps`); between frames they are the two frames that bracket `time`.
 
