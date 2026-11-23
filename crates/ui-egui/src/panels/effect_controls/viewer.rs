@@ -354,20 +354,75 @@ fn overlay_color(c: [f32; 4]) -> Color32 {
     Color32::from_rgba_unmultiplied(ch(c[0]), ch(c[1]), ch(c[2]), ch(c[3]))
 }
 
-/// Paint a dashed segment between `a` and `b` in screen coordinates.
+/// Clip a 2D segment `(a, b)` to `rect` using Liang-Barsky so off-screen coordinates cannot
+/// force unbounded dash iteration. Returns `None` when completely outside or non-finite.
+fn clip_segment_to_rect(a: egui::Pos2, b: egui::Pos2, rect: egui::Rect) -> Option<(egui::Pos2, egui::Pos2)> {
+    if !a.x.is_finite() || !a.y.is_finite() || !b.x.is_finite() || !b.y.is_finite() {
+        return None;
+    }
+    let (dx, dy) = (f64::from(b.x) - f64::from(a.x), f64::from(b.y) - f64::from(a.y));
+    let mut t0 = 0.0f64;
+    let mut t1 = 1.0f64;
+    let checks = [
+        (-dx, f64::from(a.x) - f64::from(rect.min.x)),
+        (dx, f64::from(rect.max.x) - f64::from(a.x)),
+        (-dy, f64::from(a.y) - f64::from(rect.min.y)),
+        (dy, f64::from(rect.max.y) - f64::from(a.y)),
+    ];
+    for (p, q) in checks {
+        if p.abs() < 1e-12 {
+            if q < 0.0 {
+                return None;
+            }
+        } else {
+            let r = q / p;
+            if p < 0.0 {
+                if r > t1 {
+                    return None;
+                }
+                if r > t0 {
+                    t0 = r;
+                }
+            } else {
+                if r < t0 {
+                    return None;
+                }
+                if r < t1 {
+                    t1 = r;
+                }
+            }
+        }
+    }
+    let p0 = egui::pos2((f64::from(a.x) + t0 * dx) as f32, (f64::from(a.y) + t0 * dy) as f32);
+    let p1 = egui::pos2((f64::from(a.x) + t1 * dx) as f32, (f64::from(a.y) + t1 * dy) as f32);
+    if !p0.x.is_finite() || !p0.y.is_finite() || !p1.x.is_finite() || !p1.y.is_finite() {
+        return None;
+    }
+    Some((p0, p1))
+}
+
+/// Paint a dashed segment between `a` and `b` in screen coordinates, clipped to `painter`'s
+/// clip rect and bounded to a finite dash count.
 fn paint_dashed(painter: &egui::Painter, a: egui::Pos2, b: egui::Pos2, stroke: Stroke) {
+    let bounds = painter.clip_rect().expand(stroke.width.max(1.0) * 2.0);
+    let Some((a, b)) = clip_segment_to_rect(a, b, bounds) else { return };
     let d = b - a;
     let len = d.length();
-    if len < 1e-3 {
+    if !len.is_finite() || len < 1e-3 {
         return;
     }
     let dir = d / len;
     let (dash, gap) = (6.0f32, 4.0f32);
-    let mut t = 0.0f32;
-    while t < len {
+    let step = dash + gap;
+    const MAX_DASHES: usize = 2048;
+    let count = ((len / step).ceil() as usize).min(MAX_DASHES);
+    for i in 0..count {
+        let t = i as f32 * step;
+        if t >= len {
+            break;
+        }
         let end = (t + dash).min(len);
         painter.line_segment([a + dir * t, a + dir * end], stroke);
-        t += dash + gap;
     }
 }
 
@@ -393,7 +448,7 @@ fn plugin_viewer_overlay(
     let texts = flatten_texts(m, &params);
     let pp = PluginParams { manifest: m, flat: &flat, texts: &texts };
     let layer_time = layer.layer_time(ectx.time).seconds();
-    let layer_size = [f64::from(ectx.comp.width), f64::from(ectx.comp.height)];
+    let layer_size = ectx.effect_bounds(layer).0;
     let Ok(raw_ops) = pl.overlay(&pp, layer_time, layer_size) else { return };
     let ops = sanitize_overlay_ops(raw_ops);
     if ops.is_empty() {
