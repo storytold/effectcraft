@@ -310,13 +310,37 @@ pub fn wave_world_plan(ctx: &EffectCtx, b: &Buf) -> Option<WavePlan> {
     wave_world_impl(ctx, b, true).err()
 }
 
+/// Most cells of Wave World's grid: the largest Grid Resolution (400) on a layer four times as
+/// tall as it is wide. Only the horizontal resolution is a parameter; the vertical one follows
+/// the layer's aspect, so a tall layer would otherwise ask for any number of cells.
+pub(super) const MAX_WAVE_CELLS: usize = 401 * 1601;
+
+/// Wave World's grid (`nx` × `ny` nodes, square cells) for `res` cells across a `lw` × `lh`
+/// layer, coarsened so it has at most [`MAX_WAVE_CELLS`] nodes.
+pub(super) fn wave_grid(res: usize, lw: f64, lh: f64) -> (usize, usize) {
+    let aspect = lh / lw.max(1.0);
+    let aspect = if aspect.is_finite() { aspect.max(0.0) } else { 0.0 };
+    let nodes = |r: usize| (r as f64 + 1.0) * ((r as f64 * aspect).round().max(2.0) + 1.0);
+    let mut res = res.max(2);
+    if nodes(res) > MAX_WAVE_CELLS as f64 {
+        res = ((res as f64 * (MAX_WAVE_CELLS as f64 / nodes(res)).sqrt()).floor() as usize).max(2);
+        // The estimate can land just over the cap; step down until the full grid fits, so the
+        // vertical cap below does not clip the layer's last rows.
+        while res > 2 && nodes(res) > MAX_WAVE_CELLS as f64 {
+            res -= 1;
+        }
+    }
+    let nx = res + 1;
+    let ny = ((res as f64 * aspect).round().min((MAX_WAVE_CELLS / nx - 1) as f64) as usize).max(2) + 1;
+    (nx, ny)
+}
+
 fn wave_world_impl(ctx: &EffectCtx, b: &Buf, plan_only: bool) -> Result<Image, WavePlan> {
     let pr = ctx.params;
     let [lw, lh] = ctx.layer_size;
     let res = pr.f("simulation/gridResolution").clamp(1.0, 400.0) as usize;
     let res = if pr.b("simulation/gridResDownsamples") { ((res as f64) * b.scale).round().max(1.0) as usize } else { res };
-    let nx = res.max(2) + 1;
-    let ny = ((res as f64 * lh / lw.max(1.0)).round() as usize).max(2) + 1;
+    let (nx, ny) = wave_grid(res, lw, lh);
     let speed = pr.f("simulation/waveSpeed").max(0.0) as f32;
     let damping = pr.f("simulation/damping").max(0.0) as f32;
     let reflect = pr.e("simulation/reflectEdges");

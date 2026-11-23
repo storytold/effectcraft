@@ -281,6 +281,21 @@ fn particle_exploder_bursts_big_particles() {
     assert!(s.parts.is_empty());
 }
 
+/// Bursts count the particles still waiting to be processed, so a grid near the particle budget
+/// cannot end the frame over it.
+#[test]
+fn particle_exploder_stays_within_the_particle_budget() {
+    let st = Pg { pex_radius: 2.0, pex_dispersion: 30.0, ..bare(1) };
+    let mut s = PgState::default();
+    for _ in 0..MAX_PG_PARTICLES - 20 {
+        s.parts.push(PgParticle::new([50.0, 50.0], [0.0; 2], [1.0; 4], 6.0, 0, SRC_GRID));
+    }
+    st.step(&mut s);
+    assert!(s.parts.len() <= MAX_PG_PARTICLES, "{}", s.parts.len());
+    // Room was left for the first bursts: 20 spare slots hold two bursts of 9 - 1 new each.
+    assert!(s.parts.len() > MAX_PG_PARTICLES - 20);
+}
+
 #[test]
 fn text_particles_draw_characters() {
     let grid = |text: &str| {
@@ -369,4 +384,22 @@ fn cc_hair_grows_from_opaque_pixels() {
     assert_eq!(out.img.data, again.img.data);
     let none = run_fx("ec.sim.cchair", &[("length", num(0.0))], img.clone(), 0.0, EffectEnv::default());
     assert_eq!(none.img.data, img.data);
+}
+
+/// Grid counts from a project are held to the particle budget instead of asking for a
+/// trillion particles (or visiting a trillion empty grid points behind a blank Grid Text).
+#[test]
+fn hostile_grid_counts_stay_within_the_particle_budget() {
+    for text in ["", " "] {
+        let img = run(
+            &[
+                ("cannonEnabled", Value::Bool(false)),
+                ("grid/particlesAcross", num(1e9)),
+                ("grid/particlesDown", num(1e9)),
+                ("options/gridText", Value::Str(text.into())),
+            ],
+            0.0,
+        );
+        assert_eq!((img.width, img.height), (80, 60));
+    }
 }
