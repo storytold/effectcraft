@@ -5970,13 +5970,7 @@ fn vector_editor(app: &mut EffectcraftApp, ui: &mut egui::Ui, ve: &ValueEdit<'_>
     if linkable {
         let lr = Rect::from_center_size(pos2(x + 7.0, at.y), vec2(14.0, 14.0));
         let label = if levels { "Link Channels" } else { "Constrain Proportions" };
-        let tip = match (levels, linked) {
-            (true, true) => "Link Channels: linked",
-            (true, false) => "Link Channels: unlinked",
-            (false, true) => "Constrain Proportions: linked",
-            (false, false) => "Constrain Proportions: unlinked",
-        };
-        let resp = ui.interact(lr, egui::Id::unique(("tl-link", uid)), Sense::click()).on_hover_text(crate::i18n::tr(tip));
+        let resp = ui.interact(lr, egui::Id::unique(("tl-link", uid)), Sense::click()).on_hover_text(icons::link_tooltip(label, linked));
         icons::paint(p, lr, icons::link_icon(linked), if linked { t.accent } else { t.text_faint });
         app.auto.add(&format!("timeline.prop.{uid}.link"), lr, label);
         if resp.clicked() {

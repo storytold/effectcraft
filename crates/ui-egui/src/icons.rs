@@ -248,6 +248,12 @@ pub fn link_icon(linked: bool) -> Icon {
     if linked { Icon::Link } else { Icon::LinkBroken }
 }
 
+/// Tooltip for a link toggle: preserves the translated base label (e.g. `"Constrain Proportions"`
+/// across all locale catalogs) while showing the current linked/unlinked state (#3878).
+pub fn link_tooltip(label: &str, linked: bool) -> String {
+    format!("{}: {}", crate::i18n::tr(label), crate::i18n::tr(if linked { "linked" } else { "unlinked" }))
+}
+
 /// Paint `icon` centred in `rect`.
 pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
     let pen = Pen16 { painter, rect, color, width: 1.25 };
@@ -896,5 +902,18 @@ mod tests {
         assert!(!linked.is_empty() && !broken.is_empty());
         assert!(crosses_x(&linked, 8.0), "Icon::Link should bridge the centreline x=8");
         assert!(!crosses_x(&broken, 8.0), "Icon::LinkBroken should leave a centre gap around x=8");
+    }
+
+    #[test]
+    fn link_tooltip_preserves_translated_base_label() {
+        crate::i18n::set_current("zh-hans");
+        let linked = super::link_tooltip("Constrain Proportions", true);
+        let unlinked = super::link_tooltip("Constrain Proportions", false);
+        crate::i18n::set_current("en");
+        assert!(linked.starts_with("约束比例:"), "got {linked}");
+        assert!(unlinked.starts_with("约束比例:"), "got {unlinked}");
+        assert_ne!(linked, unlinked);
+        assert_eq!(super::link_tooltip("Constrain Proportions", true), "Constrain Proportions: linked");
+        assert_eq!(super::link_tooltip("Constrain Proportions", false), "Constrain Proportions: unlinked");
     }
 }
