@@ -7,7 +7,7 @@ use rayon::prelude::*;
 use wasmtime::{Config, Engine, Instance, Linker, Memory, Module, Store, StoreLimits, StoreLimitsBuilder, TypedFunc, WasmParams, WasmResults};
 
 use crate::{EffectPlugin, MIN_WASM_API_VERSION, PluginFrame, PluginManifest, PluginParams, WASM_API_VERSION};
-use effectcraft_effects::plugin::{PluginHost, PluginImage};
+use effectcraft_effects::plugin::{PluginHost, PluginImage, PluginParamKind};
 
 /// Instruction budget per frame: a fixed allowance plus some per pixel. Generous for per-pixel
 /// work, but a runaway loop stops instead of hanging the render.
@@ -213,9 +213,15 @@ impl WasmPlugin {
             .filter(|(y0, y1)| y0 < y1)
             .collect();
         let params_bytes = params.flat.len() * 8;
-        let mut pbytes = Vec::with_capacity(params_bytes);
-        for v in params.flat {
-            pbytes.extend_from_slice(&v.to_le_bytes());
+        // Flat indices holding Y coordinates of Point / Point3 parameters so each row band
+        // translates them into band-local pixel coordinates (`y - band_start`).
+        let mut point_y_slots: Vec<usize> = Vec::new();
+        let mut slot = 0usize;
+        for p in &self.manifest.params {
+            if matches!(p.kind, PluginParamKind::Point { .. } | PluginParamKind::Point3 { .. }) && slot + 1 < params.flat.len() {
+                point_y_slots.push(slot + 1);
+            }
+            slot += p.kind.width();
         }
         let scale = frame.scale;
         let results: Result<Vec<(u32, Vec<[f32; 4]>)>, String> = ranges
@@ -237,7 +243,11 @@ impl WasmPlugin {
                 inst.store.set_fuel(FUEL_BASE + FUEL_PER_PIXEL * band_px as u64).map_err(err)?;
                 let base = inst.alloc.call(&mut inst.store, total as i32).map_err(err)? as u32 as usize;
                 let mut buf = Vec::with_capacity(total);
-                buf.extend_from_slice(&pbytes);
+                let y_shift = f64::from(band_start);
+                for (i, &v) in params.flat.iter().enumerate() {
+                    let val = if point_y_slots.contains(&i) { v - y_shift } else { v };
+                    buf.extend_from_slice(&val.to_le_bytes());
+                }
                 push_pixels(&mut buf, &src[band_start as usize * w..band_end as usize * w]);
                 inst.memory.write(&mut inst.store, base, &buf).map_err(|e| format!("ec_alloc returned a buffer out of bounds: {e}"))?;
                 let px_ptr = (base + params_bytes) as i32;
