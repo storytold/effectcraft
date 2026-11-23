@@ -371,20 +371,41 @@ fn set_selected(s: &mut Session, p: &Value) -> Result<Value> {
     };
     let follow: Vec<usize> =
         p.get("follow").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_u64).filter_map(|d| usize::try_from(d).ok()).collect();
+    // A typed `*2`, `/2` (`factor`) or `+10` (`addend`) (#3195): each layer's own value times it
+    // or plus it, not the edited layer's result (which its range may have clamped).
+    let factor = p.get("factor").and_then(Value::as_f64).filter(|k| k.is_finite() && delta.is_none());
+    let addend = p.get("addend").and_then(Value::as_f64).filter(|n| n.is_finite() && delta.is_none());
+    let own_step = |v: f64| -> Option<f64> {
+        let r = match (factor, addend) {
+            (Some(k), _) => v * k,
+            (None, Some(n)) => v + n,
+            (None, None) => return None,
+        };
+        r.is_finite().then_some(r)
+    };
     // Each layer's own value where `set` writes it (a `time` other than the CTI keys there).
     let typed = |s: &Session, q: &mut Value, olid: LayerId, ouid: Uid| {
+        let at = snapped_key_time(s, cid, olid, q, "prop.set").ok().flatten();
+        if scalar && let Some(v) = components_at(s, cid, olid, ouid, at).and_then(|c| c.first().copied()).and_then(own_step) {
+            q["value"] = json!(v);
+        }
         if let (Some(dims), Some(n)) = (&dims, &new)
-            && let Some(mut c) = components_at(s, cid, olid, ouid, snapped_key_time(s, cid, olid, q, "prop.set").ok().flatten())
+            && let Some(mut c) = components_at(s, cid, olid, ouid, at)
         {
-            let change = dims.first().and_then(|&d| Some(n.get(d)? - c.get(d)?)).unwrap_or(0.0);
+            // The typed components' new values on this layer.
+            let typed_value = |c: &[f64], d: usize| {
+                if factor.is_some() || addend.is_some() { c.get(d).copied().and_then(own_step) } else { n.get(d).copied() }
+            };
+            let change = dims.first().and_then(|&d| Some(typed_value(&c, d)? - c.get(d)?)).unwrap_or(0.0);
+            let values: Vec<Option<f64>> = dims.iter().map(|&d| typed_value(&c, d)).collect();
             for &d in &follow {
                 if let Some(slot) = c.get_mut(d) {
                     *slot += change;
                 }
             }
-            for &d in dims {
-                if let (Some(slot), Some(v)) = (c.get_mut(d), n.get(d)) {
-                    *slot = *v;
+            for (&d, v) in dims.iter().zip(values) {
+                if let (Some(slot), Some(v)) = (c.get_mut(d), v) {
+                    *slot = v;
                 }
             }
             q["value"] = json!(c);
@@ -421,12 +442,35 @@ fn set_selected(s: &mut Session, p: &Value) -> Result<Value> {
             let mut q = twin_params(p, olid, ouid);
             shifted(s, &mut q, olid, ouid, k);
             typed(s, &mut q, olid, ouid);
+            if is_mask_feather(s, cid, olid, ouid) {
+                non_negative(&mut q["value"]);
+            }
             // (a layer that can't take it, e.g. a clamped or static property, keeps its value)
             let _ = set(s, &q);
         }
         Ok(out)
     };
     if merge_p(p).is_some() { run(s) } else { super::app_more::grouped(s, "Change Property", run) }
+}
+
+/// Whether property `uid` of `lid` is a mask's Mask Feather, which is never negative (After
+/// Effects; the panels clamp a typed or scrubbed value at 0).
+fn is_mask_feather(s: &Session, cid: ItemId, lid: LayerId, uid: Uid) -> bool {
+    let Some(l) = s.project.comp(cid).and_then(|c| c.layer(lid)) else { return false };
+    l.props.find(uid).is_some_and(|q| q.match_id == "feather") && l.props.parent_of(uid).is_some_and(|g| matches!(g.kind, GroupKind::Mask { .. }))
+}
+
+/// A JSON number, or each number of an array, raised to at least 0.
+fn non_negative(v: &mut Value) {
+    match v {
+        Value::Number(n) => {
+            if let Some(x) = n.as_f64().filter(|x| *x < 0.0) {
+                *v = json!(x.max(0.0));
+            }
+        }
+        Value::Array(a) => a.iter_mut().for_each(non_negative),
+        _ => {}
+    }
 }
 
 /// `prop.toggleAnimation`; with `selected`, the other selected layers' same property follows.
@@ -461,7 +505,7 @@ fn toggle_key_selected(s: &mut Session, p: &Value) -> Result<Value> {
         let want = added.as_bool().unwrap_or(true);
         for (olid, ouid) in twins {
             let _ = with_prop(s, "Add/Remove Keyframe", None, cid, olid, ouid, |pr, lt| {
-                if key_at(&pr.keys, lt).is_some() != want {
+                if !pr.static_only && key_at(&pr.keys, lt).is_some() != want {
                     toggle_key_at(pr, lt);
                 }
                 Ok(())
@@ -558,8 +602,9 @@ fn get(s: &mut Session, p: &Value) -> Result<Value> {
     } else if pr.has_expression()
         && let (Some(h), Some(comp)) = (s.expr.as_deref(), s.project.comp(cid))
     {
-        let mut ctx = crate::render::EvalCtx::new(&s.project, cid, comp, t);
-        ctx.expr = Some(h);
+        // The render's context, footage source included, so `sampleImage()` evaluates here as it
+        // renders and as `expr.errors` reports it (#3231).
+        let ctx = super::expr_tools::eval_ctx(s, cid, comp, t);
         match h.eval(&ctx, l, pr, &raw) {
             Ok(v) => out["evaluated"] = v.to_json(),
             Err(e) => {
@@ -589,6 +634,9 @@ fn add_key(s: &mut Session, p: &Value) -> Result<Value> {
     let at = snapped_key_time(s, cid, lid, p, "prop.addKey")?;
     let value = p.get("value").cloned();
     let count = with_prop(s, "Add Keyframe", None, cid, lid, uid, |pr, lt| {
+        if pr.static_only {
+            return Err(bad("prop.addKey", "this property can't be animated"));
+        }
         let t = at.unwrap_or(lt);
         let cur = pr.value_at(t);
         let v = match &value {
@@ -611,7 +659,12 @@ fn add_key(s: &mut Session, p: &Value) -> Result<Value> {
 
 fn toggle_key(s: &mut Session, p: &Value) -> Result<Value> {
     let (cid, lid, uid) = prop_ref(s, p, "prop.toggleKey")?;
-    with_prop(s, "Add/Remove Keyframe", None, cid, lid, uid, |pr, lt| Ok(json!(toggle_key_at(pr, lt))))
+    with_prop(s, "Add/Remove Keyframe", None, cid, lid, uid, |pr, lt| {
+        if pr.static_only {
+            return Err(bad("prop.toggleKey", "this property can't be animated"));
+        }
+        Ok(json!(toggle_key_at(pr, lt)))
+    })
 }
 
 /// Add a keyframe at layer time `lt` (true), or remove the one there (false).
@@ -686,6 +739,19 @@ fn apply_expr(pr: &mut Property, text: &Option<String>, enabled: Option<bool>, d
     }
 }
 
+/// Whether [`apply_expr`] would leave `pr` with an enabled expression it didn't have (a new one,
+/// one switched on, or new text).
+fn adds_expression(pr: &Property, text: &Option<String>, enabled: Option<bool>, def: &str) -> bool {
+    let mut after = pr.clone();
+    apply_expr(&mut after, text, enabled, def);
+    match (&pr.expr, &after.expr) {
+        (_, None) => false,
+        (_, Some(a)) if !a.enabled => false,
+        (Some(b), Some(a)) => !b.enabled || b.text != a.text,
+        (None, Some(_)) => true,
+    }
+}
+
 /// `{layer?, path|prop, ...}` for one property, or (Animation > Add Expression) no `path`/`prop`
 /// for the properties selected in the timeline, all in one undo step.
 fn set_expr(s: &mut Session, p: &Value) -> Result<Value> {
@@ -721,13 +787,30 @@ fn set_expr(s: &mut Session, p: &Value) -> Result<Value> {
     let results = s.edit("Expression", merge_p(p), |proj, state| {
         let mut out = vec![];
         let mut changed_types = vec![];
+        let mut skipped = None;
+        let mut applied = 0usize;
         for (((cid, lid, uid), def), time) in targets.iter().zip(&defs).zip(&times) {
             let pr = layer_mut(proj, *cid, *lid)?.props.find_mut(*uid).ok_or_else(|| bad(C, "property vanished"))?;
+            // A property that can't be animated takes no expression (one an older document has
+            // may still be disabled or removed): named, that is an error; in a selection it is
+            // left out, as Add Keyframe leaves it out.
+            if pr.static_only && adds_expression(pr, &text, enabled, def) {
+                if explicit {
+                    return Err(bad(C, format!("{} can't have an expression", pr.name)));
+                }
+                skipped = Some(pr.name.clone());
+                out.push(Value::Null);
+                continue;
+            }
             apply_expr(pr, &text, enabled, def);
+            applied += 1;
             out.push(json!(pr.expr.as_ref().map(|e| e.text.clone())));
             if pr.match_id == "type" {
                 changed_types.push((*cid, *lid, *uid, *time));
             }
+        }
+        if let Some(name) = skipped.filter(|_| applied == 0) {
+            return Err(bad(C, format!("{name} can't have an expression")));
         }
         // All selected targets must be edited before a Type change can remove inner controls.
         for (cid, lid, uid, time) in changed_types {
@@ -1365,8 +1448,11 @@ fn convert_expr_to_keys(s: &mut Session, p: &Value) -> Result<Value> {
     if p.get("path").is_none() && p.get("prop").is_none() && p.get("layer").is_none() {
         let cid = comp_id(s, p)?;
         let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
-        let sel: Vec<(LayerId, Uid)> =
-            selected_leaf_props(s).into_iter().filter(|(l, u)| comp.layer(*l).and_then(|l| l.props.find(*u)).is_some_and(Property::has_expression)).collect();
+        // (a property that can't be animated is left out, as Add Keyframe leaves it out)
+        let sel: Vec<(LayerId, Uid)> = selected_leaf_props(s)
+            .into_iter()
+            .filter(|(l, u)| comp.layer(*l).and_then(|l| l.props.find(*u)).is_some_and(|pr| pr.has_expression() && !pr.static_only))
+            .collect();
         if sel.is_empty() {
             return Err(bad(CMD, "no `path` given and no selected property has an expression"));
         }
@@ -1414,6 +1500,10 @@ fn convert_one_expr(s: &mut Session, cid: ItemId, lid: LayerId, uid: Uid) -> Res
     let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?.clone();
     let layer = comp.layer(lid).ok_or(EngineError::NoComp)?.clone();
     let pr = layer.props.find(uid).ok_or_else(|| bad("prop.convertExpressionToKeyframes", "no property"))?.clone();
+    // (an expression an older document left on a property that can't be animated: no keys)
+    if pr.static_only {
+        return Err(bad("prop.convertExpressionToKeyframes", format!("{} can't be animated", pr.name)));
+    }
     let fd = comp.frame_duration();
     check_convertible(fd.0, &layer)?;
     let mut keys = vec![];
@@ -1445,6 +1535,7 @@ fn convert_one_expr(s: &mut Session, cid: ItemId, lid: LayerId, uid: Uid) -> Res
     })
 }
 
+/// Returns the command specs for the property commands (get, set, keyframes, expressions and the rest).
 pub fn specs() -> Vec<CommandSpec> {
     vec![
         query!("prop.get", "Get Property", "{layer?, path|prop, time? (comp s)}", get),
@@ -1453,7 +1544,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Set Property Value",
             [],
             None,
-            "{layer?, path|prop, value, time? (layer s by default), timeBase?: layer|comp, merge?, selected? (also the other selected layers), offset? (them by the same change), proportional? (with offset: Proportional Scrubbing, each layer by its share in selection order, the first none, the last all), dims? (with selected, a typed value: the components edited, e.g. [2] for Z; the other layers keep the rest of their own value), follow? (with dims: components that move on each other layer by the change its first typed component takes)}",
+            "{layer?, path|prop, value, time? (layer s by default), timeBase?: layer|comp, merge?, selected? (also the other selected layers), offset? (them by the same change), proportional? (with offset: Proportional Scrubbing, each layer by its share in selection order, the first none, the last all), dims? (with selected, a typed value: the components edited, e.g. [2] for Z; the other layers keep the rest of their own value), follow? (with dims: components that move on each other layer by the change its first typed component takes), factor? (with selected, a typed `*` or `/`: the other layers take their own value times it, in the dims components of a vector), addend? (the same for a typed `+`: their own value plus it)}",
             has_layers,
             set_selected
         ),

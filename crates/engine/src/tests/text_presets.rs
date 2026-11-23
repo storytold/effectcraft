@@ -139,7 +139,7 @@ fn one_selected_property_saves_its_whole_animator() {
     let end = saved[0].prop("selectors/rangeSelector/end").unwrap().uid;
     let path = save(&mut s, "one-property", source, &[end]);
     let file: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-    assert_eq!(file["effectcraftAnimationPreset"], 3);
+    assert_eq!(file["effectcraftAnimationPreset"], 4);
     assert_eq!(file["properties"], json!([]));
     assert_eq!(file["textAnimators"].as_array().unwrap().len(), 1);
     let target = new_text(&mut s, "Target");
@@ -336,6 +336,49 @@ fn an_older_preset_updates_animators_and_asks_to_be_saved_again_without_them() {
     assert!(r.unwrap_err().to_string().contains("save it again"));
     assert_eq!(animators(&s, fresh), vec![]);
     assert_eq!(s.history.undo.len(), steps);
+}
+
+/// A format 3 preset holds whole animators, and its Cineon Converter Gamma has no
+/// `cineonVersion`. Its animators are made on the layer and its Gamma lands as a version 1
+/// value. The same preset in format 4 keeps the Gamma's version 2. A loose animator path in a
+/// format 3 preset is not reported as saved by an earlier version.
+#[test]
+fn a_format_3_preset_applies_its_animators_and_a_version_1_cineon_gamma() {
+    let mut s = session();
+    let source = new_text(&mut s, "Source");
+    let animator = fade_on(&mut s, source, "Fade In");
+    let cineon = |s: &Session, layer: u64, id: &str| {
+        let l = s.active_comp().unwrap().layer(LayerId(layer)).unwrap();
+        l.effects().unwrap().groups().next().unwrap().prop(id).unwrap().clone()
+    };
+    s.execute("effect.apply", json!({"layers": [source], "effect": "Cineon Converter"})).unwrap();
+    s.execute("prop.set", json!({"layer": source, "path": "effects/#1/gamma", "value": 1.3})).unwrap();
+    let gamma = cineon(&s, source, "gamma").uid;
+    let path = save(&mut s, "format-3", source, &[animator, gamma]);
+    let format_4: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(format_4["effectcraftAnimationPreset"], 4);
+    assert_eq!(format_4["textAnimators"].as_array().unwrap().len(), 1);
+    assert_eq!(format_4["properties"][0]["cineonVersion"], json!(2.0));
+    let mut format_3 = format_4.clone();
+    format_3["effectcraftAnimationPreset"] = json!(3);
+    format_3["properties"][0].as_object_mut().unwrap().remove("cineonVersion");
+
+    for (preset, version) in [(format_3, 1.0), (format_4, 2.0)] {
+        let target = new_text(&mut s, "Target");
+        s.execute("effect.apply", json!({"layers": [target], "effect": "Cineon Converter"})).unwrap();
+        assert_eq!(cineon(&s, target, "version").value, KV::Scalar(2.0));
+        let r = s.execute("anim.applyPreset", json!({"preset": preset, "layers": [target]})).unwrap();
+        assert_eq!((r["applied"].as_u64(), r["skipped"].clone()), (Some(2), json!([])), "version {version}");
+        assert_eq!(names(&s, target), ["Fade In"], "version {version}");
+        assert_eq!((cineon(&s, target, "gamma").value, cineon(&s, target, "version").value), (KV::Scalar(1.3), KV::Scalar(version)));
+    }
+
+    let loose = json!({"effectcraftAnimationPreset": 3, "properties": [{"path": "text/animators/animator/properties/opacity", "value": KV::Scalar(40.0), "keys": []}], "effects": []});
+    let fresh = new_text(&mut s, "Fresh");
+    let message = s.execute("anim.applyPreset", json!({"preset": loose, "layers": [fresh]})).unwrap_err().to_string();
+    assert!(message.contains("nothing in this preset fits the selected layer(s)"), "{message}");
+    assert!(!message.contains("save it again"), "{message}");
 }
 
 /// A malformed file, or a key that can't move to a later layer's playhead, is an error that
