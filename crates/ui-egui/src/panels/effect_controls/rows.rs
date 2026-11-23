@@ -720,7 +720,7 @@ fn curve_row(app: &mut EffectcraftApp, ui: &mut egui::Ui, cx: &CurveRowCx, actio
         } else {
             np.format()
         };
-        actions.push(("prop.set".into(), json!({"layer": layer.id.0, "prop": uid, "value": next_val, "merge": key})));
+        actions.push(("prop.set".into(), json!({"layer": layer.id.0, "prop": uid, "value": next_val, "merge": key, "selected": true})));
     }
     p.text(pos2(gr.min.x, gr.max.y + 12.0), Align2::LEFT_CENTER, crate::i18n::tr("Click adds a point; drag one off to remove"), Tokens::ui(10.5), t.text_faint);
 }
