@@ -18,6 +18,7 @@ mod opus_roundtrip;
 mod prores_color;
 mod render_settings;
 mod roundtrip;
+mod support;
 mod targa_sequence;
 mod uncompressed_mov;
 mod vp9_roundtrip;

@@ -11,6 +11,13 @@ use super::{Appearance, General, Map, PREFS_VERSION, Prefs, Startup, Value, json
 ///   old default becomes the new one (a size the user chose is kept).
 /// - version 3 and earlier could still hold `createSplitLayersAbove: false`, the default before
 ///   #2083 (every save kept it); it becomes After Effects' default, above (#2545).
+/// - version 4 and earlier had the Layer Cache, Footage Frame Cache and Preview (RAM) Cache
+///   budgets (`memory.layerCacheMb` / `mediaCacheMb` / `previewCacheMb`); they are dropped: the
+///   caches share one budget (#3298).
+/// - version 5 and earlier saved Cache Frames When Idle off, the default then (every save kept
+///   it); it becomes the new default, on, once (#3321). Off saved later is the user's choice.
+///   (Released builds wrote version 4; version 5 came only from pre-release builds of #3301,
+///   nearly all of them with the default still off. A file without a version predates both.)
 pub fn migrate(mut v: Value) -> Value {
     let Some(obj) = v.as_object_mut() else { return json!({}) };
     let version = obj.get("version").and_then(Value::as_u64).unwrap_or(0);
@@ -49,6 +56,20 @@ pub fn migrate(mut v: Value) -> Value {
         && g.get("createSplitLayersAbove") == Some(&json!(false))
     {
         g.insert("createSplitLayersAbove".into(), json!(true));
+    }
+    // Version 4 and earlier had three cache budgets (#3298): the caches now share one budget
+    // from RAM Reserved for Other Applications. The old keys are removed whatever the version
+    // says, not kept as unknown keys (the page keeps those and would write them back forever).
+    if let Some(m) = obj.get_mut("memory").and_then(Value::as_object_mut) {
+        for key in ["layerCacheMb", "mediaCacheMb", "previewCacheMb"] {
+            m.remove(key);
+        }
+    }
+    if version < 6
+        && let Some(p) = obj.get_mut("previews").and_then(Value::as_object_mut)
+        && p.get("cacheFramesWhenIdle") == Some(&json!(false))
+    {
+        p.insert("cacheFramesWhenIdle".into(), json!(true));
     }
     // Settings saved before appearance modes had one theme: keep showing it, as a fixed Dark or
     // Light mode, instead of switching established users to Auto.
@@ -155,10 +176,6 @@ impl Prefs {
                 l.color = d.color.clone();
             }
         }
-        let m = &mut self.memory;
-        m.layer_cache_mb = m.layer_cache_mb.clamp(64, 1 << 20);
-        m.media_cache_mb = m.media_cache_mb.clamp(64, 1 << 20);
-        m.preview_cache_mb = m.preview_cache_mb.clamp(64, 1 << 20);
         self.grids.grid_spacing = self.grids.grid_spacing.clamp(1.0, 10_000.0);
         let n = self.general.recent_items as usize;
         self.recent_projects.truncate(n);

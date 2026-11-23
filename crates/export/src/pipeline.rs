@@ -89,8 +89,9 @@ const PROBE_CPU_FRAMES: usize = 8;
 /// Jobs shorter than this render on the project's compositor without measuring: the frames
 /// the slower one renders for the measurement would cost more than they could save.
 const PROBE_MIN_JOB: u64 = 12;
-/// Bytes each of a job's two layer caches (one per compositor) may hold: together what the
-/// job's single cache held before (`LayerCache::default()`).
+/// Bytes each of a job's own two layer caches (one per compositor) may hold when the caller
+/// gives no budget ([`crate::JobOptions::cache_budget`]): together what the job's single cache
+/// held before (`LayerCache::default()`).
 pub const CACHE_BUDGET: usize = 1 << 29;
 
 /// The faster compositor from measured milliseconds per frame (`None`: not measured, or the
@@ -276,7 +277,7 @@ pub(crate) struct Cx<'a> {
 
 /// A job's layer caches: its own, or those of the Render Queue run it belongs to.
 enum Caches<'a> {
-    Own { gpu: Box<LayerCache>, cpu: Box<LayerCache> },
+    Own { gpu: std::sync::Arc<LayerCache>, cpu: std::sync::Arc<LayerCache> },
     Run(crate::JobCaches<'a>),
 }
 
@@ -338,7 +339,17 @@ impl<'a> Cx<'a> {
         let frame_times = (job.options.log == RenderLog::PlusPerFrameInfo).then(|| Mutex::new(Vec::new()));
         let caches = match job.options.caches {
             Some(c) => Caches::Run(c),
-            None => Caches::Own { gpu: Box::new(LayerCache::new(CACHE_BUDGET)), cpu: Box::new(LayerCache::new(CACHE_BUDGET)) },
+            None => {
+                // (in the memory accountant's common budget: they give way with the other caches)
+                let budget = job.options.cache_budget.unwrap_or(CACHE_BUDGET);
+                let (gpu, cpu) = (std::sync::Arc::new(LayerCache::new(budget)), std::sync::Arc::new(LayerCache::new(budget)));
+                let accountant = effectcraft_render::memory::Accountant::global();
+                for cache in [&gpu, &cpu] {
+                    let holder: std::sync::Arc<dyn effectcraft_render::memory::MemoryHolder> = cache.clone();
+                    accountant.register(&holder);
+                }
+                Caches::Own { gpu, cpu }
+            }
         };
         // With deferred readbacks, buffers computed from a missed pass's placeholders are not kept.
         for r in [crate::JobRenderer::Gpu, crate::JobRenderer::Cpu] {
@@ -1279,6 +1290,35 @@ mod tests {
             options: Default::default(),
         };
         assert_eq!(Cx::new(&job).gpu_cap(), None, "no accelerator");
+    }
+
+    #[test]
+    fn a_one_off_exports_caches_take_the_budget_it_is_given() {
+        // #3941: a one-off export's own caches had 512 MiB each whatever the memory budget; the
+        // session's budget for an export's caches comes with the job now.
+        use effectcraft_project::render_queue::{OutputFormat, OutputModule, RenderSettings};
+        use effectcraft_render::NoFootage;
+        let (settings, output) = (RenderSettings::default(), OutputModule::for_format(OutputFormat::PngSequence));
+        let p = Project::default();
+        for (given, want) in [(None, CACHE_BUDGET), (Some(1500 << 20), 1500 << 20)] {
+            let job = Job {
+                project: &p,
+                footage: &NoFootage,
+                expr: None,
+                accel: None,
+                comp: effectcraft_project::ItemId(0),
+                settings: &settings,
+                output: &output,
+                path: "/c/f_[#####].png",
+                sink: None,
+                nested_switches: true,
+                options: crate::JobOptions { cache_budget: given, ..Default::default() },
+            };
+            let cx = Cx::new(&job);
+            for r in [crate::JobRenderer::Gpu, crate::JobRenderer::Cpu] {
+                assert_eq!(cx.caches.of(r).budget(), want, "{given:?} {r:?}");
+            }
+        }
     }
 
     /// A resumed sequence can start with one or two missing frames. Once emitted, their

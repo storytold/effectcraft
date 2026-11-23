@@ -128,11 +128,23 @@ fn better(a: (f64, u8), b: (f64, u8)) -> bool {
     if (a.0 - b.0).abs() < 1e-6 { a.1 < b.1 } else { a.0 < b.0 }
 }
 
+/// How much nearer (as a share of the tolerance: 2 of the viewer's 8 screen points, whatever the
+/// zoom) a vertical and a horizontal line together must be than a point target to win over it
+/// when one of the two lines runs through the point. A layer's point lies on that layer's own
+/// edge and centre lines, so such a pair is only as near as the point itself plus whatever a
+/// foreign line (the comp's centre row, a guide) gains on the other axis; without the margin that
+/// pair took the foreign axis and left the feature just off the point, more often the wider the
+/// tolerance is in comp pixels, i.e. at 100 % rather than zoomed in (#2681). A pair of lines that
+/// both miss the point (a guide crossing beside a layer's point) gets no margin, so such an
+/// intersection stays reachable right next to the point.
+pub const POINT_BIAS: f64 = 0.25;
+
 /// Snap feature points `sources` (comp pixels) to the nearest target within `tol` comp pixels.
 /// A point target snaps both axes and wins unless a vertical and a horizontal line both resolve
-/// and together lie nearer than it (one line alone leaves the other axis free, so it never beats
-/// a point: a layer's edge midpoint lies on its edge line); otherwise the nearest vertical and
-/// horizontal lines snap x and y independently. Ties go to the lower priority value.
+/// and together lie nearer than it, by more than [`POINT_BIAS`] of `tol` when one of them runs
+/// through the point (one line alone leaves the other axis free, so it never beats a point: a
+/// layer's edge midpoint lies on its edge line); otherwise the nearest vertical and horizontal
+/// lines snap x and y independently. Ties go to the lower priority value.
 pub fn snap(sources: &[[f64; 2]], targets: &[SnapTarget], tol: f64) -> Option<Snap> {
     let mut best_pt: Option<((f64, u8), [f64; 2], SnapTarget)> = None;
     let mut best_x: Option<((f64, u8), [f64; 2], SnapTarget)> = None;
@@ -155,8 +167,15 @@ pub fn snap(sources: &[[f64; 2]], targets: &[SnapTarget], tol: f64) -> Option<Sn
         }
     }
     let both_lines = best_x.zip(best_y).map_or(f64::INFINITY, |(x, y)| x.0.0.hypot(y.0.0));
+    // A line of the pair through the point: the point's own edge / centre line (`at`: the
+    // line's axis, 0 for x).
+    let through = |line: Option<((f64, u8), [f64; 2], SnapTarget)>, at: usize| {
+        best_pt.zip(line).is_some_and(|((_, _, p), (_, _, l))| (l.pos[at] - p.pos[at]).abs() < 1e-6)
+    };
+    // (At least a hair, so an exact tie goes to the point.)
+    let bias = if through(best_x, 0) || through(best_y, 1) { (tol * POINT_BIAS).max(1e-9) } else { 1e-9 };
     if let Some((k, s, t)) = best_pt
-        && k.0 <= both_lines + 1e-9
+        && k.0 <= both_lines + bias
     {
         return Some(Snap { delta: [t.pos[0] - s[0], t.pos[1] - s[1]], hits: vec![t], at: t.pos });
     }
@@ -187,6 +206,50 @@ pub fn layer_features(ctx: &EvalCtx, layer: &Layer) -> Vec<[f64; 2]> {
     out.extend(anchor_feature(ctx, layer, &m));
     out.extend(layer_vertices(ctx, layer));
     out
+}
+
+/// [`snap`] for a drag Shift keeps to one axis (`along_x`: it moves along x and y stays put, else
+/// the other way round): only the free coordinate snaps, so the feature never leaves the axis
+/// (#3229). A point target acts as a line through it across the drag (a vertical line at its x
+/// for a drag along x) that reaches it only within `tol` on each axis (a square around the point),
+/// so the feature lines up with a point near the axis, not with every point in the comp; lines
+/// along the drag (horizontal ones for a drag along x) would only move the locked coordinate and
+/// are left out. The nearest target wins, ties to the lower priority value. A hit on a point
+/// reports the point (the feedback box) and the line from it to where the feature landed.
+pub fn snap_along(sources: &[[f64; 2]], targets: &[SnapTarget], tol: f64, along_x: bool) -> Option<Snap> {
+    // (Key, source, target, and the free coordinate it snaps to.)
+    let mut best: Option<((f64, u8), [f64; 2], SnapTarget, f64)> = None;
+    for s in sources {
+        let (free, along) = if along_x { (s[0], s[1]) } else { (s[1], s[0]) };
+        for t in targets {
+            // The line the target snaps as: its coordinate and extent along it.
+            let (line, span) = match (t.kind, along_x) {
+                (SnapKind::Point, true) => (t.pos[0], Some([t.pos[1] - tol, t.pos[1] + tol])),
+                (SnapKind::Point, false) => (t.pos[1], Some([t.pos[0] - tol, t.pos[0] + tol])),
+                (SnapKind::VLine, true) => (t.pos[0], t.span),
+                (SnapKind::HLine, false) => (t.pos[1], t.span),
+                (SnapKind::VLine, false) | (SnapKind::HLine, true) => continue,
+            };
+            let d = (line - free).abs();
+            if d > tol || span.is_some_and(|[a, b]| along < a || along > b) {
+                continue;
+            }
+            let key = (d, t.priority);
+            if best.as_ref().is_none_or(|(k, _, _, _)| better(key, *k)) {
+                best = Some((key, *s, *t, line));
+            }
+        }
+    }
+    let (_, s, t, line) = best?;
+    let (delta, at) = if along_x { ([line - s[0], 0.0], [line, s[1]]) } else { ([0.0, line - s[1]], [s[0], line]) };
+    let mut hits = vec![t];
+    if t.kind == SnapKind::Point {
+        // The alignment, drawn from the point to the feature.
+        let (from, to) = if along_x { (t.pos[1], at[1]) } else { (t.pos[0], at[0]) };
+        let l = if along_x { SnapTarget::vline(line, t.priority, t.source) } else { SnapTarget::hline(line, t.priority, t.source) };
+        hits.push(l.within(Some([from, to])));
+    }
+    Some(Snap { delta, hits, at })
 }
 
 /// A layer's content box in comp space: corners (top left, top right, bottom right, bottom

@@ -23,7 +23,9 @@ impl EffectcraftApp {
         ctx.set_zoom_factor(p.appearance.ui_scale as f32 / 100.0);
         self.ui.cache_when_idle = p.previews.cache_frames_when_idle;
         self.ui.viewer.fast_preview = p.previews.fast_previews;
-        self.frames.set_budget(p.cache_budgets(self.session.sys_memory).preview);
+        // No limit of its own below the common budget on the desktop, the browser's cap there:
+        // the memory accountant keeps it (#3298).
+        self.frames.set_budget(self.session.memory_budget().caps(cfg!(target_arch = "wasm32")).preview);
     }
 
     /// Change settings from the UI (applied next frame and saved).

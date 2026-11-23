@@ -69,7 +69,7 @@ fn ref_decode_channel(p: &Psd, offset: usize, len: usize, w: usize, h: usize) ->
         }
         2 | 3 => {
             let rest = r.bytes(r.remaining())?;
-            let mut v = miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(rest, rowb * h).map_err(|e| Error::Invalid(format!("zip: {:?}", e.status)))?;
+            let mut v = craft_psd::compression::zip_decompress_up_to(rest, rowb * h).map_err(|e| Error::Invalid(e.to_string()))?;
             v.resize(rowb * h, 0);
             if comp == 3 {
                 ref_unpredict(p.depth, &mut v, w, h);
@@ -112,8 +112,7 @@ fn ref_composite(p: &Psd) -> Result<Pixels> {
         }
         2 | 3 => {
             let rest = r.bytes(r.remaining())?;
-            let v =
-                miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(rest, want * rowb * h).map_err(|e| Error::Invalid(format!("zip: {:?}", e.status)))?;
+            let v = craft_psd::compression::zip_decompress_up_to(rest, want * rowb * h).map_err(|e| Error::Invalid(e.to_string()))?;
             for (c, pl) in planes.iter_mut().enumerate().take(want) {
                 let mut plane = v.get(c * rowb * h..(c + 1) * rowb * h).ok_or(Error::Truncated)?.to_vec();
                 if comp == 3 {
@@ -385,7 +384,7 @@ fn stream(planes: &[Vec<u8>], w: usize, h: usize, depth: u16, comp: u16) -> Vec<
     match comp {
         0 => planes.iter().for_each(|p| out.extend(p)),
         1 => {
-            let rows: Vec<Vec<u8>> = planes.iter().flat_map(|p| p.chunks(rowb.max(1)).map(pack_bits)).collect();
+            let rows: Vec<Vec<u8>> = planes.iter().flat_map(|p| p.chunks(rowb.max(1)).map(craft_psd::compression::packbits::encode_vec)).collect();
             rows.iter().for_each(|r| out.extend((r.len() as u16).to_be_bytes()));
             rows.iter().for_each(|r| out.extend(r));
         }
@@ -641,12 +640,134 @@ fn placed_bake_solves_the_quad_once() {
     assert_eq!(counters::take(&QUAD), 1, "33×33 mapped points, one solve (was 1089)");
     so.placed_size(20.0, 10.0, 1.0);
     assert_eq!(counters::take(&QUAD), 1);
-    // The bounds, the size and the 49×49 grid of one bake share a single solve (was 1089 × 2 + 2401).
+    // The bake itself runs in craft-psd, so it no longer bumps this crate's quad counter.
     so.render_placed(&content(20, 10), 1.0, None).unwrap();
-    assert_eq!(counters::take(&QUAD), 1);
+    assert_eq!(counters::take(&QUAD), 0);
     so.render_placed(&content(20, 10), 1.0, Some((40, 40))).unwrap();
-    assert_eq!(counters::take(&QUAD), 1);
+    assert_eq!(counters::take(&QUAD), 0);
     // A single `map` still solves for itself.
     so.map([1.0, 1.0], 20.0, 10.0);
     assert_eq!(counters::take(&QUAD), 1);
+}
+
+#[test]
+fn shared_unpredict_keeps_tail_bytes_and_refuses_unbudgeted_scratch() {
+    for depth in [8u16, 16, 32] {
+        let p = Psd { depth, ..base() };
+        let (w, h) = (3, 2);
+        let row = w * usize::from(depth / 8);
+        let mut actual: Vec<u8> = (0..row * 3 + 1).map(|i| (i * 31 % 251) as u8).collect();
+        let mut expected = actual.clone();
+        ref_unpredict(depth, &mut expected, w, h);
+        p.unpredict(&mut actual, w, h, &mut Budget::new(u64::MAX)).unwrap();
+        assert_eq!(actual, expected, "complete extra rows and partial tails stay untouched");
+    }
+    let p = Psd { depth: 32, ..base() };
+    let mut bytes = vec![0x31; 24];
+    assert!(p.unpredict(&mut bytes, 3, 2, &mut Budget::new(11)).is_err());
+    assert_eq!(bytes, vec![0x31; 24], "budget refusal precedes mutation");
+}
+
+#[test]
+fn shared_descriptor_parser_preserves_application_count_limits() {
+    use craft_psd::descriptor::{Descriptor as Shared, Value};
+    let mut bytes = Shared::new("test").to_bytes();
+    let end = bytes.len();
+    bytes[end - 4..].copy_from_slice(&100_001u32.to_be_bytes());
+    let error = crate::descriptor::read_descriptor(&mut Reader::new(&bytes)).unwrap_err();
+    assert!(matches!(error, Error::Invalid(ref message) if message.contains("too many descriptor items")));
+    let mut bytes = Shared::new("test").with("list", Value::List(vec![])).to_bytes();
+    let end = bytes.len();
+    bytes[end - 4..].copy_from_slice(&1_000_001u32.to_be_bytes());
+    let error = crate::descriptor::read_descriptor(&mut Reader::new(&bytes)).unwrap_err();
+    assert!(matches!(error, Error::Invalid(ref message) if message.contains("too many descriptor list items")));
+}
+
+#[test]
+fn placed_bake_keeps_the_borrowed_source_available_on_rejection() {
+    let object = SmartObject { uuid: String::new(), quad: [[0.0, 0.0], [2.0, 0.0], [2.0, 2.0], [0.0, 2.0]], size: None, warp: None };
+    let source = Pixels { width: 2, height: 2, data: vec![[1.0, 0.5, 0.25, 0.5]; 4] };
+    let original = source.data.clone();
+    let ptr = source.data.as_ptr();
+    assert!(object.render_placed(&source, 1.0, Some((u32::MAX, u32::MAX))).is_none());
+    assert_eq!(source.data, original);
+    assert_eq!(source.data.as_ptr(), ptr);
+    assert!(object.render_placed(&source, 1.0, Some((2, 2))).is_some());
+}
+
+#[test]
+fn identifier_and_index_references_preserve_non_null_classes_exactly() {
+    use craft_psd::descriptor::{Class, Descriptor as Shared, Id, ReferenceItem, UnicodeString, Value};
+    for class in [
+        Class { name: UnicodeString(vec![0xD800, 0]), class_id: Id::Code(*b"Lyr ") },
+        Class { name: UnicodeString::default(), class_id: Id::Code(*b"null") },
+        Class { name: UnicodeString::default(), class_id: Id::Str(b"null".to_vec()) },
+        Class { name: UnicodeString(vec![0]), class_id: Id::Code(*b"null") },
+    ] {
+        let mut original = Shared::new("test")
+            .with("refs", Value::Reference(vec![ReferenceItem::Identifier { class: class.clone(), id: u32::MAX }, ReferenceItem::Index { class, index: 7 }]));
+        original.name = UnicodeString(vec![0]);
+        let bytes = original.to_bytes();
+        let local = crate::descriptor::read_descriptor(&mut Reader::new(&bytes)).unwrap();
+        let mut out = Vec::new();
+        crate::descriptor::write_descriptor(&mut out, &local);
+        assert_eq!(Shared::from_bytes(&out).unwrap(), original);
+        assert_eq!(out, bytes);
+    }
+}
+#[test]
+fn shared_descriptor_nesting_preserves_the_application_boundary() {
+    use craft_psd::descriptor::{Descriptor as Shared, Value};
+    for count in [33, 64, 65] {
+        let mut value = Value::Integer(1);
+        for _ in 0..count {
+            value = Value::Descriptor(Shared::new("null").with("next", value));
+        }
+        let bytes = Shared::new("null").with("root", value).to_bytes();
+        let result = crate::descriptor::read_descriptor(&mut Reader::new(&bytes));
+        assert_eq!(result.is_ok(), count <= 64, "nested descriptor count {count}: {result:?}");
+    }
+}
+
+#[test]
+fn shared_placed_layer_adapter_normalizes_before_warp_classification() {
+    use craft_psd::descriptor::{Descriptor as Shared, Id, Value};
+    let warp = Shared::new("warp")
+        .with("warpStyle", Value::Enumerated { type_id: Id::new("warpStyle"), value: Id::new("warpArc") })
+        .with("warpValue", Value::Double(f64::NAN))
+        .with("warpPerspective", Value::Double(f64::INFINITY))
+        .with("warpPerspectiveOther", Value::Double(f64::NEG_INFINITY));
+    let quad = [f64::NAN, 0.0, 20.0, 0.0, 20.0, 10.0, 0.0, 10.0];
+    let descriptor = Shared::new("null").with("Trnf", Value::List(quad.into_iter().map(Value::Double).collect())).with("warp", Value::Descriptor(warp));
+    let mut bytes = b"soLD".to_vec();
+    bytes.extend_from_slice(&4u32.to_be_bytes());
+    bytes.extend_from_slice(&16u32.to_be_bytes());
+    bytes.extend_from_slice(&descriptor.to_bytes());
+    let shared = craft_psd::smart::SmartObject::from_placed_layer_data_with_limits(&bytes, crate::descriptor::PARSE_LIMITS).unwrap();
+    let object = crate::placed::from_craft_smart(shared);
+    assert_eq!(object.quad, [[0.0, 0.0], [20.0, 0.0], [20.0, 10.0], [0.0, 10.0]]);
+    assert!(object.warp.is_none(), "normalization must precede identity classification");
+    assert!(!object.needs_bake());
+    assert_eq!(object.map([10.0, 5.0], 20.0, 10.0), [10.0, 5.0]);
+}
+
+#[test]
+fn local_and_shared_warp_mapping_agree_on_overflowing_bounds() {
+    let mesh: Vec<_> = (0..4).flat_map(|j| (0..4).map(move |i| [i as f64 * 20.0 / 3.0, j as f64 * 10.0 / 3.0])).collect();
+    for bounds in [[-f64::MAX, 0.0, f64::MAX, 10.0], [0.0, -f64::MAX, 20.0, f64::MAX]] {
+        let shared = craft_psd::smart::SmartObject {
+            uuid: String::new(),
+            quad: [[0.0, 0.0], [20.0, 0.0], [20.0, 10.0], [0.0, 10.0]],
+            size: Some([20.0, 10.0]),
+            warp: Some(craft_psd::smart::Warp { style: "warpCustom".into(), bounds, cols: 1, rows: 1, mesh: mesh.clone(), ..Default::default() }),
+        };
+        let local = crate::placed::from_craft_smart(shared.clone());
+        for point in [[5.0, 2.5], [10.0, 5.0], [15.0, 7.5]] {
+            let actual = local.map(point, 20.0, 10.0);
+            assert_eq!(actual, shared.map(point, 20.0, 10.0));
+            for axis in 0..2 {
+                assert!((actual[axis] - point[axis]).abs() < 1e-9, "{bounds:?} {point:?}: {actual:?}");
+            }
+        }
+    }
 }
