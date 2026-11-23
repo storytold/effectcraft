@@ -296,11 +296,12 @@ fn import_footage(project: &mut Project, cx: &mut Ctx<'_>, item: &AepItem<'_, '_
         && let Some(found) = relocate(&path, folder, cx.options.exists)
     {
         // A sequence moves with its first file: the same folder change for every frame.
-        let (old_dir, new_dir) = (parent_of(&path), parent_of(&found));
-        for frame in &mut sequence {
-            if let Some(rest) = frame.strip_prefix(old_dir) {
-                *frame = format!("{new_dir}{rest}");
-            }
+        if !move_sequence(&mut sequence, &path, &found, &mut cx.sequence_bytes) {
+            let frames = sequence.len();
+            sequence.clear();
+            cx.col.lose_with(LossCategory::DamagedData, || {
+                format!("footage '{name}': a sequence of {frames} frames is longer than the import expands in its new folder; only its first file is linked")
+            });
         }
         path = found;
         present = true;
@@ -409,13 +410,43 @@ fn relocate(stored: &str, folder: &str, exists: &dyn Fn(&str) -> bool) -> Option
     let parts: Vec<&str> = stored.split(['\\', '/']).filter(|p| !p.is_empty() && *p != "." && *p != "..").collect();
     let sep = if folder.contains('\\') { '\\' } else { '/' };
     let folder = folder.trim_end_matches(['\\', '/']);
-    // Keep the drive or share out: only the components below it can move with the project.
-    let max = RELOCATE_DEPTH.min(parts.len().saturating_sub(1)).max(1);
-    (1..=max).rev().find_map(|k| {
-        let tail = parts.get(parts.len().checked_sub(k)?..)?;
+    // Keep the drive or share out: only the components below it can move with the project. A
+    // path that starts at `/`, or a relative one, has no such component.
+    let root = if stored.starts_with(r"\\") || stored.starts_with("//") {
+        2
+    } else if parts.first().is_some_and(|p| p.len() == 2 && p.ends_with(':') && p.starts_with(|c: char| c.is_ascii_alphabetic())) {
+        1
+    } else {
+        0
+    };
+    let below = parts.get(root..).unwrap_or_default();
+    (1..=RELOCATE_DEPTH.min(below.len())).rev().find_map(|k| {
+        let tail = below.get(below.len().checked_sub(k)?..)?;
         let candidate = format!("{folder}{sep}{}", tail.join(&sep.to_string()));
         (candidate != stored && exists(&candidate)).then_some(candidate)
     })
+}
+
+/// Moves every frame of `sequence` from the folder of `old` (its first file) to the folder of
+/// `found`, where that file was found now, joined with the separator `found` uses (a Windows
+/// sequence found below a Unix folder takes `/`). A longer folder makes every name longer: those
+/// bytes are charged to `bytes`, the import's budget of sequence names. When they do not fit,
+/// nothing changes and the result is `false`.
+fn move_sequence(sequence: &mut [String], old: &str, found: &str, bytes: &mut u64) -> bool {
+    let (old_dir, new_dir) = (parent_of(old), parent_of(found));
+    let sep = found.get(new_dir.len()..).and_then(|rest| rest.chars().next()).unwrap_or('/');
+    let longer = u64::try_from(new_dir.len().saturating_sub(old_dir.len())).unwrap_or(u64::MAX);
+    let grow = longer.saturating_mul(u64::try_from(sequence.len()).unwrap_or(u64::MAX));
+    if grow > *bytes {
+        return false;
+    }
+    *bytes -= grow;
+    for frame in sequence.iter_mut() {
+        if let Some(rest) = frame.strip_prefix(old_dir) {
+            *frame = format!("{new_dir}{sep}{}", rest.trim_start_matches(['\\', '/']));
+        }
+    }
+    true
 }
 
 /// The name After Effects shows for a footage item that stores none: the file's name, or for a
@@ -1254,6 +1285,44 @@ mod tests {
         for path in [r"C:\fixture\x\still.eps", "a.epsf", "a.epsi", "still.png", r"C:\dir.ai\file", "ai", ""] {
             assert!(!is_placed_page_path(path), "{path}");
         }
+    }
+
+    /// Footage moved with the project is looked for by every component below the stored path's
+    /// root (the drive, or a share's server and name), never by fewer real folders.
+    #[test]
+    fn relocation_keeps_the_folders_below_the_root() {
+        let at = |want: &'static str| move |p: &str| p == want;
+        assert_eq!(relocate("/assets/clip.mp4", "/project", &at("/project/assets/clip.mp4")).as_deref(), Some("/project/assets/clip.mp4"));
+        assert_eq!(relocate("assets/clip.mp4", "/project", &at("/project/assets/clip.mp4")).as_deref(), Some("/project/assets/clip.mp4"));
+        assert_eq!(relocate(r"D:\old\clip.mp4", r"E:\new", &at(r"E:\new\old\clip.mp4")).as_deref(), Some(r"E:\new\old\clip.mp4"));
+        assert_eq!(relocate(r"D:\old\clip.mp4", r"E:\new", &at(r"E:\new\D:\old\clip.mp4")), None);
+        // A share's server and name are its root.
+        assert_eq!(relocate(r"\\nas\media\x\clip.mp4", r"E:\new", &at(r"E:\new\media\x\clip.mp4")), None);
+        assert_eq!(relocate(r"\\nas\media\x\clip.mp4", r"E:\new", &at(r"E:\new\x\clip.mp4")).as_deref(), Some(r"E:\new\x\clip.mp4"));
+        // At most four components, the longest first.
+        let both = |p: &str| p == "/p/b/c/d/e.png" || p == "/p/e.png";
+        assert_eq!(relocate("/a/b/c/d/e.png", "/p", &both).as_deref(), Some("/p/b/c/d/e.png"));
+        // A bare root names no file.
+        assert_eq!(relocate(r"D:\", "/p", &|_| true), None);
+    }
+
+    /// A sequence moved to a folder with the other separator takes that separator, and the
+    /// longer names it gets there are charged to the import's budget.
+    #[test]
+    fn a_moved_sequence_takes_the_new_folder_and_its_cost() {
+        let old = r"C:\job\shots\f0001.png";
+        let found = "/project/shots/f0001.png";
+        let stored = || vec![old.to_string(), r"C:\job\shots\f0002.png".to_string()];
+        let mut frames = stored();
+        let mut budget = 1000;
+        assert!(move_sequence(&mut frames, old, found, &mut budget));
+        assert_eq!(frames, ["/project/shots/f0001.png", "/project/shots/f0002.png"]);
+        // "/project/shots" is 2 bytes longer than "C:\job\shots": 2 frames, 4 bytes.
+        assert_eq!(budget, 996);
+        let mut frames = stored();
+        let mut budget = 3;
+        assert!(!move_sequence(&mut frames, old, found, &mut budget));
+        assert_eq!((frames, budget), (stored(), 3));
     }
 
     #[test]
