@@ -247,6 +247,9 @@ fn prop_row(
         // A text parameter (Cryptomatte's Selection, Colorama's Output Cycle, config names):
         // typed in a field, set when it loses the focus (Esc keeps the old text).
         Value::Str(_) if matches!(prop.ui, ParamUi::Text) => value_text(app, ui, &cx, &value, actions),
+        // A curve parameter (plug-in curves): toggle twirl and show Reset in the row; the inline
+        // curve graph opens below when twirled open (or defaults open on first view).
+        Value::Str(_) if matches!(prop.ui, ParamUi::Curve { .. }) => value_curve(app, ui, &cx, actions),
         Value::Gradient(_) => value_gradient(app, &cx, &value),
         _ => {}
     }
@@ -616,6 +619,112 @@ fn gradient_at(g: &effectcraft_engine::keyframe::Gradient, f: f64) -> Color32 {
     Color32::from_rgb((c[0].clamp(0.0, 1.0) * 255.0) as u8, (c[1].clamp(0.0, 1.0) * 255.0) as u8, (c[2].clamp(0.0, 1.0) * 255.0) as u8)
 }
 
+/// Row controls for a [`ParamUi::Curve`] parameter: twirl toggle (graph shows below when expanded;
+/// closed by placing its uid in `fx_closed`, open by default) and a Reset link.
+fn value_curve(app: &mut EffectcraftApp, ui: &mut egui::Ui, cx: &PropCx, actions: &mut Actions) {
+    let PropCx { p, t, uid, cy, vx, swr, prop, .. } = *cx;
+    let open = !app.ui.fx_closed.contains(&uid);
+    let tw = Rect::from_center_size(pos2(swr.min.x - 9.0, cy), vec2(10.0, 10.0));
+    if widgets::twirl(ui, tw, open, egui::Id::unique(("ec-ctw", uid)), &t).clicked() {
+        if open {
+            app.ui.fx_closed.insert(uid);
+        } else {
+            app.ui.fx_closed.remove(&uid);
+        }
+    }
+    app.auto.add(&format!("effectControls.prop.{uid}.twirl"), tw, &prop.name);
+    let rr = Rect::from_min_size(pos2(vx, cy - 9.0), vec2(44.0, 18.0));
+    let resp = ui.interact(rr, egui::Id::unique(("ec-creset-p", uid)), Sense::click());
+    p.text(rr.center(), Align2::CENTER_CENTER, crate::i18n::tr("Reset"), Tokens::ui(11.5), if resp.hovered() { t.hot_text } else { t.text_dim });
+    app.auto.add(&format!("effectControls.prop.{uid}.reset"), rr, "Reset");
+    if resp.clicked() {
+        let rgb = matches!(prop.ui, ParamUi::Curve { rgb: true });
+        let identity =
+            if rgb { r#"{"rgb":"0,0 1,1","red":"0,0 1,1","green":"0,0 1,1","blue":"0,0 1,1"}"#.to_string() } else { fw::CurvePoints::identity().format() };
+        cx.set_step(actions, json!(identity));
+    }
+}
+
+/// Height of the inline curve editor drawn below a [`ParamUi::Curve`] property row.
+fn curve_row_height(width: f32, rgb: bool) -> f32 {
+    let size = (width - 72.0).clamp(120.0, 220.0);
+    let header = if rgb { 26.0 } else { 4.0 };
+    header + size + 24.0
+}
+
+/// Inline interactive curve graph for a [`ParamUi::Curve`] property (reusing the built-in Curves
+/// widget; single-channel or Master/Red/Green/Blue tabs when `rgb` is true).
+struct CurveRowCx<'a> {
+    p: &'a egui::Painter,
+    layer: &'a Layer,
+    prop: &'a Property,
+    ectx: &'a EvalCtx<'a>,
+    r: Rect,
+    x0: f32,
+    rgb: bool,
+}
+
+fn curve_row(app: &mut EffectcraftApp, ui: &mut egui::Ui, cx: &CurveRowCx, actions: &mut Actions) {
+    let CurveRowCx { p, layer, prop, ectx, r, x0, rgb } = *cx;
+    let t = app.tokens;
+    let uid = prop.uid;
+    let raw = match ectx.value(layer, prop) {
+        Value::Str(s) => s,
+        _ => String::new(),
+    };
+    let size = (r.width() - 72.0).clamp(120.0, 220.0);
+    let gx = (r.min.x + x0).min((r.max.x - size - 12.0).max(r.min.x + 12.0));
+    let mut channels =
+        if rgb { effectcraft_engine::effects::plugin::split_rgb_curve(&raw) } else { [raw.clone(), String::new(), String::new(), String::new()] };
+    let ch = if rgb { app.ui.fx_curve_channel.get(&uid).copied().unwrap_or(0).min(3) } else { 0 };
+    let gy = if rgb {
+        let cy = r.min.y + 13.0;
+        let cols = [Color32::from_gray(0xe8), Color32::from_rgb(0xf0, 0x50, 0x50), Color32::from_rgb(0x50, 0xd0, 0x60), Color32::from_rgb(0x50, 0x80, 0xff)];
+        for (i, col) in cols.iter().enumerate() {
+            let tr = Rect::from_min_size(pos2(gx + i as f32 * 24.0, cy - 9.0), vec2(20.0, 18.0));
+            let resp = ui.interact(tr, egui::Id::unique(("ec-pcurve-ch", uid, i)), Sense::click());
+            if i == ch {
+                p.rect_filled(tr, 3.0, t.row_selected);
+            } else if resp.hovered() {
+                p.rect_filled(tr, 3.0, t.hover);
+            }
+            p.circle_filled(tr.center(), 5.5, *col);
+            if i == ch {
+                p.circle_stroke(tr.center(), 7.0, Stroke::new(1.0, t.text));
+            }
+            app.auto.add(&format!("effectControls.prop.{uid}.channel.{i}"), tr, &prop.name);
+            if resp.clicked() {
+                app.ui.fx_curve_channel.insert(uid, i);
+            }
+        }
+        r.min.y + 26.0
+    } else {
+        r.min.y + 4.0
+    };
+    let cur = fw::CurvePoints::parse(&channels[ch]);
+    let gr = Rect::from_min_size(pos2(gx, gy), vec2(size, size));
+    let gid = egui::Id::unique(("ec-pcurve", uid, ch));
+    let (resp, edit) = fw::curves_graph(ui, gr, &cur, ch, fw::CurveMode { pencil: false, natural: true }, gid, &t);
+    app.auto.add(&format!("effectControls.prop.{uid}.curve"), gr, &prop.name);
+    if let Some(np) = edit.changed {
+        let key = gesture_key(ui, gid, resp.drag_started() || resp.clicked());
+        let next_val = if rgb {
+            channels[ch] = np.format();
+            json!({
+                "rgb": channels[0],
+                "red": channels[1],
+                "green": channels[2],
+                "blue": channels[3],
+            })
+            .to_string()
+        } else {
+            np.format()
+        };
+        actions.push(("prop.set".into(), json!({"layer": layer.id.0, "prop": uid, "value": next_val, "merge": key})));
+    }
+    p.text(pos2(gr.min.x, gr.max.y + 12.0), Align2::LEFT_CENTER, crate::i18n::tr("Click adds a point; drag one off to remove"), Tokens::ui(10.5), t.text_faint);
+}
+
 /// The twirled-open slider under a slider param: track, knob and the slider range's ends.
 #[allow(clippy::too_many_arguments)]
 fn slider_row(
@@ -762,7 +871,16 @@ pub(super) fn group_rows(
                     // A Timeline pick whip can be dropped here (After Effects).
                     crate::panels::timeline::whip_target(ui.ctx(), r.intersect(rect), layer.id.0, pr.uid, dims);
                 }
-                if app.ui.fx_slider_open.contains(&pr.uid) {
+                if let ParamUi::Curve { rgb } = pr.ui
+                    && !app.ui.fx_closed.contains(&pr.uid)
+                {
+                    let ch = curve_row_height(rect.width(), rgb);
+                    let cr = Rect::from_min_size(pos2(rect.min.x, *y), vec2(rect.width(), ch));
+                    *y += ch;
+                    if cr.max.y >= rect.min.y && cr.min.y <= rect.max.y {
+                        curve_row(app, ui, &CurveRowCx { p, layer, prop: pr, ectx, r: cr, x0: indent + 18.0, rgb }, actions);
+                    }
+                } else if app.ui.fx_slider_open.contains(&pr.uid) {
                     if matches!(pr.ui, ParamUi::Angle) {
                         let sr = Rect::from_min_size(pos2(rect.min.x, *y), vec2(rect.width(), DIAL_ROW));
                         *y += DIAL_ROW;

@@ -117,6 +117,60 @@ pub enum PluginParamKind {
         #[serde(default)]
         default: String,
     },
+    /// API 2: a 0..1 curve parameter shown as an interactive curve graph in Effect Controls
+    /// (single-channel `"x,y x,y ..."` or, when `rgb` is true, 4-channel Master/Red/Green/Blue
+    /// JSON `{"rgb":"...","red":"...","green":"...","blue":"..."}`). Read with
+    /// [`PluginParams::text`] (and sampled via [`PluginParams::curve_lut`]).
+    Curve {
+        #[serde(default)]
+        default: String,
+        #[serde(default)]
+        rgb: bool,
+    },
+}
+
+/// Number of uniform samples a [`PluginParamKind::Curve`] channel flattens to (over `0.0..=1.0`),
+/// so WebAssembly ABI 1/2 plug-ins can read a curve directly from `params[..]` as a lookup table
+/// while API 2 native / helper plug-ins can also read the raw point string via
+/// [`PluginParams::text`].
+pub const CURVE_LUT_SAMPLES: usize = 256;
+
+/// Sample one `"x,y x,y ..."` spline string into [`CURVE_LUT_SAMPLES`] values over `0.0..=1.0`.
+pub fn sample_curve_lut(spec: &str, out: &mut Vec<f64>) {
+    let curve = crate::color2::Curve::parse_natural(spec);
+    let denom = (CURVE_LUT_SAMPLES - 1) as f32;
+    for i in 0..CURVE_LUT_SAMPLES {
+        let x = i as f32 / denom;
+        let y = curve.as_ref().map_or(x, |c| c.eval(x).clamp(0.0, 1.0));
+        out.push(f64::from(y));
+    }
+}
+
+/// Parse an RGB curve parameter's JSON (`{"rgb": "...", "red": "...", "green": "...", "blue": "..."}`)
+/// into `[master, red, green, blue]` point strings, falling back to treating a plain string as the
+/// master curve and identity (`"0,0 1,1"`) for omitted channels.
+pub fn split_rgb_curve(spec: &str) -> [String; 4] {
+    let trimmed = spec.trim();
+    if trimmed.starts_with('{')
+        && let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(trimmed)
+    {
+        let get = |k: &str| map.get(k).and_then(serde_json::Value::as_str).unwrap_or("0,0 1,1").to_string();
+        return [get("rgb"), get("red"), get("green"), get("blue")];
+    }
+    let master = if trimmed.is_empty() { "0,0 1,1".to_string() } else { trimmed.to_string() };
+    [master, "0,0 1,1".to_string(), "0,0 1,1".to_string(), "0,0 1,1".to_string()]
+}
+
+/// Flatten a curve parameter into `out` (`CURVE_LUT_SAMPLES` entries for a single curve, or
+/// `CURVE_LUT_SAMPLES * 4` entries in `[rgb, red, green, blue]` order when `rgb` is true).
+pub fn flatten_curve_value(spec: &str, rgb: bool, out: &mut Vec<f64>) {
+    if rgb {
+        for ch in split_rgb_curve(spec) {
+            sample_curve_lut(&ch, out);
+        }
+    } else {
+        sample_curve_lut(spec, out);
+    }
 }
 
 fn hundred() -> f64 {
@@ -139,14 +193,16 @@ impl PluginParamKind {
             PluginParamKind::Point { .. } => 2,
             PluginParamKind::Point3 { .. } => 3,
             PluginParamKind::Color { .. } => 4,
+            PluginParamKind::Curve { rgb: false, .. } => CURVE_LUT_SAMPLES,
+            PluginParamKind::Curve { rgb: true, .. } => CURVE_LUT_SAMPLES * 4,
             PluginParamKind::Text { .. } | PluginParamKind::Hidden { .. } => 0,
             _ => 1,
         }
     }
-    /// Whether the parameter holds a string (it flattens to no `f64`s but one entry of
-    /// [`PluginParams::texts`]).
+    /// Whether the parameter holds a string (it flattens to no `f64`s unless `Curve`, and one
+    /// entry of [`PluginParams::texts`]).
     pub fn is_text(&self) -> bool {
-        matches!(self, PluginParamKind::Text { .. } | PluginParamKind::Hidden { .. })
+        matches!(self, PluginParamKind::Text { .. } | PluginParamKind::Hidden { .. } | PluginParamKind::Curve { .. })
     }
     /// Whether the kind needs plug-in API 2 (WebAssembly plug-ins can't carry it).
     pub fn needs_v2(&self) -> bool {
@@ -223,7 +279,7 @@ impl PluginManifest {
             {
                 return Err(format!("plug-in `{}`: point3 `{}` needs a finite default", self.id, p.id));
             }
-            if let PluginParamKind::Text { default } | PluginParamKind::Hidden { default } = &p.kind
+            if let PluginParamKind::Text { default } | PluginParamKind::Hidden { default } | PluginParamKind::Curve { default, .. } = &p.kind
                 && default.len() > MAX_TEXT
             {
                 return Err(format!("plug-in `{}`: the default of `{}` is longer than {MAX_TEXT} bytes", self.id, p.id));
@@ -490,6 +546,14 @@ fn param_spec(p: &PluginParam) -> ParamSpec {
         PluginParamKind::Layer => (Value::Layer(None), ParamUi::Layer),
         PluginParamKind::Text { default } => (Value::Str(default.clone()), ParamUi::Text),
         PluginParamKind::Hidden { default } => (Value::Str(default.clone()), ParamUi::Hidden),
+        PluginParamKind::Curve { default, rgb } => {
+            let def = if default.is_empty() {
+                if *rgb { r#"{"rgb":"0,0 1,1","red":"0,0 1,1","green":"0,0 1,1","blue":"0,0 1,1"}"#.to_string() } else { "0,0 1,1".to_string() }
+            } else {
+                default.clone()
+            };
+            (Value::Str(def), ParamUi::Curve { rgb: *rgb })
+        }
     };
     ParamSpec { id: leak(&p.id), name: leak(&p.name), default, ui }
 }
@@ -614,6 +678,13 @@ pub fn flatten_params(m: &PluginManifest, params: &Params, offset: [f64; 2], sca
             PluginParamKind::Checkbox { .. } => out.push(if v.map(Value::as_bool).unwrap_or(false) { 1.0 } else { 0.0 }),
             PluginParamKind::Popup { .. } => out.push(v.map(Value::as_enum).unwrap_or(0) as f64),
             PluginParamKind::Layer => out.push(v.and_then(Value::as_layer).map(|l| l as f64).unwrap_or(-1.0)),
+            PluginParamKind::Curve { default, rgb } => {
+                let s = match v {
+                    Some(Value::Str(s)) => s.as_str(),
+                    _ => default.as_str(),
+                };
+                flatten_curve_value(s, *rgb, &mut out);
+            }
             PluginParamKind::Text { .. } | PluginParamKind::Hidden { .. } => {}
             _ => out.push(v.map(Value::as_f64).unwrap_or(0.0)),
         }
@@ -621,12 +692,12 @@ pub fn flatten_params(m: &PluginManifest, params: &Params, offset: [f64; 2], sca
     out
 }
 
-/// The strings of an instance's text / hidden parameters, in declaration order.
+/// The strings of an instance's text / hidden / curve parameters, in declaration order.
 pub fn flatten_texts(m: &PluginManifest, params: &Params) -> Vec<String> {
     m.params
         .iter()
         .filter_map(|p| match &p.kind {
-            PluginParamKind::Text { default } | PluginParamKind::Hidden { default } => Some(match params.get(&p.id) {
+            PluginParamKind::Text { default } | PluginParamKind::Hidden { default } | PluginParamKind::Curve { default, .. } => Some(match params.get(&p.id) {
                 Some(Value::Str(s)) => s.clone(),
                 _ => default.clone(),
             }),
@@ -723,4 +794,55 @@ fn run_slot(slot: usize, ctx: &EffectCtx, mut buf: Buf) -> Buf {
         set_plugin_error(&m.id, None);
     }
     buf
+}
+
+#[cfg(test)]
+mod curve_tests {
+    use super::*;
+
+    #[test]
+    fn curve_param_flattens_to_256_samples_and_rgb_to_1024() {
+        let m = PluginManifest {
+            api: 1,
+            id: "org.test.curve".into(),
+            name: "Curve Test".into(),
+            category: "Color Correction".into(),
+            version: String::new(),
+            author: String::new(),
+            description: String::new(),
+            params: vec![
+                PluginParam {
+                    id: "tone".into(),
+                    name: "Tone".into(),
+                    group: String::new(),
+                    kind: PluginParamKind::Curve { default: "0,0 0.5,0.8 1,1".into(), rgb: false },
+                },
+                PluginParam {
+                    id: "rgb".into(),
+                    name: "RGB".into(),
+                    group: String::new(),
+                    kind: PluginParamKind::Curve {
+                        default: r#"{"rgb":"0,0 1,1","red":"0,0 0.5,0.9 1,1","green":"0,0 1,1","blue":"0,0 0.5,0.2 1,1"}"#.into(),
+                        rgb: true,
+                    },
+                },
+            ],
+        };
+        assert!(m.validate().is_ok());
+        assert_eq!(m.flat_len(), CURVE_LUT_SAMPLES * 5);
+        let params = Params::default();
+        let flat = flatten_params(&m, &params, [0.0, 0.0], 1.0);
+        assert_eq!(flat.len(), CURVE_LUT_SAMPLES * 5);
+        // Tone curve lifts midtones well above 0.5.
+        assert!(flat[128] > 0.75 && flat[128] < 0.85, "midtone={}", flat[128]);
+        // RGB curve: master stays linear (~0.5), red lifts (~0.9), blue drops (~0.2).
+        let base = CURVE_LUT_SAMPLES;
+        assert!((flat[base + 128] - 0.5).abs() < 0.02);
+        assert!(flat[base + CURVE_LUT_SAMPLES + 128] > 0.85);
+        assert!(flat[base + CURVE_LUT_SAMPLES * 3 + 128] < 0.25);
+        // Texts also preserve the raw strings for API 2 plug-ins.
+        let texts = flatten_texts(&m, &params);
+        assert_eq!(texts.len(), 2);
+        assert!(texts[0].contains("0.5,0.8"));
+    }
 }

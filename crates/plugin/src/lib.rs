@@ -92,6 +92,7 @@ pub fn preview(bytes: &[u8], width: u32, height: u32, pixels: &[[f32; 4]], times
                 // API 2 kinds: a WebAssembly module can't declare them (`WasmPlugin::new` refuses them).
                 PluginParamKind::Point3 { default } => flat.extend(default.iter().copied()),
                 PluginParamKind::Layer => flat.push(-1.0),
+                PluginParamKind::Curve { default, rgb } => effectcraft_effects::plugin::flatten_curve_value(default, *rgb, &mut flat),
                 PluginParamKind::Text { .. } | PluginParamKind::Hidden { .. } => {}
             }
         }
