@@ -67,6 +67,52 @@ fn echo_blends_neighbouring_frames() {
     assert!((a - want).abs() < 0.01, "{a} vs {want}");
 }
 
+/// Echo reads the comp below the adjustment at each sample time and runs the preceding Fill
+/// on that sample. An upper layer visible only in the past must leave no trail.
+#[test]
+fn adjustment_echo_samples_the_lower_stack() {
+    let (mut p, cid, comp) = super::setup();
+    let mut square = super::solid(&mut p, &comp, [1.0; 3], 8, 8);
+    square.props.prop_mut("transform/position").unwrap().keys =
+        vec![Keyframe::new(Tick::ZERO, Value::Vec3([20.0, 50.0, 0.0])), Keyframe::new(Tick::from_seconds_f64(2.0), Value::Vec3([180.0, 50.0, 0.0]))];
+    let mut upper = super::solid(&mut p, &comp, [1.0; 3], 8, 8);
+    upper.props.prop_mut("transform/position").unwrap().value = Value::Vec3([100.0, 20.0, 0.0]);
+    upper.out_point = Tick::from_seconds_f64(1.0);
+    let mut adjustment = super::solid(&mut p, &comp, [1.0; 3], 200, 100);
+    adjustment.switches.adjustment = true;
+    adjustment.in_point = Tick::from_seconds_f64(1.0);
+    for (id, vals) in [
+        ("ec.generate.fill", vec![]),
+        ("ec.time.echo", vec![("echoTime", Value::Scalar(-0.25)), ("numberOfEchoes", Value::Scalar(4.0)), ("echoOperator", Value::Enum(3))]),
+    ] {
+        let spec = effectcraft_effects::find(id).unwrap();
+        let mut g = effectcraft_effects::instantiate(spec, &mut Ids(&mut p.next_id), spec.name, [200.0, 100.0]);
+        for (k, v) in vals {
+            g.prop_mut(k).unwrap().value = v;
+        }
+        adjustment.props.sub_mut("effects").unwrap().children.push(g.into());
+    }
+    adjustment.props.prop_mut("effects/#1/color").unwrap().keys = vec![
+        Keyframe::new(Tick::ZERO, Value::Color([0.0, 0.0, 1.0, 1.0])).hold(),
+        Keyframe::new(Tick::from_seconds_f64(1.0), Value::Color([1.0, 0.0, 0.0, 1.0])),
+    ];
+    p.comp_mut(cid).unwrap().layers = vec![upper, adjustment, square].into();
+
+    let img = render(&p, cid, 1.5, None);
+    for x in [140, 120, 100, 80, 60] {
+        let px = img.get(x, 50);
+        let want = if x < 100 { [0.0, 0.0, 1.0, 1.0] } else { [1.0, 0.0, 0.0, 1.0] };
+        assert_eq!(px, want, "square at {x}");
+        assert!(img.get(x - 8, 50)[3] < 0.01, "gap next to {x}");
+    }
+    assert!(img.get(100, 20)[3] < 0.01, "echo of upper layer");
+    let roi = crate::RenderOpts { roi: Some([50.0, 40.0, 100.0, 20.0]), scale: 0.5, ..Default::default() };
+    let crop = crate::Renderer::new(&p, &crate::NoFootage, roi).comp_frame(cid, Tick::from_seconds_f64(1.5));
+    for x in [140, 120, 100, 80, 60] {
+        assert_eq!(crop.get((x - 50) / 2, 5), img.get(x, 50), "cropped square at {x}");
+    }
+}
+
 /// Time effects see the effects applied before them, as After Effects renders them (SceneYard
 /// "Task Preparation UI": Echo after CC Particle Systems II echoed the black solid under the
 /// fireworks and blacked out the white page). Fill (red) then Echo: the echoes are red.

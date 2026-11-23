@@ -13,6 +13,8 @@ pub(crate) struct FxHost<'r, 'a, 'c> {
     pub(crate) origin: [f64; 2],
     /// Index of the effect being rendered (bounds `self_at` to effects before it).
     pub(crate) index: usize,
+    /// The running effect reads historical frames of the adjustment's backdrop.
+    pub(crate) samples_below: bool,
     pub(crate) original: Option<&'c Buf>,
 }
 
@@ -110,11 +112,14 @@ impl EffectHost for FxHost<'_, '_, '_> {
     }
 
     fn self_at(&self, layer_time: f64, effects: usize) -> Option<Buf> {
-        if self.r.depth > MAX_FX_DEPTH || self.layer.switches.adjustment {
+        if self.r.depth > MAX_FX_DEPTH || (self.layer.switches.adjustment && !self.samples_below) {
             return None;
         }
         let n = effects.min(self.index);
         let t = self.layer.comp_time(Tick::from_seconds_f64(layer_time));
+        if self.samples_below {
+            return self.r.adjustment_input(&self.ctx.at(t), self.layer, n);
+        }
         let sub = self.r.nested();
         sub.layer_input(&self.ctx.at(t), self.layer, n).map(|b| (*b).clone())
     }

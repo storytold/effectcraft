@@ -306,10 +306,17 @@ impl<'a> Renderer<'a> {
     /// The layers drawn at the context time, bottom to top (solo, guides and visibility
     /// applied).
     pub fn visible_layers(&self, ctx: &EvalCtx<'a>) -> Vec<&'a Layer> {
+        self.visible_layers_from(ctx, 0)
+    }
+
+    /// Skip the first `skip` stack entries before testing visibility: an adjustment may be
+    /// inactive at the time its Echo samples, but still marks the boundary of the backdrop.
+    pub(crate) fn visible_layers_from(&self, ctx: &EvalCtx<'a>, skip: usize) -> Vec<&'a Layer> {
         let (comp, t) = (ctx.comp, ctx.time);
         let any_solo = comp.any_solo();
         comp.layers
             .iter()
+            .skip(skip)
             .rev()
             .filter(|l| l.is_active_at(t) && l.has_video() && !l.environment && (!any_solo || l.switches.solo) && (self.opts.guides || !l.switches.guide))
             .collect()

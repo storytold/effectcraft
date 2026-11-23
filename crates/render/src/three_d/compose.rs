@@ -173,7 +173,7 @@ pub(crate) fn camera_for(r: &Renderer, ctx: &EvalCtx) -> CameraState {
         return c.cam;
     }
     match r.opts.view {
-        Some(v) if r.depth == 0 => v,
+        Some(v) if r.top => v,
         _ => active_camera(ctx),
     }
 }

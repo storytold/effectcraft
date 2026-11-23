@@ -203,6 +203,11 @@ pub fn reads_other_frames(id: &str) -> bool {
     !id.starts_with("ec.") || id.starts_with("ec.time.") || id.starts_with("ec.sim.") || READS_OTHER_FRAMES.contains(&id)
 }
 
+/// An effect on an adjustment layer that samples the comp below at other times.
+pub fn reads_backdrop_at_other_times(id: &str) -> bool {
+    id == "ec.time.echo"
+}
+
 /// The effects outside `ec.time.` and `ec.sim.` that read their own layer at other times.
 const READS_OTHER_FRAMES: &[&str] = &[
     "ec.noise.removegrain",

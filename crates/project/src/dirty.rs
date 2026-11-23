@@ -74,7 +74,43 @@ impl Project {
         let elsewhere = heard.expressions && (outside || !new_c.same_pixels_with(&old_c, true, &|l| heard.contains(comp, l)) || !touched.is_empty());
         let mut spans = b.changed_spans(&a, heard.expressions, &|l| heard.contains(comp, l), elsewhere, &touched)?;
         spans.extend(nested);
+        if let (Some(lo), Some(hi)) = (spans.iter().map(|s| s.0).min(), spans.iter().map(|s| s.1).max()) {
+            for c in [&a, &b] {
+                widen_for_adjustments(c, lo, hi, &mut spans);
+            }
+        }
         Some(spans)
+    }
+}
+
+/// A changed pixel may also appear in an adjustment's temporal samples. Walk bottom to top
+/// so one adjustment's trails can feed the next. A fixed Echo Time bounds the direction of
+/// travel. An animated or overridable one can draw either way across the adjustment's span.
+fn widen_for_adjustments(c: &Comp, mut lo: Tick, mut hi: Tick, spans: &mut Vec<(Tick, Tick)>) {
+    let (before, after) = c.shutter_margin();
+    for l in c.layers.iter().rev().filter(|l| l.switches.adjustment && l.switches.effects) {
+        let mut earlier = false;
+        let mut later = false;
+        for g in l.effects().into_iter().flat_map(|fx| fx.groups()).filter(|g| g.enabled) {
+            if !matches!(&g.kind, GroupKind::Effect { effect } if super::reads_backdrop_at_other_times(effect)) {
+                continue;
+            }
+            let offset = g
+                .get("echoTime")
+                .filter(|p| c.essential.is_none() && p.keys.is_empty() && !p.has_expression())
+                .map(|p| p.value.as_f64() * l.effective_stretch());
+            earlier |= offset.is_none_or(|d| d > 0.0);
+            later |= offset.is_none_or(|d| d < 0.0);
+        }
+        if earlier || later {
+            let start = if earlier { l.in_point - before } else { lo.max(l.in_point - before) };
+            let end = if later { l.out_point + after } else { hi.min(l.out_point + after) };
+            if start <= end {
+                spans.push((start, end));
+                lo = lo.min(start);
+                hi = hi.max(end);
+            }
+        }
     }
 }
 
