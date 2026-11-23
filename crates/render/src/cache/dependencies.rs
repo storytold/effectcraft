@@ -59,6 +59,11 @@ impl Dependencies<'_> {
                                 // key already covers its source and mask properties.
                                 hash_debug(self.h, &ctx.world_matrix(other));
                             } else {
+                                if crate::fx_host::channels_in_comp_space(&g.kind, other) {
+                                    // The placement of a 3D text or shape source also changes
+                                    // with the camera, independently of its world transform.
+                                    hash_debug(self.h, &ctx.layer_to_comp(other).0);
+                                }
                                 self.layer(ctx, other)?;
                             }
                         }

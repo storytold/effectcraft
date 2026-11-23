@@ -1327,6 +1327,35 @@ fn layer_parameters_see_a_whole_shape_layer() {
 }
 
 #[test]
+fn set_channels_samples_a_transformed_shape_in_composition_space() {
+    for source in [0, 1, 2] {
+        let (mut p, cid, comp) = setup();
+        let mut shape = build::layer(&mut p, &comp, "Source", LayerSource::Shape, (200, 100), None);
+        let mut next = p.next_id;
+        let mut ids = Ids(&mut next);
+        let rect = build::shape_rect(&mut ids, [40.0, 30.0], [0.0, 0.0], 0.0);
+        let fill = build::shape_fill(&mut ids, [1.0, 1.0, 1.0, 1.0]);
+        let group = build::shape_group(&mut ids, "Rectangle", vec![rect, fill]);
+        p.next_id = next;
+        shape.props.sub_mut("contents").unwrap().children.push(group.into());
+        shape.props.prop_mut("transform/position").unwrap().value = Value::Vec3([45.0, 32.0, 0.0]);
+        shape.switches.video = false;
+
+        let mut receiver = solid(&mut p, &comp, [0.0, 0.0, 1.0], 200, 100);
+        add_effect_200(
+            &mut p,
+            &mut receiver,
+            "ec.channel.setchannels",
+            &[("sourceLayer4", Value::Layer(Some(shape.id.0))), ("sourceLayer4Source", Value::Enum(source))],
+        );
+        p.comp_mut(cid).unwrap().layers = vec![receiver, shape].into();
+        let image = render_frame(&p, cid, Tick::ZERO, 1.0);
+        assert!(image.get(45, 32)[3] > 0.99, "mode {source}: the shape's transformed centre supplies alpha");
+        assert!(image.get(100, 50)[3] < 0.01, "mode {source}: moving the source leaves the old centre transparent");
+    }
+}
+
+#[test]
 fn set_matte_self_source_and_masks_precede_effects() {
     for source in [0, 1] {
         let (mut p, cid, comp) = setup();

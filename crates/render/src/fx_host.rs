@@ -1,9 +1,13 @@
 use super::frames::frame_blend_mode;
-use super::{Arc, Buf, EffectHost, EvalCtx, FrameBlend, ItemKind, Layer, LayerPixels, LayerSource, Params, Renderer, Tick, three_d};
+use super::{
+    Arc, BlendMode, Buf, EffectHost, EvalCtx, FrameBlend, GroupKind, Image, ItemKind, Layer, LayerPixels, LayerSource, Params, Renderer, Tick, frame_size,
+    pipeline, three_d,
+};
 
 /// Layer parameters and audio for effects (see [`effectcraft_effects::EffectHost`]). What it
 /// hands out is in effect space (see [`effect_bounds`]): the other layer's for its pixels, the
-/// running layer's for its own frames and the comp scene.
+/// running layer's for its own frames and the comp scene. Set Channels uses composition space
+/// when it reads another layer's continuously rasterized text or shape pixels.
 pub(crate) struct FxHost<'r, 'a, 'c> {
     pub(crate) r: &'r Renderer<'a>,
     pub(crate) ctx: &'c EvalCtx<'a>,
@@ -17,15 +21,34 @@ pub(crate) struct FxHost<'r, 'a, 'c> {
 }
 
 impl FxHost<'_, '_, '_> {
-    /// Another layer's pixels for a layer parameter, in its effect space; `layer_space`: `buf`
-    /// is still in layer space (its source or its content).
-    fn pixels(&self, other: &Layer, mut buf: Buf, layer_space: bool) -> LayerPixels {
-        let (size, origin) = self.ctx.effect_bounds(other);
+    /// Another layer's pixels for a layer parameter. Source and content are in layer space,
+    /// while the Masks stage comes from the beginning of the effect stack in effect space.
+    fn pixels(&self, renderer: &Renderer, ctx: &EvalCtx, other: &Layer, mut buf: Buf, layer_space: bool) -> LayerPixels {
+        let (size, origin) = ctx.effect_bounds(other);
+        if other.id != self.layer.id
+            && self.layer.effects().and_then(|fx| fx.groups().nth(self.index)).is_some_and(|fx| channels_in_comp_space(&fx.kind, other))
+        {
+            if !layer_space {
+                buf.rebase([-origin[0], -origin[1]]);
+            }
+            // The argument is a single source sample. Placement applies the layer transform,
+            // independent of the comp's blending and post-effect motion blur.
+            let (scale, _, _) = pipeline::solid_size(ctx.comp.width, ctx.comp.height, renderer.opts.scale);
+            let renderer = Renderer { opts: super::RenderOpts { scale, motion_blur: false, ..renderer.opts }, ..*renderer };
+            let (w, h) = frame_size(ctx.comp.width, ctx.comp.height, scale);
+            let mut img = Image::new(w, h);
+            renderer.place(ctx, other, &buf, &mut img, BlendMode::Normal, 1.0);
+            return LayerPixels { buf: Buf { img, offset: [0.0; 2], scale }, size: [ctx.comp.width as f64, ctx.comp.height as f64] };
+        }
         if layer_space {
             buf.rebase(origin);
         }
         LayerPixels { buf, size }
     }
+}
+
+pub(crate) fn channels_in_comp_space(effect: &GroupKind, source: &Layer) -> bool {
+    matches!(effect, GroupKind::Effect { effect } if effect == "ec.channel.setchannels") && matches!(source.source, LayerSource::Shape | LayerSource::Text)
 }
 
 /// The comp's camera and first light relative to `layer`, in its layer pixels (see
@@ -79,11 +102,11 @@ impl EffectHost for FxHost<'_, '_, '_> {
         // comp, centred on the layer's anchor).
         if other.source.is_model() {
             let buf = sub.solo_3d(self.ctx, other);
-            return Some(self.pixels(other, buf, false));
+            return Some(self.pixels(&sub, self.ctx, other, buf, false));
         }
         // The cached layer buffer is shared; effects get their own copy.
         let buf = if masks_and_effects { (*sub.content_buf(self.ctx, other)?).clone() } else { sub.source(self.ctx, other)? };
-        Some(self.pixels(other, buf, true))
+        Some(self.pixels(&sub, self.ctx, other, buf, true))
     }
 
     fn layer_masks(&self, id: u64) -> Option<LayerPixels> {
@@ -93,7 +116,7 @@ impl EffectHost for FxHost<'_, '_, '_> {
         }
         let sub = self.r.nested();
         let buf = (*sub.layer_input(self.ctx, other, 0)?).clone();
-        Some(self.pixels(other, buf, false))
+        Some(self.pixels(&sub, self.ctx, other, buf, false))
     }
 
     /// The audio of footage layer `id` from `start`, or `None` when the layer is not footage.
@@ -154,12 +177,12 @@ impl EffectHost for FxHost<'_, '_, '_> {
         let ctx = self.ctx.at(Tick::from_seconds_f64(comp_time));
         let sub = self.r.nested();
         Some(if masks_and_effects {
-            self.pixels(other, (*sub.content_buf(&ctx, other)?).clone(), true)
+            self.pixels(&sub, &ctx, other, (*sub.content_buf(&ctx, other)?).clone(), true)
         } else if other.id == self.layer.id {
-            self.pixels(other, sub.source(&ctx, other)?, true)
+            self.pixels(&sub, &ctx, other, sub.source(&ctx, other)?, true)
         } else {
             // Preserve other-layer reads: time effects historically see source + masks.
-            self.pixels(other, (*sub.layer_input(&ctx, other, 0)?).clone(), false)
+            self.pixels(&sub, &ctx, other, (*sub.layer_input(&ctx, other, 0)?).clone(), false)
         })
     }
 }
