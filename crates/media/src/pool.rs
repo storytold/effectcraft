@@ -2343,6 +2343,34 @@ mod tests {
         assert_eq!(c.bytes, (16 * 16 * 16 + 64) + (16 * 16 * 4 + 64));
     }
 
+    /// The shared decoder's real messages read without their wrappers or the H.264 syntax-field
+    /// number, and stay "unsupported" or "can't be decoded" as the decoder said.
+    #[test]
+    fn describe_problem_unwraps_shared_decoder_errors() {
+        let unsupported = |s: &str| MediaError::Unsupported(s.into());
+        assert_eq!(
+            describe_problem("H.264", &unsupported("H.264: unsupported: chroma_format_idc 2 (only 4:2:0 is implemented)")),
+            "H.264 isn't supported by the built-in decoder: 4:2:2 chroma (only 4:2:0 is implemented)"
+        );
+        assert_eq!(
+            describe_problem("H.264", &unsupported("H.264: chroma_format_idc 0 stream")),
+            "H.264 isn't supported by the built-in decoder: monochrome stream"
+        );
+        assert_eq!(describe_problem("H.264", &unsupported("chroma_format_idc 3 stream")), "H.264 isn't supported by the built-in decoder: 4:4:4 chroma stream");
+        // The relabel is H.264's own field: another codec keeps the text.
+        assert_eq!(
+            describe_problem("HEVC", &unsupported("chroma_format_idc 2 stream")),
+            "HEVC isn't supported by the built-in decoder: chroma_format_idc 2 stream"
+        );
+        // A wrapped "unsupported" inside a decode error still counts as unsupported.
+        assert_eq!(
+            describe_problem("VP9", &MediaError::Decode("decode error: unsupported video: VP9: profile 3".into())),
+            "VP9 isn't supported by the built-in decoder: profile 3"
+        );
+        assert_eq!(describe_problem("VP9", &MediaError::Decode("malformed video: VP9: bad frame header".into())), "VP9 can't be decoded: bad frame header");
+        assert_eq!(describe_problem("", &MediaError::Decode("malformed video: truncated".into())), "This video can't be decoded: truncated");
+    }
+
     /// #482: an OpenEXR file with HTJ2K compression (which the decoder lacks) says so on import
     /// and when its frame is read, instead of "no non-deep rgb channels" or a transparent frame.
     #[test]

@@ -2870,6 +2870,15 @@ mod raw_avi_tests;
 mod tests {
     use super::*;
 
+    /// A decoder's "unsupported" stays unsupported; anything else is a decode failure.
+    #[test]
+    fn video_decode_errors_keep_unsupported_apart() {
+        assert!(matches!(video_decode_error(VideoError::Unsupported("H.264: 4:2:2".into())), MediaError::Unsupported(s) if s == "H.264: 4:2:2"));
+        assert!(
+            matches!(video_decode_error(VideoError::Malformed("VP9: bad header".into())), MediaError::Decode(s) if s == "malformed video: VP9: bad header")
+        );
+    }
+
     // One 20 ms mono packet from craft-audio's generated tone.opus test fixture.
     // Re-mux it into ordinary small audio-only files without an external encoder.
     const OPUS_TONE: &[u8] = b"\x78\x82\x01\xB7\x6C\x7E\x40\xE6\x00\x00\x0A\xBE\x9A\xA7\xBE\xFF\xB6\x85\xD7\x0A\x71\xE0\xDD\
