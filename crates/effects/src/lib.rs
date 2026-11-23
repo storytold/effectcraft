@@ -543,6 +543,14 @@ pub trait EffectHost: Sync {
     fn self_at(&self, _layer_time: f64, _effects: usize) -> Option<Buf> {
         None
     }
+    /// Translation of a historical frame in the current effect space (2D shape Echo).
+    fn time_sample_shift(&self, _layer_time: f64) -> Option<[f64; 2]> {
+        None
+    }
+    /// Preferred effect-space region when translated samples span an oversized rectangle.
+    fn time_sample_view(&self) -> Option<effectcraft_geom::Rect> {
+        None
+    }
     /// Layer `id` of the same composition at comp time `comp_time` (seconds), like
     /// [`EffectHost::layer`] but at another time.
     fn layer_at(&self, _id: u64, _comp_time: f64, _masks_and_effects: bool) -> Option<LayerPixels> {

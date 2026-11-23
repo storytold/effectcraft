@@ -244,6 +244,33 @@ fn echo_and_posterize_time() {
 }
 
 #[test]
+fn shape_echo_combines_content_and_layer_motion_across_two_stages() {
+    let Some(gpu) = crate::tests::gpu() else { return };
+    let mut s = Scene::new(BitDepth::Bpc8);
+    let mut shape = build::layer(&mut s.p, &s.comp, "Square", LayerSource::Shape, (97, 61), None);
+    let mut ids = build::Ids(&mut s.p.next_id);
+    let mut rect = build::shape_rect(&mut ids, [4.0; 2], [0.0; 2], 0.0);
+    rect.prop_mut("position").unwrap().keys =
+        vec![Keyframe::new(Tick::ZERO, Value::Vec2([0.0; 2])), Keyframe::new(Tick::from_seconds_f64(2.0), Value::Vec2([40.0, 0.0]))];
+    let fill = build::shape_fill(&mut ids, [1.0; 4]);
+    shape.props.sub_mut("contents").unwrap().children.extend([rect.into(), fill.into()]);
+    shape.props.prop_mut("transform/position").unwrap().keys =
+        vec![Keyframe::new(Tick::ZERO, crate::tests::v3(10.0, 30.0)), Keyframe::new(Tick::from_seconds_f64(2.0), crate::tests::v3(50.0, 30.0))];
+    for (dt, count) in [(-0.25, 2.0), (-0.5, 1.0)] {
+        s.effect(&mut shape, "ec.time.echo", &[("echoTime", n(dt)), ("numberOfEchoes", n(count)), ("echoOperator", e(3))]);
+    }
+    s.push(shape);
+    let cache = effectcraft_render::LayerCache::default();
+    let mut r = effectcraft_render::Renderer::new(&s.p, &crate::tests::Pattern, RenderOpts { backend: effectcraft_render::Backend::Gpu, ..opts() });
+    r.accel = Some(gpu);
+    r.cache = Some(&cache);
+    let frame = gpu.render(&r, s.cid, Tick::from_seconds_f64(1.5)).unwrap();
+    for x in [30, 40, 50, 60, 70] {
+        assert!(frame.get(x, 30)[3] > 0.99 && frame.get(x + 5, 30)[3] < 0.01, "square at {x}");
+    }
+}
+
+#[test]
 fn echo_after_star_burst_preserves_the_stars() {
     for depth in [BitDepth::Bpc8, BitDepth::Bpc32] {
         for operator in 0..7 {

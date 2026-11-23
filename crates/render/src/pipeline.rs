@@ -881,7 +881,7 @@ impl<'a> Renderer<'a> {
             origin,
             index,
             original: original.as_ref(),
-            samples_below: adjustment && effectcraft_project::reads_backdrop_at_other_times(effect),
+            echo_source: super::fx_host::EchoSource::for_effect(layer, effect, adjustment),
         };
         let env = EffectEnv {
             masks: &mask_shapes,

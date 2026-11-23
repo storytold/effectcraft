@@ -32,6 +32,19 @@ impl Dependencies<'_> {
             && let Some(fx) = layer.effects()
         {
             for g in fx.groups().take(limit.unwrap_or(usize::MAX)).filter(|g| g.enabled) {
+                if let effectcraft_project::GroupKind::Effect { effect } = &g.kind
+                    && crate::fx_host::EchoSource::for_effect(layer, effect, false) == crate::fx_host::EchoSource::PositionedShape
+                {
+                    // The current matrix alone does not key the earlier positions. A parent's
+                    // animation or an expression can read beyond this layer's own keys.
+                    let tr = layer.transform()?;
+                    if layer.parent.is_some() || super::has_expression(tr) {
+                        return None;
+                    }
+                    hash_debug(self.h, tr);
+                    hash_debug(self.h, &layer.auto_orient);
+                    ctx.comp.pixel_aspect.to_bits().hash(self.h);
+                }
                 self.group(ctx, layer, g, 0)?;
                 // A LUT file edited on disk changes the pixels without an edit (#3493).
                 crate::reads::lut_files(ctx, layer, g).hash(self.h);
