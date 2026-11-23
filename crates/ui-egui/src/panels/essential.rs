@@ -390,8 +390,13 @@ fn value_widget(app: &mut EffectcraftApp, ui: &mut egui::Ui, auto: &str, ty: Opt
             let linked = !app.ui.timeline.unlinked.contains(&p.uid);
             let (lr, link) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::click());
             let t = app.tokens;
-            crate::icons::paint(ui.painter(), lr, crate::icons::Icon::Link, if linked { t.accent } else { t.text_faint });
-            let link = link.on_hover_text(tr("Constrain Proportions"));
+            let (icon, tint, tip) = if linked {
+                (crate::icons::Icon::Link, t.accent, "Constrain Proportions: linked")
+            } else {
+                (crate::icons::Icon::LinkBroken, t.text_faint, "Constrain Proportions: unlinked")
+            };
+            crate::icons::paint(ui.painter(), lr, icon, tint);
+            let link = link.on_hover_text(tr(tip));
             app.auto.add(&format!("{auto}.link"), lr, "Constrain Proportions");
             if link.clicked() && !app.ui.timeline.unlinked.remove(&p.uid) {
                 app.ui.timeline.unlinked.insert(p.uid);
