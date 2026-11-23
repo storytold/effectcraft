@@ -4,6 +4,7 @@
 use std::collections::BTreeMap;
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::Condvar;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
@@ -90,6 +91,48 @@ fn run_deadlines(inner: &Inner) {
 pub(crate) struct Ticket {
     owner: Weak<Readbacks>,
     id: u64,
+}
+
+/// Tracks one GPU buffer mapping shared by the callback and its waiter. A timeout can race a
+/// late callback, so the buffer must be unmapped exactly once. A failed map is never unmapped.
+pub(crate) struct Mapping(AtomicU8);
+
+impl Mapping {
+    const PENDING: u8 = 0;
+    const MAPPED: u8 = 1;
+    const FAILED: u8 = 2;
+    const FINISHED: u8 = 3;
+
+    pub(crate) fn new() -> Self {
+        Self(AtomicU8::new(Self::PENDING))
+    }
+
+    /// Claim a successful map callback. False means a timeout already cancelled the map.
+    pub(crate) fn mapped(&self) -> bool {
+        self.0.compare_exchange(Self::PENDING, Self::MAPPED, Ordering::AcqRel, Ordering::Acquire).is_ok()
+    }
+
+    /// Record a failed map so the waiter will not unmap a buffer that was never mapped.
+    pub(crate) fn failed(&self) {
+        let _ = self.0.compare_exchange(Self::PENDING, Self::FAILED, Ordering::AcqRel, Ordering::Acquire);
+    }
+
+    /// Unmap once if mapping is pending (cancel it) or mapped (release it).
+    pub(crate) fn unmap(&self, unmap: impl FnOnce()) {
+        let mut unmap = Some(unmap);
+        loop {
+            let state = self.0.load(Ordering::Acquire);
+            if state != Self::PENDING && state != Self::MAPPED {
+                return;
+            }
+            if self.0.compare_exchange(state, Self::FINISHED, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+                if let Some(unmap) = unmap.take() {
+                    unmap();
+                }
+                return;
+            }
+        }
+    }
 }
 
 /// User callbacks run outside locks and are isolated one at a time. On panic=abort
@@ -401,6 +444,83 @@ pub(crate) fn rows<T: bytemuck::Pod>(view: &[u8], row: usize, stride: usize, hei
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn timeout_racing_late_map_callback_unmaps_once() {
+        let mapping = Arc::new(Mapping::new());
+        let unmap_calls = Arc::new(AtomicUsize::new(0));
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+
+        let timeout_mapping = Arc::clone(&mapping);
+        let timeout_calls = Arc::clone(&unmap_calls);
+        let timeout_barrier = Arc::clone(&barrier);
+        let timeout = std::thread::spawn(move || {
+            timeout_barrier.wait();
+            timeout_mapping.unmap(|| {
+                timeout_calls.fetch_add(1, Ordering::SeqCst);
+            });
+        });
+
+        let callback_mapping = Arc::clone(&mapping);
+        let callback_calls = Arc::clone(&unmap_calls);
+        let callback_barrier = Arc::clone(&barrier);
+        let callback = std::thread::spawn(move || {
+            callback_barrier.wait();
+            if callback_mapping.mapped() {
+                callback_mapping.unmap(|| {
+                    callback_calls.fetch_add(1, Ordering::SeqCst);
+                });
+            }
+        });
+
+        barrier.wait();
+        timeout.join().unwrap();
+        callback.join().unwrap();
+        assert_eq!(unmap_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn timeout_before_map_callback_cancels_late_map() {
+        let mapping = Mapping::new();
+        let unmap_calls = AtomicUsize::new(0);
+
+        mapping.unmap(|| {
+            unmap_calls.fetch_add(1, Ordering::SeqCst);
+        });
+        assert!(!mapping.mapped());
+        mapping.unmap(|| {
+            unmap_calls.fetch_add(1, Ordering::SeqCst);
+        });
+
+        assert_eq!(unmap_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn mapped_callback_and_timeout_release_once() {
+        let mapping = Mapping::new();
+        let unmap_calls = AtomicUsize::new(0);
+        assert!(mapping.mapped());
+
+        mapping.unmap(|| {
+            unmap_calls.fetch_add(1, Ordering::SeqCst);
+        });
+        mapping.unmap(|| {
+            unmap_calls.fetch_add(1, Ordering::SeqCst);
+        });
+
+        assert_eq!(unmap_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn failed_map_is_not_unmapped() {
+        let mapping = Mapping::new();
+        let unmap_calls = AtomicUsize::new(0);
+        mapping.failed();
+        mapping.unmap(|| {
+            unmap_calls.fetch_add(1, Ordering::SeqCst);
+        });
+        assert_eq!(unmap_calls.load(Ordering::SeqCst), 0);
+    }
 
     #[test]
     fn early_rejection_reports_no_pixels_exactly_once() {

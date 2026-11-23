@@ -5,7 +5,7 @@ use effectcraft_effects::camera_tracker::{TRACKS, TRACKS_KEY};
 use effectcraft_effects::roto::{FROZEN, INPUT_KEY};
 use effectcraft_effects::warp_stab::{ANALYSIS, ANALYSIS_KEY};
 use effectcraft_keyframe::Value;
-use effectcraft_project::{ItemId, LayerId, Project};
+use effectcraft_project::{GroupKind, ItemId, LayerId, ParamUi, Project};
 use serde_json::json;
 
 use crate::Session;
@@ -91,6 +91,19 @@ fn analyses_saved_by_0_24_survive_edits_that_keep_their_frames() {
     assert_eq!(saved(&s)[2].0, "");
     s.execute_checked("edit.undo", json!({})).unwrap();
     assert_eq!(saved(&s), before);
+}
+
+/// 0.24 hashed each effect's UI hints into the Roto Brush's key, and opening a project takes the
+/// current ones: the legacy text puts back Gaussian Blur's 0.24 Blurriness range (#3460).
+#[test]
+fn legacy_roto_keys_hash_the_0_24_blurriness_range() {
+    let s = open(ANALYSED_0_24);
+    let layer = s.project.comp(COMP).unwrap().layer(CLIP).unwrap();
+    let is_blur = |kind: &GroupKind| matches!(kind, GroupKind::Effect { effect } if effect == "ec.blur.gaussian");
+    let blur = layer.effects().and_then(|fx| fx.groups().find(|g| is_blur(&g.kind))).expect("the fixture has a Gaussian Blur above the Roto Brush");
+    let mut as_0_24 = blur.clone();
+    as_0_24.get_mut("blurriness").unwrap().ui = ParamUi::Slider { min: 0.0, max: 3000.0, slider_min: 0.0, slider_max: 50.0, decimals: 1 };
+    assert_eq!(crate::analysis::frames_key::legacy::effect_text(blur), format!("{as_0_24:?}"));
 }
 
 /// The text keys are made from today, written field by field (#3536). It changes only when this

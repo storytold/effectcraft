@@ -1,4 +1,4 @@
-//! Round trips through the filmcraft-hevc decoder and (when installed) ffmpeg: decoded pictures must
+//! Round trips through the craft-video HEVC decoder and (when installed) ffmpeg: decoded pictures must
 //! equal the encoder's own reconstruction bit-exactly.
 
 use craft_video::hevc::{Encoder, EncoderConfig, Frame, Profile, RateControl};
@@ -84,9 +84,9 @@ fn encode(cfg: EncoderConfig, pics: &[Pic]) -> Run {
     run
 }
 
-/// Decode with filmcraft-hevc and compare with the reconstructions.
-fn check_filmcraft(run: &Run, w: usize, h: usize) {
-    let mut dec = filmcraft_hevc::Decoder::from_hvcc(&run.hvcc).unwrap();
+/// Decode with craft-video's HEVC decoder and compare with the reconstructions.
+fn check_decoder(run: &Run, w: usize, h: usize) {
+    let mut dec = craft_video::hevc::decode::Decoder::from_hvcc(&run.hvcc).unwrap();
     let mut pics = Vec::new();
     for (i, p) in run.packets.iter().enumerate() {
         pics.extend(dec.decode(p, i as i64).unwrap());
@@ -211,7 +211,7 @@ fn intra_8bit_quality_and_decoders() {
     let run = encode(cfg(w as u32, h as u32, 22, 1, Profile::Main), &pics);
     eprintln!("intra QP22: {} bytes, PSNR-Y {:.2}", run.packets[0].len(), run.psnr_y[0]);
     assert!(run.psnr_y[0] > 35.0, "PSNR {}", run.psnr_y[0]);
-    check_filmcraft(&run, w, h);
+    check_decoder(&run, w, h);
     check_ffmpeg(&run, w, h, 8, "intra8");
 }
 
@@ -267,7 +267,7 @@ fn inter_8bit_moving_pattern() {
     let p_avg = sizes[1..].iter().sum::<usize>() as f64 / 5.0;
     assert!(p_avg < sizes[0] as f64 * 0.6, "P frames {p_avg} vs I {}", sizes[0]);
     assert!(run.psnr_y.iter().all(|&p| p > 33.0));
-    check_filmcraft(&run, w, h);
+    check_decoder(&run, w, h);
     check_ffmpeg(&run, w, h, 8, "inter8");
 }
 
@@ -276,7 +276,7 @@ fn odd_multiple_sizes_and_cropping() {
     for (w, h) in [(34usize, 18usize), (66, 38), (8, 8), (130, 72), (2, 2), (2, 70), (264, 6)] {
         let pics: Vec<Pic> = (0..3).map(|i| synth(w, h, 8, i, 2 * i)).collect();
         let run = encode(cfg(w as u32, h as u32, 30, 2, Profile::Main), &pics);
-        check_filmcraft(&run, w, h);
+        check_decoder(&run, w, h);
         check_ffmpeg(&run, w, h, 8, &format!("size{w}x{h}"));
     }
 }
@@ -305,7 +305,7 @@ fn noise_low_qp() {
             .collect();
         let run = encode(cfg(w as u32, h as u32, 0, 2, profile), &pics);
         assert!(run.psnr_y.iter().all(|&p| p > 45.0), "{:?}", run.psnr_y);
-        check_filmcraft(&run, w, h);
+        check_decoder(&run, w, h);
         check_ffmpeg(&run, w, h, bd, &format!("noise{bd}"));
     }
 }
@@ -317,7 +317,7 @@ fn high_qp_deblocking() {
     for (qp, profile, bd) in [(38u8, Profile::Main, 8u32), (44, Profile::Main, 8), (37, Profile::Main10, 10)] {
         let pics: Vec<Pic> = (0..5).map(|i| synth(w, h, bd, 2 * i, i)).collect();
         let run = encode(cfg(w as u32, h as u32, qp, 4, profile), &pics);
-        check_filmcraft(&run, w, h);
+        check_decoder(&run, w, h);
         check_ffmpeg(&run, w, h, bd, &format!("hq{qp}"));
     }
 }
@@ -329,7 +329,7 @@ fn long_gop_poc_wrap() {
     let pics: Vec<Pic> = (0..300).map(|i| synth(w, h, 8, i % 7, i % 5)).collect();
     let run = encode(cfg(w as u32, h as u32, 30, 0, Profile::Main), &pics);
     assert_eq!(run.keys.iter().filter(|&&k| k).count(), 1);
-    check_filmcraft(&run, w, h);
+    check_decoder(&run, w, h);
     check_ffmpeg(&run, w, h, 8, "pocwrap");
     let run = encode(cfg(w as u32, h as u32, 30, 260, Profile::Main), &pics);
     assert_eq!(run.keys.iter().filter(|&&k| k).count(), 2);
@@ -348,7 +348,7 @@ fn main10_round_trip() {
     let run = encode(cfg(w as u32, h as u32, 24, 3, Profile::Main10), &pics);
     eprintln!("main10 psnr {:?}", run.psnr_y);
     assert!(run.psnr_y[0] > 35.0);
-    check_filmcraft(&run, w, h);
+    check_decoder(&run, w, h);
     check_ffmpeg(&run, w, h, 10, "main10");
 }
 
@@ -358,7 +358,7 @@ fn qp_extremes() {
     for qp in [0u8, 51] {
         let pics: Vec<Pic> = (0..2).map(|i| synth(w, h, 8, i, i)).collect();
         let run = encode(cfg(w as u32, h as u32, qp, 30, Profile::Main), &pics);
-        check_filmcraft(&run, w, h);
+        check_decoder(&run, w, h);
         check_ffmpeg(&run, w, h, 8, &format!("qp{qp}"));
     }
 }
@@ -375,7 +375,7 @@ fn bitrate_mode_hits_target() {
     let kbps = bits as f64 / (pics.len() as f64 / 30.0) / 1000.0;
     eprintln!("bitrate mode: {kbps:.1} kbit/s for a 400 kbit/s target");
     assert!(kbps > 400.0 / 2.0 && kbps < 400.0 * 2.0, "{kbps}");
-    check_filmcraft(&run, w, h);
+    check_decoder(&run, w, h);
 }
 
 #[test]

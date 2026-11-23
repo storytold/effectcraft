@@ -88,7 +88,11 @@ struct Errors {
 /// Run blocking dialog `what`; one that can't open sends why to `errors` and counts as
 /// cancelled (the blocking hooks can't return an error).
 fn blocking<T>(errors: &Errors, what: &str, open: impl FnOnce() -> Option<T>) -> Option<T> {
-    guarded(what, open).unwrap_or_else(|e| {
+    blocking_on(errors, what, on_main_thread(), open)
+}
+
+fn blocking_on<T>(errors: &Errors, what: &str, main_thread: bool, open: impl FnOnce() -> Option<T>) -> Option<T> {
+    guarded_on(main_thread, what, open).unwrap_or_else(|e| {
         let _ = errors.tx.send(e);
         errors.ctx.request_repaint();
         None
@@ -107,7 +111,9 @@ pub fn install_pickers(app: &mut EffectcraftApp, ctx: &egui::Context) -> Receive
     let tx = Errors { tx, ctx: ctx.clone() };
     let errors = tx.clone();
     app.hooks.pick_files = Some(Box::new(move |exts: &[&str]| {
-        blocking(&errors, "Open", || rfd::FileDialog::new().add_filter("Media", exts).pick_files()).unwrap_or_default().into_iter().map(path_string).collect()
+        // No extensions (a script's File.openDialog without a filter): every file.
+        let dialog = || if exts.is_empty() { rfd::FileDialog::new() } else { rfd::FileDialog::new().add_filter("Media", exts) };
+        blocking(&errors, "Open", || dialog().pick_files()).unwrap_or_default().into_iter().map(path_string).collect()
     }));
     let errors = tx.clone();
     app.hooks.pick_save = Some(Box::new(move |name: &str| {
@@ -119,6 +125,12 @@ pub fn install_pickers(app: &mut EffectcraftApp, ctx: &egui::Context) -> Receive
     }));
     let errors = tx.clone();
     app.hooks.pick_folder = Some(Box::new(move || blocking(&errors, "Choose Folder", || rfd::FileDialog::new().pick_folder()).map(path_string)));
+    let errors = tx.clone();
+    // Scripts' file dialogs where they block (Windows; see `install_file_dialogs` in main.rs).
+    app.hooks.pick_file_dialog = Some(Box::new(move |dialog: FileDialog| {
+        let what = title(&dialog);
+        blocking(&errors, what, || Some(pick_blocking(dialog))).unwrap_or_default()
+    }));
     let errors = tx;
     app.hooks.pick_save_file = Some(Box::new(move |name: &str, ext: &str| {
         blocking(&errors, "Save", || {
@@ -166,17 +178,21 @@ pub fn show_asked(asked: &Receiver<Asked>, frame: &eframe::Frame, ctx: &egui::Co
 /// The dialog's title, for errors.
 fn title(dialog: &FileDialog) -> &'static str {
     match dialog {
-        FileDialog::Open { .. } | FileDialog::OpenProject => "Open",
-        FileDialog::Folder => "Choose Folder",
-        FileDialog::Save { .. } => "Save",
+        FileDialog::Open { .. } | FileDialog::OpenProject | FileDialog::Script { .. } => "Open",
+        FileDialog::Folder | FileDialog::ScriptFolder { .. } => "Choose Folder",
+        FileDialog::Save { .. } | FileDialog::ScriptSave { .. } => "Save",
     }
 }
 
 /// Open `dialog` with `open` through [`guarded`] and wait for its answer on a worker thread.
 /// `done` always gets an answer: the paths, or why the dialog couldn't open or answer.
 fn show(dialog: FileDialog, done: DialogDone, ctx: egui::Context, open: impl FnOnce(FileDialog) -> Answer) {
+    show_on(dialog, done, ctx, on_main_thread(), open);
+}
+
+fn show_on(dialog: FileDialog, done: DialogDone, ctx: egui::Context, main_thread: bool, open: impl FnOnce(FileDialog) -> Answer) {
     let what = title(&dialog);
-    let answer = match guarded(what, || open(dialog)) {
+    let answer = match guarded_on(main_thread, what, || open(dialog)) {
         Ok(answer) => answer,
         Err(e) => {
             done(Err(e));
@@ -223,6 +239,101 @@ fn path(file: Option<FileHandle>) -> Vec<String> {
     paths(file.map(|f| vec![f]))
 }
 
+/// The filters of a script's file dialog (#2778): its own, under the script's name for it (else
+/// "Files"), then "All Files" when the script's filter offers every file. Without extensions, no
+/// filter: every file. macOS takes all the filters' extensions together as the allowed types, so a
+/// dialog that also offers every file gets no filter there.
+macro_rules! script_filters {
+    ($dialog:expr, $label:expr, $exts:expr, $any:expr) => {{
+        let (d, label, exts, any): (_, &str, &[String], bool) = ($dialog, $label, $exts, $any);
+        if exts.is_empty() || (any && cfg!(target_os = "macos")) {
+            d
+        } else {
+            let d = d.add_filter(if label.is_empty() { "Files" } else { label }, exts);
+            if any { d.add_filter("All Files", &["*"]) } else { d }
+        }
+    }};
+}
+
+/// The folder a script's dialog starts in: its `start` when that is a folder, else the folder
+/// the file `start` names lives in; `None` when neither exists (the system's choice).
+fn start_dir(start: &str) -> Option<std::path::PathBuf> {
+    if start.is_empty() {
+        return None;
+    }
+    let at = std::path::Path::new(start);
+    if at.is_dir() { Some(at.to_path_buf()) } else { at.parent().filter(|d| d.is_dir()).map(std::path::Path::to_path_buf) }
+}
+
+/// The filters of a script's save dialog: the script's own ([`script_filters!`]), else the
+/// extension of the default name.
+fn save_exts(exts: &[String], default: &str) -> Vec<String> {
+    if exts.is_empty() { std::path::Path::new(default).extension().map(|e| vec![e.to_string_lossy().to_string()]).unwrap_or_default() } else { exts.to_vec() }
+}
+
+/// A script's file dialog, blocking until it closes (`Hooks::pick_file_dialog`, Windows): its
+/// paths, empty when cancelled. Runs inside [`guarded`] (see [`install_pickers`]).
+fn pick_blocking(dialog: FileDialog) -> Vec<String> {
+    let all =
+        |files: Option<Vec<std::path::PathBuf>>| -> Vec<String> { files.unwrap_or_default().into_iter().map(|p| p.to_string_lossy().to_string()).collect() };
+    let one = |file: Option<std::path::PathBuf>| all(file.map(|f| vec![f]));
+    match dialog {
+        FileDialog::Script { label, exts, any, many, prompt, start } => {
+            let mut d = script_filters!(rfd::FileDialog::new(), &label, &exts, any);
+            if !prompt.is_empty() {
+                d = d.set_title(&prompt);
+            }
+            if let Some(dir) = start_dir(&start) {
+                d = d.set_directory(dir);
+            }
+            if many { all(d.pick_files()) } else { one(d.pick_file()) }
+        }
+        FileDialog::ScriptFolder { prompt, start } => {
+            let mut d = rfd::FileDialog::new();
+            if !prompt.is_empty() {
+                d = d.set_title(&prompt);
+            }
+            if let Some(dir) = start_dir(&start) {
+                d = d.set_directory(dir);
+            }
+            one(d.pick_folder())
+        }
+        FileDialog::ScriptSave { default, prompt, label, exts, any } => {
+            let at = std::path::Path::new(&default);
+            let name = at.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            let mut d = script_filters!(rfd::FileDialog::new(), &label, &save_exts(&exts, &default), any);
+            if !prompt.is_empty() {
+                d = d.set_title(&prompt);
+            }
+            if let Some(dir) = start_dir(&default) {
+                d = d.set_directory(dir);
+            }
+            one(d.set_file_name(name).save_file())
+        }
+        FileDialog::Open { exts, many } => {
+            let d = if exts.is_empty() { rfd::FileDialog::new() } else { rfd::FileDialog::new().add_filter("Media", &exts) };
+            if many { all(d.pick_files()) } else { one(d.pick_file()) }
+        }
+        FileDialog::OpenProject => one(rfd::FileDialog::new().add_filter("EffectCraft Project", &["ecproj", "ecprojx"]).pick_file()),
+        FileDialog::Folder => one(rfd::FileDialog::new().pick_folder()),
+        FileDialog::Save { default, ext, project } => {
+            let at = std::path::Path::new(&default);
+            let name = at.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            let mut d = if project {
+                rfd::FileDialog::new().add_filter("EffectCraft Project", &["ecproj"])
+            } else if ext.is_empty() {
+                rfd::FileDialog::new()
+            } else {
+                rfd::FileDialog::new().add_filter(&ext, &[ext.as_str()])
+            };
+            if let Some(dir) = at.parent().filter(|d| d.is_dir()) {
+                d = d.set_directory(dir);
+            }
+            one(d.set_file_name(name).save_file())
+        }
+    }
+}
+
 /// The dialog, as the blocking hooks show it. On macOS rfd makes the panel here, before the
 /// future is returned, so a panel AppKit can't make panics here, inside [`guarded`].
 ///
@@ -234,7 +345,8 @@ fn path(file: Option<FileHandle>) -> Vec<String> {
 fn open(dialog: FileDialog, frame: &eframe::Frame) -> Answer {
     match dialog {
         FileDialog::Open { exts, many } => {
-            let d = parented(frame).add_filter("Media", &exts);
+            // No extensions (a script's File.openDialog without a filter): every file.
+            let d = if exts.is_empty() { parented(frame) } else { parented(frame).add_filter("Media", &exts) };
             if many {
                 let f = d.pick_files();
                 Box::pin(async move { paths(f.await) })
@@ -242,6 +354,46 @@ fn open(dialog: FileDialog, frame: &eframe::Frame) -> Answer {
                 let f = d.pick_file();
                 Box::pin(async move { path(f.await) })
             }
+        }
+        FileDialog::Script { label, exts, any, many, prompt, start } => {
+            let mut d = script_filters!(parented(frame), &label, &exts, any);
+            if !prompt.is_empty() {
+                d = d.set_title(&prompt);
+            }
+            if let Some(dir) = start_dir(&start) {
+                d = d.set_directory(dir);
+            }
+            if many {
+                let f = d.pick_files();
+                Box::pin(async move { paths(f.await) })
+            } else {
+                let f = d.pick_file();
+                Box::pin(async move { path(f.await) })
+            }
+        }
+        FileDialog::ScriptFolder { prompt, start } => {
+            let mut d = parented(frame);
+            if !prompt.is_empty() {
+                d = d.set_title(&prompt);
+            }
+            if let Some(dir) = start_dir(&start) {
+                d = d.set_directory(dir);
+            }
+            let f = d.pick_folder();
+            Box::pin(async move { path(f.await) })
+        }
+        FileDialog::ScriptSave { default, prompt, label, exts, any } => {
+            let at = std::path::Path::new(&default);
+            let name = at.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            let mut d = script_filters!(parented(frame), &label, &save_exts(&exts, &default), any);
+            if !prompt.is_empty() {
+                d = d.set_title(&prompt);
+            }
+            if let Some(dir) = start_dir(&default) {
+                d = d.set_directory(dir);
+            }
+            let f = d.set_file_name(name).save_file();
+            Box::pin(async move { path(f.await) })
         }
         FileDialog::OpenProject => {
             let f = parented(frame).add_filter("EffectCraft Project", &["ecproj", "ecprojx"]).pick_file();
@@ -282,7 +434,7 @@ mod tests {
 
     fn answered(dialog: FileDialog, open: impl FnOnce(FileDialog) -> Answer) -> Result<Vec<String>, String> {
         let (tx, rx) = channel();
-        show(dialog, Box::new(move |r| tx.send(r).unwrap()), egui::Context::default(), open);
+        show_on(dialog, Box::new(move |r| tx.send(r).unwrap()), egui::Context::default(), true, open);
         rx.recv_timeout(Duration::from_secs(10)).expect("the dialog answers")
     }
 
@@ -328,10 +480,12 @@ mod tests {
     fn a_blocking_picker_that_cannot_open_reports_why() {
         let (tx, rx) = channel();
         let tx = Errors { tx, ctx: egui::Context::default() };
-        assert_eq!(blocking(&tx, "Open", || -> Option<u8> { panic!("{NIL_PANEL}") }), None);
+        assert_eq!(blocking_on(&tx, "Open", true, || -> Option<u8> { panic!("{NIL_PANEL}") }), None);
         assert!(rx.try_recv().is_ok_and(|e| e.contains(NIL_PANEL)));
-        assert_eq!(blocking(&tx, "Open", || Some(3)), Some(3));
+        assert_eq!(blocking_on(&tx, "Open", true, || Some(3)), Some(3));
         assert!(rx.try_recv().is_err(), "nothing to report");
+        assert_eq!(blocking_on(&tx, "Open", false, || Some(5)), None);
+        assert!(rx.try_recv().is_ok_and(|e| e.contains("off the main thread")));
     }
 
     /// #3084: every rfd dialog in the desktop app goes through this module (and so through

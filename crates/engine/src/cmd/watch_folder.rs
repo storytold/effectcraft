@@ -65,6 +65,9 @@ fn render_project(host: &Session, path: &Path) -> Value {
     s.exporter = host.exporter.clone();
     s.accel = host.accel.clone();
     s.prefs = host.prefs.clone();
+    // Its Render Queue caches take the host's memory budget (#3941), which follows its reading.
+    s.sys_memory = host.sys_memory;
+    s.memory_low = host.memory_low;
     let result = (|| -> std::result::Result<Value, String> {
         s.execute("file.open", json!({"path": name})).map_err(|e| e.to_string())?;
         let queued = s.project.render_queue.iter().filter(|i| i.render && i.status == RenderStatus::Queued).count();
@@ -91,6 +94,7 @@ fn render_project(host: &Session, path: &Path) -> Value {
     // The project shared `host`'s footage source and gave it its own set of footage effects read
     // the channels of (#474): give back the host's.
     host.footage.set_aux_footage(host.aux_footage.as_deref().unwrap_or(&[]));
+    host.footage.set_aux_needs(host.aux_needs.as_deref().unwrap_or(&[]));
     let mut v = match result {
         Ok(v) => v,
         Err(e) => json!({"state": "failed", "error": e, "items": []}),

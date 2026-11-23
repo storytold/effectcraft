@@ -11,4 +11,8 @@ workspace = true
 
 [dependencies]
 craft-psd = { workspace = true }
+craft-codepage = { workspace = true }
+
+[dev-dependencies]
+craft-psd = { workspace = true, features = ["testgen"] }
 miniz_oxide = "0.9"
