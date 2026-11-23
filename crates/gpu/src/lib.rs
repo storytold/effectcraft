@@ -368,7 +368,7 @@ impl Gpu {
             Err(e) => format!("device failure / out of memory: {e}"),
             Ok(()) if !self.ctx.can_readback() => "no GPU readback is available here".into(),
             Ok(()) => format!(
-                "the GPU compositor did not handle the frame (a region of interest, unsupported content, a frame over the {} px texture limit, or an allocation failed)",
+                "the GPU compositor did not handle the frame (unsupported content, a frame over the {} px texture limit, or an allocation failed)",
                 self.ctx.max_dim
             ),
         }

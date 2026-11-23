@@ -361,7 +361,7 @@ impl<'a> Renderer<'a> {
         let Some(b) = content_bounds(ctx, layer) else { return vec![] };
         let s = self.opts.scale;
         let (l2c, _) = ctx.layer_to_comp(layer);
-        let m = Mat3::scale(vec2(s, s)) * self.outer.map_or(l2c, |o| o * l2c);
+        let m = self.out_matrix() * Mat3::scale(vec2(s, s)) * self.outer.map_or(l2c, |o| o * l2c);
         let c = [(b[0], b[1]), (b[2], b[1]), (b[2], b[3]), (b[0], b[3])].map(|(x, y)| m.apply(vec2(x, y)));
         let (w, h) = (size.0 as i64, size.1 as i64);
         let mut out = vec![];
@@ -385,15 +385,21 @@ impl<'a> Renderer<'a> {
     /// layers).
     pub fn run_effects_on(&self, ctx: &EvalCtx, layer: &Layer, adjustment: bool, target: &mut dyn FxTarget) {
         // `target` is used as it is: the comp below for adjustment layers (the callers).
-        self.run_effect_stack(ctx, layer, crate::pipeline::EffectStack { adjustment, limit: usize::MAX, origin: [0.0; 2] }, None, target);
+        self.run_effect_stack(ctx, layer, crate::pipeline::EffectStack { adjustment, limit: usize::MAX, origin: [0.0; 2], roi_cropped: false }, None, target);
     }
 
     /// [`Renderer::run_effects_on`] for a (non-adjustment) layer's own pixels: `target` holds
     /// them in effect space (as [`Renderer::layer_input`] hands them out) and the result stays
     /// there. Returns the effect-space origin in layer coordinates (rebase by its negation).
     pub fn run_layer_effects_on(&self, ctx: &EvalCtx, layer: &Layer, target: &mut dyn FxTarget) -> [f64; 2] {
+        self.run_layer_effects_cropped_on(ctx, layer, target, false)
+    }
+
+    /// [`Renderer::run_layer_effects_on`], skipping full-layer `cover` / `align` when the caller
+    /// already cropped the buffer to the ROI + effect margin.
+    pub fn run_layer_effects_cropped_on(&self, ctx: &EvalCtx, layer: &Layer, target: &mut dyn FxTarget, roi_cropped: bool) -> [f64; 2] {
         let origin = ctx.effect_bounds(layer).1;
-        self.run_effect_stack(ctx, layer, crate::pipeline::EffectStack { adjustment: false, limit: usize::MAX, origin }, None, target);
+        self.run_effect_stack(ctx, layer, crate::pipeline::EffectStack { adjustment: false, limit: usize::MAX, origin, roi_cropped }, None, target);
         origin
     }
 

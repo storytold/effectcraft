@@ -101,3 +101,86 @@ fn extended_region_is_none_inside_the_frame() {
     // Clamped to the margin.
     assert_eq!(crate::extended_region(100, 100, [-1000.0, 0.0, 50.0, 100.0], 1.0), Some([-112.0, 0.0, 212.0, 100.0]));
 }
+
+/// ROI effect-stack cropping on a full-frame layer matches cropped full-frame rendering
+/// pixel-for-pixel, and uses a distinct cache key so it never pollutes the full-layer cache.
+#[test]
+fn roi_effect_crop_matches_full_render_and_isolates_cache() {
+    let mut p = Project::default();
+    let comp = Comp::new(640, 480, FrameRate::FPS_30, Tick::from_seconds_f64(1.0));
+    let cid = p.add_item("Comp", Label::Sandstone, None, ItemKind::Comp(comp.clone().into()));
+    let sid = p.add_item("Solid", Label::Red, None, ItemKind::Solid(Solid { color: [0.85, 0.35, 0.15], width: 640, height: 480, pixel_aspect: 1.0 }));
+    let mut l = build::layer(&mut p, &comp, "HeavyFx", LayerSource::Solid { item: sid }, (640, 480), None);
+    let mut ids = build::Ids(&mut p.next_id);
+    let mask =
+        build::mask(&mut ids, "Mask 1", effectcraft_keyframe::ShapePath::rect([320.0, 240.0], 280.0, 200.0), effectcraft_project::MaskMode::Add, [255, 255, 0]);
+    l.props.sub_mut("masks").unwrap().children.push(effectcraft_project::Node::Group(mask));
+    let mut blur = effectcraft_effects::instantiate(effectcraft_effects::find("ec.blur.gaussian").unwrap(), &mut ids, "Gaussian Blur", [640.0, 480.0]);
+    blur.prop_mut("blurriness").unwrap().value = Value::Scalar(18.0);
+    let mut glow = effectcraft_effects::instantiate(effectcraft_effects::find("ec.stylize.glow").unwrap(), &mut ids, "Glow", [640.0, 480.0]);
+    glow.prop_mut("radius").unwrap().value = Value::Scalar(14.0);
+    let mut levels = effectcraft_effects::instantiate(effectcraft_effects::find("ec.color.levels").unwrap(), &mut ids, "Levels", [640.0, 480.0]);
+    levels.prop_mut("gamma").unwrap().value = Value::Scalar(1.3);
+    let fx = l.props.sub_mut("effects").unwrap();
+    fx.children.push(effectcraft_project::Node::Group(blur));
+    fx.children.push(effectcraft_project::Node::Group(glow));
+    fx.children.push(effectcraft_project::Node::Group(levels));
+    p.comp_mut(cid).unwrap().layers = vec![l].into();
+
+    let roi_box = [200.0, 160.0, 160.0, 120.0];
+    let cache = crate::LayerCache::default();
+    let mut r_roi = Renderer::new(&p, &NoFootage, RenderOpts { roi: Some(roi_box), ..Default::default() });
+    r_roi.cache = Some(&cache);
+    let roi = r_roi.comp_frame(cid, Tick::ZERO);
+
+    let mut r_full = Renderer::new(&p, &NoFootage, RenderOpts::default());
+    r_full.cache = Some(&cache);
+    let full = r_full.comp_frame(cid, Tick::ZERO);
+
+    assert_eq!((roi.width, roi.height), (160, 120));
+    assert_same(&roi, &crop(&full, 200, 160, 160, 120));
+    // Verify both the ROI-cropped entry and the full-layer entry exist separately in cache.
+    assert!(cache.stats().entries >= 2, "expected distinct ROI and full cache entries, got {:?}", cache.stats());
+}
+
+/// Off-ROI 2D layers and adjustment layers are culled safely, while stencil layers outside the
+/// ROI are NOT culled because they clear pixels outside their own bounds.
+#[test]
+fn roi_layer_culling_respects_stencil_and_matches_full_render() {
+    let mut p = Project::default();
+    let comp = Comp::new(320, 240, FrameRate::FPS_30, Tick::from_seconds_f64(1.0));
+    let cid = p.add_item("Comp", Label::Sandstone, None, ItemKind::Comp(comp.clone().into()));
+    let s_bg = p.add_item("BG", Label::Red, None, ItemKind::Solid(Solid { color: [0.2, 0.7, 0.4], width: 320, height: 240, pixel_aspect: 1.0 }));
+    let s_off = p.add_item("Off", Label::Blue, None, ItemKind::Solid(Solid { color: [0.9, 0.1, 0.1], width: 60, height: 60, pixel_aspect: 1.0 }));
+    let s_in = p.add_item("In", Label::Yellow, None, ItemKind::Solid(Solid { color: [0.9, 0.9, 0.1], width: 80, height: 80, pixel_aspect: 1.0 }));
+
+    let bg = build::layer(&mut p, &comp, "BG", LayerSource::Solid { item: s_bg }, (320, 240), None);
+    let mut off = build::layer(&mut p, &comp, "OffROI", LayerSource::Solid { item: s_off }, (60, 60), None);
+    off.props.prop_mut("transform/position").unwrap().value = Value::Vec3([30.0, 30.0, 0.0]);
+    let mut adj_off = build::layer(&mut p, &comp, "AdjOffROI", LayerSource::Solid { item: s_off }, (60, 60), None);
+    adj_off.switches.adjustment = true;
+    adj_off.props.prop_mut("transform/position").unwrap().value = Value::Vec3([30.0, 30.0, 0.0]);
+    let mut inside = build::layer(&mut p, &comp, "InROI", LayerSource::Solid { item: s_in }, (80, 80), None);
+    inside.props.prop_mut("transform/position").unwrap().value = Value::Vec3([240.0, 180.0, 0.0]);
+
+    p.comp_mut(cid).unwrap().layers = vec![inside, adj_off, off, bg].into();
+    let roi_box = [180.0, 120.0, 120.0, 100.0];
+    let r_roi = Renderer::new(&p, &NoFootage, RenderOpts { roi: Some(roi_box), ..Default::default() });
+    let ctx = r_roi.eval_ctx(cid, Tick::ZERO).unwrap();
+    assert!(r_roi.layer_outside_roi(&ctx, &ctx.comp.layers[2]), "OffROI layer should be culled");
+    assert!(r_roi.layer_outside_roi(&ctx, &ctx.comp.layers[1]), "OffROI adjustment layer should be culled");
+    assert!(!r_roi.layer_outside_roi(&ctx, &ctx.comp.layers[0]), "InROI layer must not be culled");
+
+    let full = Renderer::new(&p, &NoFootage, RenderOpts::default()).comp_frame(cid, Tick::ZERO);
+    let roi = r_roi.comp_frame(cid, Tick::ZERO);
+    assert_same(&roi, &crop(&full, 180, 120, 120, 100));
+
+    // Stencil Alpha outside ROI MUST NOT be culled (it clears the ROI to transparent).
+    p.comp_mut(cid).unwrap().layers[2].blend_mode = BlendMode::StencilAlpha;
+    let r_roi2 = Renderer::new(&p, &NoFootage, RenderOpts { roi: Some(roi_box), ..Default::default() });
+    let ctx2 = r_roi2.eval_ctx(cid, Tick::ZERO).unwrap();
+    assert!(!r_roi2.layer_outside_roi(&ctx2, &ctx2.comp.layers[2]), "Stencil layer outside ROI must not be culled");
+    let full2 = Renderer::new(&p, &NoFootage, RenderOpts::default()).comp_frame(cid, Tick::ZERO);
+    let roi2 = r_roi2.comp_frame(cid, Tick::ZERO);
+    assert_same(&roi2, &crop(&full2, 180, 120, 120, 100));
+}
