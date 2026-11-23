@@ -66,6 +66,106 @@ fn source_project(dir: &std::path::Path) -> String {
 }
 
 #[test]
+fn import_project_preserves_a_frozen_object_matte_across_new_ids_and_reopen() {
+    check_imported_object_matte(false);
+}
+
+#[test]
+fn import_project_clears_the_object_matte_when_the_input_roto_freeze_is_discarded() {
+    check_imported_object_matte(true);
+}
+
+fn check_imported_object_matte(with_roto_brush: bool) {
+    use effectcraft_effects::{
+        object_matte as om,
+        roto::{self, FROZEN, FrozenCache, INPUT_KEY},
+    };
+    use effectcraft_keyframe::Value;
+    use effectcraft_project::LayerId;
+
+    let dir = out_dir(if with_roto_brush { "import-project-roto-stack" } else { "import-project-frozen-object-matte" });
+    let width = 18;
+    let height = 12;
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Matte template", "width": width, "height": height, "frameRate": 25, "duration": 1})).unwrap();
+    let comp = s.active_comp_id().unwrap();
+    std::fs::write(dir.join("clip.mov"), b"placeholder footage").unwrap();
+    let item = std::sync::Arc::make_mut(&mut s.project).add_item(
+        "Source",
+        Default::default(),
+        None,
+        ItemKind::Footage(Footage { path: "clip.mov".into(), kind: FootageKind::Video, width: width as u32, height: height as u32, ..Default::default() }),
+    );
+    let layer = LayerId(s.execute("layer.addItem", json!({"item": item.0, "time": 0.0})).unwrap()["layer"].as_u64().unwrap());
+    if with_roto_brush {
+        s.execute("roto.stroke", json!({"layer": layer.0, "points": [[7, 6]], "radius": 3})).unwrap();
+        let c = s.project.comp(comp).unwrap();
+        let l = c.layer(layer).unwrap();
+        let brush = l.effects().unwrap().groups().find(|g| crate::roto::is_roto(g)).unwrap();
+        let uid = brush.uid;
+        let params = crate::roto::params_static(brush);
+        let key = roto::frozen_key(&params, crate::roto::layer_size(&s.project, c, l), c.frame_rate.as_f64());
+        let mut cache = FrozenCache { key, size: [width, height], ..Default::default() };
+        cache.frames.insert(0, roto::freeze_frame(&vec![1.0; width * height], &[]));
+        let brush = std::sync::Arc::make_mut(&mut s.project).comp_mut(comp).unwrap().layer_mut(layer).unwrap().props.find_group_mut(uid).unwrap();
+        brush.get_mut(FROZEN).unwrap().value = Value::Str(cache.to_json());
+    }
+    let effect = s.execute("objectMatte.apply", json!({"layer": layer.0, "point": [7, 6]})).unwrap()["effect"].as_u64().unwrap();
+    let c = s.project.comp(comp).unwrap();
+    let l = c.layer(layer).unwrap();
+    let g = l.props.find_group(effect).unwrap();
+    let params = crate::roto::params_static(g);
+    let old_input = params.get(INPUT_KEY).unwrap().clone();
+    let old_source = l.source.item().unwrap();
+    let layer_size = crate::roto::layer_size(&s.project, c, l);
+    let fps = c.frame_rate.as_f64();
+    let alpha: Vec<_> = (0..width * height).map(|i| if i % width < width / 2 { 1.0 } else { 0.0 }).collect();
+    let mut frozen = FrozenCache { key: om::frozen_key(&params, layer_size, fps, None), size: [width, height], ..Default::default() };
+    frozen.frames.insert(0, roto::freeze_frame(&alpha, &[]));
+    let group = std::sync::Arc::make_mut(&mut s.project).comp_mut(comp).unwrap().layer_mut(layer).unwrap().props.find_group_mut(effect).unwrap();
+    group.get_mut(FROZEN).unwrap().value = Value::Str(frozen.to_json());
+    let source_params = crate::roto::params_static(group);
+    assert_eq!(om::frozen_alpha(&source_params, layer_size, fps, 0, width, height, None), Some(alpha.clone()));
+    let source = dir.join("Source.ecproj").to_string_lossy().into_owned();
+    s.execute("file.saveAs", json!({"path": source})).unwrap();
+
+    let mut destination = Session::default();
+    destination.execute("comp.new", json!({"name": "Destination"})).unwrap();
+    let imported = destination.execute("file.importProject", json!({"path": source})).unwrap();
+    let comp = ItemId(imported["primaryComp"].as_u64().unwrap());
+    assert_eq!(imported["missingMedia"], json!([]));
+    if with_roto_brush {
+        let l = &destination.project.comp(comp).unwrap().layers[0];
+        let matte = l.effects().unwrap().groups().find(|g| g.match_id == om::ID).unwrap();
+        assert_eq!(matte.get(FROZEN).unwrap().value, Value::Str(String::new()));
+        assert_eq!(matte.get(INPUT_KEY).unwrap().value, Value::Str(crate::roto::input_key(&destination.project, comp, l, matte.uid)));
+        assert!(destination.roto_pending.contains(&(comp, l.id, matte.uid)));
+        return;
+    }
+    assert!(destination.roto_pending.is_empty(), "the imported freeze needs no propagation");
+    let path = dir.join("Destination.ecproj").to_string_lossy().into_owned();
+    destination.execute("file.saveAs", json!({"path": path})).unwrap();
+
+    let mut reopened = Session::default();
+    reopened.execute("file.open", json!({"path": path})).unwrap();
+    let c = reopened.project.comp(comp).unwrap();
+    let l = &c.layers[0];
+    assert_ne!(l.id, layer);
+    assert_ne!(l.source.item(), Some(old_source));
+    let effect = l.effects().unwrap().groups().find(|g| g.match_id == om::ID).unwrap();
+    let params = crate::roto::params_static(effect);
+    assert_ne!(params.get(INPUT_KEY), Some(&old_input));
+    assert_eq!(om::frozen_alpha(&params, layer_size, fps, 0, width, height, None), Some(alpha));
+
+    let (layer, effect) = (l.id, effect.uid);
+    assert!(crate::roto::imported_freeze_matches(&reopened.project, comp, layer, effect));
+    // A payload can still be present when an earlier sync changes its input. It must stay queued.
+    let mut changed = (*reopened.project).clone();
+    changed.comp_mut(comp).unwrap().layer_mut(layer).unwrap().stretch = 200.0;
+    assert!(!crate::roto::imported_freeze_matches(&changed, comp, layer, effect));
+}
+
+#[test]
 fn import_project_merges_with_fresh_ids_and_one_undo() {
     let dir = out_dir("import-project");
     let path = source_project(&dir);

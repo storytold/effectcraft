@@ -214,6 +214,104 @@ pub fn input_key(p: &Project, comp: ItemId, layer: &Layer, uid: Uid) -> String {
     frames_key::input_key(p, comp, layer, uid)
 }
 
+fn saved_input_matches(p: &Project, comp: ItemId, layer: &Layer, uid: Uid, saved: &str) -> bool {
+    frames_key::key_matches(p, comp, layer, saved, |signature, era| match era {
+        Era::Current => frames_key::input_key_of(signature, layer, uid),
+        Era::Legacy => frames_key::legacy::input_key_of(signature, layer, uid),
+    })
+}
+
+/// Whether the imported freeze still matches the final effect stack after input sync.
+pub(crate) fn imported_freeze_matches(p: &Project, comp: ItemId, layer: LayerId, uid: Uid) -> bool {
+    let Some(layer) = p.comp(comp).and_then(|c| c.layer(layer)) else { return false };
+    layer.props.find_group(uid).is_some_and(|g| has_frozen_matte(g) && saved_input_matches(p, comp, layer, uid, &str_of(g, INPUT_KEY)))
+}
+
+fn has_frozen_matte(g: &PropGroup) -> bool {
+    matches!(g.get(FROZEN).map(|p| &p.value), Some(Value::Str(frozen)) if !frozen.is_empty())
+}
+
+/// Object Matte freezes whose inputs are valid in the source project before IDs are shifted.
+pub(crate) fn imported_object_matte_freezes(p: &Project) -> std::collections::HashSet<(ItemId, LayerId, Uid)> {
+    let mut freezes = std::collections::HashSet::new();
+    for (&cid, comp) in p.comps() {
+        for l in &comp.layers {
+            let Some(effects) = l.effects() else { continue };
+            for g in effects.groups().filter(|g| is_object_matte(g) && has_frozen_matte(g)) {
+                if saved_input_matches(p, cid, l, g.uid, &str_of(g, INPUT_KEY)) {
+                    freezes.insert((cid, l.id, g.uid));
+                }
+            }
+        }
+    }
+    freezes
+}
+
+/// Re-key the still-valid freezes after shifting IDs in the imported project.
+pub(crate) fn rekey_imported_object_mattes(
+    p: &mut Project,
+    offset: u64,
+    freezes: std::collections::HashSet<(ItemId, LayerId, Uid)>,
+    expr: Option<&dyn ExprHost>,
+) -> std::collections::HashSet<(ItemId, LayerId, Uid)> {
+    let shifted: std::collections::HashSet<_> = freezes
+        .into_iter()
+        .map(|(cid, lid, uid)| (ItemId(cid.0.saturating_add(offset)), LayerId(lid.0.saturating_add(offset)), uid.saturating_add(offset)))
+        .collect();
+    // Settle upstream effects first: clearing a Roto Brush freeze changes the frames a lower
+    // Object Matte was frozen from. A remapped ID alone leaves those frames unchanged.
+    let mut stacks = Vec::new();
+    for (&cid, comp) in p.comps() {
+        for layer in &comp.layers {
+            let Some(effects) = layer.effects() else { continue };
+            if effects.groups().any(|g| shifted.contains(&(cid, layer.id, g.uid))) {
+                let groups = effects.groups().filter(|g| is_roto(g) || is_object_matte(g)).map(|g| g.uid).collect::<Vec<_>>();
+                stacks.push((cid, layer.id, groups));
+            }
+        }
+    }
+
+    let mut preserved = std::collections::HashSet::new();
+    for (cid, lid, groups) in stacks {
+        let mut input_changed = false;
+        for uid in groups {
+            let Some(c) = p.comp(cid) else { continue };
+            let Some(l) = c.layer(lid) else { continue };
+            let Some(g) = l.props.find_group(uid) else { continue };
+            let saved = str_of(g, INPUT_KEY);
+            let next = input_key(p, cid, l, uid);
+            let candidate = shifted.contains(&(cid, lid, uid));
+            let frozen = if candidate && !input_changed {
+                // Use the same reference time as Freeze, including animated parameters.
+                let t = comp_time_of(c, l, om::reference_frame(&params_static(g)));
+                let params = params_at(p, cid, l, g, t, expr);
+                om::rekey_frozen_input(&params, layer_size(p, c, l), c.frame_rate.as_f64(), &next)
+            } else {
+                None
+            };
+            let matches = next == saved || saved_input_matches(p, cid, l, uid, &saved);
+            let clear = frozen.is_none() && (candidate || (!matches && !saved.is_empty()));
+            if clear {
+                input_changed |= has_frozen_matte(g) || !str_of(g, TRACKED).is_empty();
+            }
+            if let Some(g) = p.comp_mut(cid).and_then(|c| c.layer_mut(lid)).and_then(|l| l.props.find_group_mut(uid)) {
+                if let Some(frozen) = frozen {
+                    set_str(g, INPUT_KEY, next);
+                    set_str(g, FROZEN, frozen);
+                    preserved.insert((cid, lid, uid));
+                } else if clear || !matches {
+                    set_str(g, INPUT_KEY, next);
+                    if clear {
+                        set_str(g, FROZEN, String::new());
+                        set_str(g, TRACKED, String::new());
+                    }
+                }
+            }
+        }
+    }
+    preserved
+}
+
 /// After an edit: refresh Input Keys (Roto Brush and Object Matte); frozen mattes made from
 /// other frames are dropped. Returns the instances whose segmentation changed (to propagate
 /// again): new frames, strokes (Roto Brush) or prompt (Object Matte).
@@ -229,11 +327,7 @@ pub(crate) fn sync(before: &Project, after: &mut Project) -> Vec<(ItemId, LayerI
                 let old = before.comp(*cid).and_then(|bc| bc.layer(l.id)).and_then(|ol| ol.props.find_group(g.uid));
                 let saved_key = str_of(g, INPUT_KEY);
                 // Keep a matching old key: the frozen cache itself also hashes that key.
-                let key_of = |s, era| match era {
-                    Era::Current => frames_key::input_key_of(s, l, g.uid),
-                    Era::Legacy => frames_key::legacy::input_key_of(s, l, g.uid),
-                };
-                if !frames_key::key_matches(after, *cid, l, &saved_key, key_of) {
+                if !saved_input_matches(after, *cid, l, g.uid, &saved_key) {
                     set.push((*cid, l.id, g.uid, key));
                     todo.push((*cid, l.id, g.uid));
                 } else if old.is_none_or(|o| guard_of(o) != guard_of(g)) {
