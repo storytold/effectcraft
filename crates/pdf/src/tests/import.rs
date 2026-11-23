@@ -747,3 +747,30 @@ fn run_length_image_data_keeps_a_whitespace_packet_header() {
     assert!(grey[0] < 0.1 && grey[1..].iter().all(|g| *g > 0.9), "{grey:?}");
     assert_eq!(shape_names(&doc).len(), 2, "the image, and the program goes on after its data");
 }
+
+#[test]
+fn lzw_image_data_read_straight_from_the_file_is_drawn() {
+    // Nine-bit codes 256 (clear), 0, 255, 257 (end of data): one black and one white sample.
+    let mut body = b"gsave 200 100 scale 2 1 8 [2 0 0 -1 0 1] currentfile /LZWDecode filter image\n".to_vec();
+    body.extend_from_slice(&[0x80, 0x00, 0x1F, 0xF0, 0x10]);
+    body.extend_from_slice(b"\ngrestore 0 0 1 setrgbcolor 0 0 1 1 rectfill\n");
+    let doc = eps(&body);
+    let img = render(&doc);
+    let (black, white) = (img.get(50, 50), img.get(150, 50));
+    assert!(black[0] < 0.1 && black[3] > 0.99 && white[0] > 0.9, "{black:?} {white:?}");
+    assert_eq!(shape_names(&doc).len(), 2, "the image, and the program goes on after its data");
+}
+
+#[test]
+fn a_refused_image_steps_over_its_filtered_data() {
+    // Three bits per sample is not an image depth: the image is refused, and its ASCII85 data
+    // (here bytes that open a string) must not run as the program and swallow the square.
+    let doc = parse(
+        b"%!PS-Adobe-3.0 EPSF-3.0\n%%BoundingBox: 0 0 200 100\n\
+          << /ImageType 1 /Width 1 /Height 1 /BitsPerComponent 3 /ImageMatrix [1 0 0 1 0 0] /Decode [0 1] \
+          /DataSource currentfile /ASCII85Decode filter >> image\n(((((~>\n0 0 10 10 rectfill\n",
+    )
+    .unwrap();
+    assert_eq!(doc.skipped, ["image"]);
+    assert_eq!(shape_names(&doc).len(), 1);
+}

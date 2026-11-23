@@ -173,8 +173,16 @@ impl Interp {
                 opacity: 1.0,
             })),
             None => {
-                if from_file && !p.sources.iter().any(|s| matches!(s, V::Filter(_))) {
-                    src.skip_image_data();
+                if from_file {
+                    let filters: Vec<_> = p.sources.iter().filter_map(|s| if let V::Filter(f) = s { Some(f.clone()) } else { None }).collect();
+                    if filters.is_empty() {
+                        src.skip_image_data();
+                    }
+                    // A refused image's filtered data is not the program: read it to its end of
+                    // data, as the image would have.
+                    for f in &filters {
+                        self.filter_take(f, 0, src);
+                    }
                 }
                 self.b.skip("image");
             }
@@ -292,6 +300,7 @@ fn decode_chain(names: &[String], src: &mut Src) -> Option<Vec<u8>> {
         "ASCII85Decode" => find(b"~>").unwrap_or(rest.len()),
         "ASCIIHexDecode" => find(b">").unwrap_or(rest.len()),
         "RunLengthDecode" => run_length_extent(rest),
+        "LZWDecode" => lzw_extent(rest),
         _ => return None,
     };
     src.pos += len;
@@ -323,6 +332,40 @@ fn run_length_extent(d: &[u8]) -> usize {
             0..=127 => l as usize + 2,
             _ => 2,
         };
+    }
+    d.len()
+}
+
+/// The length of LZW encoded data (early code-width change, as `decode_bytes` reads it), up to
+/// the byte that holds its end-of-data code. Codes are read as the decoder reads them, without
+/// building the table.
+fn lzw_extent(d: &[u8]) -> usize {
+    let (mut bits, mut acc, mut nbits) = (9u32, 0u32, 0u32);
+    let (mut len, mut prev) = (258usize, false);
+    for (i, &b) in d.iter().enumerate() {
+        acc = (acc << 8) | u32::from(b);
+        nbits += 8;
+        while nbits >= bits {
+            let code = ((acc >> (nbits - bits)) & ((1 << bits) - 1)) as usize;
+            nbits -= bits;
+            match code {
+                256 => {
+                    (len, bits, prev) = (258, 9, false);
+                    continue;
+                }
+                257 => return i + 1,
+                // The decoder stops at a code it cannot place.
+                _ if code >= len && !prev => return i + 1,
+                _ => {}
+            }
+            if prev && len < 4096 {
+                len += 1;
+            }
+            prev = true;
+            if len + 1 >= (1 << bits) && bits < 12 {
+                bits += 1;
+            }
+        }
     }
     d.len()
 }
