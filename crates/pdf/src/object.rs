@@ -522,7 +522,7 @@ pub fn ascii85(data: &[u8]) -> Vec<u8> {
     ascii85_within(data, usize::MAX).unwrap_or_default()
 }
 
-fn ascii85_within(data: &[u8], max: usize) -> Option<Vec<u8>> {
+pub(crate) fn ascii85_within(data: &[u8], max: usize) -> Option<Vec<u8>> {
     let mut out = vec![];
     let mut group = [0u32; 5];
     let mut n = 0;

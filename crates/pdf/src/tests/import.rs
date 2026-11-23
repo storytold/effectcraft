@@ -710,3 +710,10 @@ fn a_prolog_keeps_the_built_in_cmyk_conversion() {
     let doc = eps(b"0.1 0.2 0.3 0.4 setcmykcolor currentcmykcolor 0.4 eq exch 0.3 eq and exch 0.2 eq and exch 0.1 eq and { 0 0 10 10 rectfill } if\n");
     assert_eq!(shape_names(&doc).len(), 1);
 }
+
+#[test]
+fn a_self_referencing_indexed_colour_space_does_not_overflow_the_stack() {
+    // An array made its own base with `put`: `setcolorspace` followed the base for ever.
+    let doc = eps_soon("[/Indexed /DeviceRGB 0 (abc)] dup dup 1 exch put setcolorspace 0 0 10 10 rectfill\n");
+    assert_eq!(shape_names(&doc).len(), 1);
+}

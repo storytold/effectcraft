@@ -10,7 +10,7 @@ use super::scanner::Src;
 use super::value::{Filter, Flow, ImageCs, V, matrix_of};
 use super::{Affine, Interp, Rc, RefCell, is_white};
 use crate::color::cmyk_to_rgb;
-use crate::object::{ascii_hex, ascii85, lzw, run_length};
+use crate::object::{ascii_hex, ascii85_within, lzw, run_length};
 
 /// The longest side and the largest area of an image decoded (larger ones are refused rather
 /// than exhausting memory).
@@ -303,7 +303,7 @@ pub(super) fn decode_bytes(names: &[String], data: &[u8]) -> Option<Vec<u8>> {
     let mut data = data.to_vec();
     for name in names {
         data = match name.as_str() {
-            "ASCII85Decode" => ascii85(&data),
+            "ASCII85Decode" => ascii85_within(&data, MAX_DECODED)?,
             "ASCIIHexDecode" => ascii_hex(&data, MAX_DECODED)?,
             "RunLengthDecode" => run_length(&data, MAX_DECODED)?,
             "LZWDecode" => lzw(&data, true, MAX_DECODED)?,
@@ -331,14 +331,25 @@ pub(super) fn known_filter(name: &str) -> bool {
     matches!(name, "ASCII85Decode" | "ASCIIHexDecode" | "RunLengthDecode" | "LZWDecode")
 }
 
+/// How deep `Indexed` colour spaces nest their bases (a valid one has one level; an array can
+/// be made its own base with `put`, which would recurse until the stack overflows).
+const MAX_CS_DEPTH: usize = 8;
+
 pub(super) fn cs_from(v: &V) -> ImageCs {
+    cs_within(v, 0)
+}
+
+fn cs_within(v: &V, depth: usize) -> ImageCs {
+    if depth > MAX_CS_DEPTH {
+        return ImageCs::Other;
+    }
     let items = v.items().unwrap_or_else(|| vec![v.clone()]);
     match items.first().map(V::key).as_deref() {
         Some("DeviceGray" | "CalGray") => ImageCs::Gray,
         Some("DeviceRGB" | "CalRGB") => ImageCs::Rgb,
         Some("DeviceCMYK") => ImageCs::Cmyk,
         Some("Indexed") => {
-            let base = items.get(1).map(cs_from).unwrap_or(ImageCs::Other);
+            let base = items.get(1).map(|b| cs_within(b, depth + 1)).unwrap_or(ImageCs::Other);
             let hival = items.get(2).and_then(V::num).unwrap_or(0.0).clamp(0.0, 4095.0) as usize;
             match (items.get(3), base.components()) {
                 (Some(V::Str(l)), 1 | 3 | 4) => ImageCs::Indexed { base: Rc::new(base), hival, lookup: Rc::new(l.borrow().clone()) },
