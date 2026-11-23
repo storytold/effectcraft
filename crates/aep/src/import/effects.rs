@@ -257,7 +257,7 @@ pub(crate) fn import_mapped(p: &EffectParam<'_, '_>, m: &ParamMap, cx: &LayerCtx
         (Conv::Popup { items: table, .. }, Some(items))
             if items.len() == table.len() && !popup_names_match(items, &group.prop(m.target).map(|p| p.ui.clone())) =>
         {
-            table.iter().map(|s| s.to_string()).collect()
+            positional_popup_items(items, table, &group.prop(m.target).map(|p| p.ui.clone()))
         }
         (Conv::Popup { .. }, Some(items)) => items.clone(),
         (Conv::Popup { items, .. }, None) => {
@@ -472,6 +472,22 @@ fn popup_mapping(file_items: &[String], ui: &ParamUi) -> Option<Vec<Option<u32>>
 fn popup_names_match(file_items: &[String], ui: &Option<ParamUi>) -> bool {
     let Some(ui) = ui else { return false };
     popup_mapping(file_items, ui).is_some_and(|map| map.iter().zip(file_items).all(|(m, item)| m.is_some() || item.trim() == "(-"))
+}
+
+/// The items of a popup whose file names do not all place it, with the same item count as
+/// `table` (After Effects' items): an item the file names in a way EffectCraft knows, and a
+/// separator, stay as the file has them; the table's name gives each other position its meaning.
+fn positional_popup_items(file_items: &[String], table: &[&str], ui: &Option<ParamUi>) -> Vec<String> {
+    let resolved = ui.as_ref().and_then(|ui| popup_mapping(file_items, ui));
+    file_items
+        .iter()
+        .zip(table)
+        .enumerate()
+        .map(|(i, (file, name))| {
+            let keeps = file.trim() == "(-" || resolved.as_ref().and_then(|map| map.get(i)).is_some_and(Option::is_some);
+            if keeps { file.clone() } else { name.to_string() }
+        })
+        .collect()
 }
 
 /// Keys of a popup were imported as file indices (0-based); maps them to EffectCraft's items.
@@ -862,6 +878,18 @@ mod tests {
 
     fn ui(options: &[&str]) -> ParamUi {
         ParamUi::Popup { options: options.iter().map(|s| s.to_string()).collect() }
+    }
+
+    /// The positional fallback of a popup saved in another language names only the items the
+    /// file's own names do not place: an item that resolves, and a separator, stay the file's.
+    #[test]
+    fn positional_popup_names_keep_the_items_that_resolve() {
+        let file: Vec<String> = ["Radial Ramp", "unrecognized"].iter().map(|s| s.to_string()).collect();
+        let ui = Some(ui(&["Linear Ramp", "Radial Ramp"]));
+        assert_eq!(positional_popup_items(&file, &["Linear Ramp", "Radial Ramp"], &ui), ["Radial Ramp", "Radial Ramp"]);
+        let file: Vec<String> = ["甲", "(-", "乙"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(positional_popup_items(&file, &["Linear Ramp", "(-", "Radial Ramp"], &ui), ["Linear Ramp", "(-", "Radial Ramp"]);
+        assert_eq!(positional_popup_items(&file, &["Linear Ramp", "(-", "Radial Ramp"], &None), ["Linear Ramp", "(-", "Radial Ramp"]);
     }
 
     #[test]
