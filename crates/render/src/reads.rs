@@ -120,6 +120,8 @@ pub struct ReadFiles {
     /// Made of values a layer's cache key doesn't capture (a text Expression Selector evaluates
     /// per character): such a buffer is not stored on disk.
     unkeyed: bool,
+    /// A live Object Matte was used where a saved matte did not match the frame.
+    object_matte_mismatch: bool,
 }
 
 impl PartialEq for ReadFiles {
@@ -162,6 +164,7 @@ impl ReadFiles {
     pub fn extend(&mut self, other: &ReadFiles) {
         self.incomplete |= other.incomplete;
         self.unkeyed |= other.unkeyed;
+        self.object_matte_mismatch |= other.object_matte_mismatch;
         if let Some(g) = other.since {
             self.note_since(g);
         }
@@ -200,6 +203,10 @@ impl ReadFiles {
     /// a layer buffer. (A frame's key captures them: frame entries are not affected.)
     pub fn is_unkeyed(&self) -> bool {
         self.unkeyed
+    }
+
+    pub(crate) fn object_matte_mismatch(&self) -> bool {
+        self.object_matte_mismatch
     }
 
     /// The files, sorted by path.
@@ -283,6 +290,14 @@ impl ReadLog {
     /// ([`ReadFiles::is_unkeyed`]).
     pub fn mark_unkeyed(&self) {
         self.lock().mark_unkeyed();
+    }
+
+    /// Replay this warning when the cached pixels serve another render. Keep the buffer in
+    /// memory because layer entries on disk only store the source files.
+    pub(crate) fn note_object_matte_mismatch(&self) {
+        let mut files = self.lock();
+        files.object_matte_mismatch = true;
+        files.mark_unkeyed();
     }
 
     /// The files noted so far.

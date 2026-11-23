@@ -67,6 +67,7 @@ impl Exporter for FileExporter {
                     overflow: job.project.render_prefs.overflow_folders.clone(),
                     caches: job.caches.map(|c| effectcraft_export::JobCaches { gpu: &c.gpu, cpu: &c.cpu }),
                     renderer: job.renderer,
+                    object_matte_warning: job.object_matte_warning,
                     gpu_frames: job.gpu_frames,
                     free_memory: Some(&free_memory),
                     cache_budget: job.cache_budget,

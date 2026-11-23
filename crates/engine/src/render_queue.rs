@@ -41,6 +41,8 @@ pub struct ExportJob<'a> {
     /// The compositor the queue item's output modules render on (#3335): the first module
     /// chooses (measuring a GPU project's first frames) and stores it here, the others follow.
     pub renderer: Option<&'a Mutex<Option<effectcraft_render::Backend>>>,
+    /// The saved-matte warning shared by the output modules of one item.
+    pub object_matte_warning: Option<&'a std::sync::Once>,
     /// Settings ▸ Memory & CPU ▸ GPU Frames Rendered at Once: 1 to 3, `None` for Auto.
     pub gpu_frames: Option<usize>,
     /// What each of a one-off export's own two layer caches may hold
@@ -393,6 +395,7 @@ async fn run_work(w: Work, shared: &JobShared, notify: &mut dyn FnMut(&JobShared
         // first module's file is the item's output.
         let mut r: Result<ExportResult, String> = Err("no output module".into());
         let renderer = Mutex::new(None);
+        let object_matte_warning = std::sync::Once::new();
         for (mi, (mitem, path)) in modules.iter().enumerate() {
             let name = w.project.item(mitem.comp).map(|i| i.name.clone()).unwrap_or_default();
             let index = w.project.render_queue.iter().position(|i| i.id == mitem.id).map_or(0, |i| i + 1);
@@ -408,6 +411,7 @@ async fn run_work(w: Work, shared: &JobShared, notify: &mut dyn FnMut(&JobShared
                 nested_switches: w.nested_switches,
                 caches: Some(&caches),
                 renderer: Some(&renderer),
+                object_matte_warning: Some(&object_matte_warning),
                 gpu_frames: w.gpu_frames,
                 cache_budget: Some(w.cache_budget),
             };

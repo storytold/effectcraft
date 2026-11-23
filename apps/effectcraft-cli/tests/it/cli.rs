@@ -433,6 +433,67 @@ fn render_frame_writes_png() {
 }
 
 #[test]
+fn render_frame_reports_when_object_matte_needs_refreezing() {
+    use effectcraft_engine::Session;
+    use effectcraft_engine::effects::{flatten_params, object_matte, roto};
+    use effectcraft_engine::keyframe::Value as PropertyValue;
+    use effectcraft_engine::project::LayerId;
+
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Matte", "width": 24, "height": 18, "frameRate": 25, "duration": 1})).unwrap();
+    let comp = s.active_comp_id().unwrap();
+    let layer = LayerId(s.execute("layer.newSolid", json!({"name": "Source", "color": "#ff0000"})).unwrap()["layer"].as_u64().unwrap());
+    let effect = s.execute("objectMatte.apply", json!({"layer": layer.0, "point": [12, 9], "frame": 0})).unwrap()["effect"].as_u64().unwrap();
+    let g = s.active_comp().unwrap().layer(layer).unwrap().props.find_group(effect).unwrap();
+    let params = flatten_params(g, &mut |p| p.value.clone());
+    let mut cache = roto::FrozenCache { key: object_matte::frozen_key(&params, [24.0, 18.0], 25.0, None), size: [24, 18], ..Default::default() };
+    cache.frames.insert(0, roto::freeze_frame(&[1.0; 24 * 18], &[]));
+    let g = std::sync::Arc::make_mut(&mut s.project).comp_mut(comp).unwrap().layer_mut(layer).unwrap().props.find_group_mut(effect).unwrap();
+    g.get_mut(roto::FROZEN).unwrap().value = PropertyValue::Str(cache.to_json());
+
+    let project = tmp("object-matte-refreeze.ecproj");
+    let png = tmp("object-matte-refreeze.png");
+    let config = tmp("object-matte-refreeze-config");
+    let path = project.to_str().unwrap();
+    let warning = "Object Matte is using a live matte";
+    let render = |frame: &str| {
+        let out = bin()
+            .env("EFFECTCRAFT_CONFIG_DIR", &config)
+            .env("RUST_LOG", "warn")
+            .args(["render-frame", path, "--frame", frame, "--transparent", "--out", png.to_str().unwrap()])
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{stderr}");
+        stderr.contains(warning)
+    };
+    s.execute("file.saveAs", json!({"path": path})).unwrap();
+    assert!(!render("0"), "a matching freeze does not warn");
+    assert!(!render("1"), "a missing frame does not make the freeze stale");
+
+    s.execute("prop.set", json!({"layer": layer.0, "path": "effects/#1/objectMatte/feather", "value": 1})).unwrap();
+    s.execute("file.save", json!({})).unwrap();
+    assert!(render("0"), "an edit to Feather should warn that the saved matte cannot be used");
+    let params = json!({"layer": layer.0, "effect": effect}).to_string();
+    let status = ok_json(&["exec", "objectMatte.status", &params, path]);
+    assert_eq!(status["frozen"], true, "the saved payload is still present");
+    assert_eq!(status["needsRefreeze"], true);
+    assert_eq!(status["animatedMismatch"], false);
+
+    // Two jobs render the same frames with a shared layer cache. Each reports the fallback
+    // once, even when the next job reuses those pixels or an item has two output modules.
+    for name in ["refreeze-one.png", "refreeze-two.png"] {
+        s.execute("renderQueue.add", json!({"output": tmp(name), "format": "png", "start": 0.0, "end": 0.12})).unwrap();
+    }
+    s.execute("render.addOutputModule", json!({"index": 1, "format": "png", "output": tmp("refreeze-one-extra.png")})).unwrap();
+    s.execute("file.save", json!({})).unwrap();
+    let out = bin().env("EFFECTCRAFT_CONFIG_DIR", &config).env("RUST_LOG", "warn").args(["render", "--queue", "--project", path]).output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    assert_eq!(stderr.matches(warning).count(), 2, "{stderr}");
+}
+
+#[test]
 fn errors_are_json() {
     let (code, v) = run_json(&["exec", "no.such.command", "--empty"]);
     assert_eq!(code, 1);

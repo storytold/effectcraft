@@ -71,11 +71,7 @@ impl Session {
     /// Render a comp frame (comp time `t`) as opaque 8-bit RGBA over the comp background, scaled
     /// so the longest side is at most `max_side` pixels (0 = full size). Returns (width, height, rgba).
     pub fn render_rgba8(&self, comp: ItemId, t: Tick, max_side: u32) -> Result<(u32, u32, Vec<u8>)> {
-        let c = self.project.comp(comp).ok_or(EngineError::NoComp)?;
-        let long = c.width.max(c.height).max(1) as f64;
-        let scale = if max_side == 0 { 1.0 } else { (max_side as f64 / long).min(1.0) };
-        let img = self.render(comp, t, RenderOpts { scale, backend: effectcraft_render::Backend::Auto, ..Default::default() });
-        Ok((img.width, img.height, img.to_rgba8_over(c.background)))
+        self.render_rgba8_alpha(comp, t, max_side, false)
     }
 
     /// A Project panel thumbnail of an item (a comp at `t`, footage at its first frame), longest
@@ -187,14 +183,15 @@ impl Session {
     /// [`Session::render_rgba8`], or with `transparent` the frame's own straight alpha (what a
     /// render with RGB + Alpha channels writes) instead of compositing over the background.
     pub fn render_rgba8_alpha(&self, comp: ItemId, t: Tick, max_side: u32, transparent: bool) -> Result<(u32, u32, Vec<u8>)> {
-        if !transparent {
-            return self.render_rgba8(comp, t, max_side);
-        }
         let c = self.project.comp(comp).ok_or(EngineError::NoComp)?;
         let long = c.width.max(c.height).max(1) as f64;
         let scale = if max_side == 0 { 1.0 } else { (max_side as f64 / long).min(1.0) };
-        let img = self.render(comp, t, RenderOpts { scale, backend: effectcraft_render::Backend::Auto, ..Default::default() });
-        Ok((img.width, img.height, img.to_rgba8()))
+        let warning = std::sync::Once::new();
+        let mut renderer = self.renderer(RenderOpts { scale, backend: effectcraft_render::Backend::Auto, ..Default::default() });
+        renderer.object_matte_warning = Some(&warning);
+        let img = renderer.comp_frame(comp, t);
+        let rgba = if transparent { img.to_rgba8() } else { img.to_rgba8_over(c.background) };
+        Ok((img.width, img.height, rgba))
     }
 
     /// Make the media layer and the layer cache let go of what they decoded from `footage`'s

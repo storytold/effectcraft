@@ -60,6 +60,10 @@ pub(crate) fn comp_scene(ctx: &EvalCtx, layer: &Layer) -> Option<effectcraft_eff
 pub(crate) const MAX_FX_DEPTH: usize = 8;
 
 impl EffectHost for FxHost<'_, '_, '_> {
+    fn note_object_matte_mismatch(&self) {
+        self.r.note_object_matte_mismatch();
+    }
+
     fn original(&self) -> Option<&Buf> {
         self.original
     }

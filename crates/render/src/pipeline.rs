@@ -173,6 +173,7 @@ impl<'a> Renderer<'a> {
             opts,
             cache: None,
             reads: None,
+            object_matte_warning: None,
             profile: None,
             accel: None,
             depth: 0,
@@ -215,6 +216,9 @@ impl<'a> Renderer<'a> {
     /// [`Renderer::reads`].
     pub(crate) fn cached(&self, key: Option<u64>) -> Option<(Arc<Buf>, Arc<ReadFiles>)> {
         let (buf, files) = self.cache?.get(key?)?;
+        if files.object_matte_mismatch() {
+            self.warn_object_matte_mismatch();
+        }
         if let Some(log) = self.reads {
             log.note_all(&files);
         }
@@ -229,12 +233,30 @@ impl<'a> Renderer<'a> {
     pub(crate) fn keep(&self, key: Option<u64>, buf: Arc<Buf>, files: &Arc<ReadFiles>) -> (Arc<Buf>, Arc<ReadFiles>) {
         let (Some(c), Some(k)) = (self.cache_to_keep(), key) else { return (buf, files.clone()) };
         let (kept, kept_files) = c.insert(k, buf, files.clone());
-        if !Arc::ptr_eq(&kept_files, files)
-            && let Some(log) = self.reads
-        {
-            log.note_all(&kept_files);
+        if !Arc::ptr_eq(&kept_files, files) {
+            if kept_files.object_matte_mismatch() {
+                self.warn_object_matte_mismatch();
+            }
+            if let Some(log) = self.reads {
+                log.note_all(&kept_files);
+            }
         }
         (kept, kept_files)
+    }
+
+    pub(crate) fn note_object_matte_mismatch(&self) {
+        if let Some(log) = self.reads {
+            log.note_object_matte_mismatch();
+        }
+        self.warn_object_matte_mismatch();
+    }
+
+    fn warn_object_matte_mismatch(&self) {
+        if let Some(warning) = self.object_matte_warning
+            && log::log_enabled!(log::Level::Warn)
+        {
+            warning.call_once(|| log::warn!("Object Matte is using a live matte because this frame's settings differ from the saved matte."));
+        }
     }
 
     /// Run `make`, which makes a buffer to keep under `key` in the layer cache, on this renderer

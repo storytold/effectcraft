@@ -519,6 +519,9 @@ pub struct LayerPixels {
 
 /// Services the renderer offers effects that look beyond their own pixels.
 pub trait EffectHost: Sync {
+    /// A saved Object Matte cannot be used at this time, so the effect renders a live matte.
+    fn note_object_matte_mismatch(&self) {}
+
     /// Pixels entering the effect stack, in effect space, before any effects. For an
     /// adjustment layer this is the composition below it, in the effect working space.
     fn original(&self) -> Option<&Buf> {
