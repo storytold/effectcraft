@@ -117,6 +117,8 @@ pub struct WasmPlugin {
     source: String,
     /// The WebAssembly ABI the module implements (`ec_api_version`).
     abi: u32,
+    /// Whether the module exports the optional `ec_set_masks(ptr, len)` hook.
+    has_set_masks: bool,
     engine: Engine,
     module: Module,
     /// Idle instances.
@@ -149,7 +151,8 @@ impl WasmPlugin {
             return Err(format!("parameter `{}`: WebAssembly plug-ins use plug-in API 1 parameter types (no point3, layer, text or hidden)", p.id));
         }
         let inst = pending.finish(abi)?;
-        Ok(WasmPlugin { manifest, source: source.to_string(), abi, engine, module, pool: Mutex::new(vec![inst]) })
+        let has_set_masks = inst.set_masks.is_some();
+        Ok(WasmPlugin { manifest, source: source.to_string(), abi, has_set_masks, engine, module, pool: Mutex::new(vec![inst]) })
     }
 
     /// An idle instance, or a fresh one when the pool is empty.
@@ -364,7 +367,7 @@ impl EffectPlugin for WasmPlugin {
     }
 
     fn render_v2(&self, frame: &mut PluginFrame, params: &PluginParams, time: f64, host: &dyn PluginHost) -> Result<(), String> {
-        let masks = flatten_mask_paths(&host.mask_paths());
+        let masks = if self.has_set_masks { flatten_mask_paths(&host.mask_paths()) } else { Vec::new() };
         if self.abi == 1 {
             return self.render_v1(frame, params, time, &masks);
         }
