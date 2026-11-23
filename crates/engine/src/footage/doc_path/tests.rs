@@ -247,3 +247,16 @@ fn footage_on_a_trusted_share_is_followed() {
         assert!(refused.is_empty(), "{refused:?}");
     }
 }
+
+/// Opening a project or starting a new one keeps Settings ▸ Import ▸ Trusted Network Folders:
+/// the footage check on open, Reload and Relink still follow the trusted shares.
+#[test]
+fn trusted_shares_survive_replacing_the_project() {
+    let mut s = Session::default();
+    s.execute("prefs.set", json!({"key": "import.trustedShares", "value": r"\\nas\media"})).unwrap();
+    assert_eq!(*s.stored_paths.trusted(), vec![r"\\nas\media".to_string()]);
+    s.replace_project(effectcraft_project::Project::default(), None);
+    assert_eq!(*s.stored_paths.trusted(), vec![r"\\nas\media".to_string()]);
+    s.execute("file.newProject", json!({})).unwrap();
+    assert_eq!(*s.stored_paths.trusted(), vec![r"\\nas\media".to_string()]);
+}

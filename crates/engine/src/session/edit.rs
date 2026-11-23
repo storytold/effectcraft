@@ -203,7 +203,10 @@ impl Session {
             job.wait();
         }
         self.render_job = None;
+        // The paths the closed project stored are forgotten; Settings ▸ Import ▸ Trusted Network
+        // Folders is a setting, not part of the project, and stays.
         self.stored_paths = Default::default();
+        self.stored_paths.set_trusted(crate::doc_path::trusted_shares(&self.prefs.import.trusted_shares));
         self.stop_track();
         self.track_job = None;
         self.stop_mask_track();
