@@ -65,10 +65,12 @@ fn turbulent_displace_and_cc_lens() {
         &[("displacement", e(1)), ("size", n(25.0)), ("amount", n(-10000.0)), ("pinning", e(1)), ("resizeLayer", on())],
     );
     effect_case("ec.distort.turbulentdisplace", &[("displacement", e(7)), ("amount", n(f64::INFINITY)), ("pinning", e(2))]);
-    // #943: Evolution moves the pattern at a constant rate on both paths, including steps of a
-    // few degrees and angles past a whole revolution, where an eased evolution axis diverges.
-    for evolution in [10.0, 37.0, 400.0, 725.5] {
+    // Evolution moves through whole turns, including negative angles, on both paths.
+    for evolution in [-361.0, -360.0, -359.0, 10.0, 37.0, 400.0, 725.5] {
         effect_case("ec.distort.turbulentdisplace", &[("evolution", n(evolution)), ("size", n(12.0)), ("amount", n(30.0))]);
+    }
+    for evolution in [-1.0, 90.0, 270.0, 360.0, 361.0] {
+        effect_case("ec.distort.turbulentdisplace", &[("evolution", n(evolution)), ("evolutionOptions/cycleEvolution", on()), ("size", n(12.0))]);
     }
     effect_case("ec.distort.cclens", &[("size", n(70.0))]);
     effect_case("ec.distort.cclens", &[("size", n(45.0)), ("convergence", n(60.0)), ("center", Value::Vec2([30.0, 20.0]))]);

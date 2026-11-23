@@ -37,15 +37,65 @@ fn pct(max: f64) -> ParamUi {
 
 // ---------------------------------------------------------------- Turbulent Displace
 
-/// Fractional-octave fBm of value noise in 0..1. Evolution (`z`) is linear: with the eased z of
-/// plain value noise a few degrees of Evolution barely moved the pattern (#943).
-fn fbm(u: f64, v: f64, z: f64, seed: u32, octaves: f64, falloff: f32) -> f32 {
+/// Four spatial noise fields and their cubic Hermite weights for this frame. Adjacent segments
+/// share both the field and its temporal tangent, including where a cycle wraps.
+pub struct TurbulentEvolution {
+    pub seeds: [u32; 4],
+    pub weights: [f32; 4],
+}
+
+impl TurbulentEvolution {
+    pub fn new(ctx: &EffectCtx) -> Self {
+        let degrees = ctx.params.f("evolution");
+        let degrees = if degrees.is_finite() { degrees } else { 0.0 };
+        // Two fields per turn, with at least three distinct fields around a closed loop:
+        // with just two, the two neighbours of each knot coincide and its tangent vanishes.
+        let cycle = ctx.params.b("evolutionOptions/cycleEvolution").then(|| (ctx.params.f("evolutionOptions/cycle").round() as u32).clamp(1, 1000));
+        let (phase, fields) = match cycle {
+            Some(turns) => {
+                let fields = (turns * 2).max(3);
+                let period = f64::from(turns) * 360.0;
+                (degrees.rem_euclid(period) / period * f64::from(fields), Some(fields))
+            }
+            None => (degrees / 180.0, None),
+        };
+        let base = phase.floor();
+        let t = (phase - base) as f32;
+        let seeds = [-1, 0, 1, 2].map(|offset| {
+            let index = match fields {
+                Some(count) => (base as i64 + offset).rem_euclid(i64::from(count)) as u32,
+                None => (base.rem_euclid(4_294_967_296.0) as u32).wrapping_add_signed(offset as i32),
+            };
+            // Index zero retains the original pattern. Use a different stride from Random Seed
+            // so that changing the seed does not simply advance the animation by one field.
+            index.wrapping_mul(0x27d4_eb2d)
+        });
+        let s = 1.0 - t;
+        // A knot's tangent is proportional to the difference between its two neighbours.
+        // The usual Catmull–Rom factor (1/2) makes independent fields move nearly three times
+        // faster mid-segment than at the knots. At 6/5 the RMS speeds at knot and midpoint
+        // match for a three-field loop and are within 4% for four independent fields.
+        let incoming = 1.2 * t * s * s;
+        let outgoing = 1.2 * s * t * t;
+        let weights = [-incoming, s * s * (1.0 + 2.0 * t) + outgoing, t * t * (1.0 + 2.0 * s) + incoming, -outgoing];
+        Self { seeds, weights }
+    }
+}
+
+fn fbm(u: f64, v: f64, evolution: &TurbulentEvolution, seed: u32, octaves: f64, falloff: f32) -> f32 {
     let n = octaves.ceil().max(1.0) as usize;
     let frac = (octaves - octaves.floor()) as f32;
     let (mut sum, mut norm, mut amp, mut f) = (0.0f32, 0.0f32, 1.0f32, 1.0f32);
     for o in 0..n {
         let w = if o + 1 == n && frac > 0.0 { frac } else { 1.0 };
-        sum += value_noise_linear_z(u as f32 * f, v as f32 * f, z as f32 + o as f32 * 5.17, seed.wrapping_add(o as u32 * 101)) * amp * w;
+        let octave_seed = seed.wrapping_add(o as u32 * 101);
+        let mut noise = 0.0;
+        for (&knot, &weight) in evolution.seeds.iter().zip(&evolution.weights) {
+            if weight != 0.0 {
+                noise += weight * value_noise_linear_z(u as f32 * f, v as f32 * f, o as f32 * 5.17, octave_seed.wrapping_add(knot));
+            }
+        }
+        sum += noise * amp * w;
         norm += amp * w;
         amp *= falloff;
         f *= 2.0;
@@ -114,9 +164,7 @@ fn turbulent_displace(ctx: &EffectCtx, mut b: Buf) -> Buf {
     }
     let off = b.to_px(ctx.params.v2("offset"));
     let oct = ctx.params.f("complexity").clamp(1.0, 10.0);
-    let evo = ctx.params.f("evolution") / 360.0;
-    // Evolution Options: Cycle Evolution loops the noise every `cycle` revolutions.
-    let cycle = (ctx.params.b("evolutionOptions/cycleEvolution")).then(|| ctx.params.f("evolutionOptions/cycle").round().max(1.0));
+    let evolution = TurbulentEvolution::new(ctx);
     let pin_raw = ctx.params.e("pinning");
     let locked = pin_raw >= 8;
     let pin = if locked { pin_raw - 7 } else { pin_raw };
@@ -129,18 +177,7 @@ fn turbulent_displace(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let (ix, iy) = (0.5f64.min(lw * 0.5), 0.5f64.min(lh * 0.5));
     let lock = (lx + ix, lx + lw - ix, ly + iy, ly + lh - iy);
     let seed = (ctx.seed ^ 0x7d15).wrapping_add((ctx.params.f("evolutionOptions/randomSeed") as i64 as u32).wrapping_mul(0x9e37_79b9));
-    let n = |u: f64, v: f64, s: u32| {
-        let s = seed.wrapping_add(s);
-        match cycle {
-            Some(c) => {
-                // Cross-fade the noise at z and z - c so z = 0 and z = c match.
-                let z = evo.rem_euclid(c);
-                let t = z / c;
-                (fbm(u, v, z, s, oct, falloff) as f64 * (1.0 - t) + fbm(u, v, z - c, s, oct, falloff) as f64 * t) - 0.5
-            }
-            None => fbm(u, v, evo, s, oct, falloff) as f64 - 0.5,
-        }
-    };
+    let n = |u: f64, v: f64, s: u32| fbm(u, v, &evolution, seed.wrapping_add(s), oct, falloff) as f64 - 0.5;
     b.img = remap(&b.img, false, |x, y| {
         let (u, v) = ((x - off.0) / size, (y - off.1) / size);
         let (dx, dy) = match kind {
@@ -1242,8 +1279,82 @@ mod tests {
         assert!(max_diff(&render(0.0, &cycle), &render(360.0, &cycle)) < 1e-4);
         assert!(max_diff(&render(37.0, &cycle), &render(397.0, &cycle)) < 1e-4);
         assert!(max_diff(&render(0.0, &cycle), &render(37.0, &cycle)) > 0.01);
-        // Random Seed still gives a different pattern at the same Evolution.
-        assert!(max_diff(&frames[1], &render(37.0, &[("evolutionOptions/randomSeed", num(5.0))])) > 0.01);
+        // Random Seed changes the pattern independently of advancing Evolution.
+        let reseeded = render(37.0, &[("evolutionOptions/randomSeed", num(1.0))]);
+        assert!(max_diff(&frames[1], &reseeded) > 0.01);
+        assert!(max_diff(&render(217.0, &[]), &reseeded) > 0.01);
+    }
+
+    /// On a coordinate ramp the two colour channels directly record the displacement.
+    /// Ignore the outer few pixels, where the source can move out of the image.
+    fn evolution_field(degrees: f64, cycle: Option<f64>) -> Vec<f32> {
+        let mut img = Image::new(48, 48);
+        for y in 0..48 {
+            for x in 0..48 {
+                img.set(x, y, [x as f32 / 48.0, y as f32 / 48.0, 0.0, 1.0]);
+            }
+        }
+        let vals = [
+            ("evolution", num(degrees)),
+            ("amount", num(12.0)),
+            ("size", num(8.0)),
+            ("pinning", Value::Enum(0)),
+            ("evolutionOptions/cycleEvolution", Value::Bool(cycle.is_some())),
+            ("evolutionOptions/cycle", num(cycle.unwrap_or(1.0))),
+        ];
+        let out = run("ec.distort.turbulentdisplace", &vals, img).img;
+        out.data.chunks(48).skip(8).take(32).flat_map(|row| row[8..40].iter().flat_map(|p| [p[0], p[1]])).collect()
+    }
+
+    fn evolution_step(a: &[f32], b: &[f32]) -> f32 {
+        a.iter().zip(b).map(|(a, b)| (a - b).powi(2)).sum::<f32>().sqrt()
+    }
+
+    #[test]
+    fn turbulent_evolution_moves_smoothly_through_whole_turns() {
+        for (turn, cycle) in [(-360.0, None), (360.0, None), (720.0, None), (0.0, Some(1.0)), (720.0, Some(2.0))] {
+            let (a, b, c) = (evolution_field(turn - 1.0, cycle), evolution_field(turn, cycle), evolution_field(turn + 1.0, cycle));
+            let acceleration = a.iter().zip(&b).zip(&c).map(|((a, b), c)| ((c - b) - (b - a)).powi(2)).sum::<f32>().sqrt();
+            let speed = evolution_step(&a, &c) * 0.5;
+            let inside = evolution_step(&evolution_field(turn + 43.0, cycle), &evolution_field(turn + 44.0, cycle));
+            assert!(speed > 0.15 * inside && acceleration < 0.15 * speed, "{turn} cycle {cycle:?}: speed {speed}, nearby {inside}, change {acceleration}");
+        }
+    }
+
+    #[test]
+    fn turbulent_one_turn_cycle_takes_a_forward_loop() {
+        let at = |a| evolution_field(a, Some(1.0));
+        let quarter = at(90.0);
+        assert!(evolution_step(&quarter, &at(270.0)) > 8.0 * evolution_step(&quarter, &at(91.0)), "the second half must not retrace the first");
+        assert_eq!(quarter, at(-270.0));
+        assert_eq!(quarter, at(450.0));
+    }
+
+    #[test]
+    fn turbulent_evolution_handles_large_and_nonfinite_angles() {
+        assert_eq!(evolution_field(f64::MAX, Some(2.0)), evolution_field(f64::MAX.rem_euclid(720.0), Some(2.0)));
+        assert!(evolution_field(-f64::MAX, None).iter().all(|p| p.is_finite()));
+        assert_eq!(evolution_field(f64::NAN, None), evolution_field(0.0, None));
+    }
+
+    #[test]
+    fn turbulent_evolution_keeps_moving_evenly_over_a_turn() {
+        for (cycle, segment) in [(None, 180.0), (Some(1.0), 120.0)] {
+            // Average over several spatial fields. Random features may slow locally, but the
+            // displacement across the image should not pulse at the same phase of every segment.
+            let speeds = [0.0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875].map(|phase| {
+                (-3..3)
+                    .map(|i| {
+                        let at = (f64::from(i) + phase) * segment;
+                        evolution_step(&evolution_field(at - 0.5, cycle), &evolution_field(at + 0.5, cycle))
+                    })
+                    .sum::<f32>()
+                    / 6.0
+            });
+            let fastest = speeds.into_iter().fold(0.0, f32::max);
+            let slowest = speeds.into_iter().fold(f32::INFINITY, f32::min);
+            assert!(fastest < 1.5 * slowest, "cycle {cycle:?}: phase speeds {speeds:?}");
+        }
     }
 
     #[test]

@@ -567,13 +567,16 @@ fn value_noise_z(x: f32, y: f32, z: f32, seed: u32, ease_z: bool) -> f32 {
     let c100 = lattice(ix + 1, iy, iz, seed);
     let c010 = lattice(ix, iy + 1, iz, seed);
     let c110 = lattice(ix + 1, iy + 1, iz, seed);
+    let l00 = c000 + (c100 - c000) * fx;
+    let l01 = c010 + (c110 - c010) * fx;
+    let a = l00 + (l01 - l00) * fy;
+    if (fz == 0.0) {
+        return a;
+    }
     let c001 = lattice(ix, iy, iz + 1, seed);
     let c101 = lattice(ix + 1, iy, iz + 1, seed);
     let c011 = lattice(ix, iy + 1, iz + 1, seed);
     let c111 = lattice(ix + 1, iy + 1, iz + 1, seed);
-    let l00 = c000 + (c100 - c000) * fx;
-    let l01 = c010 + (c110 - c010) * fx;
-    let a = l00 + (l01 - l00) * fy;
     let l10 = c001 + (c101 - c001) * fx;
     let l11 = c011 + (c111 - c011) * fx;
     let b = l10 + (l11 - l10) * fy;
