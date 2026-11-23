@@ -591,7 +591,7 @@ fn lumetri(ctx: &EffectCtx, mut b: Buf) -> Buf {
             let ms = ((1.0 + 2.0 * off(&luma_sat, l)) * (1.0 + 2.0 * off(&sat_sat, s))).max(0.0);
             let dh = off(&hue_hue, h) * chroma;
             let dl = off(&hue_luma, h) * chroma;
-            let luma = luminance(c[0], c[1], c[2]);
+            let mut luma = luminance(c[0], c[1], c[2]);
             if dh != 0.0 {
                 let (r, g, b2) = hsl_to_rgb((h + dh).rem_euclid(1.0), s, l);
                 // Keep values outside 0..1 (HDR) by moving only the in-range part.
@@ -600,6 +600,8 @@ fn lumetri(ctx: &EffectCtx, mut b: Buf) -> Buf {
             }
             if hue_scale != 1.0 {
                 c = scale_saturation_linear(c, hue_scale);
+                // Luma vs Sat and Sat vs Sat scale the colour Hue vs Sat left, around its own grey.
+                luma = luminance(c[0], c[1], c[2]);
             }
             if ms != 1.0 {
                 c = c.map(|v| luma + (v - luma) * ms);
@@ -1012,6 +1014,21 @@ mod tests {
             for k in 0..3 {
                 assert!((out[k] * 255.0 - want[k]).abs() < 1.0, "{from:?}: {out:?}");
             }
+        }
+    }
+
+    #[test]
+    fn lumetri_luma_vs_sat_after_hue_vs_sat_keeps_the_grey() {
+        // Hue vs Sat at 0 turns red grey in linear light; Luma vs Sat at 0 then has no colour left
+        // to remove, so the grey must keep its brightness.
+        let red = || Image::filled(2, 2, [1.0, 0.0, 0.0, 1.0]);
+        let grey = run("ec.color.lumetri", &[("curves/hueSaturationCurves/hueVsSat", s("0.6,0"))], red()).get(0, 0);
+        let both =
+            run("ec.color.lumetri", &[("curves/hueSaturationCurves/hueVsSat", s("0.6,0")), ("curves/hueSaturationCurves/lumaVsSat", s("0,0 1,0"))], red())
+                .get(0, 0);
+        assert!((grey[0] - grey[1]).abs() < 1e-4 && (grey[1] - grey[2]).abs() < 1e-4, "{grey:?}");
+        for k in 0..3 {
+            assert!((both[k] - grey[k]).abs() < 1e-4, "{both:?} vs {grey:?}");
         }
     }
 
