@@ -582,7 +582,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Mouse Event on Script Window Control",
             [],
             None,
-            "{window?, widget, type: mousedown | mouseup | mousemove | mouseover | mouseout | click (default), x?, y? (relative to the control; default its centre), button? (0 left, 1 middle, 2 right), buttons? (held: 1 left, 2 right, 4 middle), detail? (click count), screenX?, screenY?, altKey?, ctrlKey?, metaKey?, shiftKey?} → the script's addEventListener listeners on the control and its containers receive a MouseEvent",
+            "{window?, widget, type: mousedown | mouseup | mousemove | mouseover | mouseout | click (default) | wheel | mousewheel, x?, y? (relative to the control; default its centre), button? (0 left, 1 middle, 2 right), buttons? (held: 1 left, 2 right, 4 middle), detail? (click count), screenX?, screenY?, deltaX?, deltaY?, deltaMode? (0 pixel, 1 line, 2 page), wheelDelta?, altKey?, ctrlKey?, metaKey?, shiftKey?} → the script's addEventListener listeners on the control and its containers receive a MouseEvent",
             always,
             scriptui::mouse
         ),
