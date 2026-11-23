@@ -843,6 +843,27 @@ pub(crate) fn answer_file_dialog(app: &mut EffectcraftApp, params: &Value, paths
     }
 }
 
+/// Prepare a docked script panel window for display at its dock `rect`.
+fn prepare_panel_window(app: &EffectcraftApp, id: u32, rect: Rect) -> Option<ScriptWindow> {
+    let mut w = app.session.script_ui.window(id).cloned()?;
+    let (pw, ph) = (rect.width() as f64, rect.height() as f64);
+    w.root.fixed_bounds = Some([0.0, 0.0, pw.max(w.root.bounds[2]), ph.max(w.root.bounds[3])]);
+    layout(&mut w);
+    Some(w)
+}
+
+/// Record `(window, widget)` pairs that already received a ScriptUI `click` mouse event so
+/// `draw_children`'s plain widget click does not fire a duplicate `Act::Click`.
+fn record_mouse_clicks(acts: &[Act], out: &mut Vec<(u32, u32)>) {
+    for a in acts {
+        if let Act::Mouse(win, wid, v) = a
+            && v.get("type").and_then(Value::as_str) == Some("click")
+        {
+            out.push((*win, *wid));
+        }
+    }
+}
+
 /// The floating script windows (dialogs, palettes, windows), drawn over the app.
 pub fn show_windows(app: &mut EffectcraftApp, ctx: &egui::Context) {
     let windows: Vec<ScriptWindow> = app.session.script_ui.windows.iter().filter(|w| w.kind != WindowKind::Panel).cloned().collect();
@@ -851,6 +872,7 @@ pub fn show_windows(app: &mut EffectcraftApp, ctx: &egui::Context) {
     }
     let t = app.tokens;
     let mut acts = vec![];
+    let mut clicked_by_mouse = vec![];
     let screen = ctx.content_rect();
     let blocked = windows.iter().any(|w| w.modal);
     if blocked {
@@ -861,12 +883,15 @@ pub fn show_windows(app: &mut EffectcraftApp, ctx: &egui::Context) {
         });
         let _ = r;
     }
-    for w in &windows {
+    for mut w in windows {
         let size = vec2(w.root.bounds[2] as f32, w.root.bounds[3] as f32);
         let mut open = true;
         let order = if w.modal { egui::Order::Foreground } else { egui::Order::Middle };
-        let resp = egui::Window::new(if w.title.is_empty() { &w.script } else { &w.title })
-            .id(egui::Id::unique(("scriptui-window", w.id)))
+        let heading = if w.title.is_empty() { w.script.clone() } else { w.title.clone() };
+        let wid = w.id;
+        let is_modal = w.modal;
+        let resp = egui::Window::new(heading)
+            .id(egui::Id::unique(("scriptui-window", wid)))
             .order(order)
             .collapsible(false)
             .resizable(false)
@@ -875,50 +900,79 @@ pub fn show_windows(app: &mut EffectcraftApp, ctx: &egui::Context) {
             .frame(egui::Frame::window(&ctx.global_style()).fill(t.panel_bg))
             .show(ctx, |ui| {
                 let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
-                draw_children(app, ui, rect.min, w.id, &w.root, &mut acts);
-                mouse_events(ui, rect.min, rect, w.id, &w.root, w.modal || !blocked, &mut acts);
+                // Dispatch pointer events before painting so canvas drags render in the same frame.
+                let mut pre_acts = vec![];
+                mouse_events(ui, rect.min, rect, wid, &w.root, is_modal || !blocked, &mut pre_acts);
+                if !pre_acts.is_empty() {
+                    record_mouse_clicks(&pre_acts, &mut clicked_by_mouse);
+                    perform(app, ctx, pre_acts);
+                    match app.session.script_ui.window(wid).cloned() {
+                        Some(updated) => w = updated,
+                        None => return rect,
+                    }
+                }
+                draw_children(app, ui, rect.min, wid, &w.root, &mut acts);
                 rect
             });
         if let Some(r) = resp {
-            app.auto.add(&format!("scriptui.{}", w.id), r.response.rect, &w.title);
+            app.auto.add(&format!("scriptui.{wid}"), r.response.rect, &w.title);
         }
         if !open {
-            acts.push(Act::Close(w.id));
+            acts.push(Act::Close(wid));
         }
     }
-    perform(app, ctx, acts);
+    if !clicked_by_mouse.is_empty() {
+        acts.retain(|a| !matches!(a, Act::Click(aw, ac) if clicked_by_mouse.contains(&(*aw, *ac))));
+    }
+    if !acts.is_empty() {
+        perform(app, ctx, acts);
+        ctx.request_repaint();
+    }
 }
 
 /// A dockable ScriptUI panel's content (Window ▸ `<panel>.jsx`).
 pub fn panel(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect, id: u32) {
     let t = app.tokens;
-    let Some(mut w) = app.session.script_ui.window(id).cloned() else {
-        ui.painter().text(rect.center(), Align2::CENTER_CENTER, tr("This ScriptUI panel has closed"), Tokens::ui(12.0), t.text_faint);
-        return;
-    };
-    // Docked panels fill their frame (ScriptUI lays them out at the panel's size).
-    let (pw, ph) = (rect.width() as f64, rect.height() as f64);
-    w.root.fixed_bounds = Some([0.0, 0.0, pw.max(w.root.bounds[2]), ph.max(w.root.bounds[3])]);
-    layout(&mut w);
-    // A modal script dialog blocks the panels too.
-    let modal = app.session.script_ui.windows.iter().any(|w| w.modal);
-    let mut acts = vec![];
+    let ctx = ui.ctx().clone();
     // The script learns its dock's size when it changes (#2585), as After Effects tells a
     // docked panel: its window takes the size and onResize runs.
     let dock = [rect.width().round(), rect.height().round()];
     let told = egui::Id::unique(("scriptui-dock-size", id));
-    if ui.data(|d| d.get_temp::<[f32; 2]>(told)) != Some(dock) && dock[0] >= 1.0 && dock[1] >= 1.0 {
+    if app.session.script_ui.window(id).is_some() && ui.data(|d| d.get_temp::<[f32; 2]>(told)) != Some(dock) && dock[0] >= 1.0 && dock[1] >= 1.0 {
         ui.data_mut(|d| d.insert_temp(told, dock));
-        acts.push(Act::Resize(id, dock));
+        perform(app, &ctx, vec![Act::Resize(id, dock)]);
     }
+    let Some(mut w) = prepare_panel_window(app, id, rect) else {
+        ui.painter().text(rect.center(), Align2::CENTER_CENTER, tr("This ScriptUI panel has closed"), Tokens::ui(12.0), t.text_faint);
+        return;
+    };
+    // A modal script dialog blocks the panels too.
+    let modal = app.session.script_ui.windows.iter().any(|w| w.modal);
+    let mut acts = vec![];
+    let mut clicked_by_mouse = vec![];
     let window = vec2(w.root.bounds[2] as f32, w.root.bounds[3] as f32);
     panel_scroll(ui, ("scriptui-panel", id), rect.size(), window, |ui, r| {
+        // Dispatch pointer events before painting so canvas drags render in the same frame.
+        let mut pre_acts = vec![];
+        mouse_events(ui, r.min, r.intersect(ui.clip_rect()), id, &w.root, !modal, &mut pre_acts);
+        if !pre_acts.is_empty() {
+            record_mouse_clicks(&pre_acts, &mut clicked_by_mouse);
+            perform(app, &ctx, pre_acts);
+            match prepare_panel_window(app, id, rect) {
+                Some(updated) => w = updated,
+                None => return,
+            }
+        }
         draw_children(app, ui, r.min, id, &w.root, &mut acts);
-        mouse_events(ui, r.min, r.intersect(ui.clip_rect()), id, &w.root, !modal, &mut acts);
     });
     app.auto.add(&format!("scriptui.{id}"), rect, &w.title);
-    let ctx = ui.ctx().clone();
-    perform(app, &ctx, acts);
+    if !clicked_by_mouse.is_empty() {
+        acts.retain(|a| !matches!(a, Act::Click(aw, ac) if clicked_by_mouse.contains(&(*aw, *ac))));
+    }
+    if !acts.is_empty() {
+        perform(app, &ctx, acts);
+        ctx.request_repaint();
+    }
 }
 
 /// The scroll area a docked ScriptUI panel shows its `window`-sized window in, at most `dock`

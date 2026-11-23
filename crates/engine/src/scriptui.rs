@@ -14,6 +14,8 @@
 //! [`layout`] is ScriptUI's automatic layout (orientation, alignChildren / alignment, spacing,
 //! margins, preferredSize), so every frontend places widgets the same way.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -122,6 +124,11 @@ pub struct Widget {
     /// Frontends paint it instead of the control's default look, unless it contains
     /// [`DrawOp::Os`] (`drawOSControl()`), which draws the default look first.
     pub draw: Vec<DrawOp>,
+    /// Snapshot wire flag: when true, this canvas's `onDraw` did not run since the previous
+    /// snapshot, so [`ScriptUi::publish`] reuses the previous widget's [`Self::draw`] list
+    /// without re-serializing it across the JS/Rust boundary.
+    #[serde(default, skip_serializing)]
+    pub draw_keep: bool,
     /// The image of an image control or icon button.
     pub image: Option<ImageRef>,
     pub children: Vec<Widget>,
@@ -571,17 +578,52 @@ impl ScriptUi {
         windows.retain(|w| w.visible);
         let mut out: Vec<ScriptWindow> = vec![];
         // Keep the order windows first appeared in.
-        for old in self.windows.drain(..) {
+        for mut old in self.windows.drain(..) {
             if old.host != host {
                 out.push(old);
             } else if let Some(i) = windows.iter().position(|w| w.id == old.id) {
-                out.push(windows.remove(i));
+                let mut next = windows.remove(i);
+                restore_kept_draws(&mut next.root, &mut old.root);
+                out.push(next);
             }
         }
         out.extend(windows);
         self.windows = out;
         self.revision += 1;
     }
+}
+
+/// Move previously published [`Widget::draw`] lists into widgets marked [`Widget::draw_keep`] so
+/// unchanged canvases skip re-serialising their draw lists across every mouse-move snapshot.
+fn restore_kept_draws(next: &mut Widget, old: &mut Widget) {
+    fn has_kept(w: &Widget) -> bool {
+        w.draw_keep || w.children.iter().any(has_kept)
+    }
+    if !has_kept(next) {
+        return;
+    }
+    fn collect(w: &mut Widget, map: &mut BTreeMap<u32, Vec<DrawOp>>) {
+        if !w.draw.is_empty() {
+            map.insert(w.id, std::mem::take(&mut w.draw));
+        }
+        for c in &mut w.children {
+            collect(c, map);
+        }
+    }
+    fn apply(w: &mut Widget, map: &mut BTreeMap<u32, Vec<DrawOp>>) {
+        if w.draw_keep {
+            if let Some(prev) = map.remove(&w.id) {
+                w.draw = prev;
+            }
+            w.draw_keep = false;
+        }
+        for c in &mut w.children {
+            apply(c, map);
+        }
+    }
+    let mut map = BTreeMap::new();
+    collect(old, &mut map);
+    apply(next, &mut map);
 }
 
 // ---------------------------------------------------------------- layout

@@ -460,6 +460,7 @@ function __uiRunDraws(win) {
       try { writeLn("onDraw: " + (e?.message ? e.message : e)); } catch (e2) {}
     }
     c.graphics.__rec = null;
+    c.__drawRev = (c.__drawRev || 0) + 1;
   }
 }
 
@@ -884,7 +885,7 @@ function __uiMouseFire(target, type, v) {
   return e;
 }
 
-function __uiJson(c, inherited) {
+function __uiJson(c, inherited, skipDraw, allowKeep) {
   var mouse = __uiMouseWanted(c, inherited || []);
   var ps = __uiSize(c.preferredSize);
   if (c.type === "edittext" && c.characters > 0) ps = [c.characters * 7 + 12, ps ? ps[1] : 0];
@@ -910,7 +911,7 @@ function __uiJson(c, inherited) {
     if (m) o.margins = m;
     if (typeof c.spacing === "number") o.spacing = c.spacing;
     var kids = c.children;
-    for (const elem of kids) o.children.push(__uiJson(elem, mouse));
+    for (const elem of kids) o.children.push(__uiJson(elem, mouse, skipDraw, allowKeep));
   }
   if (c.alignment !== null && c.alignment !== undefined) o.alignment = __uiAlign(c.alignment);
   if (c.type === "checkbox" || c.type === "radiobutton") o.checked = !!c.value;
@@ -925,7 +926,14 @@ function __uiJson(c, inherited) {
     o.selection = c.__sel.slice();
   }
   if (c.type === "tabbedpanel") o.activeTab = c.__sel.length ? c.__sel[0] : 0;
-  if (c.__draw && typeof c.onDraw === "function") o.draw = c.__draw;
+  if (!skipDraw && c.__draw && typeof c.onDraw === "function") {
+    if (allowKeep && c.type === "canvas" && c.__drawRev && c.__drawSentRev === c.__drawRev) {
+      o.drawKeep = true;
+    } else {
+      o.draw = c.__draw;
+      if (c.type === "canvas") c.__drawSentRev = c.__drawRev || 0;
+    }
+  }
   if ((c.type === "image" || c.type === "iconbutton") && c.image) o.image = __uiImageJson(c.image);
   if (c.type === "edittext") {
     o.multiline = !!c.__multiline;
@@ -939,8 +947,10 @@ function __uiSnapshot() {
   var out = [];
   for (const elem of __uiWins) {
     var w = elem;
-    if (w.__shown && !w.__closed) __uiRunDraws(w);
-    out.push({ id: w.__wid, kind: w.__kind, title: String(w.text || ""), visible: !!w.__shown && !w.__closed, modal: !!w.__modal, root: __uiJson(w) });
+    var vis = !!w.__shown && !w.__closed;
+    if (vis) __uiRunDraws(w);
+    out.push({ id: w.__wid, kind: w.__kind, title: String(w.text || ""), visible: vis, modal: !!w.__modal, root: __uiJson(w, null, false, !!w.__published && vis) });
+    w.__published = vis;
   }
   // Closed windows are forgotten.
   __uiWins = __uiWins.filter(function (w) { return !w.__closed; });
@@ -969,7 +979,7 @@ function __uiFind(c, id) {
 // layout.layout(): lay the window out now (the host does it before drawing anyway) so scripts
 // can read bounds and sizes.
 function __uiLayout(win) {
-  var b = JSON.parse(__uiLayoutNative(JSON.stringify({ id: win.__wid, kind: win.__kind, title: String(win.text || ""), visible: true, root: __uiJson(win) })));
+  var b = JSON.parse(__uiLayoutNative(JSON.stringify({ id: win.__wid, kind: win.__kind, title: String(win.text || ""), visible: true, root: __uiJson(win, null, true, false) })));
   // Bounds are relative to the parent container, as in ScriptUI.
   (function apply(c, ox, oy) {
     var r = b[c.__id];
