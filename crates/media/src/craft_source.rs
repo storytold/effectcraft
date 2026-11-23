@@ -599,7 +599,7 @@ fn compute_audio_starts(container: &ContainerFile, track_idx: usize, codec: Code
             let den = i128::from(s.rate.max(1));
             let scale = i128::from(s.scale.max(1));
             if s.sample_size > 0 {
-                let mut acc = 0i64;
+                let mut acc = delayed_avi_pcm_start(s).map_or(0, |(start, _)| start);
                 return AudioStarts::complete(
                     s.chunks
                         .iter()
@@ -1390,6 +1390,33 @@ fn default_video_info(width: u32, height: u32, frame_rate: FrameRate, codec: &Co
     }
 }
 
+/// A byte-timed PCM stream uses one indexed unit per interleaved sample frame.
+/// Convert its stream-clock start to native samples before counting those units.
+fn delayed_avi_pcm_start(stream: &avi::Stream) -> Option<(i64, u32)> {
+    if stream.start == 0 || stream.scale == 0 || stream.rate == 0 {
+        return None;
+    }
+    let wave = stream.audio.as_ref()?;
+    if !matches!((wave.format_tag, wave.bits_per_sample), (1, 8 | 16 | 24 | 32) | (3, 32 | 64)) {
+        return None;
+    }
+    let (sample_rate, channels) = filmcraft_media::bounded_audio_dimensions(wave.sample_rate, u32::from(wave.channels)).ok()?;
+    let packed = u32::from(wave.bits_per_sample.div_ceil(8)) * channels;
+    // The shared decoder consumes packed PCM. Keep the prior route when the
+    // indexed sample size or block padding implies a different packet clock.
+    if stream.sample_size != packed || u32::from(wave.block_align) > packed {
+        return None;
+    }
+    let start = i128::from(stream.start) * i128::from(stream.scale) * i128::from(sample_rate) / i128::from(stream.rate);
+    Some((i64::try_from(start).ok()?, sample_rate))
+}
+
+fn delayed_avi_pcm_end(stream: &avi::Stream) -> Option<Tick> {
+    let (start, sample_rate) = delayed_avi_pcm_start(stream)?;
+    let end = stream.chunks.iter().fold(start, |frames, chunk| frames.saturating_add(i64::from(chunk.size / stream.sample_size)));
+    Some(Tick::from_units(end, i64::from(sample_rate)))
+}
+
 fn open_avi(name: &str, source: SharedBytes) -> Option<Result<SharedSource>> {
     let file = avi::open(&*source).ok()?;
     let video_idx = file.streams.iter().position(|s| s.kind == avi::StreamKind::Video && !s.chunks.is_empty() && s.rate > 0 && s.scale > 0);
@@ -1404,22 +1431,25 @@ fn open_avi(name: &str, source: SharedBytes) -> Option<Result<SharedSource>> {
     if video_idx.is_none() && audio_candidates.is_empty() {
         return None;
     }
+    let delayed_audio_end = audio_candidates.iter().filter_map(|&(idx, _, _, _)| delayed_avi_pcm_end(&file.streams[idx])).max().unwrap_or(Tick::ZERO);
 
     if let Some(idx) = video_idx
         && let Some(raw) = RawAvi::new(&file.streams[idx])
     {
-        // Shared AVI audio positions are relative to the first chunk. Keep the
-        // legacy path for a track with a separate stream start.
-        if audio_candidates.iter().any(|&(audio, _, _, _)| file.streams[audio].start != 0) {
+        if audio_candidates.iter().any(|&(audio, _, _, _)| {
+            let stream = &file.streams[audio];
+            stream.start != 0 && delayed_avi_pcm_start(stream).is_none()
+        }) {
             return None;
         }
         let duration = audio_candidates
             .iter()
+            .filter(|&&(audio, _, _, _)| file.streams[audio].start == 0)
             .map(|&(audio, _, _, _)| {
                 let s = &file.streams[audio];
                 Tick::from_units(i64::from(s.length).saturating_mul(i64::from(s.scale.max(1))), i64::from(s.rate.max(1)))
             })
-            .fold(raw.duration(file.streams[idx].chunks.len()), Tick::max);
+            .fold(raw.duration(file.streams[idx].chunks.len()).max(delayed_audio_end), Tick::max);
         let video = ContainerVideoPart { track_idx: idx, info: raw.info(&file.streams[idx]), state: Mutex::new(VideoState::RawAvi(raw)) };
         return finish_container_source(name, "avi", source, ContainerFile::Avi(Box::new(file)), Some(video), duration, audio_candidates);
     }
@@ -1453,6 +1483,7 @@ fn open_avi(name: &str, source: SharedBytes) -> Option<Result<SharedSource>> {
     } else {
         let duration = audio_candidates
             .iter()
+            .filter(|&&(idx, _, _, _)| delayed_avi_pcm_start(&file.streams[idx]).is_none())
             .map(|(idx, _, params, _)| {
                 let s = &file.streams[*idx];
                 let units = if params.codec == CodecId::Pcm && s.sample_size > 0 {
@@ -1468,7 +1499,7 @@ fn open_avi(name: &str, source: SharedBytes) -> Option<Result<SharedSource>> {
         (None, duration)
     };
 
-    finish_container_source(name, "avi", source, ContainerFile::Avi(Box::new(file)), video, duration, audio_candidates)
+    finish_container_source(name, "avi", source, ContainerFile::Avi(Box::new(file)), video, duration.max(delayed_audio_end), audio_candidates)
 }
 
 fn estimate_mpeg_frame_rate_pts(pts: impl IntoIterator<Item = i64>) -> FrameRate {
