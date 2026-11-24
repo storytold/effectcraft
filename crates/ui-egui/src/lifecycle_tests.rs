@@ -356,6 +356,39 @@ fn image(width: usize, height: usize) -> Arc<egui::ColorImage> {
     Arc::new(egui::ColorImage::new([width, height], vec![egui::Color32::from_rgb(10, 20, 30); width.checked_mul(height).unwrap()]))
 }
 
+/// #3253 review: a script waits on a file dialog while the window is hidden. File dialogs are
+/// served in a UI pass, so the app asks for one until the dialog is shown; a hidden window with
+/// nothing waiting stays quiet.
+#[test]
+fn a_script_file_dialog_asks_for_a_pass_while_the_window_is_hidden() {
+    use effectcraft_engine::scriptui::{FileDialogKind, ScriptFileDialog};
+    let ctx = egui::Context::default();
+    let frame = eframe::Frame::_new_kittest();
+    let mut app = app_with_comp();
+    ready(&mut app, &ctx, &frame);
+    let asks =
+        |out: &egui::LogicOutput| out.viewport_commands.values().flatten().filter(|c| matches!(c, egui::ViewportCommand::RequestPaintWhileHidden)).count();
+    let size = egui::vec2(800.0, 480.0);
+    assert_eq!(asks(&tick_with(&mut app, &ctx, &frame, &raw(size))), 0, "nothing waits: a hidden window stays quiet");
+    app.session.script_ui.file_dialogs.push(ScriptFileDialog {
+        id: 1,
+        host: 1,
+        kind: FileDialogKind::Open,
+        prompt: String::new(),
+        exts: vec![],
+        label: String::new(),
+        any: true,
+        many: false,
+        start: String::new(),
+        shown: false,
+    });
+    assert_eq!(asks(&tick_with(&mut app, &ctx, &frame, &raw(size))), 1, "a script waits for its dialog: the hidden window paints");
+    if let Some(d) = app.session.script_ui.file_dialogs.first_mut() {
+        d.shown = true;
+    }
+    assert_eq!(asks(&tick_with(&mut app, &ctx, &frame, &raw(size))), 0, "the dialog is shown: no more passes asked for");
+}
+
 #[test]
 fn a_screenshot_is_issued_only_after_settled_passes_and_writes_from_the_tick() {
     let ctx = egui::Context::default();

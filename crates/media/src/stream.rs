@@ -38,7 +38,7 @@ impl DecodedFrame {
 }
 
 /// An opened movie/audio source, routed through `craft-media-source` for migrated formats
-/// (currently software MP4/H.264) and `filmcraft-media` for remaining formats.
+/// (the route matrix in `craft_source`) and `filmcraft-media` for remaining formats.
 #[derive(Clone)]
 pub(crate) enum MediaSource {
     Craft(craft_media_source::SharedSource),
@@ -74,7 +74,7 @@ impl MediaSource {
 
 /// Open an in-memory movie/audio source, trying migrated `craft-media-source` routes first.
 pub(crate) fn open_bytes(name: &str, bytes: Arc<[u8]>) -> Result<MediaSource> {
-    if let Some(res) = crate::mp4_h264::open_bytes(name, bytes.clone()) {
+    if let Some(res) = crate::craft_source::open_bytes(name, bytes.clone()) {
         return res.map(MediaSource::Craft).map_err(MediaError::from);
     }
     filmcraft_codecs::open_bytes(name, bytes).map(MediaSource::Film).map_err(MediaError::from)
@@ -173,8 +173,8 @@ pub(crate) fn open_source(path: &Path) -> Option<(Result<MediaSource>, FileStamp
     let stamp = reader.stamp;
     let name = name_of(path);
     let craft_reader: craft_media_source::SharedBytes = reader.clone();
-    if let Ok(head) = craft_media_source::read_range(&*craft_reader, 0, craft_media_source::HEAD_LEN)
-        && let Some(res) = crate::mp4_h264::open_reader(&name, &head, &craft_reader)
+    if let Ok(head) = craft_media_source::read_range(&*craft_reader, 0, crate::craft_source::NATIVE_SNIFF_HEAD_LEN)
+        && let Some(res) = crate::craft_source::open_reader(&name, &head, &craft_reader)
     {
         return Some((res.map(MediaSource::Craft).map_err(MediaError::from), stamp));
     }
@@ -191,12 +191,12 @@ pub(crate) fn open_source(_path: &Path) -> Option<(Result<MediaSource>, FileStam
 
 /// `path` read in place (`None` when it can't be opened, or without a native file system).
 #[cfg(any(unix, windows))]
-pub(crate) fn file_reader(path: &Path) -> Option<Box<dyn filmcraft_media::ByteReader>> {
+pub(crate) fn file_reader(path: &Path) -> Option<Box<dyn craft_media::ByteSource>> {
     Some(Box::new(FileReader::open(path).ok()?))
 }
 
 #[cfg(not(any(unix, windows)))]
-pub(crate) fn file_reader(_path: &Path) -> Option<Box<dyn filmcraft_media::ByteReader>> {
+pub(crate) fn file_reader(_path: &Path) -> Option<Box<dyn craft_media::ByteSource>> {
     None
 }
 
@@ -261,21 +261,110 @@ pub(crate) fn probe_source(path: &Path) -> Option<Result<MediaSource>> {
         return None;
     }
     let reader = Arc::new(FileReader::open(path).ok()?);
-    let head = filmcraft_media::reader::read_range(&*reader, 0, filmcraft_media::reader::HEAD_LEN).ok()?;
+    let head = filmcraft_media::reader::read_range(&*reader, 0, crate::craft_source::NATIVE_SNIFF_HEAD_LEN).ok()?;
+    let legacy_head = &head[..head.len().min(filmcraft_media::reader::HEAD_LEN)];
     let name = path.to_string_lossy();
-    if crate::layered::sniff(&name, &head) || image::guess_format(&head).is_ok() {
+    if crate::layered::sniff(&name, legacy_head) || image::guess_format(legacy_head).is_ok() {
         return None;
     }
     let name = name_of(path);
     let craft_reader: craft_media_source::SharedBytes = reader.clone();
-    if let Some(res) = crate::mp4_h264::open_reader(&name, &head, &craft_reader) {
+    if let Some(res) = crate::craft_source::open_reader(&name, &head, &craft_reader) {
         return Some(res.map(MediaSource::Craft).map_err(MediaError::from));
     }
     let fc_reader: filmcraft_media::SharedReader = reader;
-    filmcraft_codecs::reader_openers().into_iter().find_map(|open| open(&name, &head, &fc_reader)).map(|r| r.map(MediaSource::Film).map_err(Into::into))
+    filmcraft_codecs::reader_openers().into_iter().find_map(|open| open(&name, legacy_head, &fc_reader)).map(|r| r.map(MediaSource::Film).map_err(Into::into))
 }
 
 #[cfg(not(any(unix, windows)))]
 pub(crate) fn probe_source(_path: &Path) -> Option<Result<MediaSource>> {
     None
+}
+
+#[cfg(all(test, any(unix, windows)))]
+mod tests {
+    use super::*;
+    use craft_media::isobmff::{self, Brand, CodecConfig, Mp4Writer, SampleEntry, TrackConfig, WriteSample, WriterOptions};
+    use filmcraft_frame::PixelData;
+    use image::ExtendedColorType;
+    use image::codecs::jpeg::JpegEncoder;
+
+    type TestResult<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+    const WIDTH: u16 = 16;
+    const HEIGHT: u16 = 16;
+
+    fn generated_mjpeg_mov() -> TestResult<Arc<[u8]>> {
+        // Original synthetic fixture: encode two authored solid RGB tiles, not external media.
+        let mut writer = Mp4Writer::new(std::io::Cursor::new(Vec::new()), WriterOptions::new(Brand::Mov))?;
+        let video = writer.add_track(TrackConfig::new(SampleEntry::jpeg(WIDTH, HEIGHT), 1_000))?;
+        for rgb in [[220, 32, 24], [19, 36, 224]] {
+            let rgb = rgb.repeat(usize::from(WIDTH) * usize::from(HEIGHT));
+            let mut jpeg = Vec::new();
+            JpegEncoder::new_with_quality(&mut jpeg, 90).encode(&rgb, u32::from(WIDTH), u32::from(HEIGHT), ExtendedColorType::Rgb8)?;
+            writer.write_sample(video, WriteSample { data: &jpeg, duration: 40, composition_offset: 0, is_sync: true })?;
+        }
+        Ok(writer.finish()?.into_inner().into())
+    }
+
+    fn legacy_mjpeg_pixels(source: &MediaSource, time: Tick) -> TestResult<Arc<Vec<u8>>> {
+        let frame = match source.video_frame(time, 1.0)? {
+            DecodedFrame::Film(frame) => Some(frame),
+            DecodedFrame::Craft(_) => None,
+        }
+        .ok_or("the MJPEG baseline must use FilmCraft")?;
+        assert_eq!((frame.width, frame.height), (u32::from(WIDTH), u32::from(HEIGHT)));
+        let rgba = match &frame.data {
+            PixelData::Rgba8(rgba) => Some(rgba),
+            _ => None,
+        }
+        .ok_or("legacy MJPEG decodes to RGBA8")?;
+        assert_eq!(rgba.len(), usize::from(WIDTH) * usize::from(HEIGHT) * 4);
+        Ok(rgba.clone())
+    }
+
+    #[test]
+    fn generated_mjpeg_mov_preserves_legacy_probe_and_seek() -> TestResult<()> {
+        let bytes = generated_mjpeg_mov()?;
+        let mov = isobmff::open(bytes.as_ref())?;
+        assert!(mov.is_quicktime);
+        assert_eq!(mov.tracks.len(), 1);
+        let track = &mov.tracks[0];
+        assert!(matches!(track.codec(), Some(CodecConfig::Jpeg { .. })));
+        assert_eq!(track.timescale, 1_000);
+        assert_eq!(track.samples.len(), 2);
+        assert_eq!((track.samples[0].pts, track.samples[1].pts), (0, 40));
+
+        let dir = tempfile::tempdir()?;
+        let name = "generated-mjpeg.mov";
+        let path = dir.path().join(name);
+        std::fs::write(&path, bytes.as_ref())?;
+        let native_probe = crate::probe(&path)?;
+        let memory_probe = crate::probe_bytes(name, bytes.clone())?;
+        let direct = filmcraft_codecs::open_bytes(name, bytes.clone())?;
+        let legacy_probe = crate::probe::footage_from_info(name, direct.info());
+        let step = Tick::from_units(1, 25);
+        for probe in [native_probe, memory_probe] {
+            assert!(probe.has_video && !probe.has_audio);
+            assert_eq!((probe.width, probe.height), (u32::from(WIDTH), u32::from(HEIGHT)));
+            assert_eq!((probe.frame_rate.num, probe.frame_rate.den), (25, 1));
+            assert_eq!(probe.duration, Tick::from_units(2, 25));
+            assert_eq!(probe.codec, legacy_probe.codec);
+            assert_eq!(probe.color_profile, legacy_probe.color_profile);
+        }
+
+        let native = open_source(&path).ok_or("native source")?.0?;
+        let memory = open_bytes(name, bytes)?;
+        assert!(matches!(&native, MediaSource::Film(_)));
+        assert!(matches!(&memory, MediaSource::Film(_)));
+        let legacy = MediaSource::Film(direct);
+        for (time, dominant) in [(Tick::ZERO, 0), (step, 2), (Tick::ZERO, 0)] {
+            let expected = legacy_mjpeg_pixels(&legacy, time)?;
+            // Independent colour check: a repeated first frame or blank decode cannot pass parity.
+            assert!(expected.as_chunks::<4>().0.iter().all(|p| p[dominant] > 180 && p[2 - dominant] < 80 && p[3] == 255));
+            assert_eq!(legacy_mjpeg_pixels(&native, time)?, expected);
+            assert_eq!(legacy_mjpeg_pixels(&memory, time)?, expected);
+        }
+        Ok(())
+    }
 }
