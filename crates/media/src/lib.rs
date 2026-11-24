@@ -17,6 +17,7 @@
 
 mod aac;
 mod convert;
+mod craft_source;
 pub mod downmix;
 mod dpx;
 pub mod exr_channels;
@@ -26,7 +27,6 @@ mod exr_read;
 mod gif_anim;
 mod layered;
 mod localize;
-mod mp4_h264;
 pub use layered::vector_doc;
 mod pool;
 mod probe;
@@ -84,7 +84,7 @@ impl From<craft_media_source::MediaError> for MediaError {
 pub const STILL_EXTENSIONS: &[&str] =
     &["png", "jpg", "jpeg", "gif", "webp", "tif", "tiff", "bmp", "exr", "tga", "hdr", "psd", "psb", "svg", "pdf", "ai", "eps", "vectorcraft"];
 /// File extensions recognised as audio-only files.
-pub const AUDIO_EXTENSIONS: &[&str] = filmcraft_media::AUDIO_EXTENSIONS;
+pub const AUDIO_EXTENSIONS: &[&str] = craft_media_source::AUDIO_EXTENSIONS;
 pub use effectcraft_project::VIDEO_EXTENSIONS;
 
 /// File extensions recognised as 3D models (Advanced 3D model layers).

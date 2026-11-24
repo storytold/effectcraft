@@ -284,7 +284,7 @@ pub fn animator_selection_within(ctx: &EvalCtx, layer: &Layer, anim: &PropGroup,
                 let stat = if prop.has_expression() {
                     // The expression is not run here, but an Essential Property override still wins over the base value.
                     match ctx.property_overrides.iter().rev().find(|o| o.layer == layer.id && o.prop == prop.uid) {
-                        Some(o) => o.value(layer, prop, ctx.time),
+                        Some(o) => o.value_at_layer_time(prop, layer.layer_time(ctx.time)),
                         None => prop.value_at(layer.layer_time(ctx.time)),
                     }
                 } else {

@@ -273,13 +273,16 @@ fn playback_prefetches_past_the_cached_frames_ahead() {
     for f in 0..120 {
         h.state().request_frame(cid, f, scale);
     }
-    for _ in 0..4000 {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while std::time::Instant::now() < deadline {
         if h.state().frames.cached_frames(&series).len() >= 120 && h.state().frames.inflight() == 0 {
             break;
         }
+        h.step();
         std::thread::sleep(std::time::Duration::from_millis(2));
     }
-    assert_eq!(h.state().frames.cached_frames(&series), (0..120).collect::<Vec<_>>());
+    let cached = h.state().frames.cached_frames(&series);
+    assert_eq!(cached, (0..120).collect::<Vec<_>>(), "setup cached {} frames before playback: {cached:?}", cached.len());
     // Rendering/instrumentation time must not move the playhead near the end of the
     // cached run. Exercise real prefetch workers while holding playback in its first second.
     h.state_mut().use_manual_clock();
