@@ -50,11 +50,21 @@ jobs are refused by the environment's branch rule, and no draft release is made.
 
 ## Release-ref nightly preparation
 
-The Windows, Linux and macOS source preparation for the isolated `EffectCraft Nightly` channel is
-documented in [`nightly-release-preparation.md`](nightly-release-preparation.md). It is **not** an
-activated signing or publication pipeline: every nightly workflow job is registered literally off
-(`false && …`), there is no schedule, and no nightly policy file exists. Stable `release.yml`, its
-schedule, tags, concurrency, environment values and environment rules are unchanged.
+The Windows, Linux and macOS preparation for the isolated `EffectCraft Nightly` channel is
+documented in [`nightly-release-preparation.md`](nightly-release-preparation.md). The producer
+(`nightly.yml`, default branch) and the signer (`nightly-sign.yml`, `release`) keep only their exact
+context guards: they run when one of the reviewed manual actors dispatches them, never on a schedule,
+and the v3 policy is installed at [`.github/nightly-signing-policy.json`](../.github/nightly-signing-policy.json).
+Stable `release.yml`, its schedule, tags, concurrency, environment values and environment rules are
+unchanged.
+
+Every Linux Nightly format starts the GUI through the Nightly profile
+(`--launch-profile nightly-v1 --profile-root <dir> --`), so its settings, logs, plug-ins, recovery
+and caches are its own: the deb/rpm wrapper, the AppImage `AppRun`, the Flatpak wrapper, the Arch
+launcher and the `effectcraft` launcher inside the flat Nightly tar (the GUI beside it is
+`effectcraft-bin`). A wrapper answers `--version`/`-V` first, and passes an already-selected profile
+through, because after the injected `--` either would be a file name. The Nightly Flatpak is the one
+sandbox whose own instance id (`ai.storyteller.effectcraft.nightly`) may carry a profile.
 
 Initial installation **and later signer/policy updates** ride an already-intended reviewed stable
 release sync, with an appropriate version/build state. Every release-branch push may rebuild or

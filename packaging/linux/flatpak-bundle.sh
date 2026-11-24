@@ -60,10 +60,17 @@ tar -xzf "$TARBALL" -C "$WORK/stage" --strip-components=1
 [[ -x "$WORK/stage/bin/effectcraft" ]] || { echo "error: $TARBALL has no bin/effectcraft" >&2; exit 1; }
 if [[ "$FLATPAK_ID" != "$APP_ID" ]]; then
   mv "$WORK/stage/bin/effectcraft" "$WORK/stage/bin/effectcraft-bin"
+  # The Nightly build refuses EFFECTCRAFT_CONFIG_DIR, so the wrapper passes the profile protocol.
+  # Inside the sandbox $HOME is this app id's own folder, so the profile is the Nightly's alone.
   cat >"$WORK/stage/bin/effectcraft" <<'WRAPPER'
 #!/bin/sh
 set -eu
-exec /app/libexec/effectcraft "$@"
+real_bin=/app/libexec/effectcraft
+case "${1:-}" in
+  --version|-V|--launch-profile) exec "$real_bin" "$@" ;;
+esac
+profile_base="${XDG_DATA_HOME:-${HOME:?HOME is required}/.local/share}"
+exec "$real_bin" --launch-profile nightly-v1 --profile-root "$profile_base/effectcraft-nightly" -- "$@"
 WRAPPER
   chmod 755 "$WORK/stage/bin/effectcraft"
   sed -e "s|^Icon=$APP_ID$|Icon=$FLATPAK_ID|" \

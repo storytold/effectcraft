@@ -31,6 +31,12 @@ mv "$bin/effectcraft-cli" "$bin/effectcraft-nightly-cli"
 [[ ! -e "$stage/bin/.effectcraft-nightly" ]]
 cmp "$stage/bin/effectcraft" "$bin/.effectcraft-nightly/effectcraft"
 cmp "$stage/bin/effectcraft-cli" "$bin/effectcraft-nightly-cli"
+# The launcher must start the hidden GUI through the Nightly profile; the profile base is fixed
+# here so the recorded arguments are exactly comparable.
+export XDG_DATA_HOME="$work/xdg-data"
+profile() {
+  printf '<%s>\n' --launch-profile nightly-v1 --profile-root "$XDG_DATA_HOME/effectcraft-nightly" -- "$@"
+}
 expect() {
   expected="$1"
   shift
@@ -40,10 +46,13 @@ expect() {
     exit 1
   fi
 }
-expect '<>'
-expect "$(printf '<%s>\n' 'project with spaces.ec' '--other-name.ec')" \
+expect "$(profile)"
+expect "$(profile 'project with spaces.ec' '--other-name.ec')" \
   'project with spaces.ec' '--other-name.ec'
+# A version query and an already selected profile pass through unchanged: after `--` both are files.
 expect '<--version>' --version
 expect '<-V>' -V
+expect "$(printf '<%s>\n' --launch-profile nightly-v1 --profile-root "$work/launcher-root" --version)" \
+  --launch-profile nightly-v1 --profile-root "$work/launcher-root" --version
 
-echo "PASS: Arch Nightly handoff stages the hidden binary and preserves launch arguments"
+echo "PASS: Arch Nightly handoff starts the hidden GUI through the Nightly launch profile"

@@ -35,7 +35,7 @@ pub struct PresetFile {
 pub fn presets_dir() -> Option<std::path::PathBuf> {
     let env_presets = std::env::var("EC_PRESETS_DIR").ok().map(std::path::PathBuf::from);
     let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).ok().map(std::path::PathBuf::from);
-    presets_dir_for(effectcraft_host::app_dirs::profile_root(), env_presets, home.as_deref())
+    presets_dir_for(crate::channel::profile_presets(), env_presets, home.as_deref())
 }
 
 fn presets_dir_for(profile: Option<&std::path::Path>, env_presets: Option<std::path::PathBuf>, home: Option<&std::path::Path>) -> Option<std::path::PathBuf> {

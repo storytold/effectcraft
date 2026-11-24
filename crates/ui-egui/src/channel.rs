@@ -1,6 +1,7 @@
 //! The launch channel: stable EffectCraft, or the isolated Nightly flavor the ArtCraft Launcher
 //! starts from its own profile. Selected once at startup, before any window or saved state.
 
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU8, Ordering};
 
@@ -62,6 +63,18 @@ pub fn stable_services_allowed() -> bool {
     stable_services_for(identity())
 }
 
+/// The Nightly profile's own user-preset folder, installed once by the desktop host before the UI
+/// exists. A stable session installs nothing, so its `EC_PRESETS_DIR`/Documents rule is unchanged.
+static PROFILE_PRESETS: OnceLock<PathBuf> = OnceLock::new();
+
+pub fn set_profile_presets(dir: PathBuf) {
+    let _ = PROFILE_PRESETS.set(dir);
+}
+
+pub fn profile_presets() -> Option<&'static Path> {
+    PROFILE_PRESETS.get().map(PathBuf::as_path)
+}
+
 /// A builder for the window, carrying the channel's app id.
 pub fn builder() -> egui::ViewportBuilder {
     egui::ViewportBuilder::default().with_app_id(app_id())
@@ -91,7 +104,7 @@ pub fn commit() -> Option<&'static str> {
 }
 
 /// The channel label a Nightly build appends to its version line.
-pub const fn channel_label() -> Option<&'static str> {
+pub fn channel_label() -> Option<&'static str> {
     match identity() {
         LaunchIdentity::Stable => None,
         LaunchIdentity::NightlyV1 => Some("nightly-v1"),

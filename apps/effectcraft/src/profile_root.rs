@@ -5,6 +5,11 @@ use std::path::{Component, Path, PathBuf};
 
 use effectcraft_host::app_dirs::{PORTABLE_DATA_DIR, portable_marker};
 
+/// The bundle id of EffectCraft's own Nightly Flatpak (`packaging/linux/flatpak-bundle.sh`). Its
+/// sandbox is a separate installation; every other Flatpak instance (the stable app's included)
+/// would point the profile at another install's state.
+pub const NIGHTLY_FLATPAK_ID: &str = "ai.storyteller.effectcraft.nightly";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Platform {
     Windows,
@@ -199,10 +204,12 @@ fn validate_for(
     if env("EFFECTCRAFT_CONFIG_DIR").is_some_and(|v| !v.is_empty()) {
         return Err("nightly-v1 cannot be combined with EFFECTCRAFT_CONFIG_DIR".into());
     }
-    if platform != Platform::Windows && env("FLATPAK_ID").is_some_and(|v| !v.is_empty()) {
-        // These rows are native tar/app-bundle launches, not a Flatpak package. Inheriting its
-        // runtime socket namespace could point another profile at the stable app's state.
-        return Err("nightly-v1 native packages cannot inherit a Flatpak instance; launch through the native Launcher".into());
+    // The Nightly ships its own Flatpak, so that one sandbox may carry a profile. Any other
+    // instance (the stable app's, or a foreign one) names another installation's state.
+    if let Some(instance) = env("FLATPAK_ID").filter(|value| !value.is_empty())
+        && instance.to_string_lossy() != NIGHTLY_FLATPAK_ID
+    {
+        return Err(format!("nightly-v1 accepts only the {NIGHTLY_FLATPAK_ID} Flatpak instance; launch the Nightly from its own package"));
     }
     let chosen = canonical_future(root)?;
     if is_portable_layout(root, platform) || is_portable_layout(&chosen, platform) {
@@ -520,6 +527,24 @@ mod tests {
         fixture.env.remove("HOME");
         assert!(fixture.check(Platform::Linux, &candidate).unwrap_err().contains("HOME"));
         assert!(!candidate.exists());
+    }
+
+    #[test]
+    fn only_the_nightly_s_own_flatpak_instance_may_carry_a_profile() {
+        // Inside packaging/linux/flatpak-bundle.sh's sandbox, $HOME is this app id's own folder, so
+        // the launcher's profile is the Nightly's state and nothing else is reachable through it.
+        let mut fixture = Fixture::new();
+        fixture.env.insert("FLATPAK_ID".into(), NIGHTLY_FLATPAK_ID.into());
+        let candidate = fixture.home().join(".local/share/effectcraft-nightly");
+        assert_eq!(fixture.check(Platform::Linux, &candidate).unwrap(), std::fs::canonicalize(&candidate).unwrap());
+        fixture.env.remove("FLATPAK_ID");
+        for refused in ["ai.storyteller.effectcraft", "ai.storyteller.effectcraft.nightly-v1", "org.example.other"] {
+            let mut other = Fixture::new();
+            other.env.insert("FLATPAK_ID".into(), refused.into());
+            let refused_root = other.home().join(".local/share/effectcraft-nightly");
+            assert!(other.check(Platform::Linux, &refused_root).unwrap_err().contains("Flatpak"), "{refused}");
+            assert!(!refused_root.exists());
+        }
     }
 
     #[test]

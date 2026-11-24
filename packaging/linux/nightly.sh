@@ -18,7 +18,11 @@ OUTPUT="$DIST/effectcraft-$VERSION-linux-x86_64-nightly.tar.gz"
 nightly_build_gui
 STAGE="$NIGHTLY_WORK/stage"
 mkdir -p "$STAGE"
-cp "$NIGHTLY_GUI" "$STAGE/effectcraft"
+# An unpacked tar is isolated too: the GUI is `effectcraft-bin` and the launcher people run is
+# `effectcraft`, which starts it through this channel's own profile.
+cp "$NIGHTLY_GUI" "$STAGE/effectcraft-bin"
+chmod 755 "$STAGE/effectcraft-bin"
+cp "$ROOT/packaging/linux/nightly-launch.sh" "$STAGE/effectcraft"
 chmod 755 "$STAGE/effectcraft"
 cp "$ROOT/assets/app-icon/effectcraft-nightly.png" "$STAGE/effectcraft-nightly.png"
 nightly_copy_notices "$STAGE"

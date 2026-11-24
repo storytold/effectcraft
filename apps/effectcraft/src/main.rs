@@ -142,7 +142,11 @@ fn prepare_launch() -> Option<Vec<std::ffi::OsString>> {
                 let root = root.to_path_buf();
                 effectcraft_host::app_dirs::set_profile_root(root.clone()).map_err(str::to_owned)?;
                 // And the caches, which otherwise live in the platform cache folder.
-                effectcraft_engine::render::disk_cache::set_profile_root(root).map_err(str::to_owned)
+                effectcraft_engine::render::disk_cache::set_profile_root(root.clone()).map_err(str::to_owned)?;
+                // The UI keeps the user's animation presets in the profile too (not Documents, and
+                // not an inherited EC_PRESETS_DIR).
+                effectcraft_ui_egui::channel::set_profile_presets(root.join("Presets"));
+                Ok(())
             }
         });
     if let Err(error) = installed {

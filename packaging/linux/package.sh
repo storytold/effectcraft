@@ -152,17 +152,35 @@ if has deb || has rpm; then
     rm -rf "$NFPM_STAGE"
     cp -R "$STAGE" "$NFPM_STAGE"
     install -Dm755 "$NFPM_STAGE/usr/bin/effectcraft" "$NFPM_STAGE/usr/lib/effectcraft-nightly/effectcraft"
+    # The Nightly build refuses EFFECTCRAFT_CONFIG_DIR: every launcher passes the Launcher's own
+    # profile protocol instead, so settings, logs, plug-ins and caches are the Nightly's own.
+    # A version query and an already-selected profile pass through, because after `--` they are
+    # file names (the shared smoke test asks the Launcher form of the unpacked binary).
     cat >"$NFPM_STAGE/usr/bin/$NFPM_BIN" <<'WRAPPER'
 #!/bin/sh
 set -eu
-if [ -z "${EFFECTCRAFT_CONFIG_DIR:-}" ]; then
-  export EFFECTCRAFT_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/effectcraft-nightly"
-fi
-exec /usr/lib/effectcraft-nightly/effectcraft "$@"
+real_bin=/usr/lib/effectcraft-nightly/effectcraft
+case "${1:-}" in
+  --version|-V|--launch-profile) exec "$real_bin" "$@" ;;
+esac
+profile_base="${XDG_DATA_HOME:-${HOME:?HOME is required}/.local/share}"
+exec "$real_bin" --launch-profile nightly-v1 --profile-root "$profile_base/effectcraft-nightly" -- "$@"
 WRAPPER
     chmod 755 "$NFPM_STAGE/usr/bin/$NFPM_BIN"
     rm -f "$NFPM_STAGE/usr/bin/effectcraft"
-    mv "$NFPM_STAGE/usr/bin/effectcraft-cli" "$NFPM_STAGE/usr/bin/$NFPM_CLI"
+    # The headless CLI has no launch profile; it keeps the settings-folder variable it honours.
+    install -Dm755 "$NFPM_STAGE/usr/bin/effectcraft-cli" "$NFPM_STAGE/usr/lib/effectcraft-nightly/effectcraft-cli"
+    rm -f "$NFPM_STAGE/usr/bin/effectcraft-cli"
+    cat >"$NFPM_STAGE/usr/bin/$NFPM_CLI" <<'CLI_WRAPPER'
+#!/bin/sh
+set -eu
+if [ -z "${EFFECTCRAFT_CONFIG_DIR:-}" ]; then
+  profile_base="${XDG_DATA_HOME:-${HOME:?HOME is required}/.local/share}"
+  export EFFECTCRAFT_CONFIG_DIR="$profile_base/effectcraft-nightly"
+fi
+exec /usr/lib/effectcraft-nightly/effectcraft-cli "$@"
+CLI_WRAPPER
+    chmod 755 "$NFPM_STAGE/usr/bin/$NFPM_CLI"
     mv "$NFPM_STAGE/usr/share/doc/effectcraft" "$NFPM_STAGE/usr/share/doc/$NFPM_NAME"
     sed -e "s#^Exec=effectcraft\([[:space:]]\|$\)#Exec=$NFPM_BIN\1#" \
         -e "s|^TryExec=effectcraft$|TryExec=$NFPM_BIN|" \
@@ -220,15 +238,31 @@ if has appimage; then
   # Keep sctk-adwaita's MIT notice in the AppImage.
   install -Dm644 "$ROOT/NOTICE" "$APPDIR/usr/share/doc/effectcraft/NOTICE"
   if [[ "$IS_NIGHTLY" = 1 ]]; then
+    # A script, not the stable symlink: the AppImage starts the GUI through the Nightly profile.
     cat >"$APPDIR/AppRun" <<'APPRUN'
 #!/bin/sh
 set -eu
-if [ -z "${EFFECTCRAFT_CONFIG_DIR:-}" ]; then
-  export EFFECTCRAFT_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/effectcraft-nightly"
-fi
-exec "$(dirname "$0")/usr/bin/effectcraft" "$@"
+here="$(dirname "$0")"
+real_bin="$here/usr/bin/effectcraft"
+case "${1:-}" in
+  --version|-V|--launch-profile) exec "$real_bin" "$@" ;;
+esac
+profile_base="${XDG_DATA_HOME:-${HOME:?HOME is required}/.local/share}"
+exec "$real_bin" --launch-profile nightly-v1 --profile-root "$profile_base/effectcraft-nightly" -- "$@"
 APPRUN
     chmod 755 "$APPDIR/AppRun"
+    # The headless CLI keeps the settings-folder variable, which is the only profile it honours.
+    install -Dm755 "$APPDIR/usr/bin/effectcraft-cli" "$APPDIR/usr/lib/effectcraft-nightly/effectcraft-cli"
+    cat >"$APPDIR/usr/bin/effectcraft-cli" <<'APPRUN_CLI'
+#!/bin/sh
+set -eu
+if [ -z "${EFFECTCRAFT_CONFIG_DIR:-}" ]; then
+  profile_base="${XDG_DATA_HOME:-${HOME:?HOME is required}/.local/share}"
+  export EFFECTCRAFT_CONFIG_DIR="$profile_base/effectcraft-nightly"
+fi
+exec "$(dirname "$0")/../lib/effectcraft-nightly/effectcraft-cli" "$@"
+APPRUN_CLI
+    chmod 755 "$APPDIR/usr/bin/effectcraft-cli"
     APPIMAGE_ID="$APP_ID.nightly-v1"
     sed -e "s|^Icon=$APP_ID$|Icon=$APPIMAGE_ID|" \
         -e "s|^Name=EffectCraft$|Name=EffectCraft Nightly|" \

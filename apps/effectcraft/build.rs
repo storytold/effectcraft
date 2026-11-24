@@ -29,16 +29,21 @@ fn main() {
     println!("cargo:rerun-if-changed=../../assets/app-icon/effectcraft-nightly.ico");
     println!("cargo:rerun-if-env-changed=EFFECTCRAFT_REQUIRE_WINRES");
     println!("cargo:rerun-if-env-changed=EFFECTCRAFT_VERSION");
+    println!("cargo:rerun-if-env-changed=EFFECTCRAFT_OVERRIDE_VERSION");
     println!("cargo:rerun-if-env-changed=EFFECTCRAFT_BUILD_SHA");
     println!("cargo:rerun-if-env-changed=EFFECTCRAFT_BUILD_DATE");
     // A nightly build refuses a version the feed would not have produced: the same identity the
     // Linux, macOS and Windows packaging checks require. Stable keeps its Cargo version.
     let cargo_version = std::env::var("CARGO_PKG_VERSION").unwrap_or_default();
     let built_version = if nightly {
-        let version = match std::env::var("EFFECTCRAFT_VERSION") {
+        // `EFFECTCRAFT_VERSION` is the feed identity the shared workflow passes;
+        // `EFFECTCRAFT_OVERRIDE_VERSION` is what this repo's own Linux packaging scripts pass. Accept
+        // either, or a nightly built by package.sh would print the Cargo version and fail the
+        // version check in nightly-common.sh.
+        let version = match std::env::var("EFFECTCRAFT_VERSION").or_else(|_| std::env::var("EFFECTCRAFT_OVERRIDE_VERSION")) {
             Ok(version) if build_channel::is_nightly_version(&version) => version,
             _ => {
-                eprintln!("nightly-v1 requires an explicit EFFECTCRAFT_VERSION feed identity");
+                eprintln!("nightly-v1 requires an explicit EFFECTCRAFT_VERSION (or EFFECTCRAFT_OVERRIDE_VERSION) feed identity");
                 std::process::exit(1);
             }
         };

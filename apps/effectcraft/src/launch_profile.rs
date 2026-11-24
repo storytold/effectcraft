@@ -159,7 +159,7 @@ mod tests {
             args(&["--launch-profile", VERSION, "--profile-root", "", "--"]),
             args(&["--launch-profile", VERSION, "--profile-root", absolute(), "--control", "--"]),
             args(&["--launch-profile", VERSION, "--profile-root", absolute()]),
-            args(&["--launch-profile=" + VERSION, "--profile-root", absolute(), "--"]),
+            args(&[&format!("--launch-profile={VERSION}"), "--profile-root", absolute(), "--"]),
         ] {
             assert!(parse(argv).is_err());
         }

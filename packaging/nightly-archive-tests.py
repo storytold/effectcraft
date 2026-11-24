@@ -29,10 +29,20 @@ class ArchivePolicy(unittest.TestCase):
         self.stage = self.root / "stage"
         self.stage.mkdir()
         self.output = self.root / "nightly.tar.gz"
-        self.required = {"effectcraft", "effectcraft-nightly.png", "README.md", "LICENSE-MIT", "LICENSE-APACHE", "NOTICE", "ATTRIBUTION.md"}
+        self.required = {
+            "effectcraft",
+            "effectcraft-bin",
+            "effectcraft-nightly.png",
+            "README.md",
+            "LICENSE-MIT",
+            "LICENSE-APACHE",
+            "NOTICE",
+            "ATTRIBUTION.md",
+        }
         for name in self.required:
             (self.stage / name).write_bytes(b"generated fixture: " + name.encode())
-        (self.stage / "effectcraft").chmod(0o755)
+        for name in ("effectcraft", "effectcraft-bin"):
+            (self.stage / name).chmod(0o755)
 
     def test_flat_regular_ustar_with_all_notices(self):
         (self.stage / "OFL-Font.txt").write_text("generated fixture license", encoding="utf-8")
@@ -41,6 +51,7 @@ class ArchivePolicy(unittest.TestCase):
             self.assertEqual({m.name for m in archive}, self.required | {"OFL-Font.txt"})
             self.assertTrue(all(m.isfile() and not m.pax_headers for m in archive))
             self.assertEqual(archive.extractfile("effectcraft").read(), (self.stage / "effectcraft").read_bytes())
+            self.assertEqual(archive.extractfile("effectcraft-bin").read(), (self.stage / "effectcraft-bin").read_bytes())
         with gzip.open(self.output, "rb") as stream:
             while (header := stream.read(512)) != bytes(512):
                 self.assertEqual(len(header), 512)
