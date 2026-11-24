@@ -393,7 +393,7 @@ pub fn install(ctx: &egui::Context, t: &Tokens, language: &str) {
         stack.push("noto-symbols2".into());
     }
     install_script_fallbacks(&mut fonts, language);
-    ctx.set_fonts(fonts);
+    craft_ui::fonts::load(ctx, fonts);
     apply_visuals(ctx, t);
 }
 

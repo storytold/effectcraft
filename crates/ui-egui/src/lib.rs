@@ -21,6 +21,7 @@ pub const UPDATE_APP: craft_update::app::App = craft_update::app::App {
 pub mod audio;
 pub mod automation;
 pub mod bench;
+pub(crate) mod capture;
 pub mod color_picker;
 pub mod control;
 pub mod credits;
@@ -28,6 +29,7 @@ pub mod display_gpu;
 pub mod dock;
 pub mod dock_ui;
 mod expression_diagnostics;
+pub mod framework;
 pub mod frames;
 pub mod gpu_failure;
 pub mod header;
@@ -103,7 +105,7 @@ struct PendingShot {
     /// The geometry epoch bound to the issued capture command, if it was issued.
     issued: Option<DrawGeometry>,
     /// The shared completion slot; dropping it cancels a late callback.
-    slot: Option<craft_ui::capture::CaptureSlot>,
+    slot: Option<crate::capture::CaptureSlot>,
     /// Bytes reserved against [`EffectcraftApp::shot_bytes`].
     reserved_bytes: usize,
     /// Geometry retries used.
@@ -472,6 +474,10 @@ pub struct EffectcraftApp {
     /// Audio scrubbing's open output (Ctrl/Cmd-drag the current time, `playback.scrubAudio`).
     pub scrub: Option<audio::AudioScrub>,
     pub(crate) updates_rt: updates_ui::Runtime,
+    /// The framework dialogs (the update dialogs), run once per pass after EffectCraft's own UI.
+    pub framework_dialogs: craft_ui::dialog::DialogHost,
+    /// Who EffectCraft is to the framework's dialogs.
+    pub(crate) framework_host: std::sync::Arc<craft_host::Host>,
     /// Audio panel VU meters.
     pub meter: audio::Meter,
     /// Waveform peak summaries per footage item (see `panels::waveform`).

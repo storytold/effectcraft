@@ -16,7 +16,6 @@ craft-mime = { version = "0.1.0", git = "https://github.com/aiongg/craft-libs", 
 craft-pdf = { git = "https://github.com/aiongg/craft-libs", rev = "3ad64a26ea8a72c03c416681e14f7744393790b1", version = "=0.1.0", default-features = false, features = ["read"] }
 craft-docpath = { version = "0.1.0", git = "https://github.com/aiongg/craft-libs", rev = "3ad64a26ea8a72c03c416681e14f7744393790b1" }
 craft-jsonrpc = { version = "0.1.0", git = "https://github.com/aiongg/craft-libs", rev = "3ad64a26ea8a72c03c416681e14f7744393790b1" }
-craft-quit = { version = "0.1.0", git = "https://github.com/aiongg/craft-libs", rev = "3ad64a26ea8a72c03c416681e14f7744393790b1" }
 craft-ecproj-format = { version = "0.1.0", git = "https://github.com/aiongg/craft-libs", rev = "3ad64a26ea8a72c03c416681e14f7744393790b1" }
 craft-dpx = { version = "0.1.0", git = "https://github.com/aiongg/craft-libs", rev = "3ad64a26ea8a72c03c416681e14f7744393790b1" }
 craft-ps = { version = "0.1.0", git = "https://github.com/aiongg/craft-libs", rev = "3ad64a26ea8a72c03c416681e14f7744393790b1", default-features = false, features = ["read"] }
@@ -129,6 +128,10 @@ half = "2.7"
 # Shared UI and the complete egui family select reviewed immutable commits below.
 craft-ui = { version = "0.1.0", git = "https://github.com/aiongg/craft-libs", rev = "3ad64a26ea8a72c03c416681e14f7744393790b1" }
 craft-behavior = { git = "https://github.com/aiongg/craft-libs", rev = "3ad64a26ea8a72c03c416681e14f7744393790b1" }
+craft-host = { git = "https://github.com/aiongg/craft-libs", rev = "3ad64a26ea8a72c03c416681e14f7744393790b1" }
+craft-keymap = { git = "https://github.com/aiongg/craft-libs", rev = "3ad64a26ea8a72c03c416681e14f7744393790b1" }
+craft-theme = { git = "https://github.com/aiongg/craft-libs", rev = "3ad64a26ea8a72c03c416681e14f7744393790b1" }
+craft-window = { git = "https://github.com/aiongg/craft-libs", rev = "3ad64a26ea8a72c03c416681e14f7744393790b1" }
 # `default_fonts` and `monochrome_emoji_fonts` are explicit: the app's `FontDefinitions::default()`
 # and its `✔`/`▣` chrome glyphs need both, and kittest's own dev-dependencies do not propagate.
 egui = { version = "0.37", default-features = false, features = ["default_fonts", "monochrome_emoji_fonts"] }

@@ -55,25 +55,24 @@ fn ask(app: &mut EffectcraftApp, id: &str, params: &Value) -> bool {
     true
 }
 
-/// The window's close button (and Quit, which closes it): keep the window open and ask.
-pub fn on_close_requested(app: &mut EffectcraftApp, ctx: &egui::Context) {
-    if !ctx.input(|i| i.viewport().close_requested()) || app.dialog_state.unsaved.quitting {
-        return;
+/// The root window's close decision, which the runtime's close path (`crate::framework`, `close_path`) asks when the
+/// window's close button, Quit or `app.quit` closes the window. A lost graphics device and an answered Quit prompt
+/// close; a running script render holds the window (a close is no permission to abandon the script, and once Stop
+/// finishes it a new close is asked about as usual); a modified project holds it while the Unsaved Changes prompt
+/// asks. On macOS a close that nothing holds quits through the platform (the runtime's close path).
+pub fn close_decision(app: &mut EffectcraftApp) -> craft_ui::shell::embed::CloseDecision {
+    if app.device_lost_close.is_some() {
+        return crate::framework::decide(true);
+    }
+    if app.session.script_ui.render_host.is_some() {
+        return crate::framework::decide(false);
+    }
+    if app.dialog_state.unsaved.quitting {
+        return crate::framework::decide(true);
     }
     // Logged, so a window that closes on its own shows it (#234).
     log::info!("the window was asked to close");
-    if ask(app, "app.quit", &json!({})) {
-        ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-    }
-}
-
-/// On macOS a close that nothing held open quits through `-[NSApplication terminate:]` instead:
-/// closing the window while AppKit's run loop is running crashes on a Mac with a Touch Bar
-/// (#341). `on_exit` still runs. A desktop host calls it last in `logic`, after
-/// `EffectcraftApp::tick` (which runs [`on_close_requested`]) and its own work. Returns whether
-/// that quit was scheduled; other platforms close the window as before.
-pub fn quit_on_close(ctx: &egui::Context) -> bool {
-    craft_quit::on_close_request(ctx)
+    crate::framework::decide(!ask(app, "app.quit", &json!({})))
 }
 
 /// The project's display name: its file name, or `Untitled Project.ecproj`.
@@ -204,6 +203,7 @@ mod tests {
 
     fn app() -> (EffectcraftApp, egui::Context) {
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         let app = EffectcraftApp::new(effectcraft_engine::Session::default());
         crate::theme::install(&ctx, &app.tokens, crate::i18n::language(&app));
         (app, ctx)
@@ -218,29 +218,17 @@ mod tests {
         }
         let mut out = ctx.run_ui(raw, |ui| {
             app.auto.begin_frame();
-            on_close_requested(app, ui.ctx());
+            app.close_path(ui.ctx());
             crate::panels::dialogs::show(app, ui.ctx());
         });
         out.textures_delta.clear();
         out.viewport_output.get(&egui::ViewportId::ROOT).is_some_and(|v| v.commands.contains(&egui::ViewportCommand::CancelClose))
     }
 
-    /// One frame of the dialogs with the window's close button pressed, through
-    /// [`on_close_requested`] and then [`quit_on_close`] as the app runs them; returns whether the
-    /// close was canceled and whether the platform quit was scheduled.
-    fn close_frame(app: &mut EffectcraftApp, ctx: &egui::Context) -> (bool, bool) {
-        let mut raw = egui::RawInput::default();
-        raw.viewports.entry(egui::ViewportId::ROOT).or_default().events.push(egui::ViewportEvent::Close);
-        let mut quits = false;
-        let mut out = ctx.run_ui(raw, |ui| {
-            app.auto.begin_frame();
-            on_close_requested(app, ui.ctx());
-            quits = quit_on_close(ui.ctx());
-            crate::panels::dialogs::show(app, ui.ctx());
-        });
-        out.textures_delta.clear();
-        let canceled = out.viewport_output.get(&egui::ViewportId::ROOT).is_some_and(|v| v.commands.contains(&egui::ViewportCommand::CancelClose));
-        (canceled, quits)
+    /// One frame of the dialogs with the window's close button pressed, through the runtime's close path as the app
+    /// runs it; returns whether the close was canceled (held, or taken by the platform quit on macOS).
+    fn close_frame(app: &mut EffectcraftApp, ctx: &egui::Context) -> bool {
+        frame(app, ctx, true)
     }
 
     fn modified(app: &mut EffectcraftApp) {
@@ -401,7 +389,7 @@ mod tests {
     fn closing_a_saved_project_quits_through_the_platform_on_macos() {
         let (mut app, ctx) = app();
         let macos = cfg!(target_os = "macos");
-        assert_eq!(close_frame(&mut app, &ctx), (macos, macos));
+        assert_eq!(close_frame(&mut app, &ctx), macos);
         assert!(app.dialog.is_none(), "nothing to ask");
     }
 
@@ -409,14 +397,14 @@ mod tests {
     fn closing_a_modified_project_asks_before_the_platform_quit() {
         let (mut app, ctx) = app();
         modified(&mut app);
-        assert_eq!(close_frame(&mut app, &ctx), (true, false), "the prompt holds the window and nothing quits");
+        assert!(close_frame(&mut app, &ctx), "the prompt holds the window");
         assert_eq!(app.dialog, Some(Dialog::UnsavedChanges));
         answer_with(&mut app, &ctx, Answer::Cancel);
         assert!(app.session.is_dirty() && !app.dialog_state.unsaved.quitting);
-        assert_eq!(close_frame(&mut app, &ctx), (true, false), "asked again after Cancel");
+        assert!(close_frame(&mut app, &ctx), "asked again after Cancel");
         answer_with(&mut app, &ctx, Answer::Discard);
         let macos = cfg!(target_os = "macos");
-        assert_eq!(close_frame(&mut app, &ctx), (macos, macos), "Don't Save quits");
+        assert_eq!(close_frame(&mut app, &ctx), macos, "Don't Save closes");
     }
 
     /// While the window is minimized or hidden, eframe runs `App::logic` without `App::ui` and

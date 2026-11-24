@@ -885,6 +885,7 @@ fn phase_menu(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, v: &m
 
     // Interaction.
     let resp = ui.interact(area, egui::Id::unique("viewer-interact"), Sense::click_and_drag());
+    crate::framework::host_canvas(ui.ctx(), resp.id);
     let menu_hits_id = egui::Id::unique(("viewer-menu-hits", cid.0));
     // A right-click an overlay took (the Cryptomatte eyedropper's) opens the menu too.
     let forwarded = ui.data_mut(|d| d.remove_temp::<egui::Pos2>(egui::Id::unique(FORWARDED_SECONDARY)));

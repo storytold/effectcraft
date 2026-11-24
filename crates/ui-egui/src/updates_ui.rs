@@ -1,9 +1,12 @@
-//! Software updates, background check at startup, and startup prompt modal.
+//! Software updates, background check at startup, and startup prompt modal, as craft-update's
+//! dialogs on the app's [`DialogHost`](craft_ui::dialog::DialogHost).
 
 use crate::EffectcraftApp;
 
 #[cfg(not(target_arch = "wasm32"))]
-use craft_update::dialog::{CheckResultDialog, CheckResultResponse};
+use craft_ui::dialog::DialogResult;
+#[cfg(not(target_arch = "wasm32"))]
+use craft_update::stack_dialogs::{CheckChoice, UpdateCheckDialog};
 #[cfg(not(target_arch = "wasm32"))]
 use craft_update::updater::{Action, Status, Updater};
 
@@ -60,7 +63,7 @@ pub(crate) fn restart_to_update(rt: &mut Runtime, ctx: &egui::Context, clean: bo
     }
     // Without a prompt this only takes the close a finished installation queued, so a save after
     // Cancel does not close the app.
-    let _ = rt.updater.show_if(ctx, true);
+    let _ = rt.updater.take_close(true);
     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
 }
 
@@ -82,9 +85,9 @@ pub(crate) fn tick(app: &mut EffectcraftApp, ctx: &egui::Context) {
     {
         let rt = &mut app.updates_rt;
         if std::mem::take(&mut rt.check_requested) {
-            rt.updater.check_now(ctx);
+            rt.updater.check_now();
         } else if rt.startup_check {
-            rt.updater.check_at_start(ctx);
+            rt.updater.check_at_start();
         }
         rt.updater.tick(ctx);
     }
@@ -101,28 +104,48 @@ pub(crate) fn result_window_open(open: bool, status: &Status, check_requested: b
     !matches!(status, Status::Idle) || (open && check_requested)
 }
 
+/// One pass of the update flow, before the dialog host runs: answers the result dialog closed in
+/// the last pass, drives the update prompt, and keeps the result dialog open and current while it
+/// answers Help ▸ Check for Updates or the updater has something to report.
 pub(crate) fn show(app: &mut EffectcraftApp, ctx: &egui::Context) {
     #[cfg(not(target_arch = "wasm32"))]
     {
         // The restart helper is scheduled before the app closes, so no update starts over unsaved work.
         let clean = !app.session.is_dirty();
-        match app.updates_rt.updater.show_if(ctx, clean) {
+        // Answered before the dialog is kept open below, so a dismissed outcome does not open again at once.
+        match app.framework_dialogs.take::<UpdateCheckDialog>() {
+            Some(DialogResult::Ok(CheckChoice::CheckNow | CheckChoice::CheckAgain)) => app.updates_rt.updater.check_now(),
+            Some(DialogResult::Ok(CheckChoice::RestartToUpdate)) => restart_to_update(&mut app.updates_rt, ctx, clean),
+            Some(DialogResult::Ok(CheckChoice::Update)) => {
+                app.updates_rt.updater.request_install(clean);
+            }
+            Some(DialogResult::Ok(CheckChoice::Download)) => ctx.open_url(egui::OpenUrl::new_tab(crate::UPDATE_APP.releases_url())),
+            // Closing the dialog dismisses the outcome it showed.
+            Some(_) => {
+                app.updates_rt.manual_window_open = false;
+                app.updates_rt.updater.dismiss_status();
+            }
+            None => {}
+        }
+        match app.updates_rt.updater.run(&mut app.framework_dialogs, clean) {
             Action::OpenUrl(url) => ctx.open_url(egui::OpenUrl::new_tab(url)),
             Action::Close => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
-            Action::None => {}
+            _ => {}
         }
         let rt = &mut app.updates_rt;
         rt.manual_window_open = result_window_open(rt.manual_window_open, rt.updater.status(), rt.check_requested);
-        if rt.manual_window_open {
-            match CheckResultDialog::new(&crate::UPDATE_APP, env!("CARGO_PKG_VERSION")).show(ctx, rt.updater.status()) {
-                CheckResultResponse::None => {}
-                CheckResultResponse::Close => {
-                    rt.manual_window_open = false;
-                    rt.updater.dismiss_status();
-                }
-                CheckResultResponse::CheckAgain => rt.updater.check_now(ctx),
-                CheckResultResponse::RestartToUpdate => restart_to_update(rt, ctx, clean),
-            }
+        let shows = rt.manual_window_open;
+        let (status, installing, message) = (rt.updater.status().clone(), rt.updater.is_installing(), rt.updater.status_message());
+        let dialogs = &mut app.framework_dialogs;
+        if shows && !dialogs.is_open::<UpdateCheckDialog>() {
+            dialogs.open(UpdateCheckDialog::new(env!("CARGO_PKG_VERSION")));
+        } else if !shows && dialogs.is_open::<UpdateCheckDialog>() {
+            dialogs.cancel::<UpdateCheckDialog>(ctx);
+        }
+        if let Some(dialog) = dialogs.get_mut::<UpdateCheckDialog>() {
+            dialog.set_status(status);
+            dialog.set_installing(installing);
+            dialog.set_message(message);
         }
     }
 

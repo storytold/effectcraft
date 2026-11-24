@@ -13,7 +13,10 @@ workspace = true
 craft-mime = { workspace = true }
 craft-ui = { workspace = true }
 craft-behavior = { workspace = true }
-craft-quit = { workspace = true, features = ["ui"] }
+craft-host = { workspace = true }
+craft-keymap = { workspace = true }
+craft-theme = { workspace = true }
+craft-window = { workspace = true }
 effectcraft-time = { workspace = true }
 effectcraft-geom = { workspace = true }
 effectcraft-color = { workspace = true }
