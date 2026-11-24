@@ -12,6 +12,7 @@ mod aux_channels;
 mod collapse;
 mod color;
 mod drop_shadow_cover;
+mod fill_cover;
 mod footage_size;
 mod frame_blend;
 mod guides;
