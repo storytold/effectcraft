@@ -612,8 +612,27 @@ pub fn disk_reserve(total: u64) -> u64 {
     (total / 20).clamp(MIN_DISK_RESERVE, MAX_DISK_RESERVE)
 }
 
-/// The platform's default disk cache folder.
+/// A validated Nightly profile root, set once at startup by the desktop app: every cache folder
+/// then derives from it instead of the platform cache/state folders.
+static PROFILE_ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Select the private Nightly profile root for the cache folders (disk cache, media cache,
+/// conformed audio, local footage copies). A stable launch never sets it.
+pub fn set_profile_root(root: PathBuf) -> Result<(), &'static str> {
+    PROFILE_ROOT.set(root).map_err(|_| "the Nightly profile root was already selected")
+}
+
+/// The platform's default disk cache folder, or the Nightly profile's caches folder.
 pub fn default_folder() -> PathBuf {
+    default_folder_at(PROFILE_ROOT.get().map(PathBuf::as_path))
+}
+
+/// [`default_folder`] for an explicit Nightly profile root (`None`: the platform convention), so
+/// the choice is testable without process-global state.
+pub fn default_folder_at(profile: Option<&Path>) -> PathBuf {
+    if let Some(root) = profile {
+        return root.join("Caches").join("Disk Cache");
+    }
     let home = std::env::var_os("HOME").map(PathBuf::from);
     if cfg!(target_os = "macos")
         && let Some(h) = &home
@@ -2111,6 +2130,15 @@ pub fn frame_key(content: u128, frame: i64, scale_milli: u32, view: u64) -> u128
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A Nightly launch keeps its disk cache (and every folder derived from it: media cache,
+    /// conformed audio) inside the private profile instead of the platform cache folder.
+    #[test]
+    fn a_nightly_profile_root_holds_the_cache_folders() {
+        let root = std::path::Path::new("/nightly profiles/effectcraft");
+        assert_eq!(default_folder_at(Some(root)), root.join("Caches").join("Disk Cache"));
+        assert!(default_folder_at(Some(root)).starts_with(root));
+    }
 
     /// #3301 review: buffers for entries read back are taken fallibly; memory the system can't
     /// give is a miss, not an abort.

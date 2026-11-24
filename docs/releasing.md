@@ -48,6 +48,26 @@ any other branch (`gh workflow run release.yml --ref <branch>`), it is a dry run
 sign nothing (Linux, Flatpak, FreeBSD, web) build and check everything, the macOS and Windows
 jobs are refused by the environment's branch rule, and no draft release is made.
 
+## Release-ref nightly preparation
+
+The Windows, Linux and macOS source preparation for the isolated `EffectCraft Nightly` channel is
+documented in [`nightly-release-preparation.md`](nightly-release-preparation.md). It is **not** an
+activated signing or publication pipeline: every nightly workflow job is registered literally off
+(`false && …`), there is no schedule, and no nightly policy file exists. Stable `release.yml`, its
+schedule, tags, concurrency, environment values and environment rules are unchanged.
+
+Initial installation **and later signer/policy updates** ride an already-intended reviewed stable
+release sync, with an appropriate version/build state. Every release-branch push may rebuild or
+update a stable draft, or refuse an already-published version. An urgent change that cannot wait
+means pausing nightlies with the existing workflow controls and requesting one bounded maintenance
+push with its exact stable consequences understood. Pausing must never require a release push. Do
+not bypass CI, overwrite a stable release or make a dummy version bump.
+
+Nightlies share the existing Windows signing identity with stable, so a suspected key or signing
+service compromise affects **both** channels: stop the nightly workflows, notify the release
+maintainers privately, and have the identity's owner revoke/rotate it and assess already-signed
+packages.
+
 ## What gets built
 
 | Platform | Artifacts | Built on |

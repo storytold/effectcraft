@@ -34,7 +34,7 @@ nightly_init() {
 
 # Compile only: macOS runs the version query after signing (packaging/macos/nightly-verify.sh).
 nightly_compile_gui() {
-  (cd "$ROOT" && EFFECTCRAFT_OVERRIDE_VERSION="$VERSION" cargo build --release --locked -p effectcraft --target "$NIGHTLY_RUST_TARGET")
+  (cd "$ROOT" && EFFECTCRAFT_VERSION="$VERSION" cargo build --release --locked -p effectcraft --target "$NIGHTLY_RUST_TARGET")
   NIGHTLY_GUI="$CARGO_TARGET_DIR/$NIGHTLY_RUST_TARGET/release/effectcraft"
   [[ -f "$NIGHTLY_GUI" && ! -L "$NIGHTLY_GUI" ]] || nightly_die 'the owned GUI build did not produce a regular executable'
   [[ "$(git -C "$ROOT" rev-parse HEAD)" == "$EFFECTCRAFT_BUILD_SHA" && -z "$(git -C "$ROOT" status --porcelain)" ]] || nightly_die 'source changed during the build'
@@ -60,12 +60,14 @@ nightly_refuse_signing_env() {
 }
 
 nightly_copy_notices() {
-  local destination="$1" required
-  for required in README.md LICENSE-MIT LICENSE-APACHE NOTICE ATTRIBUTION.md; do
-    [[ -f "$ROOT/$required" && ! -L "$ROOT/$required" ]] || nightly_die "missing regular app notice: $required"
+  local destination="$1" name
+  # Copied here rather than through env.sh's copy_docs, whose stable list has no ATTRIBUTION.md.
+  for name in README.md LICENSE LICENSE-MIT LICENSE-APACHE NOTICE ATTRIBUTION.md; do
+    if [[ -f "$ROOT/$name" && ! -L "$ROOT/$name" ]]; then cp "$ROOT/$name" "$destination/"; fi
   done
-  copy_docs "$destination"
-  cp "$ROOT/ATTRIBUTION.md" "$destination/"
+  for name in README.md LICENSE-MIT LICENSE-APACHE NOTICE ATTRIBUTION.md; do
+    [[ -f "$destination/$name" && ! -L "$destination/$name" ]] || nightly_die "missing regular app notice: $name"
+  done
 }
 
 nightly_publish_archive() {

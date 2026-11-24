@@ -317,6 +317,14 @@ fn main() {
         Ok(raw) => raw,
         Err(e) => fail_usage(&e),
     };
+    // The Launcher's Nightly profile flags belong to the desktop app only. Refuse them before any
+    // argument is parsed, so no script can drive a profile outside the Launcher's control (exit 2).
+    if let Some(flag) = raw
+        .iter()
+        .find(|a| matches!(a.as_str(), "--launch-profile" | "--profile-root") || a.starts_with("--launch-profile=") || a.starts_with("--profile-root="))
+    {
+        fail_usage(&format!("`{flag}` selects the desktop Nightly profile; effectcraft-cli has no launch profile"));
+    }
     if matches!(raw.first().map(String::as_str), Some("--version" | "-V" | "version")) {
         say!("effectcraft-cli {}", env!("CARGO_PKG_VERSION"));
         return;

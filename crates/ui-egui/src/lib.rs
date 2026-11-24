@@ -21,6 +21,7 @@ pub const UPDATE_APP: craft_update::app::App = craft_update::app::App {
 pub mod audio;
 pub mod automation;
 pub mod bench;
+pub mod channel;
 pub mod color_picker;
 pub mod control;
 pub mod credits;
