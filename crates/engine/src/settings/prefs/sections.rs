@@ -36,6 +36,9 @@ page!(General {
     viewer_wheel_scrubbing: bool = false,
     /// Create New Layers at Composition Start Time (off: at the current time).
     create_layers_at_comp_start: bool = true,
+    /// Fit New Layers to Work Area: new text, solid, shape, null and adjustment layers span the
+    /// work area instead of the whole composition (off, as in After Effects).
+    fit_new_layers_to_work_area: bool = false,
     switches_affect_nested_comps: bool = true,
     /// Default Spatial Interpolation to Linear.
     default_spatial_linear: bool = false,
@@ -196,16 +199,20 @@ page!(Disk {
     disk_cache_folder: String = String::new(),
     media_cache_folder: String = String::new(),
     conformed_media_folder: String = String::new(),
+    /// Copy footage on network shares to a local folder in the background (#3271).
+    localize_footage: bool = false,
+    /// Where the local copies go (empty: beside the media cache).
+    localize_folder: String = String::new(),
+    /// The most the local copies take (GB).
+    localize_max_gb: u32 = 20,
+    /// Path prefixes counted as network footage besides UNC paths (`P:\`), `;`-separated.
+    network_footage_locations: String = String::new(),
 });
 
 page!(Memory {
+    /// RAM Reserved for Other Applications (GB): EffectCraft's caches share most of the rest
+    /// (see [`crate::prefs::Prefs::memory_budget`]).
     ram_reserved_gb: u32 = 6,
-    /// Processed-layer cache budget (MB).
-    layer_cache_mb: u32 = 1024,
-    /// Decoded footage frame cache budget (MB).
-    media_cache_mb: u32 = 1024,
-    /// RAM preview (viewer frame) cache budget (MB).
-    preview_cache_mb: u32 = 3072,
     reduce_cache_when_low: bool = true,
     /// GPU Frames Rendered at Once (Render Queue): `auto` (from the GPU memory a frame
     /// measured, 1 to 3) or `1`, `2`, `3`. `EFFECTCRAFT_GPU_INFLIGHT` overrides it.

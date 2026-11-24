@@ -33,6 +33,8 @@ impl Dependencies<'_> {
         {
             for g in fx.groups().take(limit.unwrap_or(usize::MAX)).filter(|g| g.enabled) {
                 self.group(ctx, layer, g, 0)?;
+                // A LUT file edited on disk changes the pixels without an edit (#3493).
+                crate::reads::lut_files(ctx, layer, g).hash(self.h);
             }
         }
         self.other_times = previous;
@@ -85,7 +87,7 @@ impl Dependencies<'_> {
         hash_debug(self.h, layer);
         // An overridden clip plays on the layer clock and a keyed one from its key: the same
         // selection at the same time can pose differently.
-        super::hash_overrides(self.h, ctx, layer.id);
+        super::hash_overrides(self.h, ctx, layer);
         hash_values(self.h, ctx, layer, &layer.props);
         hash_debug(self.h, &ctx.world_matrix(layer));
         if let Some(item) = layer.source.item() {
@@ -122,6 +124,8 @@ impl Dependencies<'_> {
         Some(())
     }
 
+    /// Folds what the layer contributes at this time into the dependency cache key, including its source, effects and frame blend state.
+    /// Returns `None` when the layer cannot be keyed: past the depth limit, in a reference cycle, or with expressions that read other times.
     fn layer(&mut self, ctx: &EvalCtx, layer: &Layer) -> Option<()> {
         let id = (ctx.comp_id, layer.id);
         if self.path.len() > crate::MAX_FX_DEPTH || self.path.contains(&id) {
@@ -144,7 +148,7 @@ impl Dependencies<'_> {
         hash_debug(self.h, layer);
         // A referenced layer's static values can be overridden by the collapsed instance without
         // editing it (`hash_values` only sees animated ones), so the owner's key needs them too.
-        super::hash_overrides(self.h, ctx, layer.id);
+        super::hash_overrides(self.h, ctx, layer);
         hash_values(self.h, ctx, layer, &layer.props);
         hash_debug(self.h, &ctx.world_matrix(layer));
         // A cached owner never runs this layer's effects, so the comp camera and lights its
@@ -165,10 +169,21 @@ impl Dependencies<'_> {
                 hash_debug(self.h, &source);
                 if let Some(source) = source {
                     match &source.kind {
-                        ItemKind::Footage(_) => ctx.source_time(layer).0.hash(self.h),
+                        ItemKind::Footage(_) => {
+                            ctx.source_time(layer).0.hash(self.h);
+                            super::hash_blend_spans(self.h, ctx, layer);
+                        }
                         ItemKind::Comp(comp) => {
                             let time = ctx.source_time(layer);
                             time.0.hash(self.h);
+                            // The nested layers are walked without this instance's Essential
+                            // Properties overrides, which the render applies: a LUT file one of
+                            // them names is read too (#3493).
+                            for o in crate::fx_host::essential_overrides(ctx, layer) {
+                                if let effectcraft_keyframe::Value::Str(src) = &o.value {
+                                    crate::reads::source_files(src).hash(self.h);
+                                }
+                            }
                             let nested = EvalCtx::new(ctx.project, item, comp, time);
                             for child in &comp.layers {
                                 self.layer(&nested, child)?;

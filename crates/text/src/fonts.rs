@@ -107,17 +107,29 @@ fn extra_dirs(var: Option<&std::ffi::OsStr>) -> Vec<PathBuf> {
     var.map(|v| std::env::split_paths(v).filter(|p| !p.as_os_str().is_empty()).collect()).unwrap_or_default()
 }
 
-fn walk(dir: &std::path::Path, depth: u32, out: &mut Vec<PathBuf>) {
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
-    for e in rd.flatten() {
-        let p = e.path();
-        if p.is_dir() {
-            // Bounded, so a symlink loop ends.
-            if depth < 8 {
-                walk(&p, depth + 1, out);
+/// Font files under `roots`, each real folder listed once. Breadth first from every root, so a
+/// folder reached by several routes is listed at its shallowest and keeps the most depth below it.
+fn walk(roots: &[PathBuf], out: &mut Vec<PathBuf>) {
+    let mut seen = std::collections::HashSet::new();
+    let mut queue: std::collections::VecDeque<(PathBuf, u32)> = roots.iter().map(|r| (r.clone(), 0)).collect();
+    while let Some((dir, depth)) = queue.pop_front() {
+        // Symlinks fanning out to the same folders would otherwise be walked again along every
+        // path to them (exponentially many within the depth bound).
+        if !seen.insert(std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone())) {
+            continue;
+        }
+        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                // Bounded, so a symlink loop ends.
+                if depth < 8 {
+                    queue.push_back((p, depth + 1));
+                }
+            } else if p.extension().and_then(std::ffi::OsStr::to_str).is_some_and(|x| matches!(x.to_ascii_lowercase().as_str(), "ttf" | "otf" | "ttc" | "otc"))
+            {
+                out.push(p);
             }
-        } else if p.extension().and_then(std::ffi::OsStr::to_str).is_some_and(|x| matches!(x.to_ascii_lowercase().as_str(), "ttf" | "otf" | "ttc" | "otc")) {
-            out.push(p);
         }
     }
 }
@@ -125,9 +137,7 @@ fn walk(dir: &std::path::Path, depth: u32, out: &mut Vec<PathBuf>) {
 impl FontSource for DirectorySource {
     fn faces(&self) -> Vec<FaceInfo> {
         let mut files = Vec::new();
-        for d in &self.dirs {
-            walk(d, 0, &mut files);
-        }
+        walk(&self.dirs, &mut files);
         files.sort();
         files.dedup();
         let mut out = Vec::new();
@@ -156,17 +166,6 @@ fn info_from(n: FaceNames, data: FaceData, origin: &'static str) -> FaceInfo {
         variable: n.variable,
         instances: n.instances,
     }
-}
-
-/// A font file's bytes and its metadata from the same open file (so the metadata describes the
-/// bytes, not a later version of the file).
-fn read_with_metadata(path: &std::path::Path) -> std::io::Result<(Vec<u8>, std::fs::Metadata)> {
-    use std::io::Read;
-    let mut f = std::fs::File::open(path)?;
-    let meta = f.metadata()?;
-    let mut bytes = Vec::new();
-    f.read_to_end(&mut bytes)?;
-    Ok((bytes, meta))
 }
 
 /// A loaded (or loadable) face.
@@ -207,6 +206,36 @@ pub struct VMetrics {
     pub underline_thickness: f32,
 }
 
+/// A font file's bytes, shared by every face of it that is loaded (the faces of a collection
+/// each held their own copy of the whole file), with the metadata of the open file they were read
+/// from (so it describes the bytes, not a later version of the file).
+fn file_bytes(p: &std::path::Path) -> std::io::Result<(Arc<Vec<u8>>, std::fs::Metadata)> {
+    use std::io::Read;
+    type Key = (PathBuf, u64, Option<std::time::SystemTime>);
+    type Entry = (std::sync::Weak<Vec<u8>>, std::fs::Metadata);
+    static FILES: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<Key, Entry>>> = std::sync::LazyLock::new(Default::default);
+    let lock = || FILES.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let hit = |files: &std::collections::HashMap<Key, Entry>, key: &Key| files.get(key).and_then(|(w, m)| Some((w.upgrade()?, m.clone())));
+    let mut f = std::fs::File::open(p)?;
+    // Keyed by size and modification time too: a file replaced at the same path is read afresh.
+    let m = f.metadata()?;
+    let key: Key = (p.to_path_buf(), m.len(), m.modified().ok());
+    if let Some(found) = hit(&lock(), &key) {
+        return Ok(found);
+    }
+    // Read outside the lock: a slow file must not hold up every other face's first load.
+    let mut bytes = Vec::new();
+    f.read_to_end(&mut bytes)?;
+    let b = Arc::new(bytes);
+    let mut files = lock();
+    if let Some(found) = hit(&files, &key) {
+        return Ok(found);
+    }
+    files.retain(|_, (w, _)| w.strong_count() > 0);
+    files.insert(key, (Arc::downgrade(&b), m.clone()));
+    Ok((b, m))
+}
+
 impl Face {
     /// The font file bytes, loaded once on first use, or `None` when they cannot be read.
     fn bytes(&self) -> Option<&[u8]> {
@@ -215,9 +244,9 @@ impl Face {
                 FaceData::Static(b) => Some(FaceBytes::Static(b)),
                 FaceData::Shared(b) => Some(FaceBytes::Shared(b.clone())),
                 FaceData::File(p) => {
-                    let (bytes, meta) = read_with_metadata(p).ok()?;
+                    let (bytes, meta) = file_bytes(p).ok()?;
                     let _ = self.file_meta.set(meta);
-                    Some(FaceBytes::Shared(Arc::new(bytes)))
+                    Some(FaceBytes::Shared(bytes))
                 }
             })
             .as_ref()

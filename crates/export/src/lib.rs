@@ -2,16 +2,16 @@
 //!
 //! | Format | Container / files | Video | Alpha | Audio |
 //! |---|---|---|---|---|
-//! | H.264 | MP4 | FilmCraft H.264 High, 8-bit 4:2:0 BT.709 limited, VBR | no | AAC-LC (FilmCraft), mono/stereo |
+//! | H.264 | MP4 | `craft_video::h264` High, 8-bit 4:2:0 BT.709 limited, VBR | no | AAC-LC (`craft_audio::aac`), mono/stereo |
 //! | ProRes | QuickTime MOV | FilmCraft ProRes 422 Proxy/LT/422/HQ, 10-bit; 4444/4444 XQ 4:4:4 | 4444 (16-bit alpha coding) | PCM 16/24-bit or 32-bit float, mono/stereo |
 //! | Uncompressed | QuickTime MOV (`raw `) | 8-bit RGB (depth 24, rows padded to even bytes) or ARGB (depth 32) | RGB + Alpha (straight or premultiplied) | PCM 16/24-bit or 32-bit float, mono/stereo |
 //! | PNG / JPEG / TIFF sequence | one file per frame | 8-bit | PNG, TIFF | — |
 //! | OpenEXR sequence | one file per frame, scan lines | 32-bit float (default) or half float, linear light, premultiplied; compression None, RLE, ZIPS, ZIP (default), PIZ, PXR24, B44, B44A, DWAA, DWAB | yes | — |
 //! | Targa sequence | one file per frame | uncompressed 8-bit: 24-bit RGB, 32-bit RGB + Alpha (8 alpha bits), 8-bit grey for Alpha; top-left origin | yes (straight or premultiplied) | — |
 //! | Animated GIF | GIF89a | 256-colour palette per frame (NeuQuant) | 1-bit | — |
-//! | WebM | WebM (Matroska) | VP9 profile 0 (`effectcraft-vp9enc`: key + inter frames, a key frame every 2 s, loop filter), 8-bit 4:2:0; or AV1 (`effectcraft-av1enc`) | VP9 alpha (BlockAdditional) | Opus (`effectcraft-opusenc`: SILK / hybrid / CELT by bitrate and application), 48 kHz |
-//! | HEVC | MP4 (`hvc1`) | `effectcraft-hevcenc` Main / Main 10 4:2:0, I + P slices, bitrate or constant quality, level, key-frame interval | no | AAC-LC (FilmCraft) |
-//! | AV1 | MP4 (`av01`) | `effectcraft-av1enc` Main 8/10-bit 4:2:0, key + inter frames | no | AAC-LC (FilmCraft) |
+//! | WebM | WebM (Matroska) | VP9 profile 0 (`craft_video::vp9`: key + inter frames, a key frame every 2 s, loop filter), 8-bit 4:2:0; or AV1 (`craft_video::av1`) | VP9 alpha (BlockAdditional) | Opus (`craft_audio::opus::Encoder`: SILK / hybrid / CELT by bitrate and application), 48 kHz |
+//! | HEVC | MP4 (`hvc1`) | `craft_video::hevc` Main / Main 10 4:2:0, I + P slices, bitrate or constant quality, level, key-frame interval | no | AAC-LC (`craft_audio::aac`) |
+//! | AV1 | MP4 (`av01`) | `craft_video::av1` Main 8/10-bit 4:2:0, key + inter frames | no | AAC-LC (`craft_audio::aac`) |
 //! | WAV / AIFF | RIFF WAVE / AIFF (AIFF-C for float) | — | — | PCM 16/24-bit or 32-bit float, mono/stereo (audio only) |
 //!
 //! Every frame goes through the internal `pipeline` module: the Render Settings overrides (Effects, Solo Switches,
@@ -122,6 +122,16 @@ pub struct JobOptions<'a> {
     /// Settings ▸ Memory & CPU ▸ GPU Frames Rendered at Once: 1 to 3, or `None` for Auto (from
     /// the device memory a frame measured, #3335). `EFFECTCRAFT_GPU_INFLIGHT` overrides it.
     pub gpu_frames: Option<usize>,
+    /// Reads the bytes of memory the system can hand out now (`None`: unknown), for Auto's CPU
+    /// frames in flight (#1615): read at most once per job, when a job renders on the CPU after
+    /// a GPU frame measured a frame's working memory. `None`: CPU frames are capped only by
+    /// `EFFECTCRAFT_CPU_INFLIGHT`.
+    pub free_memory: Option<&'a (dyn Fn() -> Option<u64> + Sync)>,
+    /// What each of the job's own two layer caches (one per compositor) may hold when it has no
+    /// Render Queue run's caches (#3941): the session's budget for an export's caches. Both are
+    /// in the memory accountant's common budget, so together with the other caches they stay
+    /// within it. `None`: [`CACHE_BUDGET`].
+    pub cache_budget: Option<usize>,
 }
 
 /// The layer caches of a Render Queue run (see [`JobOptions::caches`]): one per compositor,
@@ -316,7 +326,7 @@ async fn sequence(cx: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut State<'_>) 
     let mut i = 0;
     while i < st.total {
         let end = (i + batch).min(st.total);
-        let ks: Vec<u64> = (i..end).filter(|k| !(cx.settings.skip_existing && out::exists(cx.sink, &sequence_path(cx.path, f0 + *k as i64)))).collect();
+        let ks: Vec<u64> = (i..end).filter(|k| !(cx.settings.skip_existing && cx.frame_exists(&sequence_path(cx.path, f0 + *k as i64)))).collect();
         let written: Vec<Result<u64>> = cx
             .frames(comp, ks, |k, img| {
                 let path = sequence_path(cx.path, f0 + k as i64);
@@ -403,9 +413,16 @@ fn write_still<W: std::io::Write + std::io::Seek>(cx: &Cx, file: &mut W, img: &I
             };
             match fmt {
                 OutputFormat::PngSequence => image::codecs::png::PngEncoder::new(file).write_image(&data, w, h, ct),
-                // Uncompressed (the encoder's run-length compression is off), top-left origin, the
-                // alpha bits in the image descriptor: 8 for RGB + Alpha, 0 otherwise.
-                OutputFormat::TargaSequence => image::codecs::tga::TgaEncoder::new(file).disable_rle().write_image(&data, w, h, ct),
+                // The shared footerless writer: uncompressed, top-left origin, the alpha bits in the
+                // image descriptor: 8 for RGB + Alpha, 0 otherwise.
+                OutputFormat::TargaSequence => {
+                    let layout = match channels {
+                        Channels::Rgba => craft_tga::Layout::Rgba,
+                        Channels::Alpha => craft_tga::Layout::Gray,
+                        Channels::Rgb => craft_tga::Layout::Rgb,
+                    };
+                    return craft_tga::write_top_left_raw(file, w, h, layout, &data).map_err(|e| ExportError::Encode(e.to_string()));
+                }
                 // (the TIFF encoder needs Seek)
                 _ => image::codecs::tiff::TiffEncoder::new(file).write_image(&data, w, h, ct),
             }
@@ -416,13 +433,22 @@ fn write_still<W: std::io::Write + std::io::Seek>(cx: &Cx, file: &mut W, img: &I
 }
 
 async fn gif_export(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut State<'_>) -> Result<Report> {
-    if w > u16::MAX as u32 || h > u16::MAX as u32 {
-        return Err(ExportError::Unsupported("GIF frames are limited to 65535 px".into()));
-    }
+    use craft_gif::write::{AnimationWriter, Disposal, Options, PreparedFrame};
+
+    validate_gif_dimensions(w, h)?;
     let path = job.place(job.path, 1);
     let mut file = job.create(&path)?;
-    let mut enc = gif::Encoder::new(&mut file, w as u16, h as u16, &[]).map_err(|e| ExportError::Encode(e.to_string()))?;
-    enc.set_repeat(if job.output.gif_loop { gif::Repeat::Infinite } else { gif::Repeat::Finite(0) }).map_err(|e| ExportError::Encode(e.to_string()))?;
+    let mut enc = AnimationWriter::new(
+        &mut file,
+        w,
+        h,
+        Options {
+            loop_forever: job.output.gif_loop,
+            disposal: if job.output.channels == Channels::Rgba { Disposal::Background } else { Disposal::Keep },
+            speed: 10,
+        },
+    )
+    .map_err(|e| ExportError::Encode(e.to_string()))?;
     let rate = job.settings.rate(comp);
     // GIF delays are in 1/100 s: carry the rounding error so long animations keep their timing.
     let cs_per_frame = 100.0 * rate.den as f64 / rate.num as f64;
@@ -432,28 +458,29 @@ async fn gif_export(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut State<'_
     let mut i = 0;
     while i < st.total {
         let end = (i + batch).min(st.total);
-        let frames: Vec<gif::Frame<'static>> = job
-            .frames(comp, (i..end).collect(), |_, img| {
-                let mut px = job.pixels_with(&img, comp, job.output.channels, w, h, false);
-                gif::Frame::from_rgba_speed(w as u16, h as u16, &mut px, 10)
-            })
+        let frames: Vec<std::result::Result<PreparedFrame, craft_gif::write::Error>> = job
+            .frames(comp, (i..end).collect(), |_, img| craft_gif::write::prepare_frame(w, h, job.pixels_with(&img, comp, job.output.channels, w, h, false), 10))
             .await;
-        for mut f in frames {
+        for frame in frames {
             clock += cs_per_frame;
             let d = (clock.round() as u64).saturating_sub(emitted).max(1);
             emitted += d;
-            f.delay = d.min(u16::MAX as u64) as u16;
-            if job.output.channels == Channels::Rgba {
-                f.dispose = gif::DisposalMethod::Background;
-            }
-            enc.write_frame(&f).map_err(|e| ExportError::Encode(e.to_string()))?;
+            let frame = frame.map_err(|e| ExportError::Encode(e.to_string()))?;
+            enc.write_prepared_frame(frame, d.min(u16::MAX as u64) as u16).map_err(|e| ExportError::Encode(e.to_string()))?;
         }
         st.advance(end - i)?;
         i = end;
     }
-    drop(enc);
+    let _ = enc.finish().map_err(|e| ExportError::Encode(e.to_string()))?;
     let bytes = file.finish()?;
     Ok(Report { path, frames: 0, width: w, height: h, seconds: 0.0, bytes, audio: false, log: None, overflow: vec![] })
+}
+
+fn validate_gif_dimensions(w: u32, h: u32) -> Result<()> {
+    if w > u16::MAX as u32 || h > u16::MAX as u32 {
+        return Err(ExportError::Unsupported("GIF frames are limited to 65535 px".into()));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -472,5 +499,14 @@ mod tests {
         assert_eq!(&p[12..16], &[0, 0, 0, 0]);
         assert_eq!(OutputFormat::H264.coded_size(1, 101), (2, 100));
         assert_eq!(OutputFormat::Gif.coded_size(1, 101), (1, 101));
+    }
+
+    #[test]
+    fn gif_dimension_limit_keeps_the_existing_unsupported_error() {
+        assert!(validate_gif_dimensions(u16::MAX as u32, u16::MAX as u32).is_ok());
+        assert!(matches!(
+            validate_gif_dimensions(u16::MAX as u32 + 1, 1),
+            Err(ExportError::Unsupported(message)) if message == "GIF frames are limited to 65535 px"
+        ));
     }
 }

@@ -146,9 +146,10 @@ fn is_layered(p: &Value) -> bool {
     imports_ext(p, &["psd", "psb"])
 }
 
-/// The import includes a PDF or Illustrator file (which may have several pages).
+/// The import includes a PDF or Illustrator file, or a VectorCraft document read through its
+/// PDF (which may have several pages).
 fn is_pdf(p: &Value) -> bool {
-    imports_ext(p, &["pdf", "ai"])
+    imports_ext(p, &["pdf", "ai", "vectorcraft"])
 }
 
 /// File ▸ Import ▸ File… picked numbered stills that import as image sequences: ask, as After
@@ -630,9 +631,11 @@ pub fn open_form(app: &mut EffectcraftApp, id: &str, p: &Value) -> bool {
                 )],
             )
         }
+        // The time as the project displays it (timecode, or frames from Start Numbering Frames At,
+        // or feet + frames), which `time.set` reads back the same way.
         "time.set" if !has(p, &["time", "frame", "timecode"]) => {
-            let frame = comp.map(|c| c.frame_rate.frame_at(t)).unwrap_or(0);
-            ("Go to Time".into(), vec![Field::num("frame", "Frame", frame as f64)])
+            let shown = comp.map(|c| crate::panels::timecode(s, c, t)).unwrap_or_default();
+            ("Go to Time".into(), vec![Field::text("timecode", "Time", &shown)])
         }
         "view.addGuide" if !has(p, &["position"]) => {
             let (w, _) = comp.map(|c| (c.width, c.height)).unwrap_or((1920, 1080));
@@ -989,8 +992,9 @@ pub fn show_form(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
     if ok || enter {
         app.dialog = None;
         let params = f.params();
-        if let Err(e) = app.session.execute(&f.command, params) {
-            app.ui.status = e.to_string();
+        match app.session.execute(&f.command, params) {
+            Ok(r) => app.report_import_errors(&f.command, &r),
+            Err(e) => app.ui.status = e.to_string(),
         }
         return;
     }
@@ -1077,6 +1081,37 @@ mod tests {
         assert_eq!(f.params(), json!({"prop": "position", "value": [10.0, 20.0], "mode": "b"}));
     }
 
+    #[test]
+    fn import_form_shows_errors_returned_in_a_successful_result() {
+        let folder = std::env::temp_dir().join(format!("effectcraft-form-import-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let path = folder.join("no-pdf.vectorcraft");
+        std::fs::write(&path, br#"{"format":"vectorcraft","version":4,"document":{"artboards":[],"layers":[]}}"#).unwrap();
+        for (import_as, background) in [("footage", false), ("composition", true), ("compositionLayerSizes", true)] {
+            let mut app = EffectcraftApp::new(effectcraft_host::session());
+            let ctx = egui::Context::default();
+            crate::theme::install(&ctx, &app.tokens, crate::i18n::language(&app));
+            app.dialog_state.form = Form {
+                title: "Import".into(),
+                command: "file.import".into(),
+                base: json!({"paths": [path, path], "importAs": import_as, "background": background}),
+                fields: vec![],
+            };
+            app.dialog = Some(Dialog::Form);
+            let raw = egui::RawInput {
+                events: vec![egui::Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() }],
+                ..Default::default()
+            };
+            let tokens = app.tokens;
+            ctx.run_ui(raw, |ui| show_form(&mut app, ui.ctx(), &tokens)).textures_delta.clear();
+            assert!(app.dialog.is_none());
+            assert!(app.ui.status.contains("no-pdf.vectorcraft") && app.ui.status.contains("Create PDF-Compatible File"), "{import_as}: {}", app.ui.status);
+            assert!(app.ui.status.ends_with("(and 1 more)"), "{}", app.ui.status);
+            assert!(!app.ui.status.contains('\n'));
+        }
+        std::fs::remove_dir_all(folder).unwrap();
+    }
+
     /// A numeric form (Layer ▸ Transform ▸ Position…) opens with its first number being edited
     /// and selected: typing replaces it, and one Enter confirms.
     #[test]
@@ -1106,6 +1141,42 @@ mod tests {
         assert_eq!(app.dialog_state.form.params()["value"], json!([42.0, 540.0]));
         frame(&mut app, vec![egui::Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() }]);
         assert!(app.dialog.is_none(), "one Enter confirms");
+    }
+
+    /// Go to Time shows the time as the project displays it, so with Frames numbered from 1 the
+    /// viewer's frame 00013 opens as 00013 and 00020 goes to the frame displayed 00020 (the
+    /// engine's frame 19). The dialog used to show and take the engine's own frame number (#3373).
+    #[test]
+    fn go_to_time_uses_the_projects_frame_numbering() {
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        app.session.execute("comp.new", json!({"name": "Main", "width": 64, "height": 36, "frameRate": 24, "duration": 4})).unwrap();
+        app.session.execute("file.projectSettings", json!({"timeDisplay": "frames", "frameStart": 1})).unwrap();
+        app.session.execute("time.set", json!({"frame": 12})).unwrap();
+        assert!(open_form(&mut app, "time.set", &json!({})));
+        let f = &app.dialog_state.form;
+        assert_eq!(f.command, "time.set");
+        assert!(matches!(&f.fields[0].kind, FieldKind::Text(t) if t == "00013"), "{:?}", f.fields[0]);
+        app.dialog_state.form.fields[0].kind = FieldKind::Text("00020".into());
+        let (command, params) = (app.dialog_state.form.command.clone(), app.dialog_state.form.params());
+        app.session.execute(&command, params).unwrap();
+        let at = app.session.active_comp().unwrap().frame_rate.frame_at(app.session.time());
+        assert_eq!(at, 19, "displayed 00020 with frames starting at 1");
+    }
+
+    /// In a comp that starts 1 s before 0, Go to Time at frame 12 opens on the negative time the
+    /// viewer shows, and OK without editing it stays on frame 12 (it used to jump to frame 0).
+    #[test]
+    fn go_to_time_ok_keeps_a_negative_displayed_time() {
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        app.session.execute("comp.new", json!({"name": "Main", "width": 64, "height": 36, "frameRate": 24, "duration": 4, "startTime": -1})).unwrap();
+        app.session.execute("time.set", json!({"frame": 12})).unwrap();
+        assert!(open_form(&mut app, "time.set", &json!({})));
+        let f = &app.dialog_state.form;
+        assert!(matches!(&f.fields[0].kind, FieldKind::Text(t) if t == "-0:00:00:12"), "{:?}", f.fields[0]);
+        let (command, params) = (f.command.clone(), f.params());
+        app.session.execute(&command, params).unwrap();
+        let at = app.session.active_comp().unwrap().frame_rate.frame_at(app.session.time());
+        assert_eq!(at, 12, "OK on the unedited time stays put");
     }
 
     /// File ▸ Export ▸ Adobe Premiere Pro Project… opens a form that says it writes Final Cut Pro

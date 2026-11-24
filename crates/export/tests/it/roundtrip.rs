@@ -9,6 +9,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::support::write_tone;
 use effectcraft_color::Label;
 use effectcraft_export::render_queue::{AlphaMode, AudioOutput, Channels, OutputFormat, OutputModule, ProResProfile, RenderSettings, TimeSpan, sequence_path};
 use effectcraft_export::{Job, Progress, export};
@@ -125,7 +126,19 @@ fn check_frame(img: &Image, k: u64, tol: f32) {
     assert!(near([c[0], c[1], c[2]], want, tol), "frame {k} centre {c:?} want {want:?}");
 }
 
-fn decode_movie(path: &Path, frames: u64, tol: f32) -> effectcraft_project::Footage {
+/// Write to the test process's stderr, not libtest's buffered per-test capture: nextest can
+/// then show the last stage even when it has to terminate a stuck process.
+fn prores_stage(trace: bool, stage: std::fmt::Arguments<'_>) {
+    use std::io::Write as _;
+
+    if trace {
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(stderr, "ProRes MOV roundtrip: {stage}").and_then(|()| stderr.flush());
+    }
+}
+
+fn decode_movie(path: &Path, frames: u64, tol: f32, trace: bool) -> effectcraft_project::Footage {
+    prores_stage(trace, format_args!("native probe"));
     let f = effectcraft_media::probe(path).expect("probe our output");
     assert_eq!((f.width, f.height), (W, H));
     assert!(f.has_video);
@@ -133,6 +146,7 @@ fn decode_movie(path: &Path, frames: u64, tol: f32) -> effectcraft_project::Foot
     assert_eq!(n as u64, frames, "frame count from duration {:?} @ {:?}", f.duration, f.frame_rate);
     let pool = MediaPool::new();
     for k in 0..frames {
+        prores_stage(trace, format_args!("native decode frame {k}"));
         let img = pool.frame_at(&f, f.frame_rate.tick_of(k as i64)).expect("decode");
         check_frame(&img, k, tol);
     }
@@ -152,8 +166,9 @@ fn ffprobe(path: &Path) -> Option<String> {
 }
 
 /// Frame `k` decoded by ffmpeg (external oracle) as RGBA, or `None` without ffmpeg.
-fn ffmpeg_frame(path: &Path, k: u64) -> Option<Image> {
+fn ffmpeg_frame(path: &Path, k: u64, trace: bool) -> Option<Image> {
     let png = path.with_extension(format!("ffmpeg-{k}.png"));
+    prores_stage(trace, format_args!("FFmpeg decode frame {k}"));
     let st = Command::new("ffmpeg")
         .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
         .arg(path)
@@ -162,13 +177,14 @@ fn ffmpeg_frame(path: &Path, k: u64) -> Option<Image> {
         .status()
         .ok()?;
     assert!(st.success(), "ffmpeg failed to decode {}", path.display());
+    prores_stage(trace, format_args!("read FFmpeg oracle PNG for frame {k}"));
     let img = image::open(&png).expect("ffmpeg png").to_rgba8();
     Some(Image::from_rgba8(img.width(), img.height(), img.as_raw()))
 }
 
-fn ffmpeg_check(path: &Path, tol: f32) {
+fn ffmpeg_check(path: &Path, tol: f32, trace: bool) {
     for k in [0, 4, 5, FRAMES - 1] {
-        match ffmpeg_frame(path, k) {
+        match ffmpeg_frame(path, k, trace) {
             Some(img) => check_frame(&img, k, tol),
             None => {
                 eprintln!("ffmpeg not found: skipping oracle decode");
@@ -186,8 +202,8 @@ fn h264_mp4_roundtrip() {
     let path = d.join("comp.mp4");
     let r = run(&p, cid, &NoFootage, &om, &path);
     assert!(r.bytes > 100 && !r.audio);
-    decode_movie(&path, FRAMES, 0.08);
-    ffmpeg_check(&path, 0.08);
+    decode_movie(&path, FRAMES, 0.08, false);
+    ffmpeg_check(&path, 0.08, false);
     if let Some(s) = ffprobe(&path) {
         assert!(s.contains("h264|64|48|yuv420p"), "{s}");
         assert!(s.lines().next().unwrap_or("").ends_with("|12"), "{s}");
@@ -222,17 +238,21 @@ fn h264_odd_size_is_cropped_even() {
 
 #[test]
 fn prores_mov_roundtrip() {
+    prores_stage(true, format_args!("fixture setup"));
     let d = out_dir("prores");
     let (p, cid) = project(None);
     let om = OutputModule::for_format(OutputFormat::ProRes);
     let path = d.join("comp.mov");
+    prores_stage(true, format_args!("native export"));
     run(&p, cid, &NoFootage, &om, &path);
-    decode_movie(&path, FRAMES, 0.03);
-    ffmpeg_check(&path, 0.03);
+    decode_movie(&path, FRAMES, 0.03, true);
+    ffmpeg_check(&path, 0.03, true);
+    prores_stage(true, format_args!("ffprobe metadata"));
     if let Some(s) = ffprobe(&path) {
         assert!(s.starts_with("prores|64|48"), "{s}");
         assert!(s.lines().next().unwrap_or("").ends_with("|12"), "{s}");
     }
+    prores_stage(true, format_args!("complete"));
 }
 
 #[test]
@@ -288,15 +308,15 @@ fn prores_alpha_final_run_is_present_in_exported_movies() {
                 run_frames(&project, comp, &MediaPool::new(), &output, &path, 1);
 
                 let bytes = std::fs::read(&path).expect("exported MOV");
-                let movie = filmcraft_isobmff::open(bytes.as_slice()).expect("demux exported MOV");
-                let video = movie.tracks.iter().find(|track| track.kind == filmcraft_isobmff::TrackKind::Video).expect("video track");
+                let movie = craft_media::isobmff::open(bytes.as_slice()).expect("demux exported MOV");
+                let video = movie.tracks.iter().find(|track| track.kind == craft_media::isobmff::TrackKind::Video).expect("video track");
                 assert_eq!(video.samples.len(), 1);
                 let sample = &video.samples[0];
                 let frame = &bytes[sample.offset as usize..][..sample.size as usize];
-                let (header, start, size) = filmcraft_prores::FrameHeader::parse(frame).expect("ProRes header");
+                let (header, start, size) = craft_video::prores::FrameHeader::parse(frame).expect("ProRes header");
                 assert_eq!((header.width, header.height), (16, 16));
                 let picture = &frame[start..size];
-                let header = filmcraft_prores::PictureHeader::parse(picture).expect("picture header");
+                let header = craft_video::prores::PictureHeader::parse(picture).expect("picture header");
                 assert_eq!(header.num_slices, 1);
                 let slice = &picture[header.header_size + 2..];
                 let color_bytes: usize = slice[2..8].as_chunks::<2>().0.iter().map(|b| u16::from_be_bytes(*b) as usize).sum();
@@ -543,21 +563,47 @@ fn exr_sequence_values_at_or_below_one_are_unchanged() {
         assert!((c[0] - 1.0).abs() < 1e-4 && (c[1] - lin(0.4)).abs() < 1e-4 && c[2].abs() < 1e-6, "{channels:?}: {c:?}");
     }
 }
-#[test]
-fn gif_roundtrip() {
+/// Render the test project as a GIF with `om` into `out_dir(name)`, and open it for RGBA decoding.
+fn render_gif(name: &str, om: &OutputModule) -> (PathBuf, gif::Decoder<std::fs::File>) {
     let (p, cid) = project(None);
-    let d = out_dir("gif");
-    let om = OutputModule::for_format(OutputFormat::Gif);
-    let path = d.join("anim.gif");
-    run(&p, cid, &NoFootage, &om, &path);
+    let path = out_dir(name).join("anim.gif");
+    run(&p, cid, &NoFootage, om, &path);
     let mut opts = gif::DecodeOptions::new();
     opts.set_color_output(gif::ColorOutput::RGBA);
-    let mut dec = opts.read_info(std::fs::File::open(&path).expect("open")).expect("gif header");
+    let dec = opts.read_info(std::fs::File::open(&path).expect("open")).expect("gif header");
+    (path, dec)
+}
+
+/// The test project's frames, rendered as PNGs, re-encoded through the former app-local gif 0.13
+/// path (`Frame::from_rgba_speed` at speed 10, 1/10 s per frame, looping).
+fn reference_gif() -> Vec<u8> {
+    let (p, cid) = project(None);
+    let png_pattern = out_dir("gif-byte-parity").join("frame_[#####].png");
+    run(&p, cid, &NoFootage, &OutputModule::for_format(OutputFormat::PngSequence), &png_pattern);
+    let png_pattern = png_pattern.to_string_lossy();
+    let mut expected = Vec::new();
+    let mut encoder = gif::Encoder::new(&mut expected, W as u16, H as u16, &[]).expect("reference GIF encoder");
+    encoder.set_repeat(gif::Repeat::Infinite).expect("reference GIF repeat");
+    for frame_number in 0..FRAMES {
+        let mut rgba = image::open(sequence_path(&png_pattern, frame_number as i64)).expect("reference PNG").to_rgba8().into_raw();
+        let mut frame = gif::Frame::from_rgba_speed(W as u16, H as u16, &mut rgba, 10);
+        frame.delay = 10;
+        encoder.write_frame(&frame).expect("reference GIF frame");
+    }
+    drop(encoder);
+    expected
+}
+
+#[test]
+fn gif_roundtrip() {
+    let (path, mut dec) = render_gif("gif", &OutputModule::for_format(OutputFormat::Gif));
     assert_eq!((dec.width() as u32, dec.height() as u32), (W, H));
+    assert_eq!(dec.repeat(), gif::Repeat::Infinite);
     let mut k = 0;
     let mut total_delay = 0u32;
     while let Some(f) = dec.read_next_frame().expect("frame") {
         assert_eq!((f.width as u32, f.height as u32), (W, H));
+        assert_eq!(f.dispose, gif::DisposalMethod::Keep);
         total_delay += f.delay as u32;
         let img = Image::from_rgba8(W, H, &f.buffer);
         check_frame(&img, k, 0.06);
@@ -568,6 +614,30 @@ fn gif_roundtrip() {
     if let Some(s) = ffprobe(&path) {
         assert!(s.starts_with("gif|64|48"), "{s}");
     }
+}
+
+#[test]
+fn gif_matches_the_former_encoder_byte_for_byte() {
+    // The shared writer must keep the complete output, quantization and LZW data included.
+    let (path, _) = render_gif("gif-parity", &OutputModule::for_format(OutputFormat::Gif));
+    let actual = std::fs::read(&path).expect("GIF bytes");
+    let expected = reference_gif();
+    let difference = actual.iter().zip(&expected).position(|(a, b)| a != b);
+    assert!(
+        actual.len() == expected.len() && difference.is_none(),
+        "GIF bytes differ: {} vs {} bytes, first difference at {difference:?}",
+        actual.len(),
+        expected.len()
+    );
+}
+
+#[test]
+fn gif_rgba_keeps_background_disposal_and_non_looping() {
+    let om = OutputModule { channels: Channels::Rgba, gif_loop: false, ..OutputModule::for_format(OutputFormat::Gif) };
+    let (_, mut dec) = render_gif("gif-rgba", &om);
+    assert_eq!(dec.repeat(), gif::Repeat::Finite(0));
+    let first = dec.read_next_frame().expect("frame").expect("first frame");
+    assert_eq!(first.dispose, gif::DisposalMethod::Background);
 }
 
 #[test]
@@ -594,33 +664,6 @@ fn cancel_stops_early() {
     assert!(matches!(r, Err(effectcraft_export::ExportError::Cancelled)));
     let written = std::fs::read_dir(&d).map(|r| r.count()).unwrap_or(0);
     assert_eq!(written, 0, "cancelled before the first batch");
-}
-
-/// 16-bit stereo WAV with a 440 Hz sine at amplitude 0.5 (left) and silence (right).
-fn write_tone(path: &Path, secs: f64) {
-    let sr = 48_000u32;
-    let n = (secs * sr as f64) as usize;
-    let mut data = Vec::with_capacity(n * 4);
-    for i in 0..n {
-        let s = (0.5 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / sr as f64).sin() * 32767.0).round() as i16;
-        data.extend_from_slice(&s.to_le_bytes());
-        data.extend_from_slice(&0i16.to_le_bytes());
-    }
-    let mut w = Vec::new();
-    w.extend_from_slice(b"RIFF");
-    w.extend_from_slice(&(36 + data.len() as u32).to_le_bytes());
-    w.extend_from_slice(b"WAVEfmt ");
-    w.extend_from_slice(&16u32.to_le_bytes());
-    w.extend_from_slice(&1u16.to_le_bytes());
-    w.extend_from_slice(&2u16.to_le_bytes());
-    w.extend_from_slice(&sr.to_le_bytes());
-    w.extend_from_slice(&(sr * 4).to_le_bytes());
-    w.extend_from_slice(&4u16.to_le_bytes());
-    w.extend_from_slice(&16u16.to_le_bytes());
-    w.extend_from_slice(b"data");
-    w.extend_from_slice(&(data.len() as u32).to_le_bytes());
-    w.extend_from_slice(&data);
-    std::fs::write(path, w).expect("write wav");
 }
 
 fn rms(v: impl Iterator<Item = f32>) -> f32 {
@@ -734,12 +777,12 @@ fn webm_vp9_opus_roundtrip() {
     let r = run(&p, cid, &pool, &om, &path);
     assert!(r.audio && r.bytes > 200, "{r:?}");
     // Decoded back through FilmCraft (Matroska demuxer, VP9 and Opus decoders).
-    let f = decode_movie(&path, FRAMES, 0.08);
+    let f = decode_movie(&path, FRAMES, 0.08, false);
     assert!(f.has_audio);
     let s = MediaPool::new().audio_samples(&f, Tick::from_seconds_f64(0.3), 24_000, 48_000);
     let l = rms(s.iter().step_by(2).copied());
     assert!((l - 0.3536).abs() < 0.06, "left RMS {l}");
-    ffmpeg_check(&path, 0.08);
+    ffmpeg_check(&path, 0.08, false);
     if let Some(s) = ffprobe(&path) {
         assert!(s.contains("vp9|64|48|yuv420p"), "{s}");
         assert!(s.contains("opus"), "{s}");

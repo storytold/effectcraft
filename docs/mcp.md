@@ -28,7 +28,7 @@ The server provides the same core conventions as FilmCraft #28:
 | `command_run` | `id`, `params?` | Engine command result |
 | `command_batch` | `steps: [{id, params?}]`, `stop_on_error?` | `completed`, `failed`, per-step `results` |
 | `doc_inspect` | none | Project overview and active composition |
-| `render_preview` | `comp?`, `time?`, `max_side?`, `transparent?` | PNG and frame information |
+| `render_preview` | `comp?`, `time?` or `times?`, `columns?`, `labels?`, `max_side?`, `transparent?` | PNG and frame information; with `times`, one contact-sheet PNG and its layout (`columns`, `rows`, `cellWidth`, `cellHeight`, `width`, `height`) |
 
 `command_batch` stops at the first error by default; false continues. Each edit has its
 own undo step. The existing `batch` tool retains its atomic undo grouping and result references.

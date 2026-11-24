@@ -54,7 +54,7 @@ fn key_kind(conv: StyleConv) -> Option<Kind> {
 fn import_param(spec: &StyleParam, full: &str, node: Option<PropNode<'_, '_>>, prop: &mut EcProp, tm: &TimeMap, what: &str, col: &mut Collector) {
     if spec.conv == StyleConv::Gradient {
         if node.is_some() {
-            col.lose(LossCategory::LayerStyles, format!("{what}: {full} (gradient colours are not decoded, EffectCraft's default gradient kept)"));
+            col.lose_with(LossCategory::LayerStyles, || format!("{what}: {full} (gradient colours are not decoded, EffectCraft's default gradient kept)"));
         }
         return;
     }
@@ -63,7 +63,7 @@ fn import_param(spec: &StyleParam, full: &str, node: Option<PropNode<'_, '_>>, p
     }
     let Some(node) = node else { return };
     let PropNode::Property(p) = node else {
-        col.lose(LossCategory::LayerStyles, format!("{what}: {full} is not a property, default used"));
+        col.lose_with(LossCategory::LayerStyles, || format!("{what}: {full} is not a property, default used"));
         return;
     };
     import_record(spec.conv, &p, full, prop, tm, what, col);
@@ -73,12 +73,12 @@ fn import_record(conv: StyleConv, p: &AepProp<'_, '_>, full: &str, prop: &mut Ec
     if p.is_animated() {
         match key_kind(conv) {
             Some(kind) => import_keys(p, kind, what, full, tm, prop, col),
-            None => col.lose(LossCategory::LayerStyles, format!("{what}: keys on {full} are not imported (not sampled), default used")),
+            None => col.lose_with(LossCategory::LayerStyles, || format!("{what}: keys on {full} are not imported (not sampled), default used")),
         }
     } else if let Some(stored) = p.static_value() {
         match value(conv, &stored) {
             Some(v) => prop.value = v,
-            None => col.lose(LossCategory::LayerStyles, format!("{what}: {full} holds a value that is not valid ({stored:?}), default used")),
+            None => col.lose_with(LossCategory::LayerStyles, || format!("{what}: {full} holds a value that is not valid ({stored:?}), default used")),
         }
     }
     import_expression(p, prop, col);
@@ -102,33 +102,37 @@ pub(crate) fn import_layer_styles(layer: &AepLayer<'_, '_>, l: &mut Layer, gl: &
             Some(sm::FLAGS_ON) => true,
             Some(sm::FLAGS_OFF) => false,
             other => {
-                col.lose(LossCategory::LayerStyles, format!("{what}: style {prefix} in state {} (not sampled), not imported", other.unwrap_or(0)));
+                col.lose_with(LossCategory::LayerStyles, || format!("{what}: style {prefix} in state {} (not sampled), not imported", other.unwrap_or(0)));
                 continue;
             }
         };
         match sm::by_ae(prefix) {
             Some(spec) => applied.push((spec, g, on)),
-            None if prefix == sm::PATTERN_OVERLAY => col.lose(LossCategory::LayerStyles, format!("{what}: Pattern Overlay (no counterpart)")),
-            None => col.lose(LossCategory::LayerStyles, format!("{what}: unknown layer style {prefix}")),
+            None if prefix == sm::PATTERN_OVERLAY => col.lose_with(LossCategory::LayerStyles, || format!("{what}: Pattern Overlay (no counterpart)")),
+            None => col.lose_with(LossCategory::LayerStyles, || format!("{what}: unknown layer style {prefix}")),
         }
     }
     if applied.is_empty() {
         // Without a style the Blending Options group holds only an empty Advanced Blending group
         // (every case); stored values there have nowhere to go.
-        if let Some(PropNode::Group(bo)) = ls.get(sm::BLEND_OPTIONS)
-            && holds_values(&bo, 0)
-        {
-            col.lose(LossCategory::LayerStyles, format!("{what}: Blending Options set without a layer style, not imported"));
+        if let Some(PropNode::Group(bo)) = ls.get(sm::BLEND_OPTIONS) {
+            match holds_values(&bo, 0) {
+                Held::Values => col.lose_with(LossCategory::LayerStyles, || format!("{what}: Blending Options set without a layer style, not imported")),
+                Held::TooDeep => col.lose_with(LossCategory::LayerStyles, || {
+                    format!("{what}: Blending Options nest groups deeper than {MAX_HELD_DEPTH} levels, not read (they may hold values)")
+                }),
+                Held::Nothing => {}
+            }
         }
         return;
     }
     if !l.can_have_styles() {
-        col.lose(LossCategory::LayerStyles, format!("{what}: this kind of layer takes no layer styles here ({} not imported)", applied.len()));
+        col.lose_with(LossCategory::LayerStyles, || format!("{what}: this kind of layer takes no layer styles here ({} not imported)", applied.len()));
         return;
     }
     for (spec, g, on) in &applied {
         let Some(uid) = st::add_style(l, ids, spec.ec, gl, *on) else {
-            col.lose(LossCategory::LayerStyles, format!("{what}: style {} could not be added", spec.ae));
+            col.lose_with(LossCategory::LayerStyles, || format!("{what}: style {} could not be added", spec.ae));
             continue;
         };
         let Some(group) = l.props.find_group_mut(uid) else { continue };
@@ -138,12 +142,12 @@ pub(crate) fn import_layer_styles(layer: &AepLayer<'_, '_>, l: &mut Layer, gl: &
             let node = records.iter().find(|r| r.match_name == full).map(|r| r.node);
             match group.get_mut(prm.ec) {
                 Some(prop) => import_param(prm, &full, node, prop, tm, what, col),
-                None => col.lose(LossCategory::LayerStyles, format!("{what}: {full} has no counterpart '{}'", prm.ec)),
+                None => col.lose_with(LossCategory::LayerStyles, || format!("{what}: {full} has no counterpart '{}'", prm.ec)),
             }
         }
         for r in &records {
             if r.match_name != "ADBE Group End" && !spec.params.iter().any(|prm| spec.param_name(prm) == r.match_name) {
-                col.lose(LossCategory::LayerStyles, format!("{what}: {} is not imported (unknown parameter)", r.match_name));
+                col.lose_with(LossCategory::LayerStyles, || format!("{what}: {} is not imported (unknown parameter)", r.match_name));
             }
         }
         col.imported.layer_styles += 1;
@@ -151,14 +155,40 @@ pub(crate) fn import_layer_styles(layer: &AepLayer<'_, '_>, l: &mut Layer, gl: &
     import_blending(&ls, l, tm, what, col);
 }
 
-/// True when `g` or a group below it (to a bounded depth) stores a property.
-fn holds_values(g: &AepGroup<'_, '_>, depth: usize) -> bool {
-    depth < 8
-        && g.entries().iter().any(|e| match e.node {
-            PropNode::Property(_) => true,
-            PropNode::Group(sub) => holds_values(&sub, depth.saturating_add(1)),
-            PropNode::Other(_) => false,
-        })
+/// The deepest group below Blending Options that is looked into for stored values.
+const MAX_HELD_DEPTH: usize = 8;
+
+/// What a group stores, looked at to [`MAX_HELD_DEPTH`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Held {
+    Nothing,
+    /// A property, in the group or a group below it.
+    Values,
+    /// No property within the depth, but a group at the depth limit that is not empty (it may
+    /// hold values; deeper is not read).
+    TooDeep,
+}
+
+/// Whether `g` or a group below it (to a bounded depth) stores a property. A non-empty group at
+/// the depth limit is not looked into: it counts as [`Held::TooDeep`] (reported), not as empty;
+/// After Effects nests Blending Options two levels deep.
+fn holds_values(g: &AepGroup<'_, '_>, depth: usize) -> Held {
+    if depth >= MAX_HELD_DEPTH {
+        return if g.entries().is_empty() { Held::Nothing } else { Held::TooDeep };
+    }
+    let mut held = Held::Nothing;
+    for e in g.entries() {
+        match e.node {
+            PropNode::Property(_) => return Held::Values,
+            PropNode::Group(sub) => match holds_values(&sub, depth.saturating_add(1)) {
+                Held::Values => return Held::Values,
+                Held::TooDeep => held = Held::TooDeep,
+                Held::Nothing => {}
+            },
+            PropNode::Other(_) => {}
+        }
+    }
+    held
 }
 
 /// Blending Options: Global Light (adopted by the composition later) and Advanced Blending.

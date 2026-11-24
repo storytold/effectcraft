@@ -118,7 +118,7 @@ See [MCP conventions](mcp.md) for core tools, resources, strict arguments, and r
 | `list_effects {filter?, compact?}` | Effect ids, names, categories, GPU / 32-bpc support and parameters; `compact` lists only ids, names and categories. |
 | `list_fonts {query?, variable?, rescan?}` | Font families text layers can use, bundled and installed, with their styles, origin, whether each is a variable font and own-language name; `variable` lists only variable fonts; `rescan` picks up fonts installed since launch. |
 | `add_effect {layer, effect, values?, comp?}` | Apply an effect and set its parameters in one call and one undo step (a failing value leaves nothing applied); returns the instance path (`effects/#n`) and its parameter paths. |
-| `render_frame {comp?, time?, max_side?, path?, inline?, transparent?}` | Returns a PNG image of a frame; `transparent: true` keeps the alpha (as an RGB + Alpha render writes it) instead of compositing over the comp background. |
+| `render_frame {comp?, time? \| times?, columns?, labels?, max_side?, path?, inline?, transparent?}` | Returns a PNG image of a frame; `transparent: true` keeps the alpha (as an RGB + Alpha render writes it) instead of compositing over the comp background. `times` (1 to 64 comp seconds, not with `time`) returns one contact-sheet PNG instead, the frames tiled row by row in the order given: `columns` sets the grid width (default near-square), `max_side` applies to each cell (default 320; a sheet is at most 7680 pixels on a side), `labels` (default true) draws each cell's time. The metadata gives `comp`, `times`, `columns`, `rows`, `cellWidth`, `cellHeight`, `width` and `height`. `path` writes the sheet in a headless session; bridged, a sheet comes back inline only. |
 | `open_project {path \| demo \| new}` / `save_project {path?}` | Open and save files. |
 | `undo {steps?}` / `redo {steps?}` | History. |
 | `history {goto?}` | The branching undo history (History panel): every state with its index, id, label, branch depth and whether it's current; `goto` (an index or id) jumps to any state, on any branch, without losing the others. |
@@ -129,7 +129,7 @@ See [MCP conventions](mcp.md) for core tools, resources, strict arguments, and r
 | `command_run {id, params?}` | Run a command. |
 | `command_batch {steps, stop_on_error?}` | Run commands in order with per-step results; each edit has its own undo step. |
 | `doc_inspect` | Project overview and active composition. |
-| `render_preview` | Render a PNG without writing a file (`comp`, `time`, `max_side`, `transparent`). |
+| `render_preview` | Render a PNG without writing a file (`comp`, `time`, `max_side`, `transparent`), or a contact sheet of several times (`times`, `columns`, `labels`, as `render_frame`). |
 
 Layers are referenced by id (from `get_comp`), `"#n"` (1-based index from the top) or name. Comps are
 referenced by id or name, and default to the active comp. An id may also be sent as a string (`"98"`):
@@ -340,8 +340,9 @@ build real projects through these interfaces; they are worked examples of everyt
 * **OCIO effects**: with Configuration ▸ Custom, `configFile` is a `.ocio` path or the config's
   text; `effect.warning {layer, effect}` says what Effect Controls warns about (a config it
   can't read, a colour space it lacks, transforms that pass colours through) or `null`.
-* **Multi-layer OpenEXR**: the footage shows the beauty pass (an unnamed RGBA layer, else
-  Combined / Beauty / Image / RGBA…, never Cryptomatte or depth). `layer.channels {layer}`
+* **Multi-layer OpenEXR**: the footage shows the main picture as After Effects does (the
+  unprefixed `R`, `G`, `B` (`A`) of the first part with them, else `Y` as grey; a file of named
+  layers only, such as Blender's `ViewLayer.Combined.R`, is black). `layer.channels {layer}`
   lists a footage layer's EXR layers and
   channels (`{"layers":[{"name":"diffuse","rgba":["diffuse.R","diffuse.G","diffuse.B",""]}]}`);
   EXtractoR shows them when its `red` / `green` / `blue` / `alpha` are set to those names
@@ -492,8 +493,9 @@ between the layer's In and Out points in the background ("Analyzing in backgroun
 then "Stabilizing..."; `warp.status` reports `progress`, `banner`, whether the effect is
 `analyzed`, and the current frame's `warp` matrix, `autoScale` and `crop`); `warp.cancel` stops it
 without writing anything. The analysis is stored in the effect (saved with the project) and is
-one undo step; trimming, slipping, time-remapping or replacing the layer's source clears it and
-the app re-analyses automatically (headless: run `warp.analyze` again). Settings are ordinary
+one undo step; trimming, slipping, time-remapping or replacing the layer's source, editing its
+masks, the effects above the Warp Stabilizer or, on a precomp layer, the precomp's contents
+clears it and the app re-analyses automatically (headless: run `warp.analyze` again). Settings are ordinary
 properties under the instance's groups, e.g. `effects/#1/stabilization/result` (0 Smooth Motion,
 1 No Motion), `effects/#1/stabilization/smoothness`, `effects/#1/stabilization/method`,
 `effects/#1/borders/framing` (0 Stabilize Only … 3 Stabilize, Synthesize Edges),
@@ -540,7 +542,8 @@ Each edit is one undo step; the first create adds the one-node "3D Tracker Camer
 startFrame?: 1, includePoints?: true}` exports the solve as an executable Blender scene script:
 baked camera/lens/focus, synced video background, points and ground. See
 [Blender camera export](blender-camera-export.md) for framing, assumptions and limitations.
-Changing the layer's frames clears the analysis; changing `effects/#1/shotType`,
+Changing the layer's frames, masks, the effects above the tracker or a precomp's contents
+clears the analysis; changing `effects/#1/shotType`,
 `effects/#1/horizontalAngleOfView`, `effects/#1/advanced/solveMethod` re-solves the stored tracks.
 
 ```sh
@@ -685,7 +688,15 @@ Scripts that build ScriptUI windows publish them to the session; agents drive th
 
 A dialog's `show()` waits for the user: the `script.run` / `file.runScript` reply carries
 `"waiting": true`, and the script continues (its final output arrives in the reply of the click
-that closes the dialog). File ▸ Scripts: `file.scripts.list`, `file.runScript {"name": …}`,
+that closes the dialog). A script's file dialog (`File.openDialog`, `File.saveDialog`,
+`Folder.selectDialog`, `openDlg` / `saveDlg` / `selectDlg`, as a Browse… button calls them) waits
+the same way in the app, which shows it. `scriptui.fileDialogs` lists the dialogs scripts wait on
+(`{id, host, kind: open|save|folder, prompt, exts, label, any, many, start, shown}`; `shown`: the
+app has shown it) and `scriptui.fileDialog {"id": …, "paths": […]}` (or `null`: cancelled) answers
+one. On Windows the system dialog blocks the app's window until a person closes it, so an agent
+can't answer it there; on macOS and Linux it doesn't block. The script's windows refuse events
+meanwhile, except `scriptui.close`, which cancels the file dialog first. Without the app (headless
+runs), in the Script Console and in Shutdown scripts these return `null` at once. File ▸ Scripts: `file.scripts.list`, `file.runScript {"name": …}`,
 `file.installScript` / `file.installScriptUIPanel {"path": …}`, `window.scriptPanel {"name": …}`,
 `window.restoreScriptPanels` (the panels open when the app last quit), `file.runStartupScripts` and
 `file.runShutdownScripts` (the scripts in `Scripts/Startup` and `Scripts/Shutdown`; the second closes

@@ -228,6 +228,8 @@ pub(crate) fn sprite_layer(e: &mut Enc, src: &GpuImage, plan: &SpritePlan) -> Op
             Shape::Square => (6.0, 0.0, 0.0),
             Shape::Tri => (7.0, 0.0, 0.0),
             Shape::Line { dx, dy } => (8.0, dx, dy),
+            // The strength rides in the (otherwise unused) first segment slot.
+            Shape::Ball { shade } => (9.0, shade, 0.0),
         };
         let mut rec = [kind, s.x, s.y, s.r, s.c[0], s.c[1], s.c[2], s.c[3], s.rot, dx, dy, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
         match plan.tints.get(i).copied().unwrap_or(Tint::Fixed) {

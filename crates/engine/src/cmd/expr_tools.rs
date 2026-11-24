@@ -2,7 +2,7 @@
 //! Language menu (the ⓕ button next to an expression), written from the public Expression
 //! Language Reference.
 
-use effectcraft_project::{Expression, ItemId, Layer, Property};
+use effectcraft_project::{Comp, Expression, ItemId, Layer, Property};
 use effectcraft_render::EvalCtx;
 use effectcraft_time::Tick;
 use serde::Serialize;
@@ -42,8 +42,16 @@ impl ExprError {
 /// expressions and the syntax errors that disabled others.
 pub fn errors(s: &Session, cid: ItemId, t: Tick) -> Vec<ExprError> {
     let Some(comp) = s.project.comp(cid) else { return vec![] };
-    let ctx = EvalCtx { footage: Some(s.footage.as_ref()), expr: s.expr.as_deref(), ..EvalCtx::new(&s.project, cid, comp, t) };
-    errors_in(&ctx, s.expr_check, || true).unwrap_or_default()
+    errors_in(&eval_ctx(s, cid, comp, t), s.expr_check, || true).unwrap_or_default()
+}
+
+/// The context to evaluate expressions of comp `cid` at comp time `t` as the render does for the
+/// comp at top level: with the session's expression host and its footage source, so
+/// `sampleImage()` reads footage pixels instead of failing or sampling transparent (#1000,
+/// #3231). `expr.errors`, `prop.get`, [`Session::expression_errors`] and the script value query
+/// all evaluate through this one context.
+pub fn eval_ctx<'a>(s: &'a Session, cid: ItemId, comp: &'a Comp, t: Tick) -> EvalCtx<'a> {
+    EvalCtx { footage: Some(s.footage.as_ref()), expr: s.expr.as_deref(), ..EvalCtx::new(&s.project, cid, comp, t) }
 }
 
 /// Evaluate diagnostics against an immutable snapshot. Background callers can cancel between
@@ -65,20 +73,26 @@ pub fn errors_in(ctx: &EvalCtx, check: Option<fn(&str) -> std::result::Result<()
             if !keep_going() {
                 return None;
             }
-            let msg = if e.enabled {
-                match &ctx.expr {
-                    Some(h) => h.eval(ctx, l, p, &p.value_at(l.layer_time(ctx.time))).err(),
-                    None => None,
-                }
-            } else {
-                check.and_then(|check| check(&e.text).err())
-            };
-            if let Some(message) = msg {
+            if let Some(message) = property_error(ctx, check, l, p) {
                 out.push(error_of(ctx.comp_id, i, l, p, message, !e.enabled));
             }
         }
     }
     keep_going().then_some(out)
+}
+
+/// Why property `p` of layer `l` fails at `ctx.time` (comp time), as `expr.errors` reports it and
+/// scripts read it as `Property.expressionError`: the evaluation error (an exception or a
+/// non-finite result) of an enabled expression, or the syntax error that disabled one. `None`
+/// without an expression or when it evaluates. Evaluates this one expression; renders nothing.
+/// Without an evaluator an enabled expression gets the syntax check, so a broken one (from a
+/// project file) still reports why.
+pub fn property_error(ctx: &EvalCtx, check: Option<fn(&str) -> std::result::Result<(), String>>, l: &Layer, p: &Property) -> Option<String> {
+    let e = p.expr.as_ref().filter(|e| !e.text.trim().is_empty())?;
+    match ctx.expr {
+        Some(h) if e.enabled => h.eval(ctx, l, p, &p.value_at(l.layer_time(ctx.time))).err(),
+        _ => check.and_then(|check| check(&e.text).err()),
+    }
 }
 
 fn error_of(cid: ItemId, i: usize, l: &Layer, p: &Property, message: String, disabled: bool) -> ExprError {

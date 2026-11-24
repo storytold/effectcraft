@@ -195,6 +195,15 @@ impl ImageRef {
     }
 }
 
+/// Most edges a ScriptUI `fillPath` is filled with (a path past it fills its first edges).
+pub const MAX_FILL_EDGES: usize = 65_536;
+/// Most horizontal bands a ScriptUI fill is cut into (vertices and edge crossings); the topmost are filled.
+pub const MAX_FILL_BANDS: usize = 262_144;
+/// Most triangles a ScriptUI fill produces.
+pub const MAX_FILL_TRIANGLES: usize = 1 << 22;
+/// Most band-by-edge steps a fill takes while cutting bands.
+pub const MAX_FILL_WORK: usize = 1 << 31;
+
 impl PathSeg {
     /// The subpaths of `path` as polylines (ellipses flattened to `n` segments), each with
     /// whether it is closed.
@@ -248,8 +257,16 @@ impl PathSeg {
     /// self-intersecting and holed paths fill correctly (frontends' polygon fills are often
     /// convex-only). Exact trapezoid decomposition: the plane is cut into horizontal bands at
     /// every vertex and edge crossing; inside a band no edges cross, so each inside span is a
-    /// trapezoid (two triangles).
+    /// trapezoid (two triangles). Edges are compared pairwise and every band looks at every edge,
+    /// on the UI thread, for geometry a script chooses, so a path past [`MAX_FILL_EDGES`] edges,
+    /// [`MAX_FILL_BANDS`] bands, [`MAX_FILL_TRIANGLES`] triangles or [`MAX_FILL_WORK`] steps (edge
+    /// pairs compared, then edges looked at per band) is filled only as far as the limit allows
+    /// (topmost part first) and a warning is logged.
     pub fn fill_triangles(path: &[PathSeg], n: usize, even_odd: bool) -> Vec<[[f64; 2]; 3]> {
+        Self::fill_triangles_within(path, n, even_odd, [MAX_FILL_EDGES, MAX_FILL_BANDS, MAX_FILL_TRIANGLES, MAX_FILL_WORK])
+    }
+
+    fn fill_triangles_within(path: &[PathSeg], n: usize, even_odd: bool, [max_edges, max_bands, max_triangles, max_work]: [usize; 4]) -> Vec<[[f64; 2]; 3]> {
         // Non-horizontal edges, top to bottom, with their winding direction.
         let mut edges: Vec<([f64; 2], [f64; 2], i32)> = vec![];
         for (pts, _) in PathSeg::polylines(path, n) {
@@ -261,15 +278,37 @@ impl PathSeg {
                 edges.push(if a[1] < b[1] { (a, b, 1) } else { (b, a, -1) });
             }
         }
+        if edges.len() > max_edges {
+            log::warn!("fillPath: {} edges, filling only the first {max_edges}", edges.len());
+            edges.truncate(max_edges);
+        }
         if edges.len() < 2 {
             return vec![];
         }
         let x_at = |e: &([f64; 2], [f64; 2], i32), y: f64| e.0[0] + (e.1[0] - e.0[0]) * (y - e.0[1]) / (e.1[1] - e.0[1]);
         let mut ys: Vec<f64> = edges.iter().flat_map(|e| [e.0[1], e.1[1]]).collect();
-        // Where two edges cross, a band boundary.
-        for i in 0..edges.len() {
-            for j in i + 1..edges.len() {
+        // Where two edges cross, a band boundary. Edges by top, so each is compared only with the
+        // ones that start above its bottom (the pairs that share some height); the pairs and the
+        // boundaries found are counted against the budgets, and past one the rest are not looked
+        // for. A band that holds a crossing that was not looked for is not filled (its edges
+        // change order inside it, which the band loop below tells), so what is drawn is never
+        // outside the path.
+        let mut truncated = false;
+        let mut order: Vec<usize> = (0..edges.len()).collect();
+        order.sort_by(|&a, &b| edges[a].0[1].total_cmp(&edges[b].0[1]));
+        let mut pairs = 0usize;
+        'cross: for (k, &i) in order.iter().enumerate() {
+            for &j in &order[k + 1..] {
                 let (a, b) = (&edges[i], &edges[j]);
+                if b.0[1] >= a.1[1] {
+                    break;
+                }
+                pairs += 1;
+                if pairs > max_work || ys.len() > max_bands {
+                    log::warn!("fillPath: over its crossing budget; bands with crossings that were not cut are left unfilled");
+                    truncated = true;
+                    break 'cross;
+                }
                 let (lo, hi) = (a.0[1].max(b.0[1]), a.1[1].min(b.1[1]));
                 if hi <= lo {
                     continue;
@@ -282,6 +321,11 @@ impl PathSeg {
         }
         ys.sort_by(f64::total_cmp);
         ys.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+        if ys.len() > max_bands {
+            log::warn!("fillPath: {} bands, filling only the topmost {max_bands}", ys.len());
+            ys.truncate(max_bands);
+        }
+        let mut work = 0usize;
         let mut out = vec![];
         let mut row: Vec<(f64, f64, f64, i32)> = vec![];
         for w in ys.windows(2) {
@@ -290,8 +334,14 @@ impl PathSeg {
             row.clear();
             row.extend(edges.iter().filter(|e| e.0[1] < ym && ym < e.1[1]).map(|e| (x_at(e, ym), x_at(e, ya), x_at(e, yb), e.2)));
             row.sort_by(|a, b| a.0.total_cmp(&b.0));
+            // With crossings missing, edges that swap places inside the band make its trapezoids
+            // wrong: it is left out.
+            let swapped = truncated && !row.windows(2).all(|w| w[0].1 <= w[1].1 + 1e-9 && w[0].2 <= w[1].2 + 1e-9);
             let mut wind = 0;
             for k in 0..row.len().saturating_sub(1) {
+                if swapped {
+                    break;
+                }
                 wind += row[k].3;
                 let inside = if even_odd { wind % 2 != 0 } else { wind != 0 };
                 if inside {
@@ -299,6 +349,13 @@ impl PathSeg {
                     out.push([[l.1, ya], [r.1, ya], [r.2, yb]]);
                     out.push([[l.1, ya], [r.2, yb], [l.2, yb]]);
                 }
+            }
+            // (Every band's edge scan counts, a band left out included.)
+            work = work.saturating_add(edges.len());
+            if out.len() > max_triangles || work > max_work {
+                log::warn!("fillPath: over its triangle or work budget, filled down to y = {yb}");
+                out.truncate(max_triangles);
+                break;
             }
         }
         out
@@ -379,6 +436,50 @@ pub struct ScriptUiEvent {
 /// The ScriptUI mouse events scripts can listen for (`addEventListener`).
 pub const MOUSE_EVENTS: [&str; 6] = ["mousedown", "mouseup", "mousemove", "mouseover", "mouseout", "click"];
 
+/// The [`ScriptUiEvent::kind`] that answers a script's file dialog ([`ScriptFileDialog`]); its
+/// value is `{host, paths: [path…] | null}` and it goes to the script context `host`, not to a
+/// window.
+pub const FILE_DIALOG_EVENT: &str = "fileDialog";
+
+/// What a script's file dialog picks.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FileDialogKind {
+    /// A file (or several) to open: `File.openDialog`, `file.openDlg`.
+    #[default]
+    Open,
+    /// Where to save: `File.saveDialog`, `file.saveDlg`.
+    Save,
+    /// A folder: `Folder.selectDialog`, `folder.selectDlg`.
+    Folder,
+}
+
+/// A file dialog a script asked for and waits on (#2778). The frontend shows it and answers with
+/// `scriptui.fileDialog`; agents can answer it the same way.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ScriptFileDialog {
+    /// Unique in the process: an answer goes to this dialog only.
+    pub id: u32,
+    /// The script context waiting for the answer.
+    pub host: u32,
+    pub kind: FileDialogKind,
+    /// The script's prompt.
+    pub prompt: String,
+    /// The extensions the script's filter names, lower case (empty: any file).
+    pub exts: Vec<String>,
+    /// The filter's name (`"Audio"` in `"Audio:*.mp3;*.wav"`; empty: none given).
+    pub label: String,
+    /// The filter also offers every file (`*.*`).
+    pub any: bool,
+    /// `multiSelect`: several files may be picked.
+    pub many: bool,
+    /// The file or folder the dialog starts from (`file.saveDlg`: the default name).
+    pub start: String,
+    /// A frontend has shown it (it is not shown again).
+    pub shown: bool,
+}
+
 /// Hands an event to the script that owns the window; returns what the handler reported
 /// (`{ok, output, error}`) and updates [`Session::script_ui`].
 pub type ScriptUiDispatch = fn(&mut Session, &ScriptUiEvent) -> std::result::Result<Value, String>;
@@ -434,6 +535,13 @@ pub struct ScriptUi {
     /// replaced, until EffectCraft quits.
     #[serde(skip)]
     pub startup_hosts: Vec<u32>,
+    /// The file dialogs scripts wait on, until `scriptui.fileDialog` answers them.
+    pub file_dialogs: Vec<ScriptFileDialog>,
+    /// A frontend shows the scripts' file dialogs (the egui UI sets it). Without one, as in
+    /// headless runs, `File.openDialog` and the like return `null` at once, so a script never
+    /// waits on a dialog nobody shows.
+    #[serde(skip)]
+    pub answers_file_dialogs: bool,
 }
 
 impl ScriptUi {
@@ -802,10 +910,63 @@ pub(crate) fn resize(s: &mut Session, p: &Value) -> Result<Value> {
     dispatch(s, ScriptUiEvent { window, widget: 0, kind: "resize".into(), value: json!([w, h]) })
 }
 
+/// `scriptui.fileDialogs`: the file dialogs scripts wait on.
+pub(crate) fn file_dialogs(s: &mut Session, _: &Value) -> Result<Value> {
+    Ok(serde_json::to_value(&s.script_ui.file_dialogs).unwrap_or(Value::Null))
+}
+
+/// `scriptui.fileDialog`: answer a script's file dialog with the picked `paths` (`null` or
+/// empty: cancelled); the script goes on with them. The dialog stays pending until its script
+/// has the answer, so a refused answer leaves it to be answered again.
+pub(crate) fn file_dialog(s: &mut Session, p: &Value) -> Result<Value> {
+    let c = "scriptui.fileDialog";
+    // A script answering a dialog (its own or another script's) would only be refused when the
+    // answer is handed over: scripts can't drive script windows.
+    if s.running_for_script() {
+        return Err(crate::commands::bad(c, "scripts can't answer file dialogs"));
+    }
+    let num = |k: &str| p.get(k).map(|v| v.as_u64().and_then(|n| u32::try_from(n).ok()));
+    let pending = &s.script_ui.file_dialogs;
+    let asked = match (num("id"), num("host")) {
+        (Some(id), _) => id.and_then(|id| pending.iter().find(|d| d.id == id)),
+        (None, Some(host)) => host.and_then(|h| pending.iter().find(|d| d.host == h)),
+        (None, None) if pending.len() == 1 => pending.first(),
+        (None, None) => None,
+    };
+    let asked = asked.cloned().ok_or_else(|| crate::commands::bad(c, "no such file dialog (give `id` from scriptui.fileDialogs)"))?;
+    let mut paths: Vec<String> = match p.get("paths").or_else(|| p.get("path")) {
+        None | Some(Value::Null) => vec![],
+        Some(Value::String(one)) => vec![one.clone()],
+        Some(Value::Array(a)) => {
+            a.iter().map(|v| v.as_str().map(str::to_string)).collect::<Option<Vec<_>>>().ok_or_else(|| crate::commands::bad(c, "`paths` must be strings"))?
+        }
+        Some(other) => return Err(crate::commands::bad(c, format!("`paths` must be a list of paths or null, not {other}"))),
+    };
+    paths.retain(|p| !p.is_empty());
+    if !asked.many {
+        paths.truncate(1);
+    }
+    let paths = if paths.is_empty() { Value::Null } else { json!(paths) };
+    // The scripting engine takes the dialog off the list when its script has the answer.
+    let value = json!({"id": asked.id, "host": asked.host, "paths": paths});
+    dispatch(s, ScriptUiEvent { window: 0, widget: 0, kind: FILE_DIALOG_EVENT.into(), value })
+}
+
 /// `scriptui.close`: close a window (a dialog's `show()` returns `result`, default 2 = Cancel).
 pub(crate) fn close(s: &mut Session, p: &Value) -> Result<Value> {
     let window = window_p(s, p, "scriptui.close")?;
     let result = p.get("result").cloned().unwrap_or(json!(2));
+    // A script waiting on its file dialog (one whose answer never came) can still be closed:
+    // the file dialog counts as cancelled first. If that is refused, the close is tried all the
+    // same (and refused with its own reason).
+    let host = s.script_ui.window(window).map(|w| w.host);
+    let asked = host.and_then(|h| s.script_ui.file_dialogs.iter().find(|d| d.host == h)).map(|d| d.id);
+    if let Some(id) = asked
+        && let Ok(cancelled) = file_dialog(s, &json!({"id": id, "paths": null}))
+        && s.script_ui.window(window).is_none()
+    {
+        return Ok(cancelled);
+    }
     dispatch(s, ScriptUiEvent { window, widget: 0, kind: "close".into(), value: result })
 }
 
@@ -950,5 +1111,51 @@ mod tests {
         assert!((a - 8.0 - std::f64::consts::PI * 100.0).abs() < 1.0, "{a}");
         let open = vec![PathSeg::M { x: 0.0, y: 0.0 }, PathSeg::L { x: 4.0, y: 0.0 }, PathSeg::L { x: 0.0, y: 4.0 }];
         assert!((area(&PathSeg::fill_triangles(&open, 48, false)) - 8.0).abs() < 1e-9);
+    }
+
+    /// A script's path past the fill budgets is filled as far as they allow, never emptied.
+    #[test]
+    fn a_fill_past_its_budgets_draws_what_fits() {
+        let area = |t: &[[[f64; 2]; 3]]| {
+            t.iter().map(|t| ((t[1][0] - t[0][0]) * (t[2][1] - t[0][1]) - (t[2][0] - t[0][0]) * (t[1][1] - t[0][1])).abs() / 2.0).sum::<f64>()
+        };
+        let rect = |x: f64, y: f64, w: f64, h: f64| PathSeg::R { x, y, w, h };
+        let rects: Vec<PathSeg> = (0..8).map(|i| rect(2.0 * i as f64, 0.0, 1.0, 10.0)).collect();
+        let full = PathSeg::fill_triangles(&rects, 48, false);
+        assert!((area(&full) - 80.0).abs() < 1e-9);
+        // Edges over the limit: the first edges still fill (4 edges = 2 rectangles).
+        let t = PathSeg::fill_triangles_within(&rects, 48, false, [4, usize::MAX, usize::MAX, usize::MAX]);
+        assert!((area(&t) - 20.0).abs() < 1e-9, "{}", area(&t));
+        // Triangles over the limit: truncated, not empty.
+        let t = PathSeg::fill_triangles_within(&rects, 48, false, [usize::MAX, usize::MAX, 6, usize::MAX]);
+        assert_eq!(t.len(), 6);
+        // Bands over the limit: the topmost band fills.
+        let stair: Vec<PathSeg> = (0..4).map(|i| rect(0.0, i as f64, 1.0, 1.0)).collect();
+        let t = PathSeg::fill_triangles_within(&stair, 48, false, [usize::MAX, 2, usize::MAX, usize::MAX]);
+        assert!(!t.is_empty() && area(&t) < 4.0);
+        // Work over the limit stops the cut.
+        let t = PathSeg::fill_triangles_within(&stair, 48, false, [usize::MAX, usize::MAX, usize::MAX, 1]);
+        assert!(!t.is_empty() && area(&t) < 4.0);
+        // Many crossing edges (every pair of 120 diagonals meets): the crossing scan is held to the
+        // band and work budgets too.
+        let fan: Vec<PathSeg> = (0..60)
+            .flat_map(|i| {
+                let x = i as f64;
+                [PathSeg::M { x, y: 0.0 }, PathSeg::L { x: 60.0 - x, y: 100.0 }, PathSeg::L { x: x + 0.5, y: 100.0 }]
+            })
+            .collect();
+        for limits in [[usize::MAX, 50, usize::MAX, usize::MAX], [usize::MAX, usize::MAX, usize::MAX, 500]] {
+            let t = PathSeg::fill_triangles_within(&fan, 48, false, limits);
+            assert!(area(&t) <= area(&PathSeg::fill_triangles(&fan, 48, false)) + 1e-6, "{limits:?}");
+        }
+        // Bands whose crossings were not looked for are not filled: a bow tie (area 50, crossing at
+        // y = 5) under a crossing budget of one boundary gives no overlapping triangles.
+        let bow = vec![PathSeg::M { x: 0.0, y: 0.0 }, PathSeg::L { x: 10.0, y: 10.0 }, PathSeg::L { x: 0.0, y: 10.0 }, PathSeg::L { x: 10.0, y: 0.0 }];
+        assert!((area(&PathSeg::fill_triangles(&bow, 48, false)) - 50.0).abs() < 1e-9);
+        let t = PathSeg::fill_triangles_within(&bow, 48, false, [usize::MAX, 2, usize::MAX, usize::MAX]);
+        assert!(area(&t) <= 50.0 + 1e-9, "{}", area(&t));
+        // Bands left out still count against the work budget (it ends the scan after the first).
+        let t = PathSeg::fill_triangles_within(&bow, 48, false, [usize::MAX, 2, usize::MAX, 1]);
+        assert!(area(&t) <= 50.0 + 1e-9, "{}", area(&t));
     }
 }

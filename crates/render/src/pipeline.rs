@@ -9,7 +9,7 @@ use super::{
     ItemId, ItemKind, Layer, LayerCache, LayerSource, Params, Project, Quality, Region, Renderer, Tick, cache, color, masks, shapes, styles, text, three_d,
     vec2,
 };
-use effectcraft_keyframe::Value;
+use effectcraft_keyframe::{Keyframe, Value};
 use effectcraft_project::LayerId;
 
 /// Coordinate space and stack range shared by CPU and accelerated effect evaluation.
@@ -44,6 +44,8 @@ pub struct PropertyOverride {
     pub(crate) layer: LayerId,
     pub(crate) prop: u64,
     pub(crate) value: Value,
+    /// The override's keyframes, in the target layer's time.
+    pub(crate) keys: Vec<Keyframe>,
     /// A Font control changes only the font of the target text, not its text.
     pub(crate) font: bool,
 }
@@ -54,6 +56,29 @@ pub struct PropertyOverride {
 pub struct MediaOverride {
     pub(crate) layer: LayerId,
     pub(crate) item: ItemId,
+}
+
+/// The most pixels a solid layer's buffer holds (as the other layer buffers are held to).
+const MAX_SOLID_PIXELS: f64 = 16.0e6;
+
+/// The scale and whole-pixel size of a `width`×`height` solid rendered at `scale`, lowered until
+/// the rounded size (each side at least one pixel) is within [`MAX_SOLID_PIXELS`].
+pub(crate) fn solid_size(width: u32, height: u32, mut scale: f64) -> (f64, u32, u32) {
+    let size = |s: f64| (((width as f64 * s).ceil() as u32).max(1), ((height as f64 * s).ceil() as u32).max(1));
+    // Rounding up leaves an elongated solid over the cap after one step; each step shrinks the
+    // overshoot geometrically, so a few are enough.
+    for i in 0..64 {
+        let (w, h) = size(scale);
+        let area = w as f64 * h as f64;
+        if area <= MAX_SOLID_PIXELS {
+            break;
+        }
+        // The first step is the exact area ratio; later ones undershoot a little so rounding up
+        // cannot leave the size stuck just over the cap.
+        scale *= (MAX_SOLID_PIXELS / area).sqrt() * if i == 0 { 1.0 } else { 0.99 };
+    }
+    let (w, h) = size(scale);
+    (scale, w, h)
 }
 
 impl MediaOverride {
@@ -70,6 +95,26 @@ pub struct Collapsed {
     pub(crate) media_overrides: Vec<MediaOverride>,
 }
 
+/// Cache key of a frame-blended footage frame: `seed` (which frames, how they mix, the footage
+/// file) and the Interpret Footage settings that change the decoded pixels.
+fn blended_frame_key(f: &Footage, seed: impl std::hash::Hash) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    seed.hash(&mut h);
+    // Every file of a sequence: the key must tell two projects apart whose items share an id
+    // and a first frame (on disk, no project-wide salt does, #3184).
+    f.sequence.hash(&mut h);
+    (f.alpha as u8).hash(&mut h);
+    if f.alpha == effectcraft_project::AlphaMode::Premultiplied {
+        f.premul_color.map(f32::to_bits).hash(&mut h);
+    }
+    if f.cineon_applies() {
+        let c = &f.cineon;
+        [c.converted_black, c.converted_white, c.black, c.white, c.gamma, c.rolloff].map(f32::to_bits).hash(&mut h);
+    }
+    h.finish()
+}
+
 /// The property and media overrides of a collapsed precomp layer. `None` when its Essential
 /// Properties group or the source comp's definitions are missing (the flattened path then
 /// preserves the old behaviour).
@@ -79,28 +124,29 @@ fn collapsed_instance(ctx: &EvalCtx, layer: &Layer, item: ItemId) -> Option<(Vec
     if over.is_empty() {
         return Some((vec![], vec![]));
     }
-    let g = essential::group(layer)?;
-    let eg = ctx.project.comp(item)?.essential.as_ref()?;
+    essential::group(layer)?;
+    let nc = ctx.project.comp(item)?;
+    let eg = nc.essential.as_ref()?;
     let mut property = vec![];
     let mut fonts: Vec<PropertyOverride> = vec![];
     let mut media = vec![];
-    g.walk("", &mut |_, p| {
-        if !over.contains(&p.uid) {
-            return;
-        }
-        let Some(control) = essential::control_of(&p.match_id) else { return };
-        let Some(ctl) = eg.resolve(control) else { return };
-        let value = ctx.value(layer, p);
+    for over in essential_overrides(ctx, layer) {
+        let Some(ctl) = eg.resolve(over.control) else { continue };
         match &ctl.kind {
             EgKind::Property { .. } => {
                 let font = ctl.as_type == Some(ControlType::Font);
-                for (layer, prop) in ctl.kind.targets() {
-                    let o = PropertyOverride { layer, prop, value: value.clone(), font };
+                for (target_layer, prop) in ctl.kind.targets() {
+                    let keys = if font {
+                        vec![]
+                    } else {
+                        nc.layer(target_layer).map(|target| essential::keys_in_layer_time(&over.keys, target.start_time, target.stretch)).unwrap_or_default()
+                    };
+                    let o = PropertyOverride { layer: target_layer, prop, value: over.value.clone(), keys, font };
                     if font { fonts.push(o) } else { property.push(o) }
                 }
             }
             EgKind::Media { layer: target } => {
-                let Value::Scalar(id) = value else { return };
+                let Value::Scalar(id) = over.value else { continue };
                 let item = ItemId(id.max(0.0) as u64);
                 if matches!(ctx.project.item(item).map(|i| &i.kind), Some(ItemKind::Footage(_))) {
                     media.push(MediaOverride { layer: *target, item });
@@ -108,12 +154,17 @@ fn collapsed_instance(ctx: &EvalCtx, layer: &Layer, item: ItemId) -> Option<(Vec
             }
             _ => {}
         }
-    });
+    }
     // A Font control merges into the text its instance shows, after a whole-value (Text) override
     // of the same property, as `essential::with_overrides` does: keep one entry per property.
     for f in fonts {
         match property.iter_mut().rev().find(|o| o.layer == f.layer && o.prop == f.prop) {
-            Some(o) => effectcraft_project::essential::merge_font(&mut o.value, &f.value),
+            Some(o) => {
+                effectcraft_project::essential::merge_font(&mut o.value, &f.value);
+                for key in &mut o.keys {
+                    effectcraft_project::essential::merge_font(&mut key.value, &f.value);
+                }
+            }
             None => property.push(f),
         }
     }
@@ -757,6 +808,15 @@ impl<'a> Renderer<'a> {
             return;
         }
         let Some(fx) = layer.effects() else { return };
+        // The LUT files the stack reads go to this render's files: a frame on disk made with one
+        // that changed since is not used (#3493).
+        if let Some(log) = self.reads {
+            for g in fx.groups().take(limit).filter(|g| g.enabled) {
+                for f in super::reads::lut_files(ctx, layer, g) {
+                    log.note(f);
+                }
+            }
+        }
         let lt = layer.layer_time(ctx.time);
         let layer_size = ctx.effect_bounds(layer).0;
         // #659 / #1205: an authored layer's buffer spans only its painted content. Effects that
@@ -890,8 +950,9 @@ impl<'a> Renderer<'a> {
         match &layer.source {
             LayerSource::Solid { item } => {
                 let ItemKind::Solid(sol) = &self.project.item(*item)?.kind else { return None };
-                let w = ((sol.width as f64 * s).ceil() as u32).max(1);
-                let h = ((sol.height as f64 * s).ceil() as u32).max(1);
+                // One colour: a solid larger than MAX_SOLID_PIXELS is made at a lower scale (the
+                // buffer carries it) instead of allocating gigabytes for a uniform plane.
+                let (s, w, h) = solid_size(sol.width, sol.height, s);
                 if layer.switches.adjustment {
                     return Some(Buf { img: Image::filled(w, h, [1.0; 4]), offset: [0.0; 2], scale: s });
                 }
@@ -1096,7 +1157,9 @@ impl<'a> Renderer<'a> {
         let proxy = self.proxy_for(item);
         let pf = proxy.unwrap_or(f);
         let size = self.reduced_size(f.width, f.height).filter(|_| proxy.is_none());
-        let img = self.footage_frame(ctx, layer, item, pf, lt, size)?;
+        // Only the rows a viewer region of interest shows of it (#3271).
+        let rows = proxy.is_none().then(|| self.footage_rows(ctx, layer, f)).flatten();
+        let img = self.footage_frame_in(ctx, layer, item, pf, lt, size, rows)?;
         Some((img, pf))
     }
 
@@ -1139,6 +1202,11 @@ impl<'a> Renderer<'a> {
                 return None;
             }
         }
+        // (some rows of the frame for a region of interest, #3271: a part of the picture, never
+        // shared as the whole)
+        if self.proxy_for(item).is_none() && self.footage_rows(ctx, layer, f).is_some() {
+            return None;
+        }
         let (img, _) = self.footage_picture_of(ctx, layer, item, f)?;
         let FootageLayout::Native { scale } = self.footage_layout(&img, f.width, f.height) else { return None };
         // `layer_input`'s rebase into effect space (`Buf::rebase` of a buffer at the origin).
@@ -1167,6 +1235,76 @@ impl<'a> Renderer<'a> {
     /// `t` falls between frames (footage rate ≠ comp rate, time stretch, time remapping).
     /// `size`: a plain frame may come resampled to it ([`FootageSource::frame_at_size`]).
     fn footage_frame(&self, ctx: &EvalCtx, layer: &Layer, item: ItemId, f: &Footage, t: Tick, size: Option<(u32, u32)>) -> Option<Arc<Image>> {
+        self.footage_frame_in(ctx, layer, item, f, t, size, None)
+    }
+
+    /// The footage rows a top-level region of interest shows of footage layer `layer` (`f`), at
+    /// full resolution, grown by what reaches into them: the layer's resampling (wider at a
+    /// reduced scale) and its effects' declared margins (#3271). `None` (the whole frame) without
+    /// a region, when the rows are all of it, or when anything may read the layer's other pixels:
+    /// a 3D layer, motion blur, frame blending, fields, layer styles, an effect that doesn't
+    /// declare its margin, or anything in the comp that reads layers' pixels (an effect's layer
+    /// parameter, an expression).
+    pub(crate) fn footage_rows(&self, ctx: &EvalCtx, layer: &Layer, f: &Footage) -> Option<(i64, i64)> {
+        // (a caller that needs the whole layer: the Layer panel, sampleImage, effect inputs)
+        let roi = self.opts.roi.filter(|_| self.top && !self.whole_raster)?;
+        // (a collapsed precomp's layers are placed through the outer layers too, and an
+        // adjustment layer's footprint is keyed whole: the whole frame there)
+        if self.outer.is_some() || self.collapse3d.is_some() || self.depth > 0 || layer.switches.adjustment {
+            return None;
+        }
+        if layer.switches.three_d
+            || f.fields != effectcraft_project::FieldOrder::Off
+            || !matches!(f.kind, FootageKind::Still | FootageKind::Sequence)
+            || self.mb_on(ctx, layer)
+            || frame_blend_mode(ctx, layer) != FrameBlend::Off
+            || styles::group(layer).is_some()
+        {
+            return None;
+        }
+        let fx_margin = effects_margin(ctx, layer)?;
+        // (a source that reads whole frames anyway: the whole frame, which the layer cache keeps)
+        if comp_reads_pixels(ctx) || !self.footage.reads_rows(f, ctx.source_time(layer)) {
+            return None;
+        }
+        // (the transform the compositor places the 2D layer with: a 3D parent's matrix projected
+        // to the comp's plane)
+        let inv = ctx.layer_to_comp(layer).0.inverse()?;
+        let ys: Vec<f64> = [[roi[0], roi[1]], [roi[0] + roi[2], roi[1]], [roi[0], roi[1] + roi[3]], [roi[0] + roi[2], roi[1] + roi[3]]]
+            .iter()
+            .map(|p| inv.apply(effectcraft_geom::vec2(p[0], p[1])).y)
+            .collect();
+        let (lo, hi) = ys.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), y| (lo.min(*y), hi.max(*y)));
+        if !lo.is_finite() || !hi.is_finite() {
+            return None;
+        }
+        // The warp samples its source with point taps (bilinear, bicubic: ±2 source pixels), so
+        // the rows reach 2 buffer pixels past the region's mapped centres (a reduced buffer's
+        // pixels are 1/scale footage rows), plus the region's rounding to output pixels: one
+        // output pixel is `k / scale` footage rows, `k` the footage rows per comp pixel.
+        let s = self.opts.scale.max(1e-3);
+        let k = [effectcraft_geom::vec2(1.0, 0.0), effectcraft_geom::vec2(0.0, 1.0)].iter().map(|v| inv.apply_vec(*v).length()).fold(1.0f64, f64::max);
+        if !k.is_finite() {
+            return None;
+        }
+        let margin = 2.0 + (2.0 / s).ceil() + (2.0 * k / s).ceil() + fx_margin.ceil();
+        let h = i64::from(f.height);
+        let (y0, y1) = (((lo - margin).floor() as i64).clamp(0, h), ((hi + margin).ceil() as i64).clamp(0, h));
+        (y0 > 0 || y1 < h).then_some((y0, y1.max(y0)))
+    }
+
+    /// [`Renderer::footage_frame`] of only the rows `rows` (see [`Renderer::footage_rows`]).
+    #[allow(clippy::too_many_arguments)]
+    fn footage_frame_in(
+        &self,
+        ctx: &EvalCtx,
+        layer: &Layer,
+        item: ItemId,
+        f: &Footage,
+        t: Tick,
+        size: Option<(u32, u32)>,
+        rows: Option<(i64, i64)>,
+    ) -> Option<Arc<Image>> {
         // Interpret Footage ▸ Separate Fields: each field is a frame at twice the rate.
         if f.fields != effectcraft_project::FieldOrder::Off && matches!(f.kind, FootageKind::Video | FootageKind::Sequence) {
             let field_rate = FrameRate::new(f.frame_rate.num * 2, f.frame_rate.den);
@@ -1180,7 +1318,11 @@ impl<'a> Renderer<'a> {
         // Interpretation is per pixel but not linear: it runs on the frame before resampling.
         let per_pixel = f.invert_alpha || f.linear_light_applies();
         let size = size.filter(|_| !(per_pixel || f.cineon_applies()));
-        let img = self.footage_frame_raw(ctx, layer, item, f, t, size)?;
+        let img = match rows {
+            // (no frame blending, no fields: see `footage_rows`)
+            Some(rows) => self.read(|| self.footage.frame_rows(item, f, t, size, self.pipe.float_curve(f), rows)).map(|img| cineon_frame(img, f))?,
+            None => self.footage_frame_raw(ctx, layer, item, f, t, size)?,
+        };
         if per_pixel { Some(Arc::new(interpret_pixels(&img, f, self.pipe.linear_footage_space(f)))) } else { Some(img) }
     }
 
@@ -1190,26 +1332,16 @@ impl<'a> Renderer<'a> {
         let mode = frame_blend_mode(ctx, layer);
         let float = self.pipe.float_curve(f);
         if mode != FrameBlend::Off && matches!(f.kind, FootageKind::Video | FootageKind::Sequence) {
+            // Many source frames per comp frame (footage interpreted much faster than the comp,
+            // #3180): the frames the comp frame spans are averaged.
+            if let Some(img) = self.mixed_span_frame(ctx, layer, item, f, t, size) {
+                return Some(img);
+            }
             let (i, w) = frame_position(t, f.frame_rate);
             if w > 1e-6 {
                 // Blended frames are cached (Pixel Motion is expensive).
-                let key = self.cache.map(|_| {
-                    use std::hash::{Hash, Hasher};
-                    let mut h = std::collections::hash_map::DefaultHasher::new();
-                    (0x00f8_a3e5_u64, item, i, (w as f32).to_bits(), mode as u8, f.frame_rate.num, f.frame_rate.den, &f.path, float).hash(&mut h);
-                    // Every file of a sequence: the key must tell two projects apart whose items
-                    // share an id and a first frame (on disk, no project-wide salt does, #3184).
-                    f.sequence.hash(&mut h);
-                    (f.alpha as u8).hash(&mut h);
-                    if f.alpha == effectcraft_project::AlphaMode::Premultiplied {
-                        f.premul_color.map(f32::to_bits).hash(&mut h);
-                    }
-                    if f.cineon_applies() {
-                        let c = &f.cineon;
-                        [c.converted_black, c.converted_white, c.black, c.white, c.gamma, c.rolloff].map(f32::to_bits).hash(&mut h);
-                    }
-                    h.finish()
-                });
+                let seed = (0x00f8_a3e5_u64, item, i, (w as f32).to_bits(), mode as u8, f.frame_rate.num, f.frame_rate.den, &f.path, float);
+                let key = self.cache.map(|_| blended_frame_key(f, seed));
                 if let Some((b, _)) = self.cached(key) {
                     return Some(Arc::new(b.img.clone()));
                 }
@@ -1226,6 +1358,69 @@ impl<'a> Renderer<'a> {
             }
         }
         self.read(|| self.footage.frame_with(item, f, t, size, float)).map(|img| cineon_frame(img, f))
+    }
+
+    /// Is footage layer `layer` read in part ([`Renderer::footage_rows`]).
+    pub(crate) fn reads_footage_rows(&self, ctx: &EvalCtx, layer: &Layer) -> bool {
+        let LayerSource::Footage { item } = &layer.source else { return false };
+        let item = ctx.media_item(layer, *item);
+        if self.opts.roi.is_none() || !self.top || self.proxy_for(item).is_some() {
+            return false;
+        }
+        let Some(ItemKind::Footage(f)) = ctx.project.item(item).map(|it| &it.kind) else { return false };
+        self.footage_rows(ctx, layer, f).is_some()
+    }
+
+    /// A frame-blended footage frame at source time `t` when one comp frame runs through many
+    /// source frames: the average of the source frames the comp frame spans, each weighted by
+    /// the share of it the span covers ([`super::frames::mix_window`]). Both Frame Mix and
+    /// Pixel Motion average real frames here (there is no in-between frame to synthesise).
+    /// `size`: the frames may come resampled to it ([`FootageSource::frame_at_size`]). `None`
+    /// when the span is too short (or a jump) to mix, or no frame decodes.
+    fn mixed_span_frame(&self, ctx: &EvalCtx, layer: &Layer, item: ItemId, f: &Footage, t: Tick, size: Option<(u32, u32)>) -> Option<Arc<Image>> {
+        use rayon::prelude::*;
+        let float = self.pipe.float_curve(f);
+        let spans = super::frames::blend_spans(ctx, layer);
+        let frames = super::frames::mix_window(t, spans, f.frame_rate)?;
+        let seed = (0x00f8_a3e6_u64, item, t.0, spans, size, f.frame_rate.num, f.frame_rate.den, &f.path, float);
+        let key = self.cache.map(|_| blended_frame_key(f, seed));
+        if let Some((b, _)) = self.cached(key) {
+            return Some(Arc::new(b.img.clone()));
+        }
+        // A weighted sum in one buffer, divided by the total weight at the end. A frame that does
+        // not decode, or has another size than the first (a sequence of mixed sizes), is left
+        // out and the mix renormalises over the rest. Log scans are converted before they mix.
+        let ((acc, total), files) = self.recorded(key, |r| {
+            let mut acc: Option<Image> = None;
+            let mut total = 0.0;
+            for (j, w) in frames {
+                let Some(img) = r.read(|| r.footage.frame_with(item, f, f.frame_rate.tick_of(j), size, float)).map(|a| cineon_frame(a, f)) else { continue };
+                let sum = acc.get_or_insert_with(|| Image::new(img.width, img.height));
+                if (sum.width, sum.height) != (img.width, img.height) {
+                    continue;
+                }
+                let wf = w as f32;
+                sum.data.par_iter_mut().zip(img.data.par_iter()).for_each(|(s, p)| {
+                    for (a, b) in s.iter_mut().zip(p) {
+                        *a += b * wf;
+                    }
+                });
+                total += w;
+            }
+            (acc, total)
+        });
+        let mut img = acc?;
+        if total <= 1e-9 {
+            return None;
+        }
+        let norm = (1.0 / total) as f32;
+        img.data.par_iter_mut().for_each(|s| {
+            for c in s.iter_mut() {
+                *c *= norm;
+            }
+        });
+        let _kept = self.keep(key, Arc::new(Buf { img: img.clone(), offset: [0.0; 2], scale: 1.0 }), &files);
+        Some(Arc::new(img))
     }
 
     /// Source → masks, clamped/quantised to the project depth.
@@ -1340,6 +1535,9 @@ impl<'a> Renderer<'a> {
             }
             return Some((b, key, files));
         }
+        // A footage layer read in part (a region of interest, #3271) isn't kept: its key names
+        // the whole layer (a whole buffer kept before is used above).
+        let key = key.filter(|_| !self.reads_footage_rows(ctx, layer));
         let (buf, files) = self.recorded(key, |r| {
             // (what expressions read while it is made, at shutter times too, goes to its files)
             let ctx = &r.with_reads(ctx);
@@ -1361,6 +1559,8 @@ impl<'a> Renderer<'a> {
 
     fn whole_layer_input(&self, ctx: &EvalCtx, layer: &Layer, effects: usize) -> Option<Arc<Buf>> {
         let key = self.cache.and_then(|_| cache::input_key(ctx, layer, self.raster_scale(ctx, layer), self.opts.draft, self.mb_on(ctx, layer), effects));
+        // (a footage layer read in part is never kept under a whole layer's key, #3271)
+        let key = key.filter(|_| !self.reads_footage_rows(ctx, layer));
         let key = self.content_key(ctx, layer, self.clipped_key(ctx, layer, key));
         if let Some((b, _)) = self.cached(key) {
             return Some(b);
@@ -1377,6 +1577,33 @@ impl<'a> Renderer<'a> {
         });
         Some(self.keep(key, Arc::new(buf?), &files).0)
     }
+}
+
+/// How far the enabled effects of `layer` reach around a pixel (layer pixels), `None` when one
+/// doesn't declare it (`effectcraft_effects::pixel_margin`).
+fn effects_margin(ctx: &EvalCtx, layer: &Layer) -> Option<f64> {
+    if !layer.switches.effects {
+        return Some(0.0);
+    }
+    let mut most: f64 = 0.0;
+    for g in layer.effects().into_iter().flat_map(|fx| fx.groups()).filter(|g| g.enabled) {
+        let effectcraft_project::GroupKind::Effect { effect } = &g.kind else { return None };
+        let params = effectcraft_effects::flatten_params(g, &mut |p| ctx.value(layer, p));
+        most = most.max(effectcraft_effects::pixel_margin(effect, &params)?);
+    }
+    Some(most)
+}
+
+/// Does anything in the comp read layers' pixels where it likes: an enabled effect with a layer
+/// parameter set, or an expression (`sampleImage`).
+fn comp_reads_pixels(ctx: &EvalCtx) -> bool {
+    fn group(g: &effectcraft_project::PropGroup, effects: bool) -> bool {
+        g.children.iter().any(|c| match c {
+            effectcraft_project::Node::Prop(p) => p.has_expression() || (effects && matches!(p.value, effectcraft_keyframe::Value::Layer(Some(_)))),
+            effectcraft_project::Node::Group(sub) => group(sub, effects || matches!(sub.kind, effectcraft_project::GroupKind::Effect { .. })),
+        })
+    }
+    ctx.comp.layers.iter().any(|l| group(&l.props, false))
 }
 
 /// Snap cells can be finer than 1/16 unit: preserve every coordinate bit so visible

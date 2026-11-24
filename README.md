@@ -156,7 +156,7 @@ MP4, **WebM** (VP9 with inter frames and alpha, or AV1; Opus audio), PNG, JPEG, 
 rendering with 3:2 pulldown, effect/solo/guide/depth overrides, crop, region of interest and
 resize, Render Settings and Output Module templates with defaults, post-render actions, storage
 overflow and render logs. The same queue runs from the command line. Every encoder is pure
-Rust (FilmCraft's H.264, ProRes and AAC; EffectCraft's own VP9, AV1, HEVC and Opus); there is no
+Rust (craft-libs' H.264, ProRes, HEVC, VP9, AV1 and AAC; EffectCraft's own Opus); there is no
 FFmpeg inside.
 
 **Lottie** goes both ways: File ▸ Export ▸ Lottie JSON… writes a composition (precomps, shape,
@@ -220,7 +220,7 @@ cargo xtask web --serve 8765                # the browser build on http://127.0.
 New to it? [docs/footage.md](docs/footage.md) covers importing footage and image sequences and
 Interpret Footage.
 
-To work on it: `cargo test --workspace`, and `cargo xtask ci` before every commit (format, lints,
+To work on it: `cargo test --workspace`, and the checks for the crates you changed (`cargo xtask ci --affected`; the full `cargo xtask ci` covers format, lints,
 tests, layering, asset attribution and the WebAssembly build). See [CONTRIBUTING.md](CONTRIBUTING.md),
 [docs/architecture.md](docs/architecture.md) and [docs/testing.md](docs/testing.md).
 

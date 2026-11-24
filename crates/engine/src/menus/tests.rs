@@ -159,6 +159,44 @@ fn checked_reflects_layer_state() {
     assert_eq!(checked(&s, "file.save", &serde_json::json!({})), None);
 }
 
+#[test]
+fn closed_menu_opens_and_recloses_a_manual_shape() {
+    use serde_json::json;
+    let mut s = crate::Session::default();
+    s.execute("comp.new", json!({"width": 320, "height": 180})).unwrap();
+    let r = s
+        .execute(
+            "shape.newPath",
+            json!({"vertices": [[0, 0], [100, 0], [100, 100]], "closed": true,
+                "inTangents": [[0, -12], [-8, 0], [0, -6]], "outTangents": [[12, 0], [0, 8], [-6, 0]]}),
+        )
+        .unwrap();
+    let lid = effectcraft_project::LayerId(r["layer"].as_u64().unwrap());
+    let uid = r["path"].as_u64().unwrap();
+    let path =
+        |s: &crate::Session| s.active_comp().unwrap().layer(lid).unwrap().props.find_group(uid).unwrap().get("path").unwrap().value.as_path().unwrap().clone();
+    let original = path(&s);
+    for mac in [true, false] {
+        let (_, entry) =
+            platform_entries(mac).into_iter().find(|(p, e)| p.iter().map(String::as_str).eq(["Layer", "Mask and Shape Path"]) && e.label == "Closed").unwrap();
+        assert!(s.is_enabled(&entry.command));
+        assert_eq!(checked(&s, &entry.command, &entry.params), Some(true));
+        s.execute(&entry.command, entry.params.clone()).unwrap();
+        let mut opened = original.clone();
+        opened.closed = false;
+        assert_eq!(path(&s), opened);
+        assert!(!effectcraft_path::to_kurbo(&path(&s)).elements().contains(&effectcraft_path::PathEl::ClosePath));
+        assert_eq!(checked(&s, &entry.command, &entry.params), Some(false));
+        s.execute("edit.undo", json!({})).unwrap();
+        assert_eq!(path(&s), original);
+        s.execute("edit.redo", json!({})).unwrap();
+        assert_eq!(path(&s), opened);
+        s.execute(&entry.command, entry.params).unwrap();
+        assert_eq!(path(&s), original);
+        assert!(effectcraft_path::to_kurbo(&path(&s)).elements().contains(&effectcraft_path::PathEl::ClosePath));
+    }
+}
+
 /// `cargo test -p effectcraft-engine dump_specs -- --ignored --nocapture`: every command as TSV.
 #[test]
 #[ignore]

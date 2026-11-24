@@ -3,8 +3,10 @@
 //! Keyframe times are stored in **layer time** (they move with the layer), so evaluating a
 //! property at comp time `t` first maps `t` through the layer's start time and stretch.
 
+use std::borrow::Cow;
+
 use effectcraft_geom::{Mat3, Mat4, Vec3, vec2, vec3};
-use effectcraft_keyframe::Value;
+use effectcraft_keyframe::{Value, evaluate, evaluate_orientation};
 use effectcraft_project::{Comp, ItemId, Layer, LayerId, LayerSource, Project, PropGroup, Property};
 use effectcraft_time::Tick;
 
@@ -57,12 +59,21 @@ impl<'a> EvalCtx<'a> {
     pub fn at(&self, time: Tick) -> EvalCtx<'a> {
         EvalCtx { time, ..*self }
     }
+    /// The property as this context evaluates it: a collapsed Essential Property override
+    /// replaces its value and keyframes, while a Font override merges only the font. The
+    /// expression stays on the property and is not evaluated here.
+    pub fn effective_property<'p>(&self, layer: &Layer, prop: &'p Property) -> Cow<'p, Property> {
+        let Some(o) = self.property_overrides.iter().rev().find(|o| o.layer == layer.id && o.prop == prop.uid) else {
+            return Cow::Borrowed(prop);
+        };
+        Cow::Owned(o.effective_property(prop))
+    }
     /// Value of a property at the context time (keyframes, then expression).
     pub fn value(&self, layer: &Layer, prop: &Property) -> Value {
         // A collapsed precomp instance's Essential Property override replaces the base value;
         // its expression (if any) still runs, and sees the overrides of this context.
         if let Some(o) = self.property_overrides.iter().rev().find(|o| o.layer == layer.id && o.prop == prop.uid) {
-            let v = o.value(layer, prop, self.time);
+            let v = o.value_at_layer_time(prop, layer.layer_time(self.time));
             if prop.has_expression()
                 && let Some(h) = self.expr
             {
@@ -87,7 +98,12 @@ impl<'a> EvalCtx<'a> {
     /// fractional stretch: a Hold key at `lt` could read its previous value). An expression
     /// still runs at the context time.
     pub fn value_at_layer_time(&self, layer: &Layer, prop: &Property, lt: Tick) -> Value {
-        let v = prop.value_at(lt);
+        let v = self
+            .property_overrides
+            .iter()
+            .rev()
+            .find(|o| o.layer == layer.id && o.prop == prop.uid)
+            .map_or_else(|| prop.value_at(lt), |o| o.value_at_layer_time(prop, lt));
         if prop.has_expression()
             && let Some(h) = self.expr
         {
@@ -283,16 +299,41 @@ impl<'a> EvalCtx<'a> {
 }
 
 impl crate::PropertyOverride {
-    fn value(&self, layer: &Layer, prop: &Property, time: Tick) -> Value {
+    /// The target property with this override applied, without evaluating its expression.
+    fn effective_property(&self, prop: &Property) -> Property {
+        let mut property = prop.clone();
         if self.font {
             // A Font control merges only the font into the target text, as
-            // `essential::with_overrides` does.
-            let mut value = prop.value_at(layer.layer_time(time));
-            effectcraft_project::essential::merge_font(&mut value, &self.value);
-            value
+            // `essential::with_overrides` does. The target's own text and keyframes stay.
+            effectcraft_project::essential::merge_font(&mut property.value, &self.value);
+            for key in &mut property.keys {
+                effectcraft_project::essential::merge_font(&mut key.value, &self.value);
+            }
         } else {
-            self.value.clone()
+            property.keys = self.keys.clone();
+            property.value = self.value.clone();
         }
+        property
+    }
+    /// The overridden value at the target layer's exact `layer_time`.
+    pub(crate) fn value_at_layer_time(&self, prop: &Property, layer_time: Tick) -> Value {
+        if self.font {
+            // A Font override leaves the target's history in place and merges its font into the
+            // value that history selects. The same font is merged into every key, so merging
+            // after evaluation is equivalent and avoids cloning all the target's keys.
+            let mut value = prop.value_at(layer_time);
+            effectcraft_project::essential::merge_font(&mut value, &self.value);
+            return value;
+        }
+        if self.keys.is_empty() {
+            return self.value.clone();
+        }
+        // Match `Property::value_at` for the replacement history, including orientation's
+        // shortest-arc interpolation and spatial position paths.
+        if prop.match_id == "orientation" && matches!(self.value, Value::Vec3(_)) {
+            return evaluate_orientation(&self.keys, layer_time).unwrap_or_else(|| self.value.clone());
+        }
+        evaluate(&self.keys, layer_time, prop.spatial).unwrap_or_else(|| self.value.clone())
     }
 }
 

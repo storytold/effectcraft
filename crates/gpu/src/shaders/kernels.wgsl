@@ -270,7 +270,7 @@ fn line_get(horizontal: bool, line: i32, i: i32, n: i32, repeat: bool) -> vec4<f
 }
 
 // One box pass of radius r along rows (horizontal) or columns, as running sums over blocks of
-// `block` pixels (each block restarts its sum, as the CPU's vertical pass does).
+// `block` pixels (each block restarts its sum, as the CPU's vertical pass does; rows are one block).
 fn box_pass(gid: vec3<u32>, horizontal: bool) {
     let dims = out_dims();
     let r = i32(P.u[0].x);
@@ -289,8 +289,24 @@ fn box_pass(gid: vec3<u32>, horizontal: bool) {
     }
     let norm = 1.0 / f32(2 * r + 1);
     var acc = vec4<f32>(0.0);
-    for (var i = b0 - r; i <= b0 + r; i++) {
+    // The starting window, as the CPU sums it: the pixels inside the line once each, and the
+    // repeated edge pixels counted rather than visited (a radius far past the line, such as
+    // Gaussian Blur's at Blurriness 30000, would otherwise loop over it once per pixel).
+    let lo = b0 - r;
+    let hi = b0 + r;
+    for (var i = max(lo, 0); i <= min(hi, n - 1); i++) {
         acc += line_get(horizontal, line, i, n, repeat);
+    }
+    if (repeat) {
+        let before = f32(max(-lo, 0));
+        let after = f32(max(hi - (n - 1), 0));
+        // A zero count adds nothing (0 * NaN would be NaN).
+        if (before > 0.0) {
+            acc += line_get(horizontal, line, 0, n, repeat) * before;
+        }
+        if (after > 0.0) {
+            acc += line_get(horizontal, line, n - 1, n, repeat) * after;
+        }
     }
     let b1 = min(b0 + block, n);
     for (var i = b0; i < b1; i++) {
@@ -618,7 +634,8 @@ fn straight(px: vec4<f32>) -> vec3<f32> {
 //  9 Gradient Ramp   f[0] = (sx, sy, ex, ey); f[1] = start colour; f[2] = end colour;
 //                    f[3] = (len2, scatter, blend); u[0] = (_, radial, seed)
 // 10 Fractal Noise   f[0] = (contrast, brightness, scale x, frac); f[1] = (ox, oy, sr, cr);
-//                    f[2] = (evo, blend, opacity, scale y); f[3] = (sub influence, 1 / sub scaling);
+//                    f[2] = (evo, blend, opacity, scale y); f[3] = (sub influence, 1 / sub scaling,
+//                    OCTAVE_SCALE_MAX);
 //                    u[0] = (_, kind, n_oct, seed); u[1] = (invert, overflow, normal blend)
 @compute @workgroup_size(16, 16)
 fn pointwise(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -856,6 +873,7 @@ fn pointwise(@builtin(global_invocation_id) gid: vec3<u32>) {
             let scale_y = P.f[2].w;
             let infl = P.f[3].x;
             let fmul = P.f[3].y;
+            let fmax = P.f[3].z;
             let frac = P.f[0].w;
             let ox = P.f[1].x;
             let oy = P.f[1].y;
@@ -888,7 +906,8 @@ fn pointwise(@builtin(global_invocation_id) gid: vec3<u32>) {
                 sum += n * amp * w;
                 norm += amp * w;
                 amp *= infl;
-                f *= fmul;
+                // noise3::next_octave: the frequency stays within OCTAVE_SCALE_MAX (#3486).
+                f = clamp(f * fmul, 1.0 / fmax, fmax);
             }
             var val = sum / max(norm, 1e-6);
             val = (val - 0.5) * contrast + 0.5 + brightness;

@@ -1,7 +1,8 @@
 //! Effects: a table maps an After Effects effect (its match name) and its parameters (by their
-//! index in `parT`) to an EffectCraft effect, a parameter id and a unit conversion. Effects and
-//! parameters outside the table are reported in [`LossCategory::Effects`] by match name, never
-//! dropped silently.
+//! index in `parT`) to an EffectCraft effect, a parameter id and a unit conversion. Parameters
+//! outside the table are reported in [`LossCategory::Effects`] by match name, never dropped
+//! silently. An effect outside it arrives as a placeholder holding its parameters (`placeholder.rs`)
+//! and is reported too.
 //!
 //! Every conversion is backed by the corpus (`docs/aep-format.md` 3.7, cases 356-450, 511-516):
 //!
@@ -34,7 +35,7 @@
 //! import. Hue/Saturation's master values and Levels' values are arbitrary data, decoded by the
 //! reader (444-446, 512-516).
 
-use crate::effect_map::{CRYPTOMATTE_OUTPUT, Conv, EFFECTS, EffectMap, Extra, HUE_SATURATION_MASTER, LEVELS_RGB, ParamMap, popup_key};
+use crate::effect_map::{CRYPTOMATTE_OUTPUT, Conv, EFFECTS, EffectMap, Extra, HUE_SATURATION_MASTER, LEVELS_RGB, ParamMap, popup_alias, popup_key};
 use crate::{
     CryptomatteData, CurvesData, DefinitionSource, Effect as AepEffect, EffectDefinitions, EffectParam, ExtractorChannels, HueSaturationData,
     Layer as AepLayer, LayerRef, LevelsData, MeshData, ParamKind, ParamValue,
@@ -82,44 +83,37 @@ pub(crate) fn import_effects<'f, 'a>(
             continue;
         }
         let shown = fx.display_name().unwrap_or_else(|| fx.match_name().to_string());
-        let Some(map) = EFFECTS.iter().find(|m| m.match_name == fx.match_name()) else {
-            col.lose(LossCategory::Effects, format!("{}: '{}' has the effect '{shown}' ({})", cx.comp, cx.layer, fx.match_name()));
-            continue;
-        };
-        let Some(spec) = effectcraft_effects::find(map.effect) else {
-            col.lose(LossCategory::Effects, format!("{}: '{}' has the effect '{shown}' ({})", cx.comp, cx.layer, fx.match_name()));
-            continue;
-        };
+        let found = EFFECTS.iter().find(|m| m.match_name == fx.match_name()).and_then(|m| Some((m, effectcraft_effects::find(m.effect)?)));
+        let lost = || format!("{}: '{}' has the effect '{shown}' ({})", cx.comp, cx.layer, fx.match_name());
         if defs.source(&fx) == DefinitionSource::Missing {
-            col.lose(
-                LossCategory::Effects,
-                format!("{}: '{}' has the effect '{shown}' ({}) without readable parameter definitions, not imported", cx.comp, cx.layer, fx.match_name()),
-            );
+            match found {
+                Some(_) => col.lose_with(LossCategory::Effects, || format!("{} without readable parameter definitions, not imported", lost())),
+                None => col.lose_unmapped_effect(fx.match_name(), lost),
+            }
             continue;
         }
-        let size = [f64::from(cx.size.0), f64::from(cx.size.1)];
-        let mut group = effectcraft_effects::instantiate(spec, ids, &shown, size);
-        match fx.enabled() {
-            Some(on) => group.enabled = on,
-            None => col.lose(LossCategory::DamagedData, format!("{}: '{}': the fx switch of '{shown}' is unreadable, imported switched on", cx.comp, cx.layer)),
+        if found.is_none() && col.placeholder_cost >= crate::import::placeholder::MAX_COST {
+            // The import's placeholder budget is spent: the definitions (shared by many instances)
+            // are not read again. Named like any effect without a counterpart, in a group of its
+            // own (with the kept instances it would read as kept).
+            let key = format!("{} (not kept)", fx.match_name());
+            col.lose_unmapped_effect(&key, || format!("{}, not kept (past the import's placeholder parameters)", lost()));
+            continue;
         }
         let params = defs.params(&fx);
-        // Borrowed definitions (another instance's or the project copy) may not name every value
-        // record this instance has: such a record has nothing to import into, so it is reported.
-        if params.first().is_some_and(|p| p.borrowed_definition) {
-            let defined: std::collections::HashSet<&str> = params.iter().map(|p| p.match_name.as_str()).collect();
-            for name in fx.value_record_names().iter().filter(|n| !defined.contains(n.as_str())) {
-                col.lose(
-                    LossCategory::Effects,
-                    format!(
-                        "{}: '{}' effect '{shown}' ({}): the value record {name} has no parameter definition, not imported",
-                        cx.comp,
-                        cx.layer,
-                        fx.match_name()
-                    ),
-                );
-            }
-        }
+        report_records_without_definition(&fx, &params, cx, &shown, col);
+        let Some((map, spec)) = found else {
+            // No counterpart: kept as a placeholder that renders nothing, for expressions (#3087).
+            let mut group = crate::import::placeholder::placeholder(&fx, &params, cx, &shown, ids, refs, col);
+            set_enabled(&fx, &mut group, cx, &shown, col);
+            col.lose_unmapped_effect(fx.match_name(), || format!("{}, kept without rendering", lost()));
+            col.imported.placeholder_effects = col.imported.placeholder_effects.saturating_add(1);
+            target.children.push(Node::Group(group));
+            continue;
+        };
+        let size = [f64::from(cx.size.0), f64::from(cx.size.1)];
+        let mut group = effectcraft_effects::instantiate(spec, ids, &shown, size);
+        set_enabled(&fx, &mut group, cx, &shown, col);
         if map.extra == Extra::Lumetri {
             crate::import::lumetri::import_lumetri(&fx, &params, cx, &shown, ParamOut { group: &mut group, refs: &mut *refs, col: &mut *col });
         } else if map.extra == Extra::Cryptomatte {
@@ -129,8 +123,41 @@ pub(crate) fn import_effects<'f, 'a>(
                 import_param(&fx, map, p, cx, &shown, ParamOut { group: &mut group, refs: &mut *refs, col: &mut *col });
             }
         }
+        // Channel selection is static, as in After Effects (which can't animate it either): a
+        // key or an expression there can't come from After Effects; defensively, the first
+        // value is kept and the rest reported.
+        for name in effectcraft_effects::migrate::static_channel_params(spec, &mut group) {
+            col.lose(
+                LossCategory::Effects,
+                format!("{}: '{}' effect '{shown}': keyframes or an expression on the channel selection {name} are not imported (it can't be animated), first value used", cx.comp, cx.layer),
+            );
+        }
         col.imported.effects = col.imported.effects.saturating_add(1);
         target.children.push(Node::Group(group));
+    }
+}
+
+/// The effect's fx switch.
+fn set_enabled(fx: &AepEffect<'_, '_>, group: &mut PropGroup, cx: &LayerCtx<'_>, shown: &str, col: &mut Collector) {
+    match fx.enabled() {
+        Some(on) => group.enabled = on,
+        None => {
+            col.lose_with(LossCategory::DamagedData, || format!("{}: '{}': the fx switch of '{shown}' is unreadable, imported switched on", cx.comp, cx.layer))
+        }
+    }
+}
+
+/// Borrowed definitions (another instance's or the project copy) may not name every value record
+/// this instance has: such a record has nothing to import into, so it is reported.
+fn report_records_without_definition(fx: &AepEffect<'_, '_>, params: &[EffectParam<'_, '_>], cx: &LayerCtx<'_>, shown: &str, col: &mut Collector) {
+    if !params.first().is_some_and(|p| p.borrowed_definition) {
+        return;
+    }
+    let defined: std::collections::HashSet<&str> = params.iter().map(|p| p.match_name.as_str()).collect();
+    for name in fx.value_record_names().iter().filter(|n| !defined.contains(n.as_str())) {
+        col.lose_with(LossCategory::Effects, || {
+            format!("{}: '{}' effect '{shown}' ({}): the value record {name} has no parameter definition, not imported", cx.comp, cx.layer, fx.match_name())
+        });
     }
 }
 
@@ -182,7 +209,7 @@ fn import_param(fx: &AepEffect<'_, '_>, map: &EffectMap, p: &EffectParam<'_, '_>
         // Not in the table: lost only when the file stores something for it. A layer parameter
         // set to no layer (its record always exists, Timewarp's Matte Layer 529) holds nothing.
         if p.stored().is_some() && !matches!(p.stored_value(), Some(ParamValue::Layer(0))) {
-            col.lose(LossCategory::Effects, format!("{here}: parameter {label} not imported"));
+            col.lose_with(LossCategory::Effects, || format!("{here}: parameter {label} not imported"));
         }
         return;
     };
@@ -195,7 +222,7 @@ pub(crate) fn import_mapped(p: &EffectParam<'_, '_>, m: &ParamMap, cx: &LayerCtx
     let (here, label) = names;
     let ParamOut { group, refs, col } = out;
     if p.kind != m.kind {
-        col.lose(LossCategory::Effects, format!("{here}: parameter {label} has type {:?}, expected {:?}; not imported", p.kind, m.kind));
+        col.lose_with(LossCategory::Effects, || format!("{here}: parameter {label} has type {:?}, expected {:?}; not imported", p.kind, m.kind));
         return;
     }
     match m.conv {
@@ -215,7 +242,7 @@ pub(crate) fn import_mapped(p: &EffectParam<'_, '_>, m: &ParamMap, cx: &LayerCtx
         // After Effects 2026 writes 0.990005 (the 16.16 rounding differs); the scale is the same.
         let ok = found.is_some_and(|v| (v - valid_max).abs() <= valid_max.abs() * 1e-4);
         if !ok {
-            col.lose(LossCategory::Effects, format!("{here}: parameter {label} has the valid maximum {found:?}, expected {valid_max}; not imported"));
+            col.lose_with(LossCategory::Effects, || format!("{here}: parameter {label} has the valid maximum {found:?}, expected {valid_max}; not imported"));
         }
         ok
     };
@@ -224,10 +251,9 @@ pub(crate) fn import_mapped(p: &EffectParam<'_, '_>, m: &ParamMap, cx: &LayerCtx
         (Conv::Popup { .. }, Some(items)) => items.clone(),
         (Conv::Popup { items, .. }, None) => {
             if p.popup_item_count().map(usize::from) != Some(items.len()) {
-                col.lose(
-                    LossCategory::Effects,
-                    format!("{here}: parameter {label}: the file names no popup items and has {:?} of them, not imported", p.popup_item_count()),
-                );
+                col.lose_with(LossCategory::Effects, || {
+                    format!("{here}: parameter {label}: the file names no popup items and has {:?} of them, not imported", p.popup_item_count())
+                });
                 return;
             }
             items.iter().map(|s| s.to_string()).collect()
@@ -242,28 +268,17 @@ pub(crate) fn import_mapped(p: &EffectParam<'_, '_>, m: &ParamMap, cx: &LayerCtx
         Conv::Checkbox => Kind::EffectBool,
         // Handled above.
         Conv::LayerRef { .. } | Conv::Skip => return,
-        Conv::Percent { valid_max } => {
+        Conv::Percent { valid_max } | Conv::Plain { valid_max } | Conv::Factor { valid_max, .. } => {
             if !checked(valid_max, col) {
                 return;
             }
-            Kind::EffectNumber(100.0 / valid_max)
-        }
-        Conv::Plain { valid_max } => {
-            if !checked(valid_max, col) {
-                return;
-            }
-            Kind::EffectNumber(1.0)
-        }
-        Conv::Factor { valid_max, factor } => {
-            if !checked(valid_max, col) {
-                return;
-            }
-            Kind::EffectNumber(factor)
+            let Some(scale) = m.conv.number_scale() else { return };
+            Kind::EffectNumber(scale)
         }
     };
     // Grouped parameters are addressed by path (`master/exposure`).
     let Some(prop) = group.prop_mut(m.target) else {
-        col.lose(LossCategory::Effects, format!("{here}: parameter {label} has no counterpart '{}'", m.target));
+        col.lose_with(LossCategory::Effects, || format!("{here}: parameter {label} has no counterpart '{}'", m.target));
         return;
     };
     // For a popup: file item (0-based over all items) -> EffectCraft item, by name.
@@ -271,7 +286,7 @@ pub(crate) fn import_mapped(p: &EffectParam<'_, '_>, m: &ParamMap, cx: &LayerCtx
         Conv::Popup { .. } => match popup_mapping(&items, &prop.ui) {
             Some(map) => Some(map),
             None => {
-                col.lose(LossCategory::Effects, format!("{here}: parameter {label}: the popup items do not match EffectCraft's, not imported"));
+                col.lose_with(LossCategory::Effects, || format!("{here}: parameter {label}: the popup items do not match EffectCraft's, not imported"));
                 return;
             }
         },
@@ -288,7 +303,7 @@ pub(crate) fn import_mapped(p: &EffectParam<'_, '_>, m: &ParamMap, cx: &LayerCtx
             _ => false,
         };
         if converted && stored.expression().is_some() {
-            col.lose(LossCategory::Effects, format!("{here}: the expression on parameter {label} is not imported (the value is converted here)"));
+            col.lose_with(LossCategory::Effects, || format!("{here}: the expression on parameter {label} is not imported (the value is converted here)"));
         } else {
             import_expression(&stored, prop, col);
         }
@@ -296,14 +311,14 @@ pub(crate) fn import_mapped(p: &EffectParam<'_, '_>, m: &ParamMap, cx: &LayerCtx
     if p.is_animated() {
         if kind == Kind::EffectBool {
             // Keys on a checkbox are not sampled by the corpus.
-            col.lose(LossCategory::Effects, format!("{here}: the keyframes of parameter {label} are not imported (not decoded), default used"));
+            col.lose_with(LossCategory::Effects, || format!("{here}: the keyframes of parameter {label} are not imported (not decoded), default used"));
             return;
         }
         if let Some(stored) = p.stored() {
             let before = prop.keys.len();
             import_keys(&stored, kind, cx.layer, &p.match_name, cx.tm, prop, col);
             if prop.keys.len() == before {
-                col.lose(LossCategory::DamagedData, format!("{here}: parameter {label} has no readable keyframe, default used"));
+                col.lose_with(LossCategory::DamagedData, || format!("{here}: parameter {label} has no readable keyframe, default used"));
             }
             if let Some(map) = &popup_map {
                 remap_popup_keys(prop, map, here, label, col);
@@ -317,7 +332,7 @@ pub(crate) fn import_mapped(p: &EffectParam<'_, '_>, m: &ParamMap, cx: &LayerCtx
     let value = match (p.stored(), p.recorded_value()) {
         (Some(_), Some(v)) => Some(v),
         (Some(_), None) => {
-            col.lose(LossCategory::DamagedData, format!("{here}: parameter {label} holds an unreadable value, default used"));
+            col.lose_with(LossCategory::DamagedData, || format!("{here}: parameter {label} holds an unreadable value, default used"));
             return;
         }
         // Absent = default. A borrowed popup's default slot is not reliable (a selection writes
@@ -335,7 +350,7 @@ pub(crate) fn import_mapped(p: &EffectParam<'_, '_>, m: &ParamMap, cx: &LayerCtx
             Some(Some(ec)) => Some(Value::Enum(ec)),
             Some(None) => {
                 let item = usize::try_from(i).ok().and_then(|i| i.checked_sub(1)).and_then(|i| items.get(i)).cloned().unwrap_or_default();
-                col.lose(LossCategory::Effects, format!("{here}: parameter {label}: item '{item}' has no counterpart, default used"));
+                col.lose_with(LossCategory::Effects, || format!("{here}: parameter {label}: item '{item}' has no counterpart, default used"));
                 return;
             }
             None => None,
@@ -347,7 +362,7 @@ pub(crate) fn import_mapped(p: &EffectParam<'_, '_>, m: &ParamMap, cx: &LayerCtx
             report_beyond_limit(m.limit, std::iter::once(&v), here, label, col);
             prop.value = v;
         }
-        None => col.lose(LossCategory::DamagedData, format!("{here}: parameter {label} holds a value that is not valid ({value:?}), default used")),
+        None => col.lose_with(LossCategory::DamagedData, || format!("{here}: parameter {label} holds a value that is not valid ({value:?}), default used")),
     }
 }
 
@@ -357,14 +372,16 @@ fn report_beyond_limit<'v>(limit: Option<(f64, f64)>, values: impl Iterator<Item
     let Some((lo, hi)) = limit else { return };
     let beyond: Vec<f64> = values.filter_map(|v| if let Value::Scalar(x) = v { Some(*x) } else { None }).filter(|x| *x < lo || *x > hi).collect();
     if let Some(x) = beyond.first() {
-        col.lose(LossCategory::Effects, format!("{here}: parameter {label} is {x}, EffectCraft's effect uses {lo} to {hi} (rendered as the nearest of them)"));
+        col.lose_with(LossCategory::Effects, || {
+            format!("{here}: parameter {label} is {x}, EffectCraft's effect uses {lo} to {hi} (rendered as the nearest of them)")
+        });
     }
 }
 
 /// A layer parameter: None stays unset, the owning layer is itself (`own`) or unset, another layer
 /// is resolved by [`resolve_layer_refs`] once the composition's layers exist.
 /// `names` is `(here, label)`, the effect and the parameter for the report.
-fn import_layer_ref(p: &EffectParam<'_, '_>, target: &str, own: bool, cx: &LayerCtx<'_>, names: (&str, &str), out: ParamOut<'_>) {
+pub(crate) fn import_layer_ref(p: &EffectParam<'_, '_>, target: &str, own: bool, cx: &LayerCtx<'_>, names: (&str, &str), out: ParamOut<'_>) {
     let (here, label) = names;
     let ParamOut { group, refs, col } = out;
     // After Effects hands the named layer's source to the effect, without its masks and effects
@@ -375,11 +392,11 @@ fn import_layer_ref(p: &EffectParam<'_, '_>, target: &str, own: bool, cx: &Layer
         src.value = Value::Enum(0);
     }
     let Some(prop) = group.prop_mut(target) else {
-        col.lose(LossCategory::Effects, format!("{here}: parameter {label} has no counterpart '{target}'"));
+        col.lose_with(LossCategory::Effects, || format!("{here}: parameter {label} has no counterpart '{target}'"));
         return;
     };
     if p.is_animated() || p.stored().is_some_and(|s| s.expression().is_some()) {
-        col.lose(LossCategory::Effects, format!("{here}: keyframes or an expression on the layer parameter {label} are not imported"));
+        col.lose_with(LossCategory::Effects, || format!("{here}: keyframes or an expression on the layer parameter {label} are not imported"));
     }
     // No record: the default, the owning layer (320).
     match p.layer_ref(cx.aep_id).unwrap_or(LayerRef::This) {
@@ -395,29 +412,33 @@ fn import_layer_ref(p: &EffectParam<'_, '_>, target: &str, own: bool, cx: &Layer
 }
 
 /// Sets the layer parameters that name another layer of the composition (`ids`: file id ->
-/// project layer); one whose layer was not imported stays unset and is reported.
+/// project layer; `at`: project layer -> position in the composition); one whose layer was not
+/// imported stays unset and is reported.
 pub(crate) fn resolve_layer_refs(
     comp: &mut effectcraft_project::Comp,
+    at: &std::collections::HashMap<effectcraft_project::LayerId, usize>,
     refs: &[PendingLayerRef],
     ids: &std::collections::HashMap<u32, effectcraft_project::LayerId>,
     col: &mut Collector,
 ) {
     for r in refs {
         let Some(target) = ids.get(&r.target) else {
-            col.lose(LossCategory::Effects, format!("{} names a layer that is not imported (id {}), left unset", r.what, r.target));
+            col.lose_with(LossCategory::Effects, || format!("{} names a layer that is not imported (id {}), left unset", r.what, r.target));
             continue;
         };
-        if let Some(prop) = comp.layers.iter_mut().find(|l| l.id == r.layer).and_then(|l| l.props.find_mut(r.prop)) {
+        if let Some(prop) = crate::import::build::layer_at(comp, at, r.layer).and_then(|l| l.props.find_mut(r.prop)) {
             prop.value = Value::Layer(Some(target.0));
         }
     }
 }
 
-/// The EffectCraft item of each file item (by name, ignoring case and separators); `None` when
-/// the parameter here is not a popup.
+/// The EffectCraft item of each file item (by name, ignoring case and separators, and a known
+/// non-English name for it, [`popup_alias`]); `None` when the parameter here is not a popup.
 fn popup_mapping(file_items: &[String], ui: &ParamUi) -> Option<Vec<Option<u32>>> {
     let ParamUi::Popup { options } = ui else { return None };
-    let norm = popup_key;
+    // The file's item count is not bounded (its `pdnm`), EffectCraft's options are: the options'
+    // keys are built once, and each file item's once, so the cost is linear in the file's items.
+    let options: Vec<String> = options.iter().map(|o| popup_key(o)).collect();
     Some(
         file_items
             .iter()
@@ -425,7 +446,12 @@ fn popup_mapping(file_items: &[String], ui: &ParamUi) -> Option<Vec<Option<u32>>
                 if item.trim() == "(-" {
                     return None;
                 }
-                options.iter().position(|o| norm(o) == norm(item)).and_then(|i| u32::try_from(i).ok())
+                let key = popup_key(item);
+                options
+                    .iter()
+                    .position(|o| *o == key)
+                    .or_else(|| popup_alias(&key).and_then(|a| options.iter().position(|o| o == a)))
+                    .and_then(|i| u32::try_from(i).ok())
             })
             .collect(),
     )
@@ -445,7 +471,7 @@ fn remap_popup_keys(prop: &mut effectcraft_project::Property, map: &[Option<u32>
         _ => true,
     });
     if prop.keys.len() != before {
-        col.lose(LossCategory::Effects, format!("{here}: a keyframe of parameter {label} has an item without a counterpart, dropped"));
+        col.lose_with(LossCategory::Effects, || format!("{here}: a keyframe of parameter {label} has an item without a counterpart, dropped"));
     }
     if let Some(first) = prop.keys.first() {
         prop.value = first.value.clone();
@@ -455,17 +481,16 @@ fn remap_popup_keys(prop: &mut effectcraft_project::Property, map: &[Option<u32>
 /// Hue/Saturation's master values, Levels' RGB values: from the arbitrary data of `p`.
 fn import_extra(fx: &AepEffect<'_, '_>, extra: Extra, p: &EffectParam<'_, '_>, here: &str, size: (u32, u32), group: &mut PropGroup, col: &mut Collector) {
     if p.is_animated() || p.stored().is_some_and(|s| s.expression().is_some()) {
-        col.lose(LossCategory::Effects, format!("{here}: keyframes or an expression on {} are not imported", p.name));
+        col.lose_with(LossCategory::Effects, || format!("{here}: keyframes or an expression on {} are not imported", p.name));
     }
     let Some(data) = fx.arbitrary_data(&p.match_name) else {
         // No record: every value is at its default. A Channel Info value record without its
         // aRbs/aRbp payload (every sampled record has it) is damaged: the payload may have chosen
         // other channels (`Z`), so the defaults are not what After Effects renders.
         if p.stored().is_some() && matches!(extra, Extra::Extractor | Extra::Identifier) {
-            col.lose(
-                LossCategory::DamagedData,
-                format!("{here}: the Channel Info data is missing (a value record without its data), the default channels used"),
-            );
+            col.lose_with(LossCategory::DamagedData, || {
+                format!("{here}: the Channel Info data is missing (a value record without its data), the default channels used")
+            });
         }
         return;
     };
@@ -483,10 +508,10 @@ fn import_extra(fx: &AepEffect<'_, '_>, extra: Extra, p: &EffectParam<'_, '_>, h
                     set(id, f64::from(v));
                 }
                 if !d.ranges_are_default() {
-                    col.lose(LossCategory::Effects, format!("{here}: the colour ranges (Reds ... Magentas) are not imported (not sampled)"));
+                    col.lose_with(LossCategory::Effects, || format!("{here}: the colour ranges (Reds ... Magentas) are not imported (not sampled)"));
                 }
             }
-            None => col.lose(LossCategory::DamagedData, format!("{here}: the Hue/Saturation data is unreadable, defaults used")),
+            None => col.lose_with(LossCategory::DamagedData, || format!("{here}: the Hue/Saturation data is unreadable, defaults used")),
         },
         Extra::Levels => match LevelsData::parse(data) {
             Some(d) => {
@@ -494,10 +519,10 @@ fn import_extra(fx: &AepEffect<'_, '_>, extra: Extra, p: &EffectParam<'_, '_>, h
                     set(id, f64::from(v));
                 }
                 if d.channels[1..].iter().any(|c| *c != LevelsData::DEFAULT_CHANNEL) {
-                    col.lose(LossCategory::Effects, format!("{here}: the per-channel values (Red, Green, Blue, Alpha) are not imported (not sampled)"));
+                    col.lose_with(LossCategory::Effects, || format!("{here}: the per-channel values (Red, Green, Blue, Alpha) are not imported (not sampled)"));
                 }
             }
-            None => col.lose(LossCategory::DamagedData, format!("{here}: the Levels data is unreadable, defaults used")),
+            None => col.lose_with(LossCategory::DamagedData, || format!("{here}: the Levels data is unreadable, defaults used")),
         },
         Extra::Curves => match CurvesData::parse(data) {
             Some(d) => {
@@ -511,13 +536,13 @@ fn import_extra(fx: &AepEffect<'_, '_>, extra: Extra, p: &EffectParam<'_, '_>, h
                     }
                 }
             }
-            None => col.lose(LossCategory::DamagedData, format!("{here}: the Curves data is unreadable, defaults used")),
+            None => col.lose_with(LossCategory::DamagedData, || format!("{here}: the Curves data is unreadable, defaults used")),
         },
         Extra::MeshWarp => match MeshData::parse(data) {
             Some(m) => import_mesh(&m, here, size, group, col),
-            None => col.lose(LossCategory::DamagedData, format!("{here}: the Distortion Mesh is unreadable, defaults used")),
+            None => col.lose_with(LossCategory::DamagedData, || format!("{here}: the Distortion Mesh is unreadable, defaults used")),
         },
-        Extra::Extractor => match ExtractorChannels::parse(data).map(|c| (c.sources(), c)) {
+        Extra::Extractor => match ExtractorChannels::parse(data).map(|c| (c.sources(effectcraft_effects::EXTRACTOR_COPY), c)) {
             // Each output channel reads the footage's channel of the stored name, which
             // EffectCraft's EXtractoR finds by the same name (`Z`); After Effects' `(copy)` is the
             // input's own channel, EffectCraft's `(copy)` (not `A`, which EffectCraft reads from an
@@ -531,16 +556,16 @@ fn import_extra(fx: &AepEffect<'_, '_>, extra: Extra, p: &EffectParam<'_, '_>, h
             }
             Some((Err(k), c)) => {
                 let names: Vec<&str> = c.channels.iter().map(|(_, n)| n.as_str()).collect();
-                col.lose(
+                col.lose_with(
                     LossCategory::Effects,
-                    format!(
+                    || format!(
                         "{here}: the channels {} are not imported (record {} is of an unknown kind or names no channel), R, G, B, A used",
                         names.join(", "),
                         k.saturating_add(1)
                     ),
                 );
             }
-            None => col.lose(LossCategory::Effects, format!("{here}: the Channel Info data is not in the sampled layout, R, G, B, A used")),
+            None => col.lose_with(LossCategory::Effects, || format!("{here}: the Channel Info data is not in the sampled layout, R, G, B, A used")),
         },
         Extra::Identifier => match crate::identifier_channel_type(data) {
             // No channel chosen (the type's label): After Effects lists only the footage's integer
@@ -550,9 +575,9 @@ fn import_extra(fx: &AepEffect<'_, '_>, extra: Extra, p: &EffectParam<'_, '_>, h
                 if let Some(prop) = group.prop_mut("channelType") {
                     prop.value = Value::Enum(0);
                 }
-                col.lose(
+                col.lose_with(
                     LossCategory::Effects,
-                    format!("{here}: no ID channel is chosen (Channel Info), so After Effects leaves the layer unchanged; EffectCraft draws the footage's object ID channel"),
+                    || format!("{here}: no ID channel is chosen (Channel Info), so After Effects leaves the layer unchanged; EffectCraft draws the footage's object ID channel"),
                 );
             }
             // A chosen channel, by name. EffectCraft's IDentifier has no channel of its own: it
@@ -564,12 +589,12 @@ fn import_extra(fx: &AepEffect<'_, '_>, extra: Extra, p: &EffectParam<'_, '_>, h
                         prop.value = Value::Enum(u32::try_from(kind).unwrap_or(0));
                     }
                 }
-                None => col.lose(
+                None => col.lose_with(
                     LossCategory::Effects,
-                    format!("{here}: the ID channel '{name}' (Channel Info) is not imported; EffectCraft reads the footage's object ID channel (ObjectID, object_id, objectId, id)"),
+                    || format!("{here}: the ID channel '{name}' (Channel Info) is not imported; EffectCraft reads the footage's object ID channel (ObjectID, object_id, objectId, id)"),
                 ),
             },
-            None => col.lose(LossCategory::Effects, format!("{here}: the Channel Info data is not in the sampled layout, the object ID channel used")),
+            None => col.lose_with(LossCategory::Effects, || format!("{here}: the Channel Info data is not in the sampled layout, the object ID channel used")),
         },
         Extra::None | Extra::Lumetri | Extra::Cryptomatte => {}
     }
@@ -599,13 +624,13 @@ fn import_cryptomatte(fx: &AepEffect<'_, '_>, params: &[EffectParam<'_, '_>], cx
         match (p.index, p.kind) {
             (1, ParamKind::ArbitraryData) => {
                 if moving {
-                    col.lose(LossCategory::Effects, format!("{here}: keyframes or an expression on {label} are not imported"));
+                    col.lose_with(LossCategory::Effects, || format!("{here}: keyframes or an expression on {label} are not imported"));
                 }
                 // No record: the definition's default, no layer and no selection. A record
                 // without its data (every sampled record has it) is damaged.
                 let Some(data) = fx.arbitrary_data(&p.match_name) else {
                     if p.stored().is_some() {
-                        col.lose(LossCategory::DamagedData, format!("{here}: the Cryptomatte settings (layer, selection) have no data, none used"));
+                        col.lose_with(LossCategory::DamagedData, || format!("{here}: the Cryptomatte settings (layer, selection) have no data, none used"));
                     }
                     continue;
                 };
@@ -614,12 +639,14 @@ fn import_cryptomatte(fx: &AepEffect<'_, '_>, params: &[EffectParam<'_, '_>], cx
                         set(group, "layerName", Value::Str(d.layer));
                         set(group, "selection", Value::Str(d.selection));
                     }
-                    None => col.lose(LossCategory::DamagedData, format!("{here}: the Cryptomatte settings (layer, selection) are unreadable, none used")),
+                    None => {
+                        col.lose_with(LossCategory::DamagedData, || format!("{here}: the Cryptomatte settings (layer, selection) are unreadable, none used"))
+                    }
                 }
             }
             (2, ParamKind::Popup) => {
                 if moving {
-                    col.lose(LossCategory::Effects, format!("{here}: keyframes or an expression on {label} are not imported, Colors used"));
+                    col.lose_with(LossCategory::Effects, || format!("{here}: keyframes or an expression on {label} are not imported, Colors used"));
                     continue;
                 }
                 let (display, matte_only) = crypto_output(p, &here, &label, col);
@@ -628,19 +655,19 @@ fn import_cryptomatte(fx: &AepEffect<'_, '_>, params: &[EffectParam<'_, '_>], cx
             }
             (3, ParamKind::Checkbox) => {
                 if moving {
-                    col.lose(LossCategory::Effects, format!("{here}: keyframes or an expression on {label} are not imported"));
+                    col.lose_with(LossCategory::Effects, || format!("{here}: keyframes or an expression on {label} are not imported"));
                 } else {
                     match selection_mode_on(p) {
                         // A picking switch of the plug-in; EffectCraft picks with its own tool.
-                        Some(true) => col.lose(LossCategory::Effects, format!("{here}: parameter {label} is on and has no counterpart")),
+                        Some(true) => col.lose_with(LossCategory::Effects, || format!("{here}: parameter {label} is on and has no counterpart")),
                         Some(false) => {}
-                        None => col.lose(LossCategory::DamagedData, format!("{here}: parameter {label} holds an unreadable value, off used")),
+                        None => col.lose_with(LossCategory::DamagedData, || format!("{here}: parameter {label} holds an unreadable value, off used")),
                     }
                 }
             }
             _ => {
                 if p.stored().is_some() && !matches!(p.stored_value(), Some(ParamValue::Layer(0))) {
-                    col.lose(LossCategory::Effects, format!("{here}: parameter {label} ({:?}) not imported", p.kind));
+                    col.lose_with(LossCategory::Effects, || format!("{here}: parameter {label} ({:?}) not imported", p.kind));
                 }
             }
         }
@@ -671,17 +698,16 @@ fn crypto_output(p: &EffectParam<'_, '_>, here: &str, label: &str, col: &mut Col
         Some(items) => items.clone(),
         None if p.popup_item_count().map(usize::from) == Some(CRYPTOMATTE_OUTPUT.len()) => CRYPTOMATTE_OUTPUT.iter().map(|s| s.to_string()).collect(),
         None => {
-            col.lose(
-                LossCategory::Effects,
-                format!("{here}: parameter {label}: the file names no popup items and has {:?} of them, not imported, Colors used", p.popup_item_count()),
-            );
+            col.lose_with(LossCategory::Effects, || {
+                format!("{here}: parameter {label}: the file names no popup items and has {:?} of them, not imported, Colors used", p.popup_item_count())
+            });
             return CRYPTO_COLORS;
         }
     };
     let index = match (p.stored(), p.stored_value()) {
         (Some(_), Some(ParamValue::Index(i))) => i,
         (Some(_), _) => {
-            col.lose(LossCategory::DamagedData, format!("{here}: parameter {label} holds an unreadable value, Colors used"));
+            col.lose_with(LossCategory::DamagedData, || format!("{here}: parameter {label} holds an unreadable value, Colors used"));
             return CRYPTO_COLORS;
         }
         // No record: the default. The plug-in's is Colors (1): the `pard` default of the
@@ -699,14 +725,14 @@ fn crypto_output(p: &EffectParam<'_, '_>, here: &str, label: &str, col: &mut Col
         "matted rgba" => (1, false),
         "matte only" => (1, true),
         "matted colors" => {
-            col.lose(
+            col.lose_with(
                 LossCategory::Effects,
-                format!("{here}: parameter {label}: item '{item}' ({index}) has no counterpart, imported as Matte (the layer's colours keyed by the selection, not the ID colours)"),
+                || format!("{here}: parameter {label}: item '{item}' ({index}) has no counterpart, imported as Matte (the layer's colours keyed by the selection, not the ID colours)"),
             );
             (1, false)
         }
         _ => {
-            col.lose(LossCategory::Effects, format!("{here}: parameter {label}: item '{item}' ({index}) has no counterpart, Colors used"));
+            col.lose_with(LossCategory::Effects, || format!("{here}: parameter {label}: item '{item}' ({index}) has no counterpart, Colors used"));
             CRYPTO_COLORS
         }
     }
@@ -734,7 +760,9 @@ fn import_mesh(m: &MeshData, here: &str, size: (u32, u32), group: &mut PropGroup
     let rows_stored = group.prop("rows").map(|p| p.value.as_f64().round());
     let cols_stored = group.prop("columns").map(|p| p.value.as_f64().round());
     if rows_stored != Some(f64::from(m.rows)) || cols_stored != Some(f64::from(m.columns)) {
-        col.lose(LossCategory::Effects, format!("{here}: the Distortion Mesh is {} x {} cells, Rows / Columns say otherwise; not imported", m.columns, m.rows));
+        col.lose_with(LossCategory::Effects, || {
+            format!("{here}: the Distortion Mesh is {} x {} cells, Rows / Columns say otherwise; not imported", m.columns, m.rows)
+        });
         return;
     }
     let mut offs = Vec::with_capacity(m.vertices.len());
@@ -760,7 +788,7 @@ fn import_mesh(m: &MeshData, here: &str, size: (u32, u32), group: &mut PropGroup
             }
         }
         if !(dx.is_finite() && dy.is_finite() && own.iter().all(|x| x.is_finite())) {
-            col.lose(LossCategory::DamagedData, format!("{here}: the Distortion Mesh holds a number that is not valid, not imported"));
+            col.lose_with(LossCategory::DamagedData, || format!("{here}: the Distortion Mesh holds a number that is not valid, not imported"));
             return;
         }
         // EffectCraft's mesh reads the first two numbers of a vertex; moved handles follow as
@@ -775,10 +803,9 @@ fn import_mesh(m: &MeshData, here: &str, size: (u32, u32), group: &mut PropGroup
         offs.push(token);
     }
     if handles_moved {
-        col.lose(
-            LossCategory::Effects,
-            format!("{here}: Distortion Mesh Bezier handles moved on their own are not drawn (EffectCraft's mesh is bilinear; they are kept for the export)"),
-        );
+        col.lose_with(LossCategory::Effects, || {
+            format!("{here}: Distortion Mesh Bezier handles moved on their own are not drawn (EffectCraft's mesh is bilinear; they are kept for the export)")
+        });
     }
     if let Some(p) = group.prop_mut("rows") {
         p.value = Value::Scalar(f64::from(m.rows));
@@ -799,7 +826,7 @@ fn px(v: f64) -> String {
 
 /// A decoded value in EffectCraft's units, `None` when it does not fit the kind or is not a valid
 /// number.
-fn convert(value: ParamValue, kind: Kind) -> Option<Value> {
+pub(crate) fn convert(value: ParamValue, kind: Kind) -> Option<Value> {
     let raw = match (value, kind) {
         // The reader gives colours as ARGB fractions; `Kind` takes the stored 0..255.
         (ParamValue::Argb(c), Kind::EffectColor) => c.map(|x| x * 255.0).to_vec(),
@@ -810,4 +837,35 @@ fn convert(value: ParamValue, kind: Kind) -> Option<Value> {
         _ => return None,
     };
     kind.value(&raw)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ui(options: &[&str]) -> ParamUi {
+        ParamUi::Popup { options: options.iter().map(|s| s.to_string()).collect() }
+    }
+
+    #[test]
+    fn popup_items_map_by_name_ignoring_case_separators_and_channel() {
+        let file: Vec<String> = ["Red Channel", "(-", " GREEN ", "Alpha channel", "Other", "red"].iter().map(|s| s.to_string()).collect();
+        let map = popup_mapping(&file, &ui(&["Red", "Green", "Blue", "Alpha", "red"])).expect("a popup");
+        // The first option of a name wins, as `position` finds it.
+        assert_eq!(map, [Some(0), None, Some(1), Some(3), None, Some(0)]);
+        assert_eq!(popup_mapping(&file, &ParamUi::Checkbox), None);
+    }
+
+    #[test]
+    fn a_popup_with_a_huge_item_list_maps_in_linear_time() {
+        // A `pdnm` of 200 000 items (a hostile file: the count is not bounded there) against an
+        // effect's options. Each comparison used to build two keys (two allocations), 4e7 of
+        // them here at 100 options; now each key is borrowed once and compared in place.
+        let options: Vec<String> = (0..100).map(|i| format!("Option {i}")).collect();
+        let file: Vec<String> = (0..200_000).map(|i| format!("Item {}", i % 1000)).collect();
+        let ui = ParamUi::Popup { options };
+        let map = popup_mapping(&file, &ui).expect("a popup");
+        assert_eq!(map.len(), file.len());
+        assert!(map.iter().all(Option::is_none));
+    }
 }

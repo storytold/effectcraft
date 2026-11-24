@@ -10,7 +10,7 @@
 use effectcraft_aep::import::{ImportOptions, ImportResult, LossCategory, import};
 use effectcraft_aep::{Body, Chunk, ParamKind, ParamValue, Project as AepProject, parse, write};
 use effectcraft_keyframe::Value;
-use effectcraft_project::{Project, PropGroup};
+use effectcraft_project::{GroupKind, Project, PropGroup};
 
 const SYNTHETIC: &[u8] = include_bytes!("../../fixtures/synthetic.aep");
 
@@ -274,10 +274,15 @@ pub fn import_bytes(bytes: &[u8], effect: &str) -> (Option<PropGroup>, ImportRes
     let mut project = Project::default();
     let none = |_: &str| false;
     let r = import(&mut project, bytes, &ImportOptions { allow_losses: true, ..ImportOptions::new(&none) }).unwrap();
-    let g = project
-        .comps()
-        .flat_map(|(_, c)| c.layers.iter())
-        .find_map(|l| l.props.sub("effects").and_then(|fx| fx.children.iter().filter_map(|n| n.as_group()).find(|g| g.match_id == effect).cloned()));
+    let g = project.comps().flat_map(|(_, c)| c.layers.iter()).find_map(|l| {
+        l.props.sub("effects").and_then(|fx| {
+            fx.children
+                .iter()
+                .filter_map(|n| n.as_group())
+                .find(|g| g.match_id == effect || matches!(&g.kind, GroupKind::Effect { effect: e } if e == effect))
+                .cloned()
+        })
+    });
     (g, r)
 }
 
