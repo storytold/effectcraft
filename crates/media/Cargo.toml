@@ -10,7 +10,7 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
-craft-audio-markers = { package = "craft-audio", version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "30596f73c5ef851ba3dad9cf145669f391e2eb0d", default-features = false }
+craft-audio-markers = { package = "craft-audio", version = "0.1.0", git = "https://github.com/aiongg/craft-libs", rev = "3ad64a26ea8a72c03c416681e14f7744393790b1", default-features = false }
 craft-docpath = { workspace = true }
 effectcraft-time = { workspace = true }
 effectcraft-color = { workspace = true }
