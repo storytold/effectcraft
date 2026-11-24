@@ -142,7 +142,10 @@ fn first_supported(requested: Option<&str>, browser: &[String], drawable: impl F
         .map(|t| (t, true))
         .into_iter()
         .chain(browser.iter().map(|t| (t.as_str(), false)))
-        .map(|(t, asked)| (t, asked, supported(Some(t))))
+        .map(|(t, asked)| {
+            let code = if asked && t.split(['-', '_']).next().is_some_and(|p| p.eq_ignore_ascii_case("ar")) { "ar" } else { supported(Some(t)) };
+            (t, asked, code)
+        })
         .find(|(t, asked, code)| (*code != "en" && (*asked || drawable(code))) || english(t))
         .map_or("en", |(_, _, code)| code)
 }
@@ -8913,7 +8916,9 @@ mod tests {
         let tags = |t: &[&str]| t.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         assert_eq!(super::first_supported(None, &tags(&["ja-JP", "zh-CN", "zh-TW", "ka-GE", "cs"]), super::web_draws), "cs");
         assert_eq!(super::first_supported(None, &tags(&["ka"]), super::web_draws), "en");
+        assert_eq!(super::first_supported(None, &tags(&["ar"]), super::web_draws), "en");
         assert_eq!(super::first_supported(Some("ka"), &tags(&["cs"]), super::web_draws), "ka");
+        assert_eq!(super::first_supported(Some("ar"), &tags(&["cs"]), super::web_draws), "ar");
         assert_eq!(super::first_supported(Some("ja"), &tags(&[]), super::web_draws), "ja");
     }
 
