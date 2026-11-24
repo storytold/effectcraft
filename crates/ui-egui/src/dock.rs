@@ -464,25 +464,33 @@ fn node_group(node: &Node<PanelKind>, p: PanelKind) -> Option<Vec<PanelKind>> {
 
 impl WorkspaceExt for Workspace {
     fn is_docked(&self, p: PanelKind) -> bool {
-        self.layout.root.as_ref().is_some_and(|root| node_group(root, p).is_some())
+        self.layout().root.as_ref().is_some_and(|root| node_group(root, p).is_some())
     }
     fn is_floating(&self, p: PanelKind) -> bool {
-        self.layout.floating.iter().any(|w| w.contains(&p))
+        self.layout().floating.iter().any(|w| w.contains(&p))
     }
     fn is_open(&self, p: PanelKind) -> bool {
-        self.layout.contains(&p)
+        self.layout().contains(&p)
     }
     fn is_visible(&self, p: PanelKind) -> bool {
-        self.layout.panel_state(&p) == PanelState::Front
+        self.layout().panel_state(&p) == PanelState::Front
     }
     fn group_of(&self, p: PanelKind) -> Vec<PanelKind> {
-        self.layout.root.iter().chain(self.layout.floating.iter().map(|w| &w.root)).find_map(|node| node_group(node, p)).unwrap_or_default()
+        let layout = self.layout();
+        layout
+            .root
+            .as_ref()
+            .and_then(|root| node_group(root, p))
+            .or_else(|| layout.floating.iter().flat_map(|w| w.groups()).find(|g| g.panels.contains(&p)).map(|g| g.panels.clone()))
+            .unwrap_or_default()
     }
     fn panels(&self) -> Vec<PanelKind> {
+        let layout = self.layout();
         let mut out = Vec::new();
-        for node in self.layout.root.iter().chain(self.layout.floating.iter().map(|w| &w.root)) {
-            node_panels(node, &mut out);
+        if let Some(root) = &layout.root {
+            node_panels(root, &mut out);
         }
+        out.extend(layout.floating.iter().flat_map(|w| w.panels().copied()));
         out
     }
 }
@@ -490,12 +498,7 @@ impl WorkspaceExt for Workspace {
 /// Every panel a workspace names: open, or closed with a recorded place.
 pub fn referenced_panels(workspace: &Workspace) -> Vec<PanelKind> {
     let mut out = workspace.panels();
-    out.extend(workspace.hidden.iter().map(|(p, _)| *p));
-    if let Some(saved) = &workspace.saved {
-        for node in saved.root.iter().chain(saved.floating.iter().map(|w| &w.root)) {
-            node_panels(node, &mut out);
-        }
-    }
+    out.extend(workspace.hidden().iter().map(|(p, _)| *p));
     out
 }
 
