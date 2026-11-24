@@ -28,7 +28,7 @@ bin="$work/installed/bin"
 mv "$bin/effectcraft" "$bin/effectcraft-nightly"
 mv "$bin/effectcraft-cli" "$bin/effectcraft-nightly-cli"
 
-test ! -e "$stage/bin/.effectcraft-nightly"
+[[ ! -e "$stage/bin/.effectcraft-nightly" ]]
 cmp "$stage/bin/effectcraft" "$bin/.effectcraft-nightly/effectcraft"
 cmp "$stage/bin/effectcraft-cli" "$bin/effectcraft-nightly-cli"
 expect() {

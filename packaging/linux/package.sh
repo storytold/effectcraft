@@ -155,13 +155,16 @@ if has deb || has rpm; then
     cat >"$NFPM_STAGE/usr/bin/$NFPM_BIN" <<'WRAPPER'
 #!/bin/sh
 set -eu
+if [ -z "${EFFECTCRAFT_CONFIG_DIR:-}" ]; then
+  export EFFECTCRAFT_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/effectcraft-nightly"
+fi
 exec /usr/lib/effectcraft-nightly/effectcraft "$@"
 WRAPPER
     chmod 755 "$NFPM_STAGE/usr/bin/$NFPM_BIN"
     rm -f "$NFPM_STAGE/usr/bin/effectcraft"
     mv "$NFPM_STAGE/usr/bin/effectcraft-cli" "$NFPM_STAGE/usr/bin/$NFPM_CLI"
     mv "$NFPM_STAGE/usr/share/doc/effectcraft" "$NFPM_STAGE/usr/share/doc/$NFPM_NAME"
-    sed -e "s|^Exec=effectcraft\([[:space:]]\|$\)|Exec=$NFPM_BIN\1|" \
+    sed -e "s#^Exec=effectcraft\([[:space:]]\|$\)#Exec=$NFPM_BIN\1#" \
         -e "s|^TryExec=effectcraft$|TryExec=$NFPM_BIN|" \
         -e "s|^Icon=$APP_ID$|Icon=$NIGHTLY_DESK_ID|" \
         -e "s|^Name=EffectCraft$|Name=EffectCraft Nightly|" \
@@ -216,8 +219,16 @@ if has appimage; then
   cp -R "$STAGE" "$APPDIR"
   # Keep sctk-adwaita's MIT notice in the AppImage.
   install -Dm644 "$ROOT/NOTICE" "$APPDIR/usr/share/doc/effectcraft/NOTICE"
-  ln -s usr/bin/effectcraft "$APPDIR/AppRun"
   if [[ "$IS_NIGHTLY" = 1 ]]; then
+    cat >"$APPDIR/AppRun" <<'APPRUN'
+#!/bin/sh
+set -eu
+if [ -z "${EFFECTCRAFT_CONFIG_DIR:-}" ]; then
+  export EFFECTCRAFT_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/effectcraft-nightly"
+fi
+exec "$(dirname "$0")/usr/bin/effectcraft" "$@"
+APPRUN
+    chmod 755 "$APPDIR/AppRun"
     APPIMAGE_ID="$APP_ID.nightly-v1"
     sed -e "s|^Icon=$APP_ID$|Icon=$APPIMAGE_ID|" \
         -e "s|^Name=EffectCraft$|Name=EffectCraft Nightly|" \
@@ -233,6 +244,7 @@ if has appimage; then
     cp "$NIGHTLY_ICON" "$APPDIR/$APPIMAGE_ID.png"
     ln -s "$APPIMAGE_ID.png" "$APPDIR/.DirIcon"
   else
+    ln -s usr/bin/effectcraft "$APPDIR/AppRun"
     cp "$HERE/$APP_ID.desktop" "$APPDIR/$APP_ID.desktop"
     cp "$ROOT/assets/app-icon/hicolor/256x256/apps/$APP_ID.png" "$APPDIR/$APP_ID.png"
     ln -s "$APP_ID.png" "$APPDIR/.DirIcon"
