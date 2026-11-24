@@ -505,6 +505,11 @@ fn transform_form(p: &Value, layer: Option<&effectcraft_engine::project::Layer>,
     (title.into(), fields)
 }
 
+/// The Import dialog's note on how a PhotoCraft file imports as a composition.
+fn pcraft_note() -> Field {
+    Field::note("pcraftNote", "Composition uses canvas-sized saved pixels. Masks, effects and profiles may differ; use Footage for the saved appearance.")
+}
+
 /// If `id` is a dialog command invoked without its parameters, open its form and return true.
 pub fn open_form(app: &mut EffectcraftApp, id: &str, p: &Value) -> bool {
     let s = &app.session;
@@ -517,13 +522,8 @@ pub fn open_form(app: &mut EffectcraftApp, id: &str, p: &Value) -> bool {
         "file.import" if !has(p, &["importAs"]) && imports_ext(p, &["pcraft"]) && !is_layered(p) => {
             let drag = p.get("drag").and_then(Value::as_bool).unwrap_or(false);
             let sel = usize::from(drag && s.prefs.drag_import_as() != "footage");
-            let mut fields = vec![
-                Field::choice("importAs", "Import Kind", &[("Footage", json!("footage")), ("Composition", json!("composition"))], sel),
-                Field::note(
-                    "pcraftNote",
-                    "Composition uses canvas-sized saved pixels. Masks, effects and profiles may differ; use Footage for the saved appearance.",
-                ),
-            ];
+            let mut fields =
+                vec![Field::choice("importAs", "Import Kind", &[("Footage", json!("footage")), ("Composition", json!("composition"))], sel), pcraft_note()];
             // A PDF or Illustrator file picked with it keeps its Page field.
             if is_pdf(p) && !has(p, &["page"]) {
                 fields.push(Field::num("page", "Page", 1.0));
@@ -537,7 +537,10 @@ pub fn open_form(app: &mut EffectcraftApp, id: &str, p: &Value) -> bool {
                 [("Footage", json!("footage")), ("Composition", json!("composition")), ("Composition - Retain Layer Sizes", json!("compositionLayerSizes"))];
             let drag = p.get("drag").and_then(Value::as_bool).unwrap_or(false);
             let sel = if drag { kinds.iter().position(|(_, v)| v.as_str() == Some(s.prefs.drag_import_as())).unwrap_or(0) } else { 1 };
-            ("Import Photoshop File".into(), vec![Field::choice("importAs", "Import Kind", &kinds, sel)])
+            let mut fields = vec![Field::choice("importAs", "Import Kind", &kinds, sel)];
+            // A PhotoCraft file picked with it keeps its compatibility note.
+            fields.extend(imports_ext(p, &["pcraft"]).then(pcraft_note));
+            ("Import Photoshop File".into(), fields)
         }
         // PDF / Illustrator files: Import Kind and the page.
         "file.import" if !has(p, &["importAs", "page"]) && is_pdf(p) => (
@@ -1095,6 +1098,23 @@ mod tests {
             assert_eq!(reply["dialog"], "file.import");
             assert_eq!(app.dialog_state.form.title, "Import PhotoCraft File");
             assert_eq!(app.dialog_state.form.params()["page"], json!(1.0), "{pdf}");
+        }
+    }
+
+    #[test]
+    fn photocraft_import_with_a_photoshop_file_keeps_the_note() {
+        let has_note = |paths: Value| {
+            let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+            let reply = crate::menus::invoke(&mut app, &egui::Context::default(), "file.import", json!({"paths": paths, "drag": true})).unwrap();
+            assert_eq!(reply["dialog"], "file.import");
+            assert_eq!(app.dialog_state.form.title, "Import Photoshop File");
+            let FieldKind::Choice { options, .. } = &app.dialog_state.form.fields[0].kind else { panic!("no import choices") };
+            assert_eq!(options.len(), 3);
+            app.dialog_state.form.fields.iter().any(|f| f.key == "pcraftNote")
+        };
+        for psd in ["/picked.psd", "/picked.psb"] {
+            assert!(has_note(json!(["/picked.pcraft", psd])), "{psd}");
+            assert!(!has_note(json!([psd])), "{psd}");
         }
     }
 
