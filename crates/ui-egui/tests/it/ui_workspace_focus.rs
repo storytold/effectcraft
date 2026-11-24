@@ -189,10 +189,12 @@ fn tab_traversal_activates_an_inactive_dock_tab_without_editing_the_project() {
     for _ in 0..200 {
         key(&mut h, Key::Tab, Modifiers::NONE);
         tabs += 1;
-        if tab_focused(&h, target) {
+        if tab_focused(&h, "Project") {
             break;
         }
     }
+    assert!(tab_focused(&h, "Project"));
+    key(&mut h, Key::ArrowRight, Modifiers::NONE);
     assert!(tab_focused(&h, target));
     println!("Tab presses from no focus to Effect Controls: {tabs}");
     assert_eq!(h.state().ui.dock, before, "traversal alone must not activate a tab");
@@ -205,7 +207,7 @@ fn tab_traversal_activates_an_inactive_dock_tab_without_editing_the_project() {
     assert!(Arc::ptr_eq(&h.state().session.project, &project));
     let inspected = effectcraft_ui_egui::control::inspect(h.state(), &h.ctx);
     assert_eq!(inspected["keyboardFocus"]["automationId"], "panel.tab.EffectControls");
-    key(&mut h, Key::Tab, Modifiers::SHIFT);
+    key(&mut h, Key::ArrowLeft, Modifiers::NONE);
     assert!(tab_focused(&h, "Project"));
     key(&mut h, Key::Enter, Modifiers::NONE);
     assert_eq!(h.state().ui.focused, PanelKind::Project);
@@ -295,15 +297,17 @@ fn control_root_divider_drag_after_toolbar_and_dock_tab_keyboard_activation() {
     for tabs in 1..=200 {
         d.ok("ui.key", json!({"key":"Tab"}), true);
         assert!(d.h.state().ui.mini_flowchart.is_none(), "dock-tab traversal must not open a foreground popup");
-        if tab_focused(&d.h, target) {
-            println!("control Tab presses to Effect Controls: {tabs}");
+        if tab_focused(&d.h, "Project") {
+            println!("control Tab presses to Project: {tabs}");
             break;
         }
     }
-    assert!(tab_focused(&d.h, target), "Effect Controls must remain reachable by control-channel Tab traversal");
+    // A tab strip is one Tab stop: Tab reaches the shown tab, the arrows move between tabs.
+    d.ok("ui.key", json!({"key":"ArrowRight"}), true);
+    assert!(tab_focused(&d.h, target), "Effect Controls must remain reachable by control-channel keyboard traversal");
     d.ok("ui.key", json!({"key":"Space"}), true);
     assert_eq!(d.h.state().ui.focused, PanelKind::EffectControls);
-    d.ok("ui.key", json!({"key":"Tab","shift":true}), true);
+    d.ok("ui.key", json!({"key":"ArrowLeft"}), true);
     d.ok("ui.key", json!({"key":"Enter"}), true);
     assert_eq!(d.h.state().ui.focused, PanelKind::Project);
     let before = d.h.state().ui.dock.clone();
