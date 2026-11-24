@@ -261,12 +261,13 @@ windows stay in the main window. Keys pressed in a floating window that none of 
 run the main window's shortcuts, and files dropped on one import as on the main window. While a
 modal dialog is open, floating windows take no input.
 
-The automation ids of the docking chrome are `panel.tab.<Panel>`, `panel.drag.<Panel>` (a
-group's drag bar), `panel.menu.<Panel>` (≡), `panel.tab.<Panel>.lock` (viewer lock),
-`panel.float.<n>.move`, `.resize` and `.resize.<Edge>` for floating window `n`, and
-`dock.gutter.<path>` for dividers (`a`/`b` per split level; a stack's gap below entry `i` adds
-`s<i>`). The other parts (the Timeline's comp tabs, a floating window's close button, the tab
-overflow menu) are found by their accessible names.
+The automation ids of the docking chrome are `panel.tab.<Panel>`, `panel.tab.Timeline.<comp>`
+(the Timeline's comp tabs), `panel.drag.<Panel>` (a group's drag bar), `panel.menu.<Panel>` (≡),
+`panel.tab.<Panel>.lock` (viewer lock), `panel.float.<n>.move`, `.resize` and `.resize.<Edge>`
+for floating window `n`, `dock.gutter.<path>` for split dividers (`a`/`b` per split level),
+`dock.gutter.group.<Panel>` below a dock column's group and `dock.column.<Panel>` at a dock
+column's inner edge. The other parts (a tab's close button, "Close <tab>", and the tab
+overflow button, "More tabs") are found by their accessible names.
 
 Saved workspaces (`workspaces.json`, version 2) hold craft-ui `Workspace`s: the layout, the
 closed panels with where each goes back, the lock, and each floating window's desktop place. A

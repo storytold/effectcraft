@@ -43,7 +43,7 @@ fn panel_window_command_moves_a_docked_panel_into_its_own_window_and_back() {
 }
 
 #[test]
-fn a_click_on_a_floating_panel_does_nothing_while_a_dialog_is_open() {
+fn a_drag_on_a_floating_panel_does_nothing_while_a_dialog_is_open() {
     use egui::{Event, Modifiers, PointerButton, vec2};
     use egui_kittest::Harness;
     let mut app = EffectcraftApp::new(Session::default());
@@ -52,32 +52,37 @@ fn a_click_on_a_floating_panel_does_nothing_while_a_dialog_is_open() {
     let mut h =
         Harness::builder().with_size(vec2(1400.0, 900.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(move |_| app);
     h.run_steps(3);
-    // The floating window's ×, by its accessible name.
-    let close = |h: &Harness<'_, EffectcraftApp>| {
-        use egui_kittest::kittest::Queryable;
-        h.get_by_label("Close panel window").rect().center()
+    // The floating window's move grip: a drag moves it only while no dialog is up.
+    let grip = |h: &Harness<'_, EffectcraftApp>| {
+        let e = h.state().auto.find("panel.float.0.move").expect("the floating window's move grip");
+        egui::pos2(e.rect[0] + e.rect[2] / 2.0, e.rect[1] + e.rect[3] / 2.0)
     };
-    let click = |h: &mut Harness<'_, EffectcraftApp>, pos| {
-        h.event(Event::PointerMoved(pos));
+    let drag = |h: &mut Harness<'_, EffectcraftApp>, from: egui::Pos2| {
+        let to = from + vec2(-30.0, 20.0);
+        h.event(Event::PointerMoved(from));
         h.step();
-        for pressed in [true, false] {
-            h.event(Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE });
+        h.event(Event::PointerButton { pos: from, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+        h.step();
+        for k in 1..=5 {
+            h.event(Event::PointerMoved(from + (to - from) * (k as f32 / 5.0)));
             h.step();
         }
+        h.event(Event::PointerButton { pos: to, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+        h.step();
         h.run_steps(2);
     };
-    let at = close(&h);
+    let at = grip(&h);
     let ctx = h.ctx.clone();
     effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "app.settings", json!({"page": "general"})).unwrap();
     h.run_steps(3);
     let before = h.state().ui.dock.clone();
-    click(&mut h, at);
-    assert_eq!(h.state().ui.dock, before, "the floating panel takes no click while Settings is open");
-    assert!(h.state().ui.dock.is_floating(PanelKind::Project));
-    // The same click closes the window once the dialog is gone.
+    drag(&mut h, at);
+    assert_eq!(h.state().ui.dock, before, "the floating panel takes no drag while Settings is open");
+    // The same drag moves the window once the dialog is gone.
     h.state_mut().dialog = None;
     h.run_steps(3);
-    let at = close(&h);
-    click(&mut h, at);
-    assert!(!h.state().ui.dock.is_open(PanelKind::Project));
+    let at = grip(&h);
+    drag(&mut h, at);
+    assert_ne!(h.state().ui.dock, before, "the drag moved the floating window");
+    assert!(h.state().ui.dock.is_floating(PanelKind::Project));
 }

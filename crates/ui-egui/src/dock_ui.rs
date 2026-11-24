@@ -417,7 +417,7 @@ impl EffectcraftApp {
         };
         let EffectPanels { locks, menu, bodies, ime, .. } = panels;
         self.live_dock.specs = specs;
-        let DockAreaOutput { actions, requested, events, focused, picked, error, float_space, windows, window_files, sources, .. } = output;
+        let DockAreaOutput { actions, requested, events, focused, pressed, picked, error, float_space, windows, window_files, sources, .. } = output;
         self.dock_rects = bodies;
         self.unpublished_viewports = ime.unpublished();
         // A window that closed or docked takes its composition with it.
@@ -431,10 +431,10 @@ impl EffectcraftApp {
         }
         self.forward_window_input(&ctx, &windows, window_files);
         self.live_dock.windows = windows;
-        // Key focus moving to a group, or a tab picked, focuses that panel.
+        // A press in a panel's body, a tab picked, or key focus moving to a group focuses that panel.
         let moved = focused != self.live_dock.focused;
         self.live_dock.focused = focused;
-        if let Some(panel) = picked.or(focused.filter(|_| moved)) {
+        if let Some(panel) = pressed.or(picked).or(focused.filter(|_| moved)) {
             self.focus_panel(&ctx, panel);
         }
         if let Some(error) = error {
@@ -513,10 +513,10 @@ impl EffectcraftApp {
         }
     }
 
-    /// Automation ids for the dock's gesture sources: `panel.tab.<Panel>`, `panel.drag.<Panel>`
-    /// (the group's drag bar), `panel.float.<n>.move` and `.resize` (bottom-right corner) and
-    /// `.resize.<Edge>` for floating window `n`, `dock.gutter.<path>` (`a`/`b` per split level; a
-    /// stack's gap below entry `i` adds `s<i>`), `dock.gutter.group.<Panel>` under a dock
+    /// Automation ids for the dock's gesture sources: `panel.tab.<Panel>`, `panel.tab.<Panel>.<document>`
+    /// (the Timeline's comp tabs), `panel.drag.<Panel>` (the group's drag bar), `panel.float.<n>.move`
+    /// and `.resize` (bottom-right corner) and `.resize.<Edge>` for floating window `n`,
+    /// `dock.gutter.<path>` (`a`/`b` per split level), `dock.gutter.group.<Panel>` under a dock
     /// column's group and `dock.column.<Panel>` at a dock column's inner edge.
     fn register_dock_hits(&mut self, sources: &[DockSource<PanelKind>]) {
         let window = |panel: &PanelKind| self.ui.dock.layout().floating.iter().position(|window| window.contains(panel));
@@ -527,6 +527,10 @@ impl EffectcraftApp {
         for source in sources {
             let entry = match &source.kind {
                 SourceKind::Tab(panel) => (format!("panel.tab.{}", panel.id()), title(panel)),
+                SourceKind::Document(panel, document) => {
+                    let name = self.session.project.item(effectcraft_engine::project::ItemId(*document)).map_or_else(String::new, |item| item.name.clone());
+                    (format!("panel.tab.{}.{document}", panel.id()), name)
+                }
                 SourceKind::GroupBar(panel) => (format!("panel.drag.{}", panel.id()), "Move panel group".into()),
                 SourceKind::WindowGrip(panel) => match window(panel) {
                     Some(index) => (format!("panel.float.{index}.move"), "Move floating panel".into()),
@@ -538,10 +542,7 @@ impl EffectcraftApp {
                     None => continue,
                 },
                 SourceKind::Divider(DividerKind::Split(path)) => (format!("dock.gutter.{}", path_id(path)), "gutter".into()),
-                SourceKind::Divider(DividerKind::Groups(panel)) => {
-                    let id = dock::stack_gutter_id(self.ui.dock.layout(), *panel).unwrap_or_else(|| format!("dock.gutter.group.{}", panel.id()));
-                    (id, "gutter".into())
-                }
+                SourceKind::Divider(DividerKind::Groups(panel)) => (format!("dock.gutter.group.{}", panel.id()), "gutter".into()),
                 SourceKind::Divider(DividerKind::ColumnEdge(panel)) => (format!("dock.column.{}", panel.id()), "gutter".into()),
                 _ => continue,
             };

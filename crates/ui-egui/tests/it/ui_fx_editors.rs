@@ -93,14 +93,20 @@ fn at(r: egui::Rect, fx: f32, fy: f32) -> Pos2 {
     pos2(r.min.x + r.width() * fx, r.min.y + r.height() * fy)
 }
 
+/// `n` clicks at `p`, one press per step as the runtime takes them (each press is its step's last
+/// pointer event): the releases are one step apart, within egui's double-click interval.
 fn click_n(h: &mut Harness<'_, EffectcraftApp>, p: Pos2, n: u32) {
     h.event(Event::PointerMoved(p));
     h.step();
-    // (all in one frame: the harness' frame time is longer than a double-click's)
-    for _ in 0..n {
-        h.event(Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
-        h.event(Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
+    let button = |pressed| Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() };
+    for i in 0..n {
+        if i > 0 {
+            h.input_mut().events.push(button(false));
+        }
+        h.input_mut().events.push(button(true));
+        h.step();
     }
+    h.input_mut().events.push(button(false));
     h.step();
     h.run_steps(2);
 }
@@ -293,15 +299,21 @@ fn composition_tabs_and_scrolling_preview() {
         .with_context_setup(effectcraft_ui_egui::framework::install_headless)
         .build_eframe(|_| EffectcraftApp::new(s));
     h.run_steps(4);
-    rect(&h, "panel.tab.Timeline.close");
+    let shown = h.state().session.state.active_comp.unwrap();
+    // The Timeline's tab for the shown comp, and its × by its accessible name.
+    rect(&h, &format!("panel.tab.Timeline.{}", shown.0));
+    let close = {
+        use egui_kittest::kittest::Queryable;
+        let name = h.state().session.project.item(shown).unwrap().name.clone();
+        h.get_by_label(&format!("Close {name}")).rect().center()
+    };
     rect(&h, "preview.scroll");
     click_id(&mut h, "panel.tab.Composition.lock");
     assert!(h.state().ui.locked_tabs.contains("Composition"));
     click_id(&mut h, "panel.tab.Composition.lock");
     assert!(h.state().ui.locked_tabs.is_empty());
     // The Timeline's × closes its comp's tab (the panel stays, as in After Effects).
-    let shown = h.state().session.state.active_comp.unwrap();
-    click_id(&mut h, "panel.tab.Timeline.close");
+    click_n(&mut h, close, 1);
     assert!(!h.state().session.state.open_comps.contains(&shown));
     assert!(h.state().ui.dock.is_docked(PanelKind::Timeline));
 }

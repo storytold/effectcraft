@@ -499,32 +499,6 @@ pub fn referenced_panels(workspace: &Workspace) -> Vec<PanelKind> {
     out
 }
 
-/// The automation id of the gap below stacked panel `p`: `dock.gutter.<path>s<i>`, with the
-/// stack's split path (`a`/`b` per level) and the entry's index.
-pub fn stack_gutter_id(layout: &Layout, p: PanelKind) -> Option<String> {
-    fn rec(node: &Node<PanelKind>, p: PanelKind, path: &mut String, depth: usize) -> Option<String> {
-        if depth > craft_behavior::dock::MAX_DEPTH {
-            return None;
-        }
-        match node {
-            Node::Split { first, second, .. } => {
-                path.push('a');
-                if let Some(id) = rec(first, p, path, depth + 1) {
-                    return Some(id);
-                }
-                path.pop();
-                path.push('b');
-                let found = rec(second, p, path, depth + 1);
-                path.pop();
-                found
-            }
-            Node::Stack { entries, .. } => entries.iter().position(|e| e.panel == p).map(|i| format!("dock.gutter.{path}s{i}")),
-            _ => None,
-        }
-    }
-    rec(layout.root.as_ref()?, p, &mut String::new(), 0)
-}
-
 /// A panel lock button (Composition viewers and the Timeline keep their comp while locked,
 /// Effect Controls its layer): a closed padlock while locked, an open one while unlocked.
 /// Returns true when clicked. Automation: `panel.tab.<panel>.lock`.

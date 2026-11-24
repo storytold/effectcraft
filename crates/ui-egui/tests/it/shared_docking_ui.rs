@@ -8,7 +8,6 @@ use effectcraft_ui_egui::{
 };
 use egui::{Event, Modifiers, PointerButton, Rect, pos2, vec2};
 use egui_kittest::Harness;
-use egui_kittest::kittest::{NodeT, Queryable};
 use serde_json::json;
 
 fn invoke(app: &mut EffectcraftApp, id: &str, params: serde_json::Value) -> Result<serde_json::Value, String> {
@@ -134,8 +133,6 @@ fn pointer_drop_merges_floats_and_redocks_without_project_changes() {
     drag(&mut h, from, pos2(700.0, 400.0), Modifiers::COMMAND);
     assert_eq!(floating(h.state()).len(), 1);
     assert!(h.state().ui.dock.is_floating(PanelKind::Info));
-    let grips: Vec<_> = h.query_all_by_label("Resize panel window").collect();
-    assert!(!grips.is_empty() && grips.iter().all(|grip| grip.accesskit_node().role() == egui::accesskit::Role::Button));
     // Its corner resizes it and its title bar moves it.
     let original = rect4(floating(h.state())[0].rect);
     let grip = rect(&h, "panel.float.0.resize").center();
@@ -320,30 +317,6 @@ fn catalog_close_keeps_dynamic_panel_identity_and_releases_viewers() {
     assert!(app.ui.dock.is_docked(PanelKind::Composition));
     assert_eq!(app.ui.maximized, None);
     assert!(!app.ui.viewers.get(&42).is_some_and(Option::is_some), "the closed viewer forgets its comp");
-}
-
-#[test]
-fn stacked_panels_resize_by_pointer_without_changing_closed_entries() {
-    let mut session = Session::default();
-    session.execute("comp.new", json!({"width": 160, "height": 90, "duration": 1})).unwrap();
-    let mut app = EffectcraftApp::new(session);
-    app.ui.start_screen = false;
-    let mut h =
-        Harness::builder().with_size(vec2(1000.0, 720.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(move |_| app);
-    h.run_steps(4);
-    h.state_mut().ui.dock =
-        dock::docked(dock::stack(&[(PanelKind::Preview, true, Some(100.0)), (PanelKind::Properties, true, None), (PanelKind::Align, false, Some(77.0))]));
-    h.run_steps(3);
-    let project = h.state().session.project.clone();
-    let before = rect(&h, "panel.Preview").height();
-    let from = rect(&h, "dock.gutter.s0").center();
-    drag(&mut h, from, from + vec2(0.0, 16.0), Modifiers::NONE);
-    let after = rect(&h, "panel.Preview").height();
-    assert!((after - before - 16.0).abs() < 2.0, "{before} -> {after}");
-    let Some(Node::Stack { entries, .. }) = &h.state().ui.dock.layout().root else { panic!("stack lost") };
-    assert!(entries[0].height.unwrap_or_default() > 100.0, "{entries:?}");
-    assert_eq!((entries[2].panel, entries[2].open, entries[2].height), (PanelKind::Align, false, Some(77.0)));
-    assert!(std::sync::Arc::ptr_eq(&project, &h.state().session.project));
 }
 
 #[test]

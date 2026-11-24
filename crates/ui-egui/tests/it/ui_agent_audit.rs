@@ -170,6 +170,13 @@ fn every_panel_registers_automation_ids_for_its_widgets() {
     for (r, l) in widgets {
         if !panels.iter().any(|p| p.contains(r.center())) && !covered(r, &elements) {
             gaps.push(format!("chrome: [{:.0},{:.0} {:.0}x{:.0}] {l:?}", r.min.x, r.min.y, r.width(), r.height()));
+            // DIAG: the accessibility nodes at the gap.
+            {
+                use egui_kittest::kittest::{By, NodeT, Queryable};
+                for node in h.query_all(By::new().predicate(|_| true)).filter(|n| n.rect().contains(r.center()) && n.rect().width() < 200.0) {
+                    eprintln!("DIAG gap node {:?} {:?} {:?}", node.accesskit_node().role(), node.accesskit_node().label(), node.rect());
+                }
+            }
         }
     }
     assert!(gaps.is_empty(), "{} interactive widgets without an automation id:\n{}", gaps.len(), gaps.join("\n"));

@@ -479,8 +479,9 @@ fn text_field_event(command: &str) -> Option<Vec<egui::Event>> {
 
 /// Hand a text field's Edit command to the window `window` whose field has the keyboard. The
 /// main window gets the clipboard text itself and the events through the synthetic queue; a
-/// floating panel's OS window gets each key pressed and released through the window host, and
-/// the clipboard text as typed text on Cmd+V.
+/// floating panel's OS window gets each command as the key equivalent the platform's menu took
+/// from it (Copy and Cut as egui's copy and cut events, the rest as the key's tap), and the
+/// clipboard text as typed text on Cmd+V.
 fn send_to_text_field(app: &mut EffectcraftApp, ctx: &egui::Context, window: egui::ViewportId, events: Vec<egui::Event>) {
     if window == egui::ViewportId::ROOT {
         for event in events {
@@ -496,24 +497,26 @@ fn send_to_text_field(app: &mut EffectcraftApp, ctx: &egui::Context, window: egu
         ctx.request_repaint();
         return;
     }
-    let host = craft_ui::runtime::windows::WindowHost::of(ctx);
+    use craft_ui::runtime::windows::{KeyEquivalent, WindowHost};
+    let host = WindowHost::of(ctx);
     let platform = craft_keymap::egui::platform(ctx);
     for event in events {
-        let (key, modifiers) = match event {
+        let equivalent = match event {
             egui::Event::Key { key: egui::Key::V, .. } => {
                 if let Some(text) = app.hooks.clipboard_text.as_ref().and_then(|f| f()) {
                     host.inject_text(window, &text);
                 }
                 continue;
             }
-            egui::Event::Key { key, modifiers, .. } => (key, modifiers),
-            egui::Event::Copy => (egui::Key::C, egui::Modifiers::COMMAND),
-            egui::Event::Cut => (egui::Key::X, egui::Modifiers::COMMAND),
+            egui::Event::Key { key, modifiers, .. } => match craft_keymap::Key::from_egui(key) {
+                Some(key) => KeyEquivalent::Tap(craft_keymap::Chord::new(craft_keymap::Mods::from_egui(&modifiers, platform), key)),
+                None => continue,
+            },
+            egui::Event::Copy => KeyEquivalent::Copy,
+            egui::Event::Cut => KeyEquivalent::Cut,
             _ => continue,
         };
-        if let Some(key) = craft_keymap::Key::from_egui(key) {
-            host.inject_key(window, key, craft_keymap::Mods::from_egui(&modifiers, platform), false);
-        }
+        host.key_equivalent(window, equivalent);
     }
 }
 
