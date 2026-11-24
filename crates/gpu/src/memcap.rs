@@ -357,8 +357,12 @@ const NVIDIA_SMI_ARGS: [&str; 2] = ["--query-gpu=pci.bus_id,pci.device_id,memory
 #[cfg(not(target_arch = "wasm32"))]
 const NVIDIA_SMI_TIMEOUT: Duration = Duration::from_secs(3);
 
+/// Allow hundreds of short CSV rows while bounding the reader even after a caller timeout.
+#[cfg(not(target_arch = "wasm32"))]
+const NVIDIA_SMI_MAX_STDOUT: usize = 16 * 1024;
+
 /// The output of `nvidia-smi` (see [`NVIDIA_SMI_ARGS`]), run once per process and kept: `None` when
-/// it is missing, fails, or takes too long.
+/// it is missing, fails, takes too long, or exceeds its output budget.
 #[cfg(not(target_arch = "wasm32"))]
 fn nvidia_smi_output() -> Option<&'static str> {
     static OUTPUT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
@@ -383,6 +387,8 @@ const REAP_TIMEOUT: Duration = Duration::from_millis(200);
 enum NoOutput {
     /// The program could not start, exited with an error, or its output could not be read.
     Failed,
+    /// The diagnostic exceeded its stdout budget.
+    TooLarge,
     /// The program was still running at the timeout (it is killed).
     TimedOut,
     /// The program exited successfully, but its output was still open at the timeout (a process
@@ -390,13 +396,23 @@ enum NoOutput {
     OutputOpen,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+fn read_probe_stdout(stdout: impl std::io::Read) -> Result<String, NoOutput> {
+    use std::io::Read;
+    let mut out = Vec::new();
+    stdout.take(NVIDIA_SMI_MAX_STDOUT as u64 + 1).read_to_end(&mut out).map_err(|_| NoOutput::Failed)?;
+    if out.len() > NVIDIA_SMI_MAX_STDOUT {
+        return Err(NoOutput::TooLarge);
+    }
+    String::from_utf8(out).map_err(|_| NoOutput::Failed)
+}
+
 /// Runs `program` with `args` and returns its standard output when it exits successfully and its
-/// output ends within `timeout`, without a console window on Windows. The output is read on a
+/// output ends within `timeout` and fits the byte budget, without a console window on Windows. The output is read on a
 /// thread of its own, so a process the program left behind holding the pipe open cannot hold the
 /// caller past the timeout. A program still running at the timeout is killed (see [`stop`]).
 #[cfg(not(target_arch = "wasm32"))]
 fn run_with_timeout(program: &std::ffi::OsStr, args: &[&str], timeout: Duration) -> Result<String, NoOutput> {
-    use std::io::Read;
     use std::process::{Command, Stdio};
     let mut cmd = Command::new(program);
     cmd.args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
@@ -409,12 +425,11 @@ fn run_with_timeout(program: &std::ffi::OsStr, args: &[&str], timeout: Duration)
     let start = std::time::Instant::now();
     let mut child = cmd.spawn().map_err(|_| NoOutput::Failed)?;
     let (tx, rx) = std::sync::mpsc::channel();
-    let reader = child.stdout.take().and_then(|mut stdout| {
+    let reader = child.stdout.take().and_then(|stdout| {
         std::thread::Builder::new()
             .name("nvidia-smi output".into())
             .spawn(move || {
-                let mut out = String::new();
-                let _ = tx.send(stdout.read_to_string(&mut out).ok().map(|_| out));
+                let _ = tx.send(read_probe_stdout(stdout));
             })
             .ok()
     });
@@ -438,9 +453,9 @@ fn run_with_timeout(program: &std::ffi::OsStr, args: &[&str], timeout: Duration)
         }
     }
     match rx.recv_timeout(timeout.saturating_sub(start.elapsed())) {
-        Ok(Some(out)) => Ok(out),
+        Ok(out) => out,
         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(NoOutput::OutputOpen),
-        Ok(None) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(NoOutput::Failed),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(NoOutput::Failed),
     }
 }
 
@@ -742,6 +757,20 @@ mod tests {
         assert_eq!(vram_from_nvidia_smi(twins, 0x2503, "0000:09:00.0"), None, "no such address: either twin");
         assert_eq!(vram_from_nvidia_smi(twins, 0x2503, "0000:02:00.0"), Some(8 * GIB), "the known twin by its address");
         assert_eq!(vram_from_nvidia_smi(twins, 0x1234, ""), Some(8 * GIB), "no such device: the smallest known card");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn oversized_probe_output_leaves_video_memory_unknown() {
+        let mut csv = b"00000000:01:00.0, 0x250310de, 12288\n".to_vec();
+        csv.resize(NVIDIA_SMI_MAX_STDOUT, b' ');
+        let vram = |out: Result<String, NoOutput>| out.ok().and_then(|out| vram_from_nvidia_smi(&out, 0x2503, "0000:01:00.0"));
+        assert_eq!(vram(read_probe_stdout(csv.as_slice())), Some(12 * GIB));
+
+        csv.extend_from_slice(b"  ");
+        let mut stdout = std::io::Cursor::new(csv);
+        assert_eq!(vram(read_probe_stdout(&mut stdout)), None);
+        assert_eq!(stdout.position(), NVIDIA_SMI_MAX_STDOUT as u64 + 1, "stop reading as soon as the budget is exceeded");
     }
 
     /// Stands in for an `nvidia-smi` that hangs: only run (through `--ignored`) as a child of
