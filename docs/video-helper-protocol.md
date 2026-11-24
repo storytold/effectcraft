@@ -136,10 +136,10 @@ and the helper carries on; it does not count.
   helper.
 - **`{"op":"error","job":1,"frame":3,"code":"…","message":"…"}`** answers one request. `frame` is
   there when it answers an `encode.frame` (it ends that frame's timeout) and absent for
-  `encode.open` and `encode.flush`. The helper process carries on, but the job is over:
-  EffectCraft sends `cancel`, then `encode.close` once `cancelled` arrives. Frames sent before the
-  error are not answered; a late reply for one is dropped. Codes: `unsupported` (the settings are
-  declined), `device_lost`, `out_of_memory`, `packet_too_large` (the encoder's output for a frame does not fit
+  `encode.open` and `encode.flush`. The helper process carries on, but the job is over: EffectCraft
+  sends `cancel`, then `encode.close` once `cancelled` arrives. Frames sent before the error are not
+  answered; a late reply for one is dropped. Codes: `unsupported` (the settings are declined),
+  `device_lost`, `out_of_memory`, `packet_too_large` (the encoder's output for a frame does not fit
   the `out` region), `encoder`. All of them are job errors.
 - **EffectCraft stops the helper** when it exits, closes stdout, sends a line that does not parse
   or does not fit, breaks the rules above, or misses a timeout. After 3 stops it is turned off and
