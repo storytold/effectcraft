@@ -86,7 +86,11 @@ fn photocraft_composition_keeps_layer_names_visibility_opacity_and_blend() {
     let before = s.project.items.len();
     let r = s.execute("file.import", json!({"paths":[path],"importAs":"composition"})).unwrap();
     assert_eq!(r["comps"].as_array().unwrap().len(), 1, "{r}");
-    assert!(r["errors"].as_array().unwrap().iter().any(|e| e.as_str().is_some_and(|e| e.contains("Some masks, effects and profiles are unsupported"))), "{r}");
+    assert!(r["errors"].as_array().unwrap().is_empty(), "{r}");
+    assert!(
+        r["warnings"].as_array().unwrap().iter().any(|e| e.as_str().is_some_and(|e| e.contains("Some masks, effects and profiles are unsupported"))),
+        "{r}"
+    );
     let cid = ItemId(r["comps"][0].as_u64().unwrap());
     let c = s.project.comp(cid).unwrap();
     assert_eq!((c.width, c.height), (8, 6));
@@ -117,6 +121,22 @@ fn photocraft_composition_keeps_layer_names_visibility_opacity_and_blend() {
     s.execute("edit.undo", json!({})).unwrap();
     assert_eq!(s.project.items.len(), before);
     std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn photocraft_composition_notes_arrive_before_a_background_footage_job() {
+    let layered = fixture("background-layered.pcraft", json!([layer("Bottom", true, 1.0, "Normal", json!({"kind":"raster","surface":surface("ff0000ff")}))]));
+    let mut png = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(2, 2, image::Rgba([1, 2, 3, 255]))).write_to(&mut png, image::ImageFormat::Png).unwrap();
+    let still = fixture_bytes("background-still.png", png.into_inner());
+    let mut s = Session { importer: Some(std::sync::Arc::new(Import)), ..Default::default() };
+    let r = s.execute("file.import", json!({"paths":[layered, still],"importAs":"composition","background":true})).unwrap();
+    assert!(r["errors"].as_array().unwrap().is_empty(), "{r}");
+    let notes = |r: &Value| r["warnings"].as_array().unwrap().iter().any(|w| w.as_str().is_some_and(|w| w.contains("Some masks, effects and profiles")));
+    assert!(notes(&r), "the composition already exists, so a canceled job must not hide its notes: {r}");
+    s.execute("jobs.wait", json!({})).unwrap();
+    std::fs::remove_file(layered).unwrap();
+    std::fs::remove_file(still).unwrap();
 }
 
 #[test]

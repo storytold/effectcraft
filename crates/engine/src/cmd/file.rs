@@ -144,6 +144,13 @@ fn import_cmd(s: &mut Session, p: &Value) -> Result<Value> {
         };
         let p = p.clone();
         let immediate_errors = pending.errors.clone();
+        // Compositions made during preparation stay when the job is canceled, so their notes are
+        // shown now and returned in both results.
+        let immediate_warnings = std::mem::take(&mut pending.warnings);
+        for w in &immediate_warnings {
+            s.events.push(crate::Event::Toast { message: w.clone(), error: true });
+        }
+        let job_warnings = immediate_warnings.clone();
         let mut result = s.spawn_task("import", label, false, move |ctl| {
             let mut probed = Vec::with_capacity(total);
             for (k, src) in sources.iter().enumerate() {
@@ -157,6 +164,9 @@ fn import_cmd(s: &mut Session, p: &Value) -> Result<Value> {
             let apply: crate::jobs::Apply = Box::new(move |s: &mut Session| {
                 let made = pending.comps.len() + probed.iter().filter(|r| r.is_ok()).count();
                 let mut r = add_footage(s, pending, probed)?;
+                if let Some(w) = r.get_mut("warnings").and_then(Value::as_array_mut) {
+                    w.splice(0..0, job_warnings.into_iter().map(Value::from));
+                }
                 finish_import(s, &mut r, target, &p);
                 let mut toast = format!("Imported {made} item{}", if made == 1 { "" } else { "s" });
                 let errors: Vec<&str> = r["errors"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
@@ -174,6 +184,7 @@ fn import_cmd(s: &mut Session, p: &Value) -> Result<Value> {
         // Report those failures now as well as in the eventual job result.
         if result["started"] == true {
             result["errors"] = json!(immediate_errors);
+            result["warnings"] = json!(immediate_warnings);
         }
         return Ok(result);
     }
@@ -281,6 +292,8 @@ struct PendingImport {
     comps: Vec<u64>,
     items: Vec<u64>,
     errors: Vec<String>,
+    /// Notes about compositions that imported, such as what a PhotoCraft composition leaves out.
+    warnings: Vec<String>,
     /// EffectCraft projects merged in (`file.importProject` results); never added to a comp.
     projects: Vec<Value>,
 }
@@ -427,6 +440,7 @@ fn prepare_import(s: &mut Session, p: &Value) -> Result<PendingImport> {
     let mut comps = vec![];
     let mut items = vec![];
     let mut errors = vec![];
+    let mut warnings = vec![];
     // EffectCraft projects import as projects, as After Effects imports an .aep; so do After
     // Effects projects, refused when parts of them cannot come over. The app asks about those
     // before it gets here (`panels::aep_losses`); a script or agent gets the refusal.
@@ -460,10 +474,10 @@ fn prepare_import(s: &mut Session, p: &Value) -> Result<PendingImport> {
             let bytes = match read {
                 Ok(b) if pcraft || craft_doc::sniff(&b) == Some(craft_doc::Kind::PhotoCraft) => {
                     match import_pcraft_comp(s, &path, &b, retain) {
-                        Ok((comp, made, warnings)) => {
+                        Ok((comp, made, notes)) => {
                             comps.push(comp);
                             items.extend(made);
-                            errors.extend(warnings);
+                            warnings.extend(notes);
                         }
                         Err(e) => errors.push(format!("{path}: {e}")),
                     }
@@ -526,15 +540,14 @@ fn prepare_import(s: &mut Session, p: &Value) -> Result<PendingImport> {
         page,
         psd_layer: p.get("layer").cloned(),
     };
-    Ok(PendingImport { sources, prober, comps, items, errors, projects })
+    Ok(PendingImport { sources, prober, comps, items, errors, warnings, projects })
 }
 
 /// The last part of an import: add the probed files to the project (one undo step) and select
 /// everything the import made, so the Project panel shows it.
 fn add_footage(s: &mut Session, pending: PendingImport, probed: Vec<std::result::Result<Probed, String>>) -> Result<Value> {
-    let PendingImport { comps, mut items, mut errors, projects, .. } = pending;
+    let PendingImport { comps, mut items, mut errors, mut warnings, projects, .. } = pending;
     let mut found = vec![];
-    let mut warnings = vec![];
     for r in probed {
         match r {
             Ok(f) => {
