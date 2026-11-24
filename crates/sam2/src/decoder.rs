@@ -321,8 +321,10 @@ mod tests {
         let reference = x64.conv_transpose2d(&k64, 0, 0, 2, 1).unwrap().flatten_all().unwrap().to_vec1::<f64>().unwrap();
         let magnitude = x64.abs().unwrap().conv_transpose2d(&k64.abs().unwrap(), 0, 0, 2, 1).unwrap().flatten_all().unwrap().to_vec1::<f64>().unwrap();
         // A c-term dot product has forward error <= gamma_c * sum |x_i k_i|,
-        // gamma_c = c*u/(1-c*u), u = half the machine epsilon. This covers either
-        // fused or separate multiply/add reductions, including cancellation.
+        // gamma_c = c*u/(1-c*u), u = half the machine epsilon, in any summation order
+        // (Higham, Accuracy and Stability of Numerical Algorithms, eq. 3.5). Without
+        // FMA each term sees one multiply and at most c-1 additions; with FMA at most
+        // c fused operations. Either way that is at most c roundings per term.
         // Account for the f64 oracle and magnitude sum's own rounding as well.
         let gamma32 = c * (f64::from(f32::EPSILON) / 2.0) / (1.0 - c * (f64::from(f32::EPSILON) / 2.0));
         let gamma64 = c * (f64::EPSILON / 2.0) / (1.0 - c * (f64::EPSILON / 2.0));
