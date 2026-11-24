@@ -890,7 +890,7 @@ fn delete_selected(app: &EffectcraftApp, ui: &egui::Ui, allowed: bool, on_row: b
 // and Left open and close the item's settings, Enter and Space do the same (Space only with a
 // row focused: otherwise it plays the preview). The focus follows the selection.
 ///
-/// Returns whether a queue row has keyboard focus.
+/// Returns whether a queue row has keyboard focus, and the item the keys moved the selection to.
 fn list_keys(
     app: &mut EffectcraftApp,
     ctx: &egui::Context,
@@ -899,9 +899,10 @@ fn list_keys(
     can_navigate: bool,
     tops: &[(u64, f32)],
     list_h: f32,
-) -> bool {
+) -> (bool, Option<u64>) {
     let focused = crate::framework::focused_widget(ctx);
     let on_row = focused.is_some_and(|f| queue.iter().any(|i| row_id(i.id) == f));
+    let mut moved = None;
     let by_mouse = focused.is_none() && app.ui.focused == crate::dock::PanelKind::RenderQueue;
     if (on_row || by_mouse) && can_navigate && app.dialog.is_none() && !widgets::any_menu_open(ctx) {
         let keys: Vec<egui::Key> = ctx.input(|i| {
@@ -913,7 +914,6 @@ fn list_keys(
                 })
                 .collect()
         });
-        let mut moved = None;
         for key in keys {
             use egui::Key;
             let at = (*selected).and_then(|s| queue.iter().position(|i| i.id == s));
@@ -959,7 +959,7 @@ fn list_keys(
             ctx.memory_mut(|m| m.move_focus(egui::FocusDirection::None));
         }
     }
-    on_row
+    (on_row, moved)
 }
 
 /// An item's Status cell: its state, or the percentage while it is the one rendering.
@@ -1210,12 +1210,14 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         None => d.remove::<(u64, String)>(editing_id),
     });
 
-    let anchor = sel.anchor;
-    let on_row = list_keys(app, &ctx, &queue, (&mut open, &mut sel.anchor), editing.is_none(), &tops, list.height());
-    if let Some(moved) = sel.anchor.filter(|a| Some(*a) != anchor) {
-        sel.only(moved);
-    }
-
+    let (on_row, moved) = list_keys(app, &ctx, &queue, (&mut open, &mut sel.anchor), editing.is_none(), &tops, list.height());
+    let picked = match moved {
+        Some(moved) => {
+            sel.only(moved);
+            sel.in_order(&order)
+        }
+        None => picked,
+    };
     if delete_selected(app, ui, editing.is_none() && !rendering, on_row, &picked, &mut actions) {
         sel = Selection::default();
     }

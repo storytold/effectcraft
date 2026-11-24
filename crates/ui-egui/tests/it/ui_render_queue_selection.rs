@@ -56,6 +56,15 @@ fn key(h: &mut Harness<'_, EffectcraftApp>, key: Key) {
     h.run_steps(3);
 }
 
+fn keys_together(h: &mut Harness<'_, EffectcraftApp>, keys: &[Key]) {
+    for pressed in [true, false] {
+        for key in keys {
+            h.input_mut().events.push(Event::Key { key: *key, physical_key: None, pressed, repeat: false, modifiers: Modifiers::NONE });
+        }
+        h.step();
+    }
+    h.run_steps(3);
+}
 /// The comp names of the rows that say they are selected, in queue order.
 fn selected(h: &Harness<'_, EffectcraftApp>) -> Vec<String> {
     let mut rows: Vec<String> = h
@@ -90,6 +99,21 @@ fn shift_and_ctrl_click_select_rows_and_delete_removes_them_all() {
     assert_eq!(queued(&h), ["Alpha", "Beta", "Gamma"]);
 }
 
+#[test]
+fn arrow_down_then_delete_in_one_input_pass_removes_the_row_moved_to() {
+    let mut h = harness();
+    click(&mut h, "renderQueue.item.1.row", Modifiers::NONE);
+    keys_together(&mut h, &[Key::ArrowDown, Key::Delete]);
+    assert_eq!(queued(&h), ["Alpha", "Gamma"], "Delete acts on the row the arrow moved to");
+}
+#[test]
+fn an_arrow_at_the_anchor_collapses_a_range_before_delete() {
+    let mut h = harness();
+    click(&mut h, "renderQueue.item.1.row", Modifiers::NONE);
+    click(&mut h, "renderQueue.item.3.row", Modifiers::SHIFT);
+    keys_together(&mut h, &[Key::ArrowUp, Key::Delete]);
+    assert_eq!(queued(&h), ["Beta", "Gamma"], "only the row the arrow landed on is removed");
+}
 #[test]
 fn the_render_checkbox_and_render_settings_reach_every_selected_item() {
     let mut h = harness();
