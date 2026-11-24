@@ -1347,6 +1347,23 @@ fn swedish_interface_language_is_validated_and_persisted() {
     assert_eq!(Prefs::from_json(r#"{"general":{"language":"sv"}}"#).general.language, "sv");
 }
 
+/// Arabic is stored as `ar` rather than a locale tag, and persists like every other catalog.
+#[test]
+fn arabic_interface_language_is_validated_and_persisted() {
+    let store = Arc::new(MemoryConfig::default());
+    let mut s = Session { config: Some(store.clone()), ..Default::default() };
+    assert!(crate::prefs::LANGUAGES.contains(&("العربية", "ar")));
+    for value in ["ar-SA", "ar_EG", "AR"] {
+        assert!(s.execute("prefs.set", json!({"key": "general.language", "value": value})).is_err(), "{value}");
+    }
+    s.execute("prefs.set", json!({"key": "general.language", "value": "ar"})).unwrap();
+    assert_eq!(s.execute("prefs.get", json!({"key": "general.language"})).unwrap(), json!("ar"));
+    let mut ar = Session { config: Some(store), ..Default::default() };
+    ar.load_settings();
+    assert_eq!(ar.prefs.general.language, "ar");
+    assert_eq!(Prefs::from_json(r#"{"general":{"language":"ar"}}"#).general.language, "ar");
+}
+
 #[test]
 fn unicode_label_colors_fall_back_without_panicking() {
     use effectcraft_color::Label;

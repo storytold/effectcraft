@@ -53,6 +53,7 @@ const ROWS: &[(&str, &[(&str, &str)])] = &[
     ("pl", POLISH),
     ("ka", GEORGIAN),
     ("ka", GEORGIAN_PANELS),
+    ("ar", super::ar_data::ARABIC_UI),
     ("sv", SWEDISH),
     ("fr", FRENCH),
 ];
@@ -71,6 +72,7 @@ fn catalog(language: &str) -> Option<&'static Index> {
     static KA: OnceLock<Index> = OnceLock::new();
     static SV: OnceLock<Index> = OnceLock::new();
     static FR: OnceLock<Index> = OnceLock::new();
+    static AR: OnceLock<Index> = OnceLock::new();
     let (index, rows) = match language {
         "ja" => (&JA, JAPANESE),
         "zh-hans" => (&HANS, SIMPLIFIED_CHINESE),
@@ -83,6 +85,7 @@ fn catalog(language: &str) -> Option<&'static Index> {
         "fr" => (&FR, FRENCH),
         // Georgian also reads its own rows for text the other catalogs don't have yet.
         "ka" => return Some(KA.get_or_init(|| GEORGIAN.iter().chain(GEORGIAN_PANELS).copied().collect())),
+        "ar" => (&AR, super::ar_data::ARABIC_UI),
         "sv" => (&SV, SWEDISH),
         _ => return None,
     };

@@ -5,6 +5,8 @@
 
 use crate::EffectcraftApp;
 
+/// Arabic (`ar`) menus, panels and effects.
+mod ar_data;
 /// Effect names, keyed by effect id (#821).
 pub(crate) mod effects;
 /// Translations for the panels, tooltips and dialogs below the menu bar (see the module docs).
@@ -15,7 +17,7 @@ pub(crate) use ui::catalog_characters;
 pub(crate) use ui::{set_current, tr, tr_args};
 
 /// Every language with a catalog, in the order Settings ▸ General ▸ Language lists them.
-const CATALOG_CODES: [&str; 13] = ["cs", "de", "es", "fr", "pl", "pt-br", "sv", "ru", "uk", "ka", "ja", "zh-hans", "zh-hant"];
+const CATALOG_CODES: [&str; 14] = ["cs", "de", "es", "fr", "pl", "pt-br", "sv", "ru", "uk", "ka", "ar", "ja", "zh-hans", "zh-hant"];
 
 /// The active interface language: the stored preference when it names a catalog, otherwise `en`
 /// (English is the source of every label and needs no lookup).
@@ -81,6 +83,21 @@ pub(crate) fn swedish(app: &EffectcraftApp) -> bool {
     language(app) == "sv"
 }
 
+/// The UI is in Arabic.
+pub(crate) fn arabic(app: &EffectcraftApp) -> bool {
+    language(app) == "ar"
+}
+
+/// Whether `language` reads right-to-left.
+pub(crate) fn is_rtl_language(language: &str) -> bool {
+    matches!(language, "ar" | "he")
+}
+
+/// Whether the current interface language reads right-to-left.
+pub(crate) fn is_rtl() -> bool {
+    is_rtl_language(ui::current())
+}
+
 /// Settings ▸ General ▸ Language ▸ Match System: the operating system's interface language
 /// where EffectCraft has it, else English (#229), as After Effects installs in the system's
 /// language. The browser build follows the locales its page passes in ([`set_system_locales`]).
@@ -135,12 +152,12 @@ fn first_supported(requested: Option<&str>, browser: &[String], drawable: impl F
 /// rather than draw boxes; `?lang=` and a language chosen in Settings still select them.
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 fn web_draws(language: &str) -> bool {
-    !matches!(language, "ja" | "zh-hans" | "zh-hant" | "ka")
+    !matches!(language, "ja" | "zh-hans" | "zh-hant" | "ka" | "ar")
 }
 
 /// The language EffectCraft shows for a BCP 47 locale (`ja-JP` → `ja`, `zh-Hans-CN` → `zh-hans`,
 /// `zh-TW` → `zh-hant`, `uk-UA` → `uk`, `es-ES` → `es`, `pt-BR` → `pt-br`, `cs-CZ` → `cs`,
-/// `ka-GE` → `ka`, `ru-RU` → `ru`, `de-AT` → `de`, `fr-CA` → `fr`, `sv-SE` → `sv`).
+/// `ka-GE` → `ka`, `ar-SA` → `ar`, `ru-RU` → `ru`, `de-AT` → `de`, `fr-CA` → `fr`, `sv-SE` → `sv`).
 fn supported(locale: Option<&str>) -> &'static str {
     let Some(locale) = locale else { return "en" };
     let mut parts = locale.split(['-', '_']);
@@ -153,6 +170,7 @@ fn supported(locale: Option<&str>) -> &'static str {
         "cs" => "cs",
         "pl" => "pl",
         "ka" => "ka",
+        "ar" => "ar",
         "ru" => "ru",
         "de" => "de",
         "fr" => "fr",
@@ -182,6 +200,7 @@ const REVEAL_FINDER: &[(&str, &str, &str)] = &[
     ("es", "Mostrar en el Explorador", "Mostrar en el gestor de archivos"),
     ("pt-br", "Mostrar no Explorador", "Mostrar no gerenciador de arquivos"),
     ("fr", "Afficher dans l’Explorateur", "Afficher dans le gestionnaire de fichiers"),
+    ("ar", "إظهار في مستكشف الملفات", "إظهار في مدير الملفات"),
     ("ru", "Показать в Проводнике", "Показать в файловом менеджере"),
 ];
 
@@ -228,6 +247,7 @@ fn menu_catalog(language: &str) -> Option<&'static [(&'static str, &'static str,
         "pl" => POLISH,
         "ka" => GEORGIAN,
         "sv" => SWEDISH,
+        "ar" => ar_data::ARABIC_MENUS,
         _ => return None,
     })
 }
@@ -305,6 +325,7 @@ pub(crate) fn entry(app: &EffectcraftApp, e: &MenuEntry, shown: String) -> Strin
         // A colon before the history's (untranslated) action name: "Отменить: Comp1".
         "ru" => Some(("Отменить:", "Нечего отменять", "Повторить:", "Нечего повторять")),
         "sv" => Some(("Ångra", "Det går inte att ångra", "Gör om", "Det går inte att göra om")),
+        "ar" => Some(("تراجع:", "لا شيء للتراجع عنه", "إعادة:", "لا شيء للإعادة")),
         _ => None,
     };
     match e.command.as_str() {
@@ -367,6 +388,17 @@ pub(crate) fn submenu(app: &EffectcraftApp, source: &str, shown: String) -> Stri
                 && let Some(name) = shown.strip_prefix("Assign Shortcut to “").and_then(|s| s.strip_suffix('”'))
             {
                 return format!("Přiřadit zkratku 3D zobrazení „{name}“");
+            }
+        }
+        "ar" => {
+            if source == "Assign Shortcut to Workspace" {
+                if let Some(name) = shown.strip_prefix("Assign Shortcut to “").and_then(|s| s.strip_suffix("” Workspace")) {
+                    return format!("إسناد اختصار لمساحة العمل «{name}»");
+                }
+            } else if source == "Assign Shortcut to 3D View"
+                && let Some(name) = shown.strip_prefix("Assign Shortcut to “").and_then(|s| s.strip_suffix('”'))
+            {
+                return format!("إسناد اختصار للعرض الثلاثي «{name}»");
             }
         }
         "uk" => {
@@ -9356,5 +9388,22 @@ mod tests {
         // No renderer here: drop the frame's texture uploads (egui asserts on unhandled ones in debug).
         out.textures_delta.clear();
         assert!(app.auto.find("settings.general.language").is_some());
+    }
+
+    #[test]
+    fn arabic_flag_and_rtl_follow_language() {
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        assert!(!arabic(&app));
+        assert!(is_rtl_language("ar"));
+        set_current("ar");
+        app.session.execute("prefs.set", json!({"key": "general.language", "value": "ar"})).unwrap();
+        assert!(arabic(&app));
+        assert!(is_rtl());
+        assert_eq!(language(&app), "ar");
+        assert_eq!(label(&app, "comp.new", "New Composition..."), "تركيب جديد...");
+        assert_eq!(command_label("window.panel", "Project"), "مشروع");
+        assert_eq!(tr("Composition Settings"), "إعدادات التركيب");
+        set_current("en");
+        assert!(!is_rtl());
     }
 }

@@ -228,11 +228,21 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let p = ui.painter().with_clip_rect(rect);
     p.rect_filled(rect, 0.0, t.app_bg);
     let mut actions: Vec<(&str, serde_json::Value)> = vec![];
-    let rail = Rect::from_min_size(rect.min, vec2(RAIL_W.min(rect.width() * 0.4), rect.height()));
-    p.rect_filled(rail, 0.0, t.panel_bg);
-    p.line_segment([rail.right_top(), rail.right_bottom()], Stroke::new(1.0, t.separator));
+    let rail_w = RAIL_W.min(rect.width() * 0.4);
+    let (rail, main) = if crate::i18n::is_rtl() {
+        let rail = Rect::from_min_max(pos2(rect.max.x - rail_w, rect.min.y), rect.max);
+        p.rect_filled(rail, 0.0, t.panel_bg);
+        p.line_segment([rail.left_top(), rail.left_bottom()], Stroke::new(1.0, t.separator));
+        let main = Rect::from_min_max(pos2(rect.min.x + 40.0, rect.min.y + 32.0), pos2(rail.min.x - 40.0, rect.max.y - 16.0));
+        (rail, main)
+    } else {
+        let rail = Rect::from_min_size(rect.min, vec2(rail_w, rect.height()));
+        p.rect_filled(rail, 0.0, t.panel_bg);
+        p.line_segment([rail.right_top(), rail.right_bottom()], Stroke::new(1.0, t.separator));
+        let main = Rect::from_min_max(pos2(rail.max.x + 40.0, rect.min.y + 32.0), pos2(rect.max.x - 40.0, rect.max.y - 16.0));
+        (rail, main)
+    };
     rail_ui(app, ui, &p, rail, &mut actions);
-    let main = Rect::from_min_max(pos2(rail.max.x + 40.0, rect.min.y + 32.0), pos2(rect.max.x - 40.0, rect.max.y - 16.0));
     if app.ui.home_learn {
         super::learn::home_tab(app, ui, main);
     } else if app.ui.home_templates {
