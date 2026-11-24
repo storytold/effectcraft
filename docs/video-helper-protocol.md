@@ -3,7 +3,8 @@
 **Status: proposed, not implemented.** This page specifies how EffectCraft will talk to a
 hardware video helper, as decided in [RFC-0031][rfc-0031] (hardware video in a helper process).
 Nothing here exists in the app yet. Phase 1 covers **encoding**; decoding is reserved for phase 2
-([decoding](#decoding-phase-2)).
+([decoding](#decoding-phase-2)). Where this page is more specific than the RFC or differs from it,
+[Differences from RFC-0031](#differences-from-rfc-0031) lists it.
 
 A **video helper** is an [external helper](external-helpers.md) that offers hardware video
 encoding instead of effects. It reuses that page's process model: the helper is a child process,
@@ -55,9 +56,12 @@ helper answers with the usual fields plus a `video` object:
 Video does not use the effect protocol's float RGBA image refs (16 bytes a pixel, about 133 MB at
 4K). A picture is **8-bit 4:2:0, three planes**, Y then U then V. The luma plane is `width ×
 height`; each chroma plane is `width/2 × height/2`. Width and height are even and within the
-device's `min_size` and `max_size`; other sizes are declined before the encoder opens. Planes are
-tightly packed (`stride` = plane width) and sit one after the other in the slot. Colour is given as
-[H.273](https://www.itu.int/rec/T-REC-H.273) code points. Only limited range is used at first.
+device's `min_size` and `max_size`; other sizes are declined before the encoder opens. Every
+`encode.frame` describes the three planes itself (see [Encoding](#encoding)). EffectCraft version 1
+always sends them tightly packed (`stride` = plane width), Y then U then V, one after the other in
+the slot's `in` region; a later version can add padding without changing the message. Colour is
+given once per job, in `encode.open`, as [H.273](https://www.itu.int/rec/T-REC-H.273) code points.
+Only limited range is used at first.
 
 ## Encoding
 
@@ -69,8 +73,8 @@ encode.open → encode.opened → (encode.frame → encode.packets)… → encod
 | Request | Reply | |
 |---|---|---|
 | `{"op":"encode.open","job":1,"device":"nvenc:0","codec":"h264","width":1920,"height":1080,"rate":[30,1],"bitrate_kbps":15000,"profile":"high","keyint":60,"colour":{"primaries":1,"transfer":1,"matrix":1,"range":"limited"},"slots":[{"in":{"offset":0,"len":3110400},"out":{"offset":3110400,"len":1048576}},…]}` | `{"op":"encode.opened","job":1,"codec_config":"<base64 avcC>","delay":2}` | `job` is chosen by EffectCraft and is never reused. `slots` is the memory the helper may use, decided by EffectCraft. `codec_config` is the `avcC` (H.264) or `hvcC` (HEVC) record for the MP4 sample entry. `delay` is the number of frames the encoder holds back (B-frames). |
-| `{"op":"encode.frame","job":1,"frame":0,"slot":0}` | `{"op":"encode.packets","job":1,"frame":0,"packets":[{"offset":0,"len":41230,"pts":0,"dts":-2,"key":true}]}` | The picture is in `slots[0].in`. The reply means the slot may be reused and says where the packets are, inside `slots[0].out`. It may hold no packets (the encoder is still holding frames) or several. |
-| `{"op":"encode.flush","job":1,"out":{"offset":…,"len":…}}` | `{"op":"encode.packets","job":1,"frame":null,"packets":[…]}` then `{"op":"encode.flushed","job":1}` | The rest of the stream, inside `out`. EffectCraft sizes `out` for the frames the encoder still holds: at least `(delay + 1)` times the length of a slot's `out` region. A packet that still does not fit is `packet_too_large`. |
+| `{"op":"encode.frame","job":1,"frame":0,"slot":0,"planes":[{"offset":0,"stride":1920,"size":[1920,1080],"len":2073600},{"offset":2073600,"stride":960,"size":[960,540],"len":518400},{"offset":2592000,"stride":960,"size":[960,540],"len":518400}]}` | `{"op":"encode.packets","job":1,"frame":0,"packets":[{"offset":0,"len":41230,"pts":0,"dts":-2,"key":true}]}` | The picture is in `slots[0].in`. `planes` lists Y, U and V: `offset` is from the start of the file, `size` is in samples, `len` is `stride × height` bytes. EffectCraft sets them, and the helper reads only them. The reply means the slot may be reused and says where the packets are, inside `slots[0].out`. It may hold no packets (the encoder is still holding frames) or several. |
+| `{"op":"encode.flush","job":1,"out":{"offset":…,"len":…}}` | `{"op":"encode.packets","job":1,"frame":null,"packets":[…]}` then `{"op":"encode.flushed","job":1}` | The rest of the stream, inside `out`. EffectCraft sizes `out` for the frames the encoder still holds: at least `(delay + 1)` times the length of a slot's `out` region. If the encoder's output still does not fit, the helper answers `error` with code `packet_too_large`. |
 | `{"op":"encode.close","job":1}` | none | Free everything for the job. EffectCraft sends it after `encode.flushed` or `cancelled`, and frees or reuses the job's regions only then. If the helper was stopped first, there is no reply to wait for: the exchange file is dropped and its regions are never reused (see [stopping](#timeouts-and-errors)). |
 | `{"op":"cancel","job":1}` | `{"op":"cancelled","job":1}` | Stop now. After it sends `cancel`, EffectCraft ignores every reply for the job except `cancelled`, so replies for frames still in flight are not protocol breaks. The helper stops using the job's regions before it replies `cancelled`, and `cancelled` ends every frame of the job that is still outstanding. |
 
@@ -81,7 +85,8 @@ encode.open → encode.opened → (encode.frame → encode.packets)… → encod
 - **Packet offsets** are counted from the start of the region the reply uses (`slots[slot].out`,
   or the `out` region of `encode.flush`). In the example the packet starts at file offset
   3110400 + 0. EffectCraft adds the region's offset and checks that `offset + len` is within the
-  region's length.
+  region's length. A packet outside the region is a protocol break (see the table below), not a
+  `packet_too_large` error.
 - **Timestamps** are in units of 1 / `rate[0]` seconds, so frame `i` has `pts = i × rate[1]`.
   `dts` may be earlier than `pts`.
 - **Who owns what.** EffectCraft decides every offset. The helper reads only the slot it is told
@@ -91,10 +96,33 @@ encode.open → encode.opened → (encode.frame → encode.packets)… → encod
 - **Backpressure.** At most 8 frames, and at most 256 MiB, are queued plus in flight together. When
   the budget is used up EffectCraft waits for a reply before sending the next frame, so a slow GPU
   slows the export and does not use more memory.
-- **Replies are in frame order,** `error` replies included. A reply with an unknown `job` or
-  `frame`, outside the regions, or larger than its `out` region (`packet_too_large`) is a protocol
-  break.
+- **Replies are in frame order,** `error` replies included.
 - **Control lines** are at most 1 MiB. Pictures and packets never go through the pipe.
+
+### Job and frame ids
+
+`job` is a positive whole number that EffectCraft takes from a counter that only goes up, so an id
+is never reused, not even after the helper is restarted. `frame` counts from 0 inside a job and is
+never reused in it. Every id EffectCraft has sent is **issued**. A job is **open** from
+`encode.open` until EffectCraft sends `cancel` or `encode.close`; after that it is **ended**, and
+it stays ended. An id EffectCraft has not sent is **never issued**.
+
+### What EffectCraft does with each reply
+
+A **protocol break** stops the helper and counts towards the 3 stops. A **job error** ends one job
+and the helper carries on; it does not count.
+
+| Reply | EffectCraft |
+|---|---|
+| `encode.packets` or `error` for an open job, for the oldest outstanding frame, with every packet inside its region | Accepts it. |
+| `encode.packets` or `error` for an open job with a `frame` that was never sent, already answered, or not the oldest outstanding; or `error` without `frame` when no `encode.open` or `encode.flush` is outstanding | Protocol break. |
+| `encode.packets` with a packet whose `offset + len` is outside its region | Protocol break. |
+| `error` with `packet_too_large`: the helper says the encoder's output does not fit the `out` region it was given, and it did not write past it | Job error. |
+| `cancelled` for a job EffectCraft sent `cancel` for | Accepts it; the job's frames are over. |
+| `cancelled` for an open job | Protocol break. |
+| Any other reply for an **ended** job (late replies for frames that were in flight, a second `cancelled`) | Dropped and logged. The regions it names are not read. Not a break. |
+| Any reply for a job that was **never issued** | Protocol break. |
+| A line that does not parse, or is over 1 MiB | Protocol break. |
 
 ## Timeouts and errors
 
@@ -110,8 +138,9 @@ encode.open → encode.opened → (encode.frame → encode.packets)… → encod
   there when it answers an `encode.frame` (it ends that frame's timeout) and absent for
   `encode.open` and `encode.flush`. The helper process carries on, but the job is over:
   EffectCraft sends `cancel`, then `encode.close` once `cancelled` arrives. Frames sent before the
-  error are not answered. Codes: `unsupported` (the settings are declined),
-  `device_lost`, `out_of_memory`, `packet_too_large`, `encoder`.
+  error are not answered; a late reply for one is dropped. Codes: `unsupported` (the settings are declined),
+  `device_lost`, `out_of_memory`, `packet_too_large` (the encoder's output for a frame does not fit
+  the `out` region), `encoder`. All of them are job errors.
 - **EffectCraft stops the helper** when it exits, closes stdout, sends a line that does not parse
   or does not fit, breaks the rules above, or misses a timeout. After 3 stops it is turned off and
   listed in `helper_blocklist.txt` until the user retries in Settings, as for effect helpers.
@@ -136,6 +165,17 @@ What EffectCraft does with a failure:
 
 A hardware export writes to a temporary file and replaces the destination only when it finishes,
 so a failed or cancelled export leaves any existing file as it was.
+
+## Differences from RFC-0031
+
+[D3](https://github.com/storytold/craft-contrib/blob/main/rfcs/0031-hardware-video-helper.md)
+describes the frame format. This page follows it, with these differences and additions:
+
+- **Plane descriptors** are in every `encode.frame`, as D3 says. Colour information is not: it is
+  sent once per job, in `encode.open`, because it cannot change inside a job.
+- **Replies for a cancelled or old job** are ignored, as D3 says, but only for ids EffectCraft has
+  issued. A reply for a job id it never issued is a protocol break.
+- **Limits** D3 leaves open ("a few frames", "a cap on the bytes") are 8 frames and 256 MiB.
 
 ## Decoding (phase 2)
 
