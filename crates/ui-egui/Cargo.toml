@@ -14,7 +14,7 @@ craft-mime = { workspace = true }
 craft-ui = { workspace = true }
 craft-behavior = { workspace = true }
 craft-host = { workspace = true }
-craft-keymap = { workspace = true }
+craft-keymap = { workspace = true, features = ["egui"] }
 craft-theme = { workspace = true }
 craft-window = { workspace = true }
 effectcraft-time = { workspace = true }

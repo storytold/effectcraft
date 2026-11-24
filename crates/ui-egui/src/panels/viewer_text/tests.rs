@@ -147,7 +147,7 @@ impl ImePass {
 /// One native floating window holding the Timeline's group and then the Viewer's.
 fn two_group_window() -> craft_behavior::dock::Floating<PanelKind> {
     let groups = vec![craft_behavior::dock::Group::new(vec![PanelKind::Timeline], 0), craft_behavior::dock::Group::new(vec![PanelKind::Viewer(1)], 0)];
-    craft_behavior::dock::Floating::stack(groups, [0.0, 0.0, 320.0, 360.0]).expect("two groups make a window")
+    craft_behavior::dock::Floating::stack(1, groups, egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(320.0, 360.0))).expect("two groups make a window")
 }
 
 impl ImePass {
@@ -169,7 +169,7 @@ impl ImePass {
         let raw = egui::RawInput { viewport_id: viewport, viewports, screen_rect: Some(rect), events, ..Default::default() };
         let mut preedit = None;
         let mut out = ctx.run_ui(raw, |ui| {
-            let mut ime = crate::dock_ui::NativeIme::new(std::slice::from_ref(window), &[]);
+            let mut ime = crate::dock_ui::NativeIme::new(std::slice::from_ref(window), &[(PanelKind::Timeline, viewport)], &[]);
             let order = if viewer_first { [true, false] } else { [false, true] };
             for viewer in order {
                 if ime.begin_body(viewport) {
@@ -198,7 +198,7 @@ impl ImePass {
 #[test]
 fn native_window_with_a_group_before_the_viewer_keeps_the_composition() {
     let window = two_group_window();
-    let viewport = craft_ui::docking::DockArea::<PanelKind>::window_viewport(crate::dock_ui::area_id(), window.id);
+    let viewport = egui::ViewportId::from_hash_of(("native panel window", window.id));
     let preview = || egui::Event::Ime(egui::ImeEvent::Preedit { text: "é".into(), active_range_chars: None });
     for viewer_first in [false, true] {
         let (mut app, _) = editor("abcd", 4, 4);
@@ -223,12 +223,12 @@ fn native_window_with_a_group_before_the_viewer_keeps_the_composition() {
     assert_eq!(preedit, None);
     // A window that drew fewer bodies than its layout counts publishes after every body in
     // its next pass.
-    let mut ime = crate::dock_ui::NativeIme::new(std::slice::from_ref(&window), &[]);
+    let mut ime = crate::dock_ui::NativeIme::new(std::slice::from_ref(&window), &[(PanelKind::Timeline, viewport)], &[]);
     ime.begin_body(viewport);
     assert!(!ime.publishes(viewport, false));
     let unpublished = ime.unpublished();
     assert_eq!(unpublished, vec![viewport]);
-    let mut ime = crate::dock_ui::NativeIme::new(std::slice::from_ref(&window), &unpublished);
+    let mut ime = crate::dock_ui::NativeIme::new(std::slice::from_ref(&window), &[(PanelKind::Timeline, viewport)], &unpublished);
     ime.begin_body(viewport);
     assert!(ime.publishes(viewport, false));
 }

@@ -309,7 +309,7 @@ impl EffectcraftApp {
         // A hidden window paints when work needs a UI pass: queued input and waits, a settled
         // screenshot, or playback into a child viewport.
         let focused = self.focused;
-        let child_viewports = !self.ui.dock.layout.floating.is_empty() || prefs_live::video_preview_active(self, focused);
+        let child_viewports = !self.ui.dock.layout().floating.is_empty() || prefs_live::video_preview_active(self, focused);
         let paint = self.want_paint
             || !self.synthetic.is_empty()
             || !self.input_waiters.is_empty()

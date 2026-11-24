@@ -443,7 +443,10 @@ impl MenuSync {
 /// window, where any widget that holds the keyboard counts (the Viewer's text editor is not an
 /// egui text field).
 pub fn text_field_window(ctx: &egui::Context) -> Option<egui::ViewportId> {
-    craft_ui::docking::typing_window(ctx).or_else(|| ctx.egui_wants_keyboard_input().then_some(egui::ViewportId::ROOT))
+    let host = craft_ui::runtime::windows::WindowHost::of(ctx);
+    let window = host.key_window();
+    let floating = (window != egui::ViewportId::ROOT && host.typing()).then_some(window);
+    floating.or_else(|| ctx.egui_wants_keyboard_input().then_some(egui::ViewportId::ROOT))
 }
 
 /// Whether a focused text field takes the menu command `command` ([`activate`]): the native menu
@@ -476,8 +479,8 @@ fn text_field_event(command: &str) -> Option<Vec<egui::Event>> {
 
 /// Hand a text field's Edit command to the window `window` whose field has the keyboard. The
 /// main window gets the clipboard text itself and the events through the synthetic queue; a
-/// floating panel's OS window gets each key pressed and released, and asks for the clipboard
-/// text on Cmd+V (`craft_ui::docking::send_keys`).
+/// floating panel's OS window gets each key pressed and released through the window host, and
+/// the clipboard text as typed text on Cmd+V.
 fn send_to_text_field(app: &mut EffectcraftApp, ctx: &egui::Context, window: egui::ViewportId, events: Vec<egui::Event>) {
     if window == egui::ViewportId::ROOT {
         for event in events {
@@ -493,19 +496,25 @@ fn send_to_text_field(app: &mut EffectcraftApp, ctx: &egui::Context, window: egu
         ctx.request_repaint();
         return;
     }
-    let events = events
-        .into_iter()
-        .flat_map(|event| {
-            let release = match &event {
-                egui::Event::Key { key, physical_key, modifiers, .. } => {
-                    Some(egui::Event::Key { key: *key, physical_key: *physical_key, pressed: false, repeat: false, modifiers: *modifiers })
+    let host = craft_ui::runtime::windows::WindowHost::of(ctx);
+    let platform = craft_keymap::egui::platform(ctx);
+    for event in events {
+        let (key, modifiers) = match event {
+            egui::Event::Key { key: egui::Key::V, .. } => {
+                if let Some(text) = app.hooks.clipboard_text.as_ref().and_then(|f| f()) {
+                    host.inject_text(window, &text);
                 }
-                _ => None,
-            };
-            std::iter::once(event).chain(release)
-        })
-        .collect();
-    craft_ui::docking::send_keys(ctx, window, events);
+                continue;
+            }
+            egui::Event::Key { key, modifiers, .. } => (key, modifiers),
+            egui::Event::Copy => (egui::Key::C, egui::Modifiers::COMMAND),
+            egui::Event::Cut => (egui::Key::X, egui::Modifiers::COMMAND),
+            _ => continue,
+        };
+        if let Some(key) = craft_keymap::Key::from_egui(key) {
+            host.inject_key(window, key, craft_keymap::Mods::from_egui(&modifiers, platform), false);
+        }
+    }
 }
 
 /// Run a native menu item (by id) the way the in-window menu bar does. While a text field has

@@ -122,6 +122,7 @@ impl EffectcraftApp {
             native_viewports: vec![],
             unpublished_viewports: vec![],
             pending_panel_raise: None,
+            live_dock: Default::default(),
             home_thumbs: Default::default(),
             home_thumb_saved: None,
             window_title: String::new(),

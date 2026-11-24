@@ -27,10 +27,11 @@ pub mod control;
 pub mod credits;
 pub mod display_gpu;
 pub mod dock;
+pub mod dock_command;
 pub mod dock_ui;
 mod expression_diagnostics;
-pub mod framework;
 pub mod frames;
+pub mod framework;
 pub mod gpu_failure;
 pub mod header;
 pub mod i18n;
@@ -500,6 +501,8 @@ pub struct EffectcraftApp {
     pub(crate) unpublished_viewports: Vec<egui::ViewportId>,
     /// A floating panel shown by a command: its window comes to the front next frame.
     pub(crate) pending_panel_raise: Option<PanelKind>,
+    /// What the dock area keeps between frames.
+    pub(crate) live_dock: dock_ui::LiveDock,
     /// Home screen: recent-project thumbnail textures by path (None = no thumbnail).
     pub(crate) home_thumbs: std::collections::HashMap<String, Option<egui::TextureHandle>>,
     /// The (project path, saved revision) whose thumbnail was stored last.

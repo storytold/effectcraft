@@ -20,7 +20,10 @@ fn harness() -> (Harness<'static, EffectcraftApp>, u64, u64) {
     s.execute("layer.addItem", json!({"item": pre})).unwrap();
     s.state.open_comps = vec![ItemId(main)];
     s.state.active_comp = Some(ItemId(main));
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(s));
     h.run_steps(3);
     (h, pre, main)
 }
@@ -181,8 +184,8 @@ fn panels_dock_beside_others_and_gutters_resize_them() {
     let dock = |h: &Harness<'_, EffectcraftApp>| h.state().ui.dock.clone();
     let tab = rect(&h, "panel.tab.EffectControls");
     let tl = rect(&h, "panel.Timeline");
-    // Inside the Timeline body's left drop zone.
-    let depth = craft_ui::docking::SIDE_EDGE_ZONE_DEPTH.min(tl.width().min(tl.height()) / 4.0);
+    // Inside the Timeline body's left drop zone, a few points in from its edge.
+    let depth = 16.0_f32.min(tl.width().min(tl.height()) / 4.0);
     drag(&mut h, tab.center(), pos2(tl.min.x + depth / 2.0, tl.center().y));
     assert_eq!(group_of(&dock(&h), PanelKind::EffectControls), Some(vec![PanelKind::EffectControls]));
     assert!(!group_of(&dock(&h), PanelKind::Timeline).unwrap().contains(&PanelKind::EffectControls));
@@ -251,7 +254,7 @@ fn the_preview_frame_divider_resizes_it() {
                 _ => None,
             }
         }
-        rec(w.layout.root.as_ref()?)
+        rec(w.layout().root.as_ref()?)
     }
     let (preview, props) = (rect(&h, "panel.Preview"), rect(&h, "panel.Properties"));
     let gap = preview_divider(&h);
@@ -440,7 +443,10 @@ fn open_comps_are_tabs_in_the_timeline_row_and_the_rest_are_in_its_overflow_menu
         .collect();
     s.state.open_comps = vec![ItemId(comps[0])];
     s.state.active_comp = Some(ItemId(comps[0]));
-    let mut h = Harness::builder().with_size(egui::vec2(1000.0, 800.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1000.0, 800.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(s));
     h.run_steps(3);
     let alone = rect(&h, "panel.tab.RenderQueue");
     h.state_mut().session.state.open_comps = comps.iter().map(|c| ItemId(*c)).collect();

@@ -19,7 +19,10 @@ fn harness() -> (Harness<'static, EffectcraftApp>, u64, u64) {
     s.execute("layer.newSolid", json!({"name": "Red", "color": [1.0, 0.0, 0.0, 1.0]})).unwrap();
     s.state.open_comps = vec![ItemId(main)];
     s.state.active_comp = Some(ItemId(main));
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(s));
     h.run_steps(3);
     (h, other, main)
 }
@@ -93,9 +96,9 @@ fn opening_a_comp_in_the_minimal_workspace_docks_the_viewer_above_the_timeline()
     invoke(&mut h, "window.closePanel", json!({"panel": "Composition"}));
     assert!(!h.state().ui.dock.is_docked(PanelKind::Composition));
     invoke(&mut h, "comp.open", json!({"comp": other}));
-    match &h.state().ui.dock.layout.root {
+    match &h.state().ui.dock.layout().root {
         Some(Node::Split { axis: effectcraft_ui_egui::dock::SplitAxis::Vertical, first, second, .. }) => {
-            assert_eq!(**first, Node::Tabs { panels: vec![PanelKind::Composition], active: 0 }, "the viewer is on top");
+            assert_eq!(**first, Node::tabs(vec![PanelKind::Composition], 0), "the viewer is on top");
             assert!(matches!(&**second, Node::Tabs { panels, .. } if panels.contains(&PanelKind::Timeline)));
         }
         other => panic!("expected the viewer above the Timeline, got {other:?}"),
