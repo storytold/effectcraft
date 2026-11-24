@@ -151,8 +151,13 @@ fn click_at(h: &mut Harness<'_, EffectcraftApp>, p: Pos2) {
 fn double_click_at(h: &mut Harness<'_, EffectcraftApp>, pos: Pos2) {
     h.input_mut().events.push(Event::PointerMoved(pos));
     h.step();
+    // One press per step, as the runtime takes them: the releases are one step (0.25 s) apart,
+    // within egui's double-click interval (0.3 s).
     for pressed in [true, false, true, false] {
         h.input_mut().events.push(Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() });
+        if pressed {
+            h.step();
+        }
     }
     h.run_steps(3);
 }

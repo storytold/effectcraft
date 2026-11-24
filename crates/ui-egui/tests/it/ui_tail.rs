@@ -365,8 +365,10 @@ fn project_name_column_edge_resizes_and_fits_again() {
     let edge = rect(&h, "project.nameColumn.edge").center();
     assert!((edge.x - (before.x + 80.0)).abs() < 2.0, "{edge:?} after dragging from {before:?}");
     h.input_mut().events.push(Event::PointerMoved(edge));
+    // A double-click, one press per step as the runtime takes them.
     for _ in 0..2 {
         h.input_mut().events.push(Event::PointerButton { pos: edge, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+        h.step();
         h.input_mut().events.push(Event::PointerButton { pos: edge, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
     }
     h.run_steps(3);

@@ -1346,8 +1346,12 @@ fn pen_mask_undoes_step_by_step_and_double_click_moves_the_whole_mask() {
     let at = screen(&h, [100.0, 300.0]);
     h.input_mut().events.push(Event::PointerMoved(at));
     h.step();
+    // One press per step, as the runtime takes them.
     for pressed in [true, false, true, false] {
         h.input_mut().events.push(Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() });
+        if pressed {
+            h.step();
+        }
     }
     h.run_steps(3);
     assert_eq!(h.state().session.state.selected_vertices.len(), 4);

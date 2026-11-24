@@ -420,13 +420,23 @@ fn a_tab_dropped_on_a_frame_joins_it() {
     assert!(group.starts_with(&[PanelKind::Properties]) && group.contains(&PanelKind::EffectControls), "{group:?}");
     assert!(dock(&h).is_visible(PanelKind::EffectControls) && !dock(&h).is_visible(PanelKind::Properties));
     assert!(dock(&h).is_visible(PanelKind::Preview));
-    // DIAG: the right column's chrome after the drop.
-    for e in h.state().auto.elements.iter().filter(|e| e.id.starts_with("panel.tab") || e.id.starts_with("panel.drag") || e.id.starts_with("panel.menu")) {
-        eprintln!("DIAG {} {:?}", e.id, e.rect);
+    // The frame's other tab shows Properties again, the frame stays open. The right column is
+    // narrow: the active tab keeps its whole title and a tab with no room for its first letters
+    // is in the » menu.
+    if has(&h, "panel.tab.Properties") {
+        let tab = rect(&h, "panel.tab.Properties");
+        click_n(&mut h, tab.center(), 1);
+    } else {
+        use egui_kittest::kittest::{NodeT, Queryable};
+        let more = h.query_all_by_label("More tabs").map(|node| node.rect()).find(|r| props.x_range().contains(r.center().x)).expect("the frame's » menu");
+        click_n(&mut h, more.center(), 1);
+        let item = h
+            .query_all_by_label("Properties")
+            .find(|node| node.accesskit_node().role() == egui::accesskit::Role::MenuItem)
+            .expect("Properties in the » menu")
+            .rect();
+        click_n(&mut h, item.center(), 1);
     }
-    // The frame's other tab shows Properties again, the frame stays open.
-    let tab = rect(&h, "panel.tab.Properties");
-    click_n(&mut h, tab.center(), 1);
     assert!(dock(&h).is_visible(PanelKind::Properties) && !dock(&h).is_visible(PanelKind::EffectControls));
     // The layout (saved workspaces) round-trips.
     let s = serde_json::to_string(&dock(&h)).unwrap();
@@ -459,12 +469,12 @@ fn open_comps_are_tabs_in_the_timeline_row_and_the_rest_are_in_its_overflow_menu
     h.run_steps(3);
     h.state_mut().session.state.open_comps = comps.iter().map(|c| ItemId(*c)).collect();
     h.run_steps(3);
-    // The comp tabs follow the panel tabs in the same row, in order (tabs that do not fit clip to
-    // their first letters).
-    let (tl, rq) = (rect(&h, "panel.tab.Timeline"), rect(&h, "panel.tab.RenderQueue"));
+    // The comp tabs follow the Timeline's tab in the same row, in order (tabs that do not fit clip
+    // to their first letters; a panel tab with no room for them is in the » menu too).
+    let tl = rect(&h, "panel.tab.Timeline");
     let shown: Vec<u64> = comps.iter().copied().filter(|c| has(&h, &format!("panel.tab.Timeline.{c}"))).collect();
     assert!(shown.contains(&comps[0]) && shown.len() < comps.len(), "{shown:?}");
-    let mut x = rq.max.x;
+    let mut x = tl.max.x;
     for c in &shown {
         let tab = rect(&h, &format!("panel.tab.Timeline.{c}"));
         assert!(tl.y_range().contains(tab.center().y) && tab.min.x >= x - 0.5, "comp {c} at {tab:?} after x {x}");
@@ -472,8 +482,11 @@ fn open_comps_are_tabs_in_the_timeline_row_and_the_rest_are_in_its_overflow_menu
     }
     // A comp with no room is in the » menu; picking it shows it, and its tab joins the row.
     let hidden = comps.iter().copied().find(|c| !shown.contains(c)).unwrap();
-    let more = named(&h, "More tabs");
-    assert!(more.min.x >= x - 0.5 && tl.y_range().contains(more.center().y), "{more:?}");
+    let more = {
+        use egui_kittest::kittest::{NodeT, Queryable};
+        h.query_all_by_label("More tabs").map(|node| node.rect()).find(|r| tl.y_range().contains(r.center().y)).expect("the Timeline row's » menu")
+    };
+    assert!(more.min.x >= x - 0.5, "{more:?}");
     click_n(&mut h, more.center(), 1);
     let name = names[comps.iter().position(|c| *c == hidden).unwrap()];
     let item = {

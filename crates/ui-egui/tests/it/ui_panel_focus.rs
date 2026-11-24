@@ -38,9 +38,13 @@ fn rect(h: &Harness<'_, EffectcraftApp>, id: &str) -> egui::Rect {
 fn click_n(h: &mut Harness<'_, EffectcraftApp>, p: Pos2, n: u32) {
     h.event(Event::PointerMoved(p));
     h.step();
+    // One press per step, as the runtime takes them: the releases are one step (0.25 s) apart,
+    // within egui's double-click interval (0.3 s).
+    let button = |pressed| Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() };
     for _ in 0..n {
-        h.input_mut().events.push(Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
-        h.input_mut().events.push(Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
+        h.input_mut().events.push(button(true));
+        h.step();
+        h.input_mut().events.push(button(false));
     }
     h.step();
     h.run_steps(2);

@@ -42,11 +42,15 @@ fn click(h: &mut Harness<'_, EffectcraftApp>, id: &str) {
     h.run_steps(3);
 }
 
-/// Double-click element `id` (in one frame: the harness' frame time is longer than a double-click's).
+/// Double-click element `id`, one press per step as the runtime takes them: the releases are one
+/// step (0.25 s) apart, within egui's double-click interval (0.3 s).
 fn double_click(h: &mut Harness<'_, EffectcraftApp>, id: &str) {
     let p = hover(h, id);
     for pressed in [true, false, true, false] {
         button(h, p, pressed);
+        if pressed {
+            h.step();
+        }
     }
     h.run_steps(3);
 }

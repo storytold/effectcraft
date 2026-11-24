@@ -173,7 +173,11 @@ fn every_panel_registers_automation_ids_for_its_widgets() {
             // DIAG: the accessibility nodes at the gap.
             {
                 use egui_kittest::kittest::{By, NodeT, Queryable};
-                for node in h.query_all(By::new().predicate(|_| true)).filter(|n| n.rect().contains(r.center()) && n.rect().width() < 200.0) {
+                for node in h
+                    .query_all(By::new().predicate(|_| true))
+                    .filter(|n| n.accesskit_node().bounding_box().is_some())
+                    .filter(|n| n.rect().contains(r.center()) && n.rect().width() < 200.0)
+                {
                     eprintln!("DIAG gap node {:?} {:?} {:?}", node.accesskit_node().role(), node.accesskit_node().label(), node.rect());
                 }
             }
