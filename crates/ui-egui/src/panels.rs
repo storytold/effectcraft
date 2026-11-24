@@ -344,13 +344,13 @@ pub(crate) fn panel_menu_area(app: &mut EffectcraftApp, ui: &mut egui::Ui) {
             // only ever narrows what the area measured: the separator fills whatever width it is given
             ui.set_max_width(ui.max_rect().width().min(width));
             if ui.button(tr("Close Panel")).clicked() {
-                let _ = app.dock_command(ui.ctx(), craft_ui::docking::Action::Close { panel });
+                let _ = app.dock_command(ui.ctx(), craft_behavior::dock::Action::Close { panel });
                 close = true;
             }
             let floating = crate::dock::WorkspaceExt::is_floating(&app.ui.dock, panel);
             if !floating && ui.button(tr("Undock Panel")).clicked() {
                 let r = crate::dock_ui::default_float_rect(ui.ctx().content_rect());
-                let _ = app.dock_command(ui.ctx(), craft_ui::docking::Action::Float { panel, rect: r });
+                let _ = app.dock_command(ui.ctx(), craft_behavior::dock::Action::Float { panel, rect: r });
                 close = true;
             }
             // Multiple monitors: an OS window of its own, which can go on another screen. Where

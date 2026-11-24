@@ -1,6 +1,7 @@
 //! EffectCraft's workspaces in craft-ui's shared docking: transactions, the command path, pointer
 //! gestures and persistence.
-use craft_ui::docking::{Action, Node, Placement, StackEntry, Zone};
+use craft_behavior::dock::{Action, DockPlacement, Node, StackEntry};
+use craft_ui::docking::Zone;
 use effectcraft_engine::Session;
 use effectcraft_ui_egui::{
     EffectcraftApp,
@@ -29,7 +30,7 @@ fn shared_move_preserves_accordion_metadata_and_unrelated_active_tabs() {
     workspace.apply(Action::Close { panel: PanelKind::Project }, dock::permissions).unwrap();
     assert!(workspace.is_visible(PanelKind::Composition));
     workspace
-        .apply(Action::Move { panel: PanelKind::Preview, anchor: PanelKind::Layer, placement: Placement::Tab { before: None } }, dock::permissions)
+        .apply(Action::Move { panel: PanelKind::Preview, anchor: PanelKind::Layer, placement: DockPlacement::Tab { before: None } }, dock::permissions)
         .unwrap();
     let Some(Node::Split { second, size, .. }) = &workspace.layout.root else { panic!("split was lost") };
     assert_eq!(*size, SplitSize::FixedSecond(300.0));
@@ -44,7 +45,7 @@ fn shared_move_preserves_accordion_metadata_and_unrelated_active_tabs() {
     let before = workspace.clone();
     assert!(
         workspace
-            .apply(Action::Move { panel: PanelKind::Preview, anchor: PanelKind::Audio, placement: Placement::Split(Zone::Left) }, dock::permissions)
+            .apply(Action::Move { panel: PanelKind::Preview, anchor: PanelKind::Audio, placement: DockPlacement::Split(Zone::Left) }, dock::permissions)
             .is_err()
     );
     assert!(workspace.apply(Action::Float { panel: PanelKind::Preview, rect: [0.0, 0.0, f32::INFINITY, 200.0] }, dock::permissions).is_err());
@@ -70,7 +71,7 @@ fn every_builtin_workspace_validates_and_roundtrips_with_dynamic_identities() {
     assert!(text.contains("\"ScriptPanel\":77") && text.contains("\"Viewer\":42"), "{text}");
     assert_eq!(serde_json::from_str::<Workspace>(&text).unwrap(), workspace);
     workspace
-        .apply(Action::Move { panel: PanelKind::ScriptPanel(77), anchor: PanelKind::Viewer(42), placement: Placement::Tab { before: None } }, dock::permissions)
+        .apply(Action::Move { panel: PanelKind::ScriptPanel(77), anchor: PanelKind::Viewer(42), placement: DockPlacement::Tab { before: None } }, dock::permissions)
         .unwrap();
     assert!(workspace.layout.floating.is_empty());
     assert!(workspace.is_visible(PanelKind::ScriptPanel(77)));
@@ -221,7 +222,7 @@ fn catalog_docking_action_supports_resize_reorder_and_floating_geometry() {
     ));
     for action in [
         Action::ResizeSplit { path: vec![], size: SplitSize::FixedFirst(360.0) },
-        Action::Move { panel: PanelKind::Info, anchor: PanelKind::Project, placement: Placement::Tab { before: Some(PanelKind::Project) } },
+        Action::Move { panel: PanelKind::Info, anchor: PanelKind::Project, placement: DockPlacement::Tab { before: Some(PanelKind::Project) } },
         Action::Float { panel: PanelKind::Info, rect: [20.0, 40.0, 300.0, 200.0] },
         Action::MoveFloating { panel: PanelKind::Info, rect: [45.0, 65.0, 330.0, 240.0] },
     ] {
@@ -285,7 +286,7 @@ fn raw_open_actions_are_rejected_through_every_docking_route() {
     for panel in [PanelKind::ScriptPanel(77), PanelKind::Viewer(42)] {
         for action in [
             Action::Open { panel, anchor: Some(PanelKind::Project) },
-            Action::OpenAt { panel, anchor: PanelKind::Project, placement: Placement::Tab { before: None } },
+            Action::OpenAt { panel, anchor: PanelKind::Project, placement: DockPlacement::Tab { before: None } },
         ] {
             for id in ["ui.dock", "window.panel.layout", "window.dockAction"] {
                 let error = invoke(&mut app, id, json!({"action": action})).unwrap_err();

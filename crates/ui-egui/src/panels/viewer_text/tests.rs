@@ -143,9 +143,9 @@ impl ImePass {
 }
 
 /// One native floating window holding the Timeline's group and then the Viewer's.
-fn two_group_window() -> craft_ui::docking::Floating<PanelKind> {
-    let groups = vec![craft_ui::docking::Group::new(vec![PanelKind::Timeline], 0), craft_ui::docking::Group::new(vec![PanelKind::Viewer(1)], 0)];
-    craft_ui::docking::Floating::stack(groups, [0.0, 0.0, 320.0, 360.0]).expect("two groups make a window")
+fn two_group_window() -> craft_behavior::dock::Floating<PanelKind> {
+    let groups = vec![craft_behavior::dock::Group::new(vec![PanelKind::Timeline], 0), craft_behavior::dock::Group::new(vec![PanelKind::Viewer(1)], 0)];
+    craft_behavior::dock::Floating::stack(groups, [0.0, 0.0, 320.0, 360.0]).expect("two groups make a window")
 }
 
 impl ImePass {
@@ -155,7 +155,7 @@ impl ImePass {
     fn window(
         &mut self,
         app: &mut EffectcraftApp,
-        window: &craft_ui::docking::Floating<PanelKind>,
+        window: &craft_behavior::dock::Floating<PanelKind>,
         events: Vec<egui::Event>,
         viewer_first: bool,
         every: bool,

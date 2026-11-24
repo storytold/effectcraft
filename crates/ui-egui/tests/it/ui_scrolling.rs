@@ -462,7 +462,7 @@ fn effect_values_stay_clear_of_the_keyframe_navigator() {
     app.session.execute("prop.toggleAnimation", json!({"layer": lid, "path": path})).unwrap();
     app.session.execute("prop.set", json!({"layer": lid, "path": path, "value": [123456.7, 123456.7]})).unwrap();
     let uid = app.session.active_comp().unwrap().layer(effectcraft_engine::project::LayerId(lid)).unwrap().props.prop(path).unwrap().uid;
-    app.apply_dock(craft_ui::docking::Action::Float { panel: PanelKind::EffectControls, rect: [300.0, 150.0, 330.0, 500.0] }).unwrap();
+    app.apply_dock(craft_behavior::dock::Action::Float { panel: PanelKind::EffectControls, rect: [300.0, 150.0, 330.0, 500.0] }).unwrap();
     h.run_steps(3);
     let value = rect(&h, &format!("effectControls.prop.{uid}.value.1"));
     let nav = rect(&h, &format!("effectControls.prop.{uid}.prevKey"));

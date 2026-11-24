@@ -58,7 +58,7 @@ fn panel_windows_survive_restart_with_hostile_places_made_safe() {
     let ctx = egui::Context::default();
     invoke(&mut app, &ctx, json!({"panel": "Project", "window": true})).unwrap();
     let hostile = [90_000.0, -99_000.0, 99_000.0, 0.5];
-    app.apply_dock(craft_ui::docking::Action::SetNative { panel: PanelKind::Project, rect: Some(hostile) }).unwrap();
+    app.apply_dock(craft_behavior::dock::Action::SetNative { panel: PanelKind::Project, rect: Some(hostile) }).unwrap();
     eframe::App::on_exit(&mut app);
     let restarted = EffectcraftApp::new(Session { config: Some(store), ..Default::default() });
     assert_eq!(native(&restarted, PanelKind::Project), Some(sanitized_window_rect(hostile)));
@@ -73,7 +73,7 @@ fn a_click_on_a_floating_panel_does_nothing_while_a_dialog_is_open() {
     use egui_kittest::Harness;
     let mut app = EffectcraftApp::new(Session::default());
     app.ui.start_screen = false;
-    app.apply_dock(craft_ui::docking::Action::Float { panel: PanelKind::Project, rect: [80.0, 120.0, 320.0, 240.0] }).unwrap();
+    app.apply_dock(craft_behavior::dock::Action::Float { panel: PanelKind::Project, rect: [80.0, 120.0, 320.0, 240.0] }).unwrap();
     let mut h = Harness::builder().with_size(vec2(1400.0, 900.0)).build_eframe(move |_| app);
     h.run_steps(3);
     let close = |h: &Harness<'_, EffectcraftApp>| {

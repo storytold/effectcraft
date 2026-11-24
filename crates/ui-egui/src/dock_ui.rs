@@ -7,9 +7,8 @@
 //! share one route.
 
 use crate::state::UiState;
-use craft_ui::docking::{
-    Action, Divider, DockArea, DockCommand, DockContent, DockError, DockEvent, DockStyle, FloatSpace, Floating, Hit, Node, ResizeEdge, UiDock,
-};
+use craft_behavior::dock::{Action, DockError, Floating, Node};
+use craft_ui::docking::{Divider, DockArea, DockCommand, DockContent, DockEvent, DockStyle, FloatSpace, Hit, ResizeEdge, UiDock};
 use egui::{Rect, Sense, Stroke, StrokeKind, pos2, vec2};
 use serde_json::{Value, json};
 
@@ -286,7 +285,7 @@ impl EffectcraftApp {
                 panels.into_iter().find(|panel| *panel != p)
             });
             let actions = match anchor {
-                Some(anchor) => vec![Action::Move { panel: p, anchor, placement: craft_ui::docking::Placement::Tab { before: None } }],
+                Some(anchor) => vec![Action::Move { panel: p, anchor, placement: craft_behavior::dock::DockPlacement::Tab { before: None } }],
                 // Nothing is docked: the panel becomes the docked layout.
                 None => vec![Action::Close { panel: p }, Action::Open { panel: p, anchor: None }],
             };

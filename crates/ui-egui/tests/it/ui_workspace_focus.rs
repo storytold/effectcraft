@@ -229,7 +229,7 @@ fn tab_traversal_activates_an_inactive_dock_tab_without_editing_the_project() {
     );
     key(&mut h, Key::Space, Modifiers::NONE);
     let mut activated = before;
-    activated.apply(craft_ui::docking::Action::Activate { panel: PanelKind::EffectControls }, dock::permissions).unwrap();
+    activated.apply(craft_behavior::dock::Action::Activate { panel: PanelKind::EffectControls }, dock::permissions).unwrap();
     assert_eq!(h.state().ui.dock, activated);
     assert_eq!(h.state().ui.focused, PanelKind::EffectControls);
     assert!(!h.state().playback.playing);

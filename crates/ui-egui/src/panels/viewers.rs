@@ -327,7 +327,7 @@ fn add_viewer(app: &mut EffectcraftApp, near: u32) -> u32 {
     app.ui.viewers.insert(id, None);
     let p = panel(id);
     let anchor = [panel(near), PanelKind::Composition].into_iter().find(|q| app.ui.dock.is_open(*q));
-    let _ = app.ui.dock.apply(craft_ui::docking::Action::Open { panel: p, anchor }, crate::dock::permissions);
+    let _ = app.ui.dock.apply(craft_behavior::dock::Action::Open { panel: p, anchor }, crate::dock::permissions);
     id
 }
 

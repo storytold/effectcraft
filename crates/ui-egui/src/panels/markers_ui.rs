@@ -197,7 +197,7 @@ pub fn dialog(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
             ui.label(tr("Label:"));
             let labels = effectcraft_engine::color::Label::ALL;
             let cur = labels.get(d.label).copied().unwrap_or_default();
-            let r = craft_ui::ComboBox::from_id_salt("dialog.marker.label").selected_text(app.session.prefs.label_name(cur)).show_ui(ui, |ui| {
+            let r = egui::ComboBox::from_id_salt("dialog.marker.label").selected_text(app.session.prefs.label_name(cur)).show_ui(ui, |ui| {
                 for (i, l) in labels.into_iter().enumerate() {
                     if crate::widgets::label_entry(ui, l, &app.session.prefs.label_name(l), d.label == i, &app.tokens).clicked() {
                         d.label = i;

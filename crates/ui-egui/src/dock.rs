@@ -7,8 +7,9 @@
 use egui::{Align2, Rect, Sense, Stroke, pos2, vec2};
 use serde::{Deserialize, Serialize};
 
-pub use craft_ui::docking::{Floating, Node, PanelState, Permissions, StackEntry};
-pub use craft_ui::layout::{SplitAxis, SplitSize};
+pub use craft_behavior::dock::{Floating, Node, PanelState, Permissions, StackEntry};
+pub use craft_behavior::flow::Axis;
+pub use craft_behavior::dock::SplitSize;
 
 use crate::icons::{self, Icon};
 use crate::theme::Tokens;
@@ -172,9 +173,9 @@ impl PanelKind {
 }
 
 /// The docked tree plus floating windows.
-pub type Layout = craft_ui::docking::Layout<PanelKind>;
+pub type Layout = craft_behavior::dock::Layout<PanelKind>;
 /// What a workspace saves: the layout, closed panels with where each goes back, and the lock.
-pub type Workspace = craft_ui::docking::Workspace<PanelKind>;
+pub type Workspace = craft_behavior::dock::Workspace<PanelKind>;
 
 /// What may happen to a panel. Every panel moves, floats and closes, as in After Effects
 /// (the Composition panel too: Window ▸ Composition reopens it); the last docked group staying
@@ -194,11 +195,11 @@ pub fn stack(e: &[(PanelKind, bool, Option<f32>)]) -> Node<PanelKind> {
 }
 /// Two frames side by side.
 pub fn hsplit(size: SplitSize, a: Node<PanelKind>, b: Node<PanelKind>) -> Node<PanelKind> {
-    Node::Split { axis: SplitAxis::Horizontal, size, first: Box::new(a), second: Box::new(b) }
+    Node::Split { axis: Axis::X, size, first: Box::new(a), second: Box::new(b) }
 }
 /// Two frames one above the other.
 pub fn vsplit(size: SplitSize, a: Node<PanelKind>, b: Node<PanelKind>) -> Node<PanelKind> {
-    Node::Split { axis: SplitAxis::Vertical, size, first: Box::new(a), second: Box::new(b) }
+    Node::Split { axis: Axis::Y, size, first: Box::new(a), second: Box::new(b) }
 }
 
 /// A workspace of just `root`, with no floating windows.
@@ -491,7 +492,7 @@ pub fn referenced_panels(workspace: &Workspace) -> Vec<PanelKind> {
 /// stack's split path (`a`/`b` per level) and the entry's index.
 pub fn stack_gutter_id(layout: &Layout, p: PanelKind) -> Option<String> {
     fn rec(node: &Node<PanelKind>, p: PanelKind, path: &mut String, depth: usize) -> Option<String> {
-        if depth > craft_ui::docking::MAX_DEPTH {
+        if depth > craft_behavior::dock::MAX_DEPTH {
             return None;
         }
         match node {
@@ -703,7 +704,8 @@ pub fn placeholder(ui: &mut egui::Ui, rect: Rect, t: &Tokens, text: &str) {
 mod tests {
     use super::*;
     use PanelKind::*;
-    use craft_ui::docking::{Action, Placement, Zone};
+    use craft_behavior::dock::{Action, DockPlacement};
+    use craft_ui::docking::Zone;
 
     fn apply(w: &mut Workspace, action: Action<PanelKind>) {
         w.apply(action, permissions).unwrap();
@@ -751,7 +753,7 @@ mod tests {
     fn default_right_column_is_a_short_preview_frame_over_the_properties_frame() {
         let default = workspace("Default");
         let Some(Node::Split { second, size: SplitSize::FixedSecond(300.0), .. }) = &default.root else { panic!("{default:?}") };
-        let Node::Split { axis: SplitAxis::Vertical, size: SplitSize::FixedFirst(PREVIEW_FRAME), first, second } = second.as_ref() else {
+        let Node::Split { axis: Axis::Y, size: SplitSize::FixedFirst(PREVIEW_FRAME), first, second } = second.as_ref() else {
             panic!("{second:?}")
         };
         assert_eq!(**first, tabs(&[Preview], 0));
@@ -759,7 +761,7 @@ mod tests {
         let mut w = Workspace::new(default);
         assert!(w.is_visible(Preview) && w.is_visible(Properties) && !w.is_visible(Align));
         // The Properties frame takes tabs; the Preview frame stays a frame of its own.
-        apply(&mut w, Action::Move { panel: Project, anchor: Properties, placement: Placement::Tab { before: None } });
+        apply(&mut w, Action::Move { panel: Project, anchor: Properties, placement: DockPlacement::Tab { before: None } });
         assert_eq!(w.group_of(Project), vec![Properties, Align, Audio, EffectsPresets, Project]);
         assert_eq!(w.group_of(Preview), vec![Preview]);
     }
@@ -767,15 +769,15 @@ mod tests {
     #[test]
     fn panels_split_off_and_join_tab_groups() {
         let mut w = docked(hsplit(SplitSize::FixedFirst(300.0), tabs(&[Project, EffectControls], 0), tabs(&[Composition, Layer], 0)));
-        apply(&mut w, Action::Move { panel: EffectControls, anchor: Composition, placement: Placement::Split(Zone::Right) });
+        apply(&mut w, Action::Move { panel: EffectControls, anchor: Composition, placement: DockPlacement::Split(Zone::Right) });
         assert_eq!(w.group_of(EffectControls), vec![EffectControls]);
         assert_eq!(w.group_of(Project), vec![Project]);
-        apply(&mut w, Action::Move { panel: EffectControls, anchor: Composition, placement: Placement::Tab { before: Some(Layer) } });
+        apply(&mut w, Action::Move { panel: EffectControls, anchor: Composition, placement: DockPlacement::Tab { before: Some(Layer) } });
         assert_eq!(w.group_of(Composition), vec![Composition, EffectControls, Layer]);
         assert!(w.is_visible(EffectControls));
         // A rejected move (onto itself, onto a closed panel) changes nothing.
         let before = w.clone();
-        assert!(w.apply(Action::Move { panel: Project, anchor: Info, placement: Placement::Split(Zone::Left) }, permissions).is_err());
+        assert!(w.apply(Action::Move { panel: Project, anchor: Info, placement: DockPlacement::Split(Zone::Left) }, permissions).is_err());
         assert_eq!(w, before);
     }
 

@@ -12,6 +12,7 @@ workspace = true
 [dependencies]
 craft-mime = { workspace = true }
 craft-ui = { workspace = true }
+craft-behavior = { workspace = true }
 craft-quit = { workspace = true, features = ["ui"] }
 effectcraft-time = { workspace = true }
 effectcraft-geom = { workspace = true }

@@ -623,7 +623,7 @@ fn solid(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
                 .find(|(_, v)| (v - par).abs() < 1e-3)
                 .map(|p| p.0.to_string())
                 .unwrap_or_else(|| format!("{par:.2}"));
-            let r = craft_ui::ComboBox::from_id_salt("solid-par").width(240.0).selected_text(cur).show_ui(ui, |ui| {
+            let r = egui::ComboBox::from_id_salt("solid-par").width(240.0).selected_text(cur).show_ui(ui, |ui| {
                 for (label, v) in super::comp_settings::PIXEL_ASPECTS {
                     if ui.selectable_label((v - par).abs() < 1e-3, *label).clicked() {
                         par = *v;

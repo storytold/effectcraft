@@ -74,13 +74,13 @@ fn new_viewers_lock_route_comps_and_activate_on_click() {
     assert_eq!((h.state().ui.active_viewer, shows(&h, 0), shows(&h, 1)), (1, Some(a), Some(a)));
     // Side by side, so both draw.
     h.state_mut()
-        .apply_dock(craft_ui::docking::Action::Move {
+        .apply_dock(craft_behavior::dock::Action::Move {
             panel: PanelKind::Viewer(1),
             anchor: PanelKind::Composition,
-            placement: craft_ui::docking::Placement::Split(craft_ui::docking::Zone::Right),
+            placement: craft_behavior::dock::DockPlacement::Split(craft_ui::docking::Zone::Right),
         })
         .unwrap();
-    h.state_mut().apply_dock(craft_ui::docking::Action::Activate { panel: PanelKind::Composition }).unwrap();
+    h.state_mut().apply_dock(craft_behavior::dock::Action::Activate { panel: PanelKind::Composition }).unwrap();
     h.run_steps(3);
     // Opening B shows it in the active (unlocked) viewer; the locked one keeps A.
     invoke(&mut h, "comp.open", json!({"comp": b}));
@@ -154,13 +154,13 @@ fn viewers_snapshot() {
     h.run_steps(3);
     invoke(&mut h, "view.newViewer", json!({}));
     h.state_mut()
-        .apply_dock(craft_ui::docking::Action::Move {
+        .apply_dock(craft_behavior::dock::Action::Move {
             panel: PanelKind::Viewer(1),
             anchor: PanelKind::Composition,
-            placement: craft_ui::docking::Placement::Split(craft_ui::docking::Zone::Right),
+            placement: craft_behavior::dock::DockPlacement::Split(craft_ui::docking::Zone::Right),
         })
         .unwrap();
-    h.state_mut().apply_dock(craft_ui::docking::Action::Activate { panel: PanelKind::Composition }).unwrap();
+    h.state_mut().apply_dock(craft_behavior::dock::Action::Activate { panel: PanelKind::Composition }).unwrap();
     invoke(&mut h, "comp.open", json!({"comp": other.0}));
     for _ in 0..300 {
         h.step();

@@ -165,7 +165,7 @@ fn effect_header_arrows_ignore_hidden_panels_with_stale_focus() {
             "closed" => h.state_mut().close_panel(PanelKind::EffectControls),
             "maximized" => h.state_mut().toggle_maximize(PanelKind::Composition),
             "floating under maximized" => {
-                h.state_mut().apply_dock(craft_ui::docking::Action::Float { panel: PanelKind::EffectControls, rect: [40.0, 40.0, 600.0, 400.0] }).unwrap();
+                h.state_mut().apply_dock(craft_behavior::dock::Action::Float { panel: PanelKind::EffectControls, rect: [40.0, 40.0, 600.0, 400.0] }).unwrap();
                 h.state_mut().toggle_maximize(PanelKind::Composition);
             }
             _ => h.state_mut().ui.start_screen = true,
@@ -187,10 +187,10 @@ fn effect_header_arrows_work_wherever_effect_controls_is_on_screen() {
         let (mut h, lid, [(fx, prop), _, _]) = header_arrow_harness();
         h.state_mut().toggle_maximize(PanelKind::EffectControls);
         if place == "floating" {
-            h.state_mut().apply_dock(craft_ui::docking::Action::Float { panel: PanelKind::EffectControls, rect: [40.0, 40.0, 600.0, 400.0] }).unwrap();
+            h.state_mut().apply_dock(craft_behavior::dock::Action::Float { panel: PanelKind::EffectControls, rect: [40.0, 40.0, 600.0, 400.0] }).unwrap();
         } else {
-            let placement = craft_ui::docking::Placement::Tab { before: None };
-            h.state_mut().apply_dock(craft_ui::docking::Action::Move { panel: PanelKind::EffectControls, anchor: PanelKind::Composition, placement }).unwrap();
+            let placement = craft_behavior::dock::DockPlacement::Tab { before: None };
+            h.state_mut().apply_dock(craft_behavior::dock::Action::Move { panel: PanelKind::EffectControls, anchor: PanelKind::Composition, placement }).unwrap();
             h.state_mut().toggle_maximize(PanelKind::Composition);
             assert_eq!(h.state().ui.maximized, Some(PanelKind::Composition), "the frame was maximized from its Composition tab");
         }
