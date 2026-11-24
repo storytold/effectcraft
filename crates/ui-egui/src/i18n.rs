@@ -157,7 +157,7 @@ fn web_draws(language: &str) -> bool {
 
 /// The language EffectCraft shows for a BCP 47 locale (`ja-JP` → `ja`, `zh-Hans-CN` → `zh-hans`,
 /// `zh-TW` → `zh-hant`, `uk-UA` → `uk`, `es-ES` → `es`, `pt-BR` → `pt-br`, `cs-CZ` → `cs`,
-/// `ka-GE` → `ka`, `ar-SA` → `ar`, `ru-RU` → `ru`, `de-AT` → `de`, `fr-CA` → `fr`, `sv-SE` → `sv`).
+/// `ka-GE` → `ka`, `ru-RU` → `ru`, `de-AT` → `de`, `fr-CA` → `fr`, `sv-SE` → `sv`).
 fn supported(locale: Option<&str>) -> &'static str {
     let Some(locale) = locale else { return "en" };
     let mut parts = locale.split(['-', '_']);
@@ -170,7 +170,6 @@ fn supported(locale: Option<&str>) -> &'static str {
         "cs" => "cs",
         "pl" => "pl",
         "ka" => "ka",
-        "ar" => "ar",
         "ru" => "ru",
         "de" => "de",
         "fr" => "fr",

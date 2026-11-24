@@ -90,7 +90,7 @@ pub(crate) const ARABIC_MENUS: &[(&str, &str, &str)] = &[
     ("app.commandPalette", "Quick Apply...", "تطبيق سريع..."),
     ("app.find", "Find", "بحث"),
     ("app.hide", "Hide EffectCraft", "إخفاء EffectCraft"),
-    ("app.hideOthers", "Hide Others", "إخفاء الطبقات الأخرى"),
+    ("app.hideOthers", "Hide Others", "إخفاء التطبيقات الأخرى"),
     ("app.keyboardShortcuts", "Keyboard Shortcuts", "اختصارات لوحة المفاتيح"),
     ("app.keyboardShortcuts", "Keyboard Shortcuts...", "اختصارات لوحة المفاتيح..."),
     ("app.quit", "Exit", "إنهاء"),
