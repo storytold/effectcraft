@@ -63,7 +63,11 @@ fn locked_viewer_follows_display_profile_and_simulation() {
     s.execute("prefs.set", json!({"key": "previews.displayProfile", "value": "srgb"})).unwrap();
     s.execute("view.displayColorManagement", json!({"value": true})).unwrap();
     let images = Images::default();
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).renderer(Capture(images.clone())).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .renderer(Capture(images.clone()))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(s));
     h.run_steps(3);
     invoke(&mut h, "view.splitLockedViewer", json!({}));
     let first = expected_center(&mut h);

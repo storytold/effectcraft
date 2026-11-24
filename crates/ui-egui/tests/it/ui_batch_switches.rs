@@ -22,7 +22,10 @@ fn harness() -> (Harness<'static, EffectcraftApp>, Vec<u64>) {
         .collect();
     ids.reverse();
     s.execute("edit.deselectAll", json!({})).unwrap();
-    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(vec2(1600.0, 1000.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(s));
     h.run_steps(3);
     (h, ids)
 }
@@ -165,7 +168,10 @@ fn switch_targets_skip_the_layers_the_switch_does_not_apply_to() {
     let cam = s.execute("layer.newCamera", json!({})).unwrap()["layer"].as_u64().unwrap();
     s.execute("effect.apply", json!({"effect": "ec.blur.gaussian", "layers": [solid]})).unwrap();
     s.execute("edit.deselectAll", json!({})).unwrap();
-    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(vec2(1600.0, 1000.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(s));
     h.run_steps(3);
     select(&mut h, &[solid, null, cam]);
 

@@ -27,7 +27,8 @@ fn rect(h: &Harness<'_, EffectcraftApp>, id: &str) -> egui::Rect {
 
 #[test]
 fn tracker_panel_and_track_point_widgets() {
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app());
+    let mut h =
+        Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app());
     h.state_mut().show_panel(PanelKind::Tracker);
     h.run_steps(3);
     let all = ids(&h);
@@ -140,7 +141,10 @@ fn zoomed_out_track_point_can_be_grabbed() {
         s.execute("layer.newSolid", json!({"name": "Plate", "color": "#406080"})).unwrap();
         s.execute("layer.select", json!({"layers": ["Plate"]})).unwrap();
         s.execute("track.motion", json!({})).unwrap();
-        let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(move |_| EffectcraftApp::new(s));
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(1600.0, 1000.0))
+            .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+            .build_eframe(move |_| EffectcraftApp::new(s));
         h.state_mut().show_panel(PanelKind::Composition);
         h.run_steps(3);
         h.state_mut().ui.viewer.zoom = Some(mag);

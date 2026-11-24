@@ -1090,7 +1090,6 @@ fn fit_preview(lines: &[Vec<[f32; 2]>], room: Rect, baseline: f32) -> Option<(f3
     Some((k, o))
 }
 
-
 /// The tallest the font menu gets, its header included.
 const FONT_MENU_HEIGHT: f32 = 380.0;
 

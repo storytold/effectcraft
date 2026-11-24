@@ -135,7 +135,8 @@ fn scrubbing_plays_one_frame_per_new_frame() {
 fn cmd_dragging_the_current_time_scrubs_and_an_idle_scrub_closes() {
     let fake = Fake::default();
     let (app, _) = setup(true, &fake);
-    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app);
+    let mut h =
+        Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app);
     h.run_steps(3);
     let cti = h.state().auto.find("timeline.cti").expect("current time indicator").clone();
     let from = pos2(cti.rect[0] + cti.rect[2] / 2.0, cti.rect[1] + cti.rect[3] / 2.0);
@@ -217,7 +218,11 @@ fn preview_with_audio_holds_the_first_frame_and_sounds_from_it() {
     app.frames.set_remote(Some(renderer));
     let ahead = (app.frames.lanes() * 2).max(4) as i64;
     app.session.execute("comp.settings", json!({"comp": cid.0, "duration": (4 * ahead) as f64 / 30.0})).unwrap();
-    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_step_dt(1.0 / 30.0).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app);
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1400.0, 900.0))
+        .with_step_dt(1.0 / 30.0)
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| app);
     h.state_mut().use_manual_clock();
     h.run_steps(2);
     gate.discard(&mut h);
@@ -254,7 +259,11 @@ fn preview_with_audio_sounds_without_caching_the_work_area() {
     let gate = GatedFrames::default();
     let renderer: Arc<dyn RemoteFrames> = Arc::new(gate.clone());
     app.frames.set_remote(Some(renderer));
-    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_step_dt(1.0 / 30.0).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app);
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1400.0, 900.0))
+        .with_step_dt(1.0 / 30.0)
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| app);
     h.state_mut().use_manual_clock();
     h.run_steps(2);
     gate.discard(&mut h);
@@ -281,7 +290,11 @@ fn a_preview_behind_its_sound_drops_frames_and_keeps_the_sound() {
     let gate = GatedFrames::default();
     let renderer: Arc<dyn RemoteFrames> = Arc::new(gate.clone());
     app.frames.set_remote(Some(renderer));
-    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_step_dt(1.0 / 30.0).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app);
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1400.0, 900.0))
+        .with_step_dt(1.0 / 30.0)
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| app);
     h.state_mut().use_manual_clock();
     h.run_steps(2);
     gate.discard(&mut h);
@@ -346,7 +359,11 @@ fn a_sound_in_the_first_100_ms_is_heard() {
         app.session.execute("layer.timing", json!({"layers": [l], "in": start, "out": start + 0.1})).unwrap();
         app.session.execute("time.set", json!({"time": start})).unwrap();
         let first = (start * 30.0) as i64;
-        let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_step_dt(1.0 / 30.0).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app);
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(1400.0, 900.0))
+            .with_step_dt(1.0 / 30.0)
+            .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+            .build_eframe(|_| app);
         h.state_mut().use_manual_clock();
         h.run_steps(2);
         let now = h.state().now();
@@ -366,7 +383,8 @@ fn a_sound_in_the_first_100_ms_is_heard() {
 fn audio_only_previews_start_at_once() {
     let fake = Fake::default();
     let (app, cid) = setup(true, &fake);
-    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app);
+    let mut h =
+        Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app);
     h.state_mut().use_manual_clock();
     h.run_steps(2);
     let now = h.state().now();
@@ -382,7 +400,11 @@ fn no_device_plays_the_picture_and_stop_ends_the_wait() {
     let fake = Fake::default();
     let (mut app, cid) = setup_long(true, &fake, 10.0);
     app.hooks.audio_device = Some(Box::new(|_| None));
-    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_step_dt(1.0 / 30.0).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app);
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1400.0, 900.0))
+        .with_step_dt(1.0 / 30.0)
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| app);
     h.state_mut().use_manual_clock();
     h.run_steps(2);
     let now = h.state().now();
@@ -451,7 +473,11 @@ fn startup_finishes_at_any_ram_preview_budget() {
             if !device {
                 app.hooks.audio_device = Some(Box::new(|_| None));
             }
-            let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_step_dt(1.0 / 30.0).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app);
+            let mut h = Harness::builder()
+                .with_size(egui::vec2(1400.0, 900.0))
+                .with_step_dt(1.0 / 30.0)
+                .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+                .build_eframe(|_| app);
             h.state_mut().use_manual_clock();
             h.run_steps(2);
             let budget = ((fit as f64 + 0.5) * 9216.0 / 0.9) as usize;
@@ -482,7 +508,11 @@ fn extended_viewer(fake: &Fake) -> (Harness<'static, EffectcraftApp>, ItemId, [u
     let mut app = EffectcraftApp::new(s);
     let f = fake.clone();
     app.hooks.audio_device = Some(Box::new(move |_| Some(Box::new(f.clone()) as Box<dyn AudioDevice>)));
-    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_step_dt(1.0 / 30.0).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app);
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1400.0, 900.0))
+        .with_step_dt(1.0 / 30.0)
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| app);
     h.state_mut().use_manual_clock();
     // The viewer shows the pasteboard: frames render the extended region.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
@@ -591,7 +621,11 @@ fn a_device_that_fails_to_start_plays_the_picture() {
     let fake = Fake::default();
     let (mut app, cid) = setup_long(true, &fake, 8.0);
     app.hooks.audio_device = Some(Box::new(|_| Some(Box::new(Broken) as Box<dyn AudioDevice>)));
-    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_step_dt(1.0 / 30.0).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app);
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1400.0, 900.0))
+        .with_step_dt(1.0 / 30.0)
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| app);
     h.state_mut().use_manual_clock();
     h.run_steps(2);
     assert!(until_started(&mut h), "it left its startup");
@@ -644,7 +678,11 @@ fn a_started_preview_follows_its_sound() {
     let device = Playing::default();
     let d = device.clone();
     app.hooks.audio_device = Some(Box::new(move |_| Some(Box::new(d.clone()) as Box<dyn AudioDevice>)));
-    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_step_dt(1.0 / 30.0).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app);
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1400.0, 900.0))
+        .with_step_dt(1.0 / 30.0)
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| app);
     h.state_mut().use_manual_clock();
     h.run_steps(2);
     assert!(until_started(&mut h) && h.state().audio.is_some(), "the sound started");
@@ -671,7 +709,11 @@ fn startup_does_not_wait_when_the_ram_preview_holds_no_frame() {
     for budget in [0, 9216 / 2] {
         let fake = Fake::default();
         let (app, _) = setup_long(true, &fake, 8.0);
-        let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_step_dt(1.0 / 30.0).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app);
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(1400.0, 900.0))
+            .with_step_dt(1.0 / 30.0)
+            .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+            .build_eframe(|_| app);
         h.state_mut().use_manual_clock();
         h.run_steps(2);
         h.state().frames.set_budget(budget);
@@ -720,7 +762,11 @@ fn adding_markers_does_not_stop_the_sound() {
     let fake = Fake::default();
     let (app, cid) = setup(true, &fake);
     // Everything is cached before the preview starts, so the sound starts at once.
-    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_step_dt(1.0 / 31.0).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app);
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1400.0, 900.0))
+        .with_step_dt(1.0 / 31.0)
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| app);
     h.run_steps(2);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     let now = h.ctx.input(|i| i.time);
@@ -751,7 +797,11 @@ fn unmuting_a_silent_preview_starts_audio_at_its_current_frame() {
         app.session.execute("layer.setSwitch", json!({"layers": [layer], "switch": "audio", "value": false})).unwrap();
         let gate = GatedFrames::default();
         app.frames.set_remote(Some(Arc::new(gate.clone())));
-        let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_step_dt(1.0 / 30.0).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app);
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(1400.0, 900.0))
+            .with_step_dt(1.0 / 30.0)
+            .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+            .build_eframe(|_| app);
         h.state_mut().use_manual_clock();
         h.run_steps(2);
         gate.render(&mut h, cid, &(0..60).collect::<Vec<_>>());
@@ -871,7 +921,8 @@ fn preview_rate_audio_drives_video_at_half_speed_and_loops() {
     let gate = GatedFrames::default();
     app.frames.set_remote(Some(Arc::new(gate.clone())));
     let ahead = (app.frames.parallelism() * 2).max(4) as i64;
-    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app);
+    let mut h =
+        Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app);
     h.state_mut().use_manual_clock();
     h.run_steps(2);
     gate.discard(&mut h);

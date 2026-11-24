@@ -39,13 +39,17 @@ fn presets_menu_copies_the_configured_folder_without_editing_the_project() {
     let expected = expected_folder();
     for language in ["en", "ja"] {
         // The `ja` run draws Japanese menu text, which needs an installed CJK face.
-        let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).allow_missing_glyphs().with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| {
-            let mut app = EffectcraftApp::new(Session::default());
-            app.session.prefs.general.language = language.into();
-            app.ui.start_screen = false;
-            app.show_panel(PanelKind::EffectsPresets);
-            app
-        });
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(1600.0, 1000.0))
+            .allow_missing_glyphs()
+            .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+            .build_eframe(|_| {
+                let mut app = EffectcraftApp::new(Session::default());
+                app.session.prefs.general.language = language.into();
+                app.ui.start_screen = false;
+                app.show_panel(PanelKind::EffectsPresets);
+                app
+            });
         h.run_steps(3);
         let before = serde_json::to_value(&h.state().session.project).unwrap();
         let revision = h.state().session.revision;
@@ -123,12 +127,16 @@ fn shared_preset_rows_search_apply_and_undo_the_selected_definition() {
     session.prefs.general.language = "en".into();
     session.execute("comp.new", json!({"width": 64, "height": 36, "duration": 2})).unwrap();
     session.execute("layer.newText", json!({"text": "Cache"})).unwrap();
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_step_dt(1.0 / 60.0).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| {
-        let mut app = EffectcraftApp::new(session);
-        app.ui.start_screen = false;
-        app.show_panel(PanelKind::EffectsPresets);
-        app
-    });
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .with_step_dt(1.0 / 60.0)
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| {
+            let mut app = EffectcraftApp::new(session);
+            app.ui.start_screen = false;
+            app.show_panel(PanelKind::EffectsPresets);
+            app
+        });
     h.run_steps(3);
     let shared = std::sync::Arc::new(entries);
     let now = h.ctx.input(|i| i.time);

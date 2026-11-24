@@ -14,7 +14,10 @@ fn rect(h: &Harness<'_, EffectcraftApp>, id: &str) -> Rect {
 fn project_settings_fits_the_form_width() {
     let mut session = Session::default();
     session.prefs.disk.disk_cache_enabled = false;
-    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| EffectcraftApp::new(session));
+    let mut h = Harness::builder()
+        .with_size(vec2(1600.0, 1000.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(session));
     h.run_steps(4);
     let ctx = h.ctx.clone();
     menus::invoke(h.state_mut(), &ctx, "file.projectSettings", json!({})).unwrap();

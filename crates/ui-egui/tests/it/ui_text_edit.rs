@@ -19,10 +19,14 @@ fn app() -> EffectcraftApp {
 
 /// A headless window at the size and frame step the viewer tests here are written for.
 fn harness(a: EffectcraftApp) -> Harness<'static, EffectcraftApp> {
-    Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_step_dt(1.0 / 60.0).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(move |cc| {
-        EffectcraftApp::install_ime_reset_hooks(&cc.egui_ctx);
-        a
-    })
+    Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .with_step_dt(1.0 / 60.0)
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(move |cc| {
+            EffectcraftApp::install_ime_reset_hooks(&cc.egui_ctx);
+            a
+        })
 }
 
 fn rect(h: &Harness<'_, EffectcraftApp>, id: &str) -> egui::Rect {
@@ -82,7 +86,10 @@ fn type_tool_skips_hidden_and_unsoloed_text_layers() {
         let (target, value) = if switch == "video" { (ids[1], false) } else { (ids[0], true) };
         s.execute("layer.setSwitch", json!({"layers": [target], "switch": switch, "value": value})).unwrap();
         s.execute("edit.deselectAll", json!({})).unwrap();
-        let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(move |_| EffectcraftApp::new(s));
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(1600.0, 1000.0))
+            .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+            .build_eframe(move |_| EffectcraftApp::new(s));
         h.state_mut().ui.tool = effectcraft_ui_egui::state::Tool::Type;
         h.run_steps(3);
         let comp = rect(&h, "viewer.comp");
@@ -94,7 +101,8 @@ fn type_tool_skips_hidden_and_unsoloed_text_layers() {
 
 #[test]
 fn modal_blocks_background_text_events() {
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app());
+    let mut h =
+        Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app());
     h.run_steps(3);
     h.state_mut().ui.tool = effectcraft_ui_egui::state::Tool::Type;
     h.run_steps(1);
@@ -870,7 +878,11 @@ fn a_chord_bound_to_both_forwarded_commands_resolves_in_list_order() {
 fn ime_producer_follows_the_committed_text_and_cause() {
     // A Latin accent is multi-byte in UTF-8 (the byte offsets below) and Inter draws it, so the
     // harness keeps its strict missing-glyph check; no CJK fallback face is needed headlessly.
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_step_dt(1.0 / 60.0).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app());
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .with_step_dt(1.0 / 60.0)
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| app());
     h.state_mut().show_panel(PanelKind::Composition);
     h.run_steps(3);
     h.state_mut().ui.tool = effectcraft_ui_egui::state::Tool::Type;
@@ -908,7 +920,11 @@ fn click_away_clears_the_canvas_ime_descriptor_in_the_final_pass() {
     s.execute("comp.new", json!({"name": "Type", "width": 640, "height": 360, "duration": 2})).unwrap();
     let solid = s.execute("layer.newSolid", json!({"name": "Plate", "color": "#406080"})).unwrap()["layer"].as_u64().unwrap();
     let title = s.execute("layer.newText", json!({"text": "Title", "size": 80, "position": [100, 120], "justify": "left"})).unwrap()["layer"].as_u64().unwrap();
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_step_dt(1.0 / 60.0).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(move |_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .with_step_dt(1.0 / 60.0)
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(move |_| EffectcraftApp::new(s));
     h.state_mut().show_panel(PanelKind::Composition);
     h.run_steps(3);
     h.state_mut().session.execute("text.edit", json!({"layer": title, "caret": 5})).unwrap();
@@ -930,7 +946,11 @@ fn switching_text_targets_interrupts_and_rejects_a_delayed_commit() {
     let second = s.execute("layer.newText", json!({"text": "B", "size": 80, "position": [80, 240], "justify": "left"})).unwrap()["layer"].as_u64().unwrap();
     // The delayed commit carries a multi-byte accent Inter draws: no broad missing-glyph
     // allowance, and the stale-composition path is still exercised with real IME events.
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_step_dt(1.0 / 60.0).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(move |_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .with_step_dt(1.0 / 60.0)
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(move |_| EffectcraftApp::new(s));
     h.state_mut().show_panel(PanelKind::Composition);
     h.run_steps(3);
     h.state_mut().session.execute("text.edit", json!({"layer": first, "caret": 1})).unwrap();
@@ -962,7 +982,11 @@ fn a_delayed_preedit_after_a_target_switch_cannot_rearm_the_stale_guard() {
     s.execute("comp.new", json!({"name": "Type", "width": 640, "height": 360, "duration": 2})).unwrap();
     let first = s.execute("layer.newText", json!({"text": "A", "size": 80, "position": [80, 120], "justify": "left"})).unwrap()["layer"].as_u64().unwrap();
     let second = s.execute("layer.newText", json!({"text": "B", "size": 80, "position": [80, 240], "justify": "left"})).unwrap()["layer"].as_u64().unwrap();
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_step_dt(1.0 / 60.0).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(move |_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .with_step_dt(1.0 / 60.0)
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(move |_| EffectcraftApp::new(s));
     h.state_mut().show_panel(PanelKind::Composition);
     h.run_steps(3);
     h.state_mut().session.execute("text.edit", json!({"layer": first, "caret": 1})).unwrap();
@@ -988,7 +1012,11 @@ fn late_preedit_and_commit_split_across_idle_frames_cannot_retarget() {
     s.execute("comp.new", json!({"name": "Type", "width": 640, "height": 360, "duration": 2})).unwrap();
     let first = s.execute("layer.newText", json!({"text": "A", "size": 80, "position": [80, 120], "justify": "left"})).unwrap()["layer"].as_u64().unwrap();
     let second = s.execute("layer.newText", json!({"text": "B", "size": 80, "position": [80, 240], "justify": "left"})).unwrap()["layer"].as_u64().unwrap();
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_step_dt(1.0 / 60.0).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(move |_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .with_step_dt(1.0 / 60.0)
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(move |_| EffectcraftApp::new(s));
     h.state_mut().show_panel(PanelKind::Composition);
     h.run_steps(3);
     h.state_mut().session.execute("text.edit", json!({"layer": first, "caret": 1})).unwrap();
@@ -1026,7 +1054,11 @@ fn late_preedit_and_delete_split_across_idle_frames_cannot_retarget() {
     s.execute("comp.new", json!({"name": "Type", "width": 640, "height": 360, "duration": 2})).unwrap();
     let first = s.execute("layer.newText", json!({"text": "A", "size": 80, "position": [80, 120], "justify": "left"})).unwrap()["layer"].as_u64().unwrap();
     let second = s.execute("layer.newText", json!({"text": "B", "size": 80, "position": [80, 240], "justify": "left"})).unwrap()["layer"].as_u64().unwrap();
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_step_dt(1.0 / 60.0).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(move |_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .with_step_dt(1.0 / 60.0)
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(move |_| EffectcraftApp::new(s));
     h.state_mut().show_panel(PanelKind::Composition);
     h.run_steps(3);
     h.state_mut().session.execute("text.edit", json!({"layer": first, "caret": 1})).unwrap();
@@ -1061,7 +1093,11 @@ fn empty_preedit_keeps_the_old_target_until_the_pending_commit_arrives() {
     s.execute("comp.new", json!({"name": "Type", "width": 640, "height": 360, "duration": 2})).unwrap();
     let first = s.execute("layer.newText", json!({"text": "A", "size": 80, "position": [80, 120], "justify": "left"})).unwrap()["layer"].as_u64().unwrap();
     let second = s.execute("layer.newText", json!({"text": "B", "size": 80, "position": [80, 240], "justify": "left"})).unwrap()["layer"].as_u64().unwrap();
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_step_dt(1.0 / 60.0).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(move |_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .with_step_dt(1.0 / 60.0)
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(move |_| EffectcraftApp::new(s));
     h.state_mut().show_panel(PanelKind::Composition);
     h.run_steps(3);
     h.state_mut().session.execute("text.edit", json!({"layer": first, "caret": 1})).unwrap();
@@ -1090,7 +1126,11 @@ fn a_matching_fence_after_old_terminals_admits_the_next_preedit_in_the_same_batc
     s.execute("comp.new", json!({"name": "Type", "width": 640, "height": 360, "duration": 2})).unwrap();
     let first = s.execute("layer.newText", json!({"text": "A", "size": 80, "position": [80, 120], "justify": "left"})).unwrap()["layer"].as_u64().unwrap();
     let second = s.execute("layer.newText", json!({"text": "B", "size": 80, "position": [80, 240], "justify": "left"})).unwrap()["layer"].as_u64().unwrap();
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_step_dt(1.0 / 60.0).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(move |_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .with_step_dt(1.0 / 60.0)
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(move |_| EffectcraftApp::new(s));
     h.state_mut().show_panel(PanelKind::Composition);
     h.run_steps(3);
     h.state_mut().session.execute("text.edit", json!({"layer": first, "caret": 1})).unwrap();
@@ -1121,7 +1161,11 @@ fn delete_surrounding_bytes_through_the_app_replaces_the_emoji() {
     let mut s = Session::default();
     s.execute("comp.new", json!({"name": "Type", "width": 640, "height": 360, "duration": 2})).unwrap();
     let lid = s.execute("layer.newText", json!({"text": "café😀", "size": 80, "position": [80, 120], "justify": "left"})).unwrap()["layer"].as_u64().unwrap();
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_step_dt(1.0 / 60.0).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(move |_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .with_step_dt(1.0 / 60.0)
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(move |_| EffectcraftApp::new(s));
     h.state_mut().show_panel(PanelKind::Composition);
     h.run_steps(3);
     h.state_mut().session.execute("text.edit", json!({"layer": lid, "caret": 5})).unwrap();
@@ -1140,10 +1184,14 @@ fn ime_interruption_editor() -> (Harness<'static, EffectcraftApp>, Pos2) {
     let mut s = Session::default();
     s.execute("comp.new", json!({"name": "Type", "width": 640, "height": 360, "duration": 2})).unwrap();
     let lid = s.execute("layer.newText", json!({"text": "abcd", "size": 80, "position": [80, 120], "justify": "left"})).unwrap()["layer"].as_u64().unwrap();
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_step_dt(1.0 / 60.0).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(move |cc| {
-        EffectcraftApp::install_ime_reset_hooks(&cc.egui_ctx);
-        EffectcraftApp::new(s)
-    });
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .with_step_dt(1.0 / 60.0)
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(move |cc| {
+            EffectcraftApp::install_ime_reset_hooks(&cc.egui_ctx);
+            EffectcraftApp::new(s)
+        });
     h.state_mut().show_panel(PanelKind::Composition);
     h.state_mut().ui.tool = effectcraft_ui_egui::state::Tool::Type;
     h.run_steps(3);

@@ -28,7 +28,10 @@ fn sized(w: f32, hh: f32) -> Harness<'static, EffectcraftApp> {
     id(s.execute("comp.new", json!({"name": "Main", "width": 100, "height": 100, "duration": 2})).unwrap());
     s.execute("layer.addItem", json!({"item": mid})).unwrap();
     s.execute("layer.addItem", json!({"item": inner})).unwrap();
-    let mut h = Harness::builder().with_size(egui::vec2(w, hh)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(w, hh))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(s));
     h.state_mut().show_panel(PanelKind::Flowchart);
     h.state_mut().ui.maximized = Some(PanelKind::Flowchart);
     h.run_steps(4);
@@ -108,7 +111,11 @@ fn the_toolbar_automation_labels_stay_english_in_another_language() {
     let mut s = Session::default();
     s.execute("comp.new", json!({"name": "Main", "width": 100, "height": 100, "duration": 2})).unwrap();
     s.prefs.general.language = "fr".into();
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).allow_missing_glyphs().with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .allow_missing_glyphs()
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(s));
     h.state_mut().show_panel(PanelKind::Flowchart);
     h.state_mut().ui.maximized = Some(PanelKind::Flowchart);
     h.run_steps(4);

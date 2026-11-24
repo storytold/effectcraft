@@ -14,7 +14,11 @@ fn harness() -> (Harness<'static, EffectcraftApp>, u64) {
     let comp = s.active_comp_id().unwrap().0;
     // Arabic, Hebrew, Devanagari and Thai names typed below need installed system faces: draw
     // tofu on a host without them rather than failing the missing-glyph gate.
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).allow_missing_glyphs().with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .allow_missing_glyphs()
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(s));
     h.run_steps(4);
     (h, comp)
 }

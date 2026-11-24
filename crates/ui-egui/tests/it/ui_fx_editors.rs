@@ -17,7 +17,8 @@ fn harness(s: Session) -> Harness<'static, EffectcraftApp> {
     let mut app = EffectcraftApp::new(s);
     app.show_panel(PanelKind::EffectControls);
     app.toggle_maximize(PanelKind::EffectControls);
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1400.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app);
+    let mut h =
+        Harness::builder().with_size(egui::vec2(1600.0, 1400.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app);
     h.run_steps(4);
     h
 }
@@ -287,7 +288,10 @@ fn mesh_warp_vertices_drag_on_the_viewer() {
 fn composition_tabs_and_scrolling_preview() {
     let mut s = Session::default();
     s.execute("file.openDemoProject", json!({})).unwrap();
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(s));
     h.run_steps(4);
     rect(&h, "panel.tab.Timeline.close");
     rect(&h, "preview.scroll");

@@ -674,7 +674,10 @@ mod tests {
         let mut session = effectcraft_engine::Session::default();
         session.execute("comp.new", serde_json::json!({"width": 320, "height": 180, "duration": 2})).unwrap();
         session.execute("layer.newSolid", serde_json::json!({"color": "#204060"})).unwrap();
-        let mut harness = egui_kittest::Harness::builder().with_size(vec2(1200.0, 800.0)).with_context_setup(crate::framework::install_headless).build_eframe(|_| crate::EffectcraftApp::new(session));
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(vec2(1200.0, 800.0))
+            .with_context_setup(crate::framework::install_headless)
+            .build_eframe(|_| crate::EffectcraftApp::new(session));
         settle_sampling_viewer(&mut harness);
         harness
     }
@@ -751,7 +754,10 @@ mod tests {
         let lid = s.execute("layer.newSolid", serde_json::json!({"color": "#ffffff"})).unwrap()["layer"].as_u64().unwrap();
         s.execute("effect.apply", serde_json::json!({"layers": [lid], "effect": "Exposure"})).unwrap();
         s.execute("prop.set", serde_json::json!({"layer": lid, "path": "effects/#1/master/exposure", "value": 2.0})).unwrap();
-        let mut harness = egui_kittest::Harness::builder().with_size(vec2(1200.0, 800.0)).with_context_setup(crate::framework::install_headless).build_eframe(|_| crate::EffectcraftApp::new(s));
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(vec2(1200.0, 800.0))
+            .with_context_setup(crate::framework::install_headless)
+            .build_eframe(|_| crate::EffectcraftApp::new(s));
         for _ in 0..400 {
             harness.step();
             if harness.state().frames.inflight() == 0 && harness.state().viewer_f16.is_some() {

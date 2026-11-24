@@ -34,7 +34,11 @@ fn harness(language: &str) -> (Harness<'static, EffectcraftApp>, u64) {
     app.show_panel(PanelKind::Timeline);
     // The Chinese/Japanese names under test have no installed face on every host: draw tofu
     // instead of failing the missing-glyph gate (the glyph coverage test covers the bundled set).
-    let mut h = Harness::builder().with_size(vec2(1400.0, 900.0)).allow_missing_glyphs().with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app);
+    let mut h = Harness::builder()
+        .with_size(vec2(1400.0, 900.0))
+        .allow_missing_glyphs()
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| app);
     h.run_steps(4);
     (h, fx)
 }

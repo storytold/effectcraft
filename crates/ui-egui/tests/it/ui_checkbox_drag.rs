@@ -20,7 +20,10 @@ fn view_options_drag_checks_and_unchecks_neighbours() {
     let mut session = Session::default();
     session.prefs.disk.disk_cache_enabled = false;
     session.execute("comp.new", json!({"width":32,"height":32,"duration":1})).unwrap();
-    let mut h = Harness::builder().with_size(vec2(1200.0, 900.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| EffectcraftApp::new(session));
+    let mut h = Harness::builder()
+        .with_size(vec2(1200.0, 900.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(session));
     h.state_mut().ui.viewer.rulers = false;
     h.state_mut().ui.viewer.guides = true;
     h.state_mut().ui.viewer.grid = false;

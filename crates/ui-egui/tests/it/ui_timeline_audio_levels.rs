@@ -72,7 +72,10 @@ fn linked_audio_levels_move_both_channels_by_the_same_db() {
     let mut s = Session::default();
     comps(&mut s);
     let (l, uid) = add_sound_layer(&mut s, [-6.0, -12.0]);
-    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(vec2(1600.0, 1000.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(s));
     reveal(&mut h, l, uid);
     let levels =
         |h: &Harness<'_, EffectcraftApp>| h.state().session.active_comp().unwrap().layer(LayerId(l)).unwrap().props.prop("audio/levels").unwrap().clone();
@@ -135,7 +138,10 @@ fn linked_typing_keeps_each_selected_layers_own_balance() {
     let (a, uid) = add_sound_layer(&mut s, [-6.0, -12.0]);
     let (b, other) = add_sound_layer(&mut s, [-20.0, -30.0]);
     s.execute("layer.select", json!({"layers": [a, b]})).unwrap();
-    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(vec2(1600.0, 1000.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(s));
     reveal(&mut h, a, uid);
     reveal(&mut h, b, other);
     click(&mut h, &format!("timeline.prop.{uid}.link"));
@@ -150,7 +156,10 @@ fn a_new_project_starts_with_its_audio_levels_unlinked() {
     let mut s = Session::default();
     comps(&mut s);
     let (l, uid) = add_sound_layer(&mut s, [0.0, 0.0]);
-    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(vec2(1600.0, 1000.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(s));
     reveal(&mut h, l, uid);
     click(&mut h, &format!("timeline.prop.{uid}.link"));
     assert!(h.state().ui.timeline.is_linked(uid, false));

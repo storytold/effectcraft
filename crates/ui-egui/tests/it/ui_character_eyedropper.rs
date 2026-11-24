@@ -48,7 +48,11 @@ fn character_fill_eyedropper_samples_viewer_and_keeps_text_selection() {
     let mut app = EffectcraftApp::new(s);
     app.set_workspace("Text");
     let builder = Harness::builder().with_size(vec2(1600.0, 1400.0));
-    let mut h = if std::env::var_os("EC_SNAPSHOT_DIR").is_some() { builder.wgpu().with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app) } else { builder.with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app) };
+    let mut h = if std::env::var_os("EC_SNAPSHOT_DIR").is_some() {
+        builder.wgpu().with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app)
+    } else {
+        builder.with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app)
+    };
     h.state_mut().show_panel(PanelKind::Character);
     settle(&mut h);
     click_auto(&mut h, "character.fill.eyedropper");
@@ -76,7 +80,11 @@ fn character_stroke_eyedropper_samples_viewer() {
     app.ui.viewer.show_layer_controls = false;
     app.ui.dock = dock::docked(dock::hsplit(SplitSize::FixedSecond(360.0), dock::tabs(&[PanelKind::Composition], 0), dock::tabs(&[PanelKind::Character], 0)));
     let builder = Harness::builder().with_size(vec2(1200.0, 760.0));
-    let mut h = if std::env::var_os("EC_SNAPSHOT_DIR").is_some() { builder.wgpu().with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app) } else { builder.with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app) };
+    let mut h = if std::env::var_os("EC_SNAPSHOT_DIR").is_some() {
+        builder.wgpu().with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app)
+    } else {
+        builder.with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app)
+    };
     h.state_mut().show_panel(PanelKind::Character);
     h.state_mut().show_panel(PanelKind::Composition);
     settle(&mut h);

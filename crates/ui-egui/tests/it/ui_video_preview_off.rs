@@ -19,7 +19,11 @@ fn an_audio_only_preview_says_video_preview_is_off() {
     s.execute("comp.new", json!({"name": "Muted", "width": 320, "height": 180, "duration": 10})).unwrap();
     let sc = s.prefs.preview.current;
     s.prefs.preview.get_mut(sc).include_video = false;
-    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_step_dt(1.0 / 30.0).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1400.0, 900.0))
+        .with_step_dt(1.0 / 30.0)
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(s));
     h.run_steps(4);
     let chip = |h: &Harness<'_, EffectcraftApp>| h.ctx.data(|d| d.get_temp::<egui::Rect>(egui::Id::unique("viewer-video-off-chip")));
     assert!(chip(&h).is_none());

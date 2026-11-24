@@ -29,7 +29,10 @@ fn render_settings_template_applies_from_a_menu_moved_to_fit_the_window() {
     let id = s.project.render_queue[0].id;
     assert_eq!(s.project.render_queue[0].settings.name, "Best Settings");
     let mut app = Some(EffectcraftApp::new(s));
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app.take().expect("app"));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| app.take().expect("app"));
     // Twirl the item open, as clicking its twirl does.
     h.ctx.data_mut(|d| d.insert_temp(egui::Id::unique("rq-ui"), (vec![id], None::<u64>)));
     h.state_mut().show_panel(PanelKind::RenderQueue);
@@ -79,7 +82,10 @@ fn clicking_the_output_file_name_opens_the_save_dialog() {
         Some(answer.clone())
     }));
     let mut app = Some(app);
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app.take().expect("app"));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| app.take().expect("app"));
     h.ctx.data_mut(|d| d.insert_temp(egui::Id::unique("rq-ui"), (vec![id], None::<u64>)));
     h.state_mut().show_panel(PanelKind::RenderQueue);
     h.run_steps(4);

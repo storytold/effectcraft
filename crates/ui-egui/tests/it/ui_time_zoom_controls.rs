@@ -24,7 +24,8 @@ fn harness(graph: bool) -> Harness<'static, EffectcraftApp> {
     let mut app = EffectcraftApp::new(s);
     // (Opening a comp may zoom; start from the whole comp.)
     app.ui.timeline.pps = None;
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app);
+    let mut h =
+        Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app);
     h.run_steps(3);
     h.state_mut().session.execute("time.set", json!({"time": 4.0})).unwrap();
     h.state_mut().ui.timeline.pps = None;

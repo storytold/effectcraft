@@ -33,7 +33,10 @@ fn the_graph_editor_follows_the_theme() {
     }
     s.execute("layer.select", json!({"layers": [id.0]})).unwrap();
 
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(move |_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(move |_| EffectcraftApp::new(s));
     h.state_mut().ui.timeline.graph_editor = true;
     h.run_steps(4);
     let ctx = h.ctx.clone();

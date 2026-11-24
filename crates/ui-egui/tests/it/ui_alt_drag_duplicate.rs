@@ -18,7 +18,10 @@ fn harness() -> (Harness<'static, EffectcraftApp>, u64, u64) {
     s.execute("prop.set", json!({"layer": a, "path": "transform/position", "value": [150.0, 180.0]})).unwrap();
     s.execute("prop.set", json!({"layer": b, "path": "transform/position", "value": [450.0, 180.0]})).unwrap();
     s.execute("layer.select", json!({"layers": [a, b]})).unwrap();
-    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(vec2(1600.0, 1000.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(s));
     h.run_steps(4);
     (h, a, b)
 }
@@ -139,7 +142,10 @@ fn alt_dragging_a_gizmo_arrow_moves_a_copy() {
     let solid = s.execute("layer.newSolid", json!({"color": "#ff0000", "width": 200, "height": 200})).unwrap()["layer"].as_u64().unwrap();
     s.execute("layer.setSwitch", json!({"layer": solid, "switch": "threeD", "value": true})).unwrap();
     s.execute("layer.select", json!({"layers": [solid]})).unwrap();
-    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(vec2(1600.0, 1000.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(s));
     h.run_steps(6);
     let p0 = pos(&h, LayerId(solid));
     let [x, y, w, hh] = h.state().auto.find(&format!("viewer.gizmo.{solid}.x")).expect("x arrow registered").rect;
