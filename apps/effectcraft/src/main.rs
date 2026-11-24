@@ -107,12 +107,19 @@ fn report_launch_profile_error(error: &str) {
     }
 }
 
+/// Whether this launch only asks for the version: the plain `--version`/`-V` query, or the
+/// Launcher's profile preamble followed by it. The shared smoke test and the macOS verifier ask
+/// the second form, and it answers without validating or touching the profile root.
+fn version_query(argv: &[std::ffi::OsString]) -> bool {
+    build_flavor::version_query(argv) || launch_profile::version_query(argv)
+}
+
 /// Select the immutable launch profile, its data roots and its window identity before any startup
 /// service or side effect. `None` means the version query answered and the process is done.
 fn prepare_launch() -> Option<Vec<std::ffi::OsString>> {
     // The trusted Launcher protocol is decided before logging, the crash helper, fonts or prefs.
     let argv: Vec<_> = std::env::args_os().skip(1).collect();
-    if build_flavor::COMPILED == build_flavor::BuildFlavor::NightlyV1 && build_flavor::version_query(&argv) {
+    if build_flavor::COMPILED == build_flavor::BuildFlavor::NightlyV1 && version_query(&argv) {
         use std::io::Write as _;
         let _ = writeln!(std::io::stdout(), "{}", build_flavor::version_line(build_flavor::COMPILED, env!("EFFECTCRAFT_BUILT_VERSION")));
         return None;
@@ -145,7 +152,8 @@ fn prepare_launch() -> Option<Vec<std::ffi::OsString>> {
                 effectcraft_engine::render::disk_cache::set_profile_root(root.clone()).map_err(str::to_owned)?;
                 // The UI keeps the user's animation presets in the profile too (not Documents, and
                 // not an inherited EC_PRESETS_DIR).
-                effectcraft_ui_egui::channel::set_profile_presets(root.join("Presets"));
+                // The UI joins "Presets" itself, so the profile root is passed, not `<root>/Presets`.
+                effectcraft_ui_egui::channel::set_profile_presets(root);
                 Ok(())
             }
         });
@@ -177,6 +185,17 @@ fn is_project_file(path: &str) -> bool {
 fn wayland_drop_notice(wayland_display: Option<&std::ffi::OsStr>, backend: Option<&std::ffi::OsStr>) -> Option<&'static str> {
     (wayland_display.is_some_and(|v| !v.is_empty()) && backend != Some(std::ffi::OsStr::new("x11")))
         .then_some("Native Wayland file drops are unavailable. Use File ▸ Import ▸ File… or run via XWayland (see README, Linux).")
+}
+
+/// The start-up status line. An interruption from the previous Nightly session and the launch
+/// guard's graphics notice both matter: the notice must not hide the interruption, because the
+/// interruption's record is cleared once it has been shown.
+fn startup_status(interruption: Option<&str>, notice: Option<&str>) -> Option<String> {
+    match (interruption, notice) {
+        (Some(interruption), Some(notice)) => Some(format!("{interruption} {notice}")),
+        (Some(text), None) | (None, Some(text)) => Some(text.to_owned()),
+        (None, None) => None,
+    }
 }
 
 /// The command line.
@@ -298,12 +317,16 @@ fn start_helpers_if_opted_in(session: &mut effectcraft_engine::Session) {
 /// Builds the session, loads settings, plugins, the requested project/media and the optional control server, then
 /// reports startup failure through `startup_failed`. Returns the event loop's result.
 fn main() -> eframe::Result {
-    let Some(args) = prepare_launch() else { return Ok(()) };
-    if crash_report::maybe_run(&args, |description| {
+    // This program's own crash-reporter helper re-runs it with no profile tokens, so its mode is
+    // answered before the launch-profile bootstrap, which would refuse it as a bare Nightly start
+    // (a dialog, a 3 s readiness timeout and no crash reporting on every launch).
+    let raw: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    if crash_report::maybe_run(&raw, |description| {
         file_dialogs::message("EffectCraft diagnostic report", description.to_owned());
     }) {
         return Ok(());
     }
+    let Some(args) = prepare_launch() else { return Ok(()) };
     let reporter = crash_report::Shutdown::default();
     let result = run_desktop(&reporter, &args);
     // run_desktop has dropped the app and handled any startup error with its existing dialog.
@@ -518,17 +541,20 @@ fn run_desktop(reporter: &crash_report::Shutdown, arguments: &[std::ffi::OsStrin
             app.set_startup_update_check(stable_services() && startup_update_check(control_port));
             app.set_gpu_failure_bridge(gpu_failures);
             app.ui.start_screen = show_home;
-            if previous_nightly_unclean || session_health_warning {
-                let message = if previous_nightly_unclean {
-                    "The previous EffectCraft Nightly session did not finish normally. You can report a problem from About. No diagnostics have been sent."
-                } else {
-                    "EffectCraft Nightly could not record session health in its private profile. You can still edit, but abnormal-exit detection is unavailable."
-                };
-                app.ui.status = message.into();
-                notice_shown_in_callback.store(previous_nightly_unclean, std::sync::atomic::Ordering::Relaxed);
+            let interruption = if previous_nightly_unclean {
+                Some("The previous EffectCraft Nightly session did not finish normally. You can report a problem from About. No diagnostics have been sent.")
+            } else if session_health_warning {
+                Some(
+                    "EffectCraft Nightly could not record session health in its private profile. You can still edit, but abnormal-exit detection is unavailable.",
+                )
+            } else {
+                None
+            };
+            if let Some(status) = startup_status(interruption, notice.as_deref()) {
+                app.ui.status = status;
             }
-            if let Some(n) = notice {
-                app.ui.status = n;
+            if interruption.is_some() {
+                notice_shown_in_callback.store(previous_nightly_unclean, std::sync::atomic::Ordering::Relaxed);
             }
             if let Some(r) = recovery {
                 app.offer_recovery(r);
@@ -812,6 +838,45 @@ mod tests {
         assert!(super::wayland_drop_notice(None, None).is_none());
         assert!(super::wayland_drop_notice(Some(OsStr::new("")), None).is_none());
         assert!(super::wayland_drop_notice(Some(OsStr::new("wayland-0")), Some(OsStr::new("x11"))).is_none());
+    }
+
+    /// The Launcher asks the version through the profile preamble; the shared smoke test and the
+    /// macOS verifier use that form, so a Nightly build must answer it like `--version`.
+    #[test]
+    fn the_launcher_version_form_is_a_version_query() {
+        fn argv(values: &[&str]) -> Vec<std::ffi::OsString> {
+            values.iter().map(std::ffi::OsString::from).collect()
+        }
+        let root = if cfg!(windows) { r"C:\NightlyData\profiles\effectcraft" } else { "/nightly-data/profiles/effectcraft" };
+        assert!(super::version_query(&argv(&["--version"])));
+        assert!(super::version_query(&argv(&["-V"])));
+        for form in [&["--launch-profile", "nightly-v1", "--profile-root", root][..], &["--profile-root", root, "--launch-profile", "nightly-v1"][..]] {
+            for flag in ["--version", "-V"] {
+                let mut query = argv(form);
+                query.push(flag.into());
+                assert!(super::version_query(&query), "{query:?}");
+            }
+        }
+        for query in [
+            argv(&["--launch-profile", "nightly-v1", "--profile-root", root, "--", "--version"]),
+            argv(&["--launch-profile", "nightly-v1", "--profile-root", root]),
+            argv(&["--launch-profile", "future-v2", "--profile-root", root, "--version"]),
+            argv(&["--demo"]),
+            argv(&[]),
+        ] {
+            assert!(!super::version_query(&query), "{query:?}");
+        }
+    }
+
+    /// The launch guard's graphics notice must not hide the previous session's interruption: its
+    /// record is cleared once the notice is on screen.
+    #[test]
+    fn the_startup_status_keeps_an_interruption_and_a_notice() {
+        assert_eq!(super::startup_status(None, None), None);
+        assert_eq!(super::startup_status(Some("interrupted"), None).as_deref(), Some("interrupted"));
+        assert_eq!(super::startup_status(None, Some("now draws with OpenGL")).as_deref(), Some("now draws with OpenGL"));
+        let both = super::startup_status(Some("interrupted"), Some("now draws with OpenGL")).unwrap();
+        assert!(both.contains("interrupted") && both.contains("now draws with OpenGL"), "{both}");
     }
 
     /// The window's wgpu instance skips indirect-call validation (Intel Metal, #1153).

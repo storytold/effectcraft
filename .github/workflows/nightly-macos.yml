@@ -42,11 +42,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # The release's pin (release.yml craft-fonts-ref), so the bundle's notices match a shipped build.
+      # The producer's own craft-fonts pin (nightly.yml craft-fonts-ref), so this check builds the
+      # fonts a shipped Nightly carries.
       - name: Check out craft-fonts
         uses: storytold/craft-common-actions/actions/checkout-craft-fonts@f5141455aac7b2eb4708aa259d8ffcdf10fde939
         with:
-          ref: cc9269cd8d8258785dac603fba3122e5d2556795
+          ref: b076417b5880bd4154bd22f00695b1d28c6bea83
       - uses: storytold/craft-common-actions/actions/checkout-craft-i18n@f5141455aac7b2eb4708aa259d8ffcdf10fde939
       - id: rust
         uses: storytold/craft-common-actions/actions/rust-channel@f5141455aac7b2eb4708aa259d8ffcdf10fde939
