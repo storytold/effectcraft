@@ -167,6 +167,15 @@ impl EffectcraftApp {
         }
     }
 
+    /// The shared app's `App::logic`: `tick`, the IME pass's close and, last, the root window's close path.
+    pub(crate) fn logic_pass(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
+        // Never `ctx.input(|i| i.time)` here: `Context::run_logic` leaves events, pointer state and
+        // time at the previous full pass's values (only the viewport information is refreshed).
+        self.tick(ctx, frame);
+        self.finish_ime_logic(ctx);
+        self.close_path(ctx);
+    }
+
     /// The app's only non-paint entry: one tick of background work.
     ///
     /// This runs for every eframe logic callback, including the logic-only ticks of a hidden

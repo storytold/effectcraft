@@ -188,11 +188,7 @@ impl eframe::App for EffectcraftApp {
     /// refreshed. A close request must be answered while hidden too; an answered file dialog can change the project,
     /// so the tick's dialog answers run first.
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        // Never `ctx.input(|i| i.time)` here: `Context::run_logic` leaves events, pointer state and
-        // time at the previous full pass's values (only the viewport information is refreshed).
-        self.tick(ctx, frame);
-        self.finish_ime_logic(ctx);
-        self.close_path(ctx);
+        self.logic_pass(ctx, frame);
     }
 
     /// Draw one UI pass through `draw`.

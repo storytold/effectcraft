@@ -755,6 +755,7 @@ fn fonts_and_device_loss_all_exit_finalizers_suspend_without_allocating() {
     app.ui.focused = PanelKind::Composition;
     app.show_panel(PanelKind::Composition);
     let ctx = egui::Context::default();
+    crate::framework::install_headless(&ctx);
     install_hooks(&ctx);
     let frame = eframe::Frame::_new_kittest();
     let preview = || egui::Event::Ime(egui::ImeEvent::Preedit { text: "é".into(), active_range_chars: None });
@@ -771,19 +772,13 @@ fn fonts_and_device_loss_all_exit_finalizers_suspend_without_allocating() {
         .reset_request
         .expect("one request for the caret interruption");
 
-    // A real font-install pass draws nothing, but `draw` still reaches the finalizer.
+    // A font install asks egui for a discard pass in the same frame. The install pass draws nothing, and its
+    // all-exit finalizer retires the waiting guard without allocating; the discard pass draws with the fonts and
+    // publishes the one deferred request.
     app.styled = false;
     let fonts = draw_app_pass(&mut app, &ctx, &frame, vec![]);
-    assert!(!app.is_ready(), "the font-install pass cannot draw");
-    assert!(fonts.platform_output.ime.is_none(), "no custom descriptor is published");
-    let guard = ctx.data(|d| d.get_temp::<ResetGuard>(reset_id(egui::ViewportId::ROOT))).expect("the waiting guard");
-    assert!(guard.suspended && guard.request.is_none(), "the all-exit finalizer retired it without allocating");
-    let second = draw_app_pass(&mut app, &ctx, &frame, vec![])
-        .platform_output
-        .ime
-        .expect("returning to a drawing pass publishes the custom descriptor")
-        .reset_request
-        .expect("the deferred request");
+    assert!(app.is_ready(), "the discard pass after the font install draws");
+    let second = fonts.platform_output.ime.expect("the drawing discard pass publishes the custom descriptor").reset_request.expect("the deferred request");
     assert_ne!(first, second);
 
     // The device-loss early return is the other all-exit path. Preset the close bookkeeping

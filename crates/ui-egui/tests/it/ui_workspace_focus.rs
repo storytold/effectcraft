@@ -2,10 +2,10 @@
 
 use std::sync::Arc;
 
+use craft_behavior::dock::Action;
 use effectcraft_engine::Session;
 use effectcraft_engine::config::{ConfigStore, DirConfig, MemoryConfig};
 use effectcraft_ui_egui::EffectcraftApp;
-use craft_behavior::dock::Action;
 use effectcraft_ui_egui::dock::{self, Node, PanelKind, SplitSize};
 use effectcraft_ui_egui::state::Tool;
 use egui::{Event, Id, Key, Modifiers, vec2};
