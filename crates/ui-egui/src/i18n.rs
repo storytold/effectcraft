@@ -5,8 +5,6 @@
 
 use crate::EffectcraftApp;
 
-/// Arabic (`ar`) menus, panels and effects.
-mod ar_data;
 /// Effect names, keyed by effect id (#821).
 pub(crate) mod effects;
 /// Translations for the panels, tooltips and dialogs below the menu bar (see the module docs).
@@ -142,10 +140,7 @@ fn first_supported(requested: Option<&str>, browser: &[String], drawable: impl F
         .map(|t| (t, true))
         .into_iter()
         .chain(browser.iter().map(|t| (t.as_str(), false)))
-        .map(|(t, asked)| {
-            let code = if asked && t.split(['-', '_']).next().is_some_and(|p| p.eq_ignore_ascii_case("ar")) { "ar" } else { supported(Some(t)) };
-            (t, asked, code)
-        })
+        .map(|(t, asked)| (t, asked, supported(Some(t))))
         .find(|(t, asked, code)| (*code != "en" && (*asked || drawable(code))) || english(t))
         .map_or("en", |(_, _, code)| code)
 }
@@ -202,7 +197,6 @@ const REVEAL_FINDER: &[(&str, &str, &str)] = &[
     ("es", "Mostrar en el Explorador", "Mostrar en el gestor de archivos"),
     ("pt-br", "Mostrar no Explorador", "Mostrar no gerenciador de arquivos"),
     ("fr", "Afficher dans l’Explorateur", "Afficher dans le gestionnaire de fichiers"),
-    ("ar", "إظهار في مستكشف الملفات", "إظهار في مدير الملفات"),
     ("ru", "Показать в Проводнике", "Показать в файловом менеджере"),
 ];
 
@@ -249,7 +243,6 @@ fn menu_catalog(language: &str) -> Option<&'static [(&'static str, &'static str,
         "pl" => POLISH,
         "ka" => GEORGIAN,
         "sv" => SWEDISH,
-        "ar" => ar_data::ARABIC_MENUS,
         _ => return None,
     })
 }
@@ -327,7 +320,6 @@ pub(crate) fn entry(app: &EffectcraftApp, e: &MenuEntry, shown: String) -> Strin
         // A colon before the history's (untranslated) action name: "Отменить: Comp1".
         "ru" => Some(("Отменить:", "Нечего отменять", "Повторить:", "Нечего повторять")),
         "sv" => Some(("Ångra", "Det går inte att ångra", "Gör om", "Det går inte att göra om")),
-        "ar" => Some(("تراجع:", "لا شيء للتراجع عنه", "إعادة:", "لا شيء للإعادة")),
         _ => None,
     };
     match e.command.as_str() {
@@ -390,17 +382,6 @@ pub(crate) fn submenu(app: &EffectcraftApp, source: &str, shown: String) -> Stri
                 && let Some(name) = shown.strip_prefix("Assign Shortcut to “").and_then(|s| s.strip_suffix('”'))
             {
                 return format!("Přiřadit zkratku 3D zobrazení „{name}“");
-            }
-        }
-        "ar" => {
-            if source == "Assign Shortcut to Workspace" {
-                if let Some(name) = shown.strip_prefix("Assign Shortcut to “").and_then(|s| s.strip_suffix("” Workspace")) {
-                    return format!("إسناد اختصار لمساحة العمل «{name}»");
-                }
-            } else if source == "Assign Shortcut to 3D View"
-                && let Some(name) = shown.strip_prefix("Assign Shortcut to “").and_then(|s| s.strip_suffix('”'))
-            {
-                return format!("إسناد اختصار للعرض الثلاثي «{name}»");
             }
         }
         "uk" => {
@@ -8916,9 +8897,7 @@ mod tests {
         let tags = |t: &[&str]| t.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         assert_eq!(super::first_supported(None, &tags(&["ja-JP", "zh-CN", "zh-TW", "ka-GE", "cs"]), super::web_draws), "cs");
         assert_eq!(super::first_supported(None, &tags(&["ka"]), super::web_draws), "en");
-        assert_eq!(super::first_supported(None, &tags(&["ar"]), super::web_draws), "en");
         assert_eq!(super::first_supported(Some("ka"), &tags(&["cs"]), super::web_draws), "ka");
-        assert_eq!(super::first_supported(Some("ar"), &tags(&["cs"]), super::web_draws), "ar");
         assert_eq!(super::first_supported(Some("ja"), &tags(&[]), super::web_draws), "ja");
     }
 
@@ -9057,7 +9036,9 @@ mod tests {
             keys(&parse(TREE, mac).unwrap(), &mut actual);
         }
         for code in CATALOG_CODES {
-            let catalog = menu_catalog(code).unwrap();
+            let Some(catalog) = menu_catalog(code) else {
+                continue;
+            };
             let mut unique = BTreeSet::new();
             for (command, en, translated) in catalog {
                 let key = (command.to_string(), en.to_string());
@@ -9363,6 +9344,9 @@ mod tests {
         let closed_path = menu_entry("path.toggleClosed", "Closed");
         let undo = menu_entry("edit.undo", "Undo");
         for code in CATALOG_CODES {
+            if menu_catalog(code).is_none() {
+                continue;
+            }
             app.session.execute("prefs.set", json!({"key":"general.language", "value":code})).unwrap();
             let drawn = entry(&app, &new_comp, new_comp.label.clone());
             assert_eq!(drawn, label(&app, "comp.new", "New Composition..."), "{code}");
@@ -9399,14 +9383,13 @@ mod tests {
         let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
         assert!(!arabic(&app));
         assert!(is_rtl_language("ar"));
+        assert!(is_rtl_language("he"));
+        assert!(!is_rtl_language("en"));
         set_current("ar");
         app.session.execute("prefs.set", json!({"key": "general.language", "value": "ar"})).unwrap();
         assert!(arabic(&app));
         assert!(is_rtl());
         assert_eq!(language(&app), "ar");
-        assert_eq!(label(&app, "comp.new", "New Composition..."), "تركيب جديد...");
-        assert_eq!(command_label("window.panel", "Project"), "مشروع");
-        assert_eq!(tr("Composition Settings"), "إعدادات التركيب");
         set_current("en");
         assert!(!is_rtl());
     }

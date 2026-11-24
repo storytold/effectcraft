@@ -91,8 +91,6 @@ fn catalog(language: &str) -> Option<&'static Catalog> {
     static GEORGIAN_CATALOG: Catalog = Catalog { rows: GEORGIAN, categories: GEORGIAN_CATEGORIES, index: OnceLock::new() };
     static SWEDISH_CATALOG: Catalog = Catalog { rows: SWEDISH, categories: SWEDISH_CATEGORIES, index: OnceLock::new() };
     static FRENCH_CATALOG: Catalog = Catalog { rows: FRENCH, categories: FRENCH_CATEGORIES, index: OnceLock::new() };
-    static ARABIC_CATALOG: Catalog =
-        Catalog { rows: super::ar_data::ARABIC_EFFECTS, categories: super::ar_data::ARABIC_EFFECT_CATEGORIES, index: OnceLock::new() };
     match language {
         "zh-hans" => Some(&SIMPLIFIED),
         "zh-hant" => Some(&TRADITIONAL),
@@ -102,7 +100,6 @@ fn catalog(language: &str) -> Option<&'static Catalog> {
         "ka" => Some(&GEORGIAN_CATALOG),
         "sv" => Some(&SWEDISH_CATALOG),
         "fr" => Some(&FRENCH_CATALOG),
-        "ar" => Some(&ARABIC_CATALOG),
         _ => None,
     }
 }
