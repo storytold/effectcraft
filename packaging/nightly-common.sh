@@ -34,6 +34,8 @@ nightly_init() {
 
 # Compile only: macOS runs the version query after signing (packaging/macos/nightly-verify.sh).
 nightly_compile_gui() {
+  # The guard sits here as well as in the entrypoints: no caller may compile with signing material.
+  nightly_refuse_signing_env
   (cd "$ROOT" && EFFECTCRAFT_VERSION="$VERSION" cargo build --release --locked -p effectcraft --target "$NIGHTLY_RUST_TARGET")
   NIGHTLY_GUI="$CARGO_TARGET_DIR/$NIGHTLY_RUST_TARGET/release/effectcraft"
   [[ -f "$NIGHTLY_GUI" && ! -L "$NIGHTLY_GUI" ]] || nightly_die 'the owned GUI build did not produce a regular executable'
