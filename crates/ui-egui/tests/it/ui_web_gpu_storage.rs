@@ -231,7 +231,7 @@ fn settings_disk_page_shows_the_browser_storage_manager() {
     let mut s = Session::default();
     let host = Arc::new(Storage::default());
     s.storage = Some(host.clone());
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| EffectcraftApp::new(s));
     h.run_steps(2);
     effectcraft_ui_egui::panels::settings::open(h.state_mut(), "disk");
     h.run_steps(3);
@@ -252,7 +252,7 @@ fn settings_disk_page_shows_the_browser_storage_manager() {
     assert_eq!(*host.cleared.lock().unwrap(), vec!["diskCache".to_string()]);
     assert!(*host.persist_asked.lock().unwrap());
     // Without a host (the desktop) the section is not there.
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(Session::default()));
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| EffectcraftApp::new(Session::default()));
     h.run_steps(2);
     effectcraft_ui_egui::panels::settings::open(h.state_mut(), "disk");
     h.run_steps(3);

@@ -37,7 +37,7 @@ fn star_controls_save_and_favorite_menu_selects_the_family() {
     let store = Arc::new(MemoryConfig::default());
     let mut session = Session { config: Some(store.clone()), ..Default::default() };
     session.execute("comp.new", json!({"width":32,"height":32,"duration":2})).unwrap();
-    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(session));
+    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| EffectcraftApp::new(session));
     h.run_steps(4);
     let ctx = h.ctx.clone();
     menus::invoke(h.state_mut(), &ctx, "app.settings", json!({"page":"appearance"})).unwrap();

@@ -20,7 +20,7 @@ fn cmd_arrows_step_the_current_frame() {
     let mut session = Session::default();
     session.execute("comp.new", json!({"name": "Main", "width": 320, "height": 180, "frameRate": 30.0, "duration": 4.0})).unwrap();
     let cid = session.state.active_comp.unwrap();
-    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(|_| EffectcraftApp::new(session));
+    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| EffectcraftApp::new(session));
     h.run_steps(2);
     let frame = |h: &Harness<'_, EffectcraftApp>| {
         let app = h.state();
@@ -53,7 +53,7 @@ fn plain_arrows_nudge_the_selected_layer() {
     session.execute("comp.new", json!({"name": "Main", "width": 320, "height": 180, "frameRate": 30.0, "duration": 4.0})).unwrap();
     let lid = session.execute("layer.newSolid", json!({"name": "Box", "width": 40, "height": 40, "color": "#ff0000"})).unwrap()["layer"].as_u64().unwrap();
     session.execute("layer.select", json!({"layers": [lid]})).unwrap();
-    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(|_| EffectcraftApp::new(session));
+    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| EffectcraftApp::new(session));
     h.run_steps(2);
     let x = |h: &Harness<'_, EffectcraftApp>| {
         h.state().session.active_comp().unwrap().layer(LayerId(lid)).unwrap().props.prop("transform/position").unwrap().value.as_vec3()[0]
@@ -83,7 +83,7 @@ fn clicking_a_timeline_row_then_arrows_nudge_the_layer() {
     session.execute("comp.new", json!({"name": "Main", "width": 320, "height": 180, "frameRate": 30.0, "duration": 4.0})).unwrap();
     let lid = session.execute("layer.newSolid", json!({"name": "Box", "width": 40, "height": 40, "color": "#ff0000"})).unwrap()["layer"].as_u64().unwrap();
     session.execute("edit.deselectAll", json!({})).unwrap();
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(session));
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| EffectcraftApp::new(session));
     h.run_steps(3);
     let row = {
         let e = h.state().auto.find(&format!("timeline.layer.{lid}.row")).expect("timeline row");
@@ -114,7 +114,7 @@ fn arrows_nudge_from_any_panel_but_project() {
     session.execute("comp.new", json!({"name": "Main", "width": 320, "height": 180, "frameRate": 30.0, "duration": 4.0})).unwrap();
     let lid = session.execute("layer.newSolid", json!({"name": "Box", "width": 40, "height": 40, "color": "#ff0000"})).unwrap()["layer"].as_u64().unwrap();
     session.execute("layer.select", json!({"layers": [lid]})).unwrap();
-    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(|_| EffectcraftApp::new(session));
+    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| EffectcraftApp::new(session));
     h.run_steps(2);
     let x = |h: &Harness<'_, EffectcraftApp>| {
         h.state().session.active_comp().unwrap().layer(LayerId(lid)).unwrap().props.prop("transform/position").unwrap().value.as_vec3()[0]

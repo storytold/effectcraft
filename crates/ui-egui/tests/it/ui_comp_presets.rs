@@ -9,7 +9,7 @@ use serde_json::json;
 fn harness() -> Harness<'static, EffectcraftApp> {
     let mut s = Session::default();
     s.execute("comp.new", json!({"name": "Edit", "width": 2560, "height": 1440, "frameRate": 60, "duration": 4})).unwrap();
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_step_dt(1.0 / 60.0).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_step_dt(1.0 / 60.0).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| EffectcraftApp::new(s));
     h.run_steps(3);
     h
 }
@@ -115,7 +115,7 @@ fn composition_settings_buttons_fit_every_language() {
         s.execute("comp.new", json!({"name": "Edit", "width": 2560, "height": 1440, "frameRate": 60, "duration": 4})).unwrap();
         s.prefs.general.language = language.into();
         let mut h =
-            Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_step_dt(1.0 / 60.0).allow_missing_glyphs().build_eframe(|_| EffectcraftApp::new(s));
+            Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_step_dt(1.0 / 60.0).allow_missing_glyphs().with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| EffectcraftApp::new(s));
         h.run_steps(3);
         open_settings(&mut h);
         let mut oks = vec![];
@@ -148,7 +148,7 @@ fn rect_of(h: &Harness<'_, EffectcraftApp>, id: &str) -> egui::Rect {
 fn composition_settings_view_stays_put_when_it_scrolls() {
     let mut s = Session::default();
     s.execute("comp.new", json!({"name": "Edit", "width": 2560, "height": 1440, "frameRate": 60, "duration": 4})).unwrap();
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 520.0)).with_step_dt(1.0 / 60.0).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 520.0)).with_step_dt(1.0 / 60.0).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| EffectcraftApp::new(s));
     h.run_steps(3);
     open_settings(&mut h);
     let (view, ok) = (rect_of(&h, "dialog.comp.view"), rect_of(&h, "dialog.comp.ok"));
@@ -183,7 +183,7 @@ fn composition_settings_refits_when_the_language_changes() {
         .with_max_steps(30)
         // `run` checks accessibility after settling; that is not what this test is about.
         .with_accessibility_check(false)
-        .build_eframe(|_| EffectcraftApp::new(s));
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| EffectcraftApp::new(s));
     h.run_steps(3);
     open_settings(&mut h);
     click(&mut h, "dialog.comp.tab.advanced");
@@ -203,7 +203,7 @@ fn composition_settings_refits_when_the_language_changes() {
 /// leaves the Home screen for the new composition; Cancel keeps it.
 #[test]
 fn new_composition_dialog_ok_leaves_the_home_screen() {
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_step_dt(1.0 / 60.0).build_eframe(|_| EffectcraftApp::new(Session::default()));
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_step_dt(1.0 / 60.0).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| EffectcraftApp::new(Session::default()));
     h.run_steps(3);
     h.state_mut().ui.start_screen = true;
     h.state_mut().dialog = Some(Dialog::NewComp);

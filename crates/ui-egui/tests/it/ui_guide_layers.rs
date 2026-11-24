@@ -21,7 +21,7 @@ fn harness() -> (Harness<'static, EffectcraftApp>, LayerId, LayerId) {
     };
     let left = solid("Left", 160.0);
     let right = solid("Right", 480.0);
-    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(session));
+    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| EffectcraftApp::new(session));
     h.run_steps(3);
     (h, left, right)
 }

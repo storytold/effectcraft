@@ -60,7 +60,7 @@ fn the_interface_draws_and_composites_on_the_cpu_while_the_gpu_compositor_is_bui
     }
     let (release, gate) = std::sync::mpsc::channel::<()>();
     let s = small_session();
-    let mut h = Harness::builder().with_size(egui::vec2(1200.0, 800.0)).wgpu().build_eframe(move |_| {
+    let mut h = Harness::builder().with_size(egui::vec2(1200.0, 800.0)).wgpu().with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(move |_| {
         let mut app = EffectcraftApp::new(s);
         // The status line's 5 s expiry reads the app clock: a manual one makes the steps below
         // stand for a known span of time.
@@ -118,7 +118,7 @@ fn a_compositor_build_that_panics_leaves_the_viewer_on_the_cpu() {
         return;
     }
     let s = small_session();
-    let mut h = Harness::builder().with_size(egui::vec2(1200.0, 800.0)).wgpu().build_eframe(move |_| {
+    let mut h = Harness::builder().with_size(egui::vec2(1200.0, 800.0)).wgpu().with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(move |_| {
         let mut app = EffectcraftApp::new(s);
         app.hooks.before_gpu_build = Some(Box::new(|| panic!("synthetic shader compiler panic")));
         app
@@ -169,7 +169,7 @@ fn viewer_draws_gpu_frames_that_match_the_cpu() {
         .with_size(egui::vec2(1400.0, 900.0))
         .with_pixels_per_point(1.0)
         .wgpu_setup(same_adapter(adapter))
-        .build_eframe(|_| EffectcraftApp::new(Session::default()));
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| EffectcraftApp::new(Session::default()));
     // The project opens once the compositor (built on a worker thread) is attached. A frame the
     // CPU composited while it was being built has the GPU frame's key, so the viewer would keep
     // showing it, and the comparison below would be the CPU against itself.
@@ -215,7 +215,7 @@ fn a_lost_device_draws_nothing_autosaves_and_closes() {
     let mut s = Session { autosave_folder_override: Some(dir.clone()), ..Default::default() };
     s.execute("comp.new", json!({"name": "Unsaved", "width": 64, "height": 64, "duration": 1})).unwrap();
     assert!(s.is_dirty());
-    let mut h = Harness::builder().with_size(egui::vec2(1200.0, 800.0)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder().with_size(egui::vec2(1200.0, 800.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| EffectcraftApp::new(s));
     let told = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     let log = told.clone();
     h.state_mut().hooks.device_lost = Some(Box::new(move |saved| log.borrow_mut().push(saved)));
@@ -259,7 +259,7 @@ fn the_viewer_exposes_32_bpc_frames_on_the_gpu() {
     let lid = s.execute("layer.newSolid", json!({"color": "#ffffff"})).unwrap()["layer"].as_u64().unwrap();
     s.execute("effect.apply", json!({"layers": [lid], "effect": "Exposure"})).unwrap();
     s.execute("prop.set", json!({"layer": lid, "path": "effects/#1/master/exposure", "value": 2.0})).unwrap();
-    let mut h = Harness::builder().with_size(egui::vec2(1200.0, 800.0)).wgpu().build_eframe(move |_| EffectcraftApp::new(s));
+    let mut h = Harness::builder().with_size(egui::vec2(1200.0, 800.0)).wgpu().with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(move |_| EffectcraftApp::new(s));
     settle(&mut h);
     let p = h.state().viewer_f16().expect("a half-float viewer frame").pixel(0).unwrap();
     let l = effectcraft_engine::color::srgb_to_linear(p[0] / p[3]);

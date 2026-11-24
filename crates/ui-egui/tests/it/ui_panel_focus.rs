@@ -19,7 +19,7 @@ fn harness() -> (Harness<'static, EffectcraftApp>, u64, u64) {
     s.execute("layer.newSolid", json!({"name": "Red", "color": [1.0, 0.0, 0.0, 1.0]})).unwrap();
     s.state.open_comps = vec![ItemId(main)];
     s.state.active_comp = Some(ItemId(main));
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| EffectcraftApp::new(s));
     h.run_steps(3);
     (h, other, main)
 }

@@ -22,6 +22,7 @@ fn doc_text(app: &EffectcraftApp, lid: LayerId) -> String {
 
 fn feed(app: &mut EffectcraftApp, events: Vec<egui::Event>) {
     let ctx = egui::Context::default();
+    crate::framework::install_headless(&ctx);
     let raw = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(320.0, 180.0))), events, ..Default::default() };
     let mut out = ctx.run_ui(raw, |ui| keyboard(app, ui, egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(320.0, 180.0))));
     out.textures_delta.clear();
@@ -44,6 +45,7 @@ fn ending_an_edit_from_another_panel_clears_the_preedit() {
     let (mut app, lid) = editor("abc", 0, 0);
     let session = app.session.state.text_edit.as_ref().map_or(1, |e| e.session);
     let ctx = egui::Context::default();
+    crate::framework::install_headless(&ctx);
     let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
         let viewport = ui.ctx().viewport_id();
         let preedit = Preedit { owner: ImeOwner { layer: lid, session }, text: "x".into() };
@@ -243,6 +245,7 @@ fn discarded_custom_request_then_home_rearms_the_identical_caret() {
     app.ui.tool = Tool::Type;
     app.ui.focused = PanelKind::Composition;
     let ctx = egui::Context::default();
+    crate::framework::install_headless(&ctx);
     install_hooks(&ctx);
     let mut frame = eframe::Frame::_new_kittest();
     let raw = || egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 800.0))), ..Default::default() };

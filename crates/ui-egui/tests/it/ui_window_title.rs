@@ -9,7 +9,7 @@ use serde_json::json;
 
 #[test]
 fn the_reported_title_follows_the_open_document() {
-    let mut h = Harness::builder().with_size(vec2(800.0, 600.0)).build_eframe(|_| EffectcraftApp::new(Session::default()));
+    let mut h = Harness::builder().with_size(vec2(800.0, 600.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| EffectcraftApp::new(Session::default()));
     h.run_steps(3);
     let clean = h.state().window_title().to_owned();
     assert!(clean.starts_with("EffectCraft - ") && !clean.ends_with(" *"), "{clean}");

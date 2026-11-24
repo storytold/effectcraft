@@ -870,6 +870,7 @@ mod tests {
         assert_eq!(v.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), vec!["bounce", "Zoom In"]);
         assert!(scan_presets(&d.join("missing")).is_empty());
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         let set_time = |time| {
             let mut output = ctx.run_ui(egui::RawInput { time: Some(time), ..Default::default() }, |_| {});
             output.textures_delta.clear();

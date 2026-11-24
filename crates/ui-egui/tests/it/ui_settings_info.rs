@@ -37,7 +37,7 @@ fn check_info_transaction(via_escape: bool) {
     session.save_prefs();
     session.execute("comp.new", json!({"width":32,"height":32,"duration":2})).unwrap();
     let original_brightness = session.prefs.appearance.brightness;
-    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(session));
+    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| EffectcraftApp::new(session));
     h.run_steps(4);
     let ctx = h.ctx.clone();
     menus::invoke(h.state_mut(), &ctx, "app.settings", json!({"page":"appearance"})).unwrap();
@@ -125,7 +125,7 @@ fn gpu_information_names_the_adapter_and_why_the_gpu_is_off() {
         window_adapter: Some("NVIDIA GeForce RTX 4070 (Dx12, DiscreteGpu)".into()),
         ..Default::default()
     };
-    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(session));
+    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| EffectcraftApp::new(session));
     h.run_steps(4);
     let ctx = h.ctx.clone();
     menus::invoke(h.state_mut(), &ctx, "app.gpuInfo", json!({})).unwrap();
@@ -140,7 +140,7 @@ fn gpu_information_dialog_stays_in_place() {
     let mut session = Session::default();
     session.prefs.appearance.ui_scale = 125;
     session.execute("comp.new", json!({"width":32,"height":32,"duration":2})).unwrap();
-    let mut h = Harness::builder().with_size(vec2(1280.0, 720.0)).build_eframe(|_| EffectcraftApp::new(session));
+    let mut h = Harness::builder().with_size(vec2(1280.0, 720.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| EffectcraftApp::new(session));
     h.run_steps(4);
     let ctx = h.ctx.clone();
     menus::invoke(h.state_mut(), &ctx, "app.settings", json!({"page":"previews"})).unwrap();
@@ -161,7 +161,7 @@ fn gpu_information_dialog_stays_in_place() {
 fn gpu_information_enter_presses_ok() {
     let mut session = Session::default();
     session.execute("comp.new", json!({"width":32,"height":32,"duration":2})).unwrap();
-    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(session));
+    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| EffectcraftApp::new(session));
     h.run_steps(4);
     let enter = |h: &mut Harness<'_, EffectcraftApp>| {
         for pressed in [true, false] {

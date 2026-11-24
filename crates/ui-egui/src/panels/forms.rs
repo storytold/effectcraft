@@ -1090,6 +1090,7 @@ mod tests {
         for (import_as, background) in [("footage", false), ("composition", true), ("compositionLayerSizes", true)] {
             let mut app = EffectcraftApp::new(effectcraft_host::session());
             let ctx = egui::Context::default();
+            crate::framework::install_headless(&ctx);
             crate::theme::install(&ctx, &app.tokens, crate::i18n::language(&app));
             app.dialog_state.form = Form {
                 title: "Import".into(),
@@ -1118,6 +1119,7 @@ mod tests {
     fn a_numeric_form_opens_with_its_first_number_selected() {
         let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         crate::theme::install(&ctx, &app.tokens, crate::i18n::language(&app));
         app.dialog_state.form = Form {
             title: "Position".into(),
@@ -1185,6 +1187,7 @@ mod tests {
     fn premiere_export_dialog() {
         let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         crate::theme::install(&ctx, &app.tokens, crate::i18n::language(&app));
         app.session.execute("comp.new", json!({"name": "Spot", "width": 64, "height": 36, "frameRate": 25, "duration": 1})).unwrap();
         app.session.execute("layer.newSolid", json!({"color": "#ff0000"})).unwrap();

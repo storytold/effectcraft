@@ -154,7 +154,7 @@ fn tab_and_shift_tab_traverse_toolbar_and_space_activates_only_focused_tool() {
     let mut app = EffectcraftApp::new(session);
     app.ui.start_screen = false;
     app.ui.show_menu_bar = false;
-    let mut h = Harness::builder().with_size(vec2(1400.0, 900.0)).build_eframe(move |_| app);
+    let mut h = Harness::builder().with_size(vec2(1400.0, 900.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(move |_| app);
     h.run_steps(3);
     for _ in 0..8 {
         key(&mut h, Key::Tab, Modifiers::NONE);
@@ -202,7 +202,7 @@ fn tab_traversal_activates_an_inactive_dock_tab_without_editing_the_project() {
     {
         *size = SplitSize::FixedFirst(420.0);
     }
-    let mut h = Harness::builder().with_size(vec2(1200.0, 760.0)).build_eframe(move |_| app);
+    let mut h = Harness::builder().with_size(vec2(1200.0, 760.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(move |_| app);
     h.run_steps(3);
     assert!(h.state().auto.find("panel.tab.EffectControls").is_some(), "the inactive tab must be visible in this fixture");
     let before = h.state().ui.dock.clone();
@@ -255,7 +255,7 @@ impl ControlDriver {
         let mut app = EffectcraftApp::new(Session::default()).with_control(rx);
         app.ui.start_screen = false;
         app.ui.show_menu_bar = false;
-        let mut driver = Self { h: Harness::builder().with_size(vec2(1200.0, 760.0)).build_eframe(move |_| app), tx };
+        let mut driver = Self { h: Harness::builder().with_size(vec2(1200.0, 760.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(move |_| app), tx };
         driver.frames(4, true);
         driver.ok("engine.execute", json!({"command":"comp.new", "params":{"name":"Native Validation", "width":160,"height":90,"duration":1}}), true);
         driver.ok("engine.execute", json!({"command":"layer.newSolid", "params":{"name":"Validation Red","color":"#ff0000"}}), true);
@@ -352,6 +352,7 @@ fn unowned_tab_keeps_the_timeline_mini_flowchart_shortcut() {
     let mut app = EffectcraftApp::new(session);
     app.ui.focused = PanelKind::Timeline;
     let ctx = egui::Context::default();
+    effectcraft_ui_egui::framework::install_headless(&ctx);
     let raw = egui::RawInput {
         events: vec![egui::Event::Key { key: Key::Tab, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE }],
         ..Default::default()

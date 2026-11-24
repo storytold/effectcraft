@@ -1331,6 +1331,7 @@ mod tests {
     fn sam2_settings_offer_file_installation_without_downloads() {
         let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         let tokens = app.tokens;
         let mut actions = vec![];
         let mut output = ctx
@@ -1356,6 +1357,7 @@ mod tests {
         app.session.sys_memory = Some(effectcraft_engine::sysinfo::SysMemory { total: 64 << 30, available: 60 << 30 });
         let page = pages().into_iter().find(|p| p.id == "memory").unwrap();
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         let tokens = app.tokens;
         let cur = serde_json::to_value(&app.session.prefs).unwrap();
         let mut actions = vec![];
@@ -1385,6 +1387,7 @@ mod tests {
             // (one frame's elements: `find` returns the first match)
             app.auto = Default::default();
             let ctx = egui::Context::default();
+            crate::framework::install_headless(&ctx);
             let (tokens, cur) = (app.tokens, serde_json::to_value(&app.session.prefs).unwrap());
             let mut actions = vec![];
             let mut output = ctx

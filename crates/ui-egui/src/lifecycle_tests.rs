@@ -82,6 +82,7 @@ fn a_control_command_that_needs_no_ui_completes_without_a_pass() {
 #[test]
 fn a_pass_that_cannot_draw_receives_no_synthetic_input() {
     let ctx = egui::Context::default();
+    crate::framework::install_headless(&ctx);
     let frame = eframe::Frame::_new_kittest();
     let mut app = app_with_comp();
     assert!(!app.is_ready(), "a fresh app installs its fonts in its first pass");

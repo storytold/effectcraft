@@ -33,7 +33,7 @@ fn settle(h: &mut Harness<'_, EffectcraftApp>) {
 
 #[test]
 fn viewer_registers_3d_controls() {
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| app());
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app());
     settle(&mut h);
     h.step();
     let ids: Vec<String> = h.state().auto.previous.iter().chain(h.state().auto.elements.iter()).map(|e| e.id.clone()).collect();
@@ -64,7 +64,7 @@ fn click_id(h: &mut Harness<'_, EffectcraftApp>, id: &str) {
 /// and switches it, as After Effects' Composition panel does.
 #[test]
 fn renderer_menu_shows_and_switches_the_comp_renderer() {
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| app());
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app());
     h.state_mut().session.execute("comp.settings", json!({"renderer": "classic3D"})).unwrap();
     h.run_steps(3);
     let label = |h: &Harness<'_, EffectcraftApp>| h.state().auto.find("viewer.renderer3d").map(|e| e.label.clone());
@@ -82,7 +82,7 @@ fn renderer_menu_shows_and_switches_the_comp_renderer() {
 
 #[test]
 fn camera_and_light_dialogs_create_layers() {
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| app());
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app());
     h.step();
     let ctx = h.ctx.clone();
     let n0 = h.state().session.active_comp().unwrap().layers.len();
@@ -112,7 +112,7 @@ fn camera_and_light_dialogs_create_layers() {
 fn snapshot() {
     let _device = crate::gpu_test::lock();
     let dir = std::env::var("EC_SNAPSHOT_DIR").ok();
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_pixels_per_point(1.0).wgpu().build_eframe(|_| app());
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_pixels_per_point(1.0).wgpu().with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app());
     let shots: [(&str, Option<&str>); 4] =
         [("active", None), ("custom1", Some("view.3d.custom1")), ("top", Some("view.3d.top")), ("left", Some("view.3d.left"))];
     for (name, cmd) in shots {
@@ -155,7 +155,7 @@ fn snapshot() {
 /// frame, and 3D layers reaching past the frame draw pixels there.
 #[test]
 fn extended_viewer_renders_past_the_comp_frame() {
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| app());
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app());
     h.state_mut().session.execute("view.3d.custom1", json!({})).unwrap();
     // Zoom out so the viewer shows plenty of pasteboard.
     h.state_mut().ui.viewer.zoom = Some(0.15);
@@ -209,7 +209,7 @@ fn layout_views_draw_the_camera_and_follow_its_position() {
     s.execute("layer.setSwitch", json!({"layer": solid, "switch": "threeD", "value": true})).unwrap();
     let cam = s.execute("layer.newCamera", json!({"position": [320, 180, -300], "poi": [320, 180, 0]})).unwrap()["layer"].as_u64().unwrap();
     s.execute("view.layout", json!({"views": 4})).unwrap();
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| EffectcraftApp::new(s));
     settle(&mut h);
     let centre = |h: &Harness<'_, EffectcraftApp>, view: &str| {
         let id = format!("viewer.view.{view}.camera.{cam}");
@@ -235,7 +235,7 @@ fn four_views() -> Harness<'static, EffectcraftApp> {
     s.execute("layer.setSwitch", json!({"layer": solid, "switch": "threeD", "value": true})).unwrap();
     s.execute("layer.newCamera", json!({"position": [320, 180, -300], "poi": [320, 180, 0]})).unwrap();
     s.execute("view.layout", json!({"views": 4})).unwrap();
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| EffectcraftApp::new(s));
     settle(&mut h);
     h
 }
@@ -288,7 +288,7 @@ fn gizmo_harness(w: u32, h: u32) -> (Harness<'static, EffectcraftApp>, u64) {
     let solid = s.execute("layer.newSolid", json!({"color": "#ff0000", "width": w, "height": h})).unwrap()["layer"].as_u64().unwrap();
     s.execute("layer.setSwitch", json!({"layer": solid, "switch": "threeD", "value": true})).unwrap();
     s.execute("layer.select", json!({"layers": [solid]})).unwrap();
-    let mut harness = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut harness = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| EffectcraftApp::new(s));
     settle(&mut harness);
     (harness, solid)
 }

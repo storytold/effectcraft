@@ -27,7 +27,7 @@ fn harness() -> (Harness<'static, EffectcraftApp>, Vec<u64>) {
         ids.push(id);
     }
     s.execute("layer.select", json!({"layers": ids})).unwrap();
-    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| EffectcraftApp::new(s));
     h.run_steps(3);
     let ctx = h.ctx.clone();
     effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "timeline.reveal.opacity", json!({})).unwrap();
@@ -210,7 +210,7 @@ fn a_quick_offset_released_off_screen_ends() {
         (0..40).map(|i| s.execute("layer.newSolid", json!({"name": format!("L{i}"), "color": "#e04020"})).unwrap()["layer"].as_u64().unwrap()).collect();
     let (top, next) = (ids[39], ids[38]);
     s.execute("layer.select", json!({"layers": [top, next]})).unwrap();
-    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| EffectcraftApp::new(s));
     h.run_steps(3);
     let from = center(&h, &format!("timeline.layer.{top}.bar"));
     h.input_mut().events.push(Event::PointerMoved(from));

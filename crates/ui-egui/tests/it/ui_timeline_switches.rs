@@ -22,7 +22,7 @@ fn harness() -> (Harness<'static, EffectcraftApp>, Vec<u64>) {
         .collect();
     ids.reverse();
     s.execute("edit.deselectAll", json!({})).unwrap();
-    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| EffectcraftApp::new(s));
     h.run_steps(3);
     (h, ids)
 }
@@ -219,7 +219,7 @@ fn the_bar_past_the_source_end_is_striped() {
     s.execute("comp.new", json!({"name": "Inner", "width": 64, "height": 64, "frameRate": 30, "duration": 2})).unwrap();
     s.execute("comp.new", json!({"name": "Outer", "width": 64, "height": 64, "frameRate": 30, "duration": 4})).unwrap();
     let l = s.execute("layer.addItem", json!({"item": "Inner"})).unwrap()["layer"].as_u64().unwrap();
-    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| EffectcraftApp::new(s));
     h.run_steps(3);
     let past = format!("timeline.layer.{l}.bar.afterSource");
     assert!(h.state().auto.find(&past).is_none(), "the source fills the whole bar");

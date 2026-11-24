@@ -1157,6 +1157,7 @@ mod tests {
     #[test]
     fn font_menu_rows_draw_a_name_the_interface_fonts_have() {
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         crate::theme::install(&ctx, &Tokens::for_kind(Default::default()), "en");
         ctx.run_ui(Default::default(), |_| {}).textures_delta.clear();
         let row = |display: &str| effectcraft_engine::FontRow { family: "Menu Name Test".into(), display: display.into(), recent: false, variable: false };

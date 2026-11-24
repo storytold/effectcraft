@@ -20,7 +20,7 @@ fn harness(select_layer: bool) -> (Harness<'static, EffectcraftApp>, u64, u64) {
     }
     let uid = s.active_comp().unwrap().layer(id).unwrap().props.prop("transform/rotation").unwrap().uid;
     s.execute("layer.select", json!({"layers": if select_layer { vec![id.0] } else { vec![] }})).unwrap();
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| EffectcraftApp::new(s));
     h.state_mut().ui.timeline.pps = Some(300.0);
     h.state_mut().ui.timeline.start = 0.0;
     h.run_steps(3);

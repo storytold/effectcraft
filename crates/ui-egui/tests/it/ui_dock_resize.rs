@@ -44,7 +44,7 @@ fn focused_dock_resize_owns_arrows_and_keeps_pointer_dragging() {
     if directory.is_some() {
         builder = builder.wgpu();
     }
-    let mut h = builder.build_eframe(move |_| app);
+    let mut h = builder.with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(move |_| app);
     h.run_steps(4);
     snapshots(&mut h, directory.as_deref(), "workspace");
     h.state_mut().ui.focused = PanelKind::Composition;

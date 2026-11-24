@@ -136,7 +136,7 @@ fn native_windows(h: &mut Harness<'_, EffectcraftApp>) -> Host {
 fn edit_menu_keys_edit_a_text_field_in_a_panel_window() {
     let mut app = app();
     menus::invoke(&mut app, &egui::Context::default(), "window.panelWindow", json!({"panel": "Project", "window": true})).unwrap();
-    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_eframe(|_| app);
+    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app);
     h.ctx.set_os(egui::os::OperatingSystem::Mac);
     let host = native_windows(&mut h);
     let at = center(&h, "project.search");
@@ -163,7 +163,7 @@ fn edit_menu_keys_edit_a_text_field_in_a_panel_window() {
 
 #[test]
 fn edit_menu_keys_edit_a_docked_text_field() {
-    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_eframe(|_| app());
+    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app());
     h.ctx.set_os(egui::os::OperatingSystem::Mac);
     h.run_steps(3);
     let at = center(&h, "project.search");

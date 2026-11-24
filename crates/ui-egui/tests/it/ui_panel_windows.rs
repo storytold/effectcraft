@@ -74,7 +74,7 @@ fn a_click_on_a_floating_panel_does_nothing_while_a_dialog_is_open() {
     let mut app = EffectcraftApp::new(Session::default());
     app.ui.start_screen = false;
     app.apply_dock(craft_behavior::dock::Action::Float { panel: PanelKind::Project, rect: [80.0, 120.0, 320.0, 240.0] }).unwrap();
-    let mut h = Harness::builder().with_size(vec2(1400.0, 900.0)).build_eframe(move |_| app);
+    let mut h = Harness::builder().with_size(vec2(1400.0, 900.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(move |_| app);
     h.run_steps(3);
     let close = |h: &Harness<'_, EffectcraftApp>| {
         let e = h.state().auto.elements.iter().find(|e| e.id.starts_with("panel.float.") && e.id.ends_with(".close")).expect("the floating window's ×");

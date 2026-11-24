@@ -17,7 +17,7 @@ use super::ui_tail::drag;
 fn harness(w: f32, h: f32) -> Harness<'static, EffectcraftApp> {
     let mut s = Session::default();
     s.execute("file.openDemoProject", json!({})).unwrap();
-    let mut h = Harness::builder().with_size(vec2(w, h)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder().with_size(vec2(w, h)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| EffectcraftApp::new(s));
     h.run_steps(3);
     h
 }
@@ -539,7 +539,7 @@ fn settings_page_column_fits_japanese_names() {
         eprintln!("required Japanese input {expected:?}: {:?}", face.info);
     }
 
-    let mut h = Harness::builder().with_size(vec2(1400.0, 900.0)).build_eframe(|_| app);
+    let mut h = Harness::builder().with_size(vec2(1400.0, 900.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app);
     h.run_steps(3);
     let ctx = h.ctx.clone();
     effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "app.settings", json!({"page": "scripting"})).unwrap();

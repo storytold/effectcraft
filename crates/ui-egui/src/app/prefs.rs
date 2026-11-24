@@ -128,6 +128,7 @@ mod appearance_tests {
     #[test]
     fn auto_mode_leaves_the_native_window_following_the_system() {
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         let mut app = app();
         app.hooks.system_theme = Some(Box::new(|_| Some(egui::Theme::Light)));
         app.set_pref("appearance.appearanceMode", json!("auto")).unwrap();

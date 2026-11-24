@@ -11,7 +11,7 @@ fn harness(comp: Option<&str>) -> Harness<'static, EffectcraftApp> {
     if let Some(comp) = comp {
         s.execute("comp.open", json!({"comp": comp})).unwrap();
     }
-    Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s))
+    Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| EffectcraftApp::new(s))
 }
 
 /// Click the centre of the automation element `id`.

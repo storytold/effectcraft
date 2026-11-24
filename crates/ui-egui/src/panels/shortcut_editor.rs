@@ -676,6 +676,7 @@ mod tests {
     fn the_ok_button_stays_inside_the_dialog_in_a_small_window() {
         let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         crate::theme::install(&ctx, &app.tokens, crate::i18n::language(&app));
         open(&mut app);
         for size in [vec2(1680.0, 1020.0), vec2(1280.0, 720.0)] {

@@ -12,7 +12,7 @@ use serde_json::json;
 fn harness() -> Harness<'static, EffectcraftApp> {
     let mut s = Session::default();
     s.execute("file.openDemoProject", json!({})).unwrap();
-    let mut h = Harness::builder().with_size(vec2(1400.0, 900.0)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder().with_size(vec2(1400.0, 900.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| EffectcraftApp::new(s));
     h.run_steps(3);
     h
 }
@@ -299,7 +299,7 @@ fn space_previews_after_opening_the_demo_from_home() {
         let s = Session::default();
         let mut app = EffectcraftApp::new(s);
         app.ui.start_screen = true;
-        Harness::builder().with_size(vec2(1400.0, 900.0)).build_eframe(|_| app)
+        Harness::builder().with_size(vec2(1400.0, 900.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app)
     };
     h.run_steps(3);
     let demo = rect(&h, "home.file.openDemoProject");

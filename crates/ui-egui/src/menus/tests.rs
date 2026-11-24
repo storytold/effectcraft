@@ -16,6 +16,7 @@ fn zoom_steps_land_on_whole_screen_magnifications() {
 #[test]
 fn shortcut_passes_share_frame_start_modifiers() {
     let ctx = egui::Context::default();
+    crate::framework::install_headless(&ctx);
     let mut starts = Vec::new();
     let mut output = ctx.run_ui(egui::RawInput { events: vec![egui::Event::ModifiersChanged(egui::Modifiers::SHIFT)], ..Default::default() }, |ui| {
         let ctx = ui.ctx();
@@ -84,6 +85,7 @@ fn ctrl_backslash_maximizes_or_restores_the_window() {
     assert!(m.command && k == egui::Key::Backslash, "{m:?} {k:?}");
     assert!(bindings(&app.session).iter().any(|b| (b.0, b.1) == (m, k) && b.2 == "window.maximizeApp"));
     let ctx = egui::Context::default();
+    crate::framework::install_headless(&ctx);
     let run = |app: &mut EffectcraftApp, maximized: bool| {
         let input = egui::RawInput {
             viewports: std::iter::once((egui::ViewportId::ROOT, egui::ViewportInfo { maximized: Some(maximized), ..Default::default() })).collect(),
@@ -408,6 +410,7 @@ fn file_dialogs_block_floating_windows_only_while_up() {
     use std::sync::{Arc, Mutex};
     let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
     let ctx = egui::Context::default();
+    crate::framework::install_headless(&ctx);
     let pending: Arc<Mutex<Vec<crate::DialogDone>>> = Arc::default();
     let queue = pending.clone();
     app.hooks.file_dialog_async = Some(Box::new(move |_dialog, done| queue.lock().unwrap().push(done)));
@@ -491,6 +494,7 @@ fn a_dialog_that_cannot_open_reports_an_error() {
     use std::sync::{Arc, Mutex};
     let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
     let ctx = egui::Context::default();
+    crate::framework::install_headless(&ctx);
     let pending: Arc<Mutex<Vec<crate::DialogDone>>> = Arc::default();
     let queue = pending.clone();
     app.hooks.file_dialog_async = Some(Box::new(move |_dialog, done| queue.lock().unwrap().push(done)));
@@ -588,6 +592,7 @@ fn dropped_files_keep_import_errors_alongside_local_drop_errors() {
         let mut app = EffectcraftApp::new(effectcraft_host::session());
         app.session.prefs.import.drag_import_as = "comp".into();
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         let mut dropped_files: Vec<egui::DroppedFileHandle> = vec![std::sync::Arc::new(Drop("no-local-path".into()))];
         if bad_import {
             dropped_files.push(std::sync::Arc::new(Drop(path.clone())));
@@ -697,7 +702,7 @@ fn closing_the_render_queue_reveals_the_panel_receiving_focus() {
 fn closing_a_floating_queue_preserves_the_maximized_composition() {
     let mut session = effectcraft_engine::Session::default();
     session.execute("comp.new", json!({"name": "A", "width": 32, "height": 32, "duration": 2})).unwrap();
-    let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1200.0, 800.0)).build_eframe(|_| EffectcraftApp::new(session));
+    let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1200.0, 800.0)).with_context_setup(crate::framework::install_headless).build_eframe(|_| EffectcraftApp::new(session));
     h.run_steps(3);
     let ctx = h.ctx.clone();
     let app = h.state_mut();
@@ -771,7 +776,7 @@ fn queue_close_keeps_passive_viewer_focus_across_frames() {
     let mut session = effectcraft_engine::Session::default();
     let a = session.execute("comp.new", json!({"name": "A", "width": 32, "height": 32, "duration": 2})).unwrap()["comp"].as_u64().unwrap();
     let b = session.execute("comp.new", json!({"name": "B", "width": 32, "height": 32, "duration": 2})).unwrap()["comp"].as_u64().unwrap();
-    let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1200.0, 800.0)).build_eframe(|_| EffectcraftApp::new(session));
+    let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1200.0, 800.0)).with_context_setup(crate::framework::install_headless).build_eframe(|_| EffectcraftApp::new(session));
     h.run_steps(3);
     let ctx = h.ctx.clone();
     let app = h.state_mut();

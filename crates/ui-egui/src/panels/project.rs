@@ -1657,6 +1657,7 @@ mod tests {
         let long = p.add_item("A rather long composition name for the list", Label::Aqua, Some(folder), ItemKind::Folder);
         let app = EffectcraftApp::new(s);
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         let mut fit = (0.0, 0.0);
         ctx.run_ui(Default::default(), |ui| {
             let painter = ui.painter();

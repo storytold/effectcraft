@@ -92,7 +92,7 @@ fn harness(s: Session, size: egui::Vec2, ppp: f32, ec: f32) -> Harness<'static, 
 /// [`harness`] whose steps advance the clock by `dt` seconds.
 fn harness_dt(s: Session, size: egui::Vec2, ppp: f32, ec: f32, dt: f32) -> Harness<'static, EffectcraftApp> {
     let app = app(s, ec);
-    let mut h = Harness::builder().with_size(size).with_pixels_per_point(ppp).with_step_dt(dt).build_eframe(|_| app);
+    let mut h = Harness::builder().with_size(size).with_pixels_per_point(ppp).with_step_dt(dt).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app);
     settle(&mut h);
     h
 }
@@ -651,7 +651,7 @@ fn picks_on_the_gpu_viewer() {
     }
     let (s, ids) = crypto_session("gpu", 1919, 1079, false);
     let app = app(s, 420.0);
-    let mut h = Harness::builder().with_size(vec2(1400.0, 900.0)).with_pixels_per_point(1.0).wgpu_setup(setup).build_eframe(|_| app);
+    let mut h = Harness::builder().with_size(vec2(1400.0, 900.0)).with_pixels_per_point(1.0).wgpu_setup(setup).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app);
     settle(&mut h);
     if h.state().gpu_adapter().is_none() {
         eprintln!("the viewer stayed on the CPU ({adapter}): skipping");

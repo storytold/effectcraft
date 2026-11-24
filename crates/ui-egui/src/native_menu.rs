@@ -768,6 +768,7 @@ mod tests {
         let spec = build(&app);
         let dup = spec.items().into_iter().find(|i| i.command == "edit.duplicate").map(|i| i.id.clone()).unwrap();
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         app.dialog_state.delete_items.command = Some((json!({"items": []}), json!({"items": 1, "layers": 1, "comps": 1})));
         app.dialog = Some(crate::Dialog::DeleteItems);
         // Chosen with the mouse, Duplicate still runs.
@@ -915,6 +916,7 @@ mod tests {
     fn a_file_dialog_takes_the_edit_keys_from_a_focused_text_field() {
         let mut app = app();
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         let mut text = String::new();
         for _ in 0..2 {
             let mut out = ctx.run_ui(egui::RawInput::default(), |ui| ui.text_edit_singleline(&mut text).request_focus());
@@ -996,6 +998,7 @@ mod tests {
             app.session.execute("layer.newNull", json!({})).unwrap();
             app.session.execute("edit.undo", json!({})).unwrap();
             let ctx = egui::Context::default();
+            crate::framework::install_headless(&ctx);
             let history = label(&build_now(&app, &ctx), "edit.undo");
             let redo_history = label(&build_now(&app, &ctx), "edit.redo");
             assert!(history.starts_with(undo) && history != undo, "{history}");

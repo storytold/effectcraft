@@ -38,7 +38,7 @@ impl Rig {
         };
         std::sync::Arc::make_mut(&mut s.project).add_item("clip.png", Label::Aqua, None, ItemKind::Footage(clip));
         let mut app = Some(EffectcraftApp::new(s));
-        let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| app.take().expect("app"));
+        let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app.take().expect("app"));
         h.run_steps(2);
         Rig { h, dir }
     }

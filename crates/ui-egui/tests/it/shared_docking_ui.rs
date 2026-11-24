@@ -114,7 +114,7 @@ fn pointer_drop_merges_floats_and_redocks_without_project_changes() {
         ),
         dock::tabs(&[PanelKind::Timeline], 0),
     ));
-    let mut h = Harness::builder().with_size(vec2(1200.0, 760.0)).build_eframe(move |_| app);
+    let mut h = Harness::builder().with_size(vec2(1200.0, 760.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(move |_| app);
     h.run_steps(4);
     let project = h.state().session.project.clone();
     let times = h.state().session.state.times.clone();
@@ -193,7 +193,7 @@ fn float_command_rejects_malformed_rectangles_and_keeps_one_docked_panel() {
 /// still moves it from there.
 #[test]
 fn floating_panel_dragged_towards_the_window_edge_keeps_moving() {
-    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_eframe(|_| {
+    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| {
         let mut app = EffectcraftApp::new(Session::default());
         app.ui.start_screen = false;
         app
@@ -326,7 +326,7 @@ fn stacked_panels_resize_by_pointer_without_changing_closed_entries() {
     session.execute("comp.new", json!({"width": 160, "height": 90, "duration": 1})).unwrap();
     let mut app = EffectcraftApp::new(session);
     app.ui.start_screen = false;
-    let mut h = Harness::builder().with_size(vec2(1000.0, 720.0)).build_eframe(move |_| app);
+    let mut h = Harness::builder().with_size(vec2(1000.0, 720.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(move |_| app);
     h.run_steps(4);
     h.state_mut().ui.dock =
         dock::docked(dock::stack(&[(PanelKind::Preview, true, Some(100.0)), (PanelKind::Properties, true, None), (PanelKind::Align, false, Some(77.0))]));

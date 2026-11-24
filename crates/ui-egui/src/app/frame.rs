@@ -753,6 +753,7 @@ mod tests {
         let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
         app.session.events.push(effectcraft_engine::Event::Toast { message: "Earlier background error".into(), error: true });
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         app.handle_events(&ctx);
         app.report_import_errors("file.import", &json!({"errors":["Later import error"]}));
         ctx.run_ui(egui::RawInput::default(), |ui| app.draw_toast(ui, ui.max_rect(), 0.0)).textures_delta.clear();
@@ -783,6 +784,7 @@ mod tests {
             app.report_import_errors("file.import", &json!({"errors":[first, "Earlier details"]}));
             app.report_import_errors("file.import", &json!({"errors":[first, "Later details"]}));
             let ctx = egui::Context::default();
+            crate::framework::install_headless(&ctx);
             ctx.run_ui(egui::RawInput::default(), |ui| app.draw_toast(ui, ui.max_rect(), 0.0)).textures_delta.clear();
             let r = app.auto.elements.iter().find(|e| e.id == "toast").unwrap().rect;
             let pos = egui::pos2(r[0] + 4.0, r[1] + 4.0);
@@ -806,6 +808,7 @@ mod tests {
         let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
         app.session.events.extend((0..40).map(|i| effectcraft_engine::Event::Toast { message: format!("Error {i}"), error: true }));
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         app.handle_events(&ctx);
         assert!(app.error_toasts.len() <= 32);
         assert_eq!(app.error_toasts.front().unwrap().message, "Error 0");
@@ -833,6 +836,7 @@ mod tests {
                 effectcraft_engine::Event::Toast { message: "Second.vectorcraft failed".into(), error: true },
             ]);
             let ctx = egui::Context::default();
+            crate::framework::install_headless(&ctx);
             app.handle_events(&ctx);
             ctx.run_ui(egui::RawInput::default(), |ui| app.draw_toast(ui, ui.max_rect(), 0.0)).textures_delta.clear();
             assert!(app.auto.elements.iter().any(|e| e.id == "toast" && e.label.contains("First.vectorcraft")));
@@ -868,6 +872,7 @@ mod tests {
         app.ui.status = "First foreground status".into();
         app.session.events.push(effectcraft_engine::Event::Toast { message: "An unseen import error".into(), error: true });
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         app.handle_events(&ctx);
         ctx.run_ui(egui::RawInput::default(), |ui| app.draw_toast(ui, ui.max_rect(), 0.0)).textures_delta.clear();
         app.ui.status = "Another foreground status".into();
@@ -885,6 +890,7 @@ mod tests {
         app.ui.status = "A local drop failed".into();
         app.session.events.push(effectcraft_engine::Event::Toast { message: "A later background import failed".into(), error: true });
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         app.handle_events(&ctx);
         ctx.run_ui(egui::RawInput::default(), |ui| app.draw_toast(ui, ui.max_rect(), 0.0)).textures_delta.clear();
         let click = |app: &mut EffectcraftApp| {
@@ -919,6 +925,7 @@ mod tests {
         let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
         app.session.events.push(effectcraft_engine::Event::Toast { message: "An earlier error".into(), error: true });
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         app.handle_events(&ctx);
         ctx.run_ui(egui::RawInput::default(), |ui| app.draw_toast(ui, ui.max_rect(), 0.0)).textures_delta.clear();
         app.ui.status = "An unrelated later status".into();
@@ -936,6 +943,7 @@ mod tests {
         app.report_import_errors("file.import", &json!({"errors": ["first failed file", "second failed file"]}));
         app.session.events.push(effectcraft_engine::Event::Toast { message: "Sequence has missing frames".into(), error: false });
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         app.handle_events(&ctx);
         ctx.run_ui(egui::RawInput::default(), |ui| app.draw_toast(ui, ui.max_rect(), 0.0)).textures_delta.clear();
         assert!(app.auto.elements.iter().any(|e| e.id == "toast" && e.label.contains("second failed file")));
@@ -948,6 +956,7 @@ mod tests {
         app.ui.status = "A foreground status".into();
         app.toast = Some(("Saved".into(), 0.0));
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         for now in [0.0, 3.0, 6.0, 6.1] {
             app.now = now;
             app.auto.elements.clear();
@@ -963,6 +972,7 @@ mod tests {
         app.toast = Some(("An old toast".into(), 0.0));
         app.now = 8.0;
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         ctx.run_ui(egui::RawInput::default(), |ui| app.draw_toast(ui, ui.max_rect(), 0.0)).textures_delta.clear();
         assert!(app.auto.elements.iter().all(|e| !e.label.contains("old toast")));
         app.ui.status.clear();
@@ -978,6 +988,7 @@ mod tests {
         app.ui.status = "A local drop failed".into();
         app.session.events.push(effectcraft_engine::Event::Toast { message: "Imported 1 item. Failed first file\nFailed second file".into(), error: true });
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         app.handle_events(&ctx);
         for now in [0.0, 3.0, 6.0] {
             app.now = now;

@@ -63,7 +63,7 @@ fn harness(s: Session) -> Harness<'static, EffectcraftApp> {
         dock::hsplit(SplitSize::FixedSecond(420.0), dock::tabs(&[PanelKind::Composition], 0), dock::tabs(&[PanelKind::EffectControls], 0)),
         dock::tabs(&[PanelKind::Timeline], 0),
     ));
-    let mut h = Harness::builder().with_size(vec2(1400.0, 800.0)).with_pixels_per_point(1.0).with_step_dt(0.25).build_eframe(|_| app);
+    let mut h = Harness::builder().with_size(vec2(1400.0, 800.0)).with_pixels_per_point(1.0).with_step_dt(0.25).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app);
     settle(&mut h);
     h
 }

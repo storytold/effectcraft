@@ -30,7 +30,7 @@ fn an_edit_in_another_comp_keeps_the_cached_frames_and_undo_finds_them_again() {
     let b = s.execute("comp.new", json!({"name": "B", "width": 64, "height": 36, "duration": 1})).unwrap()["comp"].as_u64().unwrap();
     let a = s.execute("comp.new", json!({"name": "A", "width": 64, "height": 36, "duration": 1})).unwrap()["comp"].as_u64().unwrap();
     s.execute("layer.newSolid", json!({"color": "#3080ff"})).unwrap();
-    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| EffectcraftApp::new(s));
     settle(&mut h);
     assert!(shown_cached(&h, a), "A's frame rendered");
     // Edit B (open it, add a layer), then come back to A: its frame is still in RAM.
@@ -59,7 +59,7 @@ fn the_timeline_shows_the_cached_frames_in_green() {
     let mut s = Session::default();
     s.execute("comp.new", json!({"name": "Cache", "width": 64, "height": 36, "duration": 2})).unwrap();
     s.execute("layer.newSolid", json!({"color": "#3080ff"})).unwrap();
-    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| EffectcraftApp::new(s));
     settle(&mut h);
     h.run_steps(2);
     let green = h.state().tokens.cache_green;
@@ -91,7 +91,7 @@ fn prefetch_waits_while_edits_keep_coming() {
     let c = s.execute("comp.new", json!({"name": "Drag", "width": 64, "height": 36, "duration": 2})).unwrap()["comp"].as_u64().unwrap();
     let solid = s.execute("layer.newSolid", json!({"color": "#3080ff", "width": 16, "height": 16})).unwrap()["layer"].as_u64().unwrap();
     // Short steps between edits; the app clock below is advanced explicitly.
-    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_step_dt(0.05).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_step_dt(0.05).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| EffectcraftApp::new(s));
     // Prefetch waits for EDIT_QUIET on the app clock; a manual clock makes the pause
     // deterministic instead of depending on how long the test host took to run the steps.
     h.state_mut().use_manual_clock();
@@ -145,7 +145,7 @@ fn cached_frames_are_counted_at_one_third_resolution() {
         if let Some(comp) = std::sync::Arc::make_mut(&mut s.project).comp_mut(ItemId(c)) {
             comp.resolution = res;
         }
-        let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(|_| EffectcraftApp::new(s));
+        let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| EffectcraftApp::new(s));
         settle(&mut h);
         let series = h.state().shown_series(ItemId(c));
         assert_eq!(series.scale, (res.scale(1.0, 1.0) * 1000.0).round() as u32, "{res:?}");

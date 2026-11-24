@@ -629,6 +629,7 @@ mod tests {
         assert_eq!(app.session.execute("markers.list", json!({})).unwrap()[0]["chapter"], "");
         // Enter is OK and Cmd+Backspace is Delete.
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         crate::theme::install(&ctx, &app.tokens, crate::i18n::language(&app));
         // The dialog opens with Comment focused (#922), a multi-line field where Enter types a
         // new line; with the focus elsewhere, Enter is OK.

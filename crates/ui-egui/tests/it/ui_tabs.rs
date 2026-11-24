@@ -20,7 +20,7 @@ fn harness() -> (Harness<'static, EffectcraftApp>, u64, u64) {
     s.execute("layer.addItem", json!({"item": pre})).unwrap();
     s.state.open_comps = vec![ItemId(main)];
     s.state.active_comp = Some(ItemId(main));
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| EffectcraftApp::new(s));
     h.run_steps(3);
     (h, pre, main)
 }
@@ -440,7 +440,7 @@ fn open_comps_are_tabs_in_the_timeline_row_and_the_rest_are_in_its_overflow_menu
         .collect();
     s.state.open_comps = vec![ItemId(comps[0])];
     s.state.active_comp = Some(ItemId(comps[0]));
-    let mut h = Harness::builder().with_size(egui::vec2(1000.0, 800.0)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder().with_size(egui::vec2(1000.0, 800.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| EffectcraftApp::new(s));
     h.run_steps(3);
     let alone = rect(&h, "panel.tab.RenderQueue");
     h.state_mut().session.state.open_comps = comps.iter().map(|c| ItemId(*c)).collect();

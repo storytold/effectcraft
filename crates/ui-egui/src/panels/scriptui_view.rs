@@ -785,6 +785,7 @@ mod tests {
     /// frame's scroll output (viewport and content size).
     fn panel_frames(dock: egui::Vec2, first: egui::Vec2, then: egui::Vec2) -> (Rect, egui::Vec2) {
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         ctx.all_styles_mut(|s| s.spacing.scroll = egui::style::ScrollStyle::solid());
         let screen = Rect::from_min_size(egui::Pos2::ZERO, vec2(800.0, 600.0));
         let mut last = (Rect::NOTHING, egui::Vec2::ZERO);

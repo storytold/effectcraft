@@ -23,7 +23,7 @@ fn app() -> EffectcraftApp {
 }
 
 fn harness() -> Harness<'static, EffectcraftApp> {
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| app());
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app());
     h.run_steps(3);
     h
 }
@@ -127,7 +127,7 @@ fn selection_harness() -> Harness<'static, EffectcraftApp> {
         s.execute("layer.newSolid", json!({"name": name, "color": "#406080", "width": 80, "height": 80})).unwrap();
     }
     s.execute("edit.deselectAll", json!({})).unwrap();
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(move |_| EffectcraftApp::new(s));
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(move |_| EffectcraftApp::new(s));
     h.run_steps(3);
     h
 }
@@ -285,7 +285,7 @@ fn viewer_double_click_opens_the_topmost_layer_over_a_selected_one() {
     s.execute("layer.addItem", json!({"item": "Inner"})).unwrap();
     let back = s.active_comp().unwrap().layers[1].id;
     s.execute("layer.select", json!({"layers": [back.0]})).unwrap();
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(move |_| EffectcraftApp::new(s));
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(move |_| EffectcraftApp::new(s));
     h.run_steps(40);
     let at = screen(&h, [320.0, 180.0]);
     h.input_mut().events.push(Event::PointerMoved(at));
@@ -3008,7 +3008,7 @@ fn full_resolution_frames_wider_than_the_texture_limit_fit() {
     let mut s = Session::default();
     s.execute("comp.new", json!({"name": "Wide", "width": 2400, "height": 400, "duration": 1})).unwrap();
     s.execute("layer.newSolid", json!({"name": "Plate", "color": "#406080"})).unwrap();
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| EffectcraftApp::new(s));
     // (egui's font atlas needs 1024.)
     h.input_mut().max_texture_side = Some(1024);
     h.state_mut().session.execute("view.res.full", json!({})).unwrap();
@@ -3115,7 +3115,7 @@ fn frame_sits_on_the_physical_pixel_grid() {
     for ppp in [1.0f32, 1.25, 1.5] {
         let mut s = Session::default();
         s.execute("comp.new", json!({"name": "Grid", "width": 301, "height": 201, "duration": 1})).unwrap();
-        let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_pixels_per_point(ppp).build_eframe(move |_| EffectcraftApp::new(s));
+        let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_pixels_per_point(ppp).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(move |_| EffectcraftApp::new(s));
         h.run_steps(3);
         for (mag, pan) in [(1.0f32, [0.3f32, 0.37]), (2.0, [-0.45, 0.2])] {
             h.state_mut().ui.viewer.zoom = Some(mag / ppp);
@@ -3145,7 +3145,7 @@ fn fit_up_to_100_follows_the_maximized_panel() {
         h.run_steps(2);
     };
     // A comp larger than the panel: it fills the docked panel, then the maximized one.
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| {
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| {
         let mut s = Session::default();
         s.execute("comp.new", json!({"name": "Big", "width": 3840, "height": 2160, "duration": 4})).unwrap();
         EffectcraftApp::new(s)
@@ -3505,7 +3505,7 @@ fn null_eye_hides_it_in_the_viewer() {
     s.execute("comp.new", json!({"name": "Nulls", "width": 640, "height": 360, "duration": 4})).unwrap();
     let n = s.execute("layer.newNull", json!({})).unwrap()["layer"].as_u64().unwrap();
     s.execute("layer.select", json!({"layers": [n]})).unwrap();
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(move |_| EffectcraftApp::new(s));
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(move |_| EffectcraftApp::new(s));
     h.run_steps(3);
     let handle = format!("viewer.handle.{n}.0");
     let eye = format!("timeline.layer.{n}.video");
@@ -3541,7 +3541,7 @@ fn unselected_null_keeps_its_outline() {
     s.execute("comp.new", json!({"name": "Nulls", "width": 640, "height": 360, "duration": 4})).unwrap();
     let n = s.execute("layer.newNull", json!({})).unwrap()["layer"].as_u64().unwrap();
     s.execute("layer.select", json!({"layers": [n]})).unwrap();
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(move |_| EffectcraftApp::new(s));
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(move |_| EffectcraftApp::new(s));
     h.run_steps(3);
     // Use the selected box's actual geometry, so transformed nulls use the same outline.
     let corners: Vec<Pos2> = (0..4).map(|i| rect(&h, &format!("viewer.handle.{n}.{i}")).center()).collect();
