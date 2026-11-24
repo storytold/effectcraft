@@ -145,10 +145,17 @@ fn import_cmd(s: &mut Session, p: &Value) -> Result<Value> {
         let p = p.clone();
         let immediate_errors = pending.errors.clone();
         // Compositions made during preparation stay when the job is canceled, so their notes are
-        // shown now and returned in both results.
+        // shown now and returned in both results. The window keeps one notice at a time and shows
+        // its first line, so they go in one notice led by a summary, and the finished job's toast
+        // repeats them.
         let immediate_warnings = std::mem::take(&mut pending.warnings);
-        for w in &immediate_warnings {
-            s.events.push(crate::Event::Toast { message: w.clone(), error: true });
+        let notes = match immediate_warnings.as_slice() {
+            [] => String::new(),
+            [one] => one.clone(),
+            [first, rest @ ..] => format!("{first} (and {} more)\n{}", rest.len(), immediate_warnings.join("\n")),
+        };
+        if !notes.is_empty() {
+            s.events.push(crate::Event::Toast { message: notes.clone(), error: false });
         }
         let job_warnings = immediate_warnings.clone();
         let mut result = s.spawn_task("import", label, false, move |ctl| {
@@ -174,6 +181,9 @@ fn import_cmd(s: &mut Session, p: &Value) -> Result<Value> {
                     [] => {}
                     [one] => toast = format!("{toast}. {one}"),
                     [first, rest @ ..] => toast = format!("{toast}. {first} (and {} more)\n{}", rest.len(), errors.join("\n")),
+                }
+                if !notes.is_empty() {
+                    toast = if errors.is_empty() { format!("{toast}. {notes}") } else { format!("{toast}\n{notes}") };
                 }
                 r["toast"] = json!(toast);
                 Ok(r)

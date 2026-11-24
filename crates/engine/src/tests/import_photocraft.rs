@@ -134,9 +134,52 @@ fn photocraft_composition_notes_arrive_before_a_background_footage_job() {
     assert!(r["errors"].as_array().unwrap().is_empty(), "{r}");
     let notes = |r: &Value| r["warnings"].as_array().unwrap().iter().any(|w| w.as_str().is_some_and(|w| w.contains("Some masks, effects and profiles")));
     assert!(notes(&r), "the composition already exists, so a canceled job must not hide its notes: {r}");
+    let toast = s.drain_events().into_iter().find_map(|e| match e {
+        crate::Event::Toast { message, error } if message.contains("Some masks, effects and profiles") => Some(error),
+        _ => None,
+    });
+    assert_eq!(toast, Some(false), "the composition was imported, so its notes are shown as a notice, not an error");
     s.execute("jobs.wait", json!({})).unwrap();
+    let done = s.drain_events().into_iter().find_map(|e| match e {
+        crate::Event::Toast { message, error } if message.starts_with("Imported") => Some((message, error)),
+        _ => None,
+    });
+    let (done, error) = done.expect("the finished job shows its own toast");
+    assert!(!error, "{done}");
+    let shown = done.lines().next().unwrap_or_default();
+    assert!(
+        shown.contains("Some masks, effects and profiles"),
+        "the job's toast replaces the notice in the window, so its first line repeats the notes: {done}"
+    );
     std::fs::remove_file(layered).unwrap();
     std::fs::remove_file(still).unwrap();
+}
+
+#[test]
+fn photocraft_composition_notes_from_several_files_share_one_notice() {
+    let first = fixture("background-first.pcraft", json!([layer("Bottom", true, 1.0, "Normal", json!({"kind":"raster","surface":surface("ff0000ff")}))]));
+    let second = fixture("background-second.pcraft", json!([layer("Bottom", true, 1.0, "Normal", json!({"kind":"raster","surface":surface("00ff00ff")}))]));
+    let mut png = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(2, 2, image::Rgba([1, 2, 3, 255]))).write_to(&mut png, image::ImageFormat::Png).unwrap();
+    let still = fixture_bytes("background-third.png", png.into_inner());
+    let mut s = Session { importer: Some(std::sync::Arc::new(Import)), ..Default::default() };
+    let r = s.execute("file.import", json!({"paths":[first, second, still],"importAs":"composition","background":true})).unwrap();
+    assert_eq!(r["warnings"].as_array().unwrap().len(), 2, "{r}");
+    let notices: Vec<String> = s
+        .drain_events()
+        .into_iter()
+        .filter_map(|e| match e {
+            crate::Event::Toast { message, error: false } => Some(message),
+            _ => None,
+        })
+        .collect();
+    let [notice] = notices.as_slice() else { panic!("one notice for both compositions: {notices:?}") };
+    assert!(notice.lines().next().unwrap_or_default().ends_with("(and 1 more)"), "the shown line says another note is on hover: {notice}");
+    assert_eq!(notice.lines().count(), 3, "{notice}");
+    s.execute("jobs.wait", json!({})).unwrap();
+    for path in [first, second, still] {
+        std::fs::remove_file(path).unwrap();
+    }
 }
 
 #[test]
