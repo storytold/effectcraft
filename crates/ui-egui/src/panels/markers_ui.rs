@@ -446,7 +446,16 @@ pub(crate) fn marker_bin(app: &mut EffectcraftApp, ui: &mut egui::Ui, comp: &Com
         ui.ctx().set_cursor_icon(if resp.dragged() { egui::CursorIcon::Grabbing } else { egui::CursorIcon::Grab });
     }
     icons::paint(ui.painter(), bin, Icon::MarkerBin, if hot { t.icon_active } else { t.icon });
-    let at = resp.interact_pointer_pos().filter(|p| p.x >= strip.min.x && p.x < strip.max.x).map(|p| {
+    // A drag ends where its button came up: a later press in the same pass (one press per pass
+    // follows a release) has moved the pointer on.
+    let released_at = ui.input(|i| {
+        i.events.iter().find_map(|e| match e {
+            egui::Event::PointerButton { button: egui::PointerButton::Primary, pressed: false, pos, .. } => Some(*pos),
+            _ => None,
+        })
+    });
+    let pointer = if resp.drag_stopped() { released_at.or(resp.interact_pointer_pos()) } else { resp.interact_pointer_pos() };
+    let at = pointer.filter(|p| p.x >= strip.min.x && p.x < strip.max.x).map(|p| {
         let snapped = snap(app, comp, tm, tm.t(p.x), MarkerRef { layer: None, index: usize::MAX });
         snapped.min(comp.duration.seconds())
     });

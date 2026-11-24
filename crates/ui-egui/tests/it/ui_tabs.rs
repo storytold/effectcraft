@@ -430,9 +430,13 @@ fn a_tab_dropped_on_a_frame_joins_it() {
         use egui_kittest::kittest::{NodeT, Queryable};
         let more = h.query_all_by_label("More tabs").map(|node| node.rect()).find(|r| props.x_range().contains(r.center().x)).expect("the frame's » menu");
         click_n(&mut h, more.center(), 1);
+        // The menu names a panel by its tab title ("Properties: <layer>").
         let item = h
-            .query_all_by_label("Properties")
-            .find(|node| node.accesskit_node().role() == egui::accesskit::Role::MenuItem)
+            .query_all(egui_kittest::kittest::By::new().predicate(|_| true))
+            .find(|node| {
+                let n = node.accesskit_node();
+                n.role() == egui::accesskit::Role::MenuItem && n.label().is_some_and(|l| l.starts_with("Properties"))
+            })
             .expect("Properties in the » menu")
             .rect();
         click_n(&mut h, item.center(), 1);

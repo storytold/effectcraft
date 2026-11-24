@@ -5,8 +5,8 @@
 //! EffectCraft's own UI.
 //!
 //! The runtime takes Escape, Tab and the clipboard events for the whole window unless one of EffectCraft's own egui
-//! widgets has the keyboard. [`return_window_keys`] puts the window's Escape and plain Enter back into egui's input
-//! for EffectCraft's own handlers; the Composition viewer is declared to the runtime with [`host_canvas`], which keeps
+//! widgets has the keyboard. [`return_window_keys`] puts the window's Escape back into egui's input for EffectCraft's
+//! own handlers (the window's plain Enter stays in egui's input); the Composition viewer is declared to the runtime with [`host_canvas`], which keeps
 //! Tab, the edit chords and the clipboard events in egui's input for EffectCraft's shortcuts.
 
 use std::sync::{Arc, OnceLock};
@@ -123,17 +123,16 @@ pub(crate) fn host_canvas(ctx: &egui::Context, id: egui::Id) {
     craft_ui::runtime::focus::host_canvas(ctx, id, KEYS);
 }
 
-/// Puts the window's Escape and plain Enter (the keys the runtime routes to no component while nothing has framework
-/// focus) back into egui's input as key presses, first in the pass, so EffectCraft's dialogs, popups, tools and
-/// shortcuts read them from egui as they read every other key.
+/// Puts the window's Escape (the key the runtime routes to no component while nothing has framework focus) back into
+/// egui's input as a key press, first in the pass, so EffectCraft's dialogs, popups, tools and shortcuts read it from
+/// egui as they read every other key. The window's plain Enter is its Submit and also stays in egui's input, where
+/// EffectCraft reads it.
 pub(crate) fn return_window_keys(ctx: &egui::Context) {
-    for (key, intent) in [(egui::Key::Escape, Intent::Cancel), (egui::Key::Enter, Intent::Submit)] {
-        if take_window_intent(ctx, intent) {
-            ctx.input_mut(|i| {
-                let modifiers = i.modifiers;
-                i.events.insert(0, egui::Event::Key { key, physical_key: Some(key), pressed: true, repeat: false, modifiers });
-            });
-        }
+    if take_window_intent(ctx, Intent::Cancel) {
+        ctx.input_mut(|i| {
+            let modifiers = i.modifiers;
+            i.events.insert(0, egui::Event::Key { key: egui::Key::Escape, physical_key: Some(egui::Key::Escape), pressed: true, repeat: false, modifiers });
+        });
     }
 }
 

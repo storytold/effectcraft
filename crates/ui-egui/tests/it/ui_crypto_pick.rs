@@ -1933,10 +1933,11 @@ fn the_same_status_set_again_while_shown_gets_its_own_5_s() {
     let _ = std::fs::remove_dir_all(&ids.dir);
 }
 
-/// A press, a PageDown and the release in one slow pass: the click is the frame on screen at the
-/// press, so it is dropped and says so, not made on the next frame (Windows round 6, R-i pd8).
+/// A press, then a PageDown and the release in one slow pass (the runtime takes the press in its
+/// own pass): the click is the frame on screen at the press, so it is dropped and says so, not
+/// made on the next frame (Windows round 6, R-i pd8).
 #[test]
-fn a_frame_step_between_press_and_release_in_one_pass_drops_the_click() {
+fn a_frame_step_between_press_and_release_drops_the_click() {
     let (mut h, ids, a, _) = ready_at_two_ids("key-one-pass");
     let key = |pressed| Event::Key { key: egui::Key::PageDown, physical_key: None, pressed, repeat: false, modifiers: Modifiers::NONE };
     let ev = &mut h.input_mut().events;
@@ -1944,6 +1945,7 @@ fn a_frame_step_between_press_and_release_in_one_pass_drops_the_click() {
     ev.push(key(true));
     ev.push(key(false));
     ev.push(Event::PointerButton { pos: a, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+    h.step();
     h.step();
     assert!(h.state().session.time().seconds() > 0.0, "the PageDown stepped");
     assert!(h.state().ui.status.starts_with("Pick not made"), "{:?}", h.state().ui.status);

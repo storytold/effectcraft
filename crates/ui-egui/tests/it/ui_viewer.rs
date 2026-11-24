@@ -1921,7 +1921,9 @@ fn puppet_press_where_the_deformed_layer_is_empty_is_a_marquee_not_a_copy() {
         let meshes = info["meshes"].as_array().unwrap().clone();
         (meshes.len(), meshes.iter().map(|m| m["pins"].as_array().unwrap().len()).sum::<usize>())
     };
-    let at = screen(&h, [285.0, 180.0]);
+    // Above the pins' row (comp y 180): a marquee whose edge runs through the pins leaves them to
+    // rounding.
+    let at = screen(&h, [285.0, 170.0]);
     click(&mut h, at);
     assert_eq!(rig(&mut h), (1, 2), "the click made nothing");
     let comp = rect(&h, "viewer.comp");
