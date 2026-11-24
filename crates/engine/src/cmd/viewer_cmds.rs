@@ -143,7 +143,15 @@ fn channel(s: &mut Session, p: &Value) -> Result<Value> {
 
 fn onion_skin(s: &mut Session, p: &Value) -> Result<Value> {
     let mut o = s.state.viewer.onion.clone();
-    o.enabled = b_p(p, "value").or_else(|| b_p(p, "enabled")).unwrap_or(!o.enabled);
+    let mut flag = None;
+    for k in ["value", "enabled"] {
+        match p.get(k) {
+            None | Some(Value::Null) => {}
+            Some(Value::Bool(b)) => flag = flag.or(Some(*b)),
+            Some(_) => return Err(bad("view.onionSkin", format!("`{k}` must be true or false"))),
+        }
+    }
+    o.enabled = flag.unwrap_or(!o.enabled);
     let count = |k: &str| -> Result<Option<u32>> {
         match p.get(k) {
             None | Some(Value::Null) => Ok(None),

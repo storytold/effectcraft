@@ -26,7 +26,7 @@ impl EffectcraftApp {
     /// desktop reads them back (see [`frames::RenderSource::gpu_display`]).
     fn gpu_display(&self) -> bool {
         let v = &self.session.state.viewer;
-        cfg!(target_arch = "wasm32")
+        (cfg!(target_arch = "wasm32") || self.hooks.keep_gpu_frames)
             && v.channel == effectcraft_engine::viewer::Channel::Rgb
             && v.exposure == 0.0
             && self.session.state.region_of_interest.is_none()
@@ -305,6 +305,11 @@ impl EffectcraftApp {
     /// The viewer shows a frame composited on the GPU (drawn from its wgpu texture).
     pub fn viewer_on_gpu(&self) -> bool {
         matches!((&self.viewer_shown, &self.viewer_native), (Some(s), Some(n)) if s.1 == n.1)
+    }
+
+    /// How many onion skin ghosts the viewer has ready to paint.
+    pub fn onion_ghosts_ready(&self) -> usize {
+        self.onion_tex.len()
     }
 
     /// The GPU compositor's adapter, when the viewer has one.

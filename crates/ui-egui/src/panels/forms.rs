@@ -1031,29 +1031,46 @@ fn onion_options(app: &mut EffectcraftApp, ui: &mut egui::Ui) {
     ui.add_space(8.0);
     let mut o = app.session.state.viewer.onion.clone();
     let before = o.clone();
-    crate::widgets::labelled_checkbox(ui, &mut o.enabled, tr("Onion skin"));
-    let count = |ui: &mut egui::Ui, label: &str, v: &mut u32, max: u32| {
-        ui.horizontal(|ui| {
-            ui.label(tr(label));
-            ui.add(egui::DragValue::new(v).range(0..=max));
-        });
-    };
-    count(ui, "Frames before", &mut o.before, effectcraft_engine::onion::MAX_GHOSTS_PER_SIDE);
-    count(ui, "Frames after", &mut o.after, effectcraft_engine::onion::MAX_GHOSTS_PER_SIDE);
-    count(ui, "Step (frames)", &mut o.step, effectcraft_engine::onion::MAX_STEP);
-    for (label, c) in [("Tint before", &mut o.tint_before), ("Tint after", &mut o.tint_after)] {
-        ui.horizontal(|ui| {
-            ui.label(tr(label));
-            ui.color_edit_button_srgb(c);
-        });
+    let r = crate::widgets::labelled_checkbox(ui, &mut o.enabled, tr("Onion skin"));
+    app.auto.add_response("onion.enabled", &r, "Onion skin");
+    let counts = [
+        ("onion.before", "Frames before", &mut o.before, effectcraft_engine::onion::MAX_GHOSTS_PER_SIDE),
+        ("onion.after", "Frames after", &mut o.after, effectcraft_engine::onion::MAX_GHOSTS_PER_SIDE),
+        ("onion.step", "Step (frames)", &mut o.step, effectcraft_engine::onion::MAX_STEP),
+    ];
+    for (id, label, v, max) in counts {
+        let r = ui
+            .horizontal(|ui| {
+                ui.label(tr(label));
+                ui.add(egui::DragValue::new(v).range(0..=max))
+            })
+            .inner;
+        app.auto.add_response(id, &r, label);
     }
-    for (label, v) in [("Tint amount", &mut o.tint_amount), ("Opacity", &mut o.opacity), ("Opacity falloff", &mut o.falloff)] {
-        ui.horizontal(|ui| {
-            ui.label(tr(label));
-            ui.add(egui::Slider::new(v, 0.0..=1.0));
-        });
+    for (id, label, c) in [("onion.tintBefore", "Tint before", &mut o.tint_before), ("onion.tintAfter", "Tint after", &mut o.tint_after)] {
+        let r = ui
+            .horizontal(|ui| {
+                ui.label(tr(label));
+                ui.color_edit_button_srgb(c)
+            })
+            .inner;
+        app.auto.add_response(id, &r, label);
     }
-    crate::widgets::labelled_checkbox(ui, &mut o.under, tr("Ghosts below the frame"));
+    for (id, label, v) in [
+        ("onion.tintAmount", "Tint amount", &mut o.tint_amount),
+        ("onion.opacity", "Opacity", &mut o.opacity),
+        ("onion.falloff", "Opacity falloff", &mut o.falloff),
+    ] {
+        let r = ui
+            .horizontal(|ui| {
+                ui.label(tr(label));
+                ui.add(egui::Slider::new(v, 0.0..=1.0))
+            })
+            .inner;
+        app.auto.add_response(id, &r, label);
+    }
+    let r = crate::widgets::labelled_checkbox(ui, &mut o.under, tr("Ghosts below the frame"));
+    app.auto.add_response("onion.under", &r, "Ghosts below the frame");
     if o != before {
         let p = serde_json::json!({
             "value": o.enabled, "before": o.before, "after": o.after, "step": o.step,

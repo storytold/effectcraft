@@ -180,8 +180,9 @@ fn viewer_draws_gpu_frames_that_match_the_cpu() {
     }
     assert!(h.state().gpu_adapter().is_some(), "GPU compositor on egui-wgpu's device");
     eprintln!("viewer compositor adapter: {:?}", h.state().gpu_adapter());
-    h.state_mut().session.execute("file.openDemoProject", json!({})).unwrap();
-    h.state_mut().session.execute("time.set", json!({"time": 2.0})).unwrap();
+    let comp = h.state_mut().session.execute("comp.new", json!({"name": "Onion", "width": 64, "height": 64, "duration": 4})).unwrap()["comp"].as_u64().unwrap();
+    h.state_mut().session.execute("layer.newSolid", json!({"comp": comp, "color": "#ff0000"})).unwrap();
+    h.state_mut().session.execute("time.set", json!({"time": 1.0})).unwrap();
     settle(&mut h);
     let gpu_px = h.state_mut().viewer_pixels().expect("read back the GPU frame");
     let gpu_shot = h.render().expect("render");
@@ -280,4 +281,54 @@ fn the_viewer_exposes_32_bpc_frames_on_the_gpu() {
     assert!(white == 255 && n >= 1000, "-2 EV: {n} white pixels");
     let (grey, n) = count(&mut h, -4.0);
     assert!((130..=145).contains(&grey) && n >= 1000, "-4 EV: {n} pixels of {grey}");
+}
+
+#[test]
+fn onion_skin_ghosts_show_on_the_gpu_preview_path() {
+    let _device = crate::gpu_test::lock();
+    let Some(probe) = effectcraft_gpu::Gpu::headless() else {
+        eprintln!("no GPU adapter: skipping");
+        return;
+    };
+    let adapter = effectcraft_engine::render::Accelerator::name(&probe);
+    let gl = adapter.ends_with("(Gl)");
+    drop(probe);
+    let mut h = Harness::builder().with_size(egui::vec2(1200.0, 800.0)).with_pixels_per_point(1.0).wgpu_setup(same_adapter(adapter)).build_eframe(|_| {
+        let mut app = EffectcraftApp::new(Session::default());
+        app.hooks.keep_gpu_frames = true;
+        app
+    });
+    wait_for_compositor(&mut h);
+    if gl && h.state().gpu_adapter().is_none() {
+        eprintln!("egui-wgpu's GL device has WebGL2 limits: the viewer stays on the CPU, skipping");
+        return;
+    }
+    assert!(h.state().gpu_adapter().is_some(), "GPU compositor on egui-wgpu's device");
+    h.state_mut().session.execute("render.backend", json!({"backend": "gpu"})).unwrap();
+    let comp = h.state_mut().session.execute("comp.new", json!({"name": "Onion", "width": 64, "height": 64, "duration": 4})).unwrap()["comp"].as_u64().unwrap();
+    h.state_mut().session.execute("layer.newSolid", json!({"comp": comp, "color": "#ff0000"})).unwrap();
+    h.state_mut().session.execute("time.set", json!({"time": 1.0})).unwrap();
+    for _ in 0..1500 {
+        h.step();
+        if h.state().viewer_on_gpu() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(h.state().viewer_on_gpu(), "the frame on screen is a GPU frame");
+    assert_eq!(h.state().onion_ghosts_ready(), 0);
+    h.state_mut().session.execute("view.onionSkin", json!({"value": true, "before": 1, "after": 1})).unwrap();
+    for _ in 0..3000 {
+        h.step();
+        if h.state().viewer_on_gpu() && h.state().onion_ghosts_ready() == 2 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(h.state().viewer_on_gpu(), "the frame on screen is a GPU frame");
+    assert_eq!(h.state().onion_ghosts_ready(), 2, "both neighbouring GPU frames are drawn as ghosts");
+    h.state_mut().session.execute("view.onionSkin", json!({"value": false})).unwrap();
+    h.step();
+    h.step();
+    assert_eq!(h.state().onion_ghosts_ready(), 0, "switching it off releases the ghosts");
 }

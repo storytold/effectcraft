@@ -1379,3 +1379,14 @@ fn onion_skin_command_sets_options_and_round_trips() {
     assert!(s.execute("view.onionSkin", json!({"placement": "sideways"})).is_err());
     assert!(s.execute("view.onionSkin", json!({"opacity": "x"})).is_err());
 }
+
+#[test]
+fn onion_skin_rejects_a_mistyped_toggle_instead_of_flipping_it() {
+    let mut s = comp();
+    for p in [json!({"value": "false"}), json!({"enabled": 0}), json!({"value": 1})] {
+        assert!(s.execute("view.onionSkin", p).is_err());
+        assert!(!s.state.viewer.onion.enabled);
+    }
+    s.execute("view.onionSkin", json!({"value": null})).unwrap();
+    assert!(s.state.viewer.onion.enabled);
+}

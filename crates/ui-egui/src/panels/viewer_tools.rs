@@ -344,6 +344,13 @@ pub(crate) fn shown_region(ctx: &egui::Context, comp: [f32; 2]) -> [f64; 4] {
     texture_roi(ctx).unwrap_or([0.0, 0.0, comp[0] as f64, comp[1] as f64])
 }
 
+fn onion_click(app: &mut EffectcraftApp, clicked: bool) {
+    if clicked {
+        let on = app.session.state.viewer.onion.enabled;
+        let _ = app.session.execute("view.onionSkin", json!({"value": !on}));
+    }
+}
+
 /// Show Snapshot: the stored snapshot is on screen (button or F5 held).
 pub(crate) fn showing_snapshot(app: &EffectcraftApp, ctx: &egui::Context) -> bool {
     let f5 = ctx.input(|i| i.key_down(egui::Key::F5)) && !ctx.egui_wants_keyboard_input();
@@ -788,13 +795,6 @@ fn exposure_field(app: &mut EffectcraftApp, ui: &mut egui::Ui, er: Rect, stops: 
 /// renderer/view and Extended Viewer, timecode and render-time indicators, running commands or
 /// toggling viewer UI state. Returns the width the row occupies, at least `bar.width()`, for the
 /// horizontal scroll area.
-fn onion_click(app: &mut EffectcraftApp, clicked: bool) {
-    if clicked {
-        let on = app.session.state.viewer.onion.enabled;
-        let _ = app.session.execute("view.onionSkin", json!({"value": !on}));
-    }
-}
-
 fn bottom_bar_contents(app: &mut EffectcraftApp, ui: &mut egui::Ui, bar: Rect, zoom: f32, time: Tick, comp: &Comp) -> f32 {
     let t = app.tokens;
     let p = ui.painter().clone();

@@ -131,10 +131,23 @@ pub fn over(dst: [u8; 4], src: [u8; 4]) -> [u8; 4] {
 
 /// The frame with `ghosts` (farthest first) laid over it, or under it with `under`.
 pub fn composite(frame: &[u8], ghosts: &[&[u8]], under: bool) -> Vec<u8> {
+    if under {
+        let mut stack = vec![0u8; frame.len()];
+        for g in ghosts {
+            for (d, s) in stack.as_chunks_mut::<4>().0.iter_mut().zip(g.as_chunks::<4>().0) {
+                *d = over(*d, *s);
+            }
+        }
+        let mut out = frame.to_vec();
+        for (d, s) in out.as_chunks_mut::<4>().0.iter_mut().zip(stack.as_chunks::<4>().0) {
+            *d = over(*s, *d);
+        }
+        return out;
+    }
     let mut out = frame.to_vec();
     for g in ghosts {
         for (d, s) in out.as_chunks_mut::<4>().0.iter_mut().zip(g.as_chunks::<4>().0) {
-            *d = if under { over(*s, *d) } else { over(*d, *s) };
+            *d = over(*d, *s);
         }
     }
     out
@@ -207,5 +220,16 @@ mod tests {
         let under_px = composite(&frame, &[&ghost], true);
         assert_eq!(&under_px[..4], &[0, 0, 255, 255]);
         assert_eq!(&under_px[4..], &[255, 0, 0, 128]);
+    }
+
+    #[test]
+    fn under_keeps_the_nearer_ghost_on_top_of_the_farther() {
+        let frame = [0u8; 4];
+        let far = [128u8, 0, 0, 128];
+        let near = [0u8, 128, 0, 128];
+        let under_px = composite(&frame, &[&far, &near], true);
+        let over_px = composite(&frame, &[&far, &near], false);
+        assert_eq!(under_px, over_px);
+        assert!(under_px[1] > under_px[0]);
     }
 }
