@@ -97,7 +97,7 @@ fn opening_a_comp_in_the_minimal_workspace_docks_the_viewer_above_the_timeline()
     assert!(!h.state().ui.dock.is_docked(PanelKind::Composition));
     invoke(&mut h, "comp.open", json!({"comp": other}));
     match &h.state().ui.dock.layout().root {
-        Some(Node::Split { axis: effectcraft_ui_egui::dock::SplitAxis::Vertical, first, second, .. }) => {
+        Some(Node::Split { axis: effectcraft_ui_egui::dock::Axis::Y, first, second, .. }) => {
             assert_eq!(**first, Node::tabs(vec![PanelKind::Composition], 0), "the viewer is on top");
             assert!(matches!(&**second, Node::Tabs { panels, .. } if panels.contains(&PanelKind::Timeline)));
         }

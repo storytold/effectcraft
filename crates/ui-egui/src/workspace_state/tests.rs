@@ -105,7 +105,7 @@ fn version_one_file_loads_with_every_panel_in_place() {
         tabs(&[Properties]),
     );
     assert_eq!(ui.dock.layout().root, Some(root));
-    let floating: Vec<_> = ui.dock.layout().floating.iter().map(|w| (w.panels().copied().collect::<Vec<_>>(), w.rect, w.native)).collect();
+    let floating: Vec<_> = ui.dock.layout().floating.iter().map(|w| (w.panels().copied().collect::<Vec<_>>(), w.rect, w.native.clone())).collect();
     assert_eq!(
         floating,
         [

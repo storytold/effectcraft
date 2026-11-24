@@ -5,6 +5,7 @@ use std::sync::Arc;
 use effectcraft_engine::Session;
 use effectcraft_engine::config::{ConfigStore, DirConfig, MemoryConfig};
 use effectcraft_ui_egui::EffectcraftApp;
+use craft_behavior::dock::Action;
 use effectcraft_ui_egui::dock::{self, Node, PanelKind, SplitSize};
 use effectcraft_ui_egui::state::Tool;
 use egui::{Event, Id, Key, Modifiers, vec2};
@@ -14,7 +15,7 @@ use serde_json::json;
 /// Whether key focus is on the dock tab whose name starts with `name` (a tab names what its panel
 /// shows: "Effect Controls Selected"), as the accessibility tree reports it.
 fn tab_focused(h: &Harness<'_, EffectcraftApp>, name: &str) -> bool {
-    use egui_kittest::kittest::{NodeT, Queryable};
+    use egui_kittest::kittest::NodeT;
     h.root().children_recursive().any(|n| {
         n.is_focused() && n.accesskit_node().role() == egui::accesskit::Role::Tab && n.accesskit_node().label().is_some_and(|label| label.starts_with(name))
     })
@@ -32,9 +33,8 @@ fn named_and_current_workspaces_survive_frontend_restart() {
     let ctx = egui::Context::default();
     effectcraft_ui_egui::menus::invoke(&mut app, &ctx, "window.saveWorkspaceAs", json!({"name": "Restart layout"})).unwrap();
     let saved = app.ui.dock.clone();
-    if let Some(Node::Split { size, .. }) = &mut app.ui.dock.layout().root {
-        *size = SplitSize::FixedFirst(390.0);
-    }
+    assert!(matches!(app.ui.dock.layout().root, Some(Node::Split { .. })));
+    app.apply_dock(Action::resize_split(vec![], SplitSize::FixedFirst(390.0))).unwrap();
     app.ui.focused = PanelKind::Layer;
     let current = app.ui.dock.clone();
     eframe::App::on_exit(&mut app);
@@ -178,12 +178,7 @@ fn tab_traversal_activates_an_inactive_dock_tab_without_editing_the_project() {
     app.ui.start_screen = false;
     app.ui.show_menu_bar = false;
     // Leave the inactive, layer-named tab visible instead of behind the overflow control.
-    if let Some(Node::Split { first, .. }) = &mut app.ui.dock.layout().root
-        && let Node::Split { first, .. } = first.as_mut()
-        && let Node::Split { size, .. } = first.as_mut()
-    {
-        *size = SplitSize::FixedFirst(420.0);
-    }
+    app.apply_dock(Action::resize_split(vec![false, false], SplitSize::FixedFirst(420.0))).unwrap();
     let mut h =
         Harness::builder().with_size(vec2(1200.0, 760.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(move |_| app);
     h.run_steps(3);
