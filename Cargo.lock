@@ -1794,7 +1794,6 @@ version = "0.1.0"
 source = "git+https://github.com/aiongg/craft-libs?rev=3ad64a26ea8a72c03c416681e14f7744393790b1#3ad64a26ea8a72c03c416681e14f7744393790b1"
 dependencies = [
  "dispatch2",
- "egui",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
  "wasm-bindgen",
@@ -3105,10 +3104,13 @@ dependencies = [
  "bytemuck",
  "chrono",
  "craft-behavior",
+ "craft-host",
+ "craft-keymap",
  "craft-mime",
- "craft-quit",
+ "craft-theme",
  "craft-ui",
  "craft-update",
+ "craft-window",
  "effectcraft-color",
  "effectcraft-engine",
  "effectcraft-geom",
