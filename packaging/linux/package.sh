@@ -54,7 +54,11 @@ if [[ "${EFFECTCRAFT_BUILD_CHANNEL:-}" == nightly-v1 || "$VERSION" == *-nightly*
   export EFFECTCRAFT_BUILD_CHANNEL=nightly-v1
   export EFFECTCRAFT_OVERRIDE_VERSION="$VERSION"
 fi
-BASENAME="effectcraft-$VERSION-linux-$ARCH"
+ARTIFACT_VERSION="$VERSION"
+if [[ "$IS_NIGHTLY" = 1 && "$ARTIFACT_VERSION" != *-nightly* ]]; then
+  ARTIFACT_VERSION="$ARTIFACT_VERSION-nightly"
+fi
+BASENAME="effectcraft-$ARTIFACT_VERSION-linux-$ARCH"
 
 if [[ -n "$ARCH_TAR_DIR" && "$IS_NIGHTLY" != 1 ]]; then
   echo "error: --arch-tar-dir is only for Nightly builds" >&2
