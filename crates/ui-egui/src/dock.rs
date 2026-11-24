@@ -186,25 +186,34 @@ pub fn permissions(_panel: &PanelKind) -> Permissions {
 
 /// A tab group.
 pub fn tabs(p: &[PanelKind], active: usize) -> Node<PanelKind> {
-    Node::Tabs { panels: p.to_vec(), active }
+    Node::tabs(p.to_vec(), active)
 }
 /// Stacked panels: (panel, open, height). Open entries share the stack's height in proportion to
 /// their heights; an entry without one counts as craft-ui's `DockStyle::min_pane` (40).
 pub fn stack(e: &[(PanelKind, bool, Option<f32>)]) -> Node<PanelKind> {
-    Node::Stack { entries: e.iter().map(|&(panel, open, height)| StackEntry { panel, open, height }).collect() }
+    Node::stack(
+        e.iter()
+            .map(|&(panel, open, height)| {
+                let mut entry = StackEntry::new(panel);
+                entry.open = open;
+                entry.height = height;
+                entry
+            })
+            .collect(),
+    )
 }
 /// Two frames side by side.
 pub fn hsplit(size: SplitSize, a: Node<PanelKind>, b: Node<PanelKind>) -> Node<PanelKind> {
-    Node::Split { axis: Axis::X, size, first: Box::new(a), second: Box::new(b) }
+    Node::split(Axis::X, size, a, b)
 }
 /// Two frames one above the other.
 pub fn vsplit(size: SplitSize, a: Node<PanelKind>, b: Node<PanelKind>) -> Node<PanelKind> {
-    Node::Split { axis: Axis::Y, size, first: Box::new(a), second: Box::new(b) }
+    Node::split(Axis::Y, size, a, b)
 }
 
 /// A workspace of just `root`, with no floating windows.
 pub fn docked(root: Node<PanelKind>) -> Workspace {
-    Workspace::new(Layout { root: Some(root), floating: Vec::new() })
+    Workspace::new(Layout::new(Some(root), Vec::new()))
 }
 
 /// The built-in workspaces: After Effects 2026's (Window ▸ Workspace), less Libraries (an Adobe
@@ -234,7 +243,9 @@ pub const WORKSPACES: &[&str] = &[
 /// id, so a built-in layout built again is the same set of windows.
 fn workspace_floating(name: &str) -> Vec<Floating<PanelKind>> {
     use PanelKind::*;
-    let f = |id: u64, panels: &[PanelKind], rect: [f32; 4]| Floating::single(panels.to_vec(), 0, rect).with_id(id);
+    let f = |id: u64, panels: &[PanelKind], [x, y, w, h]: [f32; 4]| {
+        Floating::single(id, panels.to_vec(), 0, Rect::from_min_size(pos2(x, y), vec2(w, h)))
+    };
     match name {
         "Undocked Panels" => vec![
             f(1, &[Project, EffectControls], [24.0, 110.0, 320.0, 420.0]),
@@ -254,7 +265,7 @@ pub const PREVIEW_FRAME: f32 = TAB_STRIP + 46.0;
 
 /// The built-in layout of a named workspace (an unknown name gets Default's).
 pub fn workspace(name: &str) -> Layout {
-    Layout { root: Some(workspace_root(name)), floating: workspace_floating(name) }
+    Layout::new(Some(workspace_root(name)), workspace_floating(name))
 }
 
 /// The docked tree of a named workspace.
