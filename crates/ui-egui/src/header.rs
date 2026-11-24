@@ -2,6 +2,8 @@
 //! buttons (Discord is always one click away).
 
 use crate::i18n::{tr, tr_args};
+use craft_behavior::Input;
+use craft_ui::runtime::focus::KeyUse;
 use egui::{Align2, Color32, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
 use serde_json::json;
 
@@ -85,6 +87,7 @@ fn tool_slot(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, si:
     let active = slot.contains(&app.ui.tool);
     let id = egui::Id::unique(("tool-slot", si));
     let resp = widgets::icon_button(ui, r, cur.icon(), active, &t, id);
+    craft_ui::runtime::focus::host_stop(ui.ctx(), resp.id, KeyUse::of(Input::Pointer));
     if slot.len() > 1 {
         // Flyout corner triangle.
         p.add(egui::Shape::convex_polygon(

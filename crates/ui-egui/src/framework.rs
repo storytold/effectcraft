@@ -7,7 +7,7 @@
 //! The runtime takes Escape, Tab and the clipboard events for the whole window unless one of EffectCraft's own egui
 //! widgets has the keyboard. [`return_window_keys`] puts the window's Escape back into egui's input for EffectCraft's
 //! own handlers (the window's plain Enter stays in egui's input); the Composition viewer is declared to the runtime with [`host_canvas`], which keeps
-//! Tab, the edit chords and the clipboard events in egui's input for EffectCraft's shortcuts.
+//! the edit chords and the clipboard events in egui's input for EffectCraft's shortcuts.
 
 use std::sync::{Arc, OnceLock};
 
@@ -17,7 +17,7 @@ use craft_keymap::Overrides;
 use craft_ui::fonts::{I18nScripts, SystemFonts, UiFonts};
 use craft_ui::runtime::commands::{CommandInput, CommandSet as _, NavCommand, QuitCommand};
 use craft_ui::runtime::env::{RootEnv, Scale};
-use craft_ui::runtime::focus::{EditSet, KeepKeys, KeyUse};
+use craft_ui::runtime::focus::{EditSet, KeyUse};
 use craft_ui::runtime::frame::{FrameInput, FrameOutput};
 use craft_ui::runtime::keys::{Intent, with_window_intents};
 use craft_ui::shell::embed::{self, CloseDecision};
@@ -116,10 +116,10 @@ impl EffectcraftApp {
 }
 
 /// Declares the Composition viewer `id`, drawn in this pass, as the window's document canvas. With nothing focused it
-/// is the window's key target: Tab (the Composition Mini-Flowchart), the edit chords and the clipboard events stay in
+/// is the window's key target: the edit chords and the clipboard events stay in
 /// egui's input for EffectCraft's shortcuts.
 pub(crate) fn host_canvas(ctx: &egui::Context, id: egui::Id) {
-    const KEYS: KeyUse = KeyUse::CANVAS.with_keep(KeepKeys::Tab).with_edits(EditSet::ALL);
+    const KEYS: KeyUse = KeyUse::CANVAS.with_edits(EditSet::ALL);
     craft_ui::runtime::focus::host_canvas(ctx, id, KEYS);
 }
 

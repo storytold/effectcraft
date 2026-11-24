@@ -532,6 +532,7 @@ impl EffectcraftApp {
                     (format!("panel.tab.{}.{document}", panel.id()), name)
                 }
                 SourceKind::GroupBar(panel) => (format!("panel.drag.{}", panel.id()), "Move panel group".into()),
+                SourceKind::Overflow(panel) => (format!("panel.overflow.{}", panel.id()), "More panels".into()),
                 SourceKind::WindowGrip(panel) => match window(panel) {
                     Some(index) => (format!("panel.float.{index}.move"), "Move floating panel".into()),
                     None => continue,
