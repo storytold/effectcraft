@@ -1084,6 +1084,56 @@ fn comp_frame_ends_the_frame_when_the_render_panics() {
     assert_eq!(a.ends.load(Ordering::SeqCst), 1);
 }
 
+/// Deferred readbacks whose every pass misses: a lost device can't settle them any more.
+struct MissingAccel {
+    lost: std::sync::atomic::AtomicBool,
+    gate: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+impl crate::Accelerator for MissingAccel {
+    fn name(&self) -> String {
+        "missing".into()
+    }
+    fn comp_frame(&self, _r: &crate::Renderer, _comp: ItemId, _t: Tick) -> Option<crate::Image> {
+        Some(crate::Image::new(1, 1))
+    }
+    fn supports_effect(&self, _id: &str) -> bool {
+        false
+    }
+    fn effects(&self, _chain: &[crate::FxStep], _buf: &crate::Buf, _levels: Option<f32>) -> Option<crate::Buf> {
+        None
+    }
+    fn available(&self) -> bool {
+        !self.lost.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    fn pass_missed(&self) -> bool {
+        true
+    }
+    fn miss_gate(&self) -> Option<std::sync::Arc<std::sync::atomic::AtomicBool>> {
+        Some(self.gate.clone())
+    }
+    fn settle(&self) -> Option<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + '_>>> {
+        (!self.lost.load(std::sync::atomic::Ordering::SeqCst)).then(|| Box::pin(std::future::ready(())) as _)
+    }
+}
+
+/// #3732 review: a deferred frame that goes to the CPU says whether a lost device sent it
+/// there, apart from passes that ran out on a healthy device.
+#[test]
+fn a_deferred_frame_on_the_cpu_says_whether_the_device_was_lost() {
+    let (mut p, cid, comp) = setup();
+    let l = solid(&mut p, &comp, [1.0, 0.0, 0.0], 50, 50);
+    p.comp_mut(cid).unwrap().layers.push(l);
+    let frame = |lost: bool| {
+        let a = MissingAccel { lost: lost.into(), gate: Default::default() };
+        let mut r = crate::Renderer::new(&p, &crate::NoFootage, crate::RenderOpts { backend: crate::Backend::Gpu, ..Default::default() });
+        r.accel = Some(&a);
+        crate::passes::block_on(crate::passes::comp_frame_noting_gpu_loss(&r, cid, Tick::ZERO)).1
+    };
+
+    assert!(frame(true), "a lost device's frame fell back");
+    assert!(!frame(false), "passes that ran out on a healthy device are no device loss");
+}
+
 /// The renderer labels Project Settings ▸ Video Rendering and Effects draws parse back as the
 /// backend they name (in any case), and the older spellings still work.
 #[test]
