@@ -582,6 +582,9 @@ impl FileDialogsUp {
 #[derive(Default)]
 pub(crate) struct ForwardedInput {
     pub(crate) events: Vec<egui::Event>,
+    /// Copy, Cut and Paste the runtime took from a window with no canvas ([`crate::framework`]), for the
+    /// next pass of the shortcuts to read after that pass's own events.
+    pub(crate) clips: Vec<egui::Event>,
     pub(crate) files: Vec<egui::DroppedFileHandle>,
     /// Files handed over by a floating window whose panel under the pointer was the Timeline. The
     /// paths lose the window they came from, so this keeps the one thing the import still needs
