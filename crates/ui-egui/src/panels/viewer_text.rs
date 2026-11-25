@@ -1263,6 +1263,42 @@ fn keyboard(app: &mut EffectcraftApp, ui: &mut egui::Ui, viewer: Rect) {
     }
 }
 
+/// Alt+Left/Right: kerning at the caret, tracking over a selection, by 20 (100 with the command
+/// key) thousandths of an em.
+fn kern_or_track(app: &mut EffectcraftApp, sel: &effectcraft_engine::commands::text_edit::TextEdit, left: bool, cmd: bool) {
+    let step = if cmd { 100.0 } else { 20.0 } * if left { -1.0 } else { 1.0 };
+    let doc = layer_doc(&app.session, sel.layer).unwrap_or_default();
+    if sel.is_empty() {
+        if sel.caret < doc.char_len() {
+            let cur = match doc.style_at(sel.caret).kerning {
+                Kerning::Manual(v) => v,
+                _ => 0.0,
+            };
+            exec(
+                app,
+                "layer.setText",
+                json!({"layer": sel.layer.0, "range": [sel.caret, sel.caret + 1], "kerning": cur + step, "merge": format!("text-kern-{}", sel.caret)}),
+            );
+        }
+    } else {
+        let r = sel.range();
+        let cur = doc.style_at(r.start).tracking;
+        exec(app, "layer.setText", json!({"layer": sel.layer.0, "range": [r.start, r.end], "tracking": cur + step, "merge": "text-track"}));
+    }
+}
+
+/// Alt+Up/Down over a selection: Up tightens the leading, Down loosens it, by 2 px (10 with the
+/// command key), as text editors give it. Auto leading starts from what it stands for, 120% of
+/// the size (#3899).
+fn change_leading(app: &mut EffectcraftApp, sel: &effectcraft_engine::commands::text_edit::TextEdit, up: bool, cmd: bool) {
+    let step = if cmd { 10.0 } else { 2.0 } * if up { -1.0 } else { 1.0 };
+    let doc = layer_doc(&app.session, sel.layer).unwrap_or_default();
+    let r = sel.range();
+    let style = doc.style_at(r.start);
+    let cur = style.leading.unwrap_or(style.size * 1.2);
+    exec(app, "layer.setText", json!({"layer": sel.layer.0, "range": [r.start, r.end], "leading": (cur + step).max(0.0), "merge": "text-leading"}));
+}
+
 /// An application key press in the edited text: caret moves, deletes, insertions, formatting and
 /// the editor's own chords.
 fn key_event(
@@ -1279,28 +1315,8 @@ fn key_event(
         exec(app, "text.moveCaret", json!({"to": to, "extend": m.shift}));
     };
     match key {
-        Key::ArrowLeft | Key::ArrowRight if m.alt => {
-            // Kerning at the caret, tracking over a selection.
-            let step = if cmd { 100.0 } else { 20.0 } * if key == Key::ArrowLeft { -1.0 } else { 1.0 };
-            let doc = layer_doc(&app.session, sel.layer).unwrap_or_default();
-            if sel.is_empty() {
-                if sel.caret < doc.char_len() {
-                    let cur = match doc.style_at(sel.caret).kerning {
-                        Kerning::Manual(v) => v,
-                        _ => 0.0,
-                    };
-                    exec(
-                        app,
-                        "layer.setText",
-                        json!({"layer": sel.layer.0, "range": [sel.caret, sel.caret + 1], "kerning": cur + step, "merge": format!("text-kern-{}", sel.caret)}),
-                    );
-                }
-            } else {
-                let r = sel.range();
-                let cur = doc.style_at(r.start).tracking;
-                exec(app, "layer.setText", json!({"layer": sel.layer.0, "range": [r.start, r.end], "tracking": cur + step, "merge": "text-track"}));
-            }
-        }
+        Key::ArrowLeft | Key::ArrowRight if m.alt => kern_or_track(app, sel, key == Key::ArrowLeft, cmd),
+        Key::ArrowUp | Key::ArrowDown if m.alt && !sel.is_empty() => change_leading(app, sel, key == Key::ArrowUp, cmd),
         Key::ArrowLeft => mv(app, if cmd { "wordLeft" } else { "left" }),
         Key::ArrowRight => mv(app, if cmd { "wordRight" } else { "right" }),
         Key::ArrowUp => mv(app, if cmd { "paraUp" } else { "up" }),
