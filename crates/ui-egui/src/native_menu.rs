@@ -441,12 +441,12 @@ impl MenuSync {
 
 /// The window whose text field has the keyboard: a floating panel's own OS window, or the main
 /// window, where any widget that holds the keyboard counts (the Viewer's text editor is not an
-/// egui text field).
+/// egui text field) except the Composition viewer itself.
 pub fn text_field_window(ctx: &egui::Context) -> Option<egui::ViewportId> {
     let host = craft_ui::runtime::windows::WindowHost::of(ctx);
     let window = host.key_window();
     let floating = (window != egui::ViewportId::ROOT && host.typing()).then_some(window);
-    floating.or_else(|| ctx.egui_wants_keyboard_input().then_some(egui::ViewportId::ROOT))
+    floating.or_else(|| crate::framework::widget_has_keyboard(ctx).then_some(egui::ViewportId::ROOT))
 }
 
 /// Whether a focused text field takes the menu command `command` ([`activate`]): the native menu

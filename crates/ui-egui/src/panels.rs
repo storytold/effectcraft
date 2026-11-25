@@ -184,7 +184,7 @@ pub(crate) fn toggle_time_display(app: &mut EffectcraftApp, resp: &egui::Respons
 /// Spacebar held outside a text field: the Hand tool (drags pan the viewer and scroll the
 /// Timeline).
 pub(crate) fn space_hand(ctx: &egui::Context) -> bool {
-    ctx.input(|i| i.key_down(egui::Key::Space)) && !ctx.egui_wants_keyboard_input()
+    ctx.input(|i| i.key_down(egui::Key::Space)) && !crate::framework::widget_has_keyboard(ctx)
 }
 
 /// What a scroll gesture over a viewer (Composition, Layer) does this frame.

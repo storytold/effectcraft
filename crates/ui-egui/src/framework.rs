@@ -115,12 +115,34 @@ impl EffectcraftApp {
     }
 }
 
-/// Declares the Composition viewer `id`, drawn in this pass, as the window's document canvas. With nothing focused it
+/// The Composition viewer's widget, its window's document canvas.
+pub(crate) fn viewer_id() -> egui::Id {
+    egui::Id::unique("viewer-interact")
+}
+
+/// Declares the Composition viewer, drawn in this pass, as the window's document canvas. With nothing focused it
 /// is the window's key target: the edit chords and the clipboard events stay in
-/// egui's input for EffectCraft's shortcuts.
-pub(crate) fn host_canvas(ctx: &egui::Context, id: egui::Id) {
+/// egui's input for EffectCraft's shortcuts. Escape with the viewer focused is the viewer's own: it lets go of the
+/// keyboard, as egui's other widgets do.
+pub(crate) fn host_canvas(ctx: &egui::Context) {
     const KEYS: KeyUse = KeyUse::CANVAS.with_edits(EditSet::ALL);
-    craft_ui::runtime::focus::host_canvas(ctx, id, KEYS);
+    craft_ui::runtime::focus::host_canvas(ctx, viewer_id(), KEYS);
+    // Read from the raw input, so an Escape that a popup consumed earlier in the pass counts.
+    let escape = |event: &egui::Event| matches!(event, egui::Event::Key { key: egui::Key::Escape, pressed: true, modifiers, .. } if !modifiers.any());
+    if ctx.input(|i| i.raw.events.iter().any(escape)) {
+        ctx.memory_mut(|m| m.surrender_focus(viewer_id()));
+    }
+}
+
+/// The widget other than the Composition viewer that has the keyboard. The viewer as the focused Tab stop leaves the
+/// keys to EffectCraft, as with nothing focused.
+pub(crate) fn focused_widget(ctx: &egui::Context) -> Option<egui::Id> {
+    ctx.memory(|m| m.focused()).filter(|id| *id != viewer_id())
+}
+
+/// Whether a widget other than the Composition viewer has the keyboard ([`focused_widget`]).
+pub(crate) fn widget_has_keyboard(ctx: &egui::Context) -> bool {
+    focused_widget(ctx).is_some()
 }
 
 /// Puts the window's Escape (the key the runtime routes to no component while nothing has framework focus) back into

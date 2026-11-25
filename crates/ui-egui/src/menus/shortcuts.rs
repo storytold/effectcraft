@@ -356,12 +356,12 @@ fn handle_shortcuts_impl(app: &mut EffectcraftApp, ctx: &egui::Context, tab_only
     }
     // A mouse button down while Spacebar is held belongs to the Hand tool: its release won't
     // preview.
-    if ctx.input(|i| i.pointer.any_down()) || ctx.egui_wants_keyboard_input() {
+    if ctx.input(|i| i.pointer.any_down()) || crate::framework::widget_has_keyboard(ctx) {
         ctx.data_mut(|d| d.remove::<bool>(space_tap_id()));
     }
     // While a menu or popup list is open, keys go to it, not to the app (Space must not start a
     // preview behind the menu, #279).
-    if ctx.egui_wants_keyboard_input() || crate::widgets::any_menu_open(ctx) {
+    if crate::framework::widget_has_keyboard(ctx) || crate::widgets::any_menu_open(ctx) {
         return;
     }
     // Text editing in the viewer takes the clipboard events itself.

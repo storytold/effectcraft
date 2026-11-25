@@ -346,7 +346,7 @@ pub(crate) fn shown_region(ctx: &egui::Context, comp: [f32; 2]) -> [f64; 4] {
 
 /// Show Snapshot: the stored snapshot is on screen (button or F5 held).
 pub(crate) fn showing_snapshot(app: &EffectcraftApp, ctx: &egui::Context) -> bool {
-    let f5 = ctx.input(|i| i.key_down(egui::Key::F5)) && !ctx.egui_wants_keyboard_input();
+    let f5 = ctx.input(|i| i.key_down(egui::Key::F5)) && !crate::framework::widget_has_keyboard(ctx);
     app.session.snapshot.is_some() && (app.session.state.viewer.show_snapshot || f5)
 }
 

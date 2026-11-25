@@ -278,6 +278,45 @@ fn viewer_double_click_on_a_covered_path_of_the_selected_layer_free_transforms_i
     assert!(h.state().auto.find("viewer.freeTransform.handle.0").is_some(), "the free-transform box is up");
 }
 
+/// The Composition viewer as the focused Tab stop leaves the keys to the app, and Escape also makes it
+/// let go of the keyboard.
+#[test]
+fn the_focused_viewer_leaves_the_keys_to_the_app() {
+    use craft_ui::runtime::focus::{FocusTarget, request};
+    let viewer = egui::Id::unique("viewer-interact");
+    let mut h = selection_harness();
+    let layer = h.state().session.active_comp().unwrap().layers[0].id;
+    let s = &mut h.state_mut().session;
+    s.execute("layer.select", json!({"layers": [layer.0]})).unwrap();
+    s.execute("mask.new", json!({"layer": layer.0, "vertices": [[10, 10], [70, 10], [70, 70], [10, 70]], "closed": true})).unwrap();
+    h.run_steps(40);
+    let at = screen(&h, [320.0, 150.0]);
+    h.input_mut().events.push(Event::PointerMoved(at));
+    h.step();
+    for _ in 0..2 {
+        for pressed in [true, false] {
+            h.input_mut().events.push(Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() });
+        }
+        h.step();
+    }
+    h.run_steps(3);
+    assert!(h.state().auto.find("viewer.freeTransform.handle.0").is_some(), "the free-transform box is up");
+    let focus_viewer = |h: &mut Harness<'_, EffectcraftApp>| {
+        request(&h.ctx, FocusTarget::Id(viewer));
+        h.run_steps(2);
+        assert_eq!(h.ctx.memory(|m| m.focused()), Some(viewer));
+    };
+    focus_viewer(&mut h);
+    assert_eq!(effectcraft_ui_egui::native_menu::text_field_window(&h.ctx), None, "the Edit menu's commands are the app's");
+    key(&mut h, egui::Key::Escape, egui::Modifiers::NONE);
+    assert!(h.state().auto.find("viewer.freeTransform.handle.0").is_none(), "Escape ends the free transform");
+    assert_eq!(h.ctx.memory(|m| m.focused()), None, "and the viewer lets go of the keyboard");
+    focus_viewer(&mut h);
+    key(&mut h, egui::Key::H, egui::Modifiers::NONE);
+    assert_eq!(h.state().ui.tool, Tool::Hand, "a tool shortcut runs");
+    assert_eq!(h.ctx.memory(|m| m.focused()), Some(viewer));
+}
+
 /// A double-click where a precomp layer covers the selected layer opens the precomp: like a single
 /// click, it acts on the topmost layer, which its first click selects (#1535).
 #[test]
