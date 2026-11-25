@@ -36,6 +36,13 @@ type Answer = Pin<Box<dyn Future<Output = Vec<String>> + Send>>;
 /// A command's dialog waiting for [`show_asked`].
 pub type Asked = (FileDialog, DialogDone);
 
+/// Say something to a person who may have no console (a Windows release build has none): the one
+/// native message box the app opens. It runs before eframe exists, so it is not a [`guarded`] file
+/// picker; it is here because every `rfd` dialog belongs to this module (#3084).
+pub fn report_error(title: &str, message: &str) {
+    let _ = rfd::MessageDialog::new().set_title(title).set_description(message).set_level(rfd::MessageLevel::Error).set_buttons(rfd::MessageButtons::Ok).show();
+}
+
 /// Open dialog `what` (its title, for the error) with `open`: on the main thread only, and a
 /// panic while it opens is an error instead of a crash (#3084).
 pub fn guarded<T>(what: &str, open: impl FnOnce() -> T) -> Result<T, String> {

@@ -23,7 +23,7 @@ pub fn identity_matches(version: &str, sha: &str, date: &str) -> bool {
     if !version.ends_with(&format!(".g{}", &sha[..12])) {
         return false;
     }
-    let Some((suffix, _)) = version.split_once("-nightly.") else { return false };
+    let Some((_, suffix)) = version.split_once("-nightly.") else { return false };
     let date_digits = suffix.split('.').next().unwrap_or("");
     date.len() == 10 && digits(date_digits) && date.as_bytes()[4] == b'-' && date.as_bytes()[7] == b'-' && date.replace('-', "") == date_digits
 }
@@ -61,7 +61,9 @@ mod tests {
         let version = "0.25.1-nightly.20261124.41.1.gabcdef012345";
         assert!(identity_matches(version, sha, "2026-11-24"));
         for (v, s, d) in [
-            (version, "abcdef0123456789abcdef0123456789abcdef02", "2026-11-24"),
+            // The version carries the first 12 characters of the commit, so a near-miss has to
+            // differ inside them; a difference after the twelfth cannot be seen from the version.
+            (version, "bbcdef0123456789abcdef0123456789abcdef01", "2026-11-24"),
             (version, sha, "2026-11-23"),
             (
                 version,

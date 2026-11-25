@@ -98,12 +98,7 @@ fn report_launch_profile_error(error: &str) {
             eprintln!("EffectCraft launch profile: {error}");
             return;
         }
-        let _ = rfd::MessageDialog::new()
-            .set_title("EffectCraft Nightly")
-            .set_description(error)
-            .set_level(rfd::MessageLevel::Error)
-            .set_buttons(rfd::MessageButtons::Ok)
-            .show();
+        file_dialogs::report_error("EffectCraft Nightly", error);
     }
 }
 

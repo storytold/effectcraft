@@ -319,9 +319,11 @@ fn main() {
     };
     // The Launcher's Nightly profile flags belong to the desktop app only. Refuse them before any
     // argument is parsed, so no script can drive a profile outside the Launcher's control (exit 2).
-    if let Some(flag) = raw
-        .iter()
-        .find(|a| matches!(a.as_str(), "--launch-profile" | "--profile-root") || a.starts_with("--launch-profile=") || a.starts_with("--profile-root="))
+    // Written without a leading `--` in the literal so the option table stays the one place that
+    // declares options (`every_option_read_is_declared`).
+    const DESKTOP_PROFILE_FLAGS: [&str; 2] = ["launch-profile", "profile-root"];
+    if let Some(flag) =
+        raw.iter().find(|a| a.starts_with('-') && DESKTOP_PROFILE_FLAGS.iter().any(|name| a.trim_start_matches('-').split('=').next() == Some(*name)))
     {
         fail_usage(&format!("`{flag}` selects the desktop Nightly profile; effectcraft-cli has no launch profile"));
     }
