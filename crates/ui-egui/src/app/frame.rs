@@ -772,10 +772,13 @@ impl EffectcraftApp {
             && let Some(change) = watcher.take()
         {
             if Some(&change.0) == self.session.path.as_ref() {
-                self.project_reload_pending = Some(change);
+                // Read the disk stamp once for this observation and keep it through deferral,
+                // instead of doing file I/O on every frame while a change is held.
+                let disk = self.session.services.stamp(&change.0);
+                self.project_reload_pending = Some((change.0, change.1, disk));
             }
         }
-        let Some((path, stamp)) = self.project_reload_pending.clone() else { return };
+        let Some((path, stamp, disk_stamp)) = self.project_reload_pending.clone() else { return };
         if Some(&path) != self.session.path.as_ref() {
             self.project_reload_pending = None;
             return;
@@ -786,9 +789,9 @@ impl EffectcraftApp {
             self.project_reload_pending = None;
             return;
         }
-        if self.session.services.stamp(&path) == self.session.project_stamp {
-            // The disk now holds exactly what this session already has (a save completed after the
-            // watcher published its report). Don't reload it back and lose the undo history.
+        if let Some(known) = self.session.project_stamp
+            && disk_stamp == Some(known)
+        {
             watcher.acknowledge(self.session.project_stamp);
             self.project_reload_pending = None;
             return;
@@ -1066,7 +1069,7 @@ mod tests {
         app.session.path = Some(path.clone());
         app.session.project_stamp = Some((100, 1));
         // The stamp the watcher found is the one this session already holds (its own save).
-        app.project_reload_pending = Some((path, (100, 1)));
+        app.project_reload_pending = Some((path, (100, 1), Some((100, 1))));
         let ctx = egui::Context::default();
         let before = app.session.revision;
         app.tick_project_reload(&ctx);
@@ -1082,7 +1085,7 @@ mod tests {
         app.session.project_stamp = Some((100, 1));
         app.session.execute("comp.new", json!({"name":"Gui"})).unwrap();
         assert!(app.session.is_dirty());
-        app.project_reload_pending = Some((path, (120, 2)));
+        app.project_reload_pending = Some((path, (120, 2), None));
         let ctx = egui::Context::default();
         app.tick_project_reload(&ctx);
         assert!(app.project_reload_pending.is_some(), "the change must be held, not discarded");
@@ -1097,7 +1100,7 @@ mod tests {
         app.session.path = Some(path.clone());
         app.session.mark_unsaved();
         app.session.prefs.auto_save.enabled = true;
-        app.project_reload_pending = Some((path, (120, 2)));
+        app.project_reload_pending = Some((path, (120, 2), None));
         let ctx = egui::Context::default();
         app.tick_autosave(&ctx);
         assert!(app.session.autosave.last.is_none(), "autosave was ticked while a reload was pending");
