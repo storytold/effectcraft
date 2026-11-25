@@ -14,6 +14,20 @@ use effectcraft_engine::menus::{MenuEntry, MenuNode};
 pub(crate) use ui::catalog_characters;
 pub(crate) use ui::{set_current, tr, tr_args};
 
+/// An optional Arabic menu catalog loaded dynamically on native or registered by a consumer.
+static ARABIC_CATALOG: std::sync::OnceLock<&'static [(&'static str, &'static str, &'static str)]> = std::sync::OnceLock::new();
+
+/// Registers an Arabic menu catalog. Returns whether registration succeeded.
+#[allow(dead_code)]
+pub(crate) fn set_arabic_catalog(catalog: &'static [(&'static str, &'static str, &'static str)]) -> bool {
+    ARABIC_CATALOG.set(catalog).is_ok()
+}
+
+/// Whether an Arabic catalog has been loaded into the runtime.
+pub(crate) fn has_arabic_catalog() -> bool {
+    ARABIC_CATALOG.get().is_some()
+}
+
 /// Every language with a catalog, in the order Settings ▸ General ▸ Language lists them.
 const CATALOG_CODES: [&str; 14] = ["cs", "de", "es", "fr", "pl", "pt-br", "sv", "ru", "uk", "ka", "ar", "ja", "zh-hans", "zh-hant"];
 
@@ -26,9 +40,20 @@ pub(crate) fn language(app: &EffectcraftApp) -> &'static str {
     }
 }
 
+/// Resolve the interface language for `stored` preference on a specific platform (`is_web`).
+pub(crate) fn resolve_language(stored: &str, is_web: bool) -> &'static str {
+    if stored == "ar" && (is_web || !has_arabic_catalog()) {
+        return "en";
+    }
+    if stored == "system" {
+        return "en";
+    }
+    CATALOG_CODES.iter().copied().find(|c| *c == stored).unwrap_or("en")
+}
+
 /// `stored` as the language to show: a catalog's code, otherwise `en`.
 fn code(stored: &str) -> &'static str {
-    CATALOG_CODES.iter().copied().find(|c| *c == stored).unwrap_or("en")
+    resolve_language(stored, cfg!(target_arch = "wasm32"))
 }
 
 /// The UI is in Japanese: the fast path for the menu builders.
@@ -229,6 +254,9 @@ pub(crate) fn label<'a>(app: &EffectcraftApp, command: &str, source: &'a str) ->
 
 /// The menu catalog for `language`; `None` for English.
 fn menu_catalog(language: &str) -> Option<&'static [(&'static str, &'static str, &'static str)]> {
+    if language == "ar" {
+        return ARABIC_CATALOG.get().copied();
+    }
     Some(match language {
         "ja" => JAPANESE,
         "zh-hans" => SIMPLIFIED_CHINESE,
@@ -9379,17 +9407,39 @@ mod tests {
     }
 
     #[test]
-    fn arabic_flag_and_rtl_follow_language() {
+    fn web_arabic_preference_falls_back_to_english() {
+        assert_eq!(resolve_language("ar", true), "en");
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        app.session.execute("prefs.set", json!({"key": "general.language", "value": "ar"})).unwrap();
+        // On web, stored "ar" preference must fall back to "en".
+        assert_eq!(resolve_language(&app.session.prefs.general.language, true), "en");
+    }
+
+    #[test]
+    fn native_arabic_availability_is_gated_on_catalog_and_verifies_real_translations() {
         let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
         assert!(!arabic(&app));
         assert!(is_rtl_language("ar"));
         assert!(is_rtl_language("he"));
         assert!(!is_rtl_language("en"));
+
+        // When the catalog is not loaded, native resolution falls back to "en" and stays LTR.
+        assert_eq!(resolve_language("ar", false), "en");
+
+        // Now load an Arabic catalog on native.
+        static AR_TEST_CATALOG: &[(&str, &str, &str)] = &[("comp.new", "New Composition...", "تركيب جديد..."), ("file.new", "New", "جديد")];
+        let _ = set_arabic_catalog(AR_TEST_CATALOG);
+        assert!(has_arabic_catalog());
+        assert_eq!(resolve_language("ar", false), "ar");
+
+        // With catalog loaded on native, selecting Arabic activates "ar", RTL, and real translations.
         set_current("ar");
         app.session.execute("prefs.set", json!({"key": "general.language", "value": "ar"})).unwrap();
         assert!(arabic(&app));
         assert!(is_rtl());
         assert_eq!(language(&app), "ar");
+        assert_eq!(label(&app, "comp.new", "New Composition..."), "تركيب جديد...");
+
         set_current("en");
         assert!(!is_rtl());
     }

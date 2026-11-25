@@ -178,6 +178,12 @@ fn page_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, page: &Page, cur: &Value
                                         .width(220.0)
                                         .show_ui(ui, |ui| {
                                             for (l, val) in opts {
+                                                if key == "general.language"
+                                                    && *val == "ar"
+                                                    && (cfg!(target_arch = "wasm32") || !crate::i18n::has_arabic_catalog())
+                                                {
+                                                    continue;
+                                                }
                                                 if ui.selectable_label(*val == curv, tr(l)).clicked() {
                                                     acts.push(Act::Set(key.into(), json!(val)));
                                                 }
