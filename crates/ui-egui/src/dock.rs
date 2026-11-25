@@ -255,7 +255,7 @@ fn workspace_floating(name: &str) -> Vec<Floating<PanelKind>> {
 }
 
 /// The height of a frame's tab strip ([`Tokens::tab_h`]).
-pub const TAB_STRIP: f32 = 30.0;
+pub const TAB_STRIP: f32 = 28.0;
 /// The height of Default's Preview frame: its tab strip over a 46-point body that fits the
 /// playback controls.
 pub const PREVIEW_FRAME: f32 = TAB_STRIP + 46.0;

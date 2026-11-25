@@ -234,20 +234,20 @@ fn preview_divider(h: &Harness<'_, EffectcraftApp>) -> egui::Rect {
         .expect("a gutter between Preview and Properties")
 }
 
-/// Default's right column: a short Preview frame (48 points of body under next's 28-point strip) and the Properties frame
+/// Default's right column: a short Preview frame (46 points of body) and the Properties frame
 /// below it taking the rest of the column, at any window height.
 #[test]
 fn the_default_preview_frame_is_short_and_properties_takes_the_rest() {
     let (mut h, _, _) = harness();
     let body = |h: &Harness<'_, EffectcraftApp>| rect(h, "panel.Preview").height();
-    assert!((body(&h) - 48.0).abs() < 1.5, "Preview {}", body(&h));
+    assert!((body(&h) - 46.0).abs() < 1.5, "Preview {}", body(&h));
     let props = rect(&h, "panel.Properties");
     assert!(props.height() > 300.0, "Properties {props:?}");
     // A taller window gives the room to Properties.
     let size = h.ctx.content_rect().size();
     h.set_size(size + egui::vec2(0.0, 200.0));
     h.run_steps(3);
-    assert!((body(&h) - 48.0).abs() < 1.5, "Preview {}", body(&h));
+    assert!((body(&h) - 46.0).abs() < 1.5, "Preview {}", body(&h));
     assert!((rect(&h, "panel.Properties").height() - props.height() - 200.0).abs() < 2.0);
 }
 
@@ -504,7 +504,7 @@ fn open_comps_are_tabs_in_the_timeline_row_and_the_rest_are_in_its_overflow_menu
 }
 
 #[test]
-fn an_inactive_comp_tab_shows_its_close_button_on_hover_and_closes_without_showing_its_comp() {
+fn an_inactive_comp_tab_shows_its_close_button_and_closes_without_showing_its_comp() {
     let (mut h, pre, main) = harness();
     h.state_mut().session.state.open_comps = vec![ItemId(main), ItemId(pre)];
     h.run_steps(3);
