@@ -20,6 +20,7 @@ fn manifest(id: &str, params: Vec<PluginParam>) -> PluginManifest {
         version: "1".into(),
         author: String::new(),
         description: String::new(),
+        margin: 0,
         params,
     }
 }

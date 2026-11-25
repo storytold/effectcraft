@@ -10,14 +10,16 @@ rust-version.workspace = true
 workspace = true
 
 [features]
-# The WebAssembly runtime (wasmi, a pure-Rust interpreter). Hosts enable it on native; without
-# it `load_wasm` reports that WebAssembly plug-ins are unavailable.
-wasm = ["dep:wasmi"]
+# The WebAssembly runtime (wasmtime with Cranelift JIT compilation + deterministic NaN
+# canonicalisation, fuel metering, memory limits and SIMD; #3206). Hosts enable it on native;
+# without it `load_wasm` reports that WebAssembly plug-ins are unavailable.
+wasm = ["dep:wasmtime", "dep:rayon"]
 
 [dependencies]
 effectcraft-effects = { workspace = true }
+rayon = { workspace = true, optional = true }
 serde_json = { workspace = true }
-wasmi = { workspace = true, optional = true }
+wasmtime = { workspace = true, optional = true }
 
 [dev-dependencies]
 effectcraft-keyframe = { workspace = true }

@@ -49,6 +49,7 @@ fn rust_plugins_apply_by_id() {
         version: "1".into(),
         author: String::new(),
         description: String::new(),
+        margin: 0,
         params: vec![PluginParam { id: "on".into(), name: "On".into(), kind: PluginParamKind::Checkbox { default: true }, group: String::new() }],
     };
     register_plugin(Arc::new(Swap { m })).unwrap();

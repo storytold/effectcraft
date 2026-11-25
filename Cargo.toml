@@ -84,8 +84,8 @@ proptest = "1"
 
 # scripting (expressions)
 boa_engine = { version = "0.22", default-features = false }
-# WebAssembly effect plug-ins (sandboxed interpreter; MIT/Apache-2.0, pure Rust)
-wasmi = { version = "2", default-features = false, features = ["std", "validate", "wat", "deterministic", "portable-dispatch"] }
+# WebAssembly effect plug-ins (Cranelift JIT compiler; Apache-2.0 WITH LLVM-exception, #3206)
+wasmtime = { version = "48", default-features = false, features = ["std", "runtime", "cranelift", "wat", "anyhow"] }
 
 # geometry / fonts
 kurbo = { version = "0.13", features = ["serde"] }

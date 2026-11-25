@@ -21,11 +21,14 @@
 //! frames, resampled onto the current grid, and their layer times. The buffers are always
 //! allocated (zeroed when a frame does not exist); `flags` bit 0/1 says which are real.
 //!
-//! Modules run in the [wasmi](https://github.com/wasmi-labs/wasmi) interpreter (pure Rust,
-//! MIT/Apache-2.0) with deterministic floats, no imports (no files, network or clock) and a
-//! fuel limit per frame, so a plug-in can't escape its sandbox, hang the app, or render
-//! differently on another machine. The runtime is the `wasm` feature (on for the desktop app and
-//! the CLI); without it [`load_wasm`] says plug-ins are unavailable.
+//! Modules compile and run in [wasmtime](https://wasmtime.dev) (Cranelift JIT,
+//! Apache-2.0 WITH LLVM-exception; #3206) with deterministic NaN canonicalisation, WebAssembly
+//! SIMD (`v128`), no imports (no files, network or clock), a memory cap and a fuel limit per
+//! frame, so a plug-in can't escape its sandbox, hang the app, or render differently on another
+//! machine. Modules may optionally export `ec_render_rows(..., y0, y1)` and declare a manifest
+//! `"margin"` to split heavy frames across cores in parallel bands. The runtime is the `wasm`
+//! feature (on for the desktop app and the CLI); without it [`load_wasm`] says plug-ins are
+//! unavailable.
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
