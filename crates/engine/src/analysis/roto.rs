@@ -258,20 +258,24 @@ pub(crate) fn rekey_imported_object_mattes(
         .into_iter()
         .map(|(cid, lid, uid)| (ItemId(cid.0.saturating_add(offset)), LayerId(lid.0.saturating_add(offset)), uid.saturating_add(offset)))
         .collect();
+    if shifted.is_empty() {
+        return shifted;
+    }
     // Settle upstream effects first: clearing a Roto Brush freeze changes the frames a lower
     // Object Matte was frozen from. A remapped ID alone leaves those frames unchanged.
     let mut stacks = Vec::new();
     for (&cid, comp) in p.comps() {
         for layer in &comp.layers {
             let Some(effects) = layer.effects() else { continue };
-            if effects.groups().any(|g| shifted.contains(&(cid, layer.id, g.uid))) {
-                let groups = effects.groups().filter(|g| is_roto(g) || is_object_matte(g)).map(|g| g.uid).collect::<Vec<_>>();
+            let groups = effects.groups().filter(|g| is_roto(g) || is_object_matte(g)).map(|g| g.uid).collect::<Vec<_>>();
+            if !groups.is_empty() {
                 stacks.push((cid, layer.id, groups));
             }
         }
     }
 
     let mut preserved = std::collections::HashSet::new();
+    let mut changed_comps = std::collections::HashSet::new();
     for (cid, lid, groups) in stacks {
         let mut input_changed = false;
         for uid in groups {
@@ -291,8 +295,10 @@ pub(crate) fn rekey_imported_object_mattes(
             };
             let matches = next == saved || saved_input_matches(p, cid, l, uid, &saved);
             let clear = frozen.is_none() && (candidate || (!matches && !saved.is_empty()));
-            if clear {
-                input_changed |= has_frozen_matte(g) || !str_of(g, TRACKED).is_empty();
+            // The renderer skips disabled effects, including when another layer reads this one.
+            if clear && l.switches.effects && g.enabled && (has_frozen_matte(g) || !str_of(g, TRACKED).is_empty()) {
+                input_changed = true;
+                changed_comps.insert(cid);
             }
             if let Some(g) = p.comp_mut(cid).and_then(|c| c.layer_mut(lid)).and_then(|l| l.props.find_group_mut(uid)) {
                 if let Some(frozen) = frozen {
@@ -306,6 +312,28 @@ pub(crate) fn rekey_imported_object_mattes(
                         set_str(g, TRACKED, String::new());
                     }
                 }
+            }
+        }
+    }
+    // An Input Key records the source comp's timing and dimensions, not the contents of
+    // its layers. Discard a freeze if this import actually changed a nested source.
+    if !changed_comps.is_empty() {
+        let mut affected_sources = std::collections::HashMap::new();
+        let stale: Vec<_> = preserved
+            .iter()
+            .copied()
+            .filter(|&(cid, lid, _)| {
+                let Some(effectcraft_project::LayerSource::Comp { item }) = p.comp(cid).and_then(|c| c.layer(lid)).map(|l| &l.source) else {
+                    return false;
+                };
+                *affected_sources.entry(*item).or_insert_with(|| changed_comps.iter().any(|changed| p.comp_contains(*item, *changed)))
+            })
+            .collect();
+        for (cid, lid, uid) in stale {
+            preserved.remove(&(cid, lid, uid));
+            if let Some(g) = p.comp_mut(cid).and_then(|c| c.layer_mut(lid)).and_then(|l| l.props.find_group_mut(uid)) {
+                set_str(g, FROZEN, String::new());
+                set_str(g, TRACKED, String::new());
             }
         }
     }

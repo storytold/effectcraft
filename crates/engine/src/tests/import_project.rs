@@ -166,6 +166,82 @@ fn check_imported_object_matte(with_roto_brush: bool) {
 }
 
 #[test]
+fn import_discards_a_frozen_object_matte_if_its_nested_input_changes() {
+    use effectcraft_effects::{
+        object_matte as om,
+        roto::{self, FROZEN, FrozenCache},
+    };
+    use effectcraft_keyframe::Value;
+    use effectcraft_project::LayerId;
+
+    let (width, height) = (18, 12);
+    let alpha: Vec<_> = (0..width * height).map(|i| if i % width < width / 2 { 1.0 } else { 0.0 }).collect();
+    for (case, switches, changes_nested_input) in [
+        ("unchanged", None, false),
+        ("changed", Some((true, true)), true),
+        ("effects-off", Some((false, true)), false),
+        ("effect-disabled", Some((true, false)), false),
+    ] {
+        let dir = out_dir(&format!("import-frozen-{case}-precomp"));
+        let mut s = Session::default();
+        let mut make_comp = |name: &str| {
+            s.execute("comp.new", json!({"name": name, "width": width, "height": height, "frameRate": 25, "duration": 1})).unwrap();
+            s.active_comp_id().unwrap()
+        };
+        // The frozen outer layer's comp comes before its sources in ID order.
+        let outer = make_comp("Outer");
+        let middle = make_comp("Middle");
+        let inner = make_comp("Inner");
+        let solid = LayerId(s.execute("layer.newSolid", json!({"name": "Solid", "color": "#ff0000"})).unwrap()["layer"].as_u64().unwrap());
+        if let Some((effects_on, brush_enabled)) = switches {
+            s.execute("roto.stroke", json!({"layer": solid.0, "points": [[7, 6]], "radius": 3})).unwrap();
+            let comp = s.project.comp(inner).unwrap();
+            let layer = comp.layer(solid).unwrap();
+            let brush = layer.effects().unwrap().groups().find(|g| crate::roto::is_roto(g)).unwrap();
+            let uid = brush.uid;
+            let key = roto::frozen_key(&crate::roto::params_static(brush), [width as f64, height as f64], 25.0);
+            let mut cache = FrozenCache { key, size: [width, height], ..Default::default() };
+            cache.frames.insert(0, roto::freeze_frame(&alpha, &[]));
+            let layer = std::sync::Arc::make_mut(&mut s.project).comp_mut(inner).unwrap().layer_mut(solid).unwrap();
+            layer.switches.effects = effects_on;
+            let brush = layer.props.find_group_mut(uid).unwrap();
+            brush.enabled = brush_enabled;
+            brush.get_mut(FROZEN).unwrap().value = Value::Str(cache.to_json());
+        }
+        s.open_comp(middle);
+        s.execute("layer.addItem", json!({"item": inner.0, "time": 0.0})).unwrap();
+        s.open_comp(outer);
+        let layer = LayerId(s.execute("layer.addItem", json!({"item": middle.0, "time": 0.0})).unwrap()["layer"].as_u64().unwrap());
+        let effect = s.execute("objectMatte.apply", json!({"layer": layer.0, "point": [7, 6]})).unwrap()["effect"].as_u64().unwrap();
+        let g = s.project.comp(outer).unwrap().layer(layer).unwrap().props.find_group(effect).unwrap();
+        let key = om::frozen_key(&crate::roto::params_static(g), [width as f64, height as f64], 25.0, None);
+        let mut cache = FrozenCache { key, size: [width, height], ..Default::default() };
+        cache.frames.insert(0, roto::freeze_frame(&alpha, &[]));
+        let g = std::sync::Arc::make_mut(&mut s.project).comp_mut(outer).unwrap().layer_mut(layer).unwrap().props.find_group_mut(effect).unwrap();
+        g.get_mut(FROZEN).unwrap().value = Value::Str(cache.to_json());
+        let path = dir.join("Source.ecproj");
+        s.execute("file.saveAs", json!({"path": path})).unwrap();
+
+        let mut destination = Session::default();
+        destination.execute("comp.new", json!({"name": "Destination"})).unwrap();
+        let imported = destination.execute("file.importProject", json!({"path": path})).unwrap();
+        let comp = ItemId(imported["primaryComp"].as_u64().unwrap());
+        let layer = &destination.project.comp(comp).unwrap().layers[0];
+        let matte = layer.effects().unwrap().groups().find(|g| g.match_id == om::ID).unwrap();
+        if switches.is_some() {
+            let middle = destination.project.comp(layer.source.item().unwrap()).unwrap();
+            let inner = destination.project.comp(middle.layers[0].source.item().unwrap()).unwrap();
+            let brush = inner.layers[0].effects().unwrap().groups().find(|g| crate::roto::is_roto(g)).unwrap();
+            assert_eq!(brush.get(FROZEN).unwrap().value, Value::Str(String::new()), "{case}: the inner freeze is cleared on import");
+        }
+        let params = crate::roto::params_static(matte);
+        let actual = om::frozen_alpha(&params, [width as f64, height as f64], 25.0, 0, width, height, None);
+        assert_eq!(destination.roto_pending.contains(&(comp, layer.id, matte.uid)), changes_nested_input);
+        assert_eq!(actual, (!changes_nested_input).then(|| alpha.clone()), "only a freeze whose precomp changed is discarded");
+    }
+}
+
+#[test]
 fn import_project_merges_with_fresh_ids_and_one_undo() {
     let dir = out_dir("import-project");
     let path = source_project(&dir);
