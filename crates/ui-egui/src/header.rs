@@ -2,8 +2,6 @@
 //! buttons (Discord is always one click away).
 
 use crate::i18n::{tr, tr_args};
-use craft_behavior::Input;
-use craft_ui::runtime::focus::KeyUse;
 use egui::{Align2, Color32, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
 use serde_json::json;
 
@@ -43,7 +41,6 @@ fn brand_and_home(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter
     paint_logo(p, brand);
     let bresp = ui.interact(brand, egui::Id::unique("brand"), Sense::click());
     app.auto.add_response("header.about", &bresp, "About EffectCraft");
-    craft_ui::runtime::focus::host_stop(ui.ctx(), bresp.id, KeyUse::of(Input::Pointer));
     widgets::focus_outline(ui, &bresp, &t);
     if bresp.on_hover_text(tr("About EffectCraft")).clicked() {
         app.dialog = Some(Dialog::About);
@@ -53,7 +50,6 @@ fn brand_and_home(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter
     let home = Rect::from_min_size(pos2(x, cy - 13.0), vec2(26.0, 26.0));
     let home_response = widgets::icon_button(ui, home, Icon::Home, app.ui.start_screen, &t, egui::Id::unique("tool-home")).on_hover_text(tr("Home"));
     app.auto.add_response("header.home", &home_response, "Home");
-    craft_ui::runtime::focus::host_stop(ui.ctx(), home_response.id, KeyUse::of(Input::Pointer));
     if home_response.clicked() {
         app.ui.start_screen = !app.ui.start_screen;
     }
@@ -89,7 +85,6 @@ fn tool_slot(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, si:
     let active = slot.contains(&app.ui.tool);
     let id = egui::Id::unique(("tool-slot", si));
     let resp = widgets::icon_button(ui, r, cur.icon(), active, &t, id);
-    craft_ui::runtime::focus::host_stop(ui.ctx(), resp.id, KeyUse::of(Input::Pointer));
     if slot.len() > 1 {
         // Flyout corner triangle.
         p.add(egui::Shape::convex_polygon(

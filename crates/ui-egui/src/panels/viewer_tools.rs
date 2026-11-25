@@ -4,8 +4,6 @@
 //!
 //! Edits go through engine commands (`view.*`, `comp.*`); the viewer calls in from small hooks.
 
-use craft_behavior::Input;
-use craft_ui::runtime::focus::{KeyUse, host_stop};
 use effectcraft_engine::commands::viewer_cmds::FastPreviews;
 use effectcraft_engine::project::{Comp, ItemId, LayerId};
 use effectcraft_engine::render::EvalCtx;
@@ -766,9 +764,6 @@ pub(crate) fn bottom_bar(app: &mut EffectcraftApp, ui: &mut egui::Ui, bar: Rect,
 }
 
 /// The exposure drag field (stops) at `er`; a change runs `view.exposure`.
-/// Every control of the viewer bar is a pointer-driven stop that Tab visits in drawn order.
-const STOP_KEYS: KeyUse = KeyUse::of(Input::Pointer);
-
 fn exposure_field(app: &mut EffectcraftApp, ui: &mut egui::Ui, er: Rect, stops: f64) {
     let mut ev = stops;
     let resp = ui.put(
@@ -782,7 +777,6 @@ fn exposure_field(app: &mut EffectcraftApp, ui: &mut egui::Ui, er: Rect, stops: 
         ),
     );
     let resp = resp.on_hover_text(crate::i18n::tr("Adjust Exposure (stops)"));
-    host_stop(ui.ctx(), resp.id, STOP_KEYS);
     app.auto.add_response("viewer.exposure", &resp, "Adjust Exposure");
     if resp.changed() {
         let _ = app.session.execute("view.exposure", json!({"stops": ev}));
@@ -809,7 +803,6 @@ fn bottom_bar_contents(app: &mut EffectcraftApp, ui: &mut egui::Ui, bar: Rect, z
         app.ui.viewer.fit_up_to_100 = up;
         app.ui.viewer.zoom = z;
     }
-    host_stop(ui.ctx(), egui::Id::unique("vw-mag"), STOP_KEYS);
     x = r.max.x + 4.0;
 
     // Resolution / down-sample factor.
@@ -818,7 +811,6 @@ fn bottom_bar_contents(app: &mut EffectcraftApp, ui: &mut egui::Ui, bar: Rect, z
     let res = app.viewer_res();
     let response = widgets::dropdown(ui, r, &resolution_label(res, scale), &t, egui::Id::unique("vw-res"))
         .on_hover_text(crate::i18n::tr("Resolution/Down Sample Factor Popup"));
-    host_stop(ui.ctx(), response.id, STOP_KEYS);
     if response.clicked() {
         toggle_popup(ui, "vw-res-pop");
     }
@@ -846,7 +838,6 @@ fn bottom_bar_contents(app: &mut EffectcraftApp, ui: &mut egui::Ui, bar: Rect, z
         // The tip is the English source: the tooltip is looked up in the catalog, while the
         // automation label stays English for scripts and tests.
         let resp = widgets::icon_button(ui, r, icon, on, &t, egui::Id::unique(("vw-btn", id))).on_hover_text(crate::i18n::tr(tip));
-        host_stop(ui.ctx(), resp.id, STOP_KEYS);
         auto.add_response(&format!("viewer.{id}"), &resp, tip);
         *x += 24.0;
         (resp.clicked(), r)
@@ -953,7 +944,6 @@ fn bottom_bar_contents(app: &mut EffectcraftApp, ui: &mut egui::Ui, bar: Rect, z
         let current = renderers.iter().find(|(r, ..)| *r == comp.renderer).map_or("Classic 3D", |(_, label, _)| *label);
         let r = Rect::from_min_size(pos2(x, cy - 10.0), vec2(96.0, 20.0));
         let renderer_resp = widgets::dropdown(ui, r, crate::i18n::tr(current), &t, egui::Id::unique("vw-3d"));
-        host_stop(ui.ctx(), renderer_resp.id, STOP_KEYS);
         if renderer_resp.clicked() {
             toggle_popup(ui, "vw-3d-pop");
         }
@@ -970,7 +960,6 @@ fn bottom_bar_contents(app: &mut EffectcraftApp, ui: &mut egui::Ui, bar: Rect, z
         let cur = cid.and_then(|c| app.session.state.views3d.get(&c)).map(|v| v.current).unwrap_or_default();
         let r = Rect::from_min_size(pos2(x, cy - 10.0), vec2(118.0, 20.0));
         let response = widgets::dropdown(ui, r, crate::panels::viewer::view3d_label(cur), &t, egui::Id::unique("vw-cam"));
-        host_stop(ui.ctx(), response.id, STOP_KEYS);
         if response.clicked() {
             toggle_popup(ui, "vw-cam-pop");
         }
@@ -998,7 +987,6 @@ fn bottom_bar_contents(app: &mut EffectcraftApp, ui: &mut egui::Ui, bar: Rect, z
     let tr = Rect::from_min_size(pos2(x + 4.0, cy - 9.0), g.size() + vec2(8.0, 4.0));
     p.galley(pos2(tr.min.x + 4.0, tr.min.y + 2.0), g, t.timecode);
     let resp = ui.interact(tr, egui::Id::unique("vw-timecode"), Sense::click());
-    host_stop(ui.ctx(), resp.id, STOP_KEYS);
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "Current time"));
     if resp.has_focus() {
         p.rect_stroke(tr.shrink(1.0), 2.0, Stroke::new(1.0, t.focus), StrokeKind::Inside);
@@ -1033,7 +1021,6 @@ fn layout_switch(app: &mut EffectcraftApp, ui: &mut egui::Ui, mut x: f32, cy: f3
     for (n, text, tip) in [(1u8, "1", "1 View"), (2, "2", "2 Views"), (4, "4", "4 Views")] {
         let r = Rect::from_min_size(pos2(x, cy - 10.0), vec2(26.0, 20.0));
         let resp = widgets::text_button(ui, r, text, current == n, t, egui::Id::unique(("vw-layout", n)));
-        host_stop(ui.ctx(), resp.id, STOP_KEYS);
         // The drawn text is just "1" / "2" / "4": the accessible name is the full "N View(s)", the group
         // label ("Views") is its description, and the current layout is exposed as pressed.
         let name = crate::i18n::command_label("view.layout", tip);
