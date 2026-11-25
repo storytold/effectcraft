@@ -560,3 +560,164 @@ fn a_docked_panel_button_opens_the_file_dialog() {
     let status = h.state().session.script_ui.window(panel).and_then(|w| w.root.lookup(&json!("status"))).map(|w| w.text.clone()).unwrap_or_default();
     assert_eq!(status, "Episode 1.srt");
 }
+
+/// A docked panel taller than its dock scrolls down like a page: Tab to a control below the
+/// visible part, a button or a list box's item, scrolls the dock to it (the panel's window stays
+/// as wide as its dock and as tall as its content, as a panel listing many items sizes itself in
+/// onResize).
+#[test]
+fn tab_to_a_control_below_a_tall_panels_dock_scrolls_to_it() {
+    use effectcraft_engine::config::{ConfigStore, MemoryConfig};
+    use egui::Key;
+    use egui::accesskit::Role;
+    use egui_kittest::kittest::Queryable;
+    let store = std::sync::Arc::new(MemoryConfig::default());
+    let panel = r#"
+      var p = this;
+      p.orientation = "column";
+      p.alignChildren = ["left", "top"];
+      for (var i = 1; i <= 40; i++) p.add("button", undefined, "Item " + i, { name: "item" + i });
+      p.add("listbox", undefined, ["Alpha", "Beta", "Gamma"], { name: "list" });
+      p.onResize = function () {
+        p.size = [p.size.width, 40 * 35 + 120];
+        p.layout.layout(true);
+      };
+    "#;
+    store.write("Scripts/ScriptUI Panels/Tall Panel.jsx", panel).unwrap();
+    let mut s = effectcraft_host::session();
+    s.config = Some(store.clone());
+    s.execute("window.scriptPanel", json!({"name": "Tall Panel.jsx"})).unwrap();
+    let mut h = Harness::builder().with_size(egui::vec2(380.0, 600.0)).build_eframe(|_| EffectcraftApp::new(s));
+    h.run_steps(3);
+    let panel = h.state().session.script_ui.windows.iter().find(|w| w.script == "Tall Panel.jsx").expect("the panel's window").id;
+    h.state_mut().ui.maximized = Some(PanelKind::ScriptPanel(panel));
+    h.run_steps(6);
+    // The dock's body, where the panel scrolls.
+    let screen = rect(&h, &format!("scriptui.{panel}"));
+    assert!(h.get_by_role_and_label(Role::Button, "Item 40").rect().min.y > screen.max.y, "the last item starts below the dock");
+    h.get_by_role_and_label(Role::Button, "Item 39").focus();
+    h.run_steps(3);
+    for pressed in [true, false] {
+        h.input_mut().events.push(Event::Key { key: Key::Tab, physical_key: None, pressed, repeat: false, modifiers: Default::default() });
+        h.step();
+    }
+    h.run_steps(6);
+    let last = h.get_by_role_and_label(Role::Button, "Item 40");
+    assert!(last.is_focused(), "Tab moves to the last item");
+    let r = last.rect();
+    assert!(r.min.y >= screen.min.y && r.max.y <= screen.max.y, "the dock scrolled it into view: {r:?}");
+    // The list box under the last button, from the top of the panel again: its scroll area keeps
+    // the item's request, and the dock still scrolls to the list.
+    h.get_by_role_and_label(Role::Button, "Item 1").focus();
+    h.run_steps(6);
+    assert!(h.get_by_label("Alpha").rect().min.y > screen.max.y, "the list starts below the dock");
+    h.get_by_role_and_label(Role::Button, "Item 40").focus();
+    h.run_steps(3);
+    for pressed in [true, false] {
+        h.input_mut().events.push(Event::Key { key: Key::Tab, physical_key: None, pressed, repeat: false, modifiers: Default::default() });
+        h.step();
+    }
+    h.run_steps(6);
+    let item = h.get_by_label("Alpha");
+    assert!(item.is_focused(), "Tab moves to the list's first item");
+    let r = item.rect();
+    assert!(r.min.y >= screen.min.y && r.max.y <= screen.max.y, "the dock scrolled the list into view: {r:?}");
+}
+
+/// A list box taller than its dock, with another list box after it: Tab to an item far down the
+/// first list scrolls the dock to that item, not just to the list (whose rect spans the dock).
+/// The later list box's own scroll area doesn't take the dock's request.
+#[test]
+fn tab_to_an_item_far_down_a_tall_list_box_scrolls_the_dock_to_it() {
+    use effectcraft_engine::config::{ConfigStore, MemoryConfig};
+    use egui::Key;
+    use egui_kittest::kittest::Queryable;
+    let store = std::sync::Arc::new(MemoryConfig::default());
+    let panel = r#"
+      var p = this;
+      p.orientation = "column";
+      p.alignChildren = ["left", "top"];
+      var rows = [];
+      for (var i = 1; i <= 60; i++) rows.push("Row " + i);
+      var tall = p.add("listbox", undefined, rows, { name: "tall" });
+      tall.preferredSize = [200, 1100];
+      p.add("listbox", undefined, ["Alpha", "Beta", "Gamma"], { name: "short" });
+      p.onResize = function () {
+        p.size = [p.size.width, 1300];
+        p.layout.layout(true);
+      };
+    "#;
+    store.write("Scripts/ScriptUI Panels/Two Lists.jsx", panel).unwrap();
+    let mut s = effectcraft_host::session();
+    s.config = Some(store.clone());
+    s.execute("window.scriptPanel", json!({"name": "Two Lists.jsx"})).unwrap();
+    let mut h = Harness::builder().with_size(egui::vec2(380.0, 600.0)).build_eframe(|_| EffectcraftApp::new(s));
+    h.run_steps(3);
+    let panel = h.state().session.script_ui.windows.iter().find(|w| w.script == "Two Lists.jsx").expect("the panel's window").id;
+    h.state_mut().ui.maximized = Some(PanelKind::ScriptPanel(panel));
+    h.run_steps(6);
+    // The dock's body, where the panel scrolls.
+    let screen = rect(&h, &format!("scriptui.{panel}"));
+    assert!(h.get_by_label("Row 50").rect().min.y > screen.max.y, "row 50 starts below the dock");
+    h.get_by_label("Row 49").focus();
+    h.run_steps(3);
+    for pressed in [true, false] {
+        h.input_mut().events.push(Event::Key { key: Key::Tab, physical_key: None, pressed, repeat: false, modifiers: Default::default() });
+        h.step();
+    }
+    h.run_steps(8);
+    let row = h.get_by_label("Row 50");
+    assert!(row.is_focused(), "Tab moves to row 50");
+    let r = row.rect();
+    assert!(r.min.y >= screen.min.y && r.max.y <= screen.max.y, "the dock scrolled row 50 into view: {r:?}");
+}
+
+/// A list box taller than its dock, which scrolls within itself: Tab from row to row, down and
+/// back up the list, brings each focused row into the dock. The row moves once; when both the
+/// list and the dock scrolled toward it, it went past the dock's other edge.
+#[test]
+fn a_focused_item_of_a_scrolled_tall_list_moves_into_the_dock_once() {
+    use effectcraft_engine::config::{ConfigStore, MemoryConfig};
+    use egui::Key;
+    use egui_kittest::kittest::Queryable;
+    let store = std::sync::Arc::new(MemoryConfig::default());
+    let panel = r#"
+      var p = this;
+      p.orientation = "column";
+      p.alignChildren = ["left", "top"];
+      var rows = [];
+      for (var i = 1; i <= 160; i++) rows.push("Row " + i);
+      var tall = p.add("listbox", undefined, rows, { name: "tall" });
+      tall.preferredSize = [200, 2000];
+      p.onResize = function () {
+        p.size = [p.size.width, 2100];
+        p.layout.layout(true);
+      };
+    "#;
+    store.write("Scripts/ScriptUI Panels/Long List.jsx", panel).unwrap();
+    let mut s = effectcraft_host::session();
+    s.config = Some(store.clone());
+    s.execute("window.scriptPanel", json!({"name": "Long List.jsx"})).unwrap();
+    let mut h = Harness::builder().with_size(egui::vec2(380.0, 600.0)).build_eframe(|_| EffectcraftApp::new(s));
+    h.run_steps(3);
+    let panel = h.state().session.script_ui.windows.iter().find(|w| w.script == "Long List.jsx").expect("the panel's window").id;
+    h.state_mut().ui.maximized = Some(PanelKind::ScriptPanel(panel));
+    h.run_steps(6);
+    // The dock's body, where the panel scrolls.
+    let screen = rect(&h, &format!("scriptui.{panel}"));
+    let tab_to = |h: &mut Harness<'_, EffectcraftApp>, from: &str, to: &str| {
+        h.get_by_label(from).focus();
+        h.run_steps(3);
+        for pressed in [true, false] {
+            h.input_mut().events.push(Event::Key { key: Key::Tab, physical_key: None, pressed, repeat: false, modifiers: Default::default() });
+            h.step();
+        }
+        h.run_steps(30);
+        assert!(h.get_by_label(to).is_focused(), "Tab moves to {to}");
+        h.get_by_label(to).rect()
+    };
+    for (from, to) in [("Row 149", "Row 150"), ("Row 93", "Row 94"), ("Row 30", "Row 31"), ("Row 109", "Row 110")] {
+        let r = tab_to(&mut h, from, to);
+        assert!(r.min.y >= screen.min.y && r.max.y <= screen.max.y, "{to} moved into the dock: {r:?}");
+    }
+}
