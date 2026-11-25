@@ -864,8 +864,9 @@ impl<'a> Cx<'a> {
             self.gpu_rendered.store(true, std::sync::atomic::Ordering::Relaxed);
         }
 
-        // The GPU stops for good once unavailable: a frame that ends so fell back to the CPU
-        if gpu && self.job.accel.is_some_and(|a| !a.available()) {
+        // A GPU job's frame that ends with the GPU gone fell back to the CPU (a probe that picks the CPU drops its GPU frames)
+        let chose_gpu = self.choice().is_some_and(|c| c.renderer == crate::JobRenderer::Gpu);
+        if gpu && chose_gpu && self.job.accel.is_some_and(|a| !a.available()) {
             self.gpu_fallback_frames.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         let img = self.crop_resize(img);
@@ -1547,32 +1548,41 @@ mod tests {
         let (settings, output) = (RenderSettings::default(), OutputModule::for_format(OutputFormat::PngSequence));
         let mut p = Project::default();
         p.settings.gpu_acceleration = true;
-        let comp = Comp::new(16, 8, effectcraft_time::FrameRate::FPS_25, Tick::from_seconds_f64(6.0 / 25.0));
+        let comp = Comp::new(16, 8, effectcraft_time::FrameRate::FPS_25, Tick::from_seconds_f64(12.0 / 25.0));
         let cid = p.add_item("Comp", effectcraft_color::Label::Sandstone, None, effectcraft_project::ItemKind::Comp(comp.into()));
-        let accel = LostAtFrameOne(AtomicBool::new(false));
-        let shared = Mutex::new(Some(Backend::Gpu));
         let sink: &crate::Sink = &|_: &str, _: Vec<u8>| {};
-        let job = Job {
-            project: &p,
-            footage: &effectcraft_render::NoFootage,
-            expr: None,
-            accel: Some(&accel),
-            comp: cid,
-            settings: &settings,
-            output: &output,
-            path: "/l/f_[#####].png",
-            sink: Some(sink),
-            nested_switches: true,
-            options: crate::JobOptions { renderer: Some(&shared), gpu_frames: Some(1), ..Default::default() },
+        let export = |renderer: Option<Backend>| {
+            let accel = LostAtFrameOne(AtomicBool::new(false));
+            let shared = Mutex::new(renderer);
+            let job = Job {
+                project: &p,
+                footage: &effectcraft_render::NoFootage,
+                expr: None,
+                accel: Some(&accel),
+                comp: cid,
+                settings: &settings,
+                output: &output,
+                path: "/l/f_[#####].png",
+                sink: Some(sink),
+                nested_switches: true,
+                options: crate::JobOptions { renderer: Some(&shared), gpu_frames: Some(1), ..Default::default() },
+            };
+            crate::export(&job, &mut |_| true).expect("export").timing
         };
 
-        let timing = crate::export(&job, &mut |_| true).expect("export").timing;
+        let chosen = export(Some(Backend::Gpu));
+        let measured = std::env::var_os(RENDERER_ENV).is_none().then(|| export(None));
 
-        assert_eq!(timing.renderer, "GPU Acceleration (as the queue item's first output module); attached GPU adapter: lost");
-        assert_eq!((timing.gpu_fallback_frames, timing.frames), (5, 6), "frame 0 rendered before the device was lost");
-        let line = timing.summary();
+        assert_eq!(chosen.renderer, "GPU Acceleration (as the queue item's first output module); attached GPU adapter: lost");
+        assert_eq!((chosen.gpu_fallback_frames, chosen.frames), (11, 12), "frame 0 rendered before the device was lost");
+        let line = chosen.summary();
         assert!(line.contains("Initial compositor: GPU Acceleration"), "{line}");
-        assert!(line.contains("Later GPU fallback: 5 of 6 frames rendered on the CPU after the GPU became unavailable"), "{line}");
+        assert!(line.contains("Later GPU fallback: 11 of 12 frames rendered on the CPU after the GPU became unavailable"), "{line}");
+        // Lost while Auto measures: the job picks the CPU and the GPU's measured frames are dropped
+        if let Some(measured) = measured {
+            assert!(measured.renderer.starts_with("Software Rendering (measured on the first frames"), "{}", measured.renderer);
+            assert_eq!(measured.gpu_fallback_frames, 0, "{}", measured.summary());
+        }
     }
 
     #[test]
