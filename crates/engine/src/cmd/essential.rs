@@ -891,6 +891,10 @@ pub fn read_template(bytes: &[u8]) -> std::result::Result<(Value, Project, Vec<(
     // (channel selection can't be animated, as in After Effects: a template made before that
     // keeps its first value; read for listings and thumbnails too, so not said each time)
     let _static_channels = crate::upgrade_effects(&mut project);
+    // Layers reversed by Time-Reverse Layer before #3245 were one comp frame early: a template
+    // opens in After Effects' layout as a project file does, so a project made from it is saved
+    // with the layout marker and does not move on its next open.
+    super::layer_time::repair_old_time_reverse(&mut project);
     Ok((manifest, project, entries))
 }
 

@@ -1274,10 +1274,14 @@ impl Session {
     /// from the file's headers ([`effectcraft_render::FootageSource::aux_names`]): the planes
     /// may be empty, so this is for lists and popups only. `None` for other layers.
     pub fn layer_channels(&self, lid: LayerId) -> Option<std::sync::Arc<effectcraft_raster::AuxChannels>> {
-        let layer = self.active_comp()?.layer(lid)?;
+        let cid = self.state.active_comp?;
+        let comp = self.project.comp(cid)?;
+        let layer = comp.layer(lid)?;
         let effectcraft_project::LayerSource::Footage { item } = layer.source else { return None };
         let effectcraft_project::ItemKind::Footage(f) = &self.project.item(item)?.kind else { return None };
-        self.footage.aux_names(item, f, layer.layer_time(self.time()))
+        // The source time the layer shows (Time Remap, a reversed layer's frame), as rendered.
+        let at = effectcraft_render::EvalCtx { expr: self.expr.as_deref(), ..effectcraft_render::EvalCtx::new(&self.project, cid, comp, self.time()) };
+        self.footage.aux_names(item, f, at.source_time(layer))
     }
 }
 

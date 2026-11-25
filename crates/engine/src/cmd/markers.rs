@@ -99,7 +99,10 @@ pub fn nested_markers<'a>(project: &'a Project, comp_id: ItemId, comp: &Comp, la
     let shown = |t: Tick| t >= layer.in_point && t < layer.out_point;
     let stretched_regions = (layer.stretch - 100.0).abs() > 1e-9 && nc.markers.iter().any(|m| m.protected);
     if layer.props.get("timeRemap").is_none() && !stretched_regions {
-        return nc.markers.iter().enumerate().map(|(i, m)| (layer.comp_time(m.time), i, m)).filter(|(t, _, _)| shown(*t)).collect();
+        // A reversed layer shows nested frame [m, m + fd) from the comp time where its layer time
+        // is the end of that frame (`EvalCtx::nested_time`).
+        let end = if effectcraft_render::EvalCtx::plays_backwards(layer) { nc.frame_duration() } else { Tick::ZERO };
+        return nc.markers.iter().enumerate().map(|(i, m)| (layer.comp_time(m.time + end), i, m)).filter(|(t, _, _)| shown(*t)).collect();
     }
     // The layer's source time at every frame of its range; each marker at the first frame that
     // reaches it (within rounding: a thousandth of a nested frame).
@@ -108,14 +111,25 @@ pub fn nested_markers<'a>(project: &'a Project, comp_id: ItemId, comp: &Comp, la
     let frames: Vec<(Tick, Tick)> = (f0..f1.min(f0.saturating_add(100_000)))
         .map(|f| {
             let t = fr.tick_of(f);
-            (t, effectcraft_render::EvalCtx::new(project, comp_id, comp, t).source_time(layer))
+            // A reversed layer shows the nested frame its source time lies in (`nested_time`
+            // floors it), whichever way the source runs.
+            let ctx = effectcraft_render::EvalCtx::new(project, comp_id, comp, t);
+            (t, if effectcraft_render::EvalCtx::plays_backwards(layer) { ctx.nested_time(layer) } else { ctx.source_time(layer) })
         })
         .collect();
     let eps = nc.frame_duration().0 / 1000;
+    // Source time running backwards (a reversed layer, or Time Remap keys that fall): a frame
+    // shows the nested frame its source time lies in, and a marker sits at the first frame whose
+    // nested frame starts at or before it.
+    let backwards = matches!((frames.first(), frames.last()), (Some((_, a)), Some((_, b))) if b < a);
+    let nfr = nc.frame_rate;
+    let reaches = |src: Tick, m: Tick| {
+        if backwards { nfr.tick_of(effectcraft_render::frame_position(src, nfr).0).0 <= m.0.saturating_add(eps) } else { src.0.saturating_add(eps) >= m.0 }
+    };
     nc.markers
         .iter()
         .enumerate()
-        .filter_map(|(i, m)| frames.iter().find(|(_, src)| src.0.saturating_add(eps) >= m.time.0).map(|(t, _)| (*t, i, m)))
+        .filter_map(|(i, m)| frames.iter().find(|(_, src)| reaches(*src, m.time)).map(|(t, _)| (*t, i, m)))
         .filter(|(t, _, _)| shown(*t))
         .collect()
 }
