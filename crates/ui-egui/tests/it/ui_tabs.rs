@@ -487,7 +487,7 @@ fn open_comps_are_tabs_in_the_timeline_row_and_the_rest_are_in_its_overflow_menu
     // A comp with no room is in the » menu; picking it shows it, and its tab joins the row.
     let hidden = comps.iter().copied().find(|c| !shown.contains(c)).unwrap();
     let more = {
-        use egui_kittest::kittest::{NodeT, Queryable};
+        use egui_kittest::kittest::Queryable;
         h.query_all_by_label("More tabs").map(|node| node.rect()).find(|r| tl.y_range().contains(r.center().y)).expect("the Timeline row's » menu")
     };
     assert!(more.min.x >= x - 0.5, "{more:?}");
