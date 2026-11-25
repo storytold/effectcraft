@@ -1112,6 +1112,14 @@ fn keyboard(app: &mut EffectcraftApp, ui: &mut egui::Ui, viewer: Rect) {
             }
             continue;
         }
+        if let egui::Event::ImeResetRetired { request_id } = &ev {
+            // The integration dropped the request and no completion will follow: ask again, or the
+            // composition stays stale forever.
+            if custom_mutations && read_reset(&ctx).is_some_and(|guard| !guard.suspended && guard.request == Some(*request_id)) {
+                request_reset(app, &ctx);
+            }
+            continue;
+        }
         sync_ime_target(ui, app);
         sync_ime_selection(ui, app);
         if matches!(&ev, egui::Event::PointerButton { pos, pressed: true, .. } if !viewer.contains(*pos)) {

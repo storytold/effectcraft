@@ -319,6 +319,18 @@ fn discarded_custom_request_then_home_rearms_the_identical_caret() {
 }
 
 #[test]
+fn a_retired_reset_request_is_asked_again() {
+    let (mut app, _) = editor("abcd", 4, 4);
+    let mut pass = ImePass::new(egui::ViewportId::ROOT);
+    let preview = || egui::Event::Ime(egui::ImeEvent::Preedit { text: "é".into(), active_range_chars: None });
+    pass.frame(&mut app, vec![preview()], true, false);
+    app.session.execute("text.setSelection", json!({"caret": 1})).unwrap();
+    let first = pass.frame(&mut app, vec![], true, false).unwrap().reset_request.unwrap();
+    let again = pass.frame(&mut app, vec![egui::Event::ImeResetRetired { request_id: first }], true, false).unwrap().reset_request;
+    assert!(again.is_some_and(|id| id != first), "a retired request is replaced by a new one");
+}
+
+#[test]
 fn viewport_fences_and_duplicate_completion_keep_their_exact_lifetime() {
     let (mut app, lid) = editor("abcd", 4, 4);
     let mut root = ImePass::new(egui::ViewportId::ROOT);
