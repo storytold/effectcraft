@@ -1328,9 +1328,16 @@ fn layer_parameters_see_a_whole_shape_layer() {
 
 #[test]
 fn set_channels_samples_a_transformed_shape_in_composition_space() {
+    use effectcraft_effects::EffectHost;
+
     for source in [0, 1, 2] {
         let (mut p, cid, comp) = setup();
+        let later = Tick::from_seconds_f64(1.0);
+        let mut parent = build::layer(&mut p, &comp, "Parent", LayerSource::Null, (100, 100), None);
+        parent.props.prop_mut("transform/anchor").unwrap().value = Value::Vec3([0.0; 3]);
+        parent.props.prop_mut("transform/position").unwrap().value = Value::Vec3([30.0, 10.0, 0.0]);
         let mut shape = build::layer(&mut p, &comp, "Source", LayerSource::Shape, (200, 100), None);
+        shape.parent = Some(parent.id);
         let mut next = p.next_id;
         let mut ids = Ids(&mut next);
         let rect = build::shape_rect(&mut ids, [40.0, 30.0], [0.0, 0.0], 0.0);
@@ -1338,8 +1345,13 @@ fn set_channels_samples_a_transformed_shape_in_composition_space() {
         let group = build::shape_group(&mut ids, "Rectangle", vec![rect, fill]);
         p.next_id = next;
         shape.props.sub_mut("contents").unwrap().children.push(group.into());
-        shape.props.prop_mut("transform/position").unwrap().value = Value::Vec3([45.0, 32.0, 0.0]);
+        shape.props.prop_mut("transform/anchor").unwrap().value = Value::Vec3([0.0; 3]);
+        shape.props.prop_mut("transform/position").unwrap().keys =
+            vec![Keyframe::new(Tick::ZERO, Value::Vec3([45.0, 32.0, 0.0])), Keyframe::new(later, Value::Vec3([120.0, 42.0, 0.0]))];
+        shape.props.prop_mut("transform/scale").unwrap().value = Value::Vec3([150.0, 50.0, 100.0]);
+        shape.props.prop_mut("transform/rotation").unwrap().value = Value::Scalar(90.0);
         shape.switches.video = false;
+        let shape_id = shape.id.0;
 
         let mut receiver = solid(&mut p, &comp, [0.0, 0.0, 1.0], 200, 100);
         add_effect_200(
@@ -1348,10 +1360,39 @@ fn set_channels_samples_a_transformed_shape_in_composition_space() {
             "ec.channel.setchannels",
             &[("sourceLayer4", Value::Layer(Some(shape.id.0))), ("sourceLayer4Source", Value::Enum(source))],
         );
-        p.comp_mut(cid).unwrap().layers = vec![receiver, shape].into();
-        let image = render_frame(&p, cid, Tick::ZERO, 1.0);
-        assert!(image.get(45, 32)[3] > 0.99, "mode {source}: the shape's transformed centre supplies alpha");
-        assert!(image.get(100, 50)[3] < 0.01, "mode {source}: moving the source leaves the old centre transparent");
+        p.comp_mut(cid).unwrap().layers = vec![receiver, shape, parent].into();
+        let comp = p.comp(cid).unwrap();
+        let ctx = crate::EvalCtx::new(&p, cid, comp, Tick::ZERO);
+        let renderer = crate::Renderer::new(&p, &crate::NoFootage, crate::RenderOpts::default());
+        let host = crate::FxHost { r: &renderer, ctx: &ctx, layer: &comp.layers[0], origin: [0.0; 2], index: 0, original: None };
+        let pixels = match source {
+            0 => host.layer(shape_id, false),
+            1 => host.layer_masks(shape_id),
+            _ => host.layer(shape_id, true),
+        }
+        .unwrap();
+        assert_eq!(pixels.size, [f64::from(comp.width), f64::from(comp.height)]);
+        assert_eq!((pixels.buf.img.width, pixels.buf.img.height), (comp.width, comp.height));
+
+        let cache = crate::LayerCache::default();
+        let before = render_cached(&p, cid, Tick::ZERO, Some(&cache));
+        assert_same(&before, &render_cached(&p, cid, Tick::ZERO, None), "transformed source, cached versus uncached");
+        let hits = cache.stats().hits;
+        assert_same(&render_cached(&p, cid, Tick::ZERO, Some(&cache)), &before, "same frame reused");
+        assert!(cache.stats().hits > hits, "mode {source}: the repeated frame should reuse cached layers");
+
+        // The 40×30 rectangle is scaled to 60×15, rotated and placed at (75, 42) by its parent.
+        for (x, y) in [(75, 42), (75, 67)] {
+            assert!(before.get(x, y)[3] > 0.99, "mode {source}: inside at ({x}, {y})");
+        }
+        for (x, y) in [(85, 42), (45, 32), (20, 10), (180, 90), (150, 52)] {
+            assert!(before.get(x, y)[3] < 0.01, "mode {source}: outside at ({x}, {y})");
+        }
+
+        let after = render_cached(&p, cid, later, Some(&cache));
+        assert_same(&after, &render_cached(&p, cid, later, None), "moved source, cached versus uncached");
+        assert!(after.get(150, 52)[3] > 0.99, "mode {source}: the second frame shows the moved source");
+        assert!(after.get(75, 42)[3] < 0.01, "mode {source}: the previous source position is now clear");
     }
 }
 
