@@ -68,6 +68,12 @@ pub(crate) fn restart_to_update(rt: &mut Runtime, ctx: &egui::Context, clean: bo
 }
 
 pub(crate) fn check(app: &mut EffectcraftApp) {
+    // A Nightly session is replaced by ArtCraft Launcher, never by the stable release feed: a
+    // "restart to update" there would install stable over the nightly build.
+    if !crate::channel::stable_services_allowed() {
+        app.ui.status = "Updates come with the ArtCraft Launcher's Nightly channel.".into();
+        return;
+    }
     #[cfg(not(target_arch = "wasm32"))]
     {
         app.updates_rt.check_requested = true;

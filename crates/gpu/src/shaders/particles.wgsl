@@ -9,10 +9,10 @@ struct PSim {
     u: vec4<u32>,
     // Animation, flat, seed, particles in `prev`.
     u2: vec4<u32>,
-    // Engine: f[0] = (life, speed, extra, cone), f[1] = producer, f[2] = radius,
-    // f[3] = gravity, f[4] = axis, f[5] = (damp, dt).
-    // Cannon: f[0] = (pos.x, pos.y, barrel angle, barrel radius), f[1] = (dir spread, vel,
-    // vel spread, grav spread), f[2] = (gravity.x, gravity.y, dt), f[3] = bounds.
+    // Engine: f[0] = (life, speed, extra, cone), f[1] = radius, f[3] = gravity,
+    // f[4] = axis, f[5] = (damp, dt).
+    // Cannon: f[0] = (barrel angle, barrel radius, dir spread, vel), f[1] = (vel spread,
+    // grav spread, dt), f[2] = (gravity.x, gravity.y), f[3] = bounds.
     f: array<vec4<f32>, 6>,
 }
 
@@ -29,6 +29,8 @@ struct PState {
 @group(1) @binding(1) var<storage, read> births: array<u32>;
 @group(1) @binding(2) var<storage, read> prev: array<PState>;
 @group(1) @binding(3) var<storage, read_write> next: array<PState>;
+// Producer position at each simulated step, in the system's own coordinates.
+@group(1) @binding(4) var<storage, read> producers: array<vec4<f32>>;
 
 const PS_TAU: f32 = 6.2831855;
 
@@ -70,11 +72,11 @@ struct Part {
 }
 
 // sim::Phys::spawn (+ the step's sub-step birth offset).
-fn ps_spawn_engine(id: u32) -> Part {
+fn ps_spawn_engine(id: u32, birth: u32) -> Part {
     let flat = S.u2.y != 0u;
     let anim = S.u2.x;
-    let producer = S.f[1].xyz;
-    let radius = S.f[2].xyz;
+    let producer = producers[birth].xyz;
+    let radius = S.f[1].xyz;
     let u = ps_rand_dir(id, 1u, flat);
     var e = 1.0 / 3.0;
     if (flat) {
@@ -129,7 +131,7 @@ fn ps_step_engine(q: Part, j: u32) -> Part {
     let seed = S.u2.z;
     let dt = S.f[5].y;
     let t = f32(j) * dt;
-    let producer = S.f[1].xyz;
+    let producer = producers[j].xyz;
     let gravity = S.f[3].xyz;
     let extra = S.f[0].z;
     var a = gravity;
@@ -181,13 +183,13 @@ fn ps_step_engine(q: Part, j: u32) -> Part {
 }
 
 // sim3::Pg::spawn (+ the sub-step birth offset).
-fn ps_spawn_cannon(id: u32) -> Part {
-    let pos = S.f[0].xy;
-    let angle = S.f[0].z;
-    let r = S.f[0].w;
-    let spread = S.f[1].x;
-    let vel = S.f[1].y;
-    let vel_spread = S.f[1].z;
+fn ps_spawn_cannon(id: u32, birth: u32) -> Part {
+    let pos = producers[birth].xy;
+    let angle = S.f[0].x;
+    let r = S.f[0].y;
+    let spread = S.f[0].z;
+    let vel = S.f[0].w;
+    let vel_spread = S.f[1].x;
     let a = radians(angle + ps_hs(id, 1u) * spread * 0.5);
     let d = vec2<f32>(sin_p(a), -cos_p(a));
     let speed = max(vel + ps_hs(id, 3u) * vel_spread, 0.0);
@@ -200,7 +202,7 @@ fn ps_spawn_cannon(id: u32) -> Part {
         off = vec2<f32>(cos_p(aa) * rr, sin_p(aa) * rr);
     }
     let v = d * speed;
-    let dt = S.f[2].z;
+    let dt = S.f[1].z;
     let frac = ps_h(id, 9u) * dt;
     let p = pos + off + v * frac;
     return Part(vec3<f32>(p, 0.0), vec3<f32>(v, 0.0), 0.0, 0.0, 0.0);
@@ -208,8 +210,8 @@ fn ps_spawn_cannon(id: u32) -> Part {
 
 // sim3::Pg::step for one particle (gravity only); returns false when it leaves the bounds.
 fn ps_step_cannon(q: ptr<function, Part>, id: u32) -> bool {
-    let dt = S.f[2].z;
-    let spread = S.f[1].w;
+    let dt = S.f[1].z;
+    let spread = S.f[1].y;
     var g = 1.0;
     if (spread > 0.0) {
         g = 1.0 + (ps_h(id, 7u) * 2.0 - 1.0) * spread;
@@ -245,9 +247,9 @@ fn particles(@builtin(global_invocation_id) gid: vec3<u32>) {
         j = s0;
     } else {
         if (cannon) {
-            q = ps_spawn_cannon(id);
+            q = ps_spawn_cannon(id, b);
         } else {
-            q = ps_spawn_engine(id);
+            q = ps_spawn_engine(id, b);
         }
         j = b + 1u;
     }

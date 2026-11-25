@@ -28,12 +28,24 @@ pub struct PresetFile {
 }
 
 /// Where user presets live: `$EC_PRESETS_DIR`, else `~/Documents/EffectCraft/Presets`.
+///
+/// A Nightly session keeps its presets in its private profile (`<profile>/Presets`): an inherited
+/// `EC_PRESETS_DIR` or the stable Documents folder would let two channels write each other's files.
+/// Nothing is created here; the folder appears when a preset is saved.
 pub fn presets_dir() -> Option<std::path::PathBuf> {
-    if let Ok(d) = std::env::var("EC_PRESETS_DIR") {
-        return Some(d.into());
+    let env_presets = std::env::var("EC_PRESETS_DIR").ok().map(std::path::PathBuf::from);
+    let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).ok().map(std::path::PathBuf::from);
+    presets_dir_for(crate::channel::profile_presets(), env_presets, home.as_deref())
+}
+
+fn presets_dir_for(profile: Option<&std::path::Path>, env_presets: Option<std::path::PathBuf>, home: Option<&std::path::Path>) -> Option<std::path::PathBuf> {
+    if let Some(root) = profile {
+        return Some(root.join("Presets"));
     }
-    let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).ok()?;
-    Some(std::path::Path::new(&home).join("Documents").join("EffectCraft").join("Presets"))
+    if let Some(dir) = env_presets {
+        return Some(dir);
+    }
+    home.map(|h| h.join("Documents").join("EffectCraft").join("Presets"))
 }
 
 /// The `.ecpreset` files in `dir`, sorted by name.
@@ -929,5 +941,17 @@ mod tests {
         before.sort();
         after.sort();
         println!("1,000 custom presets, median per warm cache lookup: {:?} -> {:?}", before[2] / 1000, after[2] / 1000);
+    }
+    /// A Nightly session writes presets inside its profile: never the stable Documents folder and
+    /// never an inherited `EC_PRESETS_DIR`, so the two channels cannot overwrite each other.
+    #[test]
+    fn a_nightly_profile_owns_its_presets_folder() {
+        let profile = std::path::Path::new("/nightly profiles/effectcraft");
+        let stable_docs = std::path::Path::new("/home/someone");
+        let inherited = std::path::PathBuf::from("/home/someone/stable-presets");
+        assert_eq!(super::presets_dir_for(Some(profile), Some(inherited.clone()), Some(stable_docs)), Some(profile.join("Presets")));
+        assert_eq!(super::presets_dir_for(None, Some(inherited.clone()), Some(stable_docs)), Some(inherited));
+        assert_eq!(super::presets_dir_for(None, None, Some(stable_docs)), Some(stable_docs.join("Documents/EffectCraft/Presets")));
+        assert_eq!(super::presets_dir_for(None, None, None), None);
     }
 }

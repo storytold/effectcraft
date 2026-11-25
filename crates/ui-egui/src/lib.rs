@@ -22,6 +22,7 @@ pub mod audio;
 pub mod automation;
 pub mod bench;
 pub(crate) mod capture;
+pub mod channel;
 pub mod color_picker;
 pub mod control;
 pub mod credits;

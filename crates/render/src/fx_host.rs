@@ -139,7 +139,13 @@ impl EffectHost for FxHost<'_, '_, '_> {
     }
 
     fn param_is_static(&self, effect_index: usize, id: &str) -> bool {
-        effect_param(self.layer, effect_index, id).is_some_and(|p| p.keys.is_empty() && !p.has_expression())
+        let Some(p) = effect_param(self.layer, effect_index, id) else { return false };
+        let Some(o) = self.ctx.property_overrides.iter().rev().find(|o| o.layer == self.layer.id && o.prop == p.uid) else {
+            return p.keys.is_empty() && !p.has_expression();
+        };
+        // A whole-value override replaces the target property's keys. A Font override leaves them
+        // in place, so those keys still make the value vary over time.
+        o.keys.is_empty() && !p.has_expression() && (!o.font || p.keys.is_empty())
     }
 
     fn comp_scene(&self) -> Option<effectcraft_effects::CompScene> {
@@ -210,10 +216,25 @@ pub fn essential_overrides(ctx: &EvalCtx, layer: &Layer) -> Vec<effectcraft_proj
         if over.contains(&p.uid)
             && let Some(control) = essential::control_of(&p.match_id)
         {
-            // An expression on the instance property replaces its keys, and so does an override
-            // from a collapsed parent (only its value reaches here, the keys are the stale own ones).
-            let from_parent = ctx.property_overrides.iter().any(|o| o.layer == layer.id && o.prop == p.uid);
-            let keys = if same_time && !from_parent && !p.has_expression() { p.keys.clone() } else { vec![] };
+            // An expression on the instance property replaces its keys. A whole-value override
+            // from a collapsed parent replaces the instance's own keys with the parent's; a Font
+            // override leaves them in place, so the font merges into their history.
+            let parent = ctx.property_overrides.iter().rev().find(|o| o.layer == layer.id && o.prop == p.uid);
+            let keys = if !same_time || p.has_expression() {
+                vec![]
+            } else if let Some(parent) = parent {
+                if parent.font {
+                    let mut keys = p.keys.clone();
+                    for key in &mut keys {
+                        effectcraft_project::essential::merge_font(&mut key.value, &parent.value);
+                    }
+                    keys
+                } else {
+                    parent.keys.clone()
+                }
+            } else {
+                p.keys.clone()
+            };
             out.push(essential::Override { control, value: ctx.value(layer, p), keys });
         }
     });
