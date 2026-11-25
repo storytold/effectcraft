@@ -140,6 +140,11 @@ fn forbidden_roots(platform: Platform, env: &impl Fn(&str) -> Option<OsString>, 
             ]
         }
     };
+    // The stable app's default presets folder (`presets_dir`: HOME, else USERPROFILE). A Nightly root
+    // that contains it would share preset files with the stable app.
+    if let Some(home) = env("HOME").filter(|v| !v.is_empty()).or_else(|| env("USERPROFILE").filter(|v| !v.is_empty())) {
+        roots.push(absolute(PathBuf::from(home), "HOME")?.join("Documents").join("EffectCraft").join("Presets"));
+    }
     roots.push(installation_boundary(platform, exe)?);
     roots.into_iter().map(|p| canonical_future(&p)).collect()
 }
@@ -498,6 +503,19 @@ mod tests {
         std::fs::create_dir_all(&unrelated).unwrap();
         std::fs::write(unrelated.join(PORTABLE_MARKERS[0]), b"another app's marker").unwrap();
         assert!(fixture.check(Platform::Windows, &unrelated.join("Launcher/nightly/effectcraft")).is_ok());
+    }
+
+    #[test]
+    fn the_stable_presets_folder_is_fenced_on_every_platform() {
+        let fixture = Fixture::new();
+        let documents = fixture.home().join("Documents");
+        for platform in [Platform::Windows, Platform::Linux, Platform::Mac] {
+            for candidate in [documents.join("EffectCraft"), documents.join("EffectCraft/Presets"), documents.join("EffectCraft/nightly")] {
+                assert!(fixture.check(platform, &candidate).unwrap_err().contains("overlap"), "{platform:?} {candidate:?}");
+                assert!(!candidate.exists());
+            }
+        }
+        assert!(fixture.check(Platform::Linux, &documents.join("EffectCraft Nightly")).is_ok(), "a sibling folder stays valid");
     }
 
     #[test]
