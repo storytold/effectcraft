@@ -86,3 +86,40 @@ fn inverted_fill_keeps_the_cover() {
     let out = r.apply_effects(&ctx, &layer, source(4.0), false);
     assert!(out.img.width >= 800 && out.img.height >= 400, "{} x {}", out.img.width, out.img.height);
 }
+
+#[test]
+fn feathered_mask_fill_matches_the_covered_reference() {
+    // A feathered Fill mask whose edge lies just outside the painted content: the feather reaches
+    // into the painted pixels only if the coverage outside them is computed too.
+    for scale in [1.0, 4.0] {
+        let (mut p, cid, comp, mut layer) =
+            text_with_fill(&[("fillMask", Value::Scalar(1.0)), ("horizontalFeather", Value::Scalar(6.0)), ("verticalFeather", Value::Scalar(6.0))], false);
+        let mut next = p.next_id;
+        // Painted layer x spans about -5..11 at scale 1; the mask's right edge sits at 13.
+        let m = build::mask(&mut Ids(&mut next), "Mask 1", ShapePath::rect([-3.5, 5.0], 33.0, 50.0), MaskMode::None, [255, 255, 0]);
+        p.next_id = next;
+        layer.props.sub_mut("masks").unwrap().children.push(effectcraft_project::Node::Group(m));
+        let r = Renderer::new(&p, &NoFootage, RenderOpts::default());
+        let ctx = EvalCtx::new(&p, cid, &comp, Tick::ZERO);
+        let input = source(scale);
+        let mut covered = input.clone();
+        let (size, origin) = ctx.effect_bounds(&layer);
+        covered.rebase(origin);
+        covered.cover(size);
+        covered.rebase([-origin[0], -origin[1]]);
+        let actual = r.apply_effects(&ctx, &layer, input, false);
+        let reference = r.apply_effects(&ctx, &layer, covered, false);
+        for y in 2..10 {
+            for x in 2..18 {
+                // The painted pixels, in the input buffer's coordinates.
+                let lx = f64::from(x) - 7.0;
+                let ly = f64::from(y) + 3.0;
+                let sample = |b: &Buf| b.img.sample_bilinear(lx + b.offset[0] + 0.5, ly + b.offset[1] + 0.5);
+                let (a, b) = (sample(&actual), sample(&reference));
+                for c in 0..4 {
+                    assert!((a[c] - b[c]).abs() < 1e-4, "scale {scale}, ({x}, {y}), channel {c}: {} != {}", a[c], b[c]);
+                }
+            }
+        }
+    }
+}
