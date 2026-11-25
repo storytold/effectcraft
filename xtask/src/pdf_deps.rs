@@ -7,7 +7,7 @@ use serde_json::Value;
 
 // The repository Cargo.toml pins craft-libs from (the aiongg fork while filmcraft-media pins storytold craft-libs).
 const REPO: &str = "https://github.com/aiongg/craft-libs";
-const REV: &str = "d1bdf8e5dac7513e4fbc4dab16edaaeda5ebcf5e";
+const REV: &str = "aa401985dd4658cdaa272fdccafdcd6e7f4dd60b";
 const PACKAGES: &[(&str, &str)] = &[("craft-pdf", "0.1.0"), ("craft-ps", "0.1.0"), ("hayro-syntax", "0.7.2"), ("hayro-jbig2", "0.3.0")];
 
 pub fn run(root: &Path) -> Result<(), String> {
