@@ -32,14 +32,15 @@ fn a_host_session_bounds_the_caches() {
     assert_eq!(headless.layer_cache.budget(), b.bytes, "the caches follow it");
     assert_eq!(headless.export_cache_budget(), b.bytes, "exports and Render Queue runs follow it");
 
-    // #4157: the footage frames keep less than a large budget, also once it changes (a new
-    // memory reading, then the settings)
-    let footage_under_budget = |s: &effectcraft_engine::Session, when: &str| {
-        let (footage, budget) = (s.footage.cache_budget(), s.memory_budget().bytes);
-        assert!(footage.is_some_and(|f| f < budget), "{when}: footage frames keep {footage:?} of a {budget}-byte budget");
+    // #4157: the footage frames keep at most HEADLESS_MEDIA_CACHE (or the budget, if smaller),
+    // also once the budget changes (a new memory reading, then the settings)
+    let footage_capped = |s: &effectcraft_engine::Session, when: &str| {
+        let budget = s.memory_budget().bytes;
+        let cap = usize::try_from(effectcraft_engine::prefs::HEADLESS_MEDIA_CACHE).unwrap();
+        assert_eq!(s.footage.cache_budget(), Some(cap.min(budget)), "{when}: the footage frames' cap under a {budget}-byte budget");
     };
     headless.take_memory_reading(Some(effectcraft_engine::sysinfo::SysMemory { total: 64 << 30, available: 48 << 30 }));
-    footage_under_budget(&headless, "a new memory reading");
+    footage_capped(&headless, "a new memory reading");
     headless.execute("prefs.set", serde_json::json!({"key": "memory.ramReservedGb", "value": 8})).unwrap();
-    footage_under_budget(&headless, "a settings change");
+    footage_capped(&headless, "a settings change");
 }
