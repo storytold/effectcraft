@@ -297,6 +297,21 @@ enum Audio {
     Pcm,
 }
 
+/// One encoded sample of a movie's audio track: its bytes and its duration in audio samples.
+type AudioSample = (Vec<u8>, u32);
+
+/// One audio step of a movie: mixing and encoding count as audio, muxing the encoded samples as
+/// writing, so a slow destination shows up as writing. Each part keeps its time on an error.
+fn audio_step<W: Write + std::io::Seek>(job: &Cx, mux: &mut Mp4Writer<W>, track: usize, encode: impl FnOnce() -> Result<Vec<AudioSample>>) -> Result<()> {
+    let samples = job.timed(Stage::Audio, encode)?;
+    job.timed(Stage::Write, || -> Result<()> {
+        for (data, duration) in &samples {
+            mux.write_sample(track, WriteSample { data, duration: *duration, composition_offset: 0, is_sync: true }).map_err(mux_err)?;
+        }
+        Ok(())
+    })
+}
+
 fn deinterleave(buf: &[f32], channels: usize) -> Vec<Vec<f32>> {
     (0..channels).map(|c| buf.chunks_exact(channels).map(|p| p[c]).collect()).collect()
 }
@@ -443,35 +458,31 @@ pub(crate) async fn movie(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut St
         }
         Ok(())
     };
-    let mut write_audio_until = |mux: &mut Writer, until: Tick, cursor: &mut i64| -> Result<()> {
+    let mut audio_until = |mux: &mut Writer, until: Tick, cursor: &mut i64| -> Result<()> {
         let Some((a, at)) = audio.as_mut() else { return Ok(()) };
         let end = until.to_units_floor(sr as i64);
         if end <= *cursor {
             return Ok(());
         }
-        let n = (end - *cursor) as usize;
-        let start = Tick::from_units(*cursor, i64::from(sr));
-        let start = if start.to_units_floor(i64::from(sr)) < *cursor { Tick(start.0.saturating_add(1)) } else { start };
-        let buf = mix(job, start, n, sr);
-        *cursor = end;
-        match a {
-            Audio::Aac(e) => {
-                let planar = deinterleave(&buf, chans as usize);
-                let refs: Vec<&[f32]> = planar.iter().map(Vec::as_slice).collect();
-                for au in e.encode(&refs) {
-                    mux.write_sample(*at, WriteSample { data: &au, duration: 1024, composition_offset: 0, is_sync: true }).map_err(mux_err)?;
+        audio_step(job, mux, *at, || {
+            let n = (end - *cursor) as usize;
+            let start = Tick::from_units(*cursor, i64::from(sr));
+            let start = if start.to_units_floor(i64::from(sr)) < *cursor { Tick(start.0.saturating_add(1)) } else { start };
+            let buf = mix(job, start, n, sr);
+            *cursor = end;
+            Ok(match a {
+                Audio::Aac(e) => {
+                    let planar = deinterleave(&buf, chans as usize);
+                    let refs: Vec<&[f32]> = planar.iter().map(Vec::as_slice).collect();
+                    e.encode(&refs).into_iter().map(|au| (au, 1024)).collect()
                 }
-            }
-            Audio::Pcm => {
-                let pcm = pcm_bytes(&buf, afmt, false);
-                mux.write_sample(*at, WriteSample { data: &pcm, duration: n as u32, composition_offset: 0, is_sync: true }).map_err(mux_err)?;
-            }
-        }
-        Ok(())
+                Audio::Pcm => vec![(pcm_bytes(&buf, afmt, false), n as u32)],
+            })
+        })
     };
     let frame_end_time = |k: u64| -> Tick { if k >= total { span_end } else { job.settings.frame_time(comp, k) } };
     job.timed(Stage::Write, || write_video(&mut mux, pending))?;
-    job.timed_if(with_audio, Stage::Audio, || write_audio_until(&mut mux, frame_end_time(first_end), &mut cursor))?;
+    audio_until(&mut mux, frame_end_time(first_end), &mut cursor)?;
     let mut i = first_end;
     while i < total {
         let end = (i + batch).min(total);
@@ -483,7 +494,7 @@ pub(crate) async fn movie(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut St
                     let ps = job.timed(Stage::Encode, || encode(&mut venc, px, i + k as u64))?;
                     job.timed(Stage::Write, || write_video(&mut mux, ps))?;
                 }
-                job.timed_if(with_audio, Stage::Audio, || write_audio_until(&mut mux, frame_end_time(end), &mut cursor))
+                audio_until(&mut mux, frame_end_time(end), &mut cursor)
             })
             .await?;
         done?;
@@ -493,15 +504,10 @@ pub(crate) async fn movie(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut St
     }
     let tail = job.timed(Stage::Encode, || venc.flush())?;
     job.timed(Stage::Write, || write_video(&mut mux, tail))?;
-    job.timed_if(with_audio, Stage::Audio, || write_audio_until(&mut mux, span_end, &mut cursor))?;
+    audio_until(&mut mux, span_end, &mut cursor)?;
     // Each write is timed before its error is passed on: a failed export's line keeps the time.
     if let Some((Audio::Aac(e), at)) = audio.as_mut() {
-        job.timed(Stage::Audio, || -> Result<()> {
-            for au in e.flush() {
-                mux.write_sample(*at, WriteSample { data: &au, duration: 1024, composition_offset: 0, is_sync: true }).map_err(mux_err)?;
-            }
-            Ok(())
-        })?;
+        audio_step(job, &mut mux, *at, || Ok(e.flush().into_iter().map(|au| (au, 1024)).collect()))?;
     }
     let t = Instant::now();
     let finished = mux.finish().map_err(mux_err).and_then(|out| out.flush().map_err(mux_err));
@@ -595,5 +601,77 @@ mod tests {
         assert_eq!(y10[1], 64);
         assert_eq!(cb[0], 512);
         assert!(cr[2] > 900, "red has high Cr: {}", cr[2]);
+    }
+
+    /// A destination that takes the movie's header, then is slow on every write once `slow` is
+    /// set, and refuses the write after the delay when `fails` is set too.
+    struct SlowDestination {
+        data: std::io::Cursor<Vec<u8>>,
+        slow: std::rc::Rc<std::cell::Cell<bool>>,
+        fails: bool,
+        delay: std::time::Duration,
+    }
+
+    impl Write for SlowDestination {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if self.slow.get() {
+                std::thread::sleep(self.delay);
+                if self.fails {
+                    return Err(std::io::Error::other("destination refused the write"));
+                }
+            }
+            self.data.write(buf)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl std::io::Seek for SlowDestination {
+        fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+            self.data.seek(pos)
+        }
+    }
+
+    /// #3724 review: muxing an audio sample counts as writing, not as audio (mixing and
+    /// encoding), also when the destination refuses it.
+    #[test]
+    fn an_audio_mux_write_counts_as_writing() {
+        use effectcraft_project::render_queue::{OutputModule, RenderSettings};
+        let (project, settings, output) = (effectcraft_project::Project::default(), RenderSettings::default(), OutputModule::for_format(OutputFormat::ProRes));
+        let job = crate::Job {
+            project: &project,
+            footage: &effectcraft_render::NoFootage,
+            expr: None,
+            accel: None,
+            comp: effectcraft_project::ItemId(0),
+            settings: &settings,
+            output: &output,
+            path: "/a/movie.mov",
+            sink: None,
+            nested_switches: true,
+            options: Default::default(),
+        };
+        let delay = std::time::Duration::from_millis(50);
+        let pcm = PcmConfig { bits: 16, float: false, big_endian: false, signed: true, channels: 2, sample_rate: 48_000.0 };
+
+        for fails in [false, true] {
+            let cx = Cx::new(&job);
+            let slow = std::rc::Rc::new(std::cell::Cell::new(false));
+            let destination = SlowDestination { data: Default::default(), slow: slow.clone(), fails, delay };
+            let mut mux = Mp4Writer::new(destination, WriterOptions::new(Brand::Mov)).expect("movie header");
+            let track = mux.add_track(TrackConfig::new(SampleEntry::pcm(pcm), 48_000)).expect("audio track");
+            slow.set(true);
+            let started = Instant::now();
+            let result = audio_step(&cx, &mut mux, track, || Ok(vec![(vec![0; 4], 1)]));
+            let wall = started.elapsed().as_secs_f64();
+
+            assert_eq!(result.is_err(), fails, "the refused write is passed on");
+            let timing = cx.timing(wall, 0);
+            let write = timing.write_seconds.expect("the attempted mux write is timed as writing");
+            let audio = timing.audio_seconds.expect("mixing and encoding are timed as audio");
+            assert!(write >= delay.as_secs_f64(), "fails {fails}: the slow write is in writing: {timing:?}");
+            assert!(audio + write <= wall, "fails {fails}: the write counts once, not in audio too: {timing:?}");
+        }
     }
 }

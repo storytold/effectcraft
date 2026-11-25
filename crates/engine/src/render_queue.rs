@@ -213,9 +213,11 @@ impl JobShared {
                     item.remove("last_timing");
                 }
                 ItemUpdate::Finished { status, seconds, output, timing, .. } => {
-                    if let Some(timing) = timing {
-                        item.insert("last_timing".into(), json!(timing));
-                    }
+                    // Each finish reports its own run: an item stopped before it started has no timing
+                    match timing {
+                        Some(timing) => item.insert("last_timing".into(), json!(timing)),
+                        None => item.remove("last_timing"),
+                    };
                     item.insert("status".into(), json!(status));
                     item.insert("statusLabel".into(), json!(status.label()));
                     item.insert("render_time".into(), json!(seconds));
@@ -783,9 +785,7 @@ impl Session {
                             if output.is_some() {
                                 i.last_output = output.clone();
                             }
-                            if timing.is_some() {
-                                i.last_timing = timing.clone();
-                            }
+                            i.last_timing = timing.clone();
                             if let (RenderStatus::Done, Some(o)) = (status, output)
                                 && !i.post_render.is_none()
                             {
