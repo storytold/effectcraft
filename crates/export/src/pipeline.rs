@@ -267,6 +267,9 @@ pub(crate) struct Cx<'a> {
     gpu_frames: Mutex<Option<(usize, String)>>,
     /// A frame has rendered on the GPU compositor: its memory can be measured.
     gpu_rendered: std::sync::atomic::AtomicBool,
+    /// Frames asked of the GPU compositor that ended with the GPU unavailable: they fell back
+    /// to the CPU after the job started.
+    gpu_fallback_frames: std::sync::atomic::AtomicU64,
     /// Auto's CPU frames in flight once settled ([`Cx::auto_cpu_frames`]; `Some(None)`: not
     /// capped).
     cpu_frames: Mutex<Option<Option<usize>>>,
@@ -404,6 +407,7 @@ impl<'a> Cx<'a> {
             choice: Mutex::new(None),
             gpu_frames: Mutex::new(None),
             gpu_rendered: Default::default(),
+            gpu_fallback_frames: Default::default(),
             cpu_frames: Mutex::new(None),
             frame_times,
             overflowed: Mutex::new(vec![]),
@@ -448,6 +452,7 @@ impl<'a> Cx<'a> {
             frames,
             frames_per_second: if wall > 0.0 { frames as f64 / wall } else { 0.0 },
             renderer: self.choice().map_or_else(|| "none was needed".to_string(), |c| self.describe(&c)),
+            gpu_fallback_frames: self.gpu_fallback_frames.load(std::sync::atomic::Ordering::Relaxed),
             encoder: describe_encoder(self.job.output),
         }
     }
@@ -511,12 +516,13 @@ impl<'a> Cx<'a> {
         log::info!(target: "effectcraft_export", "{}: {}", self.job.options.label, self.describe(&c));
     }
 
-    /// [`describe_choice`] with the GPU adapter a GPU project's job had, so a log shows which
-    /// device was measured.
+    /// [`describe_choice`] with the GPU adapter attached to a GPU project's job, so a log shows
+    /// which device was measured. It describes the choice made at the start: a later fallback to
+    /// the CPU is counted apart ([`Cx::timing`]).
     fn describe(&self, c: &Choice) -> String {
         let d = describe_choice(c);
         match self.job.accel {
-            Some(a) if self.project.settings.gpu_acceleration => format!("{d}; GPU adapter: {}", a.name()),
+            Some(a) if self.project.settings.gpu_acceleration => format!("{d}; attached GPU adapter: {}", a.name()),
             _ => d,
         }
     }
@@ -856,6 +862,11 @@ impl<'a> Cx<'a> {
         };
         if gpu {
             self.gpu_rendered.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        // The GPU stops for good once unavailable: a frame that ends so fell back to the CPU
+        if gpu && self.job.accel.is_some_and(|a| !a.available()) {
+            self.gpu_fallback_frames.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         let img = self.crop_resize(img);
         if let Some(ft) = &self.frame_times {
@@ -1499,7 +1510,69 @@ mod tests {
         };
         let cx = Cx::new(&job);
         cx.decide(Choice { renderer: crate::JobRenderer::Cpu, gpu_ms: Some(164.5), cpu_ms: Some(115.6), why: "measured on the first frames" });
-        assert_eq!(cx.timing(1.0, 1).renderer, "Software Rendering (measured on the first frames: GPU 164.5 ms/frame, CPU 115.6 ms/frame); GPU adapter: none");
+        assert_eq!(
+            cx.timing(1.0, 1).renderer,
+            "Software Rendering (measured on the first frames: GPU 164.5 ms/frame, CPU 115.6 ms/frame); attached GPU adapter: none"
+        );
+    }
+
+    /// An accelerator whose device is lost while it renders frame 1: it is unavailable from then on.
+    struct LostAtFrameOne(AtomicBool);
+    impl effectcraft_render::Accelerator for LostAtFrameOne {
+        fn name(&self) -> String {
+            "lost".into()
+        }
+        fn comp_frame(&self, _r: &Renderer, _comp: effectcraft_project::ItemId, t: Tick) -> Option<Image> {
+            if t > Tick(0) {
+                self.0.store(true, Ordering::Relaxed);
+            }
+            None
+        }
+        fn supports_effect(&self, _id: &str) -> bool {
+            false
+        }
+        fn effects(&self, _chain: &[effectcraft_render::FxStep], _buf: &effectcraft_effects::Buf, _levels: Option<f32>) -> Option<effectcraft_effects::Buf> {
+            None
+        }
+        fn available(&self) -> bool {
+            !self.0.load(Ordering::Relaxed)
+        }
+    }
+
+    /// #3732 review: a GPU job whose device becomes unavailable after it started keeps its
+    /// initial choice and attached adapter as such and reports the frames that fell back apart.
+    #[test]
+    fn a_gpu_lost_after_the_start_is_reported_apart_from_the_initial_choice() {
+        use effectcraft_project::render_queue::{OutputFormat, OutputModule, RenderSettings};
+        let (settings, output) = (RenderSettings::default(), OutputModule::for_format(OutputFormat::PngSequence));
+        let mut p = Project::default();
+        p.settings.gpu_acceleration = true;
+        let comp = Comp::new(16, 8, effectcraft_time::FrameRate::FPS_25, Tick::from_seconds_f64(6.0 / 25.0));
+        let cid = p.add_item("Comp", effectcraft_color::Label::Sandstone, None, effectcraft_project::ItemKind::Comp(comp.into()));
+        let accel = LostAtFrameOne(AtomicBool::new(false));
+        let shared = Mutex::new(Some(Backend::Gpu));
+        let sink: &crate::Sink = &|_: &str, _: Vec<u8>| {};
+        let job = Job {
+            project: &p,
+            footage: &effectcraft_render::NoFootage,
+            expr: None,
+            accel: Some(&accel),
+            comp: cid,
+            settings: &settings,
+            output: &output,
+            path: "/l/f_[#####].png",
+            sink: Some(sink),
+            nested_switches: true,
+            options: crate::JobOptions { renderer: Some(&shared), gpu_frames: Some(1), ..Default::default() },
+        };
+
+        let timing = crate::export(&job, &mut |_| true).expect("export").timing;
+
+        assert_eq!(timing.renderer, "GPU Acceleration (as the queue item's first output module); attached GPU adapter: lost");
+        assert_eq!((timing.gpu_fallback_frames, timing.frames), (5, 6), "frame 0 rendered before the device was lost");
+        let line = timing.summary();
+        assert!(line.contains("Initial compositor: GPU Acceleration"), "{line}");
+        assert!(line.contains("Later GPU fallback: 5 of 6 frames rendered on the CPU after the GPU became unavailable"), "{line}");
     }
 
     #[test]

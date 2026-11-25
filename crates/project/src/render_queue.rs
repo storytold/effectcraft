@@ -1500,8 +1500,13 @@ pub struct RenderTiming {
     pub frames: u64,
     /// Frames per second of wall time over the whole job.
     pub frames_per_second: f64,
-    /// The compositor and why it was used.
+    /// The compositor chosen when the job started, why, and the GPU adapter attached then. Frames
+    /// that later fell back to the CPU are counted in `gpu_fallback_frames`, not in this label.
     pub renderer: String,
+    /// Frames asked of the GPU compositor that fell back to the CPU because the GPU became
+    /// unavailable after the job started (0: none).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub gpu_fallback_frames: u64,
     /// The encoder: name, software or hardware, codec settings.
     pub encoder: String,
 }
@@ -1539,8 +1544,20 @@ impl RenderTiming {
             }
         }
         let stages = s;
-        format!("{head}. Busy time per stage (the stages overlap, so this is not a sum): {stages}. Compositor: {}. Encoder: {}", self.renderer, self.encoder)
+        let fallback = match (self.gpu_fallback_frames, self.frames) {
+            (0, _) => String::new(),
+            (n, 0) => format!(". Later GPU fallback: {n} frames rendered on the CPU after the GPU became unavailable"),
+            (n, m) => format!(". Later GPU fallback: {n} of {m} frames rendered on the CPU after the GPU became unavailable"),
+        };
+        format!(
+            "{head}. Busy time per stage (the stages overlap, so this is not a sum): {stages}. Initial compositor: {}{fallback}. Encoder: {}",
+            self.renderer, self.encoder
+        )
     }
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

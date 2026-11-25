@@ -57,9 +57,17 @@ fn a_movie_export_reports_where_the_time_went() {
     assert!(t.encoder.contains("H.264") && t.encoder.contains("software"), "{}", t.encoder);
 
     let line = t.summary();
-    for part in
-        ["export took", "30 frames", "frames/s", "overlap", "rendering frames", "encoder", "writing output", "Compositor: Software Rendering", "Encoder: H.264"]
-    {
+    for part in [
+        "export took",
+        "30 frames",
+        "frames/s",
+        "overlap",
+        "rendering frames",
+        "encoder",
+        "writing output",
+        "Initial compositor: Software Rendering",
+        "Encoder: H.264",
+    ] {
         assert!(line.contains(part), "{part:?} missing from {line}");
     }
     // The render log carries the same line.
@@ -206,11 +214,14 @@ fn a_stopped_export_has_a_summary_without_a_frame_count() {
     let t = effectcraft_export::render_queue::RenderTiming {
         wall_seconds: 2.0,
         render_seconds: 1.5,
-        renderer: "Software Rendering (x)".into(),
+        renderer: "GPU Acceleration (x)".into(),
+        gpu_fallback_frames: 3,
         encoder: "H.264".into(),
         ..Default::default()
     };
     let line = t.summary_of_unfinished("stopped");
     assert!(line.starts_with("export stopped after 2.00 s. Busy time per stage"), "{line}");
     assert!(!line.contains("frames/s"), "{line}");
+    // (#3732 review) the frames that fell back are counted without a total the stop doesn't know
+    assert!(line.contains("Later GPU fallback: 3 frames rendered on the CPU after the GPU became unavailable"), "{line}");
 }
