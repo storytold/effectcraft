@@ -9,7 +9,7 @@ use std::borrow::Cow;
 use effectcraft_color::BlendMode;
 use effectcraft_effects::Buf;
 use effectcraft_geom::{Mat3, Mat4, Vec3, vec2, vec3};
-use effectcraft_keyframe::{Justify, TextDoc, Value};
+use effectcraft_keyframe::{Justify, TextDoc, TextFillGradient, Value};
 use effectcraft_path::{BezPath, FillRule, StrokeStyle};
 use effectcraft_project::{Layer, PropGroup};
 use effectcraft_raster::{Image, Mask};
@@ -579,6 +579,8 @@ pub struct PlacedGlyph {
     pub m: Mat4,
     pub xf: CharXf,
     pub fill: [f32; 4],
+    /// Vertical fill gradient for this glyph; overrides `fill` on the fill pass only.
+    pub fill_gradient: Option<TextFillGradient>,
     pub stroke: [f32; 4],
     pub stroke_width: f64,
     pub join: effectcraft_path::Join,
@@ -971,6 +973,7 @@ pub fn text_geom(ctx: &EvalCtx, layer: &Layer) -> Option<TextGeom> {
             m,
             xf: x,
             fill,
+            fill_gradient: doc.fill_gradient,
             stroke,
             stroke_width: (base_stroke_w + x.stroke_width).max(0.0),
             join: path_join(doc.line_join),
@@ -1069,14 +1072,25 @@ fn raster_pass(g: &PlacedGlyph, stroke: bool, paths: &[BezPath], m: &Mat3, rect:
     } else {
         grown_coverage(paths, &mm, w, h, bold)
     };
-    let col = if stroke { g.stroke } else { g.fill };
+    let solid = if stroke { g.stroke } else { g.fill };
     let op = (g.xf.opacity / 100.0).clamp(0.0, 1.0) as f32;
-    let a = col[3] * op;
     let mut img = Image::new(w, h);
-    for (px, c) in img.data.iter_mut().zip(&cov.data) {
-        let k = c * a;
+    let hf = h.max(1) as f32;
+    for (i, (px, c)) in img.data.iter_mut().zip(&cov.data).enumerate() {
+        let rgba = if !stroke {
+            if let Some(gr) = g.fill_gradient {
+                let t = ((i / w.max(1) as usize) as f32 / hf).clamp(0.0, 1.0);
+                let mix = |a: f32, b: f32| a + (b - a) * t;
+                [mix(gr.top[0], gr.bottom[0]), mix(gr.top[1], gr.bottom[1]), mix(gr.top[2], gr.bottom[2]), mix(gr.top[3], gr.bottom[3])]
+            } else {
+                solid
+            }
+        } else {
+            solid
+        };
+        let k = c * rgba[3] * op;
         if k > 0.0 {
-            *px = [col[0] * k, col[1] * k, col[2] * k, k];
+            *px = [rgba[0] * k, rgba[1] * k, rgba[2] * k, k];
         }
     }
     if blur_px[0] > 0.05 || blur_px[1] > 0.05 {
