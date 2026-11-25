@@ -42,10 +42,17 @@ expect "$(profile 'project with spaces.ec' '--other-name.ec')" 'project with spa
 # Both version spellings reach the GUI as one plain `--version`: the template never forwards `-V`.
 expect "$(printf '<%s>\n' --launch-profile nightly-v1 --profile-root "$XDG_DATA_HOME/$identity" --version)" --version
 expect "$(printf '<%s>\n' --launch-profile nightly-v1 --profile-root "$XDG_DATA_HOME/$identity" --version)" -V
-# A command line that already names a profile is wrapped like any other argument: the template has no
-# pass-through, so its own profile root is the one that is used and nothing the caller wrote is dropped.
+# The ArtCraft Launcher starts the entry point with its own profile pair and per-install root; the
+# template hands that line to the GUI unchanged.
 supplied=(--launch-profile nightly-v1 --profile-root "$work/launcher-root" --version)
-expect "$(printf '<%s>\n' --launch-profile nightly-v1 --profile-root "$XDG_DATA_HOME/$identity" -- "${supplied[@]}")" "${supplied[@]}"
+expect "$(printf '<%s>\n' "${supplied[@]}")" "${supplied[@]}"
+supplied=(--launch-profile nightly-v1 --profile-root "$work/launcher root" -- 'project.ec')
+expect "$(printf '<%s>\n' "${supplied[@]}")" "${supplied[@]}"
+# Anything else is wrapped in the template's own profile, including a profile line that does not open
+# the arguments and an `=` spelling of the selector.
+wrapped=(--profile-root "$work/launcher-root" --)
+expect "$(printf '<%s>\n' --launch-profile nightly-v1 --profile-root "$XDG_DATA_HOME/$identity" -- "${wrapped[@]}")" "${wrapped[@]}"
+expect "$(printf '<%s>\n' --launch-profile nightly-v1 --profile-root "$XDG_DATA_HOME/$identity" -- --launch-profile=nightly-v1)" --launch-profile=nightly-v1
 # HOME is the only other base, and the profile root is never optional.
 home_run=$(env -u XDG_DATA_HOME HOME="$work/home" "$stage/effectcraft")
 expected_home=$(printf '<%s>\n' --launch-profile nightly-v1 --profile-root "$work/home/.local/share/$identity" --)
