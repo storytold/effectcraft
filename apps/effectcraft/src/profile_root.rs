@@ -140,10 +140,11 @@ fn forbidden_roots(platform: Platform, env: &impl Fn(&str) -> Option<OsString>, 
             ]
         }
     };
-    // The stable app's default presets folder (`presets_dir`: HOME, else USERPROFILE). A Nightly root
-    // that contains it would share preset files with the stable app.
+    // The stable app's folder under Documents (`presets_dir` keeps `Presets` there, from HOME, else
+    // USERPROFILE). Fence the whole folder: a Nightly root at, above or inside it would share the
+    // stable app's presets, and any Nightly root below Documents/EffectCraft is not this channel's.
     if let Some(home) = env("HOME").filter(|v| !v.is_empty()).or_else(|| env("USERPROFILE").filter(|v| !v.is_empty())) {
-        roots.push(absolute(PathBuf::from(home), "HOME")?.join("Documents").join("EffectCraft").join("Presets"));
+        roots.push(absolute(PathBuf::from(home), "HOME")?.join("Documents").join("EffectCraft"));
     }
     roots.push(installation_boundary(platform, exe)?);
     roots.into_iter().map(|p| canonical_future(&p)).collect()
