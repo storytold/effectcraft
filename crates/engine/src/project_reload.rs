@@ -80,12 +80,17 @@ impl Watcher {
                             // The first sighting only records the baseline: it is not an edit.
                             (None, Some(stamp)) => s.stamp = Some(stamp),
                             (Some(old), Some(new)) if old != new => {
-                                // Advance the baseline now so a slow interface cannot make the
-                                // same change be reported twice.
-                                s.stamp = Some(new);
                                 drop(s);
                                 std::thread::sleep(DEBOUNCE);
                                 if services.stamp(&path) == Some(new) {
+                                    // Publish the stamp together with the report. Keep the old
+                                    // baseline while debouncing: a failed check or a stamp that
+                                    // changed back must not swallow the original change.
+                                    let mut s = lock(&st);
+                                    if s.path.as_ref() == Some(&path) {
+                                        s.stamp = Some(new);
+                                    }
+                                    drop(s);
                                     *lock(&res) = Some((path.clone(), new));
                                     wake();
                                 }
@@ -100,15 +105,17 @@ impl Watcher {
         Some(Watcher { _stop: tx, state, result })
     }
 
-    /// Watch this project path (the session's saved path). A new path starts a new baseline;
-    /// `None` lets the worker sleep without touching files.
-    pub fn set_path(&mut self, path: Option<String>) {
+    /// Watch this project path with the stamp of the bytes the session loaded. Installing both
+    /// under one lock closes the gap between opening a file and the worker's first observation.
+    /// A new path starts a new baseline; an unchanged path keeps its baseline so external changes
+    /// stay detectable.
+    pub fn set_watched(&mut self, path: Option<String>, stamp: Option<Stamp>) {
         let mut s = lock(&self.state);
         if s.path == path {
             return;
         }
         s.path = path;
-        s.stamp = None;
+        s.stamp = stamp;
         drop(s);
         let _ = self._stop.try_send(());
     }
@@ -122,6 +129,11 @@ impl Watcher {
         s.focused = focused;
         drop(s);
         let _ = self._stop.try_send(());
+    }
+
+    /// The baseline the worker is comparing against (tests and diagnostics).
+    pub fn baseline(&self) -> Option<Stamp> {
+        lock(&self.state).stamp
     }
 
     /// The change found by the worker, once. The interface decides whether to reload it.
@@ -189,7 +201,8 @@ mod tests {
         let (d, path) = disk((100, 1));
         let wakes = Arc::new(AtomicUsize::new(0));
         let mut w = start(d, Arc::clone(&wakes));
-        w.set_path(Some(path));
+        w.set_watched(Some(path), None);
+        wait_for("first baseline", || w.baseline().is_some());
         std::thread::sleep(Duration::from_millis(200));
         assert!(w.take().is_none(), "first sight must not be reported as an edit");
         assert_eq!(wakes.load(Ordering::SeqCst), 0);
@@ -200,8 +213,9 @@ mod tests {
         let (d, path) = disk((100, 1));
         let wakes = Arc::new(AtomicUsize::new(0));
         let mut w = start(d.clone(), Arc::clone(&wakes));
-        w.set_path(Some(path.clone()));
-        wait_for("baseline", || d.looks.load(Ordering::SeqCst) >= 1);
+        // The session's loaded stamp is installed synchronously with the path.
+        w.set_watched(Some(path.clone()), Some((100, 1)));
+        assert_eq!(w.baseline(), Some((100, 1)));
         // Simulate an atomic save: a new size and mtime.
         lock(&d.stamps).insert(path.clone(), (120, 2));
         wait_for("wake", || wakes.load(Ordering::SeqCst) >= 1);
@@ -213,8 +227,8 @@ mod tests {
         let (d, path) = disk((100, 1));
         let wakes = Arc::new(AtomicUsize::new(0));
         let mut w = start(d.clone(), Arc::clone(&wakes));
-        w.set_path(Some(path.clone()));
-        wait_for("baseline", || d.looks.load(Ordering::SeqCst) >= 1);
+        w.set_watched(Some(path.clone()), Some((100, 1)));
+        assert_eq!(w.baseline(), Some((100, 1)));
         lock(&d.stamps).insert(path.clone(), (120, 2));
         wait_for("wake", || wakes.load(Ordering::SeqCst) >= 1);
         assert_eq!(w.take(), Some((path.clone(), (120, 2))));

@@ -767,7 +767,7 @@ impl EffectcraftApp {
         }
         let Some(watcher) = self.project_watcher.as_mut() else { return };
         watcher.set_focused(self.focused);
-        watcher.set_path(self.session.path.clone());
+        watcher.set_watched(self.session.path.clone(), self.session.project_stamp);
         if self.project_reload_pending.is_none()
             && let Some(change) = watcher.take()
         {
@@ -787,7 +787,7 @@ impl EffectcraftApp {
             return;
         }
         if self.session.is_dirty() || self.session.script_ui.render_host.is_some() || self.session.render_job.is_some() {
-            self.ui.status = "Project changed on disk. Save your work, then File ▸ Revert to load it.".into();
+            self.ui.status = "Project changed on disk. To keep your changes, use File ▸ Save As ▸ Save a Copy... Then File ▸ Revert loads the disk version; Revert discards unsaved changes.".into();
             return;
         }
         match self.session.execute("file.revert", serde_json::json!({})) {
@@ -1045,5 +1045,49 @@ mod tests {
         app.now = 6.1;
         ctx.run_ui(egui::RawInput::default(), |ui| app.draw_toast(ui, ui.max_rect(), 0.0)).textures_delta.clear();
         assert!(app.auto.elements.iter().any(|e| e.id == "toast" && e.label.contains("Failed second file")), "{:?}", app.auto.elements);
+    }
+
+    #[test]
+    fn a_pending_change_equal_to_the_session_stamp_is_acknowledged() {
+        let path = "C:/test/project.ecproj".to_string();
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        app.session.path = Some(path.clone());
+        app.session.project_stamp = Some((100, 1));
+        // The stamp the watcher found is the one this session already holds (its own save).
+        app.project_reload_pending = Some((path, (100, 1)));
+        let ctx = egui::Context::default();
+        let before = app.session.revision;
+        app.tick_project_reload(&ctx);
+        assert_eq!(app.session.revision, before, "an own save must not be reloaded");
+        assert!(app.project_reload_pending.is_none());
+    }
+
+    #[test]
+    fn an_external_change_is_held_while_the_session_is_dirty() {
+        let path = "C:/test/project.ecproj".to_string();
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        app.session.path = Some(path.clone());
+        app.session.project_stamp = Some((100, 1));
+        app.session.execute("comp.new", json!({"name":"Gui"})).unwrap();
+        assert!(app.session.is_dirty());
+        app.project_reload_pending = Some((path, (120, 2)));
+        let ctx = egui::Context::default();
+        app.tick_project_reload(&ctx);
+        assert!(app.project_reload_pending.is_some(), "the change must be held, not discarded");
+        assert!(app.ui.status.contains("Save a Copy"), "{}", app.ui.status);
+        assert!(app.ui.status.contains("discards unsaved changes"), "{}", app.ui.status);
+    }
+
+    #[test]
+    fn autosave_is_paused_while_a_project_change_is_pending() {
+        let path = "C:/test/project.ecproj".to_string();
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        app.session.path = Some(path.clone());
+        app.session.mark_unsaved();
+        app.session.prefs.auto_save.enabled = true;
+        app.project_reload_pending = Some((path, (120, 2)));
+        let ctx = egui::Context::default();
+        app.tick_autosave(&ctx);
+        assert!(app.session.autosave.last.is_none(), "autosave was ticked while a reload was pending");
     }
 }
