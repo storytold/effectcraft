@@ -122,16 +122,11 @@ pub(crate) fn viewer_id() -> egui::Id {
 
 /// Declares the Composition viewer, drawn in this pass, as the window's document canvas. With nothing focused it
 /// is the window's key target: the edit chords and the clipboard events stay in
-/// egui's input for EffectCraft's shortcuts. Escape with the viewer focused is the viewer's own: it lets go of the
-/// keyboard, as egui's other widgets do.
+/// egui's input for EffectCraft's shortcuts. The focused viewer keeps its focus at Escape, which EffectCraft's own
+/// handlers read from egui.
 pub(crate) fn host_canvas(ctx: &egui::Context) {
     const KEYS: KeyUse = KeyUse::CANVAS.with_edits(EditSet::ALL);
     craft_ui::runtime::focus::host_canvas(ctx, viewer_id(), KEYS);
-    // Read from the raw input, so an Escape that a popup consumed earlier in the pass counts.
-    let escape = |event: &egui::Event| matches!(event, egui::Event::Key { key: egui::Key::Escape, pressed: true, modifiers, .. } if !modifiers.any());
-    if ctx.input(|i| i.raw.events.iter().any(escape)) {
-        ctx.memory_mut(|m| m.surrender_focus(viewer_id()));
-    }
 }
 
 /// The widget other than the Composition viewer that has the keyboard. The viewer as the focused Tab stop leaves the

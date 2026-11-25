@@ -278,8 +278,7 @@ fn viewer_double_click_on_a_covered_path_of_the_selected_layer_free_transforms_i
     assert!(h.state().auto.find("viewer.freeTransform.handle.0").is_some(), "the free-transform box is up");
 }
 
-/// The Composition viewer as the focused Tab stop leaves the keys to the app, and Escape also makes it
-/// let go of the keyboard.
+/// The Composition viewer as the focused Tab stop leaves the keys to the app, and keeps its focus.
 #[test]
 fn the_focused_viewer_leaves_the_keys_to_the_app() {
     use craft_ui::runtime::focus::{FocusTarget, request};
@@ -301,17 +300,13 @@ fn the_focused_viewer_leaves_the_keys_to_the_app() {
     }
     h.run_steps(3);
     assert!(h.state().auto.find("viewer.freeTransform.handle.0").is_some(), "the free-transform box is up");
-    let focus_viewer = |h: &mut Harness<'_, EffectcraftApp>| {
-        request(&h.ctx, FocusTarget::Id(viewer));
-        h.run_steps(2);
-        assert_eq!(h.ctx.memory(|m| m.focused()), Some(viewer));
-    };
-    focus_viewer(&mut h);
+    request(&h.ctx, FocusTarget::Id(viewer));
+    h.run_steps(2);
+    assert_eq!(h.ctx.memory(|m| m.focused()), Some(viewer));
     assert_eq!(effectcraft_ui_egui::native_menu::text_field_window(&h.ctx), None, "the Edit menu's commands are the app's");
     key(&mut h, egui::Key::Escape, egui::Modifiers::NONE);
     assert!(h.state().auto.find("viewer.freeTransform.handle.0").is_none(), "Escape ends the free transform");
-    assert_eq!(h.ctx.memory(|m| m.focused()), None, "and the viewer lets go of the keyboard");
-    focus_viewer(&mut h);
+    assert_eq!(h.ctx.memory(|m| m.focused()), Some(viewer), "and the viewer keeps its focus");
     key(&mut h, egui::Key::H, egui::Modifiers::NONE);
     assert_eq!(h.state().ui.tool, Tool::Hand, "a tool shortcut runs");
     assert_eq!(h.ctx.memory(|m| m.focused()), Some(viewer));
