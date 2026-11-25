@@ -11,28 +11,28 @@ rust-version = "1.95"
 repository = "https://github.com/storytold/effectcraft"
 
 [workspace.dependencies]
-craft-timeline = { git = "https://github.com/aiongg/craft-libs", rev = "aa401985dd4658cdaa272fdccafdcd6e7f4dd60b", default-features = false }
-craft-mime = { version = "0.1.0", git = "https://github.com/aiongg/craft-libs", rev = "aa401985dd4658cdaa272fdccafdcd6e7f4dd60b" }
-craft-pdf = { git = "https://github.com/aiongg/craft-libs", rev = "aa401985dd4658cdaa272fdccafdcd6e7f4dd60b", version = "=0.1.0", default-features = false, features = ["read"] }
-craft-docpath = { version = "0.1.0", git = "https://github.com/aiongg/craft-libs", rev = "aa401985dd4658cdaa272fdccafdcd6e7f4dd60b" }
-craft-jsonrpc = { version = "0.1.0", git = "https://github.com/aiongg/craft-libs", rev = "aa401985dd4658cdaa272fdccafdcd6e7f4dd60b" }
-craft-ecproj-format = { version = "0.1.0", git = "https://github.com/aiongg/craft-libs", rev = "aa401985dd4658cdaa272fdccafdcd6e7f4dd60b" }
-craft-dpx = { version = "0.1.0", git = "https://github.com/aiongg/craft-libs", rev = "aa401985dd4658cdaa272fdccafdcd6e7f4dd60b" }
-craft-ps = { version = "0.1.0", git = "https://github.com/aiongg/craft-libs", rev = "aa401985dd4658cdaa272fdccafdcd6e7f4dd60b", default-features = false, features = ["read"] }
-craft-exr = { version = "0.1.0", git = "https://github.com/aiongg/craft-libs", rev = "aa401985dd4658cdaa272fdccafdcd6e7f4dd60b" }
-craft-gif = { version = "0.1.0", git = "https://github.com/aiongg/craft-libs", rev = "aa401985dd4658cdaa272fdccafdcd6e7f4dd60b" }
-craft-tga = { version = "0.1.0", git = "https://github.com/aiongg/craft-libs", rev = "aa401985dd4658cdaa272fdccafdcd6e7f4dd60b" }
-craft-psd = { version = "0.1.0", git = "https://github.com/aiongg/craft-libs", rev = "aa401985dd4658cdaa272fdccafdcd6e7f4dd60b" }
-craft-codepage = { version = "0.1.0", git = "https://github.com/aiongg/craft-libs", rev = "aa401985dd4658cdaa272fdccafdcd6e7f4dd60b" }
-craft-svg = { version = "0.1.0", git = "https://github.com/aiongg/craft-libs", rev = "aa401985dd4658cdaa272fdccafdcd6e7f4dd60b" }
-craft-webp = { version = "0.1.0", git = "https://github.com/aiongg/craft-libs", rev = "aa401985dd4658cdaa272fdccafdcd6e7f4dd60b" }
-craft-lottie = { version = "0.1.0", git = "https://github.com/aiongg/craft-libs", rev = "aa401985dd4658cdaa272fdccafdcd6e7f4dd60b" }
-craft-mesh = { version = "0.1.0", git = "https://github.com/aiongg/craft-libs", rev = "aa401985dd4658cdaa272fdccafdcd6e7f4dd60b", default-features = false, features = ["stl", "obj", "gltf", "fbx"] }
-craft-aep = { version = "0.1.0", git = "https://github.com/aiongg/craft-libs", rev = "aa401985dd4658cdaa272fdccafdcd6e7f4dd60b" }
-craft-doc = { version = "0.1.0", git = "https://github.com/aiongg/craft-libs", rev = "aa401985dd4658cdaa272fdccafdcd6e7f4dd60b" }
-craft-vectorcraft-format = { version = "0.1.0", git = "https://github.com/aiongg/craft-libs", rev = "aa401985dd4658cdaa272fdccafdcd6e7f4dd60b" }
+craft-timeline = { git = "https://github.com/storytold/craft-libs", rev = "33be35625e252cc4f06aa375b3b428521faea37d", default-features = false }
+craft-mime = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "8fa4db64a9bb943520259ea95331a303ba788f21" }
+craft-pdf = { git = "https://github.com/storytold/craft-libs", rev = "8fa4db64a9bb943520259ea95331a303ba788f21", version = "=0.1.0", default-features = false, features = ["read"] }
+craft-docpath = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "8fa4db64a9bb943520259ea95331a303ba788f21" }
+craft-jsonrpc = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "8fa4db64a9bb943520259ea95331a303ba788f21" }
+craft-ecproj-format = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "8fa4db64a9bb943520259ea95331a303ba788f21" }
+craft-dpx = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "8fa4db64a9bb943520259ea95331a303ba788f21" }
+craft-ps = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "8fa4db64a9bb943520259ea95331a303ba788f21", default-features = false, features = ["read"] }
+craft-exr = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "8fa4db64a9bb943520259ea95331a303ba788f21" }
+craft-gif = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "8fa4db64a9bb943520259ea95331a303ba788f21" }
+craft-tga = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "33be35625e252cc4f06aa375b3b428521faea37d" }
+craft-psd = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "8fa4db64a9bb943520259ea95331a303ba788f21" }
+craft-codepage = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "8fa4db64a9bb943520259ea95331a303ba788f21" }
+craft-svg = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "8fa4db64a9bb943520259ea95331a303ba788f21" }
+craft-webp = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "8fa4db64a9bb943520259ea95331a303ba788f21" }
+craft-lottie = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "8fa4db64a9bb943520259ea95331a303ba788f21" }
+craft-mesh = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "8fa4db64a9bb943520259ea95331a303ba788f21", default-features = false, features = ["stl", "obj", "gltf", "fbx"] }
+craft-aep = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "8fa4db64a9bb943520259ea95331a303ba788f21" }
+craft-doc = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "8fa4db64a9bb943520259ea95331a303ba788f21" }
+craft-vectorcraft-format = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "8fa4db64a9bb943520259ea95331a303ba788f21" }
 # craft-update: app-specific pretend versions apply to startup and manual checks.
-craft-update = { git = "https://github.com/aiongg/craft-libs", version = "=0.1.0", rev = "aa401985dd4658cdaa272fdccafdcd6e7f4dd60b", features = ["ui"] }
+craft-update = { git = "https://github.com/storytold/craft-libs", version = "=0.1.0", rev = "8fa4db64a9bb943520259ea95331a303ba788f21", features = ["ui"] }
 # internal
 effectcraft-time = { path = "crates/time" }
 effectcraft-geom = { path = "crates/geom" }
@@ -96,14 +96,15 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg"]
 same-file = "1.0"
 tempfile = "3.27"
 
-# codecs + containers shared by the Craft apps (crates/media, crates/export); keep all in sync.
-craft-media = { version = "0.1.0", git = "https://github.com/aiongg/craft-libs", rev = "aa401985dd4658cdaa272fdccafdcd6e7f4dd60b", default-features = false, features = ["isobmff", "matroska"] }
-craft-media-source = { version = "0.1.0", git = "https://github.com/aiongg/craft-libs", rev = "aa401985dd4658cdaa272fdccafdcd6e7f4dd60b" }
-craft-frame = { version = "0.1.0", git = "https://github.com/aiongg/craft-libs", rev = "aa401985dd4658cdaa272fdccafdcd6e7f4dd60b" }
-craft-color = { version = "0.1.0", git = "https://github.com/aiongg/craft-libs", rev = "aa401985dd4658cdaa272fdccafdcd6e7f4dd60b" }
-craft-time = { version = "0.1.0", git = "https://github.com/aiongg/craft-libs", rev = "aa401985dd4658cdaa272fdccafdcd6e7f4dd60b" }
-craft-audio = { version = "0.1.0", git = "https://github.com/aiongg/craft-libs", rev = "aa401985dd4658cdaa272fdccafdcd6e7f4dd60b", default-features = false, features = ["aac-decode", "aac-encode", "alac-decode", "opus-decode", "opus-encode", "ac3-decode", "mp3-decode", "mpa-decode"] }
-craft-video = { version = "0.1.0", git = "https://github.com/aiongg/craft-libs", rev = "aa401985dd4658cdaa272fdccafdcd6e7f4dd60b", features = ["h264-decode", "h264-encode", "prores", "hevc-encode", "vp9-encode", "av1", "threads"] }
+# codecs + containers shared by the Craft apps (crates/media, crates/export); keep all in sync, with
+# filmcraft-media's craft-libs rev: their types cross between the two.
+craft-media = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "33be35625e252cc4f06aa375b3b428521faea37d", default-features = false, features = ["isobmff", "matroska"] }
+craft-media-source = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "33be35625e252cc4f06aa375b3b428521faea37d" }
+craft-frame = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "33be35625e252cc4f06aa375b3b428521faea37d" }
+craft-color = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "33be35625e252cc4f06aa375b3b428521faea37d" }
+craft-time = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "33be35625e252cc4f06aa375b3b428521faea37d" }
+craft-audio = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "33be35625e252cc4f06aa375b3b428521faea37d", default-features = false, features = ["aac-decode", "aac-encode", "alac-decode", "opus-decode", "opus-encode", "ac3-decode", "mp3-decode", "mpa-decode"] }
+craft-video = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "33be35625e252cc4f06aa375b3b428521faea37d", features = ["h264-decode", "h264-encode", "prores", "hevc-encode", "vp9-encode", "av1", "threads"] }
 
 # footage decoding: FilmCraft's pure-Rust crates, pinned to a revision (plan/adr/0001).
 # Only `crates/media`, `crates/export` and `crates/interchange` may depend on these.
@@ -126,12 +127,12 @@ half = "2.7"
 # ui
 # Shared frontend components; keep this dependency above the engine boundary.
 # Shared UI and the complete egui family select reviewed immutable commits below.
-craft-ui = { version = "0.1.0", git = "https://github.com/aiongg/craft-libs", rev = "aa401985dd4658cdaa272fdccafdcd6e7f4dd60b" }
-craft-behavior = { git = "https://github.com/aiongg/craft-libs", rev = "aa401985dd4658cdaa272fdccafdcd6e7f4dd60b" }
-craft-host = { git = "https://github.com/aiongg/craft-libs", rev = "aa401985dd4658cdaa272fdccafdcd6e7f4dd60b" }
-craft-keymap = { git = "https://github.com/aiongg/craft-libs", rev = "aa401985dd4658cdaa272fdccafdcd6e7f4dd60b" }
-craft-theme = { git = "https://github.com/aiongg/craft-libs", rev = "aa401985dd4658cdaa272fdccafdcd6e7f4dd60b" }
-craft-window = { git = "https://github.com/aiongg/craft-libs", rev = "aa401985dd4658cdaa272fdccafdcd6e7f4dd60b" }
+craft-ui = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "8fa4db64a9bb943520259ea95331a303ba788f21" }
+craft-behavior = { git = "https://github.com/storytold/craft-libs", rev = "8fa4db64a9bb943520259ea95331a303ba788f21" }
+craft-host = { git = "https://github.com/storytold/craft-libs", rev = "8fa4db64a9bb943520259ea95331a303ba788f21" }
+craft-keymap = { git = "https://github.com/storytold/craft-libs", rev = "8fa4db64a9bb943520259ea95331a303ba788f21" }
+craft-theme = { git = "https://github.com/storytold/craft-libs", rev = "8fa4db64a9bb943520259ea95331a303ba788f21" }
+craft-window = { git = "https://github.com/storytold/craft-libs", rev = "8fa4db64a9bb943520259ea95331a303ba788f21" }
 # `default_fonts` and `monochrome_emoji_fonts` are explicit: the app's `FontDefinitions::default()`
 # and its `✔`/`▣` chrome glyphs need both, and kittest's own dev-dependencies do not propagate.
 egui = { version = "0.37", default-features = false, features = ["default_fonts", "monochrome_emoji_fonts"] }
@@ -235,43 +236,20 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 
-# filmcraft-media pins storytold craft-libs; the app needs one copy of each crate.
-[patch."https://github.com/storytold/craft-libs"]
-craft-aaf = { git = "https://github.com/aiongg/craft-libs", rev = "aa401985dd4658cdaa272fdccafdcd6e7f4dd60b", version = "=0.1.0" }
-craft-audio = { git = "https://github.com/aiongg/craft-libs", rev = "aa401985dd4658cdaa272fdccafdcd6e7f4dd60b", version = "=0.1.0" }
-craft-cfb = { git = "https://github.com/aiongg/craft-libs", rev = "aa401985dd4658cdaa272fdccafdcd6e7f4dd60b", version = "=0.1.0" }
-craft-color = { git = "https://github.com/aiongg/craft-libs", rev = "aa401985dd4658cdaa272fdccafdcd6e7f4dd60b", version = "=0.1.0" }
-craft-dpx = { git = "https://github.com/aiongg/craft-libs", rev = "aa401985dd4658cdaa272fdccafdcd6e7f4dd60b", version = "=0.1.0" }
-craft-exr = { git = "https://github.com/aiongg/craft-libs", rev = "aa401985dd4658cdaa272fdccafdcd6e7f4dd60b", version = "=0.1.0" }
-craft-frame = { git = "https://github.com/aiongg/craft-libs", rev = "aa401985dd4658cdaa272fdccafdcd6e7f4dd60b", version = "=0.1.0" }
-craft-hdr = { git = "https://github.com/aiongg/craft-libs", rev = "aa401985dd4658cdaa272fdccafdcd6e7f4dd60b", version = "=0.1.0" }
-craft-jpeg = { git = "https://github.com/aiongg/craft-libs", rev = "aa401985dd4658cdaa272fdccafdcd6e7f4dd60b", version = "=0.1.0" }
-craft-media = { git = "https://github.com/aiongg/craft-libs", rev = "aa401985dd4658cdaa272fdccafdcd6e7f4dd60b", version = "=0.1.0" }
-craft-media-source = { git = "https://github.com/aiongg/craft-libs", rev = "aa401985dd4658cdaa272fdccafdcd6e7f4dd60b", version = "=0.1.0" }
-craft-psd = { git = "https://github.com/aiongg/craft-libs", rev = "aa401985dd4658cdaa272fdccafdcd6e7f4dd60b", version = "=0.1.0" }
-craft-raw = { git = "https://github.com/aiongg/craft-libs", rev = "aa401985dd4658cdaa272fdccafdcd6e7f4dd60b", version = "=0.1.0" }
-craft-sniff = { git = "https://github.com/aiongg/craft-libs", rev = "aa401985dd4658cdaa272fdccafdcd6e7f4dd60b", version = "=0.1.0" }
-craft-tga = { git = "https://github.com/aiongg/craft-libs", rev = "aa401985dd4658cdaa272fdccafdcd6e7f4dd60b", version = "=0.1.0" }
-craft-tiff = { git = "https://github.com/aiongg/craft-libs", rev = "aa401985dd4658cdaa272fdccafdcd6e7f4dd60b", version = "=0.1.0" }
-craft-time = { git = "https://github.com/aiongg/craft-libs", rev = "aa401985dd4658cdaa272fdccafdcd6e7f4dd60b", version = "=0.1.0" }
-craft-video = { git = "https://github.com/aiongg/craft-libs", rev = "aa401985dd4658cdaa272fdccafdcd6e7f4dd60b", version = "=0.1.0" }
-craft-xml = { git = "https://github.com/aiongg/craft-libs", rev = "aa401985dd4658cdaa272fdccafdcd6e7f4dd60b", version = "=0.1.0" }
-craft-y4m = { git = "https://github.com/aiongg/craft-libs", rev = "aa401985dd4658cdaa272fdccafdcd6e7f4dd60b", version = "=0.1.0" }
-
 [patch.crates-io]
-hayro-syntax = { git = "https://github.com/aiongg/craft-libs", rev = "aa401985dd4658cdaa272fdccafdcd6e7f4dd60b", version = "=0.7.2" }
-hayro-jbig2 = { git = "https://github.com/aiongg/craft-libs", rev = "aa401985dd4658cdaa272fdccafdcd6e7f4dd60b", version = "=0.3.0" }
-ecolor = { git = "https://github.com/storytold/egui.git", rev = "b15ffe9bfc2c8e6748533b32b708e10abaf2afec" }
-emath = { git = "https://github.com/storytold/egui.git", rev = "b15ffe9bfc2c8e6748533b32b708e10abaf2afec" }
-epaint = { git = "https://github.com/storytold/egui.git", rev = "b15ffe9bfc2c8e6748533b32b708e10abaf2afec" }
-epaint_default_fonts = { git = "https://github.com/storytold/egui.git", rev = "b15ffe9bfc2c8e6748533b32b708e10abaf2afec" }
-egui = { git = "https://github.com/storytold/egui.git", rev = "b15ffe9bfc2c8e6748533b32b708e10abaf2afec" }
-egui-winit = { git = "https://github.com/storytold/egui.git", rev = "b15ffe9bfc2c8e6748533b32b708e10abaf2afec" }
-egui-wgpu = { git = "https://github.com/storytold/egui.git", rev = "b15ffe9bfc2c8e6748533b32b708e10abaf2afec" }
-egui_glow = { git = "https://github.com/storytold/egui.git", rev = "b15ffe9bfc2c8e6748533b32b708e10abaf2afec" }
-egui_extras = { git = "https://github.com/storytold/egui.git", rev = "b15ffe9bfc2c8e6748533b32b708e10abaf2afec" }
-egui_kittest = { git = "https://github.com/storytold/egui.git", rev = "b15ffe9bfc2c8e6748533b32b708e10abaf2afec" }
-eframe = { git = "https://github.com/storytold/egui.git", rev = "b15ffe9bfc2c8e6748533b32b708e10abaf2afec" }
+hayro-syntax = { git = "https://github.com/storytold/craft-libs", rev = "8fa4db64a9bb943520259ea95331a303ba788f21", version = "=0.7.2" }
+hayro-jbig2 = { git = "https://github.com/storytold/craft-libs", rev = "8fa4db64a9bb943520259ea95331a303ba788f21", version = "=0.3.0" }
+ecolor = { git = "https://github.com/storytold/egui.git", rev = "b9770908e0f304896f9658d239a7b29cf8af1564" }
+emath = { git = "https://github.com/storytold/egui.git", rev = "b9770908e0f304896f9658d239a7b29cf8af1564" }
+epaint = { git = "https://github.com/storytold/egui.git", rev = "b9770908e0f304896f9658d239a7b29cf8af1564" }
+epaint_default_fonts = { git = "https://github.com/storytold/egui.git", rev = "b9770908e0f304896f9658d239a7b29cf8af1564" }
+egui = { git = "https://github.com/storytold/egui.git", rev = "b9770908e0f304896f9658d239a7b29cf8af1564" }
+egui-winit = { git = "https://github.com/storytold/egui.git", rev = "b9770908e0f304896f9658d239a7b29cf8af1564" }
+egui-wgpu = { git = "https://github.com/storytold/egui.git", rev = "b9770908e0f304896f9658d239a7b29cf8af1564" }
+egui_glow = { git = "https://github.com/storytold/egui.git", rev = "b9770908e0f304896f9658d239a7b29cf8af1564" }
+egui_extras = { git = "https://github.com/storytold/egui.git", rev = "b9770908e0f304896f9658d239a7b29cf8af1564" }
+egui_kittest = { git = "https://github.com/storytold/egui.git", rev = "b9770908e0f304896f9658d239a7b29cf8af1564" }
+eframe = { git = "https://github.com/storytold/egui.git", rev = "b9770908e0f304896f9658d239a7b29cf8af1564" }
 # Patch a crate only together with the dependency that needs it: an unused patch makes the Nix
 # build, which uses vendored sources, fail (`cargo xtask lock-patches`).
 winit = { git = "https://github.com/storytold/winit.git", rev = "a517b3846ee8457d84ee4975110bfda6797c44dc" }

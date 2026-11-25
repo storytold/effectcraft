@@ -5,9 +5,7 @@ use std::process::Command;
 
 use serde_json::Value;
 
-// The repository Cargo.toml pins craft-libs from (the aiongg fork while filmcraft-media pins storytold craft-libs).
-const REPO: &str = "https://github.com/aiongg/craft-libs";
-const REV: &str = "aa401985dd4658cdaa272fdccafdcd6e7f4dd60b";
+const REV: &str = "8fa4db64a9bb943520259ea95331a303ba788f21";
 const PACKAGES: &[(&str, &str)] = &[("craft-pdf", "0.1.0"), ("craft-ps", "0.1.0"), ("hayro-syntax", "0.7.2"), ("hayro-jbig2", "0.3.0")];
 
 pub fn run(root: &Path) -> Result<(), String> {
@@ -28,7 +26,7 @@ pub fn run(root: &Path) -> Result<(), String> {
 fn validate(metadata: &Value) -> Result<(), String> {
     let packages = metadata.get("packages").and_then(Value::as_array).ok_or("cargo metadata has no packages")?;
     let nodes = metadata.pointer("/resolve/nodes").and_then(Value::as_array).ok_or("cargo metadata has no resolved nodes")?;
-    let source = format!("git+{REPO}?rev={REV}#{REV}");
+    let source = format!("git+https://github.com/storytold/craft-libs?rev={REV}#{REV}");
     for (name, version) in PACKAGES {
         let matches: Vec<_> = packages.iter().filter(|p| p["name"] == *name).collect();
         if matches.len() != 1 || matches[0]["version"] != *version || matches[0]["source"] != source {
@@ -59,10 +57,9 @@ mod tests {
     use serde_json::json;
 
     fn metadata() -> Value {
-        let packages: Vec<_> = PACKAGES
-            .iter()
-            .map(|(name, version)| json!({"id": name, "name": name, "version": version, "source": format!("git+{REPO}?rev={REV}#{REV}")}))
-            .collect();
+        let packages: Vec<_> = PACKAGES.iter().map(|(name, version)| {
+            json!({"id": name, "name": name, "version": version, "source": format!("git+https://github.com/storytold/craft-libs?rev={REV}#{REV}")})
+        }).collect();
         json!({"packages": packages, "resolve": {"nodes": [
             {"id": "hayro-syntax", "features": ["std"]}, {"id": "craft-pdf", "features": ["read"]},
             {"id": "craft-ps", "features": ["read"]}
