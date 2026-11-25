@@ -283,7 +283,7 @@ pub fn build(app: &EffectcraftApp) -> NativeMenu {
                                 } else if crate::i18n::georgian(app) {
                                     "სერვისები"
                                 } else if crate::i18n::arabic(app) {
-                                    "خدمات"
+                                    crate::i18n::label(app, "", "Services")
                                 } else if crate::i18n::swedish(app) {
                                     "Tjänster"
                                 } else {

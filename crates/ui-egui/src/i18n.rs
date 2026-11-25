@@ -17,6 +17,11 @@ pub(crate) use ui::{set_current, tr, tr_args};
 /// An optional Arabic menu catalog loaded dynamically on native or registered by a consumer.
 static ARABIC_CATALOG: std::sync::OnceLock<&'static [(&'static str, &'static str, &'static str)]> = std::sync::OnceLock::new();
 
+#[cfg(test)]
+std::thread_local! {
+    static TEST_ARABIC_CATALOG: std::cell::Cell<Option<&'static [(&'static str, &'static str, &'static str)]>> = const { std::cell::Cell::new(None) };
+}
+
 /// Registers an Arabic menu catalog. Returns whether registration succeeded.
 #[allow(dead_code)]
 pub(crate) fn set_arabic_catalog(catalog: &'static [(&'static str, &'static str, &'static str)]) -> bool {
@@ -25,6 +30,10 @@ pub(crate) fn set_arabic_catalog(catalog: &'static [(&'static str, &'static str,
 
 /// Whether an Arabic catalog has been loaded into the runtime.
 pub(crate) fn has_arabic_catalog() -> bool {
+    #[cfg(test)]
+    if TEST_ARABIC_CATALOG.with(|c| c.get().is_some()) {
+        return true;
+    }
     ARABIC_CATALOG.get().is_some()
 }
 
@@ -255,6 +264,10 @@ pub(crate) fn label<'a>(app: &EffectcraftApp, command: &str, source: &'a str) ->
 /// The menu catalog for `language`; `None` for English.
 fn menu_catalog(language: &str) -> Option<&'static [(&'static str, &'static str, &'static str)]> {
     if language == "ar" {
+        #[cfg(test)]
+        if let Some(cat) = TEST_ARABIC_CATALOG.with(|c| c.get()) {
+            return Some(cat);
+        }
         return ARABIC_CATALOG.get().copied();
     }
     Some(match language {
@@ -9426,9 +9439,16 @@ mod tests {
         // When the catalog is not loaded, native resolution falls back to "en" and stays LTR.
         assert_eq!(resolve_language("ar", false), "en");
 
-        // Now load an Arabic catalog on native.
+        // Now load an Arabic catalog on native (scoped to this test thread so parallel tests remain isolated).
         static AR_TEST_CATALOG: &[(&str, &str, &str)] = &[("comp.new", "New Composition...", "تركيب جديد..."), ("file.new", "New", "جديد")];
-        let _ = set_arabic_catalog(AR_TEST_CATALOG);
+        struct Reset(Option<&'static [(&'static str, &'static str, &'static str)]>);
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                TEST_ARABIC_CATALOG.with(|c| c.set(self.0));
+            }
+        }
+        let prev = TEST_ARABIC_CATALOG.with(|c| c.replace(Some(AR_TEST_CATALOG)));
+        let _reset = Reset(prev);
         assert!(has_arabic_catalog());
         assert_eq!(resolve_language("ar", false), "ar");
 
