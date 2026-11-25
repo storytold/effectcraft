@@ -1105,11 +1105,13 @@ fn header_menu<H, R>(
 ) -> Option<R> {
     egui::Popup::from_response(field)
         .open_bool(open)
+        .max_height_from_constrain(true)
+        .align_alternatives(&[egui::RectAlign::TOP_START])
         .width(field.rect.width())
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .show(|ui| {
             ui.set_min_width(ui.available_width());
-            ui.set_max_height(height);
+            ui.set_max_height(height.min(ui.available_height()));
             let header = header(ui);
             egui::ScrollArea::vertical().max_height(ui.available_height().max(0.0)).show(ui, |ui| list(ui, header)).inner
         })
