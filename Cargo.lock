@@ -1304,11 +1304,11 @@ dependencies = [
 [[package]]
 name = "craft-aaf"
 version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=33be35625e252cc4f06aa375b3b428521faea37d#33be35625e252cc4f06aa375b3b428521faea37d"
+source = "git+https://github.com/aiongg/craft-libs?rev=0bac50867b2c4977e492f436029ff0075a14dab5#0bac50867b2c4977e492f436029ff0075a14dab5"
 dependencies = [
- "craft-audio 0.1.0 (git+https://github.com/storytold/craft-libs?rev=33be35625e252cc4f06aa375b3b428521faea37d)",
+ "craft-audio",
  "craft-cfb",
- "craft-timeline 0.1.0 (git+https://github.com/storytold/craft-libs?rev=33be35625e252cc4f06aa375b3b428521faea37d)",
+ "craft-timeline 0.1.0 (git+https://github.com/aiongg/craft-libs?rev=0bac50867b2c4977e492f436029ff0075a14dab5)",
  "thiserror 2.0.21",
 ]
 
@@ -1340,19 +1340,8 @@ name = "craft-audio"
 version = "0.1.0"
 source = "git+https://github.com/aiongg/craft-libs?rev=0bac50867b2c4977e492f436029ff0075a14dab5#0bac50867b2c4977e492f436029ff0075a14dab5"
 dependencies = [
- "craft-media 0.1.0 (git+https://github.com/aiongg/craft-libs?rev=0bac50867b2c4977e492f436029ff0075a14dab5)",
- "craft-xml 0.1.0 (git+https://github.com/aiongg/craft-libs?rev=0bac50867b2c4977e492f436029ff0075a14dab5)",
- "log",
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "craft-audio"
-version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=33be35625e252cc4f06aa375b3b428521faea37d#33be35625e252cc4f06aa375b3b428521faea37d"
-dependencies = [
- "craft-media 0.1.0 (git+https://github.com/storytold/craft-libs?rev=33be35625e252cc4f06aa375b3b428521faea37d)",
- "craft-xml 0.1.0 (git+https://github.com/storytold/craft-libs?rev=33be35625e252cc4f06aa375b3b428521faea37d)",
+ "craft-media",
+ "craft-xml",
  "log",
  "rayon",
  "symphonia 0.6.1",
@@ -1380,7 +1369,7 @@ dependencies = [
 [[package]]
 name = "craft-cfb"
 version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=33be35625e252cc4f06aa375b3b428521faea37d#33be35625e252cc4f06aa375b3b428521faea37d"
+source = "git+https://github.com/aiongg/craft-libs?rev=0bac50867b2c4977e492f436029ff0075a14dab5#0bac50867b2c4977e492f436029ff0075a14dab5"
 
 [[package]]
 name = "craft-cloud-ui"
@@ -1408,14 +1397,6 @@ source = "git+https://github.com/aiongg/craft-libs?rev=0bac50867b2c4977e492f4360
 name = "craft-color"
 version = "0.1.0"
 source = "git+https://github.com/aiongg/craft-libs?rev=0bac50867b2c4977e492f436029ff0075a14dab5#0bac50867b2c4977e492f436029ff0075a14dab5"
-dependencies = [
- "serde",
-]
-
-[[package]]
-name = "craft-color"
-version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=33be35625e252cc4f06aa375b3b428521faea37d#33be35625e252cc4f06aa375b3b428521faea37d"
 dependencies = [
  "serde",
 ]
@@ -1451,14 +1432,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "craft-dpx"
-version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=33be35625e252cc4f06aa375b3b428521faea37d#33be35625e252cc4f06aa375b3b428521faea37d"
-dependencies = [
- "thiserror 2.0.21",
-]
-
-[[package]]
 name = "craft-ecproj-format"
 version = "0.1.0"
 source = "git+https://github.com/aiongg/craft-libs?rev=0bac50867b2c4977e492f436029ff0075a14dab5#0bac50867b2c4977e492f436029ff0075a14dab5"
@@ -1486,15 +1459,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "craft-exr"
-version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=33be35625e252cc4f06aa375b3b428521faea37d#33be35625e252cc4f06aa375b3b428521faea37d"
-dependencies = [
- "flate2",
- "serde_json",
-]
-
-[[package]]
 name = "craft-font-catalog"
 version = "0.1.0"
 source = "git+https://github.com/aiongg/craft-libs?rev=0bac50867b2c4977e492f436029ff0075a14dab5#0bac50867b2c4977e492f436029ff0075a14dab5"
@@ -1518,19 +1482,8 @@ name = "craft-frame"
 version = "0.1.0"
 source = "git+https://github.com/aiongg/craft-libs?rev=0bac50867b2c4977e492f436029ff0075a14dab5#0bac50867b2c4977e492f436029ff0075a14dab5"
 dependencies = [
- "craft-color 0.1.0 (git+https://github.com/aiongg/craft-libs?rev=0bac50867b2c4977e492f436029ff0075a14dab5)",
- "craft-time 0.1.0 (git+https://github.com/aiongg/craft-libs?rev=0bac50867b2c4977e492f436029ff0075a14dab5)",
- "rayon",
- "serde",
-]
-
-[[package]]
-name = "craft-frame"
-version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=33be35625e252cc4f06aa375b3b428521faea37d#33be35625e252cc4f06aa375b3b428521faea37d"
-dependencies = [
- "craft-color 0.1.0 (git+https://github.com/storytold/craft-libs?rev=33be35625e252cc4f06aa375b3b428521faea37d)",
- "craft-time 0.1.0 (git+https://github.com/storytold/craft-libs?rev=33be35625e252cc4f06aa375b3b428521faea37d)",
+ "craft-color",
+ "craft-time",
  "rayon",
  "serde",
 ]
@@ -1547,7 +1500,7 @@ dependencies = [
 [[package]]
 name = "craft-hdr"
 version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=33be35625e252cc4f06aa375b3b428521faea37d#33be35625e252cc4f06aa375b3b428521faea37d"
+source = "git+https://github.com/aiongg/craft-libs?rev=0bac50867b2c4977e492f436029ff0075a14dab5#0bac50867b2c4977e492f436029ff0075a14dab5"
 dependencies = [
  "thiserror 2.0.21",
 ]
@@ -1596,7 +1549,7 @@ dependencies = [
 [[package]]
 name = "craft-jpeg"
 version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=33be35625e252cc4f06aa375b3b428521faea37d#33be35625e252cc4f06aa375b3b428521faea37d"
+source = "git+https://github.com/aiongg/craft-libs?rev=0bac50867b2c4977e492f436029ff0075a14dab5#0bac50867b2c4977e492f436029ff0075a14dab5"
 dependencies = [
  "thiserror 2.0.21",
 ]
@@ -1618,7 +1571,7 @@ dependencies = [
  "craft-i18n",
  "craft-tracked",
  "craft-ui-macros",
- "craft-xml 0.1.0 (git+https://github.com/aiongg/craft-libs?rev=0bac50867b2c4977e492f436029ff0075a14dab5)",
+ "craft-xml",
  "egui",
  "serde",
  "serde_json",
@@ -1644,39 +1597,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "craft-media"
-version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=33be35625e252cc4f06aa375b3b428521faea37d#33be35625e252cc4f06aa375b3b428521faea37d"
-dependencies = [
- "chrono",
- "thiserror 2.0.21",
-]
-
-[[package]]
 name = "craft-media-source"
 version = "0.1.0"
 source = "git+https://github.com/aiongg/craft-libs?rev=0bac50867b2c4977e492f436029ff0075a14dab5#0bac50867b2c4977e492f436029ff0075a14dab5"
 dependencies = [
- "craft-audio 0.1.0 (git+https://github.com/aiongg/craft-libs?rev=0bac50867b2c4977e492f436029ff0075a14dab5)",
- "craft-color 0.1.0 (git+https://github.com/aiongg/craft-libs?rev=0bac50867b2c4977e492f436029ff0075a14dab5)",
- "craft-frame 0.1.0 (git+https://github.com/aiongg/craft-libs?rev=0bac50867b2c4977e492f436029ff0075a14dab5)",
- "craft-media 0.1.0 (git+https://github.com/aiongg/craft-libs?rev=0bac50867b2c4977e492f436029ff0075a14dab5)",
- "craft-time 0.1.0 (git+https://github.com/aiongg/craft-libs?rev=0bac50867b2c4977e492f436029ff0075a14dab5)",
- "craft-y4m 0.1.0 (git+https://github.com/aiongg/craft-libs?rev=0bac50867b2c4977e492f436029ff0075a14dab5)",
- "serde",
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "craft-media-source"
-version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=33be35625e252cc4f06aa375b3b428521faea37d#33be35625e252cc4f06aa375b3b428521faea37d"
-dependencies = [
- "craft-audio 0.1.0 (git+https://github.com/storytold/craft-libs?rev=33be35625e252cc4f06aa375b3b428521faea37d)",
- "craft-color 0.1.0 (git+https://github.com/storytold/craft-libs?rev=33be35625e252cc4f06aa375b3b428521faea37d)",
- "craft-frame 0.1.0 (git+https://github.com/storytold/craft-libs?rev=33be35625e252cc4f06aa375b3b428521faea37d)",
- "craft-media 0.1.0 (git+https://github.com/storytold/craft-libs?rev=33be35625e252cc4f06aa375b3b428521faea37d)",
- "craft-time 0.1.0 (git+https://github.com/storytold/craft-libs?rev=33be35625e252cc4f06aa375b3b428521faea37d)",
+ "craft-audio",
+ "craft-color",
+ "craft-frame",
+ "craft-media",
+ "craft-time",
+ "craft-y4m",
  "serde",
  "thiserror 2.0.21",
 ]
@@ -1778,17 +1708,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "craft-psd"
-version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=33be35625e252cc4f06aa375b3b428521faea37d#33be35625e252cc4f06aa375b3b428521faea37d"
-dependencies = [
- "encoding_rs",
- "flate2",
- "rayon",
- "thiserror 2.0.21",
-]
-
-[[package]]
 name = "craft-quit"
 version = "0.1.0"
 source = "git+https://github.com/aiongg/craft-libs?rev=0bac50867b2c4977e492f436029ff0075a14dab5#0bac50867b2c4977e492f436029ff0075a14dab5"
@@ -1803,7 +1722,7 @@ dependencies = [
 [[package]]
 name = "craft-raw"
 version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=33be35625e252cc4f06aa375b3b428521faea37d#33be35625e252cc4f06aa375b3b428521faea37d"
+source = "git+https://github.com/aiongg/craft-libs?rev=0bac50867b2c4977e492f436029ff0075a14dab5#0bac50867b2c4977e492f436029ff0075a14dab5"
 dependencies = [
  "craft-tiff",
  "miniz_oxide 0.9.1",
@@ -1834,14 +1753,14 @@ dependencies = [
 [[package]]
 name = "craft-sniff"
 version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=33be35625e252cc4f06aa375b3b428521faea37d#33be35625e252cc4f06aa375b3b428521faea37d"
+source = "git+https://github.com/aiongg/craft-libs?rev=0bac50867b2c4977e492f436029ff0075a14dab5#0bac50867b2c4977e492f436029ff0075a14dab5"
 
 [[package]]
 name = "craft-svg"
 version = "0.1.0"
 source = "git+https://github.com/aiongg/craft-libs?rev=0bac50867b2c4977e492f436029ff0075a14dab5#0bac50867b2c4977e492f436029ff0075a14dab5"
 dependencies = [
- "craft-xml 0.1.0 (git+https://github.com/aiongg/craft-libs?rev=0bac50867b2c4977e492f436029ff0075a14dab5)",
+ "craft-xml",
  "flate2",
  "kurbo",
  "quick-xml 0.41.0",
@@ -1857,14 +1776,6 @@ dependencies = [
 name = "craft-tga"
 version = "0.1.0"
 source = "git+https://github.com/aiongg/craft-libs?rev=0bac50867b2c4977e492f436029ff0075a14dab5#0bac50867b2c4977e492f436029ff0075a14dab5"
-dependencies = [
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "craft-tga"
-version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=33be35625e252cc4f06aa375b3b428521faea37d#33be35625e252cc4f06aa375b3b428521faea37d"
 dependencies = [
  "thiserror 2.0.21",
 ]
@@ -1887,15 +1798,6 @@ dependencies = [
 [[package]]
 name = "craft-tiff"
 version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=33be35625e252cc4f06aa375b3b428521faea37d#33be35625e252cc4f06aa375b3b428521faea37d"
-dependencies = [
- "serde",
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "craft-time"
-version = "0.1.0"
 source = "git+https://github.com/aiongg/craft-libs?rev=0bac50867b2c4977e492f436029ff0075a14dab5#0bac50867b2c4977e492f436029ff0075a14dab5"
 dependencies = [
  "serde",
@@ -1905,7 +1807,7 @@ dependencies = [
 [[package]]
 name = "craft-time"
 version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=33be35625e252cc4f06aa375b3b428521faea37d#33be35625e252cc4f06aa375b3b428521faea37d"
+source = "git+https://github.com/aiongg/craft-libs?rev=0bac50867b2c4977e492f436029ff0075a14dab5#0bac50867b2c4977e492f436029ff0075a14dab5"
 dependencies = [
  "serde",
  "thiserror 2.0.21",
@@ -1916,7 +1818,7 @@ name = "craft-timeline"
 version = "0.1.0"
 source = "git+https://github.com/aiongg/craft-libs?rev=0bac50867b2c4977e492f436029ff0075a14dab5#0bac50867b2c4977e492f436029ff0075a14dab5"
 dependencies = [
- "craft-time 0.1.0 (git+https://github.com/aiongg/craft-libs?rev=0bac50867b2c4977e492f436029ff0075a14dab5)",
+ "craft-time",
  "serde",
  "web-time",
 ]
@@ -1926,8 +1828,8 @@ name = "craft-timeline"
 version = "0.1.0"
 source = "git+https://github.com/storytold/craft-libs?rev=33be35625e252cc4f06aa375b3b428521faea37d#33be35625e252cc4f06aa375b3b428521faea37d"
 dependencies = [
- "craft-time 0.1.0 (git+https://github.com/storytold/craft-libs?rev=33be35625e252cc4f06aa375b3b428521faea37d)",
- "craft-xml 0.1.0 (git+https://github.com/storytold/craft-libs?rev=33be35625e252cc4f06aa375b3b428521faea37d)",
+ "craft-time",
+ "craft-xml",
  "serde",
  "serde_json",
 ]
@@ -2139,18 +2041,7 @@ name = "craft-video"
 version = "0.1.0"
 source = "git+https://github.com/aiongg/craft-libs?rev=0bac50867b2c4977e492f436029ff0075a14dab5#0bac50867b2c4977e492f436029ff0075a14dab5"
 dependencies = [
- "craft-media 0.1.0 (git+https://github.com/aiongg/craft-libs?rev=0bac50867b2c4977e492f436029ff0075a14dab5)",
- "rav1e",
- "rayon",
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "craft-video"
-version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=33be35625e252cc4f06aa375b3b428521faea37d#33be35625e252cc4f06aa375b3b428521faea37d"
-dependencies = [
- "craft-media 0.1.0 (git+https://github.com/storytold/craft-libs?rev=33be35625e252cc4f06aa375b3b428521faea37d)",
+ "craft-media",
  "rav1e",
  "rayon",
  "thiserror 2.0.21",
@@ -2208,27 +2099,9 @@ dependencies = [
 ]
 
 [[package]]
-name = "craft-xml"
-version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=33be35625e252cc4f06aa375b3b428521faea37d#33be35625e252cc4f06aa375b3b428521faea37d"
-dependencies = [
- "quick-xml 0.41.0",
- "serde",
- "thiserror 2.0.21",
-]
-
-[[package]]
 name = "craft-y4m"
 version = "0.1.0"
 source = "git+https://github.com/aiongg/craft-libs?rev=0bac50867b2c4977e492f436029ff0075a14dab5#0bac50867b2c4977e492f436029ff0075a14dab5"
-dependencies = [
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "craft-y4m"
-version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=33be35625e252cc4f06aa375b3b428521faea37d#33be35625e252cc4f06aa375b3b428521faea37d"
 dependencies = [
  "thiserror 2.0.21",
 ]
@@ -2688,12 +2561,12 @@ dependencies = [
 name = "effectcraft-export"
 version = "0.25.1"
 dependencies = [
- "craft-audio 0.1.0 (git+https://github.com/aiongg/craft-libs?rev=0bac50867b2c4977e492f436029ff0075a14dab5)",
- "craft-exr 0.1.0 (git+https://github.com/aiongg/craft-libs?rev=0bac50867b2c4977e492f436029ff0075a14dab5)",
+ "craft-audio",
+ "craft-exr",
  "craft-gif",
- "craft-media 0.1.0 (git+https://github.com/aiongg/craft-libs?rev=0bac50867b2c4977e492f436029ff0075a14dab5)",
- "craft-tga 0.1.0 (git+https://github.com/aiongg/craft-libs?rev=0bac50867b2c4977e492f436029ff0075a14dab5)",
- "craft-video 0.1.0 (git+https://github.com/aiongg/craft-libs?rev=0bac50867b2c4977e492f436029ff0075a14dab5)",
+ "craft-media",
+ "craft-tga",
+ "craft-video",
  "effectcraft-color",
  "effectcraft-effects",
  "effectcraft-keyframe",
@@ -2854,17 +2727,17 @@ dependencies = [
 name = "effectcraft-media"
 version = "0.25.1"
 dependencies = [
- "craft-audio 0.1.0 (git+https://github.com/aiongg/craft-libs?rev=0bac50867b2c4977e492f436029ff0075a14dab5)",
- "craft-color 0.1.0 (git+https://github.com/aiongg/craft-libs?rev=0bac50867b2c4977e492f436029ff0075a14dab5)",
+ "craft-audio",
+ "craft-color",
  "craft-docpath",
- "craft-dpx 0.1.0 (git+https://github.com/aiongg/craft-libs?rev=0bac50867b2c4977e492f436029ff0075a14dab5)",
- "craft-exr 0.1.0 (git+https://github.com/aiongg/craft-libs?rev=0bac50867b2c4977e492f436029ff0075a14dab5)",
- "craft-frame 0.1.0 (git+https://github.com/aiongg/craft-libs?rev=0bac50867b2c4977e492f436029ff0075a14dab5)",
+ "craft-dpx",
+ "craft-exr",
+ "craft-frame",
  "craft-gif",
- "craft-media 0.1.0 (git+https://github.com/aiongg/craft-libs?rev=0bac50867b2c4977e492f436029ff0075a14dab5)",
- "craft-media-source 0.1.0 (git+https://github.com/aiongg/craft-libs?rev=0bac50867b2c4977e492f436029ff0075a14dab5)",
- "craft-time 0.1.0 (git+https://github.com/aiongg/craft-libs?rev=0bac50867b2c4977e492f436029ff0075a14dab5)",
- "craft-video 0.1.0 (git+https://github.com/aiongg/craft-libs?rev=0bac50867b2c4977e492f436029ff0075a14dab5)",
+ "craft-media",
+ "craft-media-source",
+ "craft-time",
+ "craft-video",
  "craft-webp",
  "effectcraft-color",
  "effectcraft-effects",
@@ -2969,7 +2842,7 @@ name = "effectcraft-psd"
 version = "0.25.1"
 dependencies = [
  "craft-codepage",
- "craft-psd 0.1.0 (git+https://github.com/aiongg/craft-libs?rev=0bac50867b2c4977e492f436029ff0075a14dab5)",
+ "craft-psd",
  "miniz_oxide 0.9.1",
 ]
 
@@ -2977,7 +2850,7 @@ dependencies = [
 name = "effectcraft-raster"
 version = "0.25.1"
 dependencies = [
- "craft-exr 0.1.0 (git+https://github.com/aiongg/craft-libs?rev=0bac50867b2c4977e492f436029ff0075a14dab5)",
+ "craft-exr",
  "effectcraft-color",
  "effectcraft-geom",
  "rayon",
@@ -3581,7 +3454,7 @@ name = "filmcraft-bitstream"
 version = "0.20.1"
 source = "git+https://github.com/storytold/filmcraft?rev=e7345f6e04a9bb921c2613a6aa92d162edf39b3b#e7345f6e04a9bb921c2613a6aa92d162edf39b3b"
 dependencies = [
- "craft-media 0.1.0 (git+https://github.com/storytold/craft-libs?rev=33be35625e252cc4f06aa375b3b428521faea37d)",
+ "craft-media",
 ]
 
 [[package]]
@@ -3597,11 +3470,11 @@ name = "filmcraft-codecs"
 version = "0.20.1"
 source = "git+https://github.com/storytold/filmcraft?rev=e7345f6e04a9bb921c2613a6aa92d162edf39b3b#e7345f6e04a9bb921c2613a6aa92d162edf39b3b"
 dependencies = [
- "craft-audio 0.1.0 (git+https://github.com/storytold/craft-libs?rev=33be35625e252cc4f06aa375b3b428521faea37d)",
+ "craft-audio",
  "craft-jpeg",
- "craft-media 0.1.0 (git+https://github.com/storytold/craft-libs?rev=33be35625e252cc4f06aa375b3b428521faea37d)",
- "craft-video 0.1.0 (git+https://github.com/storytold/craft-libs?rev=33be35625e252cc4f06aa375b3b428521faea37d)",
- "craft-y4m 0.1.0 (git+https://github.com/storytold/craft-libs?rev=33be35625e252cc4f06aa375b3b428521faea37d)",
+ "craft-media",
+ "craft-video",
+ "craft-y4m",
  "filmcraft-bitstream",
  "filmcraft-color",
  "filmcraft-frame",
@@ -3661,7 +3534,7 @@ version = "0.20.1"
 source = "git+https://github.com/storytold/filmcraft?rev=e7345f6e04a9bb921c2613a6aa92d162edf39b3b#e7345f6e04a9bb921c2613a6aa92d162edf39b3b"
 dependencies = [
  "craft-aaf",
- "craft-audio 0.1.0 (git+https://github.com/storytold/craft-libs?rev=33be35625e252cc4f06aa375b3b428521faea37d)",
+ "craft-audio",
  "craft-timeline 0.1.0 (git+https://github.com/storytold/craft-libs?rev=33be35625e252cc4f06aa375b3b428521faea37d)",
  "filmcraft-cfb",
  "filmcraft-color",
@@ -3680,7 +3553,7 @@ name = "filmcraft-isobmff"
 version = "0.20.1"
 source = "git+https://github.com/storytold/filmcraft?rev=e7345f6e04a9bb921c2613a6aa92d162edf39b3b#e7345f6e04a9bb921c2613a6aa92d162edf39b3b"
 dependencies = [
- "craft-media 0.1.0 (git+https://github.com/storytold/craft-libs?rev=33be35625e252cc4f06aa375b3b428521faea37d)",
+ "craft-media",
 ]
 
 [[package]]
@@ -3688,7 +3561,7 @@ name = "filmcraft-matroska"
 version = "0.20.1"
 source = "git+https://github.com/storytold/filmcraft?rev=e7345f6e04a9bb921c2613a6aa92d162edf39b3b#e7345f6e04a9bb921c2613a6aa92d162edf39b3b"
 dependencies = [
- "craft-media 0.1.0 (git+https://github.com/storytold/craft-libs?rev=33be35625e252cc4f06aa375b3b428521faea37d)",
+ "craft-media",
 ]
 
 [[package]]
@@ -3696,15 +3569,15 @@ name = "filmcraft-media"
 version = "0.20.1"
 source = "git+https://github.com/storytold/filmcraft?rev=e7345f6e04a9bb921c2613a6aa92d162edf39b3b#e7345f6e04a9bb921c2613a6aa92d162edf39b3b"
 dependencies = [
- "craft-audio 0.1.0 (git+https://github.com/storytold/craft-libs?rev=33be35625e252cc4f06aa375b3b428521faea37d)",
- "craft-dpx 0.1.0 (git+https://github.com/storytold/craft-libs?rev=33be35625e252cc4f06aa375b3b428521faea37d)",
- "craft-exr 0.1.0 (git+https://github.com/storytold/craft-libs?rev=33be35625e252cc4f06aa375b3b428521faea37d)",
+ "craft-audio",
+ "craft-dpx",
+ "craft-exr",
  "craft-hdr",
- "craft-media 0.1.0 (git+https://github.com/storytold/craft-libs?rev=33be35625e252cc4f06aa375b3b428521faea37d)",
- "craft-media-source 0.1.0 (git+https://github.com/storytold/craft-libs?rev=33be35625e252cc4f06aa375b3b428521faea37d)",
- "craft-psd 0.1.0 (git+https://github.com/storytold/craft-libs?rev=33be35625e252cc4f06aa375b3b428521faea37d)",
+ "craft-media",
+ "craft-media-source",
+ "craft-psd",
  "craft-sniff",
- "craft-tga 0.1.0 (git+https://github.com/storytold/craft-libs?rev=33be35625e252cc4f06aa375b3b428521faea37d)",
+ "craft-tga",
  "craft-tiff",
  "filmcraft-color",
  "filmcraft-dng",

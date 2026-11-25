@@ -235,6 +235,29 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 
+# filmcraft-media pins storytold craft-libs; the app needs one copy of each crate.
+[patch."https://github.com/storytold/craft-libs"]
+craft-aaf = { git = "https://github.com/aiongg/craft-libs", rev = "0bac50867b2c4977e492f436029ff0075a14dab5", version = "=0.1.0" }
+craft-audio = { git = "https://github.com/aiongg/craft-libs", rev = "0bac50867b2c4977e492f436029ff0075a14dab5", version = "=0.1.0" }
+craft-cfb = { git = "https://github.com/aiongg/craft-libs", rev = "0bac50867b2c4977e492f436029ff0075a14dab5", version = "=0.1.0" }
+craft-color = { git = "https://github.com/aiongg/craft-libs", rev = "0bac50867b2c4977e492f436029ff0075a14dab5", version = "=0.1.0" }
+craft-dpx = { git = "https://github.com/aiongg/craft-libs", rev = "0bac50867b2c4977e492f436029ff0075a14dab5", version = "=0.1.0" }
+craft-exr = { git = "https://github.com/aiongg/craft-libs", rev = "0bac50867b2c4977e492f436029ff0075a14dab5", version = "=0.1.0" }
+craft-frame = { git = "https://github.com/aiongg/craft-libs", rev = "0bac50867b2c4977e492f436029ff0075a14dab5", version = "=0.1.0" }
+craft-hdr = { git = "https://github.com/aiongg/craft-libs", rev = "0bac50867b2c4977e492f436029ff0075a14dab5", version = "=0.1.0" }
+craft-jpeg = { git = "https://github.com/aiongg/craft-libs", rev = "0bac50867b2c4977e492f436029ff0075a14dab5", version = "=0.1.0" }
+craft-media = { git = "https://github.com/aiongg/craft-libs", rev = "0bac50867b2c4977e492f436029ff0075a14dab5", version = "=0.1.0" }
+craft-media-source = { git = "https://github.com/aiongg/craft-libs", rev = "0bac50867b2c4977e492f436029ff0075a14dab5", version = "=0.1.0" }
+craft-psd = { git = "https://github.com/aiongg/craft-libs", rev = "0bac50867b2c4977e492f436029ff0075a14dab5", version = "=0.1.0" }
+craft-raw = { git = "https://github.com/aiongg/craft-libs", rev = "0bac50867b2c4977e492f436029ff0075a14dab5", version = "=0.1.0" }
+craft-sniff = { git = "https://github.com/aiongg/craft-libs", rev = "0bac50867b2c4977e492f436029ff0075a14dab5", version = "=0.1.0" }
+craft-tga = { git = "https://github.com/aiongg/craft-libs", rev = "0bac50867b2c4977e492f436029ff0075a14dab5", version = "=0.1.0" }
+craft-tiff = { git = "https://github.com/aiongg/craft-libs", rev = "0bac50867b2c4977e492f436029ff0075a14dab5", version = "=0.1.0" }
+craft-time = { git = "https://github.com/aiongg/craft-libs", rev = "0bac50867b2c4977e492f436029ff0075a14dab5", version = "=0.1.0" }
+craft-video = { git = "https://github.com/aiongg/craft-libs", rev = "0bac50867b2c4977e492f436029ff0075a14dab5", version = "=0.1.0" }
+craft-xml = { git = "https://github.com/aiongg/craft-libs", rev = "0bac50867b2c4977e492f436029ff0075a14dab5", version = "=0.1.0" }
+craft-y4m = { git = "https://github.com/aiongg/craft-libs", rev = "0bac50867b2c4977e492f436029ff0075a14dab5", version = "=0.1.0" }
+
 [patch.crates-io]
 hayro-syntax = { git = "https://github.com/aiongg/craft-libs", rev = "0bac50867b2c4977e492f436029ff0075a14dab5", version = "=0.7.2" }
 hayro-jbig2 = { git = "https://github.com/aiongg/craft-libs", rev = "0bac50867b2c4977e492f436029ff0075a14dab5", version = "=0.3.0" }
