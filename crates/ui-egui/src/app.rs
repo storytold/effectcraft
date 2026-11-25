@@ -100,6 +100,8 @@ impl EffectcraftApp {
             gpu_failure_applied: None,
             footage_watcher: None,
             footage_watch_key: None,
+            project_watcher: None,
+            project_reload_pending: None,
             lut_watcher: None,
             lut_generation: effectcraft_engine::lut_reload::generation(),
             purges: 0,

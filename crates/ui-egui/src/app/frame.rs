@@ -677,7 +677,9 @@ impl EffectcraftApp {
     fn tick_autosave(&mut self, ctx: &egui::Context) {
         // Monotonic app time: a wall-clock jump must not skip or repeat an auto-save.
         let now = self.now;
-        if let Some(Err(e)) = self.session.autosave_tick(now) {
+        if self.project_reload_pending.is_none()
+            && let Some(Err(e)) = self.session.autosave_tick(now)
+        {
             self.ui.status = e.to_string();
         }
         if self.session.prefs.auto_save.enabled {
@@ -701,6 +703,7 @@ impl EffectcraftApp {
             ctx.request_repaint_after(std::time::Duration::from_secs(10));
         }
         self.tick_footage_reload(ctx);
+        self.tick_project_reload(ctx);
         self.tick_lut_files(ctx);
     }
 
@@ -750,6 +753,50 @@ impl EffectcraftApp {
         if self.session.revision != before {
             self.footage_watch_key = Some((self.session.revision, self.session.prefs.import.auto_reload_footage.clone(), self.session.disk_cache.is_some()));
             watcher.update(&self.session);
+        }
+    }
+
+    /// The open project's file changed outside this process. Reload it into the same session
+    /// when it is safe, so an agent's CLI/MCP edits show without a restart. The watcher only
+    /// stamps the file; `file.revert` reuses the ordinary open path and `replace_project`.
+    fn tick_project_reload(&mut self, ctx: &egui::Context) {
+        use effectcraft_engine::project_reload;
+        if self.project_watcher.is_none() {
+            let wake = ctx.clone();
+            self.project_watcher = project_reload::Watcher::start(self.session.services.clone(), move || wake.request_repaint());
+        }
+        let Some(watcher) = self.project_watcher.as_mut() else { return };
+        watcher.set_focused(self.focused);
+        watcher.set_path(self.session.path.clone());
+        if self.project_reload_pending.is_none()
+            && let Some(change) = watcher.take()
+        {
+            if Some(&change.0) == self.session.path.as_ref() {
+                self.project_reload_pending = Some(change);
+            }
+        }
+        let Some((path, stamp)) = self.project_reload_pending.clone() else { return };
+        if Some(&path) != self.session.path.as_ref() {
+            self.project_reload_pending = None;
+            return;
+        }
+        if self.session.project_stamp == Some(stamp) {
+            // A write we made ourselves is already in memory; don't reload it back.
+            watcher.acknowledge(Some(stamp));
+            self.project_reload_pending = None;
+            return;
+        }
+        if self.session.is_dirty() || self.session.script_ui.render_host.is_some() || self.session.render_job.is_some() {
+            self.ui.status = "Project changed on disk. Save your work, then File ▸ Revert to load it.".into();
+            return;
+        }
+        match self.session.execute("file.revert", serde_json::json!({})) {
+            Ok(_) => {
+                self.ui.status = format!("Reloaded {path} changed on disk");
+                watcher.acknowledge(self.session.project_stamp);
+                self.project_reload_pending = None;
+            }
+            Err(e) => self.ui.status = e.to_string(),
         }
     }
 }

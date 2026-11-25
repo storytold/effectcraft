@@ -239,6 +239,7 @@ impl Session {
         self.history = History::default();
         self.state = EditorState { snapping: true, view_layout: 1, ..Default::default() };
         self.path = path;
+        self.project_stamp = self.path.as_deref().and_then(|p| self.services.stamp(p));
         self.bump();
         self.mark_saved();
         // (channel selection can't be animated, as in After Effects: a document that animated it

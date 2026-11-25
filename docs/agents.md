@@ -14,6 +14,12 @@ limits. This guard does not change ordinary-file overwrite defaults or add anoth
 | **CLI** (`effectcraft-cli exec/get/set/...`) | one-shot scripting and CI; JSON output with `--json` | no |
 | **Control channel** (`effectcraft --control 9877`) | driving and seeing the live UI; see [control-protocol.md](control-protocol.md) | yes |
 
+While the desktop app is open, a `.ecproj` saved by another process (CLI, headless MCP, an editor)
+is detected by the project watcher (1 s while the window is in front, 5 s otherwise) and reloaded
+into the running session once it is clean and idle. Unsaved GUI work is never discarded: the change
+is held and the status line asks for File ▸ Revert. Prefer `--bridge` for agent edits so they apply
+directly to the live session instead of going through a file round-trip.
+
 ## MCP setup
 
 Build once with `cargo build --release -p effectcraft-cli`, then register the server. For Claude
