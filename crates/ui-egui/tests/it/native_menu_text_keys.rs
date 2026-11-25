@@ -1,6 +1,7 @@
 //! The macOS menu bar takes the Edit menu's key equivalents before any window sees them: while a
 //! text field has the keyboard, in a docked panel or a floating panel's own OS window, they edit
-//! the field and leave the project alone, and the items stay enabled.
+//! the field and leave the project alone, and the items stay enabled. The keys a floating panel's
+//! window hands to the main window.
 
 use effectcraft_engine::Session;
 use effectcraft_ui_egui::EffectcraftApp;
@@ -188,4 +189,47 @@ fn edit_menu_keys_edit_a_docked_text_field() {
     assert_eq!(h.state().ui.project_search, "", "Undo undoes the paste");
     menu(&mut h, "edit.copy");
     assert_eq!(project(h.state()), before, "the project is untouched");
+}
+
+/// Only the keys go from a floating panel's window to the main window, and only while no widget
+/// there has the keyboard: its pointer, wheel and typed text are its own.
+#[test]
+fn a_panel_window_hands_over_only_the_keys_no_widget_has() {
+    use egui::Key;
+    let mut app = app();
+    menus::invoke(&mut app, &egui::Context::default(), "window.panelWindow", json!({"panel": "Project", "window": true})).unwrap();
+    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app);
+    let host = native_windows(&mut h);
+    let handed = |h: &mut Harness<'_, EffectcraftApp>, events: &[Event]| {
+        let hook = |h: &mut Harness<'_, EffectcraftApp>| {
+            let ctx = h.ctx.clone();
+            let mut raw = egui::RawInput::default();
+            eframe::App::raw_input_hook(h.state_mut(), &ctx, &mut raw);
+            raw.events
+        };
+        hook(h);
+        for event in events {
+            to_window(&host, event.clone());
+        }
+        h.step();
+        hook(h)
+    };
+    let key = |key| Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE };
+    let at = center(&h, "project.search");
+    let wheel = Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: vec2(0.0, 10.0),
+        modifiers: Modifiers::NONE,
+        phase: egui::TouchPhase::Move,
+        source: egui::MouseWheelSource::Wheel,
+    };
+    let typed = [Event::PointerMoved(at), wheel, key(Key::J), Event::Text("j".into())];
+    assert_eq!(handed(&mut h, &typed), vec![key(Key::J)], "the key alone");
+    click(&mut h, at, Some(&host));
+    h.run_steps(2);
+    assert_eq!(handed(&mut h, &typed), Vec::new(), "the search field has the keyboard");
+    to_window(&host, key(Key::Tab));
+    h.run_steps(3);
+    assert_ne!(native_menu::text_field_window(&h.ctx), host.borrow().window, "Tab moved on from the field");
+    assert_eq!(handed(&mut h, &typed), Vec::new(), "another widget has the keyboard");
 }

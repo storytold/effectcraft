@@ -401,7 +401,7 @@ impl EffectcraftApp {
         let ime = NativeIme::new(&shown.layout().floating, &self.live_dock.windows, &self.unpublished_viewports);
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(body).id_salt("effectcraft-dock-area"));
         child.set_clip_rect(body.intersect(ui.clip_rect()));
-        let mut panels = EffectPanels { app: &mut *self, tokens: t, locks: Vec::new(), menu: None, bodies: Vec::new(), ime };
+        let mut panels = EffectPanels { app: &mut *self, tokens: t, locks: Vec::new(), menu: None, bodies: Vec::new(), ime, focused_windows: Vec::new() };
         let output = {
             let mut area = DockArea::new("Panels", Bind::given(Arc::clone(&shown)), &specs, &mut panels, dock_config());
             if let Some(panel) = maximized {
@@ -415,7 +415,7 @@ impl EffectcraftApp {
             }
             area.show(&mut child)
         };
-        let EffectPanels { locks, menu, bodies, ime, .. } = panels;
+        let EffectPanels { locks, menu, bodies, ime, focused_windows, .. } = panels;
         self.live_dock.specs = specs;
         let DockAreaOutput { actions, requested, events, focused, pressed, picked, error, float_space, windows, window_files, sources, .. } = output;
         self.dock_rects = bodies;
@@ -429,7 +429,7 @@ impl EffectcraftApp {
         if float_space.is_some() {
             self.live_dock.float_space = float_space;
         }
-        self.forward_window_input(&ctx, &windows, window_files);
+        self.forward_window_input(&ctx, &windows, &focused_windows, window_files);
         self.live_dock.windows = windows;
         // A press in a panel's body, a tab picked, or key focus moving to a group focuses that panel.
         let moved = focused != self.live_dock.focused;
@@ -491,15 +491,22 @@ impl EffectcraftApp {
         panels::panel_menu_popup(self, ui);
     }
 
-    /// Keys and dropped files that reach a floating panel's own OS window go to the main
-    /// window's next frame ([`crate::EffectcraftApp::raw_input_hook`]), so its shortcuts and
-    /// file import handle them. Text is not forwarded, and no key is while a text field has the
-    /// keyboard.
-    fn forward_window_input(&mut self, ctx: &egui::Context, windows: &[(PanelKind, egui::ViewportId)], files: Vec<WindowFiles<PanelKind>>) {
-        let typing = crate::native_menu::text_field_window(ctx).is_some();
-        for (_, viewport) in windows {
-            let events = ctx.input_for(*viewport, |i| i.events.clone());
-            self.forwarded.events.extend(events.into_iter().filter(|event| !typing && !matches!(event, egui::Event::Text(_) | egui::Event::Ime(_))));
+    /// Keys, clipboard events and dropped files that reach a floating panel's own OS window go to
+    /// the main window's next frame ([`crate::EffectcraftApp::raw_input_hook`]), so its shortcuts
+    /// and file import handle them. No key or clipboard event goes from a window of `focused`
+    /// (one of its widgets has the keyboard), or while a text field has the keyboard.
+    fn forward_window_input(
+        &mut self,
+        ctx: &egui::Context,
+        windows: &[(PanelKind, egui::ViewportId)],
+        focused: &[egui::ViewportId],
+        files: Vec<WindowFiles<PanelKind>>,
+    ) {
+        if crate::native_menu::text_field_window(ctx).is_none() {
+            for (_, viewport) in windows.iter().filter(|(_, viewport)| !focused.contains(viewport)) {
+                let events = ctx.input_for(*viewport, |i| i.events.iter().filter(|event| forwards(event)).cloned().collect::<Vec<_>>());
+                self.forwarded.events.extend(events);
+            }
         }
         if handed_over_to_the_timeline(files.iter().map(|drop| (drop.panel, !drop.files.is_empty()))) {
             self.forwarded.dropped_on_timeline = true;
@@ -695,6 +702,8 @@ struct EffectPanels<'a> {
     bodies: Vec<(PanelKind, Rect)>,
     /// Where each native window's IME descriptor is set up and published.
     ime: NativeIme,
+    /// The native windows in which a widget had the keyboard after their last body.
+    focused_windows: Vec<egui::ViewportId>,
 }
 
 impl DockPanels<PanelKind> for EffectPanels<'_> {
@@ -718,6 +727,12 @@ impl DockPanels<PanelKind> for EffectPanels<'_> {
         // last body, at that window's coordinates.
         if native && self.ime.menu_turn(viewport) {
             panels::panel_menu_area(self.app, ui);
+        }
+        if native {
+            self.focused_windows.retain(|window| *window != viewport);
+            if crate::framework::widget_has_keyboard(ui.ctx()) {
+                self.focused_windows.push(viewport);
+            }
         }
         // The body fills its frame; allocating it lets a floated panel keep its full size.
         ui.allocate_rect(rect, Sense::hover());
@@ -880,6 +895,12 @@ fn window_bodies(window: &Floating<PanelKind>) -> usize {
         return 0;
     }
     window.groups().iter().filter(|group| !group.minimized && group.active_panel().is_some()).count()
+}
+
+/// Whether a floating panel's own window hands `event` to the main window. Every other event is
+/// the window's own: typed text is its panels', and the pointer is at its coordinates.
+fn forwards(event: &egui::Event) -> bool {
+    matches!(event, egui::Event::Key { .. } | egui::Event::Copy | egui::Event::Cut | egui::Event::Paste(_))
 }
 
 /// Whether a handed-over *drop* named the Timeline. Only a drop with files counts, so a window
