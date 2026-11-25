@@ -24,7 +24,7 @@ function __begin(t, v, c, l, path, uid, idx, fd, ti, tt, sv) {
   time = t;
   // A path's own value arrives as [points, inTangents, outTangents, closed], the one list that
   // ends in a boolean; scripts read it as a Path, like every other path value (#4098).
-  value = Array.isArray(v) && v.length === 4 && typeof v[3] === 'boolean' ? new __Path(v[0], v[1], v[2], v[3]) : v;
+  value = Array.isArray(v) && v.length === 4 && typeof v[3] === 'boolean' ? new __Path(v[0], v[1], v[2], v[3], true) : v;
   textIndex = ti;
   textTotal = tt;
   selectorValue = sv;
@@ -428,8 +428,10 @@ function hexToRgb(hex) {
 // ---------------------------------------------------------------------------------------------
 // Paths.
 
-function __Path(pts, ins, outs, closed) {
+function __Path(pts, ins, outs, closed, own) {
   this.__path = true;
+  // The property's own value, so returning it untouched keeps what a script can't see (feather).
+  this.__own = own === true;
   this.__pts = pts; this.__in = ins; this.__out = outs; this.__closed = !!closed;
 }
 __Path.prototype.points = function () { return this.__pts; };

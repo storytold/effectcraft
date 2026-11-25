@@ -4,7 +4,7 @@ mod deep_nesting;
 mod fuzz;
 
 use effectcraft_color::Label;
-use effectcraft_keyframe::{Keyframe, ShapePath, TextDoc, Value};
+use effectcraft_keyframe::{FeatherPoint, Keyframe, ShapePath, TextDoc, Value};
 use effectcraft_project::build::{self, Ids};
 use effectcraft_project::{Comp, Expression, ItemId, ItemKind, Layer, LayerId, LayerSource, Marker, MaskMode, Project, PropGroup, Solid};
 use effectcraft_render::{EvalCtx, NoFootage, RenderOpts, Renderer};
@@ -890,6 +890,26 @@ fn path_rigs_read_properties_the_paths_own_closed_flag_and_the_layer_surface() {
     // A layer's surface is where `fromComp` already lands, for 2D and 3D layers alike.
     assert_eq!(f.pos("fromCompToSurface([50, 40])", 0.0), f.pos("fromComp([50, 40])", 0.0));
     assert_eq!(f.pos("thisComp.layer(\"B\").fromCompToSurface([50, 40], 0.5)", 0.0), f.pos("thisComp.layer(\"B\").fromComp([50, 40], 0.5)", 0.0));
+}
+
+#[test]
+fn a_path_expression_returning_its_own_value_keeps_the_mask_feather() {
+    let mut f = fx();
+    let Value::Path(mut feathered) = f.layer_mut(f.a).props.prop_mut("masks/#1/path").unwrap().value.clone() else { panic!("not a path") };
+    feathered.feather = vec![FeatherPoint { segment: 1, t: 0.5, radius: 8.0, tension: 0.0 }];
+    f.layer_mut(f.a).props.prop_mut("masks/#1/path").unwrap().value = Value::Path(feathered.clone());
+    let path = |text: &str| match f.ev(f.a, "masks/#1/path", text, 0.0) {
+        Ok(Value::Path(p)) => p,
+        other => panic!("{text}: {other:?}"),
+    };
+    for text in ["value", "thisProperty", "thisProperty.value", "valueAtTime(time)"] {
+        assert_eq!(path(text), feathered, "{text}");
+    }
+    // A path the script builds, or the own value's points edited in place, has none.
+    assert!(path("createPath(value.points(), value.inTangents(), value.outTangents(), true)").feather.is_empty());
+    let moved = path("value.points()[0][0] += 5; value");
+    assert_ne!(moved.vertices, feathered.vertices);
+    assert!(moved.feather.is_empty());
 }
 
 #[test]
