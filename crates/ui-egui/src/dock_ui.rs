@@ -637,7 +637,10 @@ fn dock_style(ui: &egui::Ui, t: &Tokens) -> DockStyle {
     style.tab_height = t.tab_h;
     style.gap = t.gap;
     style.background = t.panel_bg;
-    style.tab_background = t.panel_bg;
+    // The active tab keeps the panel's own background, so it joins the panel below it; the others sit on
+    // a darker one, halfway between the header and the window background. With one colour for both, only
+    // the text colour told them apart (#3728).
+    style.tab_background = t.header_bg.lerp_to_gamma(t.app_bg, 0.5);
     style.active_background = t.panel_bg;
     style.floating_background = t.panel_bg;
     style.text = t.tab_text_active;
@@ -928,6 +931,21 @@ fn handed_over_to_the_timeline(drops: impl Iterator<Item = (PanelKind, bool)>) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The active tab is drawn on a different background from the others, in every theme (#3728).
+    #[test]
+    fn the_active_tab_has_its_own_background() {
+        for kind in [crate::theme::ThemeKind::Dark, crate::theme::ThemeKind::Darker, crate::theme::ThemeKind::Light] {
+            let t = Tokens::for_kind(kind);
+            let ctx = egui::Context::default();
+            let mut style = None;
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| style = Some(dock_style(ui, &t)));
+            out.textures_delta.clear();
+            let style = style.expect("the style is built in the pass");
+            assert_ne!(style.tab_background, style.active_background, "{kind:?}: the active tab must stand out");
+            assert_eq!(style.active_background, t.panel_bg, "{kind:?}: the active tab joins the panel");
+        }
+    }
 
     /// A drop handed over by a floating window says which panel it landed on; only the Timeline
     /// turns it into a layer instead of a project item. A window that only saw the file hover over
