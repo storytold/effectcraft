@@ -19,7 +19,7 @@ use craft_ui::runtime::commands::{CommandInput, CommandSet as _, NavCommand, Qui
 use craft_ui::runtime::env::{RootEnv, Scale};
 use craft_ui::runtime::focus::{EditSet, KeyUse};
 use craft_ui::runtime::frame::{FrameInput, FrameOutput};
-use craft_ui::runtime::keys::{Intent, with_window_intents};
+use craft_ui::runtime::keys::{Intent, escape_mods, with_window_intents};
 use craft_ui::shell::embed::{self, CloseDecision};
 use craft_window::system::WindowSystem;
 use egui::ViewportId;
@@ -173,8 +173,9 @@ pub(crate) fn widget_has_keyboard(ctx: &egui::Context) -> bool {
 /// EffectCraft reads it.
 pub(crate) fn return_window_keys(ctx: &egui::Context) {
     if take_window_intent(ctx, Intent::Cancel) {
+        let held = escape_mods(ctx).unwrap_or_default();
+        let modifiers = egui::Modifiers { shift: held.shift, alt: held.alt, ..Default::default() };
         ctx.input_mut(|i| {
-            let modifiers = i.modifiers;
             i.events.insert(0, egui::Event::Key { key: egui::Key::Escape, physical_key: Some(egui::Key::Escape), pressed: true, repeat: false, modifiers });
         });
     }
