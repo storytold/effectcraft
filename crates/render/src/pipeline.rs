@@ -607,7 +607,22 @@ impl<'a> Renderer<'a> {
     /// Render a composition at comp time `t` (transparent background, comp size × scale).
     /// Top-level frames go to the GPU when [`Self::active_accel`] is set and handles them.
     pub fn comp_frame(&self, comp_id: ItemId, t: Tick) -> Image {
-        self.comp_frame_with(comp_id, t, false, |a| Ok::<_, std::convert::Infallible>(a.comp_frame(self, comp_id, t))).unwrap_or_else(|never| match never {})
+        self.comp_frame_noting_gpu_loss(comp_id, t).0
+    }
+
+    /// [`Self::comp_frame`], and whether the CPU rendered it because the accelerator declined it
+    /// while no longer [available](Accelerator::available). Decided when the accelerator answers:
+    /// a frame it rendered never counts, whatever another frame does to the device afterwards.
+    pub fn comp_frame_noting_gpu_loss(&self, comp_id: ItemId, t: Tick) -> (Image, bool) {
+        let lost = std::cell::Cell::new(false);
+        let img = self
+            .comp_frame_with(comp_id, t, false, |a| {
+                let img = a.comp_frame(self, comp_id, t);
+                lost.set(img.is_none() && !a.available());
+                Ok::<_, std::convert::Infallible>(img)
+            })
+            .unwrap_or_else(|never| match never {});
+        (img, lost.get())
     }
 
     /// Render a frame, validating the accelerated attempt before starting any CPU fallback.

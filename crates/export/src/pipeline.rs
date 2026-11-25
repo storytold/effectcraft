@@ -581,9 +581,10 @@ impl<'a> Cx<'a> {
         r
     }
 
-    async fn render_at(&self, t: Tick, on: crate::JobRenderer) -> Image {
+    /// A frame at `t`, and whether the CPU rendered it because the GPU was lost meanwhile.
+    async fn render_at(&self, t: Tick, on: crate::JobRenderer) -> (Image, bool) {
         // With deferred GPU readbacks (a browser worker) the frame renders in passes.
-        effectcraft_render::passes::comp_frame(&self.renderer_on(on), self.job.comp, t).await
+        effectcraft_render::passes::comp_frame_noting_gpu_loss(&self.renderer_on(on), self.job.comp, t).await
     }
 
     /// Whether frames render in passes (an accelerator with deferred readbacks).
@@ -853,20 +854,25 @@ impl<'a> Cx<'a> {
     async fn frame_async_on(&self, comp: &Comp, i: u64, on: crate::JobRenderer) -> Image {
         let t0 = Instant::now();
         let gpu = on == crate::JobRenderer::Gpu && self.job.accel.is_some();
-        let img = match self.job.settings.sample(comp, i) {
+        let (img, lost) = match self.job.settings.sample(comp, i) {
             FrameSample::Progressive(t) => self.render_at(t, on).await,
             FrameSample::Fields { first, second, upper_first } => {
-                let a = self.render_at(first, on).await;
-                if second == first { a } else { interleave(&a, &self.render_at(second, on).await, upper_first) }
+                let (a, lost) = self.render_at(first, on).await;
+                if second == first {
+                    (a, lost)
+                } else {
+                    let (b, lost_b) = self.render_at(second, on).await;
+                    (interleave(&a, &b, upper_first), lost || lost_b)
+                }
             }
         };
         if gpu {
             self.gpu_rendered.store(true, std::sync::atomic::Ordering::Relaxed);
         }
 
-        // A GPU job's frame that ends with the GPU gone fell back to the CPU (a probe that picks the CPU drops its GPU frames)
+        // Counted as the frame was rendered; a probe that picks the CPU drops its GPU frames
         let chose_gpu = self.choice().is_some_and(|c| c.renderer == crate::JobRenderer::Gpu);
-        if gpu && chose_gpu && self.job.accel.is_some_and(|a| !a.available()) {
+        if lost && chose_gpu {
             self.gpu_fallback_frames.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         let img = self.crop_resize(img);
@@ -1517,17 +1523,28 @@ mod tests {
         );
     }
 
-    /// An accelerator whose device is lost while it renders frame 1: it is unavailable from then on.
-    struct LostAtFrameOne(AtomicBool);
-    impl effectcraft_render::Accelerator for LostAtFrameOne {
+    /// An accelerator that renders the frames before `gpu_until`, each only once another frame
+    /// has lost the device, and loses the device on the first later frame (which falls back).
+    struct LostWhileRendering {
+        lost: AtomicBool,
+        gpu_until: Tick,
+    }
+    impl effectcraft_render::Accelerator for LostWhileRendering {
         fn name(&self) -> String {
             "lost".into()
         }
         fn comp_frame(&self, _r: &Renderer, _comp: effectcraft_project::ItemId, t: Tick) -> Option<Image> {
-            if t > Tick(0) {
-                self.0.store(true, Ordering::Relaxed);
+            if t >= self.gpu_until {
+                self.lost.store(true, Ordering::Relaxed);
+                return None;
             }
-            None
+
+            // Bounded: with a single render thread the sibling never runs meanwhile
+            let waited = Instant::now();
+            while !self.lost.load(Ordering::Relaxed) && waited.elapsed().as_secs() < 10 {
+                std::thread::yield_now();
+            }
+            Some(Image::new(16, 8))
         }
         fn supports_effect(&self, _id: &str) -> bool {
             false
@@ -1536,12 +1553,13 @@ mod tests {
             None
         }
         fn available(&self) -> bool {
-            !self.0.load(Ordering::Relaxed)
+            !self.lost.load(Ordering::Relaxed)
         }
     }
 
     /// #3732 review: a GPU job whose device becomes unavailable after it started keeps its
     /// initial choice and attached adapter as such and reports the frames that fell back apart.
+    /// Two frames are in flight: frame 0 renders on the GPU while frame 1 loses the device.
     #[test]
     fn a_gpu_lost_after_the_start_is_reported_apart_from_the_initial_choice() {
         use effectcraft_project::render_queue::{OutputFormat, OutputModule, RenderSettings};
@@ -1551,8 +1569,8 @@ mod tests {
         let comp = Comp::new(16, 8, effectcraft_time::FrameRate::FPS_25, Tick::from_seconds_f64(12.0 / 25.0));
         let cid = p.add_item("Comp", effectcraft_color::Label::Sandstone, None, effectcraft_project::ItemKind::Comp(comp.into()));
         let sink: &crate::Sink = &|_: &str, _: Vec<u8>| {};
-        let export = |renderer: Option<Backend>| {
-            let accel = LostAtFrameOne(AtomicBool::new(false));
+        let export = |renderer: Option<Backend>, gpu_until: Tick| {
+            let accel = LostWhileRendering { lost: AtomicBool::new(false), gpu_until };
             let shared = Mutex::new(renderer);
             let job = Job {
                 project: &p,
@@ -1565,16 +1583,16 @@ mod tests {
                 path: "/l/f_[#####].png",
                 sink: Some(sink),
                 nested_switches: true,
-                options: crate::JobOptions { renderer: Some(&shared), gpu_frames: Some(1), ..Default::default() },
+                options: crate::JobOptions { renderer: Some(&shared), gpu_frames: Some(2), ..Default::default() },
             };
             crate::export(&job, &mut |_| true).expect("export").timing
         };
 
-        let chosen = export(Some(Backend::Gpu));
-        let measured = std::env::var_os(RENDERER_ENV).is_none().then(|| export(None));
+        let chosen = export(Some(Backend::Gpu), Tick::from_seconds_f64(0.5 / 25.0));
+        let measured = std::env::var_os(RENDERER_ENV).is_none().then(|| export(None, Tick(0)));
 
         assert_eq!(chosen.renderer, "GPU Acceleration (as the queue item's first output module); attached GPU adapter: lost");
-        assert_eq!((chosen.gpu_fallback_frames, chosen.frames), (11, 12), "frame 0 rendered before the device was lost");
+        assert_eq!((chosen.gpu_fallback_frames, chosen.frames), (11, 12), "frame 0 rendered on the GPU before the loss counted");
         let line = chosen.summary();
         assert!(line.contains("Initial compositor: GPU Acceleration"), "{line}");
         assert!(line.contains("Later GPU fallback: 11 of 12 frames rendered on the CPU after the GPU became unavailable"), "{line}");

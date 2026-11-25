@@ -73,10 +73,16 @@ impl Drop for FrameEnd<'_> {
 /// frame workers do. Ends the frame for the accelerator ([`Accelerator::frame_end`]) on every
 /// exit, including a panic.
 pub async fn comp_frame(r: &Renderer<'_>, comp: ItemId, t: Tick) -> Image {
-    let Some(a) = r.accel else { return r.comp_frame(comp, t) };
+    comp_frame_noting_gpu_loss(r, comp, t).await.0
+}
+
+/// [`comp_frame`], and whether the CPU rendered it because the accelerator was lost
+/// ([`Renderer::comp_frame_noting_gpu_loss`]).
+pub async fn comp_frame_noting_gpu_loss(r: &Renderer<'_>, comp: ItemId, t: Tick) -> (Image, bool) {
+    let Some(a) = r.accel else { return r.comp_frame_noting_gpu_loss(comp, t) };
     let _end = FrameEnd(a);
     if a.miss_gate().is_none() {
-        return r.comp_frame(comp, t);
+        return r.comp_frame_noting_gpu_loss(comp, t);
     }
     let mut opts = r.opts;
     let mut auto = None;
@@ -94,9 +100,9 @@ pub async fn comp_frame(r: &Renderer<'_>, comp: ItemId, t: Tick) -> Image {
     }
     let t0 = web_time::Instant::now();
     let img = if opts.backend == Backend::Cpu {
-        Renderer { opts, accel: None, ..*r }.comp_frame(comp, t)
+        (Renderer { opts, accel: None, ..*r }.comp_frame(comp, t), false)
     } else {
-        in_passes(Some(a), |acc| Renderer { opts, accel: acc, ..*r }.comp_frame(comp, t)).await.value
+        in_passes(Some(a), |acc| Renderer { opts, accel: acc, ..*r }.comp_frame_noting_gpu_loss(comp, t)).await.value
     };
     if let Some(t) = auto {
         t.record(t0.elapsed().as_secs_f64() * 1e3);
