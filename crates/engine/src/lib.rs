@@ -123,6 +123,9 @@ pub struct Session {
     /// Size + mtime of `path` as last opened/saved by this session. The project watcher uses it
     /// to tell its own writes from an external edit.
     pub project_stamp: Option<(u64, u128)>,
+    /// A save whose post-write check failed: the first observation of this path must be reported
+    /// as an external change, never adopted as the baseline.
+    pub project_stamp_unverified: bool,
     pub state: EditorState,
     pub services: Arc<dyn Services>,
     pub footage: Arc<dyn FootageSource>,
@@ -347,6 +350,7 @@ impl Default for Session {
             saved_revision: 0,
             path: None,
             project_stamp: None,
+            project_stamp_unverified: false,
             state: EditorState { snapping: true, view_layout: 1, ..Default::default() },
             services: Arc::new(FsServices),
             footage: Arc::new(NoFootage),

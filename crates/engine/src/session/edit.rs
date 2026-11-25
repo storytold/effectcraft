@@ -242,6 +242,7 @@ impl Session {
         // The stamp is installed by the caller that actually read the file (file.open), from
         // the stamp observed with those bytes. New/demo projects have no file stamp.
         self.project_stamp = None;
+        self.project_stamp_unverified = false;
         self.bump();
         self.mark_saved();
         // (channel selection can't be animated, as in After Effects: a document that animated it

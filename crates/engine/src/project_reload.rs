@@ -33,6 +33,7 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 struct State {
     path: Option<String>,
     stamp: Option<Stamp>,
+    unverified: bool,
     focused: bool,
 }
 
@@ -77,8 +78,18 @@ impl Watcher {
                             continue;
                         }
                         match (s.stamp, now) {
-                            // The first sighting only records the baseline: it is not an edit.
-                            (None, Some(stamp)) => s.stamp = Some(stamp),
+                            // The first sighting is normally only a baseline. A save whose
+                            // post-write check failed is different: the file on disk is not known
+                            // to be ours, so the first stamp must reach the pending-change path.
+                            (None, Some(stamp)) => {
+                                s.stamp = Some(stamp);
+                                if s.unverified {
+                                    s.unverified = false;
+                                    drop(s);
+                                    *lock(&res) = Some((path.clone(), stamp));
+                                    wake();
+                                }
+                            }
                             (Some(old), Some(new)) if old != new => {
                                 drop(s);
                                 std::thread::sleep(DEBOUNCE);
@@ -109,13 +120,14 @@ impl Watcher {
     /// under one lock closes the gap between opening a file and the worker's first observation.
     /// A new path starts a new baseline; an unchanged path keeps its baseline so external changes
     /// stay detectable.
-    pub fn set_watched(&mut self, path: Option<String>, stamp: Option<Stamp>) {
+    pub fn set_watched(&mut self, path: Option<String>, stamp: Option<Stamp>, unverified: bool) {
         let mut s = lock(&self.state);
         if s.path == path {
             return;
         }
         s.path = path;
         s.stamp = stamp;
+        s.unverified = unverified;
         drop(s);
         let _ = self._stop.try_send(());
     }
@@ -144,7 +156,9 @@ impl Watcher {
     /// Record the stamp the session itself just wrote (open/save/reload) so it is not reported
     /// back as an external change.
     pub fn acknowledge(&self, stamp: Option<Stamp>) {
-        lock(&self.state).stamp = stamp;
+        let mut s = lock(&self.state);
+        s.stamp = stamp;
+        s.unverified = false;
     }
 }
 
@@ -201,11 +215,21 @@ mod tests {
         let (d, path) = disk((100, 1));
         let wakes = Arc::new(AtomicUsize::new(0));
         let mut w = start(d, Arc::clone(&wakes));
-        w.set_watched(Some(path), None);
+        w.set_watched(Some(path), None, false);
         wait_for("first baseline", || w.baseline().is_some());
         std::thread::sleep(Duration::from_millis(200));
         assert!(w.take().is_none(), "first sight must not be reported as an edit");
         assert_eq!(wakes.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn an_unverified_path_reports_its_first_stamp() {
+        let (d, path) = disk((100, 1));
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let mut w = start(d, Arc::clone(&wakes));
+        w.set_watched(Some(path.clone()), None, true);
+        wait_for("wake", || wakes.load(Ordering::SeqCst) >= 1);
+        assert_eq!(w.take(), Some((path, (100, 1))));
     }
 
     #[test]
@@ -214,7 +238,7 @@ mod tests {
         let wakes = Arc::new(AtomicUsize::new(0));
         let mut w = start(d.clone(), Arc::clone(&wakes));
         // The session's loaded stamp is installed synchronously with the path.
-        w.set_watched(Some(path.clone()), Some((100, 1)));
+        w.set_watched(Some(path.clone()), Some((100, 1)), false);
         assert_eq!(w.baseline(), Some((100, 1)));
         // Simulate an atomic save: a new size and mtime.
         lock(&d.stamps).insert(path.clone(), (120, 2));
@@ -227,7 +251,7 @@ mod tests {
         let (d, path) = disk((100, 1));
         let wakes = Arc::new(AtomicUsize::new(0));
         let mut w = start(d.clone(), Arc::clone(&wakes));
-        w.set_watched(Some(path.clone()), Some((100, 1)));
+        w.set_watched(Some(path.clone()), Some((100, 1)), false);
         assert_eq!(w.baseline(), Some((100, 1)));
         lock(&d.stamps).insert(path.clone(), (120, 2));
         wait_for("wake", || wakes.load(Ordering::SeqCst) >= 1);

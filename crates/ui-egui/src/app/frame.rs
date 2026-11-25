@@ -767,7 +767,7 @@ impl EffectcraftApp {
         }
         let Some(watcher) = self.project_watcher.as_mut() else { return };
         watcher.set_focused(self.focused);
-        watcher.set_watched(self.session.path.clone(), self.session.project_stamp);
+        watcher.set_watched(self.session.path.clone(), self.session.project_stamp, self.session.project_stamp_unverified);
         if self.project_reload_pending.is_none()
             && let Some(change) = watcher.take()
         {
@@ -786,7 +786,14 @@ impl EffectcraftApp {
             self.project_reload_pending = None;
             return;
         }
-        if self.session.is_dirty() || self.session.script_ui.render_host.is_some() || self.session.render_job.is_some() {
+        if self.session.services.stamp(&path) == self.session.project_stamp {
+            // The disk now holds exactly what this session already has (a save completed after the
+            // watcher published its report). Don't reload it back and lose the undo history.
+            watcher.acknowledge(self.session.project_stamp);
+            self.project_reload_pending = None;
+            return;
+        }
+        if self.session.is_dirty() || self.session.script_ui.render_host.is_some() || !self.session.script_ui.file_dialogs.is_empty() || self.session.render_job.is_some() {
             self.ui.status = "Project changed on disk. To keep your changes, use File ▸ Save As ▸ Save a Copy... Then File ▸ Revert loads the disk version; Revert discards unsaved changes.".into();
             return;
         }
@@ -796,7 +803,12 @@ impl EffectcraftApp {
                 watcher.acknowledge(self.session.project_stamp);
                 self.project_reload_pending = None;
             }
-            Err(e) => self.ui.status = e.to_string(),
+            Err(e) => {
+                // Keep the failure visible but drop this observation: retry only when the worker
+                // reports a new stamp, not every frame while the file stays malformed.
+                self.ui.status = e.to_string();
+                self.project_reload_pending = None;
+            }
         }
     }
 }

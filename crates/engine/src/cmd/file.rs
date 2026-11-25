@@ -122,6 +122,9 @@ fn save_to(s: &mut Session, path: &str) -> Result<Value> {
     let ours = stamp.is_some_and(|(len, _)| len as usize == json.len())
         && s.services.read_file(path).map(|bytes| bytes.as_slice() == json.as_bytes()).unwrap_or(false);
     s.project_stamp = ours.then_some(stamp).flatten();
+    // An unverified write never becomes a baseline. The watcher will report the first stamp it
+    // sees for this path as an external edit, so a later Save cannot silently overwrite it.
+    s.project_stamp_unverified = !ours;
     s.mark_saved();
     s.note_project_path(path);
     s.toast(format!("Saved {path}"));
