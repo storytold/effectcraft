@@ -7,6 +7,7 @@ use super::{
 
 pub(super) fn timing(s: &mut Session, p: &Value) -> Result<Value> {
     let (cid, ids) = layers_p(s, p)?;
+    let ids = unlocked(s, cid, ids, "layer.timing")?;
     let t = s.time();
     let op = str_p(p, "op").unwrap_or("set").to_string();
     // Layer times stay on frame boundaries of the comp (as in AE).

@@ -118,6 +118,9 @@ Come tell us what matters most to you on [Discord](https://discord.gg/artcraft).
 
 ## Progress log
 
+- 2026-11-25: `layer.timing` and `edit.splitLayer` leave locked layers alone, as the other
+  layer edits do. A mixed selection still moves or splits its unlocked layers; a call naming
+  only locked layers is refused without changing them (#4148).
 - 2026-11-05: ProRes 4444 and XQ exports write the required run after the final alpha
   difference. The FilmCraft encoder pin fixes alpha movies rejected by native macOS
   decoding; an export regression checks the stored bytes for both profiles, alpha modes,
