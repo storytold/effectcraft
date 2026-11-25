@@ -86,10 +86,17 @@ pub fn project_name(app: &EffectcraftApp) -> String {
         .unwrap_or_else(|| "Untitled Project.ecproj".into())
 }
 
-/// The window title: the project's path (or name) and `*` while it has unsaved changes.
+/// The window title: the project's path (or name) and `*` while it has unsaved changes, under the
+/// channel's own product name (`EffectCraft`, or `EffectCraft Nightly`).
 pub fn window_title(app: &EffectcraftApp) -> String {
     let doc = app.session.path.clone().unwrap_or_else(|| project_name(app));
-    format!("EffectCraft - {doc}{}", if app.session.is_dirty() { " *" } else { "" })
+    title_for(crate::channel::name_for(crate::channel::identity()), &doc, app.session.is_dirty())
+}
+
+/// The title rule, as text: the channel's name, the document and ` *` while it has unsaved
+/// changes. Kept separate from the process-global identity so both channels' titles are testable.
+fn title_for(app_name: &str, document: &str, dirty: bool) -> String {
+    format!("{app_name} - {document}{}", if dirty { " *" } else { "" })
 }
 
 /// Whether the prompt is Revert Project (Revert / Cancel) instead of Unsaved Changes.
@@ -273,6 +280,10 @@ mod tests {
         assert!(app.dialog.is_none());
         modified(&mut app);
         assert!(window_title(&app).ends_with("Untitled Project.ecproj *"), "{}", window_title(&app));
+        // The channel's own name leads the title, in both its clean and dirty form.
+        assert_eq!(title_for("EffectCraft Nightly", "Shot.ecproj", false), "EffectCraft Nightly - Shot.ecproj");
+        assert_eq!(title_for("EffectCraft Nightly", "Shot.ecproj", true), "EffectCraft Nightly - Shot.ecproj *");
+        assert_eq!(title_for("EffectCraft", "Shot.ecproj", false), "EffectCraft - Shot.ecproj");
         let r = crate::menus::invoke(&mut app, &ctx, "file.newProject", json!({})).unwrap();
         assert_eq!(r, json!({"dialog": "unsavedChanges"}));
         assert_eq!(app.dialog, Some(Dialog::UnsavedChanges));
