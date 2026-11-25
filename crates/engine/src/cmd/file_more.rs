@@ -273,6 +273,12 @@ fn new_comp_from_selection(s: &mut Session, p: &Value) -> Result<Value> {
 
 // ---------------------------------------------------------------- dependencies
 
+/// The items a comp's layers use directly: their sources and the media their Essential Properties
+/// swap in.
+fn layer_items(c: &Comp) -> impl Iterator<Item = ItemId> {
+    c.layers.iter().flat_map(|l| l.source.item().into_iter().chain(effectcraft_project::essential::instance_media(l)))
+}
+
 /// Items used (transitively) by `roots`.
 fn used_items(proj: &Project, roots: &[ItemId]) -> BTreeSet<ItemId> {
     let mut seen = BTreeSet::new();
@@ -282,7 +288,7 @@ fn used_items(proj: &Project, roots: &[ItemId]) -> BTreeSet<ItemId> {
             continue;
         }
         if let Some(c) = proj.comp(i) {
-            stack.extend(c.layers.iter().filter_map(|l| l.source.item()));
+            stack.extend(layer_items(c));
         }
         // Parent folders stay so the structure is kept.
         if let Some(parent) = proj.item(i).and_then(|x| x.parent) {
@@ -293,7 +299,7 @@ fn used_items(proj: &Project, roots: &[ItemId]) -> BTreeSet<ItemId> {
 }
 
 fn referenced_sources(proj: &Project) -> BTreeSet<ItemId> {
-    proj.comps().flat_map(|(_, c)| c.layers.iter().filter_map(|l| l.source.item())).collect()
+    proj.comps().flat_map(|(_, c)| layer_items(c)).collect()
 }
 
 fn remove_unused(s: &mut Session, _: &Value) -> Result<Value> {

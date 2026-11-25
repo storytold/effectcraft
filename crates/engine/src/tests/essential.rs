@@ -367,6 +367,35 @@ fn media_replacement_swaps_footage_per_instance() {
     assert!(center(&s, main)[0] > 0.99);
 }
 
+/// #4129: media only an instance's override names is in use, so cleaning the project keeps it.
+#[test]
+fn cleaning_the_project_keeps_replacement_media() {
+    for command in ["file.reduceProject", "file.removeUnusedFootage"] {
+        let mut s = Session::default();
+        let foot = |s: &mut Session| ItemId(s.execute("file.importPlaceholder", json!({})).unwrap()["item"].as_u64().unwrap());
+        let (default, replacement, unused) = (foot(&mut s), foot(&mut s), foot(&mut s));
+        s.execute("comp.new", json!({"name": "Slot", "width": 16, "height": 16, "frameRate": 30, "duration": 1})).unwrap();
+        let slot = s.active_comp_id().unwrap();
+        let clip = s.execute("layer.addItem", json!({"item": default.0})).unwrap()["layer"].as_u64().unwrap();
+        let media = s.execute("essential.addMedia", json!({"layer": clip})).unwrap()["control"].as_u64().unwrap();
+        s.execute("comp.new", json!({"name": "Main", "width": 16, "height": 16, "frameRate": 30, "duration": 1})).unwrap();
+        let main = s.active_comp_id().unwrap();
+        let instance = s.execute("layer.addItem", json!({"item": slot.0})).unwrap()["layer"].as_u64().unwrap();
+        s.execute("essential.set", json!({"layer": instance, "control": media, "item": replacement.0})).unwrap();
+        s.state.project_selection = vec![main];
+        s.execute(command, json!({})).unwrap();
+        for (what, item, kept) in [("default", default, true), ("replacement", replacement, true), ("unused", unused, false)] {
+            assert_eq!(s.project.item(item).is_some(), kept, "{command}: {what}");
+        }
+        // Reverted, nothing uses the replacement any more.
+        s.execute("essential.revert", json!({"layer": instance})).unwrap();
+        s.state.project_selection = vec![main];
+        s.execute(command, json!({})).unwrap();
+        assert!(s.project.item(replacement).is_none(), "{command}: reverted");
+        assert!(s.project.item(default).is_some(), "{command}: default");
+    }
+}
+
 /// #1747: a collapsed precomp with an Essential Property override must keep drawing its nested
 /// layers past the precomp's frame instead of falling back to a flattened, clipped frame.
 #[test]
