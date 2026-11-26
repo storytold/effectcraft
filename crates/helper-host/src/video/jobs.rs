@@ -11,6 +11,10 @@ pub const MAX_FRAMES_IN_FLIGHT: usize = 8;
 
 pub const MAX_BYTES_IN_FLIGHT: u64 = 256 << 20;
 
+/// The most frames an encoder may say it holds back (`encode.opened` `delay`). The flush region is
+/// sized from it, so a larger number from the helper is a protocol break, not a huge file.
+pub const MAX_DELAY: u32 = 64;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SendError {
     UnknownJob,
@@ -233,6 +237,9 @@ impl Job {
     fn accept(&mut self, job: u64, reply: &VideoReply) -> Verdict {
         match (&self.phase, reply) {
             (Phase::Failed, _) => Verdict::Dropped,
+            (Phase::Opening, VideoReply::EncodeOpened { delay, .. }) if *delay > MAX_DELAY => {
+                Verdict::Break(format!("the video helper said its encoder holds back {delay} frames; at most {MAX_DELAY} are allowed"))
+            }
             (Phase::Opening, VideoReply::EncodeOpened { codec_config, delay, .. }) => {
                 self.phase = Phase::Ready;
                 self.delay = *delay;
@@ -407,6 +414,18 @@ mod tests {
 
     fn is_break(v: &Verdict) -> bool {
         matches!(v, Verdict::Break(_))
+    }
+
+    #[test]
+    fn a_delay_over_the_limit_is_a_break() {
+        // The limit itself is accepted (`ready` checks the reply opens the job).
+        let _ = ready(2, MAX_DELAY);
+        let mut jobs = Jobs::new(1);
+        let id = jobs.open(|job| open_msg(job, slots(2))).unwrap().job;
+        assert!(is_break(&jobs.receive(&opened(id, MAX_DELAY + 1))));
+        let mut jobs = Jobs::new(1);
+        let id = jobs.open(|job| open_msg(job, slots(2))).unwrap().job;
+        assert!(is_break(&jobs.receive(&opened(id, u32::MAX))));
     }
 
     #[test]

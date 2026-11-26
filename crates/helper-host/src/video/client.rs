@@ -321,9 +321,10 @@ impl VideoHelper {
             Some(st) => (st.slots.iter().map(|s| s.out.len).max().unwrap_or(0), st.delay),
             None => return Err(VideoError::Request("no such video job".into())),
         };
-        let out = Region { offset: align(self.top), len: out_len * (u64::from(delay) + 1) };
-        self.grow(out.offset + out.len)?;
-        self.top = out.offset + out.len;
+        let out = Region { offset: align(self.top), len: out_len.saturating_mul(u64::from(delay) + 1) };
+        let Some(out_end) = out.end() else { return Err(VideoError::Request("the flush region is too large".into())) };
+        self.grow(out_end)?;
+        self.top = out_end;
         self.jobs.start_flush(job, out).map_err(|e| VideoError::Request(e.to_string()))?;
         self.send(&VideoRequest::EncodeFlush { job, out }, self.opts.load_timeout)?;
         // The batch and `encode.flushed` share one timeout.
@@ -723,14 +724,14 @@ mod tests {
         }
     }
 
-    /// The planes tile the slot's `in` region exactly, in Y, U, V order, so a helper that reads
-    /// them reads the whole picture and nothing else.
     #[test]
     fn a_timeout_too_long_to_represent_does_not_panic() {
         assert!(deadline(Duration::MAX) > Instant::now());
         assert!(deadline(Duration::ZERO) <= Instant::now());
     }
 
+    /// The planes tile the slot's `in` region exactly, in Y, U, V order, so a helper that reads
+    /// them reads the whole picture and nothing else.
     #[test]
     fn planes_fill_the_picture_region_without_gaps() {
         let [y, u, v] = planes(640, 1920, 1080);
