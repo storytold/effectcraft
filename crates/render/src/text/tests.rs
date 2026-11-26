@@ -811,3 +811,29 @@ fn selector_evaluations_are_counted_across_the_layer_not_timed() {
     assert!(!b.take() && !b.take());
     assert_eq!(SelectorBudget::new().0.get(), MAX_SELECTOR_EVALS);
 }
+
+/// CodeRabbit on #3664: the outlines external effect helpers get from a text layer are named by
+/// the character each glyph came from (its `char_index` into the whole text), not by the glyph's
+/// position among the non-blank characters, which drifts after a character that makes no glyph of
+/// its own (a zero-width space, a combining accent drawn with its base letter).
+#[test]
+fn helper_glyph_outlines_are_named_by_their_own_character() {
+    let (mut p, cid, comp) = setup(600, 200);
+    let l = text_layer(&mut p, &comp, doc("A\u{200B}B CD\nEe\u{301}F", 40.0));
+    p.comp_mut(cid).unwrap().layers.push(l);
+    let l = &p.comp(cid).unwrap().layers[0];
+    let c = ctx(&p, cid, 0.0);
+    let geom = text_geom(&c, l).unwrap();
+    let chars: Vec<char> = geom.doc.text.chars().collect();
+    let mut want = vec![];
+    for g in &geom.glyphs {
+        let n = effectcraft_path::from_kurbo(&g.path()).len();
+        want.extend(std::iter::repeat_n(chars[g.char_index].to_string(), n));
+    }
+    let names: Vec<String> = crate::masks::glyph_paths(&c, l).into_iter().map(|m| m.name).collect();
+    assert!(!names.is_empty());
+    assert_eq!(names, want);
+    for n in ["A", "B", "C", "D", "E", "e", "F"] {
+        assert!(names.iter().any(|x| x == n), "{n} in {names:?}");
+    }
+}

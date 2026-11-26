@@ -4,10 +4,15 @@
 //! the helper. (`harness = false`: libtest would reject the helper argument.)
 
 use std::io::Write;
-use std::sync::Arc;
-use std::time::Duration;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
-use effectcraft_effects::plugin::{EffectPlugin, PluginFrame, PluginHost, PluginImage, PluginManifest, PluginParam, PluginParamKind, PluginParams, plugin};
+use effectcraft_effects::plugin::{
+    EffectPlugin, ParamChange, PluginFrame, PluginHost, PluginImage, PluginManifest, PluginParam, PluginParamKind, PluginParams, plugin,
+};
 use effectcraft_helper_host::protocol::{HELPER_ARG, Reply, reply_line};
 use effectcraft_helper_host::serve::{Provider, serve};
 
@@ -50,11 +55,91 @@ enum Kind {
     Hang,
     /// Writes a long line of bytes that aren't UTF-8 to stderr, then more, then inverts.
     Noisy,
+    /// Pool checks: marks itself active, waits until `amount` renders (this one included, in any
+    /// process of this helper) are active at once, holds the frame for `hold_ms`, then finishes,
+    /// or, with `exit`, exits the process.
+    Meet { hold_ms: u64, exit: bool },
+    /// Pool checks: asks for the input at another time (a callback) and finishes.
+    Ask,
+    /// Parameter-change checks: answers `param_changed` for `preset` (see [`preset_answer`]).
+    Preset,
+    /// Mask checks: writes what it got into the frame (see [`mask_pixels`]); its padding is the
+    /// number of masks it got.
+    Masks,
+}
+
+/// What [`Kind::Masks`] writes: pixel 0 = the layer's masks (count, first vertex x, y, all
+/// vertices), pixel 1 = the masks of the layer in parameter `layer` at 0.5 s (count or -1 for
+/// none, first vertex x, y, its first in tangent x), pixel 2 = the first mask's out tangent x,
+/// feather x, expansion, opacity.
+fn mask_pixels(host: &dyn PluginHost) -> [[f32; 4]; 3] {
+    let own = host.masks();
+    let first = |m: &[effectcraft_effects::MaskPath]| m.first().and_then(|m| m.vertices.first().copied()).unwrap_or([-1.0; 2]);
+    let total: usize = own.iter().map(|m| m.vertices.len()).sum();
+    let o = first(&own);
+    let other = host.layer_masks("layer", 0.5);
+    let (n, p, t) = match &other {
+        Some(m) => (m.len() as f32, first(m), m.first().and_then(|m| m.in_tangents.first().copied()).unwrap_or([0.0; 2])),
+        None => (-1.0, [-1.0; 2], [0.0; 2]),
+    };
+    let m0 = own.first().cloned().unwrap_or_default();
+    let out0 = m0.out_tangents.first().copied().unwrap_or([0.0; 2]);
+    [
+        [own.len() as f32, o[0] as f32, o[1] as f32, total as f32],
+        [n, p[0] as f32, p[1] as f32, t[0] as f32],
+        [out0[0] as f32, m0.feather[0] as f32, m0.expansion as f32, m0.opacity as f32],
+    ]
 }
 
 struct Fake {
     m: PluginManifest,
     kind: Kind,
+    /// The parameters whose changes it wants to hear about.
+    notify: Vec<String>,
+}
+
+impl Fake {
+    fn new(m: PluginManifest, kind: Kind) -> Fake {
+        Fake { m, kind, notify: vec![] }
+    }
+}
+
+/// What the fake answers when `preset` changes to: 1, values made from what it was told
+/// (amount halved; tint = time, layer width / 100, whether the instance is 7, 1); 2, values that
+/// don't fit (only `link`, as a number, survives and amount 5 is clamped); 3, nothing for 10 s
+/// (past the edit timeout); 4, it exits; 5, a reply that isn't `set_params`; else nothing.
+fn preset_answer(change: &ParamChange) -> Result<Vec<(String, serde_json::Value)>, String> {
+    use serde_json::json;
+    if let Ok(dir) = pool_dir() {
+        let _ = append(&dir, "changed.log", &format!("{} {}", std::process::id(), change.param));
+    }
+    let amount = change.values.get("amount").and_then(serde_json::Value::as_f64).unwrap_or(-1.0);
+    match change.values.get("preset").and_then(serde_json::Value::as_u64) {
+        Some(1) => Ok(vec![
+            ("amount".into(), json!(amount * 0.5)),
+            ("tint".into(), json!([change.time, change.layer_size[0] / 100.0, if change.instance_key == 7 { 1.0 } else { 0.0 }, 1.0])),
+        ]),
+        Some(2) => Ok(vec![
+            ("nope".into(), json!(1)),
+            ("tint".into(), json!([1.0])),
+            ("preset".into(), json!(9)),
+            ("link".into(), json!(1)),
+            ("amount".into(), json!(5.0)),
+            ("tint".into(), json!("red")),
+        ]),
+        Some(3) => {
+            std::thread::sleep(Duration::from_secs(10));
+            Ok(vec![])
+        }
+        Some(4) => std::process::exit(3),
+        Some(5) => {
+            let mut out = std::io::stdout();
+            out.write_all(reply_line(&Reply::Pong)?.as_bytes()).and_then(|_| out.flush()).map_err(|e| e.to_string())?;
+            std::thread::sleep(Duration::from_secs(10));
+            Ok(vec![])
+        }
+        _ => Ok(vec![]),
+    }
 }
 
 impl EffectPlugin for Fake {
@@ -89,6 +174,18 @@ impl EffectPlugin for Fake {
                     p[3] = *a as f32;
                 }
             }
+            Kind::Meet { hold_ms, exit } => meet(params.f("amount") as usize, hold_ms, exit)?,
+            Kind::Ask => {
+                IN_ASK.store(true, Ordering::SeqCst);
+                let _ = host.input_at(0.0);
+                IN_ASK.store(false, Ordering::SeqCst);
+            }
+            Kind::Preset => {}
+            Kind::Masks => {
+                for (px, v) in frame.pixels.iter_mut().zip(mask_pixels(host)) {
+                    *px = v;
+                }
+            }
             Kind::Crash => std::process::exit(3),
             Kind::Hang => {
                 let mut out = std::io::stdout();
@@ -108,6 +205,233 @@ impl EffectPlugin for Fake {
         }
         Ok(())
     }
+    fn padding_v2(&self, params: &PluginParams, time: f64, scale: f64, layer_size: [f64; 2], key: u64, host: &dyn PluginHost) -> u32 {
+        if self.kind == Kind::Masks { host.masks().len() as u32 } else { self.padding(params, time, scale, layer_size, key) }
+    }
+    fn notify_params(&self) -> &[String] {
+        &self.notify
+    }
+    fn param_changed(&self, change: &ParamChange) -> Result<Vec<(String, serde_json::Value)>, String> {
+        if self.kind == Kind::Preset { preset_answer(change) } else { Ok(vec![]) }
+    }
+}
+
+/// Set while a fake helper process waits for the answer to a callback.
+static IN_ASK: AtomicBool = AtomicBool::new(false);
+
+/// Where the pool checks' fake helpers keep their marks (`EC_FAKE_DIR`, set by the checks).
+fn pool_dir() -> Result<PathBuf, String> {
+    std::env::var_os("EC_FAKE_DIR").map(PathBuf::from).ok_or_else(|| "EC_FAKE_DIR is not set".to_string())
+}
+
+/// Create an empty mark file `name` in `dir`.
+fn mark(dir: &Path, name: &str) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let p = dir.join(name);
+    std::fs::write(&p, b"").map_err(|e| e.to_string())?;
+    Ok(p)
+}
+
+fn count_files(dir: &Path, prefix: &str) -> usize {
+    std::fs::read_dir(dir).map_or(0, |rd| rd.flatten().filter(|e| e.file_name().to_string_lossy().starts_with(prefix)).count())
+}
+
+/// Append one line to the log `name` in `dir` (one write: processes append at the same time).
+fn append(dir: &Path, name: &str, line: &str) -> Result<(), String> {
+    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(dir.join(name)).map_err(|e| e.to_string())?;
+    f.write_all(format!("{line}\n").as_bytes()).map_err(|e| e.to_string())
+}
+
+/// The lines of the log `name` in `dir`, split at the first space (process id, rest).
+fn log_lines(dir: &Path, name: &str) -> Vec<(String, String)> {
+    std::fs::read_to_string(dir.join(name))
+        .unwrap_or_default()
+        .lines()
+        .map(|l| l.split_once(' ').map_or((l.to_string(), String::new()), |(a, b)| (a.to_string(), b.to_string())))
+        .collect()
+}
+
+/// The processes that loaded `path` (`loads.log`), each with how often.
+fn loads_of(dir: &Path, path: &str) -> std::collections::BTreeMap<String, usize> {
+    let mut m = std::collections::BTreeMap::new();
+    for (pid, p) in log_lines(dir, "loads.log") {
+        if p == path {
+            *m.entry(pid).or_insert(0) += 1;
+        }
+    }
+    m
+}
+
+/// The paths a fake helper process has loaded, in order.
+static LOADED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// A destroyed instance that makes the pool's fake helper stop reading its input for a while.
+const SLEEPY_INSTANCE: u64 = 666;
+
+/// One render of [`Kind::Meet`]: `need` renders (this one included) are active at the same time,
+/// or this fails after 15 s. The most renders seen at once is appended to `seen.log`.
+fn meet(need: usize, hold_ms: u64, exit: bool) -> Result<(), String> {
+    let dir = pool_dir()?;
+    let mine = mark(&dir.join("marks"), &std::process::id().to_string())?;
+    let (deadline, mut seen) = (Instant::now() + Duration::from_secs(15), 0);
+    loop {
+        seen = seen.max(count_files(&dir.join("marks"), ""));
+        if seen >= need || Instant::now() > deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    append(&dir, "seen.log", &seen.to_string())?;
+    // What this process had loaded when it rendered.
+    let loaded = LOADED.lock().map(|l| l.join(",")).unwrap_or_default();
+    append(&dir, "renders.log", &format!("{} {loaded}", std::process::id()))?;
+    std::thread::sleep(Duration::from_millis(hold_ms));
+    let _ = std::fs::remove_file(&mine);
+    if exit {
+        append(&dir, "crashes.log", &std::process::id().to_string())?;
+        std::process::exit(3);
+    }
+    if seen < need { Err(format!("only {seen} renders were active at once, wanted {need}")) } else { Ok(()) }
+}
+
+/// The fake helper of the pool checks: `max` processes, effects `org.test.<tag>.meet` (waits for
+/// the other renders, holds 100 ms), `.slow` (holds 400 ms) and `.crash` (exits after 100 ms).
+struct PoolProvider {
+    tag: &'static str,
+    max: u32,
+}
+
+impl PoolProvider {
+    fn new(tag: &'static str, max: u32) -> PoolProvider {
+        if let Ok(dir) = pool_dir() {
+            // A process that dies while it starts up (before answering `hello`).
+            if dir.join("die-on-start").exists() {
+                std::process::exit(3);
+            }
+            let _ = mark(&dir.join("procs"), &std::process::id().to_string());
+        }
+        PoolProvider { tag, max }
+    }
+}
+
+impl Provider for PoolProvider {
+    fn name(&self) -> String {
+        "Pool".into()
+    }
+    fn loads(&self) -> Vec<String> {
+        vec!["pool".into()]
+    }
+    fn max_processes(&self) -> u32 {
+        self.max
+    }
+    fn effects(&mut self) -> (Vec<Arc<dyn EffectPlugin>>, Vec<String>) {
+        let kinds = [
+            ("meet", Kind::Meet { hold_ms: 100, exit: false }),
+            ("slow", Kind::Meet { hold_ms: 400, exit: false }),
+            ("crash", Kind::Meet { hold_ms: 100, exit: true }),
+            ("ask", Kind::Ask),
+        ];
+        let v: Vec<Arc<dyn EffectPlugin>> = kinds
+            .into_iter()
+            .map(|(n, kind)| Arc::new(Fake::new(manifest(&format!("org.test.{}.{n}", self.tag), vec![amount()]), kind)) as Arc<dyn EffectPlugin>)
+            .collect();
+        (v, vec![])
+    }
+    fn load(&mut self, path: &str) -> Result<(Vec<Arc<dyn EffectPlugin>>, Vec<String>), String> {
+        let pid = std::process::id();
+        let dir = pool_dir()?;
+        // A load in the middle of a render's callback is a protocol error of EffectCraft's side.
+        if IN_ASK.load(Ordering::SeqCst) {
+            mark(&dir, &format!("load-during-render.{pid}"))?;
+        }
+        // While `refuse-z` exists, only the first process to load `z.pool` can.
+        if path == "z.pool" && dir.join("refuse-z").exists() && std::fs::OpenOptions::new().write(true).create_new(true).open(dir.join("z-first")).is_err() {
+            return Err("z.pool can't be loaded now".into());
+        }
+        append(&dir, "loads.log", &format!("{pid} {path}"))?;
+        if let Ok(mut l) = LOADED.lock() {
+            l.push(path.to_string());
+        }
+        Ok((vec![], vec![]))
+    }
+    fn destroy(&mut self, instance: u64) {
+        if instance == SLEEPY_INSTANCE {
+            std::thread::sleep(Duration::from_secs(6));
+        }
+        if let Ok(dir) = pool_dir()
+            && instance < 1000
+        {
+            let _ = mark(&dir, &format!("destroyed.{}.{instance}", std::process::id()));
+        }
+    }
+}
+
+/// The fake helper of the parameter-change checks (`EC_FAKE_MODE` `notify`, or `old`: a helper
+/// from before the extension, which announces no features): one process, effects
+/// `org.test.<tag>.preset` (notifies on `preset`) and `.ask` (holds its process in a callback).
+struct NotifyProvider {
+    tag: &'static str,
+}
+
+impl Provider for NotifyProvider {
+    fn name(&self) -> String {
+        "Notify".into()
+    }
+    fn features(&self) -> Vec<String> {
+        if self.tag == "old" { vec![] } else { vec![effectcraft_helper_host::protocol::FEATURE_PARAM_CHANGED.into()] }
+    }
+    fn loads(&self) -> Vec<String> {
+        vec!["notify".into()]
+    }
+    /// Loads anything, except while `refuse-loads` exists (a loaded folder that went away).
+    fn load(&mut self, _path: &str) -> Result<(Vec<Arc<dyn EffectPlugin>>, Vec<String>), String> {
+        if pool_dir().is_ok_and(|d| d.join("refuse-loads").exists()) {
+            return Err("the folder is gone".into());
+        }
+        Ok((vec![], vec![]))
+    }
+    fn effects(&mut self) -> (Vec<Arc<dyn EffectPlugin>>, Vec<String>) {
+        let preset = PluginParam {
+            id: "preset".into(),
+            name: "Preset".into(),
+            group: String::new(),
+            kind: PluginParamKind::Popup { options: vec!["Custom".into(); 6], default: 0 },
+        };
+        let tint = PluginParam { id: "tint".into(), name: "Tint".into(), group: String::new(), kind: PluginParamKind::Color { default: [1.0; 4] } };
+        let link = PluginParam { id: "link".into(), name: "Link".into(), group: String::new(), kind: PluginParamKind::Checkbox { default: false } };
+        let mut fx = Fake::new(manifest(&format!("org.test.{}.preset", self.tag), vec![amount(), preset, tint, link]), Kind::Preset);
+        // Unknown ids are dropped by EffectCraft.
+        fx.notify = vec!["preset".into(), "no_such_param".into()];
+        let ask = Fake::new(manifest(&format!("org.test.{}.ask", self.tag), vec![amount()]), Kind::Ask);
+        (vec![Arc::new(fx), Arc::new(ask)], vec![])
+    }
+}
+
+/// The fake helper of the mask checks (`EC_FAKE_MODE` `masks`, or `nomasks`: a helper that
+/// announces no features): `org.test.<tag>.shape` asks for its layer's masks, `.blind` doesn't;
+/// both are [`Kind::Masks`] with a layer parameter `layer`.
+struct MasksProvider {
+    tag: &'static str,
+}
+
+impl Provider for MasksProvider {
+    fn name(&self) -> String {
+        "Masks".into()
+    }
+    fn features(&self) -> Vec<String> {
+        if self.tag == "nomasks" { vec![] } else { vec![effectcraft_helper_host::protocol::FEATURE_MASKS.into()] }
+    }
+    fn wants_masks(&self, effect: &dyn EffectPlugin) -> bool {
+        effect.manifest().id.ends_with(".shape")
+    }
+    fn effects(&mut self) -> (Vec<Arc<dyn EffectPlugin>>, Vec<String>) {
+        let layer = || PluginParam { id: "layer".into(), name: "Layer".into(), group: String::new(), kind: PluginParamKind::Layer };
+        let v: Vec<Arc<dyn EffectPlugin>> = ["shape", "blind"]
+            .into_iter()
+            .map(|n| Arc::new(Fake::new(manifest(&format!("org.test.{}.{n}", self.tag), vec![amount(), layer()]), Kind::Masks)) as Arc<dyn EffectPlugin>)
+            .collect();
+        (v, vec![])
+    }
 }
 
 struct FakeProvider;
@@ -120,7 +444,7 @@ impl Provider for FakeProvider {
         let v: Vec<Arc<dyn EffectPlugin>> =
             [("invert", Kind::Invert), ("pad", Kind::Pad), ("echo", Kind::Echo), ("crash", Kind::Crash), ("hang", Kind::Hang), ("noisy", Kind::Noisy)]
                 .into_iter()
-                .map(|(n, kind)| Arc::new(Fake { m: manifest(&format!("org.test.helper.{n}"), vec![amount()]), kind }) as Arc<dyn EffectPlugin>)
+                .map(|(n, kind)| Arc::new(Fake::new(manifest(&format!("org.test.helper.{n}"), vec![amount()]), kind)) as Arc<dyn EffectPlugin>)
                 .collect();
         (v, vec!["fake helper: a warning".into()])
     }
@@ -295,9 +619,518 @@ fn run_checks() -> bool {
     );
 
     effectcraft_helper_host::stop_all();
+    all &= pool_group("serial");
+    all &= pool_group("pool");
+    all &= pool_group("startup");
+    all &= pool_group("notify");
+    all &= pool_group("old");
+    all &= pool_group("masks");
+    all &= pool_group("nomasks");
     let _ = std::fs::remove_dir_all(&state);
     all
 }
+
+/// Render `id` (a pool check effect) on a 2x2 frame; `need` renders must be active at once.
+fn render_pool_with(id: &str, need: f64, host: &dyn PluginHost) -> Result<(), String> {
+    let p = plugin(id).ok_or_else(|| format!("{id} is not registered"))?;
+    let m = p.manifest().clone();
+    let mut px = vec![[0.5; 4]; 4];
+    let mut f = PluginFrame { width: 2, height: 2, pixels: &mut px, scale: 1.0, origin: [0.0; 2], layer_size: [2.0; 2] };
+    p.render_v2(&mut f, &PluginParams { manifest: &m, flat: &[need], texts: &[] }, 1.0, host)
+}
+
+fn render_pool(id: &str, need: f64) -> Result<(), String> {
+    render_pool_with(id, need, &TestHost { w: 2, h: 2, nest: false })
+}
+
+/// Render each job (effect id, renders needed at once) on its own thread, all at once.
+fn render_together(jobs: &[(&'static str, f64)]) -> Vec<Result<(), String>> {
+    let threads: Vec<_> = jobs.iter().map(|&(id, need)| std::thread::spawn(move || render_pool(id, need))).collect();
+    threads.into_iter().map(|t| t.join().unwrap_or_else(|_| Err("thread panicked".into()))).collect()
+}
+
+/// The host of a render that, when the helper asks for its input, tells the test, waits for it to
+/// go on, and renders another effect of the same helper (a nested render) before answering.
+struct GateHost {
+    ready: Mutex<Sender<()>>,
+    go: Mutex<Receiver<()>>,
+    /// The effect of the nested render.
+    nested: &'static str,
+}
+
+impl PluginHost for GateHost {
+    fn input_at(&self, _: f64) -> Option<PluginImage> {
+        let _ = self.ready.lock().ok()?.send(());
+        self.go.lock().ok()?.recv_timeout(Duration::from_secs(30)).ok()?;
+        render_pool(self.nested, 1.0).ok()?;
+        Some(PluginImage { width: 2, height: 2, pixels: vec![[0.0; 4]; 4], origin: [0.0; 2], scale: 1.0 })
+    }
+    fn layer_input(&self, _: &str, _: f64) -> Option<PluginImage> {
+        None
+    }
+    fn params_at(&self, _: f64) -> Option<(Vec<f64>, Vec<String>)> {
+        None
+    }
+    fn frame_rate(&self) -> f64 {
+        10.0
+    }
+    fn time(&self) -> f64 {
+        1.0
+    }
+    fn instance_key(&self) -> u64 {
+        9
+    }
+}
+
+/// The most renders any process saw at once since `seen.log` was last removed.
+fn seen_max(dir: &Path) -> usize {
+    std::fs::read_to_string(dir.join("seen.log")).unwrap_or_default().lines().filter_map(|l| l.trim().parse().ok()).max().unwrap_or(0)
+}
+
+/// Forget what earlier checks saw, so a check reads only its own renders.
+fn reset_seen(dir: &Path) {
+    let _ = std::fs::remove_file(dir.join("seen.log"));
+}
+
+fn helper_entry() -> serde_json::Value {
+    effectcraft_helper_host::list()["helpers"][0].clone()
+}
+
+/// Process pools: a helper that says `max_processes` gets that many processes, one render each.
+/// Run in a child of the test (`--pool-checks`) with `EC_FAKE_MODE` (`pool`: max 4, `serial`: no
+/// `max_processes`, `startup`: max 4, see [`startup_checks`]), `EC_FAKE_DIR` for the helpers' marks, and the helper program being this
+/// very binary, which reads the same variables when started as the helper.
+fn run_pool_checks(exe: &Path, mode: &str) -> bool {
+    let mut all = true;
+    // The pool checks wait for each other: more than the short timeout of the hang check.
+    effectcraft_helper_host::client::set_render_timeout(Duration::from_secs(30));
+    let Ok(dir) = pool_dir() else { return check("EC_FAKE_DIR", false, "not set") };
+    let state = dir.join("state");
+    effectcraft_helper_host::blocklist::set_state_dir(state);
+    let r = effectcraft_helper_host::scan_paths(std::slice::from_ref(&exe.to_path_buf()), false);
+    all &= check(&format!("{mode}: scan registers the helper's effects"), r["loaded"].as_array().map_or(0, Vec::len) == 4, &r);
+
+    if mode == "serial" {
+        // Without max_processes there is one process and the renders take turns.
+        let rs = render_together(&[("org.test.serial.meet", 1.0); 3]);
+        let procs = count_files(&dir.join("procs"), "");
+        all &=
+            check("without max_processes renders stay serial", rs.iter().all(Result::is_ok) && seen_max(&dir) == 1 && procs == 1, (&rs, seen_max(&dir), procs));
+        let e = helper_entry();
+        all &= check("list: one process, at most one", e["processes"] == 1 && e["max_processes"] == 1, &e);
+        effectcraft_helper_host::stop_all();
+        return all;
+    }
+    if mode == "startup" {
+        return all & startup_checks(&dir);
+    }
+
+    // max_processes 4: four renders that only finish when all four are active at once. A serial
+    // helper can't, so this proves they ran in parallel, in four processes.
+    let rs = render_together(&[("org.test.pool.meet", 4.0); 4]);
+    let procs = count_files(&dir.join("procs"), "");
+    all &= check("four renders run at once in four processes", rs.iter().all(Result::is_ok) && seen_max(&dir) >= 4 && procs == 4, (&rs, seen_max(&dir), procs));
+    let e = helper_entry();
+    all &= check("list reports the pool", e["processes"] == 4 && e["max_processes"] == 4 && e["restarts"].as_u64().is_some_and(|r| r <= 1), &e);
+
+    // More renders than processes wait for a free one; never more than four processes or renders.
+    reset_seen(&dir);
+    let rs = render_together(&[("org.test.pool.meet", 1.0); 12]);
+    let procs = count_files(&dir.join("procs"), "");
+    all &= check("never more processes than max_processes", rs.iter().all(Result::is_ok) && procs == 4, (&rs, procs));
+    all &= check("never more renders at once than processes", (1..=4).contains(&seen_max(&dir)), seen_max(&dir));
+
+    // load reaches every running process; destroy too.
+    let r = effectcraft_helper_host::load_path("x.pool");
+    all &= check("load is accepted", r.is_ok(), &r);
+    let x = loads_of(&dir, "x.pool");
+    all &= check("load reached all four processes", x.len() == 4 && x.values().all(|n| *n == 1), &x);
+    // Loading the same path again (a folder with new plug-ins) reaches every process again.
+    let r = effectcraft_helper_host::load_path("x.pool");
+    let x = loads_of(&dir, "x.pool");
+    all &= check("a repeated load reaches all four processes", r.is_ok() && x.len() == 4 && x.values().all(|n| *n == 2), (&r, &x));
+
+    // A load a process refuses stays pending, and that process loads it before its next render.
+    let _ = mark(&dir, "refuse-z");
+    let r = effectcraft_helper_host::load_path("z.pool");
+    let z = loads_of(&dir, "z.pool");
+    all &= check("a load refused by the other processes", r.is_ok() && z.len() == 1, (&r, &z));
+    let _ = std::fs::remove_file(dir.join("refuse-z"));
+    let rs = render_together(&[("org.test.pool.meet", 4.0); 4]);
+    let z = loads_of(&dir, "z.pool");
+    all &= check("a refused load is tried again before the next render", rs.iter().all(Result::is_ok) && z.len() == 4, (&rs, &z));
+
+    let told = effectcraft_helper_host::destroy_instance(42);
+    let t0 = Instant::now();
+    while count_files(&dir, "destroyed.") < 4 && t0.elapsed() < Duration::from_secs(10) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    all &= check("destroy reached all four processes", told == 4 && count_files(&dir, "destroyed.") == 4, (told, count_files(&dir, "destroyed.")));
+
+    // destroy never waits for a process to read its input: these processes stop reading for a
+    // while, and many more destroys than their pipes hold are still handed over at once. Renders
+    // afterwards are in step (the writer's results for the destroys come first).
+    let told = effectcraft_helper_host::destroy_instance(SLEEPY_INSTANCE);
+    let t0 = Instant::now();
+    let flood: usize = (0..20_000u64).map(|i| effectcraft_helper_host::destroy_instance(1000 + i)).sum();
+    let took = t0.elapsed();
+    all &= check("destroy doesn't wait for a helper that stopped reading", told == 4 && flood == 80_000 && took < Duration::from_secs(3), (told, flood, took));
+    let rs = render_together(&[("org.test.pool.meet", 4.0); 4]);
+    all &= check("renders after many destroys", rs.iter().all(Result::is_ok), &rs);
+
+    // A crash in one process leaves the renders in the other three alone.
+    let rs = render_together(&[("org.test.pool.slow", 4.0), ("org.test.pool.slow", 4.0), ("org.test.pool.slow", 4.0), ("org.test.pool.crash", 4.0)]);
+    all &= check(
+        "a crash in one process leaves the other renders intact",
+        rs[..3].iter().all(Result::is_ok) && rs[3].as_ref().is_err_and(|e| e.contains("helper failed")),
+        &rs,
+    );
+    let e = helper_entry();
+    all &= check("only the crashed process is gone", e["processes"] == 3 && !effectcraft_helper_host::blocklist::is_blocked("org.test.pool.crash"), &e);
+
+    // A process started later knows the loaded paths already.
+    effectcraft_helper_host::stop_all();
+    let r = render_pool("org.test.pool.meet", 1.0);
+    all &= check("a stopped pool restarts for a render", r.is_ok(), &r);
+    let x = loads_of(&dir, "x.pool");
+    // The new process loads x.pool once, though it was loaded twice.
+    all &= check("a process started later loads what was loaded", x.len() == 5 && x.values().filter(|n| **n == 1).count() == 1, &x);
+
+    // A path loaded while a render waits for a callback is not sent into that conversation: the
+    // nested render in the callback runs on the same process, which catches up on its next turn.
+    let (ready_tx, ready_rx) = channel();
+    let (go_tx, go_rx) = channel();
+    let renderer = std::thread::spawn(move || {
+        render_pool_with("org.test.pool.ask", 0.0, &GateHost { ready: Mutex::new(ready_tx), go: Mutex::new(go_rx), nested: "org.test.pool.meet" })
+    });
+    let waiting = ready_rx.recv_timeout(Duration::from_secs(30)).is_ok();
+    let r = effectcraft_helper_host::load_path("y.pool");
+    let _ = go_tx.send(());
+    let rendered = renderer.join().unwrap_or_else(|_| Err("thread panicked".into()));
+    all &= check("a load during a callback is accepted", waiting && r.is_ok() && rendered.is_ok(), (waiting, &r, &rendered));
+    all &=
+        check("a load never reaches a render waiting for a callback", count_files(&dir, "load-during-render.") == 0, count_files(&dir, "load-during-render."));
+    // Four renders at once, so all four processes: each had loaded y.pool when it rendered.
+    let _ = std::fs::remove_file(dir.join("renders.log"));
+    let rs = render_together(&[("org.test.pool.meet", 4.0); 4]);
+    let renders = log_lines(&dir, "renders.log");
+    let pids: std::collections::BTreeSet<&String> = renders.iter().map(|(pid, _)| pid).collect();
+    all &= check(
+        "every process catches up on loads before it is used",
+        rs.iter().all(Result::is_ok) && pids.len() == 4 && renders.iter().all(|(_, loaded)| loaded.split(',').any(|p| p == "y.pool")),
+        (&rs, &renders),
+    );
+
+    // Crashes are counted per effect across the pool, not per process: three turn it off. Each
+    // crash ends its process, so they are spread over three processes.
+    for _ in 0..2 {
+        let _ = render_pool("org.test.pool.crash", 1.0);
+    }
+    let crashed: std::collections::BTreeSet<String> = log_lines(&dir, "crashes.log").into_iter().map(|(pid, _)| pid).collect();
+    let r = render_pool("org.test.pool.crash", 1.0);
+    all &= check(
+        "three crashes in different processes block the effect",
+        crashed.len() == 3 && r.as_ref().is_err_and(|e| e.contains("turned off")),
+        (&crashed, &r),
+    );
+
+    effectcraft_helper_host::stop_all();
+    all
+}
+
+/// A fresh pool whose new processes die while they start: the first try of a slot other than the
+/// first doesn't count as a restart, every later one does.
+fn startup_checks(dir: &Path) -> bool {
+    let mut all = true;
+    let restarts = || helper_entry()["restarts"].as_u64().unwrap_or(u64::MAX);
+    let before = restarts();
+    // Hold the running process (slot 0) in a callback, so the renders below need another slot.
+    let (ready_tx, ready_rx) = channel();
+    let (go_tx, go_rx) = channel();
+    let holder = std::thread::spawn(move || {
+        render_pool_with("org.test.startup.ask", 0.0, &GateHost { ready: Mutex::new(ready_tx), go: Mutex::new(go_rx), nested: "org.test.startup.meet" })
+    });
+    let waiting = ready_rx.recv_timeout(Duration::from_secs(30)).is_ok();
+    let _ = mark(dir, "die-on-start");
+    let first = render_pool("org.test.startup.meet", 1.0);
+    let after_first = restarts();
+    let second = render_pool("org.test.startup.meet", 1.0);
+    let after_second = restarts();
+    let _ = std::fs::remove_file(dir.join("die-on-start"));
+    let _ = go_tx.send(());
+    let held = holder.join().unwrap_or_else(|_| Err("thread panicked".into()));
+    all &= check(
+        "a slot's first start is not a restart, even when it fails",
+        waiting && first.is_err() && after_first == before,
+        (waiting, &first, before, after_first),
+    );
+    all &= check("a slot's second start is a restart", second.is_err() && after_second == before + 1, (&second, before, after_second));
+    all &= check("the held render finishes", held.is_ok(), &held);
+    effectcraft_helper_host::stop_all();
+    all
+}
+
+/// A [`ParamChange`] of `preset` to `preset` with amount 0.8, instance 7, at 1.5 s on a 300 px
+/// wide layer.
+fn change(preset: u64) -> ParamChange {
+    let mut values = serde_json::Map::new();
+    values.insert("amount".into(), serde_json::json!(0.8));
+    values.insert("preset".into(), serde_json::json!(preset));
+    values.insert("tint".into(), serde_json::json!([1.0, 1.0, 1.0, 1.0]));
+    values.insert("link".into(), serde_json::json!(false));
+    ParamChange { param: "preset".into(), instance_key: 7, time: 1.5, layer_size: [300.0, 200.0], values, texts: vec![], budget: None }
+}
+
+/// Parameter changes (#3663), run in a child of the test with `EC_FAKE_MODE` `notify` (a helper
+/// that announces `param_changed`) or `old` (one that announces nothing).
+fn run_notify_checks(exe: &Path, mode: &str) -> bool {
+    let mut all = true;
+    let Ok(dir) = pool_dir() else { return check("EC_FAKE_DIR", false, "not set") };
+    effectcraft_helper_host::blocklist::set_state_dir(dir.join("state"));
+    effectcraft_helper_host::client::set_edit_timeout(Duration::from_millis(1500));
+    let r = effectcraft_helper_host::scan_paths(std::slice::from_ref(&exe.to_path_buf()), false);
+    all &= check(&format!("{mode}: scan registers the helper's effects"), r["loaded"].as_array().map_or(0, Vec::len) == 2, &r);
+    let Some(fx) = plugin(&format!("org.test.{mode}.preset")) else { return check("the preset effect is registered", false, &r) };
+    let changed = || log_lines(&dir, "changed.log").len();
+
+    if mode == "old" {
+        // A helper without the feature: nothing to notify, and nothing is ever sent to it.
+        let r = fx.param_changed(&change(1));
+        all &= check("old helper: no notify_params", fx.notify_params().is_empty(), fx.notify_params());
+        all &= check("old helper: param_changed is never sent", r == Ok(vec![]) && changed() == 0, (&r, changed()));
+        all &= check("old helper: features are empty", helper_entry()["features"] == serde_json::json!([]), helper_entry());
+        effectcraft_helper_host::stop_all();
+        return all;
+    }
+
+    all &= check("notify_params: the valid ids", fx.notify_params() == ["preset".to_string()], fx.notify_params());
+    all &= check("list shows the features", helper_entry()["features"] == serde_json::json!(["param_changed"]), helper_entry());
+
+    // The round trip: what the helper was told comes back in its answer.
+    let r = fx.param_changed(&change(1));
+    let want = vec![("amount".to_string(), serde_json::json!(0.4)), ("tint".to_string(), serde_json::json!([1.5, 3.0, 1.0, 1.0]))];
+    all &= check("param_changed round trip", r.as_ref() == Ok(&want) && changed() == 1, (&r, changed()));
+
+    // Values that don't fit are dropped, entry by entry; slider values are clamped.
+    let r = fx.param_changed(&change(2));
+    let want = vec![("amount".to_string(), serde_json::json!(1.0)), ("link".to_string(), serde_json::json!(true))];
+    all &= check("values that don't fit are ignored", r.as_ref() == Ok(&want), &r);
+
+    // A parameter that isn't in notify_params is not sent.
+    let mut other = change(1);
+    other.param = "amount".into();
+    let r = fx.param_changed(&other);
+    all &= check("other parameters are not sent", r == Ok(vec![]) && changed() == 2, (&r, changed()));
+
+    // A helper that doesn't answer in time: the edit goes on after the edit timeout, the helper
+    // is stopped (its late answer would be out of step) and is not charged with a crash.
+    let t0 = Instant::now();
+    let r = fx.param_changed(&change(3));
+    let took = t0.elapsed();
+    all &= check(
+        "a slow answer times out within the edit timeout",
+        r.as_ref().is_err_and(|e| e.contains("did not answer")) && took < Duration::from_secs(5),
+        (&r, took),
+    );
+    all &= check("the slow helper was stopped", helper_entry()["processes"] == 0, helper_entry());
+    // Not running: an edit doesn't start the helper; a render does.
+    let t0 = Instant::now();
+    let r = fx.param_changed(&change(1));
+    all &= check("an edit doesn't start a stopped helper", r.as_ref().is_err_and(|e| e.contains("not running")) && t0.elapsed() < Duration::from_secs(1), &r);
+    let r = render_pool(&format!("org.test.{mode}.ask"), 1.0);
+    all &= check("a render starts it again", r.is_ok(), &r);
+
+    // A helper that exits, or answers something else, while asked: an error, not a crash count.
+    let r = fx.param_changed(&change(4));
+    all &= check(
+        "a helper that exits while asked is an error",
+        r.is_err() && !effectcraft_helper_host::blocklist::is_blocked(&format!("org.test.{mode}.preset")),
+        &r,
+    );
+    let _ = render_pool(&format!("org.test.{mode}.ask"), 1.0);
+    let r = fx.param_changed(&change(5));
+    all &= check("a reply that isn't set_params is an error", r.as_ref().is_err_and(|e| e.contains("unexpected reply")), &r);
+    let _ = render_pool(&format!("org.test.{mode}.ask"), 1.0);
+    let r = fx.param_changed(&change(1));
+    all &= check("and the next change is answered again", r.as_ref().is_ok_and(|v| v.len() == 2), &r);
+
+    // A load the restarted process can't replay (its folder went away) is tried again before
+    // renders, but doesn't hold edits up.
+    let r = effectcraft_helper_host::load_path("plugins.notify");
+    all &= check("a folder loads", r.is_ok(), &r);
+    let _ = mark(&dir, "refuse-loads");
+    effectcraft_helper_host::stop_all();
+    let r = render_pool(&format!("org.test.{mode}.ask"), 1.0);
+    all &= check("a render with a load that fails to replay", r.is_ok(), &r);
+    let r = fx.param_changed(&change(1));
+    all &= check("a load that failed to replay doesn't block edits", r.as_ref().is_ok_and(|v| v.len() == 2), &r);
+    let _ = std::fs::remove_file(dir.join("refuse-loads"));
+
+    // The only process is busy in a render: the edit waits at most the edit timeout for it, and
+    // never sends into that render's conversation.
+    let (ready_tx, ready_rx) = channel();
+    let (go_tx, go_rx) = channel();
+    let ask = format!("org.test.{mode}.ask");
+    let holder = std::thread::spawn(move || {
+        render_pool_with(&ask, 0.0, &GateHost { ready: Mutex::new(ready_tx), go: Mutex::new(go_rx), nested: "org.test.notify.ask" })
+    });
+    let waiting = ready_rx.recv_timeout(Duration::from_secs(30)).is_ok();
+    let before = changed();
+    let t0 = Instant::now();
+    let r = fx.param_changed(&change(1));
+    let took = t0.elapsed();
+    let _ = go_tx.send(());
+    let held = holder.join().unwrap_or_else(|_| Err("thread panicked".into()));
+    all &= check(
+        "a busy helper holds an edit up for the edit timeout at most",
+        waiting && r.as_ref().is_err_and(|e| e.contains("busy")) && took >= Duration::from_millis(1400) && took < Duration::from_secs(5) && changed() == before,
+        (waiting, &r, took),
+    );
+    all &= check("the render it waited for finishes", held.is_ok(), &held);
+    effectcraft_helper_host::stop_all();
+    all
+}
+
+/// A mask with `n` vertices from (x, y), 1 px apart, tangents (0.5, 0.25) in and (-0.5, 0) out.
+fn mask(n: usize, x: f64, y: f64) -> effectcraft_effects::MaskPath {
+    effectcraft_effects::MaskPath {
+        name: "Mask 1".into(),
+        closed: true,
+        mode: "add".into(),
+        inverted: false,
+        opacity: 0.75,
+        feather: [2.5, 2.5],
+        expansion: -1.5,
+        vertices: (0..n).map(|i| [x + i as f64, y]).collect(),
+        in_tangents: vec![[0.5, 0.25]; n],
+        out_tangents: vec![[-0.5, 0.0]; n],
+    }
+}
+
+/// The host of the mask checks: the layer's masks are `own`, the layer in parameter `layer` has
+/// `other`.
+struct MaskHost {
+    own: Vec<effectcraft_effects::MaskPath>,
+    other: Option<Vec<effectcraft_effects::MaskPath>>,
+}
+
+impl PluginHost for MaskHost {
+    fn input_at(&self, _: f64) -> Option<PluginImage> {
+        None
+    }
+    fn layer_input(&self, _: &str, _: f64) -> Option<PluginImage> {
+        None
+    }
+    fn params_at(&self, _: f64) -> Option<(Vec<f64>, Vec<String>)> {
+        None
+    }
+    fn frame_rate(&self) -> f64 {
+        10.0
+    }
+    fn time(&self) -> f64 {
+        1.0
+    }
+    fn masks(&self) -> Vec<effectcraft_effects::MaskPath> {
+        self.own.clone()
+    }
+    fn layer_masks(&self, param: &str, t: f64) -> Option<Vec<effectcraft_effects::MaskPath>> {
+        if param == "layer" && t == 0.5 { self.other.clone() } else { None }
+    }
+}
+
+/// Render mask effect `id` on a 2×2 frame (no padding) with `host`; the first three pixels.
+fn render_masks(id: &str, host: &MaskHost) -> Result<Vec<[f32; 4]>, String> {
+    let p = plugin(id).ok_or_else(|| format!("{id} is not registered"))?;
+    let m = p.manifest().clone();
+    let mut px = vec![[0.0; 4]; 4];
+    let mut f = PluginFrame { width: 2, height: 2, pixels: &mut px, scale: 1.0, origin: [0.0; 2], layer_size: [2.0; 2] };
+    p.render_v2(&mut f, &PluginParams { manifest: &m, flat: &[1.0, 3.0], texts: &[] }, 1.0, host)?;
+    px.truncate(3);
+    Ok(px)
+}
+
+/// Masks for helper effects (#3665), run in a child of the test with `EC_FAKE_MODE` `masks` or
+/// `nomasks` (a helper that announces no features).
+fn run_mask_checks(exe: &Path, mode: &str) -> bool {
+    let mut all = true;
+    let Ok(dir) = pool_dir() else { return check("EC_FAKE_DIR", false, "not set") };
+    effectcraft_helper_host::blocklist::set_state_dir(dir.join("state"));
+    let r = effectcraft_helper_host::scan_paths(std::slice::from_ref(&exe.to_path_buf()), false);
+    all &= check(&format!("{mode}: scan registers the helper's effects"), r["loaded"].as_array().map_or(0, Vec::len) == 2, &r);
+    let (shape, blind) = (format!("org.test.{mode}.shape"), format!("org.test.{mode}.blind"));
+    let host = MaskHost { own: vec![mask(4, 10.5, 20.25), mask(3, 0.0, 0.0)], other: Some(vec![mask(5, 7.0, 8.0)]) };
+    let r = render_masks(&shape, &host);
+
+    if mode == "nomasks" {
+        // Without the feature: no masks in the render or padding (the effect asked in vain).
+        all &= check("no feature: render carries no masks", r.as_ref().is_ok_and(|p| p[0][0] == 0.0), &r);
+        let pad = plugin(&shape).map(|p| {
+            let m = p.manifest().clone();
+            p.padding_v2(&PluginParams { manifest: &m, flat: &[1.0, 3.0], texts: &[] }, 1.0, 1.0, [2.0; 2], 7, &host)
+        });
+        all &= check("no feature: padding carries no masks", pad == Some(0), pad);
+        effectcraft_helper_host::stop_all();
+        return all;
+    }
+
+    // The layer's masks arrive as the host gave them (buffer pixels), with their settings.
+    all &= check("render carries the layer's masks", r.as_ref().is_ok_and(|p| p[0] == [2.0, 10.5, 20.25, 7.0] && p[2] == [-0.5, 2.5, -1.5, 0.75]), &r);
+    // The masks of another layer, asked for during the render.
+    all &= check("layer_masks answers with the other layer's masks", r.as_ref().is_ok_and(|p| p[1] == [1.0, 7.0, 8.0, 0.5]), &r);
+    let none = render_masks(&shape, &MaskHost { own: vec![], other: None });
+    all &= check("layer_masks without a layer answers null", none.as_ref().is_ok_and(|p| p[0][0] == 0.0 && p[1][0] == -1.0), &none);
+    // An effect that didn't ask gets none of its own, but may still ask for another layer's.
+    let r = render_masks(&blind, &host);
+    all &= check("an effect that didn't ask gets no masks", r.as_ref().is_ok_and(|p| p[0][0] == 0.0 && p[1][0] == 1.0), &r);
+    // Padding carries them too.
+    let pad = |id: &str| {
+        plugin(id).map(|p| {
+            let m = p.manifest().clone();
+            p.padding_v2(&PluginParams { manifest: &m, flat: &[1.0, 3.0], texts: &[] }, 1.0, 1.0, [2.0; 2], 7, &host)
+        })
+    };
+    all &= check("padding carries the layer's masks", pad(&shape) == Some(2) && pad(&blind) == Some(0), (pad(&shape), pad(&blind)));
+
+    // Bounds: masks with numbers that aren't finite or tangents that don't match are dropped,
+    // then at most 1024 masks and 65536 vertices go out, in order.
+    let mut own = vec![mask(3, f64::NAN, 0.0)];
+    let mut short = mask(3, 0.0, 0.0);
+    short.in_tangents.pop();
+    own.push(short);
+    own.extend((0..2000).map(|i| mask(100, i as f64, 1.0)));
+    let big = MaskHost { own, other: Some((0..3000).map(|i| mask(1, i as f64, 2.0)).collect()) };
+    let r = render_masks(&shape, &big);
+    all &= check("huge masks are bounded", r.as_ref().is_ok_and(|p| p[0] == [655.0, 0.0, 1.0, 65_500.0] && p[1][0] == 1024.0), &r);
+    effectcraft_helper_host::stop_all();
+    all
+}
+
+/// Run the pool checks of one mode in a child of this test, so its helpers (this same program)
+/// see the mode in their environment.
+fn pool_group(mode: &str) -> bool {
+    let (Ok(exe), dir) = (std::env::current_exe(), std::env::temp_dir().join(format!("ec-fake-{mode}-{}", std::process::id()))) else {
+        return check("current exe", false, "");
+    };
+    let _ = std::fs::remove_dir_all(&dir);
+    if std::fs::create_dir_all(&dir).is_err() {
+        return check("create the marks folder", false, &dir);
+    }
+    let status =
+        // The timeouts the checks set must not be changed by the environment the tests run in.
+        std::process::Command::new(exe)
+            .arg(POOL_ARG)
+            .env("EC_FAKE_MODE", mode)
+            .env("EC_FAKE_DIR", &dir)
+            .env("EFFECTCRAFT_HELPER_MAX_PROCESSES", "4")
+            .env_remove("EFFECTCRAFT_HELPER_EDIT_TIMEOUT")
+            .env_remove("EFFECTCRAFT_HELPER_TIMEOUT")
+            .status();
+    let _ = std::fs::remove_dir_all(&dir);
+    check(&format!("pool checks ({mode}) pass"), status.is_ok_and(|s| s.success()), "see the lines above")
+}
+
+/// Starts the pool checks of the mode in `EC_FAKE_MODE`.
+const POOL_ARG: &str = "--pool-checks";
 
 /// The one test this binary reports to test runners.
 const TEST_NAME: &str = "helper_protocol";
@@ -305,8 +1138,31 @@ const TEST_NAME: &str = "helper_protocol";
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == HELPER_ARG) {
-        if let Err(e) = serve(&mut FakeProvider) {
+        // The pool checks start this program with the mode of the fake in the environment.
+        let r = match std::env::var("EC_FAKE_MODE").as_deref() {
+            Ok("pool") => serve(&mut PoolProvider::new("pool", 4)),
+            Ok("serial") => serve(&mut PoolProvider::new("serial", 1)),
+            Ok("startup") => serve(&mut PoolProvider::new("startup", 4)),
+            Ok("notify") => serve(&mut NotifyProvider { tag: "notify" }),
+            Ok("old") => serve(&mut NotifyProvider { tag: "old" }),
+            Ok("masks") => serve(&mut MasksProvider { tag: "masks" }),
+            Ok("nomasks") => serve(&mut MasksProvider { tag: "nomasks" }),
+            _ => serve(&mut FakeProvider),
+        };
+        if let Err(e) = r {
             eprintln!("fake helper: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if args.iter().any(|a| a == POOL_ARG) {
+        let (Ok(exe), Ok(mode)) = (std::env::current_exe(), std::env::var("EC_FAKE_MODE")) else { std::process::exit(2) };
+        let ok = match mode.as_str() {
+            "notify" | "old" => run_notify_checks(&exe, &mode),
+            "masks" | "nomasks" => run_mask_checks(&exe, &mode),
+            _ => run_pool_checks(&exe, &mode),
+        };
+        if !ok {
             std::process::exit(1);
         }
         return;

@@ -6,6 +6,7 @@
 //! never travel over the pipe: they live in the **frame exchange file** named in
 //! [`Request::Hello`] and are addressed by [`ImageRef`]s (byte offset + size).
 
+use effectcraft_effects::MaskPath;
 use effectcraft_effects::plugin::PluginManifest;
 use serde::{Deserialize, Serialize};
 
@@ -22,6 +23,35 @@ pub const HELPER_ARG: &str = "--effectcraft-helper";
 
 /// The longest control line either side accepts (bytes). Hidden parameters can carry a few MB.
 pub const MAX_LINE: u64 = 256 << 20;
+
+/// The most masks one message carries (more are left out).
+pub const MAX_MASKS: usize = 1024;
+/// The most mask vertices one message carries, all masks together (a mask that doesn't fit is
+/// left out with those after it): about 8 MB of JSON, far below [`MAX_LINE`].
+pub const MAX_MASK_VERTICES: usize = 1 << 16;
+
+/// The masks as they are sent: masks whose numbers aren't all finite, or whose tangent lists
+/// don't match their vertices, are left out; then at most [`MAX_MASKS`] masks and
+/// [`MAX_MASK_VERTICES`] vertices in all, in order.
+pub fn bounded_masks(masks: Vec<MaskPath>) -> Vec<MaskPath> {
+    let finite = |m: &MaskPath| {
+        let pts = m.vertices.iter().chain(&m.in_tangents).chain(&m.out_tangents).chain(std::iter::once(&m.feather));
+        pts.flatten().chain([&m.opacity, &m.expansion]).all(|v| v.is_finite())
+    };
+    let (mut out, mut vertices) = (Vec::new(), 0usize);
+    for m in masks {
+        if !finite(&m) || m.in_tangents.len() != m.vertices.len() || m.out_tangents.len() != m.vertices.len() {
+            continue;
+        }
+        vertices = vertices.saturating_add(m.vertices.len());
+        if out.len() >= MAX_MASKS || vertices > MAX_MASK_VERTICES {
+            log::warn!("external effect helper: masks beyond {MAX_MASKS} masks / {MAX_MASK_VERTICES} vertices are not passed on");
+            break;
+        }
+        out.push(m);
+    }
+    out
+}
 
 /// The most pixels one image may have (16384 × 16384).
 pub const MAX_PIXELS: u64 = 1 << 28;
@@ -81,6 +111,10 @@ pub struct RenderRequest {
     /// The layer's source range in layer-time seconds, when it has one.
     #[serde(default)]
     pub frame_range: Option<(f64, f64)>,
+    /// The layer's masks in buffer pixels of `frame` (effects with [`RemoteEffect::masks`] of
+    /// helpers with [`FEATURE_MASKS`]; absent otherwise).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub masks: Option<Vec<MaskPath>>,
 }
 
 /// EffectCraft → helper.
@@ -95,7 +129,19 @@ pub enum Request {
     /// new ones).
     Load { path: String },
     /// Transparent pixels to add around the buffer before [`Request::Render`] → [`Reply::Padding`].
-    Padding { effect: String, instance: u64, time: f64, scale: f64, layer_size: [f64; 2], flat: Vec<f64>, texts: Vec<String> },
+    /// `masks` as in [`RenderRequest::masks`], in buffer pixels of the buffer before padding
+    /// (where `flat`'s points are).
+    Padding {
+        effect: String,
+        instance: u64,
+        time: f64,
+        scale: f64,
+        layer_size: [f64; 2],
+        flat: Vec<f64>,
+        texts: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        masks: Option<Vec<MaskPath>>,
+    },
     /// Render → callbacks ([`Reply::InputAt`], ...) answered with [`Request::Image`] /
     /// [`Request::Params`], then [`Reply::Done`] or [`Reply::Error`].
     Render(RenderRequest),
@@ -103,6 +149,25 @@ pub enum Request {
     Image { image: Option<ImageRef> },
     /// The answer to [`Reply::ParamsAt`]: flattened values and texts, or `None`.
     Params { values: Option<(Vec<f64>, Vec<String>)> },
+    /// The answer to [`Reply::LayerMasks`]: the masks in buffer pixels of the render's frame,
+    /// or `None`.
+    Masks { masks: Option<Vec<MaskPath>> },
+    /// The user changed parameter `param` of an effect that asked for it
+    /// ([`RemoteEffect::notify_params`]; only to helpers that list [`FEATURE_PARAM_CHANGED`] in
+    /// their `hello`) → [`Reply::SetParams`] or [`Reply::Error`]. `values` holds every parameter's
+    /// value in property units ([`effectcraft_effects::plugin::param_values`]), `texts` the text /
+    /// hidden ones as in [`RenderRequest::texts`]. Sent between renders, never into one.
+    ParamChanged {
+        effect: String,
+        instance: u64,
+        param: String,
+        /// Layer time, seconds.
+        time: f64,
+        layer_size: [f64; 2],
+        values: serde_json::Map<String, serde_json::Value>,
+        #[serde(default)]
+        texts: Vec<String>,
+    },
     /// The effect instance is gone; the helper may free what it keeps for it. No reply.
     Destroy { instance: u64 },
     /// Heartbeat → [`Reply::Pong`].
@@ -119,6 +184,57 @@ pub struct RemoteEffect {
     /// Whether to ask [`Request::Padding`] before every render (otherwise no padding).
     #[serde(default)]
     pub padding: bool,
+    /// Parameter ids whose changes by the user EffectCraft reports with
+    /// [`Request::ParamChanged`] (helpers that announce [`FEATURE_PARAM_CHANGED`]). Read
+    /// leniently: anything but an array of the manifest's parameter ids is ignored, entry by entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notify_params: Option<serde_json::Value>,
+    /// `true`: every `render` / `padding` of the effect carries its layer's masks (helpers that
+    /// announce [`FEATURE_MASKS`]). Anything else means no.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub masks: Option<serde_json::Value>,
+}
+
+impl RemoteEffect {
+    /// An effect without the protocol extensions.
+    pub fn new(manifest: PluginManifest, padding: bool) -> RemoteEffect {
+        RemoteEffect { manifest, padding, notify_params: None, masks: None }
+    }
+
+    /// Whether the effect asked for its layer's masks ([`RemoteEffect::masks`] is `true`).
+    pub fn wants_masks(&self) -> bool {
+        self.masks == Some(serde_json::Value::Bool(true))
+    }
+
+    /// The valid [`RemoteEffect::notify_params`]: ids of the manifest's parameters, each once.
+    pub fn notify_ids(&self) -> Vec<String> {
+        let mut out: Vec<String> = vec![];
+        for id in self.notify_params.as_ref().and_then(serde_json::Value::as_array).into_iter().flatten().filter_map(serde_json::Value::as_str) {
+            if self.manifest.params.iter().any(|p| p.id == id) && !out.iter().any(|o| o == id) {
+                out.push(id.to_string());
+            }
+        }
+        out
+    }
+}
+
+/// The `hello` feature of helpers that answer [`Request::ParamChanged`].
+pub const FEATURE_PARAM_CHANGED: &str = "param_changed";
+/// The `hello` feature of helpers that take masks ([`RemoteEffect::masks`],
+/// [`Reply::LayerMasks`]).
+pub const FEATURE_MASKS: &str = "masks";
+
+/// The feature names in a helper's `hello` (`features`): the strings of an array, at most 64,
+/// each at most 64 bytes; anything else is ignored.
+pub fn feature_list(v: Option<&serde_json::Value>) -> Vec<String> {
+    v.and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .filter(|s| s.len() <= 64)
+        .take(64)
+        .map(str::to_string)
+        .collect()
 }
 
 /// Helper → EffectCraft.
@@ -134,6 +250,14 @@ pub enum Reply {
         helper_version: String,
         #[serde(default)]
         loads: Vec<String>,
+        /// How many processes of this helper may run at once (a whole number, 1 when absent or
+        /// anything else; clamped by EffectCraft). Each process has its own conversation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_processes: Option<serde_json::Value>,
+        /// The protocol extensions the helper understands (`["param_changed"]`, see
+        /// [`feature_list`]). Absent: none, the helper is spoken to exactly as before.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        features: Option<serde_json::Value>,
     },
     Effects {
         effects: Vec<RemoteEffect>,
@@ -156,8 +280,24 @@ pub enum Reply {
     ParamsAt {
         time: f64,
     },
+    /// During a render: the masks of the layer chosen in a layer parameter, at a layer time
+    /// → [`Request::Masks`].
+    LayerMasks {
+        param: String,
+        time: f64,
+    },
     /// The render finished; the result is in the request's frame.
     Done,
+    /// Answer to [`Request::ParamChanged`]: parameter values to set with the user's change
+    /// (only those the helper changes, same units; ids that aren't the effect's, values of the
+    /// wrong type and numbers that aren't finite are ignored). `ui` (per-parameter UI state such
+    /// as `{"p12": {"enabled": false}}`) is accepted and ignored for now.
+    SetParams {
+        #[serde(default)]
+        values: Option<serde_json::Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ui: Option<serde_json::Value>,
+    },
     /// The request failed (the helper keeps running).
     Error {
         message: String,

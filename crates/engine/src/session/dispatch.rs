@@ -7,6 +7,14 @@ impl Session {
 
     /// Run a command by id.
     pub fn execute(&mut self, id: &str, params: Value) -> Result<Value> {
+        // One wait budget for plug-ins' answers per outermost command (a batch, a script).
+        self.notify_enter();
+        let r = self.execute_inner(id, params);
+        self.notify_leave();
+        r
+    }
+
+    fn execute_inner(&mut self, id: &str, params: Value) -> Result<Value> {
         if self.script_ui.render_host.is_some() && !crate::scriptui::allowed_during_render(id) {
             return Err(EngineError::Other(crate::scriptui::RENDER_WAIT_MESSAGE.into()));
         }
