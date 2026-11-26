@@ -88,6 +88,14 @@ impl ExprHost for Expressions {
         }
     }
 
+    fn busy(&self) -> bool {
+        FRAMES.with(|f| !f.borrow().is_empty())
+    }
+
+    fn faults(&self) -> Option<u64> {
+        Some(runtime::FAULTS.with(|n| n.get()))
+    }
+
     fn eval_text_selector(&self, ctx: &EvalCtx, layer: &Layer, prop: &Property, index: usize, total: usize, selector: [f64; 3]) -> Result<[f64; 3], String> {
         let Some(e) = prop.expr.as_ref().filter(|_| prop.has_expression()) else {
             let v = prop.value_at(layer.layer_time(ctx.time)).components();
@@ -135,8 +143,25 @@ struct TextSelector {
     value: [f64; 3],
 }
 
-/// Run an expression and return the raw script result.
+/// Run an expression and return the raw script result. A failure is counted
+/// ([`ExprHost::faults`]): its reader carries on with the keyframed value.
 fn evaluate_out(
+    host: &dyn ExprHost,
+    ctx: &EvalCtx,
+    layer: &Layer,
+    prop: &Property,
+    value: &Value,
+    text: &str,
+    text_selector: TextSelector,
+) -> Result<runtime::Out, String> {
+    let out = run_expression(host, ctx, layer, prop, value, text, text_selector);
+    if out.is_err() {
+        runtime::FAULTS.with(|n| n.set(n.get().wrapping_add(1)));
+    }
+    out
+}
+
+fn run_expression(
     host: &dyn ExprHost,
     ctx: &EvalCtx,
     layer: &Layer,

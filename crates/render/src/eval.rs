@@ -14,6 +14,19 @@ use effectcraft_time::Tick;
 pub trait ExprHost: Send + Sync {
     /// Evaluate the expression of `prop` (on `layer`, comp time `t`), given the keyframed value.
     fn eval(&self, ctx: &EvalCtx, layer: &Layer, prop: &Property, value: &Value) -> Result<Value, String>;
+    /// Whether an expression is being evaluated on this thread: a result worked out then may
+    /// rest on a stand-in (see [`Self::faults`]).
+    fn busy(&self) -> bool {
+        false
+    }
+    /// How many expressions have failed on this thread so far, when the host counts them: a
+    /// circular reference, expressions nested too deeply, a spent work budget, a script error.
+    /// The reader of a failed expression gets the keyframed value in its place, so a value is the
+    /// property's own, whoever asks and from wherever, exactly when this did not move while it
+    /// was worked out. `None` (the default): not counted, and no value is known to be that.
+    fn faults(&self) -> Option<u64> {
+        None
+    }
     /// Evaluate a text Expression Selector's Amount expression (on `prop`) for one unit:
     /// `textIndex` (1-based), `textTotal` and `selectorValue` (percent, per dimension) are
     /// defined. Returns the amount in percent per dimension.
@@ -107,7 +120,19 @@ impl<'a> EvalCtx<'a> {
         if prop.has_expression()
             && let Some(h) = self.expr
         {
-            return h.eval(self, layer, prop, &v).unwrap_or(v);
+            // Inside a frame memo scope an expression runs once per property and time: the
+            // viewer asks for a layer's transform for every view, outline and handle.
+            use crate::three_d::camera::memo;
+            let key = memo::prop(self, layer, prop, lt);
+            let mark = memo::mark(self);
+            if let Some(memo::Value::Prop(m)) = key.and_then(|k| memo::get(k, &mark)) {
+                return m;
+            }
+            let out = h.eval(self, layer, prop, &v).unwrap_or(v);
+            if let Some(key) = key {
+                memo::put(key, memo::Value::Prop(out.clone()), self, &mark);
+            }
+            return out;
         }
         v
     }

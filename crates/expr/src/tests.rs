@@ -2368,3 +2368,51 @@ fn sample_image_reads_3d_shape_behind_camera_before_and_after_effects() {
         assert!(pixel[0] > 0.99 && pixel[3] > 0.99, "postEffect={post}: {pixel:?}");
     }
 }
+
+/// The frame memo keeps a value worked out inside another expression only when no expression
+/// failed meanwhile ([`effectcraft_render::ExprHost::faults`]).
+#[test]
+fn the_host_counts_failed_expressions_and_only_those() {
+    use effectcraft_render::ExprHost;
+    let mut f = fx();
+    f.set_expr(f.a, OPA, "thisComp.layer('B').transform.opacity + 1");
+    f.set_expr(f.b, OPA, "50");
+    let before = Expressions.faults().expect("the engine counts");
+    assert_eq!(eval_property(&f.p, f.cid, f.a, OPA, 0.0), Ok(Value::Scalar(51.0)));
+    assert_eq!(Expressions.faults(), Some(before), "two expressions, one reading the other, both worked");
+    f.set_expr(f.b, OPA, "thisComp.layer('A').transform.opacity + 1");
+    let _ = eval_property(&f.p, f.cid, f.a, OPA, 0.0);
+    assert!(Expressions.faults() > Some(before), "the circle was cut where A needed its own value");
+    let cut = Expressions.faults();
+    let _ = eval_property(&f.p, f.cid, f.a, OPA, 0.0);
+    assert!(Expressions.faults() > cut, "and is cut again each time");
+}
+
+/// Two expressions that read each other: asked for at the top, each gets the other's value
+/// worked out with its own keyframed value standing in. Inside a frame memo those values must
+/// not depend on which was asked for first: neither a stand-in nor a value worked out round the
+/// circle answers the other's read.
+#[test]
+fn a_frame_memo_gives_a_circle_of_expressions_the_values_it_has_without_one() {
+    let mut f = fx();
+    for (layer, opacity) in [(f.a, 80.0), (f.b, 20.0)] {
+        f.layer_mut(layer).props.prop_mut(OPA).unwrap().value = Value::Scalar(opacity);
+    }
+    f.set_expr(f.a, OPA, "thisComp.layer('B').transform.opacity + 1");
+    f.set_expr(f.b, OPA, "thisComp.layer('A').transform.opacity + 1");
+    let c = f.p.comp(f.cid).unwrap();
+    let ctx = EvalCtx { expr: Some(&Expressions), ..EvalCtx::new(&f.p, f.cid, c, Tick::ZERO) };
+    let opacity = |layer: LayerId| {
+        let l = c.layer(layer).unwrap();
+        ctx.value(l, l.props.prop(OPA).unwrap()).as_f64()
+    };
+    let (a, b) = (opacity(f.a), opacity(f.b));
+    assert_eq!((a, b), (82.0, 22.0), "each: the other's value plus one, the other having read its keyframed value plus one");
+    for order in [[f.a, f.b], [f.b, f.a]] {
+        let _memo = effectcraft_render::three_d::EvalMemo::scope(&f.p);
+        let got = order.map(opacity);
+        let want = order.map(|l| if l == f.a { a } else { b });
+        assert_eq!(got, want, "asked for in the order {order:?}");
+        assert_eq!(order.map(opacity), want, "and again, remembered");
+    }
+}

@@ -266,6 +266,11 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         media_overrides: &[],
         reads: None,
     };
+    // The overlays below ask for the active camera once per 3D layer (outlines, hit areas,
+    // gizmos); with an expression-driven camera that re-ran its expressions for every layer, on
+    // the UI thread, each frame. `snap_project` stays as it is for this whole frame, so its
+    // cameras can be worked out once.
+    let _memo = three_d::EvalMemo::scope(&snap_project);
     phase_guides(app, &ectx, &mut v);
     phase_layers(app, ui, &ectx, &mut v);
     phase_scene(app, &ectx, &mut v);

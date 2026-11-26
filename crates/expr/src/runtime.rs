@@ -51,6 +51,8 @@ thread_local! {
     pub static FRAMES: RefCell<Vec<Frame>> = const { RefCell::new(Vec::new()) };
     /// Script runs since the outermost evaluation on this thread began (nested ones included).
     pub static RUNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Expressions that have failed on this thread (it only grows): see `ExprHost::faults`.
+    pub static FAULTS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     /// Stack address where the current script run began (0: none; see [`native_stack`]).
     static STACK_BASE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
