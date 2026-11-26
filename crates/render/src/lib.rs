@@ -66,6 +66,10 @@ pub use opts::{LayerTiming, RenderOpts};
 use opts::{MAX_THROUGH, Through};
 pub use pipeline::{Collapsed, FootagePicture, MediaOverride, PropertyOverride};
 
+/// The deepest nested comp whose precomp layers still collapse their transformations: a layer
+/// with Collapse Transformations in a comp nested deeper than this is rendered flattened.
+pub const MAX_COLLAPSE_DEPTH: usize = 12;
+
 pub struct Renderer<'a> {
     pub project: &'a Project,
     pub footage: &'a dyn FootageSource,

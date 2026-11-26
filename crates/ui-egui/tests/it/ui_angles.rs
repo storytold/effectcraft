@@ -49,7 +49,7 @@ fn harness(panel: Panel, angle: f64) -> (Harness<'static, EffectcraftApp>, u64, 
     app.toggle_maximize(panel.kind());
     app.ui.timeline.layer_reveal.insert(layer, vec!["rotation".into()]);
     app.ui.timeline.open_layers.insert(layer);
-    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_eframe(|_| app);
+    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app);
     h.run_steps(4);
     (h, layer, uid)
 }

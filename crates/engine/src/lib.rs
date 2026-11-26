@@ -99,7 +99,7 @@ pub use error::{EngineError, Result};
 pub use event::Event;
 pub use fonts::{FontRow, font_features, font_menu, font_preview, font_styles, text_families};
 pub use output_guard::OutputGuard;
-pub use services::{FsServices, Importer, Services};
+pub use services::{FsServices, Importer, PCRAFT_MAX_INPUT, Services, pcraft_too_large};
 pub use session::upgrade_effects;
 
 pub struct Session {

@@ -1,5 +1,5 @@
 //! WAV cue/adtl/RF64/XMP metadata is parsed by craft-audio; timeline policy remains here.
-use craft_audio_markers::wav_markers as shared;
+use craft_audio::wav_markers as shared;
 use effectcraft_color::Label;
 use effectcraft_project::Marker;
 use effectcraft_time::Tick;

@@ -42,6 +42,11 @@ and licence texts are in [`NOTICE`](NOTICE).
 | `assets/app-icon/effectcraft-macos-512.png` | EffectCraft contributors | Original work: effectCraft runtime Dock icon (macOS) (owner's ArtCraft unicorn drawing, vectorised) | MIT OR Apache-2.0 (`assets/app-icon/LICENSE.txt`) |
 | `assets/app-icon/effectcraft-small.svg` | EffectCraft contributors | Original work: effectCraft app icon, light vector (owner's ArtCraft unicorn drawing, vectorised) | MIT OR Apache-2.0 (`assets/app-icon/LICENSE.txt`) |
 | `assets/app-icon/effectcraft.icns` | EffectCraft contributors | Original work: effectCraft macOS app icon (owner's ArtCraft unicorn drawing, vectorised) | MIT OR Apache-2.0 (`assets/app-icon/LICENSE.txt`) |
+| `assets/app-icon/effectcraft-nightly.png` | EffectCraft contributors | Original work: Nightly derivative of the effectCraft app icon (256 px, deep background) | MIT OR Apache-2.0 (`assets/app-icon/LICENSE.txt`) |
+| `assets/app-icon/effectcraft-nightly-1024.png` | EffectCraft contributors | Original work: Nightly derivative of the effectCraft app icon (padded macOS 1024 px, deep background) | MIT OR Apache-2.0 (`assets/app-icon/LICENSE.txt`) |
+| `assets/app-icon/effectcraft-nightly-macos-512.png` | EffectCraft contributors | Original work: Nightly derivative of the effectCraft app icon (padded macOS 512 px, deep background) | MIT OR Apache-2.0 (`assets/app-icon/LICENSE.txt`) |
+| `assets/app-icon/effectcraft-nightly.ico` | EffectCraft contributors | Original work: Nightly derivative of the effectCraft app icon (Windows 16-256 px, deep background) | MIT OR Apache-2.0 (`assets/app-icon/LICENSE.txt`) |
+| `assets/app-icon/effectcraft-nightly.icns` | EffectCraft contributors | Original work: Nightly derivative of the effectCraft app icon (macOS bundle, deep background) | MIT OR Apache-2.0 (`assets/app-icon/LICENSE.txt`) |
 | `assets/app-icon/effectcraft.ico` | EffectCraft contributors | Original work: effectCraft Windows app icon (owner's ArtCraft unicorn drawing, vectorised) | MIT OR Apache-2.0 (`assets/app-icon/LICENSE.txt`) |
 | `assets/app-icon/effectcraft.svg` | EffectCraft contributors | Original work: effectCraft app icon, master vector (owner's ArtCraft unicorn drawing, vectorised) | MIT OR Apache-2.0 (`assets/app-icon/LICENSE.txt`) |
 | `assets/app-icon/hicolor/128x128/apps/ai.storyteller.effectcraft.png` | EffectCraft contributors | Original work: effectCraft app icon, Linux hicolor 128x128 (owner's ArtCraft unicorn drawing, vectorised) | MIT OR Apache-2.0 (`assets/app-icon/LICENSE.txt`) |
@@ -162,3 +167,4 @@ under [`docs/brand/LICENSE-brand.txt`](docs/brand/LICENSE-brand.txt). Forks and 
 | Asset | Author | Source | Licence |
 |---|---|---|---|
 | `crates/media/tests/fixtures/pce61-ffmpeg.aac-fixture` | Dylan M. Taylor | Original sine waves; reproducible recipe in `crates/media/tests/fixtures/README.md` | MIT OR Apache-2.0 |
+| `crates/media/tests/fixtures/monochrome-av1.mkv` | Terra854 | Original grayscale ramps from `crates/media/tests/fixtures/generate-monochrome-av1.sh` | MIT OR Apache-2.0 |

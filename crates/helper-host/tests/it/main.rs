@@ -3,6 +3,8 @@
 //! `--effectcraft-helper` it is the helper, otherwise it runs the checks, starting itself as
 //! the helper. (`harness = false`: libtest would reject the helper argument.)
 
+mod video;
+
 use std::io::Write;
 use std::sync::Arc;
 use std::time::Duration;
@@ -294,6 +296,8 @@ fn run_checks() -> bool {
         &starts,
     );
 
+    all &= video::run_checks(&exe);
+
     effectcraft_helper_host::stop_all();
     let _ = std::fs::remove_dir_all(&state);
     all
@@ -305,6 +309,13 @@ const TEST_NAME: &str = "helper_protocol";
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == HELPER_ARG) {
+        if video::is_fake() {
+            if let Err(e) = video::serve_fake() {
+                eprintln!("fake video helper: {e}");
+                std::process::exit(1);
+            }
+            return;
+        }
         if let Err(e) = serve(&mut FakeProvider) {
             eprintln!("fake helper: {e}");
             std::process::exit(1);

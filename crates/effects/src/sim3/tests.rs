@@ -1,5 +1,5 @@
 use super::*;
-use crate::{EffectEnv, MaskShape, run_fx};
+use crate::{EffectCtx, EffectEnv, MaskShape, Params, run_fx};
 
 fn run(vals: &[(&str, Value)], t: f64) -> Image {
     run_fx("ec.sim.particleplayground", vals, Image::filled(80, 60, [0.2, 0.2, 0.2, 1.0]), t, EffectEnv::default()).img
@@ -25,6 +25,125 @@ fn cannon_stream_is_seek_consistent() {
     // Nothing has been fired at time 0.
     let z = cannon(0.0);
     assert!(z.data.iter().all(|p| p[3] == 0.0));
+}
+
+/// A host whose cannon moves from `start_x` at layer time 0 to `start_x + 60 · t`.
+struct MovingCannon {
+    index: usize,
+    start_x: f64,
+}
+
+impl crate::EffectHost for MovingCannon {
+    fn layer(&self, _: u64, _: bool) -> Option<crate::LayerPixels> {
+        None
+    }
+    fn audio(&self, _: u64, _: f64, _: usize, _: u32) -> Option<Vec<f32>> {
+        None
+    }
+    fn param_at(&self, effect_index: usize, id: &str, t: f64) -> Option<Value> {
+        (effect_index == self.index && id == "cannon/cannonPosition").then_some(Value::Vec2([self.start_x + 60.0 * t, 50.0]))
+    }
+}
+
+fn pg_params(current_x: f64) -> Params {
+    let spec = crate::find("ec.sim.particleplayground").unwrap();
+    let mut p = Params { values: spec.params.iter().map(|ps| (ps.id.to_string(), crate::default_value(ps, [80.0, 60.0]))).collect() };
+    for (id, value) in [
+        ("gridEnabled", Value::Bool(false)),
+        ("cannonEnabled", Value::Bool(true)),
+        ("cannon/cannonPosition", Value::Vec2([current_x, 50.0])),
+        ("cannon/barrelRadius", num(0.0)),
+        ("cannon/particlesPerSecond", num(60.0)),
+        ("cannon/directionRandomSpread", num(0.0)),
+        ("cannon/velocity", num(0.0)),
+        ("cannon/velocityRandomSpread", num(0.0)),
+        ("gravity/gravityForce", num(0.0)),
+        ("randomSeed", num(1.0)),
+    ] {
+        p.values.insert(id.into(), value);
+    }
+    p
+}
+
+/// Production-shaped Particle Playground parameters, including the positional aliases that
+/// [`crate::flatten_params`] adds for grouped controls.
+fn pg_production_params(current_x: f64) -> Params {
+    use effectcraft_project::build::Ids;
+    let spec = crate::find("ec.sim.particleplayground").unwrap();
+    let mut next = 1;
+    let mut group = crate::instantiate(spec, &mut Ids(&mut next), spec.name, [80.0, 60.0]);
+    group.sub_mut("cannon").unwrap().prop_mut("cannonPosition").unwrap().value = Value::Vec2([current_x, 50.0]);
+    crate::flatten_params(&group, &mut |pr| pr.value.clone())
+}
+
+/// #1955: a Particle Playground cannon particle is born at the cannon's position during its
+/// birth step, not at the cannon's position when the frame is rendered.
+#[test]
+fn cannon_particles_are_born_at_their_producer_positions() {
+    let p = pg_params(80.0);
+    let host = MovingCannon { index: 0, start_x: 20.0 };
+    let env = EffectEnv { host: Some(&host), effect_index: 0, ..Default::default() };
+    let ctx = EffectCtx { params: &p, time: 1.0, layer_size: [80.0, 60.0], seed: 11, adjustment: false, env };
+    let parts = playground_state(&ctx).unwrap();
+    let births = crate::psim::births(60.0, steps_at(1.0), 60_000).unwrap();
+    assert!(parts.len() > 20, "{} particles", parts.len());
+    for q in parts {
+        let step = births[q.id as usize] as f32;
+        assert!((q.p[0] - (20.0 + step)).abs() < 1e-4, "particle {} at {:?}, expected {}", q.id, q.p, 20.0 + step);
+    }
+}
+
+/// The current cannon position is not part of the simulation key, but an earlier one is: a
+/// checkpoint reached with another producer history is not reused.
+#[test]
+fn a_changed_cannon_history_drops_stale_checkpoints() {
+    let p = pg_params(80.0);
+    let state = |start_x| {
+        let host = MovingCannon { index: 0, start_x };
+        let env = EffectEnv { host: Some(&host), effect_index: 0, ..Default::default() };
+        let ctx = EffectCtx { params: &p, time: 1.0, layer_size: [80.0, 60.0], seed: 12, adjustment: false, env };
+        playground_state(&ctx).unwrap().into_iter().next().unwrap().p[0]
+    };
+    assert!((state(20.0) - 20.0).abs() < 1e-4, "{}", state(20.0));
+    assert!((state(60.0) - 60.0).abs() < 1e-4, "{}", state(60.0));
+}
+
+/// The cannon's current position is not part of the simulation key, while its other cannon
+/// parameters remain part of it.
+#[test]
+fn the_cannon_position_is_not_part_of_the_particle_playground_key() {
+    let p = pg_production_params(80.0);
+    fn ctx(p: &Params) -> EffectCtx<'_> {
+        EffectCtx { params: p, time: 1.0, layer_size: [80.0, 60.0], seed: 13, adjustment: false, env: EffectEnv::default() }
+    }
+    assert!(p.values.contains_key("#2/cannonPosition"), "production parameters have the positional alias");
+    let mut moved = p.clone();
+    moved.values.insert("cannon/cannonPosition".into(), Value::Vec2([120.0, 50.0]));
+    moved.values.insert("#2/cannonPosition".into(), Value::Vec2([120.0, 50.0]));
+    assert_eq!(pg_key(&ctx(&p)), pg_key(&ctx(&moved)));
+    moved.values.insert("cannon/barrelAngle".into(), num(10.0));
+    moved.values.insert("#2/barrelAngle".into(), num(10.0));
+    assert_ne!(pg_key(&ctx(&p)), pg_key(&ctx(&moved)));
+}
+
+/// Moving the cannon only changes the position of particles born after the move; particles
+/// that already exist keep their world-space trajectory.
+#[test]
+fn moving_the_cannon_does_not_move_existing_particles() {
+    let pg = Pg { cannon: true, rate: 60.0, vel: 60.0, ..bare(3) };
+    let mut initial = PgState::default();
+    pg.step_at(&mut initial, [10.0, 10.0]);
+    let mut moved = initial.clone();
+    let mut unchanged = initial.clone();
+    pg.step_at(&mut moved, [100.0, 10.0]);
+    pg.step_at(&mut unchanged, [10.0, 10.0]);
+    assert_eq!(moved.parts.len(), 2);
+    assert_eq!(unchanged.parts.len(), 2);
+    assert_eq!(moved.parts[0].id, unchanged.parts[0].id);
+    assert_eq!(moved.parts[0].p, unchanged.parts[0].p);
+    assert_eq!(moved.parts[0].v, unchanged.parts[0].v);
+    assert!((moved.parts[1].p[0] - 100.0).abs() < 1e-4, "{:?}", moved.parts[1].p);
+    assert!((unchanged.parts[1].p[0] - 10.0).abs() < 1e-4, "{:?}", unchanged.parts[1].p);
 }
 
 #[test]
@@ -136,7 +255,6 @@ fn property_mapper_and_layer_map_read_layers() {
 fn bare(seed: u32) -> Pg {
     Pg {
         cannon: false,
-        pos: [0.0; 2],
         barrel_angle: 0.0,
         barrel_radius: 0.0,
         rate: 0.0,

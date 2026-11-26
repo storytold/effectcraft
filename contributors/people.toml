@@ -143,3 +143,9 @@ sync_github_name = true
 real_name = "Nicola Falcier"
 display_name = "Nicola Falcier"
 sync_github_name = false
+
+[people.Terra854]
+display_name = "Terra854"
+
+[people.gmrmad1]
+real_name = "Madhav Agarwal"

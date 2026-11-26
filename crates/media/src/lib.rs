@@ -11,12 +11,14 @@
 //! AV1, ProRes, DNxHD, MPEG-2, MJPEG; AAC, Opus, PCM, MP3/FLAC/Vorbis) come from FilmCraft's pure-Rust crates (git dependency,
 //! pinned; `plan/adr/0001`). FilmCraft types never leave this crate. Stills use the `image` crate
 //! (PNG, JPEG, GIF, WebP, TIFF, BMP, OpenEXR, Targa, Radiance HDR); Photoshop documents (merged image or one layer) come
-//! from `effectcraft-psd` and SVG from `effectcraft-svg` (rasterised at any scale).
+//! from `effectcraft-psd`, PhotoCraft composites and saved layer pixels from `craft-doc`, and SVG
+//! from `effectcraft-svg` (rasterised at any scale).
 
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 mod aac;
 mod convert;
+mod craft_source;
 pub mod downmix;
 mod dpx;
 pub mod exr_channels;
@@ -26,7 +28,7 @@ mod exr_read;
 mod gif_anim;
 mod layered;
 mod localize;
-mod mp4_h264;
+mod pcraft;
 pub use layered::vector_doc;
 mod pool;
 mod probe;
@@ -82,9 +84,9 @@ impl From<craft_media_source::MediaError> for MediaError {
 
 /// File extensions recognised as stills.
 pub const STILL_EXTENSIONS: &[&str] =
-    &["png", "jpg", "jpeg", "gif", "webp", "tif", "tiff", "bmp", "exr", "tga", "hdr", "psd", "psb", "svg", "pdf", "ai", "eps", "vectorcraft"];
+    &["png", "jpg", "jpeg", "gif", "webp", "tif", "tiff", "bmp", "exr", "tga", "hdr", "psd", "psb", "pcraft", "svg", "pdf", "ai", "eps", "vectorcraft"];
 /// File extensions recognised as audio-only files.
-pub const AUDIO_EXTENSIONS: &[&str] = filmcraft_media::AUDIO_EXTENSIONS;
+pub const AUDIO_EXTENSIONS: &[&str] = craft_media_source::AUDIO_EXTENSIONS;
 pub use effectcraft_project::VIDEO_EXTENSIONS;
 
 /// File extensions recognised as 3D models (Advanced 3D model layers).
@@ -117,11 +119,29 @@ pub(crate) fn read_regular_file_stamped(path: &std::path::Path) -> std::io::Resu
     if !meta.is_file() {
         return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{} is not a file", path.display())));
     }
+    // A renamed bundle is checked after its read, before it is parsed.
+    let limit = input_limit(path);
+    if limit.is_some_and(|max| meta.len() > max) {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "PhotoCraft bundle exceeds the 512 MiB input limit"));
+    }
     let mut bytes = Vec::new();
     // A sparse file can claim far more than memory: an error, not an abort.
     bytes.try_reserve_exact(usize::try_from(meta.len()).unwrap_or(usize::MAX)).map_err(|e| std::io::Error::new(std::io::ErrorKind::OutOfMemory, e))?;
-    file.read_to_end(&mut bytes)?;
+    if let Some(max) = limit {
+        file.take(max.saturating_add(1)).read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > max {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "PhotoCraft bundle grew beyond the 512 MiB input limit"));
+        }
+    } else {
+        file.read_to_end(&mut bytes)?;
+    }
     Ok((bytes, effectcraft_render::reads::FileStamp::of_metadata(&meta)))
+}
+
+/// The most bytes a read of `path` takes before it fails: `.pcraft` files have the PhotoCraft
+/// input limit; other files, ZIP-based templates and dotLottie files included, have none.
+fn input_limit(path: &std::path::Path) -> Option<u64> {
+    (ext_of(path) == "pcraft").then_some(pcraft::MAX_INPUT_BYTES)
 }
 
 #[cfg(test)]
@@ -188,6 +208,28 @@ mod read_tests {
         let f = dir.join(format!("ec-read-regular-{}.bin", std::process::id()));
         std::fs::write(&f, b"abc").unwrap();
         assert_eq!(super::read_regular_file(&f).unwrap(), b"abc");
+        let _ = std::fs::remove_file(f);
+    }
+
+    /// Templates and dotLottie files are ZIP archives too: only `.pcraft` files have the
+    /// 512 MiB input limit. A `.pcraft` file over it is refused from its length, which is set
+    /// without writing the data, so nothing is read.
+    #[test]
+    fn large_zip_files_other_than_photocraft_are_read_whole() {
+        let max = crate::pcraft::MAX_INPUT_BYTES;
+        for name in ["a.zip", "a.lottie", "a.json", "a"] {
+            assert_eq!(super::input_limit(std::path::Path::new(name)), None, "{name}");
+        }
+        for name in ["a.pcraft", "a.PCraft"] {
+            assert_eq!(super::input_limit(std::path::Path::new(name)), Some(max), "{name}");
+        }
+        let f = std::env::temp_dir().join(format!("ec-read-large-{}.pcraft", std::process::id()));
+        std::fs::write(&f, b"PK\x03\x04").unwrap();
+        std::fs::OpenOptions::new().write(true).open(&f).unwrap().set_len(max + 1).unwrap();
+        let error = super::read_regular_file(&f).unwrap_err();
+        assert!(error.to_string().contains("512 MiB input limit"), "{error}");
+        std::fs::OpenOptions::new().write(true).open(&f).unwrap().set_len(4).unwrap();
+        assert_eq!(super::read_regular_file(&f).unwrap(), b"PK\x03\x04");
         let _ = std::fs::remove_file(f);
     }
 }
