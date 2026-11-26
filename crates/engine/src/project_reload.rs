@@ -264,3 +264,98 @@ mod tests {
         assert_eq!(wakes.load(Ordering::SeqCst), 1);
     }
 }
+
+/// Watcher cost measurements for #4168's budgets (watcher-only idle CPU, watcher-attributable
+/// memory after 100 reloads). Ignored by default; run with
+/// `cargo test -p effectcraft-engine --lib project_reload::bench -- --ignored --nocapture --test-threads=1`.
+#[cfg(all(test, windows))]
+mod bench {
+    use super::*;
+    use std::time::Instant;
+
+    /// (process CPU seconds, working set bytes) for this test process, read by an external
+    /// `Get-Process` so the reading itself costs this process nothing.
+    fn sample() -> (f64, usize) {
+        let pid = std::process::id();
+        let out = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", &format!("$p=Get-Process -Id {pid}; \"$($p.TotalProcessorTime.TotalSeconds) $($p.WorkingSet64)\"")])
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        let mut it = text.split_whitespace();
+        (it.next().unwrap().replace(',', ".").parse().unwrap(), it.next().unwrap().parse().unwrap())
+    }
+
+    fn cpu() -> f64 {
+        sample().0
+    }
+
+    fn rss() -> usize {
+        sample().1
+    }
+
+    fn idle_cpu_pct(secs: u64) -> f64 {
+        let c0 = cpu();
+        std::thread::sleep(Duration::from_secs(secs));
+        (cpu() - c0) / secs as f64 * 100.0
+    }
+
+    fn mb(b: usize) -> f64 {
+        b as f64 / 1_048_576.0
+    }
+
+    #[test]
+    #[ignore = "measurement, ~3.5 min"]
+    fn watcher_idle_cpu_and_reload_memory() {
+        let dir = std::env::temp_dir().join(format!("ec-watch-bench-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("Bench.ecproj");
+        std::fs::write(&file, b"{}").unwrap();
+        let path = file.to_string_lossy().into_owned();
+        let services = crate::Session::default().services.clone();
+
+        let secs = 60;
+        let without = idle_cpu_pct(secs);
+        let wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let w2 = Arc::clone(&wakes);
+        let mut w = Watcher::start(services.clone(), move || {
+            w2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        })
+        .unwrap();
+        w.set_focused(true);
+        w.set_watched(Some(path.clone()), services.stamp(&path), false);
+        let focused = idle_cpu_pct(secs);
+        w.set_focused(false);
+        let background = idle_cpu_pct(secs);
+        println!("BENCH idle CPU over {secs}s each: no watcher {without:.4}% | watcher focused (1 s poll) {focused:.4}% | watcher background (5 s poll) {background:.4}%");
+        println!("BENCH watcher-only CPU: focused {:.4}% | background {:.4}%", focused - without, background - without);
+
+        // 100 external writes, each detected and acknowledged as the UI does.
+        w.set_focused(true);
+        let rss0 = rss();
+        let mut detect = Vec::with_capacity(100);
+        for i in 0..100u32 {
+            let body = format!("{{\"n\":{i},\"pad\":\"{}\"}}", "x".repeat(i as usize));
+            let t0 = Instant::now();
+            std::fs::write(&file, body).unwrap();
+            loop {
+                if let Some((_, stamp)) = w.take() {
+                    w.acknowledge(Some(stamp));
+                    break;
+                }
+                assert!(t0.elapsed() < Duration::from_secs(10), "change {i} not detected");
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            detect.push(t0.elapsed().as_secs_f64() * 1000.0);
+        }
+        let rss1 = rss();
+        std::thread::sleep(Duration::from_secs(30));
+        let rss2 = rss();
+        detect.sort_by(f64::total_cmp);
+        let p = |q: f64| detect[((detect.len() as f64 * q).ceil() as usize).saturating_sub(1)];
+        println!("BENCH detect latency (write -> take, focused, 100 writes): p50 {:.0} ms | p95 {:.0} ms | p99 {:.0} ms | max {:.0} ms", p(0.5), p(0.95), p(0.99), p(1.0));
+        println!("BENCH RSS: before {:.2} MB | after 100 reloads {:.2} MB ({:+.2} MB) | after 30 s idle {:.2} MB ({:+.2} MB)", mb(rss0), mb(rss1), mb(rss1) - mb(rss0), mb(rss2), mb(rss2) - mb(rss0));
+        drop(w);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}

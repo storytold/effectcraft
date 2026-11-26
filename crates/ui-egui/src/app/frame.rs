@@ -1150,6 +1150,52 @@ mod tests {
         assert_change_held(&app, revision);
     }
 
+    /// Per-frame cost the reload feature adds to the UI tick (#4168 frame-p95 budget). A/B in one
+    /// binary: "before" runs only `tick_autosave` (what main runs; with no pending change the
+    /// guarded tick is the same call), "after" adds `tick_project_reload`. Run with
+    /// `cargo test -p effectcraft-ui-egui --lib frame_tick_cost -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "measurement"]
+    fn frame_tick_cost_of_project_reload() {
+        fn pct(v: &mut [f64], q: f64) -> f64 {
+            v.sort_by(f64::total_cmp);
+            v[((v.len() as f64 * q).ceil() as usize).saturating_sub(1)]
+        }
+        fn report(label: &str, v: &mut [f64]) {
+            let (p50, p95, p99, max) = (pct(v, 0.5), pct(v, 0.95), pct(v, 0.99), pct(v, 1.0));
+            println!("BENCH {label}: p50 {p50:.2} µs | p95 {p95:.2} µs | p99 {p99:.2} µs | max {max:.1} µs");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Bench.ecproj").to_string_lossy().into_owned();
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        app.session.execute("comp.new", json!({"name": "Main"})).unwrap();
+        app.session.execute("file.saveAs", json!({"path": path})).unwrap();
+        app.session.execute("prefs.set", json!({"values": {"autoSave.enabled": true, "autoSave.intervalMinutes": 60}})).unwrap();
+        app.focused = true;
+        let ctx = egui::Context::default();
+        let n = 100_000;
+        let time = |app: &mut EffectcraftApp, reload: bool| -> Vec<f64> {
+            (0..n)
+                .map(|_| {
+                    let t = std::time::Instant::now();
+                    if reload {
+                        app.tick_project_reload(&ctx);
+                    }
+                    app.tick_autosave(&ctx);
+                    t.elapsed().as_secs_f64() * 1e6
+                })
+                .collect()
+        };
+        app.tick_project_reload(&ctx); // start the watcher outside the timed loop
+        report("before (autosave tick only), idle", &mut time(&mut app, false));
+        report("after (reload + autosave tick), idle", &mut time(&mut app, true));
+        // Held change: dirty session, pending external edit at a cached disk stamp.
+        app.session.execute("layer.newNull", json!({"name": "local"})).unwrap();
+        app.project_reload_pending = Some((path.clone(), (1, 1), Some((1, 1))));
+        report("after, change held while dirty", &mut time(&mut app, true));
+        assert!(app.project_reload_pending.is_some());
+    }
+
     #[test]
     fn recovery_autosave_keeps_running_while_a_project_change_is_pending() {
         let dir = tempfile::tempdir().unwrap();
