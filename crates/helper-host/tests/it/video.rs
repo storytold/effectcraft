@@ -349,6 +349,27 @@ pub fn run_checks(exe: &Path) -> bool {
         &open,
     );
 
+    // One job at a time: a second open is refused while the first is active, and a new job is
+    // accepted after the first is finished or cancelled.
+    let mut h = start(exe, "ok", 5_000).ok();
+    let sequence = h.as_mut().map(|h| {
+        let first = h.open_encoder(&params())?.job;
+        let second = h.open_encoder(&params()).err();
+        let (y, u, v) = picture(0);
+        h.submit(first, &Picture { y: &y, u: &u, v: &v })?;
+        let finished = h.finish(first)?.len();
+        let after_finish = h.open_encoder(&params())?.job;
+        h.cancel(after_finish)?;
+        let after_cancel = h.open_encoder(&params()).map(|o| o.job);
+        Ok::<_, VideoError>((second, finished, after_cancel.is_ok()))
+    });
+    all &= check(
+        "video: a second job is refused while one is open and accepted after finish or cancel",
+        matches!(&sequence, Some(Ok((Some(VideoError::Request(_)), 1, true)))) && h.as_ref().is_some_and(VideoHelper::is_running),
+        &sequence,
+    );
+    drop(h);
+
     // Cancel: replies to frames still in flight arrive first and are dropped, then the helper
     // carries on with a new job.
     let mut h = start(exe, "slow", 5_000);

@@ -214,9 +214,14 @@ impl VideoHelper {
         Ok(())
     }
 
-    /// Start a job. Settings the device can't do are refused here, before anything is opened.
+    /// Start a job. One job at a time: a second open is refused until the first is finished or
+    /// cancelled, so every job's error reaches its own caller. Settings the device can't do are
+    /// refused here too, before anything is opened.
     pub fn open_encoder(&mut self, p: &EncodeParams) -> Result<Opened, VideoError> {
         self.alive()?;
+        if !self.state.is_empty() {
+            return Err(VideoError::Request("a video job is already open on this helper: finish or cancel it first".into()));
+        }
         self.check_supported(p)?;
         let in_len = u64::from(p.width).checked_mul(u64::from(p.height)).and_then(|n| n.checked_mul(3)).map(|n| n / 2).filter(|n| *n <= MAX_BYTES_IN_FLIGHT);
         let Some(in_len) = in_len else {
