@@ -1197,6 +1197,20 @@ fn import_options_sequence_picks_one_still_or_the_run() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A solid's mainSource has no frame rate to conform: setting conformFrameRate leaves the solid
+/// as it was, without an error.
+#[test]
+fn conform_rate_of_a_solid_changes_nothing() {
+    let mut s = session();
+    let o = ok(
+        &mut s,
+        r#"var c = app.project.items.addComp("C", 64, 36, 1, 1, 24); var l = c.layers.addSolid([1, 0, 0], "Red", 64, 36, 1);
+           var before = JSON.stringify(l.source.mainSource.__info()); l.source.mainSource.conformFrameRate = 12;
+           [String(l.source.mainSource), l.source.mainSource.conformFrameRate, JSON.stringify(l.source.mainSource.__info()) === before]"#,
+    );
+    assert_eq!(o.result, json!(["[object SolidSource]", 0, true]));
+}
+
 /// #813: FootageItem proxies, replaceWithSequence and mainSource.conformFrameRate.
 #[test]
 fn footage_proxies_sequences_and_conform_rate() {

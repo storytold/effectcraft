@@ -316,6 +316,83 @@ fn interpret_proxy_settings_apply_to_the_proxy() {
     assert_eq!(f.alpha, AlphaMode::Straight, "the main footage keeps its interpretation");
 }
 
+/// What both Interpret Footage commands change, and what their dialog shows first: `items` in
+/// order, else `item`, else the Project selection (for Main, the selected layers' footage when no
+/// footage is selected), keeping footage only, or for Proxy only items with a proxy. A missing or
+/// other item is no target: Main skips it and changes nothing, Proxy reports that nothing named
+/// has a proxy.
+#[test]
+fn interpretation_targets_follow_the_parameters_then_the_selection() {
+    let mut s = session();
+    let a = import(&mut s, "/m/red16.png");
+    let b = import(&mut s, "/m/blue8.png");
+    let c = import(&mut s, "/m/wide.png");
+    s.execute("comp.new", json!({"name": "C", "width": 16, "height": 16, "frameRate": 10, "duration": 1})).unwrap();
+    let comp = s.active_comp_id().unwrap();
+    s.execute("file.setProxy", json!({"item": b.0, "path": "/m/half.png"})).unwrap();
+    s.execute("file.setProxy", json!({"item": comp.0, "path": "/m/half.png"})).unwrap();
+    let t = |s: &Session, p: serde_json::Value, proxy: bool| crate::commands::interpretation_targets(s, &p, proxy);
+    s.state.project_selection = vec![a];
+    // Footage.
+    assert_eq!(t(&s, json!({"item": b.0}), false), [b]);
+    assert_eq!(t(&s, json!({"items": [c.0, b.0]}), false), [c, b]);
+    assert_eq!(t(&s, json!({"items": [b.0], "item": c.0}), false), [b], "`items` comes first");
+    assert_eq!(t(&s, json!({}), false), [a]);
+    assert_eq!(t(&s, serde_json::Value::Null, false), [a]);
+    assert_eq!(t(&s, json!({"items": [999, comp.0, b.0]}), false), [b]);
+    for none in [json!({"item": 999}), json!({"item": comp.0}), json!({"items": []})] {
+        assert!(t(&s, none.clone(), false).is_empty(), "{none}");
+    }
+    // Proxies: footage and compositions that have one.
+    assert_eq!(t(&s, json!({"item": b.0}), true), [b]);
+    assert_eq!(t(&s, json!({"items": [a.0, comp.0, b.0]}), true), [comp, b]);
+    for none in [json!({}), json!({"item": 999}), json!({"item": a.0}), json!({"item": c.0})] {
+        assert!(t(&s, none.clone(), true).is_empty(), "{none}");
+    }
+    s.state.project_selection = vec![comp, a, b];
+    assert_eq!(t(&s, json!({}), false), [a, b]);
+    assert_eq!(t(&s, json!({}), true), [comp, b]);
+    // No footage selected: the selected layer's footage.
+    s.execute("layer.addItem", json!({"item": c.0})).unwrap();
+    s.state.project_selection.clear();
+    assert!(!s.state.selected_layers.is_empty());
+    assert_eq!(t(&s, json!({}), false), [c]);
+    s.state.project_selection = vec![comp];
+    assert_eq!(t(&s, json!({}), false), [c], "a selected composition is no footage");
+    // Nothing named is a target: Main succeeds and changes nothing (scripts set a solid's
+    // mainSource.conformFrameRate through it), Proxy refuses. Named with footage, only the
+    // footage changes.
+    s.execute("layer.newSolid", json!({"color": "#ff0000"})).unwrap();
+    let solid = s.project.items.values().find(|i| matches!(i.kind, ItemKind::Solid(_))).unwrap().id;
+    let before = s.project.clone();
+    for params in [json!({"item": 999, "loop": 2}), json!({"item": comp.0, "loop": 2}), json!({"items": [solid.0, 999], "loop": 2})] {
+        assert_eq!(s.execute("file.interpretFootage", params.clone()).unwrap(), json!({"items": []}), "{params}");
+    }
+    for params in [json!({"item": 999, "loop": 2}), json!({"item": a.0, "loop": 2}), json!({"item": solid.0, "loop": 2})] {
+        let e = s.execute("file.interpretProxy", params.clone()).unwrap_err().to_string();
+        assert!(e.contains("no proxy"), "{params}: {e}");
+    }
+    assert_eq!(*s.project, *before);
+    let r = s.execute("file.interpretFootage", json!({"items": [solid.0, b.0], "loop": 2})).unwrap();
+    assert_eq!(r["items"].as_array().map(|a| a.iter().map(|i| i["item"].clone()).collect::<Vec<_>>()), Some(vec![json!(b.0)]), "{r}");
+    let ItemKind::Footage(f) = &s.project.item(b).unwrap().kind else { panic!("not footage") };
+    assert_eq!(f.loop_count, 2);
+}
+
+/// Use Proxy switches only the targets that have a proxy, and the first of those decides which
+/// way: an item without one, named first, is skipped.
+#[test]
+fn use_proxy_skips_targets_without_a_proxy() {
+    let mut s = session();
+    let plain = import(&mut s, "/m/red16.png");
+    let full = import(&mut s, "/m/blue8.png");
+    s.execute("file.setProxy", json!({"item": full.0, "path": "/m/half.png"})).unwrap();
+    let r = s.execute("file.useProxy", json!({"items": [plain.0, full.0]})).unwrap();
+    assert_eq!(r, json!({"items": [full.0], "on": false}));
+    assert!(!s.project.item(full).unwrap().proxy.as_ref().unwrap().enabled);
+    assert!(s.project.item(plain).unwrap().proxy.is_none());
+}
+
 /// Agents and the control channel run commands through `execute_checked`, which refuses keys a
 /// params doc does not list. The Interpret Footage commands list every key they read.
 #[test]

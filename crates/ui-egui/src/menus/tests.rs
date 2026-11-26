@@ -230,6 +230,100 @@ fn c_cycles_the_camera_tools() {
     assert_eq!(seen, [Tool::Orbit, Tool::PanCamera, Tool::Dolly, Tool::Orbit]);
 }
 
+/// Each camera tool's command and `mode` (what the viewer sends while dragging) run in the
+/// engine and move a 3D view as the tool's name says (#2586).
+#[test]
+fn every_camera_tool_runs_its_engine_variant() {
+    use effectcraft_render::three_d::View3D;
+    let d = |a: [f64; 3], b: [f64; 3]| ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt();
+    let tools: Vec<Tool> = Tool::ALL.into_iter().filter(|t| t.is_camera()).collect();
+    assert_eq!(tools.len(), 8);
+    for tool in tools {
+        let mut s = effectcraft_engine::Session::default();
+        s.execute("comp.new", json!({"name": "C", "width": 640, "height": 360, "duration": 2})).unwrap();
+        let cid = s.active_comp_id().unwrap();
+        let id = s.execute("layer.newSolid", json!({"width": 100, "height": 100})).unwrap()["layer"].as_u64().unwrap();
+        s.execute("layer.setSwitch", json!({"layer": id, "switch": "threeD", "value": true})).unwrap();
+        s.execute("prop.set", json!({"layer": id, "path": "transform/position", "value": [400, 120, 200]})).unwrap();
+        s.execute("view.3d.custom1", json!({})).unwrap();
+        let cam = |s: &effectcraft_engine::Session| s.state.views3d[&cid].cam(View3D::Custom1, 640.0, 360.0);
+        let c0 = cam(&s);
+        let (id, mode) = tool.camera_command().unwrap();
+        let mut p = match id {
+            "camera.orbit" => json!({"yaw": 20, "pitch": -5}),
+            "camera.pan" => json!({"dx": 30, "dy": 10}),
+            _ => json!({"amount": 1.0e7}),
+        };
+        p["mode"] = json!(mode);
+        p["cursor"] = json!([400.0, 120.0]);
+        let r = s.execute(id, p).unwrap_or_else(|e| panic!("{tool:?}: {e}"));
+        let c1 = cam(&s);
+        let pivot = r["pivot"].as_array().map(|a| [a[0].as_f64().unwrap(), a[1].as_f64().unwrap(), a[2].as_f64().unwrap()]);
+        match tool {
+            Tool::OrbitTarget => {
+                assert!(pivot.is_none(), "{tool:?}");
+                assert!(d(c1.poi, c0.poi) < 1e-9 && d(c1.eye, c0.eye) > 1.0, "{tool:?}");
+            }
+            Tool::PanTarget => {
+                assert!(pivot.is_none(), "{tool:?}");
+                assert!(d(c1.poi, c0.poi) > 1.0, "{tool:?}");
+            }
+            Tool::DollyTarget => {
+                assert!(pivot.is_none(), "{tool:?}");
+                assert!(d(c1.poi, c0.poi) < 1e-9 && (d(c1.eye, c1.poi) - 1.0).abs() < 1e-6, "{tool:?}");
+            }
+            Tool::Orbit | Tool::OrbitScene => {
+                let pv = pivot.unwrap_or_else(|| panic!("{tool:?}: no pivot"));
+                if tool == Tool::OrbitScene {
+                    assert!(d(pv, [400.0, 120.0, 200.0]) < 1e-6, "{pv:?}");
+                }
+                assert!(d(c1.poi, c0.poi) > 1.0, "{tool:?}");
+                assert!((d(c1.eye, pv) - d(c0.eye, pv)).abs() < 1e-6, "{tool:?}");
+            }
+            Tool::PanCamera => {
+                assert!(pivot.is_some(), "{tool:?}");
+                assert!(d(c1.poi, c0.poi) > 1.0, "{tool:?}");
+            }
+            Tool::Dolly => {
+                let pv = pivot.unwrap_or_else(|| panic!("{tool:?}: no pivot"));
+                assert!(d(c1.eye, pv) > 1.0e6, "Dolly Towards Cursor goes on past the point");
+            }
+            Tool::DollyToCursor => {
+                let pv = pivot.unwrap_or_else(|| panic!("{tool:?}: no pivot"));
+                assert!((d(c1.eye, pv) - 1.0).abs() < 1e-6, "Dolly to Cursor stops short of the point");
+            }
+            other => panic!("not a camera tool: {other:?}"),
+        }
+    }
+}
+
+/// C and 1 / 2 / 3 pick each camera slot's variant as its flyout last left it (#2586).
+#[test]
+fn camera_keys_keep_each_slots_variant() {
+    let ctx = egui::Context::default();
+    let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+    app.ui.tool = Tool::Selection;
+    app.ui.slot_tools[3] = Tool::OrbitScene;
+    app.ui.slot_tools[4] = Tool::PanTarget;
+    app.ui.slot_tools[5] = Tool::DollyToCursor;
+    let mut seen = vec![];
+    for _ in 0..4 {
+        invoke(&mut app, &ctx, "tool.camera", json!({})).unwrap();
+        seen.push(app.ui.tool);
+    }
+    assert_eq!(seen, [Tool::OrbitScene, Tool::PanTarget, Tool::DollyToCursor, Tool::OrbitScene]);
+    app.ui.slot_tools[5] = Tool::DollyTarget;
+    for (id, tool) in [("tool.dolly", Tool::DollyTarget), ("tool.panCamera", Tool::PanTarget), ("tool.orbit", Tool::OrbitScene)] {
+        invoke(&mut app, &ctx, id, json!({})).unwrap();
+        assert_eq!(app.ui.tool, tool, "{id}");
+    }
+    // Every variant is reachable by name, as the control channel selects tools.
+    for tool in [Tool::OrbitScene, Tool::OrbitTarget, Tool::PanTarget, Tool::DollyToCursor, Tool::DollyTarget] {
+        invoke(&mut app, &ctx, &format!("tool.{tool:?}"), json!({})).unwrap();
+        assert_eq!(app.ui.tool, tool);
+    }
+}
+
 #[test]
 fn dispatch_uses_the_active_custom_preset() {
     let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
@@ -994,6 +1088,47 @@ fn the_unlabeled_alpha_question_does_not_replace_an_open_dialog() {
     app.dialog = None;
     super::frontend(&mut app, &ctx, "file.interpretFootage", json!({"item": item, "reason": "unlabeledAlpha"})).unwrap();
     assert_eq!(app.dialog, Some(crate::Dialog::Form), "with no dialog open it asks");
+}
+
+/// The unlabeled alpha question opens Interpret Footage on the imported footage, not on the
+/// footage selected before, and OK interprets the imported footage only.
+#[test]
+fn the_unlabeled_alpha_question_opens_on_the_imported_footage() {
+    use effectcraft_engine::project::{AlphaMode, Footage, FootageKind, ItemKind};
+    let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+    let ctx = egui::Context::default();
+    let still = |path: &str, loop_count: u32, alpha: AlphaMode| {
+        ItemKind::Footage(Footage {
+            path: path.into(),
+            kind: FootageKind::Still,
+            width: 4,
+            height: 4,
+            has_video: true,
+            loop_count,
+            alpha,
+            ..Default::default()
+        })
+    };
+    let project = std::sync::Arc::make_mut(&mut app.session.project);
+    let before = project.add_item("before.png", Default::default(), None, still("/m/before.png", 1, AlphaMode::Straight));
+    let matte = project.add_item("matte.tga", Default::default(), None, still("/m/matte.tga", 4, AlphaMode::Premultiplied));
+    app.session.state.project_selection = vec![before];
+    super::frontend(&mut app, &ctx, "file.interpretFootage", json!({"item": matte.0, "reason": "unlabeledAlpha"})).unwrap();
+    assert_eq!(app.dialog, Some(crate::Dialog::Form));
+    let params = app.dialog_state.form.params();
+    assert_eq!((params["loop"].clone(), params["alpha"].clone()), (json!(4.0), json!("premultiplied")), "{params}");
+    // OK with Alpha ▸ Ignore.
+    let alpha = app.dialog_state.form.fields.iter_mut().find(|f| f.key == "alpha").map(|f| &mut f.kind);
+    let Some(crate::panels::forms::FieldKind::Choice { options, sel }) = alpha else { panic!("no Alpha choice") };
+    *sel = options.iter().position(|(_, v)| v == "ignore").unwrap();
+    let form = app.dialog_state.form.clone();
+    app.session.execute(&form.command, form.params()).unwrap();
+    let alpha_of = |app: &EffectcraftApp, id| match app.session.project.item(id).map(|i| &i.kind) {
+        Some(ItemKind::Footage(f)) => (f.alpha, f.loop_count),
+        _ => panic!("not footage"),
+    };
+    assert_eq!(alpha_of(&app, matte), (AlphaMode::Ignore, 4));
+    assert_eq!(alpha_of(&app, before), (AlphaMode::Straight, 1));
 }
 
 /// File ▸ Import ▸ File… and Multiple Files… offer projects next to footage; File ▸ Replace
