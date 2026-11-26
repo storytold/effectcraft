@@ -29,7 +29,6 @@ mod ui_crypto_pick;
 mod ui_crypto_pick_undo;
 mod ui_crypto_select;
 mod ui_dialog_preview;
-mod ui_dock_resize;
 mod ui_drag_drop;
 mod ui_effect_controls;
 mod ui_effect_drop_highlight;

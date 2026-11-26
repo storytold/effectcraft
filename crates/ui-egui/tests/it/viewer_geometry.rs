@@ -26,7 +26,10 @@ fn harness_at_scale(width: f32, kind: ThemeKind, scale: f32) -> Harness<'static,
     let mut h = Harness::builder()
         .with_size(vec2(width, 360.0))
         .with_pixels_per_point(scale)
-        .with_context_setup(move |ctx| theme::install(ctx, &tokens, "en"))
+        .with_context_setup(move |ctx| {
+            effectcraft_ui_egui::framework::install_headless(ctx);
+            theme::install(ctx, &tokens, "en");
+        })
         .build_ui_state(
             |ui, app: &mut EffectcraftApp| {
                 app.auto.begin_frame();

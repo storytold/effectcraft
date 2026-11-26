@@ -54,13 +54,18 @@ fn file_folder_and_virtual_paths_copy_from_the_context_menu_without_document_cha
     session.prefs.general.language = "en".into();
     session.execute("comp.new", json!({"width": 64, "height": 36, "duration": 2})).unwrap();
     // The Chinese folder and file names need an installed CJK face.
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_step_dt(1.0 / 60.0).allow_missing_glyphs().build_eframe(|_| {
-        let mut app = EffectcraftApp::new(session);
-        app.ui.start_screen = false;
-        app.show_panel(PanelKind::MediaBrowser);
-        app.ui.maximized = Some(PanelKind::MediaBrowser);
-        app
-    });
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .with_step_dt(1.0 / 60.0)
+        .allow_missing_glyphs()
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| {
+            let mut app = EffectcraftApp::new(session);
+            app.ui.start_screen = false;
+            app.show_panel(PanelKind::MediaBrowser);
+            app.ui.maximized = Some(PanelKind::MediaBrowser);
+            app
+        });
     h.run_steps(3);
     let project = h.state().session.project.clone();
     let revision = h.state().session.revision;
@@ -91,6 +96,7 @@ fn file_folder_and_virtual_paths_copy_from_the_context_menu_without_document_cha
 fn copy_path_control_command_preserves_the_path_and_rejects_bad_arguments() {
     let mut app = EffectcraftApp::new(Session::default());
     let ctx = egui::Context::default();
+    effectcraft_ui_egui::framework::install_headless(&ctx);
     let project = app.session.project.clone();
     let revision = app.session.revision;
     let history = app.session.history.undo.len();

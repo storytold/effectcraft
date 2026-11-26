@@ -398,14 +398,17 @@ fn about_main(app: &mut EffectcraftApp, ui: &mut egui::Ui, t: &Tokens, cmd: &mut
     let p = ui.painter();
     p.rect_filled(r, 10.0, Color32::from_rgb(0x1b, 0x22, 0x3c));
     crate::header::paint_logo(p, Rect::from_min_size(r.min + vec2(18.0, 20.0), vec2(56.0, 56.0)));
-    p.text(r.min + vec2(90.0, 34.0), Align2::LEFT_CENTER, "EffectCraft", Tokens::semibold(24.0), Color32::WHITE);
-    p.text(
-        r.min + vec2(90.0, 62.0),
-        Align2::LEFT_CENTER,
-        format!("Version {}  •  Motion graphics & VFX in pure Rust", env!("CARGO_PKG_VERSION")),
-        Tokens::ui(12.0),
-        t.text_dim,
-    );
+    let channel = crate::channel::identity();
+    p.text(r.min + vec2(90.0, 34.0), Align2::LEFT_CENTER, crate::channel::name_for(channel), Tokens::semibold(24.0), Color32::WHITE);
+    // A Nightly build reports its prepared feed version and channel; stable keeps its Cargo version.
+    let version = match crate::channel::channel_label() {
+        Some(label) => format!("Version {} ({label})  •  Motion graphics & VFX in pure Rust", crate::channel::version()),
+        None => format!("Version {}  •  Motion graphics & VFX in pure Rust", crate::channel::version()),
+    };
+    p.text(r.min + vec2(90.0, 62.0), Align2::LEFT_CENTER, version, Tokens::ui(12.0), t.text_dim);
+    if let Some(line) = crate::channel::nightly_about_line() {
+        p.text(r.min + vec2(90.0, 80.0), Align2::LEFT_CENTER, line, Tokens::ui(11.0), t.text_faint);
+    }
     ui.add_space(12.0);
     ui.label(tr("A clean-room, open-source compositor for motion graphics and visual effects: native on macOS, Windows and Linux, and in the browser. Part of the ArtCraft family of creative apps."));
     ui.add_space(14.0);
@@ -623,7 +626,7 @@ fn solid(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
                 .find(|(_, v)| (v - par).abs() < 1e-3)
                 .map(|p| p.0.to_string())
                 .unwrap_or_else(|| format!("{par:.2}"));
-            let r = craft_ui::ComboBox::from_id_salt("solid-par").width(240.0).selected_text(cur).show_ui(ui, |ui| {
+            let r = egui::ComboBox::from_id_salt("solid-par").width(240.0).selected_text(cur).show_ui(ui, |ui| {
                 for (label, v) in super::comp_settings::PIXEL_ASPECTS {
                     if ui.selectable_label((v - par).abs() < 1e-3, *label).clicked() {
                         par = *v;

@@ -13,7 +13,10 @@ use serde_json::json;
 fn harness() -> Harness<'static, EffectcraftApp> {
     let mut s = effectcraft_host::session();
     s.execute("comp.new", json!({"name": "Main", "width": 320, "height": 180, "duration": 4})).unwrap();
-    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1400.0, 900.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(s));
     h.run_steps(3);
     h
 }
@@ -103,7 +106,10 @@ fn panels_open_at_quit_dock_again_at_launch() {
     let mut s = effectcraft_host::session();
     s.config = Some(store.clone());
     s.execute("window.restoreScriptPanels", json!({})).unwrap();
-    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1400.0, 900.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(s));
     h.run_steps(3);
     let panel = h.state().session.script_ui.windows.iter().find(|w| w.script == "Hello Panel.jsx").expect("the panel's window").id;
     assert!(h.state().ui.dock.is_docked(PanelKind::ScriptPanel(panel)), "the panel docks");
@@ -123,7 +129,10 @@ fn a_key_given_to_a_script_runs_it() {
     let store = std::sync::Arc::new(MemoryConfig::default());
     let mut s = effectcraft_host::session();
     s.config = Some(store.clone());
-    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1400.0, 900.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(s));
     h.run_steps(3);
     assert!(h.state().session.shortcuts().find(r#"file.runScript {"name":"Rename Layers.jsx"}"#).is_some(), "the shortcut table is built");
     store.write("Scripts/Add Comp.jsx", "app.project.items.addComp('From Key', 64, 64, 1, 1, 25);").unwrap();
@@ -219,7 +228,12 @@ fn on_draw_concave_fills_and_images_render() {
     let png = png.to_string_lossy().replace('\\', "/");
     let mut s = effectcraft_host::session();
     s.execute("comp.new", json!({"name": "Main", "width": 320, "height": 180, "duration": 4})).unwrap();
-    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_pixels_per_point(1.0).wgpu().build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1400.0, 900.0))
+        .with_pixels_per_point(1.0)
+        .wgpu()
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(s));
     h.run_steps(3);
     let code = format!(
         r#"
@@ -388,7 +402,10 @@ fn scheduled_import_reveals_its_composition_without_manual_clicks() {
     let mut s = effectcraft_host::session();
     let result = s.execute("script.run", json!({"code": "var w=new Window('palette','Automatic import');var b=w.add('button',undefined,'Open');b.onClick=function(){app.scheduleTask(\"var c=app.project.items.addComp('Imported',64,64,1,1,25);c.openInViewer();\",0,false);};w.show();"})).unwrap();
     assert_eq!(result["ok"], true, "{result}");
-    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1400.0, 900.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(s));
     h.state_mut().ui.start_screen = true;
     h.run_steps(2);
     h.state_mut().session.execute("scriptui.click", json!({"window":"Automatic import","widget":"Open"})).unwrap();
@@ -542,7 +559,10 @@ fn a_docked_panel_button_opens_the_file_dialog() {
     store.write("Scripts/ScriptUI Panels/Subtitles Panel.jsx", panel).unwrap();
     let mut s = effectcraft_host::session();
     s.config = Some(store.clone());
-    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1400.0, 900.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(s));
     h.run_steps(3);
     let asked: Arc<Mutex<Vec<Vec<String>>>> = Arc::default();
     let log = asked.clone();

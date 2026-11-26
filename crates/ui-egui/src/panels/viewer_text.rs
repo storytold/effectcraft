@@ -1075,6 +1075,29 @@ pub fn hook(
     owns
 }
 
+/// Answers an IME reset that the integration completed or retired, while `custom_mutations` is on: whether `event` is
+/// one.
+fn reset_ended(app: &EffectcraftApp, ui: &egui::Ui, event: &egui::Event, custom_mutations: bool) -> bool {
+    match event {
+        egui::Event::ImeResetCompleted { request_id } => {
+            if custom_mutations {
+                complete_reset(app, ui, *request_id);
+            }
+            true
+        }
+        egui::Event::ImeResetRetired { request_id } => {
+            // The integration dropped the request and no completion will follow: ask again, or the
+            // composition stays stale forever.
+            let ctx = ui.ctx();
+            if custom_mutations && read_reset(ctx).is_some_and(|guard| !guard.suspended && guard.request == Some(*request_id)) {
+                request_reset(app, ctx);
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
 /// This frame's keys, in order, into the edited text, up to a press outside the `viewer`: the
 /// panel it lands in decides (after this frame's panels) whether the edit ends, so the keys after
 /// it in this frame are neither typed nor run as shortcuts (#831).
@@ -1106,10 +1129,7 @@ fn keyboard(app: &mut EffectcraftApp, ui: &mut egui::Ui, viewer: Rect) {
     ctx.input_mut(|input| input.events.retain(|event| !matches!(event, egui::Event::ImeResetCompleted { .. })));
     let mut custom_mutations = app.session.state.text_edit.is_some();
     for ev in events {
-        if let egui::Event::ImeResetCompleted { request_id } = &ev {
-            if custom_mutations {
-                complete_reset(app, ui, *request_id);
-            }
+        if reset_ended(app, ui, &ev, custom_mutations) {
             continue;
         }
         sync_ime_target(ui, app);

@@ -20,7 +20,9 @@ pub struct Driver {
 
 impl Driver {
     pub fn new(app: EffectcraftApp, size: egui::Vec2) -> Driver {
-        Driver { ctx: egui::Context::default(), app, frame: eframe::Frame::_new_kittest(), time: 0.0, size }
+        let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
+        Driver { ctx, app, frame: eframe::Frame::_new_kittest(), time: 0.0, size }
     }
 
     /// Run one frame (layout + paint + tessellation); its wall time in ms.
@@ -30,10 +32,11 @@ impl Driver {
 
     pub fn step_with(&mut self, events: Vec<egui::Event>) -> f64 {
         self.time += 1.0 / 60.0;
-        let input =
+        let mut input =
             egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, self.size)), time: Some(self.time), events, ..Default::default() };
         let t0 = web_time::Instant::now();
         let (app, frame) = (&mut self.app, &mut self.frame);
+        eframe::App::raw_input_hook(app, &self.ctx, &mut input);
         let mut out = self.ctx.run_ui(input, |ui| {
             eframe::App::logic(app, ui.ctx(), frame);
             eframe::App::ui(app, ui, frame);

@@ -23,7 +23,8 @@ fn box_id(h: &Harness<'_, EffectcraftApp>) -> u64 {
 
 /// The harness with Box open in the Layer panel (focused).
 fn harness() -> Harness<'static, EffectcraftApp> {
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| app());
+    let mut h =
+        Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app());
     h.run_steps(3);
     let id = box_id(&h);
     h.state_mut().session.execute("layer.select", json!({"layers": [id]})).unwrap();

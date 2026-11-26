@@ -723,15 +723,22 @@ fn hash_blend_spans(h: &mut KeyHasher, ctx: &EvalCtx, layer: &Layer) {
 
 /// Feed every property of `g` that can change over time (keyframes or expression) as its value
 /// at the context time. The static structure is hashed separately.
-/// Mix the collapsed-instance overrides that target `id` into a cache key. They replace values
+/// Mix the collapsed-instance overrides that target `layer` into a cache key. They replace values
 /// without editing the layer, so a key without them would reuse another instance's buffer.
-fn hash_overrides(h: &mut KeyHasher, ctx: &EvalCtx, id: effectcraft_project::LayerId) {
-    for o in ctx.property_overrides.iter().filter(|o| o.layer == id) {
+fn hash_overrides(h: &mut KeyHasher, ctx: &EvalCtx, layer: &Layer) {
+    for o in ctx.property_overrides.iter().filter(|o| o.layer == layer.id) {
         o.prop.hash(h);
         o.font.hash(h);
         hash_debug(h, &o.value);
+        hash_debug(h, &o.keys);
+        // The stored value belongs to the outer context. The nested layer can be compared with
+        // its previous frame while that value stays fixed, so hash the effective value at the
+        // target layer's exact time as well.
+        if let Some(prop) = layer.props.find(o.prop) {
+            hash_debug(h, &o.value_at_layer_time(prop, layer.layer_time(ctx.time)));
+        }
     }
-    for m in ctx.media_overrides.iter().filter(|m| m.layer == id) {
+    for m in ctx.media_overrides.iter().filter(|m| m.layer == layer.id) {
         m.item.hash(h);
     }
 }
@@ -754,8 +761,8 @@ fn hash_values(h: &mut KeyHasher, ctx: &EvalCtx, layer: &Layer, g: &PropGroup) {
 /// time, or `None` when the layer must not be cached (movie footage, precomps, cameras, adjustment
 /// layers…).
 pub fn layer_key(ctx: &EvalCtx, layer: &Layer, scale: f64, draft: bool, blur: bool) -> Option<u64> {
-    // Time effects (and CC Particle World's Birth Rate history) see property values at other
-    // times. Keyframes are part of the hashed structure (and the layer time is folded in), but
+    // Time effects (and stepped particle systems' Birth Rate and producer history) see property
+    // values at other times. Keyframes are part of the hashed structure (and the layer time is folded in), but
     // expressions may read other layers at those times, which the key cannot see: such layers
     // are not cached.
     if history_unkeyable(layer, None) {
@@ -778,8 +785,8 @@ pub fn input_key(ctx: &EvalCtx, layer: &Layer, scale: f64, draft: bool, blur: bo
 }
 
 /// Does the layer run (among its first `effects` effects, all when `None`) an effect that reads
-/// the layer at other times (Echo, Timewarp…) or its own parameters' history (CC Particle
-/// World's Birth Rate, #1373)?
+/// the layer at other times (Echo, Timewarp…) or its own parameters' history (stepped particle
+/// systems' Birth Rate and producer position, #1373)?
 fn reads_other_times(layer: &Layer, effects: Option<usize>) -> bool {
     layer.switches.effects
         && layer.effects().is_some_and(|fx| {
@@ -930,7 +937,7 @@ fn key_any(ctx: &EvalCtx, layer: &Layer, scale: f64, draft: bool, blur: bool, fo
     // Collapsed-instance overrides replace values without editing the nested layer, so mix them
     // into the key: a Font override, effect parameter or any other source-affecting override
     // must not reuse another instance's processed buffer.
-    hash_overrides(&mut h, ctx, layer.id);
+    hash_overrides(&mut h, ctx, layer);
     hash_debug(&mut h, &layer.source);
     // (Audio, Lock and Shy don't change pixels.)
     hash_debug(&mut h, &layer.switches.pixels());

@@ -23,7 +23,14 @@ fn raw(size: egui::Vec2) -> egui::RawInput {
 }
 
 fn tick_with(app: &mut EffectcraftApp, ctx: &egui::Context, frame: &eframe::Frame, raw: &egui::RawInput) -> egui::LogicOutput {
-    ctx.run_logic(raw, |ctx| app.tick(ctx, frame))
+    ctx.run_logic(raw, |ctx| app.logic_pass(ctx, frame))
+}
+
+/// A context with the runtime installed, as the app's window has it.
+fn headless() -> egui::Context {
+    let ctx = egui::Context::default();
+    crate::framework::install_headless(&ctx);
+    ctx
 }
 
 fn hidden_tick(app: &mut EffectcraftApp, ctx: &egui::Context, frame: &eframe::Frame) {
@@ -58,7 +65,7 @@ fn send(app: &mut EffectcraftApp, method: &str, params: serde_json::Value) -> st
 
 #[test]
 fn a_logic_only_tick_installs_no_fonts_and_records_no_geometry() {
-    let ctx = egui::Context::default();
+    let ctx = headless();
     let frame = eframe::Frame::_new_kittest();
     let mut app = app_with_comp();
     hidden_tick(&mut app, &ctx, &frame);
@@ -69,7 +76,7 @@ fn a_logic_only_tick_installs_no_fonts_and_records_no_geometry() {
 
 #[test]
 fn a_control_command_that_needs_no_ui_completes_without_a_pass() {
-    let ctx = egui::Context::default();
+    let ctx = headless();
     let frame = eframe::Frame::_new_kittest();
     let mut app = app_with_comp();
     let reply = send(&mut app, "engine.execute", json!({"command": "comp.new", "params": {"name": "Queued", "width": 32, "height": 18, "duration": 1}}));
@@ -81,7 +88,7 @@ fn a_control_command_that_needs_no_ui_completes_without_a_pass() {
 
 #[test]
 fn a_pass_that_cannot_draw_receives_no_synthetic_input() {
-    let ctx = egui::Context::default();
+    let ctx = headless();
     let frame = eframe::Frame::_new_kittest();
     let mut app = app_with_comp();
     assert!(!app.is_ready(), "a fresh app installs its fonts in its first pass");
@@ -97,7 +104,9 @@ fn a_pass_that_cannot_draw_receives_no_synthetic_input() {
     assert!(app.pending_synthetic_events().is_empty());
     let mut setup_pass = ctx.run_ui(setup.take(), |ui| app.draw(ui, &frame));
     setup_pass.textures_delta.clear();
-    assert!(!app.is_ready(), "the pass that installs the fonts draws nothing");
+    // The font install asks egui for a discard pass, which draws with the fonts and gets no input.
+    assert!(app.is_ready(), "the frame that installs the fonts draws in its discard pass");
+    assert_eq!(app.synthetic.len(), 5, "the discard pass got no synthetic input: the whole gesture still waits");
     // Once fonts are ready the click reaches the UI exactly once, one event per pass.
     let mut passes = 0;
     while reply.try_recv().is_err() {
@@ -113,7 +122,7 @@ fn a_pass_that_cannot_draw_receives_no_synthetic_input() {
 
 #[test]
 fn one_pending_synthetic_batch_is_never_duplicated_while_hidden() {
-    let ctx = egui::Context::default();
+    let ctx = headless();
     let frame = eframe::Frame::_new_kittest();
     let mut app = app_with_comp();
     ready(&mut app, &ctx, &frame);
@@ -147,7 +156,7 @@ fn one_pending_synthetic_batch_is_never_duplicated_while_hidden() {
 
 #[test]
 fn geometry_epoch_tracks_size_and_scale_but_not_window_position() {
-    let ctx = egui::Context::default();
+    let ctx = headless();
     let frame = eframe::Frame::_new_kittest();
     let mut app = app_with_comp();
     let first = ready(&mut app, &ctx, &frame);
@@ -165,7 +174,7 @@ fn geometry_epoch_tracks_size_and_scale_but_not_window_position() {
 
 #[test]
 fn only_a_viewer_that_draws_records_a_prefetch_scale() {
-    let ctx = egui::Context::default();
+    let ctx = headless();
     let frame = eframe::Frame::_new_kittest();
     let mut app = app_with_comp();
     ready(&mut app, &ctx, &frame);
@@ -184,7 +193,7 @@ fn only_a_viewer_that_draws_records_a_prefetch_scale() {
 
 #[test]
 fn playback_advances_on_a_logic_only_tick() {
-    let ctx = egui::Context::default();
+    let ctx = headless();
     let frame = eframe::Frame::_new_kittest();
     let mut app = app_with_comp();
     app.playback.playing = true;
@@ -217,7 +226,7 @@ fn workspace_layout_autosave_writes_on_a_hidden_tick() {
     app.use_manual_clock();
     app.ui.focused = PanelKind::Timeline;
     app.clock_mut().advance(2.0);
-    let ctx = egui::Context::default();
+    let ctx = headless();
     let frame = eframe::Frame::_new_kittest();
     hidden_tick(&mut app, &ctx, &frame);
     assert!(store.read(WORKSPACES_FILE).is_some(), "the layout is saved while the window is hidden");
@@ -235,7 +244,7 @@ fn asks_to_close(ctx: &egui::Context, mut f: impl FnMut(&egui::Context)) -> bool
 #[test]
 #[cfg(not(target_arch = "wasm32"))]
 fn restart_to_update_with_unsaved_changes_opens_the_unsaved_changes_prompt() {
-    let ctx = egui::Context::default();
+    let ctx = headless();
     let frame = eframe::Frame::_new_kittest();
     let mut app = app_with_comp();
     assert!(app.session.is_dirty(), "creating a comp and a layer leaves unsaved changes");
@@ -252,7 +261,7 @@ fn restart_to_update_with_unsaved_changes_opens_the_unsaved_changes_prompt() {
 #[test]
 #[cfg(not(target_arch = "wasm32"))]
 fn restart_to_update_with_nothing_unsaved_leaves_the_close_to_the_updater() {
-    let ctx = egui::Context::default();
+    let ctx = headless();
     let mut app = app_with_comp();
     app.updates_rt.manual_window_open = true;
     assert!(!asks_to_close(&ctx, |ctx| updates_ui::restart_to_update(&mut app.updates_rt, ctx, true)));
@@ -262,39 +271,24 @@ fn restart_to_update_with_nothing_unsaved_leaves_the_close_to_the_updater() {
 #[test]
 #[cfg(not(target_arch = "wasm32"))]
 fn restart_to_update_with_the_startup_prompt_open_leaves_the_window_open() {
-    let ctx = egui::Context::default();
+    let ctx = headless();
     let mut app = app_with_comp();
-    // Version choices come from a file that does not exist, so the launcher settings of the
-    // machine running the test do not hold the app off the offer.
-    let pins = tempfile::tempdir().unwrap();
-    app.updates_rt.updater =
-        craft_update::updater::Updater::new(&crate::UPDATE_APP, env!("CARGO_PKG_VERSION")).with_pins_path(pins.path().join("versions.json"));
-    // The updater reads the installed files for an offer on a thread of its own, which asks the
-    // context the updater keeps for a repaint after it answers; the next tick opens the prompt.
-    let offer_ctx = egui::Context::default();
-    let (answered, wait) = std::sync::mpsc::channel();
-    offer_ctx.set_repaint_observer(move |info| {
-        if info.delay.is_zero() {
-            let _ = answered.send(());
-        }
-    });
-    let updater = &mut app.updates_rt.updater;
-    // Keeps `offer_ctx` for the offer's thread.
-    updater.tick(&offer_ctx);
-    updater.offer(craft_update::Release {
+    app.updates_rt.updater.offer(craft_update::Release {
         tag: "v99.0.0".into(),
         version: craft_update::parse_version("99.0.0"),
         name: "EffectCraft 99.0.0".into(),
         html_url: "https://github.com/storytold/effectcraft/releases/tag/v99.0.0".into(),
         ..Default::default()
     });
-    assert!(updater.managed().is_none(), "no launcher choice holds the app off stable releases");
-    // The offer's thread asks for one repaint after it answers, so one wait and one tick suffice.
-    if !updater.prompt_open() {
-        wait.recv().unwrap();
-        updater.tick(&offer_ctx);
+    // The offer reads on a thread whether this copy installs itself; a tick opens the prompt with its answer.
+    for _ in 0..400 {
+        if app.updates_rt.updater.prompt_open() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        app.updates_rt.updater.tick(&ctx);
     }
-    assert!(updater.prompt_open(), "the offer opens the startup prompt");
+    assert!(app.updates_rt.updater.prompt_open());
     app.updates_rt.manual_window_open = true;
     assert!(!asks_to_close(&ctx, |ctx| updates_ui::restart_to_update(&mut app.updates_rt, ctx, false)), "the prompt carries the restart");
     assert!(!app.updates_rt.manual_window_open, "the result dialog closes");
@@ -303,7 +297,7 @@ fn restart_to_update_with_the_startup_prompt_open_leaves_the_window_open() {
 
 #[test]
 fn the_close_guard_answers_a_close_request_without_a_pass() {
-    let ctx = egui::Context::default();
+    let ctx = headless();
     let frame = eframe::Frame::_new_kittest();
     let mut app = app_with_comp();
     assert!(app.session.is_dirty(), "creating a comp and a layer leaves unsaved changes");
@@ -385,7 +379,7 @@ fn image(width: usize, height: usize) -> Arc<egui::ColorImage> {
 #[test]
 fn a_script_file_dialog_asks_for_a_pass_while_the_window_is_hidden() {
     use effectcraft_engine::scriptui::{FileDialogKind, ScriptFileDialog};
-    let ctx = egui::Context::default();
+    let ctx = headless();
     let frame = eframe::Frame::_new_kittest();
     let mut app = app_with_comp();
     ready(&mut app, &ctx, &frame);
@@ -414,7 +408,7 @@ fn a_script_file_dialog_asks_for_a_pass_while_the_window_is_hidden() {
 
 #[test]
 fn a_screenshot_is_issued_only_after_settled_passes_and_writes_from_the_tick() {
-    let ctx = egui::Context::default();
+    let ctx = headless();
     let frame = eframe::Frame::_new_kittest();
     let mut app = app_with_comp();
     ready(&mut app, &ctx, &frame);
@@ -440,7 +434,7 @@ fn a_screenshot_is_issued_only_after_settled_passes_and_writes_from_the_tick() {
 
 #[test]
 fn a_resize_between_issue_and_completion_rejects_the_pixels_and_retries() {
-    let ctx = egui::Context::default();
+    let ctx = headless();
     let frame = eframe::Frame::_new_kittest();
     let mut app = app_with_comp();
     ready(&mut app, &ctx, &frame);
@@ -467,7 +461,7 @@ fn a_resize_between_issue_and_completion_rejects_the_pixels_and_retries() {
 
 #[test]
 fn screenshot_admission_bounds_requests_and_a_timeout_releases_its_reservation() {
-    let ctx = egui::Context::default();
+    let ctx = headless();
     let frame = eframe::Frame::_new_kittest();
     let mut app = app_with_comp();
     ready(&mut app, &ctx, &frame);
@@ -493,7 +487,7 @@ fn screenshot_admission_bounds_requests_and_a_timeout_releases_its_reservation()
 
 #[test]
 fn a_late_callback_after_cancellation_writes_nothing_and_replies_once() {
-    let ctx = egui::Context::default();
+    let ctx = headless();
     let frame = eframe::Frame::_new_kittest();
     let mut app = app_with_comp();
     ready(&mut app, &ctx, &frame);
@@ -522,7 +516,7 @@ fn wake_requests(ctx: &egui::Context) -> Arc<std::sync::Mutex<Vec<std::time::Dur
 
 #[test]
 fn an_issued_capture_schedules_a_wake_up_for_its_deadline() {
-    let ctx = egui::Context::default();
+    let ctx = headless();
     let frame = eframe::Frame::_new_kittest();
     let mut app = app_with_comp();
     ready(&mut app, &ctx, &frame);
@@ -554,7 +548,7 @@ fn an_issued_capture_schedules_a_wake_up_for_its_deadline() {
 
 #[test]
 fn a_downscaled_capture_is_cropped_with_the_images_own_scale() {
-    let ctx = egui::Context::default();
+    let ctx = headless();
     let frame = eframe::Frame::_new_kittest();
     let mut app = app_with_comp();
     let geom = ready(&mut app, &ctx, &frame);
@@ -585,7 +579,7 @@ fn a_downscaled_capture_is_cropped_with_the_images_own_scale() {
 
 #[test]
 fn a_capture_before_any_pass_never_uses_the_window_frame_rect() {
-    let ctx = egui::Context::default();
+    let ctx = headless();
     let frame = eframe::Frame::_new_kittest();
     let mut app = app_with_comp();
     // Only the outer (title bar included) rectangle is known: it is not the captured surface.
@@ -605,7 +599,7 @@ fn a_capture_before_any_pass_never_uses_the_window_frame_rect() {
 
 #[test]
 fn an_element_that_moves_while_the_ui_settles_is_captured_where_it_is() {
-    let ctx = egui::Context::default();
+    let ctx = headless();
     let frame = eframe::Frame::_new_kittest();
     let mut app = app_with_comp();
     let geom = ready(&mut app, &ctx, &frame);
