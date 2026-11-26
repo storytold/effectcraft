@@ -627,14 +627,36 @@ pub(crate) mod memo {
     /// reports to a log of its own, which is handed on to the reader's: only a value that read no
     /// file is kept. (The memo once told logs apart by their address; a log that took the place
     /// of an earlier one got that one's value without its files.)
+    ///
+    /// A camera or frame built from a read that fell back to the keyframed value ([`failed_read`])
+    /// is not kept either.
     pub(crate) fn tracked<T>(ctx: &EvalCtx, work: impl FnOnce(&EvalCtx) -> T) -> (T, bool) {
-        let Some(own) = ctx.reads else { return (work(ctx), true) };
+        let failed = FAILED_READS.with(|n| n.get());
+        let whole = || FAILED_READS.with(|n| n.get()) == failed;
+        let Some(own) = ctx.reads else {
+            let out = work(ctx);
+            return (out, whole());
+        };
         let log = crate::reads::ReadLog::new();
         let out = work(&EvalCtx { reads: Some(&log), ..*ctx });
         let files = log.into_files();
         let none = files.is_empty() && files.is_complete() && files.since().is_none() && !files.is_unkeyed();
         own.note_all(&files);
-        (out, none)
+        (out, none && whole())
+    }
+
+    thread_local! {
+        /// Reads outside any expression, on this thread, whose own expression failed.
+        static FAILED_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    }
+
+    /// A read outside any expression got the keyframed value because its own expression failed.
+    /// Whatever is being built from it on this thread (a camera, a frame) is not kept: its next
+    /// reader works it out again and so asks the host for that property again. A failure inside
+    /// an expression is not counted here: the value built round it is the property's own for
+    /// readers at the top (see [`Mark`]).
+    pub(crate) fn failed_read() {
+        FAILED_READS.with(|n| n.set(n.get().wrapping_add(1)));
     }
 
     /// What is known before a value is looked up or worked out: whether another expression is

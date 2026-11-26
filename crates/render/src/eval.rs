@@ -125,15 +125,27 @@ impl<'a> EvalCtx<'a> {
             // Inside a frame memo scope an expression runs once per property and time: the
             // viewer asks for a layer's transform for every view, outline and handle.
             use crate::three_d::camera::memo;
-            let Some(key) = memo::prop(self, layer, prop, lt) else { return h.eval(self, layer, prop, &v).unwrap_or(v) };
+            // A failed expression's stand-in is this read's only: the next read asks the host
+            // again, as it does without the memo (the failure may be a spent work budget), and
+            // a camera or frame being built from it is not kept either.
+            let stand_in = |v: Value| {
+                if !h.busy() {
+                    memo::failed_read();
+                }
+                v
+            };
+            let Some(key) = memo::prop(self, layer, prop, lt) else {
+                return match h.eval(self, layer, prop, &v) {
+                    Ok(out) => out,
+                    Err(_) => stand_in(v),
+                };
+            };
             let mark = memo::mark(self);
             if let Some(memo::Value::Prop(m)) = memo::get(key, &mark) {
                 return m;
             }
             let (out, keep) = memo::tracked(self, |ctx| h.eval(ctx, layer, prop, &v));
-            // A failed expression's stand-in is this read's only: the next read asks the host
-            // again, as it does without the memo (the failure may be a spent work budget).
-            let Ok(out) = out else { return v };
+            let Ok(out) = out else { return stand_in(v) };
             if keep {
                 memo::put(key, memo::Value::Prop(out.clone()), self, &mark);
             }

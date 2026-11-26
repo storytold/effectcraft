@@ -1191,3 +1191,44 @@ fn a_frame_with_no_3d_layer_on_screen_works_out_no_camera() {
     r.comp_frame(cid, Tick::from_seconds_f64(1.5));
     assert!(host.0.load(std::sync::atomic::Ordering::Relaxed) > 0, "control: once the 3D solid is on screen the camera is asked for");
 }
+
+/// A camera, or a camera's frame, built on the stand-in of a failed expression is not kept
+/// either: the next reader works it out again, as it does without the memo.
+#[test]
+fn a_memo_never_keeps_a_camera_built_on_a_failed_expressions_stand_in() {
+    /// The camera's position expression fails the first time it runs, then moves the camera.
+    struct FailsOnce(std::sync::atomic::AtomicUsize);
+    impl crate::ExprHost for FailsOnce {
+        fn eval(&self, _: &EvalCtx, layer: &Layer, prop: &effectcraft_project::Property, value: &Value) -> Result<Value, String> {
+            if !layer.is_camera() || prop.match_id != "position" {
+                return Ok(value.clone());
+            }
+            if self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 0 {
+                return Err("out of time".into());
+            }
+            let mut v = value.as_vec3();
+            v[0] += 100.0;
+            Ok(Value::Vec3(v))
+        }
+    }
+    let (p, cid, _) = moving_camera_comp(1);
+    let c = p.comp(cid).unwrap();
+    let cam = c.layers.iter().find(|l| l.is_camera()).unwrap();
+    let _memo = EvalMemo::scope(&p);
+
+    let host = FailsOnce(std::sync::atomic::AtomicUsize::new(0));
+    let ctx = EvalCtx { expr: Some(&host), ..EvalCtx::new(&p, cid, c, Tick::ZERO) };
+    let stand_in = super::camera::layer_frame(&ctx, cam);
+    let moved = super::camera::layer_frame(&ctx, cam);
+    assert!((moved.0.x - stand_in.0.x - 100.0).abs() < 1e-9, "the frame after a failed one is worked out again: {stand_in:?}, then {moved:?}");
+    assert_eq!(super::camera::layer_frame(&ctx, cam), moved);
+    assert_eq!(host.0.load(std::sync::atomic::Ordering::Relaxed), 2, "and that one is kept");
+
+    let host = FailsOnce(std::sync::atomic::AtomicUsize::new(0));
+    let ctx = EvalCtx { expr: Some(&host), ..EvalCtx::new(&p, cid, c, Tick::from_seconds_f64(1.0)) };
+    let stand_in = active_camera(&ctx);
+    let moved = active_camera(&ctx);
+    assert!((moved.eye.x - stand_in.eye.x - 100.0).abs() < 1e-9, "the camera after a failed one is worked out again");
+    assert_eq!(active_camera(&ctx).eye, moved.eye);
+    assert_eq!(host.0.load(std::sync::atomic::Ordering::Relaxed), 2, "and that one is kept");
+}
