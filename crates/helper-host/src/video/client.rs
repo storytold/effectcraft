@@ -675,9 +675,14 @@ fn spawn(cmd: &mut Command) -> Result<Conn, String> {
 }
 
 fn base64_decode(s: &str) -> Option<Vec<u8>> {
+    let body = s.trim_end_matches('=');
+    let padding = s.len() - body.len();
+    if padding > 2 || (padding > 0 && !s.len().is_multiple_of(4)) {
+        return None;
+    }
     let mut out = Vec::with_capacity(s.len() / 4 * 3);
     let (mut acc, mut bits) = (0u32, 0u32);
-    for c in s.trim_end_matches('=').bytes() {
+    for c in body.bytes() {
         let v = match c {
             b'A'..=b'Z' => c - b'A',
             b'a'..=b'z' => c - b'a' + 26,
@@ -711,6 +716,10 @@ mod tests {
         assert_eq!(base64_decode("AQ!D"), None);
         assert_eq!(base64_decode("A"), None);
         assert_eq!(base64_decode("AQIDB"), None);
+        assert_eq!(base64_decode("AQ=="), Some(vec![1]));
+        for padding_only in ["=", "====", "A===", "AQ===", "AQ=D"] {
+            assert_eq!(base64_decode(padding_only), None, "{padding_only}");
+        }
     }
 
     /// The planes tile the slot's `in` region exactly, in Y, U, V order, so a helper that reads

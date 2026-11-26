@@ -122,7 +122,8 @@ sends `encode.close` as soon as it reads `encode.flushed`) and is dropped.
 ### Job and frame ids
 
 `job` is a positive whole number that EffectCraft takes from a counter that only goes up, so an id
-is never reused, not even after the helper is restarted. `frame` counts from 0 inside a job and is
+is never reused within one helper process. A helper that is restarted, or a second helper process,
+is a separate connection and may see the same number again. `frame` counts from 0 inside a job and is
 never reused in it. Every id EffectCraft has sent is **issued**. A job is **open** from
 `encode.open` until EffectCraft sends `cancel` or `encode.close`; after that it is **ended**, and
 it stays ended. An id EffectCraft has not sent is **never issued**.
@@ -157,7 +158,9 @@ and the helper carries on; it does not count.
   timeout (30 s by default, set with `EFFECTCRAFT_HELPER_VIDEO_TIMEOUT`, as
   `EFFECTCRAFT_HELPER_TIMEOUT` is for effects), EffectCraft stops (kills) the helper and waits for
   it to exit. A GPU that hangs without exiting ends the helper instead of making the export look
-  busy. `encode.open` and `encode.flush` use the load timeout (600 s); for a flush it covers the
+  busy. The timeout detects a hung helper; it is not a strict arrival deadline: a reply that is
+  already queued when EffectCraft next reads is accepted even if it came after the timeout.
+  `encode.open` and `encode.flush` use the load timeout (600 s); for a flush it covers the
   `encode.packets` and the `encode.flushed` together. After `cancel` the frames of that job have no
   timeout; `cancelled` is due within the same 30 s, or EffectCraft stops the helper.
 - **`{"op":"error","job":1,"frame":3,"code":"…","message":"…"}`** answers one request. `frame` is
