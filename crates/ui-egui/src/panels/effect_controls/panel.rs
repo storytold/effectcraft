@@ -1,4 +1,4 @@
-use super::common::{Actions, PARAM_NAME_X, ROW, effect_active, prune_lock, shown_layer, shown_layer_id};
+use super::common::{Actions, PARAM_NAME_X, ROW, effect_active, prune_lock, select_effect_only, shown_layer, shown_layer_id};
 use super::editors::{curves_editor, editor_height, histogram_only, levels_editor, object_matte_editor, roto_editor, warp_editor};
 use super::rows::{FxScope, group_rows, toggle_closed};
 use super::{Align2, Color32, EffectcraftApp, EvalCtx, GroupKind, Icon, Layer, PropGroup, Rect, Sense, Stroke, Tokens, json, pos2, vec2, widgets};
@@ -366,7 +366,9 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                     app.session.state.selected_props.push((layer.id, g.uid));
                 }
             } else if !selected || hresp.clicked() {
-                app.session.state.selected_props = vec![(layer.id, g.uid)];
+                // The effect alone becomes the selection: keyframes or mask points selected
+                // elsewhere must not survive it, or Delete would act on them (#3828).
+                select_effect_only(&mut app.session.state, layer.id, g.uid);
             }
         }
         if hresp.drag_started() {

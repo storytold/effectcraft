@@ -27,6 +27,16 @@ pub(super) fn effect_active(g: &PropGroup, layer: effectcraft_engine::project::L
     selected.iter().any(|(l, uid)| *l == layer && contains(g, *uid, 0))
 }
 
+/// A click on an effect header makes that effect the only selection: the property selection
+/// is replaced and no keyframe or mask-point selection survives it, so Delete targets the
+/// effect instead of a stale key or point selection (#3828). Modifier (range/toggle) clicks
+/// don't go through here and keep what was selected.
+pub(super) fn select_effect_only(st: &mut effectcraft_engine::EditorState, layer: effectcraft_engine::project::LayerId, uid: u64) {
+    st.selected_props = vec![(layer, uid)];
+    st.selected_keys.clear();
+    st.selected_vertices.clear();
+}
+
 /// The layer Effect Controls shows: the layer it is locked to (its tab's lock) while that layer's
 /// comp is the active comp, else the first selected layer of the active comp.
 pub(crate) fn shown_layer_id(app: &EffectcraftApp) -> Option<effectcraft_engine::project::LayerId> {
@@ -178,4 +188,24 @@ pub(crate) fn gesture_key(ui: &egui::Ui, id: egui::Id, started: bool) -> String 
         ui.data(|d| d.get_temp::<u64>(kid)).unwrap_or(0)
     };
     format!("{id:?}-{n}")
+}
+
+#[cfg(test)]
+mod tests {
+    use effectcraft_engine::{EditorState, VertexRef, project::LayerId};
+
+    /// #3828: a click on an effect header makes the effect the only selection. Keyframes or
+    /// mask points selected before it must not survive, or Delete would act on them instead
+    /// of the effect.
+    #[test]
+    fn effect_header_selection_drops_keys_and_mask_points() {
+        let mut st = EditorState::default();
+        st.selected_props = vec![(LayerId(1), 10)];
+        st.selected_keys = serde_json::from_value(serde_json::json!([{ "layer": 1, "prop": 10, "time": 0 }])).unwrap();
+        st.selected_vertices = vec![VertexRef { layer: LayerId(1), mask: 20, index: 0 }];
+        super::select_effect_only(&mut st, LayerId(2), 30);
+        assert_eq!(st.selected_props, vec![(LayerId(2), 30)]);
+        assert!(st.selected_keys.is_empty());
+        assert!(st.selected_vertices.is_empty());
+    }
 }
