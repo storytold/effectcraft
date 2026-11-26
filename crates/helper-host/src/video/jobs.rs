@@ -154,6 +154,15 @@ impl Jobs {
         Ok((frame, slot_number))
     }
 
+    /// Give back the frame [`Jobs::start_frame`] reserved last, when nothing was sent for it.
+    pub fn abandon_frame(&mut self, job: u64) {
+        if let Some(j) = self.open.get_mut(&job)
+            && j.outstanding.pop_back().is_some()
+        {
+            j.next_frame -= 1;
+        }
+    }
+
     /// Allowed once every frame is answered; `out` must hold `delay + 1` slots' worth of output.
     pub fn start_flush(&mut self, job: u64, out: Region) -> Result<(), SendError> {
         let j = self.open.get_mut(&job).ok_or(SendError::UnknownJob)?;
@@ -296,8 +305,10 @@ fn describe(r: &VideoReply) -> &'static str {
     }
 }
 
+/// Packets are distinct pieces of the region, so together they can't be longer than it: without
+/// this, thousands of references to the same bytes would make the host copy them thousands of times.
 fn place(region: &Region, packets: &[PacketRef]) -> Result<Vec<Packet>, String> {
-    packets
+    let placed: Vec<Packet> = packets
         .iter()
         .enumerate()
         .map(|(i, p)| {
@@ -306,7 +317,12 @@ fn place(region: &Region, packets: &[PacketRef]) -> Result<Vec<Packet>, String> 
             at.map(|offset| Packet { offset, len: p.len, pts: p.pts, dts: p.dts, key: p.key })
                 .ok_or_else(|| format!("packet {i} (offset {}, length {}) is outside its {}-byte region", p.offset, p.len, region.len))
         })
-        .collect()
+        .collect::<Result<_, _>>()?;
+    let total = placed.iter().try_fold(0u64, |sum, p| sum.checked_add(p.len));
+    if total.is_none_or(|t| t > region.len) {
+        return Err(format!("{} packets add up to more than their {}-byte region", placed.len(), region.len));
+    }
+    Ok(placed)
 }
 
 fn check_slots(slots: &[Slot]) -> Result<(), SendError> {
@@ -432,6 +448,30 @@ mod tests {
         jobs.receive(&opened(id, 0));
         jobs.start_frame(id).unwrap();
         assert_eq!(jobs.start_frame(id), Err(SendError::Full), "2 x 200 MiB is over 256 MiB");
+    }
+
+    #[test]
+    fn packets_that_together_exceed_their_region_are_a_break_even_if_each_fits() {
+        let (mut jobs, id) = ready(1, 0);
+        jobs.start_frame(id).unwrap();
+        let each = OUT / 2 + 1;
+        let overlapping = vec![pkt(0, each, 0), pkt(0, each, 1)];
+        assert!(is_break(&jobs.receive(&packets(id, Some(0), overlapping))));
+        let (mut jobs, id) = ready(1, 0);
+        jobs.start_frame(id).unwrap();
+        let fitting = vec![pkt(0, OUT / 2, 0), pkt(OUT / 2, OUT / 2, 1)];
+        assert!(matches!(jobs.receive(&packets(id, Some(0), fitting)), Verdict::Packets { .. }));
+    }
+
+    #[test]
+    fn an_unsent_frame_can_be_given_back_and_the_next_one_takes_its_place() {
+        let (mut jobs, id) = ready(1, 0);
+        let first = jobs.start_frame(id).unwrap();
+        jobs.abandon_frame(id);
+        assert_eq!(jobs.start_frame(id), Ok(first), "same number and slot");
+        assert!(matches!(jobs.receive(&packets(id, Some(first.0), vec![])), Verdict::Packets { .. }));
+        jobs.abandon_frame(id);
+        assert_eq!(jobs.start_frame(id).map(|(frame, _)| frame), Ok(1), "an answered frame is not given back");
     }
 
     #[test]

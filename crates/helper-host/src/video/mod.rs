@@ -35,11 +35,17 @@ pub fn find_video_helper_in(exe_dir: &Path) -> Option<PathBuf> {
     let name = program_file_name();
     let mut dirs = vec![exe_dir.join("helpers")];
     if cfg!(target_os = "macos")
-        && let Some(contents) = exe_dir.parent()
+        && let Some(helpers) = bundle_helpers(exe_dir)
     {
-        dirs.push(contents.join("Helpers"));
+        dirs.push(helpers);
     }
     dirs.into_iter().map(|d| d.join(&name)).find(|p| p.is_file())
+}
+
+/// `Contents/Helpers` for an executable in `Contents/MacOS`, and nothing for any other folder.
+fn bundle_helpers(exe_dir: &Path) -> Option<PathBuf> {
+    let contents = exe_dir.parent()?;
+    (exe_dir.file_name()? == "MacOS" && contents.file_name()? == "Contents").then(|| contents.join("Helpers"))
 }
 
 /// Nothing else is sent to a helper before this passes. A refusal names the installed helper
@@ -143,6 +149,13 @@ mod tests {
         std::fs::write(&installed, b"").unwrap();
         assert_eq!(find_video_helper_in(&exe_dir), Some(installed));
         let _ = std::fs::remove_dir_all(&exe_dir);
+    }
+
+    #[test]
+    fn only_an_app_bundle_has_a_helpers_folder_beside_its_executable_folder() {
+        assert_eq!(bundle_helpers(Path::new("/Apps/EffectCraft.app/Contents/MacOS")), Some(PathBuf::from("/Apps/EffectCraft.app/Contents/Helpers")));
+        assert_eq!(bundle_helpers(Path::new("/opt/effectcraft/bin")), None);
+        assert_eq!(bundle_helpers(Path::new("/opt/MacOS")), None);
     }
 
     #[test]

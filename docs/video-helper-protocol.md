@@ -146,7 +146,7 @@ and the helper carries on; it does not count.
 | `error` with `packet_too_large`: the helper says the encoder's output does not fit the `out` region it was given, and it did not write past it | Job error. |
 | `cancelled` for a job EffectCraft sent `cancel` for | Accepts it; the job's frames are over. |
 | `cancelled` for an open job | Protocol break. |
-| Any other reply for an **ended** job (late replies for frames that were in flight, a second `cancelled`), or for a job that has just answered with an `error` and has not been cancelled yet | Dropped and logged. The regions it names are not read. Not a break. |
+| Any other reply for an **ended** job (late replies for frames that were in flight, a second `cancelled`), and any reply except `cancelled` for a job that has just answered with an `error` and has not been cancelled yet | Dropped and logged. The regions it names are not read. Not a break. |
 | Any reply for a job that was **never issued** | Protocol break. |
 | A line that does not parse, or is over 1 MiB | Protocol break. |
 

@@ -7,7 +7,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel, sync_channel};
 use std::time::{Duration, Instant};
 
 use super::check_hello;
@@ -20,6 +20,19 @@ use crate::frames::Exchange;
 use crate::protocol::PROTOCOL_VERSION;
 
 const BLOCK_ID: &str = "effectcraft-helper-video";
+
+/// Parsed replies waiting for us. When it is full the reader waits, then the helper's pipe fills
+/// and the helper waits: a helper can't make us hold unlimited memory.
+const REPLY_QUEUE: usize = 64;
+
+/// One poll looks at this many late replies at most, so a helper that floods them can't stall it.
+const MAX_DROPPED_PER_POLL: usize = 64;
+
+/// `timeout` from now; one too long to represent is a year.
+fn deadline(timeout: Duration) -> Instant {
+    let now = Instant::now();
+    now.checked_add(timeout).unwrap_or_else(|| now + Duration::from_secs(365 * 24 * 3600))
+}
 
 #[derive(Clone, Copy, Debug)]
 pub struct Options {
@@ -205,27 +218,31 @@ impl VideoHelper {
     pub fn open_encoder(&mut self, p: &EncodeParams) -> Result<Opened, VideoError> {
         self.alive()?;
         self.check_supported(p)?;
-        let in_len = u64::from(p.width) * u64::from(p.height) * 3 / 2;
+        let in_len = u64::from(p.width).checked_mul(u64::from(p.height)).and_then(|n| n.checked_mul(3)).map(|n| n / 2).filter(|n| *n <= MAX_BYTES_IN_FLIGHT);
+        let Some(in_len) = in_len else {
+            let message = format!("a {}×{} picture is larger than {} MiB", p.width, p.height, MAX_BYTES_IN_FLIGHT >> 20);
+            return Err(VideoError::Job { code: ErrorCode::Unsupported, message });
+        };
         let out_len = (in_len / 4).max(1 << 20);
         let count = (MAX_BYTES_IN_FLIGHT / in_len).clamp(1, MAX_FRAMES_IN_FLIGHT as u64);
         let (slots, end) = layout(self.top, in_len, out_len, count);
+        let build = |job| EncodeOpen {
+            job,
+            device: p.device.clone(),
+            codec: p.codec,
+            width: p.width,
+            height: p.height,
+            rate: p.rate,
+            bitrate_kbps: p.bitrate_kbps,
+            profile: p.profile.clone(),
+            keyint: p.keyint,
+            colour: p.colour,
+            slots: slots.clone(),
+        };
+        // A request that can't be written is found before the job, the ids and the regions exist.
+        request_line(&VideoRequest::EncodeOpen(build(self.jobs.next_id()))).map_err(VideoError::Request)?;
         self.grow(end)?;
-        let msg = self
-            .jobs
-            .open(|job| EncodeOpen {
-                job,
-                device: p.device.clone(),
-                codec: p.codec,
-                width: p.width,
-                height: p.height,
-                rate: p.rate,
-                bitrate_kbps: p.bitrate_kbps,
-                profile: p.profile.clone(),
-                keyint: p.keyint,
-                colour: p.colour,
-                slots: slots.clone(),
-            })
-            .map_err(|e| VideoError::Request(e.to_string()))?;
+        let msg = self.jobs.open(build).map_err(|e| VideoError::Request(e.to_string()))?;
         let job = msg.job;
         NEXT_JOB.fetch_max(self.jobs.next_id(), std::sync::atomic::Ordering::Relaxed);
         self.top = end;
@@ -268,7 +285,10 @@ impl VideoHelper {
         let base = base.ok_or_else(|| VideoError::Request("no such slot".into()))?;
         let planes = planes(base, width, height);
         for (plane, data) in planes.iter().zip([picture.y, picture.u, picture.v]) {
-            self.write_at(plane.offset, data)?;
+            if let Err(e) = self.write_at(plane.offset, data) {
+                self.jobs.abandon_frame(job);
+                return Err(e);
+            }
         }
         self.send(&VideoRequest::EncodeFrame { job, frame, slot, planes }, self.opts.frame_timeout)?;
         if let Some(st) = self.state.get_mut(&job) {
@@ -300,8 +320,14 @@ impl VideoHelper {
         self.top = out.offset + out.len;
         self.jobs.start_flush(job, out).map_err(|e| VideoError::Request(e.to_string()))?;
         self.send(&VideoRequest::EncodeFlush { job, out }, self.opts.load_timeout)?;
+        // The batch and `encode.flushed` share one timeout.
+        let end = deadline(self.opts.load_timeout);
         loop {
-            match self.receive(self.opts.load_timeout)? {
+            let left = end.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(self.broke("the video helper did not finish the flush in time".into()));
+            }
+            match self.receive(left)? {
                 Some(Verdict::Flushed { job: j }) if j == job => break,
                 Some(Verdict::Packets { job: j, frame: None, .. }) if j == job => {}
                 Some(other) => self.unexpected(job, other)?,
@@ -320,7 +346,8 @@ impl VideoHelper {
         self.cancel_sent(job)
     }
 
-    pub fn close(&mut self, job: u64) -> Result<(), VideoError> {
+    /// Only after `encode.flushed` or `cancelled`: until then the helper may still use the regions.
+    fn close(&mut self, job: u64) -> Result<(), VideoError> {
         self.alive()?;
         self.jobs.close(job).map_err(|e| VideoError::Request(e.to_string()))?;
         self.send(&VideoRequest::EncodeClose { job }, self.opts.frame_timeout)?;
@@ -408,13 +435,23 @@ impl VideoHelper {
         }
     }
 
+    /// A zero `timeout` only looks at what is already queued. A longer one ends at its deadline
+    /// even if replies keep arriving.
     fn receive(&mut self, timeout: Duration) -> Result<Option<Verdict>, VideoError> {
-        let deadline = Instant::now() + timeout;
+        let end = deadline(timeout);
+        let mut dropped = 0;
         loop {
-            let left = deadline.saturating_duration_since(Instant::now());
+            let left = end.saturating_duration_since(Instant::now());
+            let spent = if timeout.is_zero() { dropped >= MAX_DROPPED_PER_POLL } else { left.is_zero() };
+            if spent {
+                return Ok(None);
+            }
             let Some(reply) = self.next(left)? else { return Ok(None) };
             match self.jobs.receive(&reply) {
-                Verdict::Dropped => log::info!("video helper: dropped a late reply: {reply:?}"),
+                Verdict::Dropped => {
+                    dropped += 1;
+                    log::info!("video helper: dropped a late reply: {reply:?}");
+                }
                 Verdict::Break(why) => return Err(self.broke(why)),
                 verdict => {
                     self.apply(&verdict)?;
@@ -430,7 +467,15 @@ impl VideoHelper {
         let Verdict::Packets { job, frame, packets, .. } = v else { return Ok(()) };
         let mut taken = Vec::with_capacity(packets.len());
         for p in packets {
-            let data = self.read_at(p.offset, p.len)?;
+            let data = match self.read_at(p.offset, p.len) {
+                Ok(data) => data,
+                Err(e) => {
+                    // The frame is answered but its packets are lost: the job can't go on, and the
+                    // fault is ours, not the helper's.
+                    self.stop(false);
+                    return Err(VideoError::Helper(e.to_string()));
+                }
+            };
             taken.push(EncodedPacket { data, pts: p.pts, dts: p.dts, key: p.key });
         }
         if let Some(st) = self.state.get_mut(job) {
@@ -566,7 +611,7 @@ fn spawn(cmd: &mut Command) -> Result<Conn, String> {
         let _ = child.wait();
         return Err("the video helper's pipes are unavailable".into());
     };
-    let (tx, rx) = channel();
+    let (tx, rx) = sync_channel(REPLY_QUEUE);
     let reader = std::thread::Builder::new().name("video-helper-out".into()).spawn(move || {
         let mut out = BufReader::new(stdout);
         loop {
@@ -644,7 +689,8 @@ fn base64_decode(s: &str) -> Option<Vec<u8>> {
             acc &= (1 << bits) - 1;
         }
     }
-    Some(out)
+    // A last group of one character holds 6 bits, not a whole byte.
+    (bits < 6).then_some(out)
 }
 
 #[cfg(test)]
@@ -658,10 +704,18 @@ mod tests {
         assert_eq!(base64_decode("AQ"), Some(vec![1]));
         assert_eq!(base64_decode("+/8="), Some(vec![0xfb, 0xff]));
         assert_eq!(base64_decode("AQ!D"), None);
+        assert_eq!(base64_decode("A"), None);
+        assert_eq!(base64_decode("AQIDB"), None);
     }
 
     /// The planes tile the slot's `in` region exactly, in Y, U, V order, so a helper that reads
     /// them reads the whole picture and nothing else.
+    #[test]
+    fn a_timeout_too_long_to_represent_does_not_panic() {
+        assert!(deadline(Duration::MAX) > Instant::now());
+        assert!(deadline(Duration::ZERO) <= Instant::now());
+    }
+
     #[test]
     fn planes_fill_the_picture_region_without_gaps() {
         let [y, u, v] = planes(640, 1920, 1080);

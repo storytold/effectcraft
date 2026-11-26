@@ -71,7 +71,7 @@ impl Fake {
             profiles: vec!["high".into()],
             bit_depths: vec![8],
             min_size: [64, 64],
-            max_size: [4096, 4096],
+            max_size: if self.is("huge_caps") { [u32::MAX, u32::MAX] } else { [4096, 4096] },
             rate_control: vec!["bitrate".into()],
         };
         let device = Device { id: "nvenc:0".into(), name: "Fake GPU".into(), api: "nvenc".into(), driver: "1.0".into(), encode: vec![caps], decode: vec![] };
@@ -110,6 +110,10 @@ impl Fake {
     }
 
     fn flush(&mut self, job: u64, out: Region) {
+        let slow = self.is("slow_flush");
+        if slow {
+            std::thread::sleep(Duration::from_millis(300));
+        }
         let mut packets = vec![];
         if let Some((pts, bytes)) = self.held.take() {
             self.write(out.offset, &bytes);
@@ -118,6 +122,9 @@ impl Fake {
         say(&VideoReply::EncodePackets { job, frame: None, packets: packets.clone() });
         if self.is("double_batch") {
             say(&VideoReply::EncodePackets { job, frame: None, packets });
+        }
+        if slow {
+            std::thread::sleep(Duration::from_millis(300));
         }
         say(&VideoReply::EncodeFlushed { job });
     }
@@ -135,6 +142,12 @@ impl Fake {
             }
             VideoRequest::EncodeFrame { job, frame, slot, planes } => self.frame(job, frame, slot, planes.map(|p| p.offset)),
             VideoRequest::EncodeFlush { job, out } => self.flush(job, out),
+            VideoRequest::Cancel { job } if self.is("cancel_spam") => {
+                let started = Instant::now();
+                while started.elapsed() < Duration::from_secs(8) {
+                    say(&VideoReply::EncodeFlushed { job });
+                }
+            }
             VideoRequest::Cancel { job } if !self.is("ignore_cancel") => say(&VideoReply::Cancelled { job }),
             VideoRequest::Cancel { .. } | VideoRequest::EncodeClose { .. } => {}
             VideoRequest::Shutdown => return false,
@@ -153,6 +166,23 @@ pub fn serve_fake() -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Makes the host slower than a helper that floods it: each dropped late reply costs 2 ms.
+struct SlowOnLateReplies;
+
+impl log::Log for SlowOnLateReplies {
+    fn enabled(&self, _: &log::Metadata) -> bool {
+        true
+    }
+
+    fn log(&self, record: &log::Record) {
+        if record.args().to_string().contains("dropped a late reply") {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    fn flush(&self) {}
 }
 
 // --- the checks -----------------------------------------------------------------------------
@@ -246,6 +276,28 @@ pub fn run_checks(exe: &Path) -> bool {
     );
     drop(h);
 
+    // A helper that advertises absurd limits can't make us allocate or overflow.
+    let mut h = start(exe, "huge_caps", 20_000).ok();
+    let huge: Vec<_> = [(16384, 16384), (u32::MAX - 1, u32::MAX - 1)]
+        .iter()
+        .map(|&(width, height)| h.as_mut().map(|h| h.open_encoder(&EncodeParams { width, height, ..params() }).err()))
+        .collect();
+    let too_big = huge.iter().all(|r| matches!(r, Some(Some(VideoError::Job { code: ErrorCode::Unsupported, .. }))));
+    all &= check("video: a picture over 256 MiB is refused before anything is allocated", too_big && h.as_ref().is_some_and(VideoHelper::is_running), &huge);
+    drop(h);
+
+    // A request that can't be written leaves no job behind.
+    let mut h = start(exe, "ok", 20_000).ok();
+    let long = EncodeParams { profile: "x".repeat(2 << 20), ..params() };
+    let refused = h.as_mut().map(|h| h.open_encoder(&long).err());
+    let after = h.as_mut().map(|h| encode(h, 3).map(|p| p.len()));
+    all &= check(
+        "video: an oversized encode.open is refused and the helper still works",
+        matches!(refused, Some(Some(VideoError::Request(_)))) && matches!(after, Some(Ok(3))),
+        &after,
+    );
+    drop(h);
+
     // A helper that doesn't fit this EffectCraft is not used, and the message names its version.
     for scenario in ["hello_video_v2", "hello_old_app", "hello_no_video"] {
         let r = start(exe, scenario, 20_000);
@@ -261,17 +313,21 @@ pub fn run_checks(exe: &Path) -> bool {
     // Crashes, hangs and broken replies stop the helper and fail the export.
     let t0 = Instant::now();
     let crash = failure(exe, "crash_on_frame_2", 20_000);
-    all &=
-        check("video: a crash fails the export and stops the helper", matches!(&crash, Some((VideoError::Helper(m), false)) if m.contains("stopped")), &crash);
+    all &= check(
+        "video: a crash fails the export and stops the helper",
+        matches!(&crash, Some((VideoError::Helper(m), false)) if m.contains("stopped") || m.contains("can't write")),
+        &crash,
+    );
     let hang = failure(exe, "hang_on_frame_1", 500);
     all &= check(
         "video: a hang is cut off by the frame timeout",
         matches!(&hang, Some((VideoError::Helper(m), false)) if m.contains("did not answer")) && t0.elapsed() < Duration::from_secs(30),
         &hang,
     );
-    for scenario in ["wrong_order", "oob_packet", "never_issued", "double_batch"] {
+    let breaks = [("wrong_order", "oldest unanswered"), ("oob_packet", "outside its"), ("never_issued", "never issued"), ("double_batch", "nobody asked for")];
+    for (scenario, why) in breaks {
         let r = failure(exe, scenario, 5_000);
-        all &= check(&format!("video: {scenario} is a protocol break"), matches!(&r, Some((VideoError::Helper(_), false))), &r);
+        all &= check(&format!("video: {scenario} is a protocol break"), matches!(&r, Some((VideoError::Helper(m), false)) if m.contains(why)), &r);
     }
 
     // A refused job ends that job; the helper carries on and is not charged.
@@ -306,7 +362,23 @@ pub fn run_checks(exe: &Path) -> bool {
         encode(h, 3).map(|p| p.len())
     });
     all &= check("video: cancel drops late replies and the helper carries on", matches!(cancelled, Ok(Ok(3))), &cancelled);
-    let ignored = failure_on_cancel(exe);
+    let _ = log::set_logger(&SlowOnLateReplies);
+    log::set_max_level(log::LevelFilter::Info);
+    let started = Instant::now();
+    let spam = failure_on_cancel(exe, "cancel_spam");
+    all &= check(
+        "video: a flood of late replies does not keep a cancel waiting past its timeout",
+        matches!(&spam, Some((VideoError::Helper(m), false)) if m.contains("cancel")) && started.elapsed() < Duration::from_secs(5),
+        (&spam, started.elapsed()),
+    );
+    let slow = Options { load_timeout: Duration::from_millis(500), ..options(5_000) };
+    let flushed = VideoHelper::start_with(command(exe, "slow_flush"), slow).map(|mut h| encode(&mut h, 3).err());
+    all &= check(
+        "video: the flush batch and encode.flushed share one timeout",
+        matches!(&flushed, Ok(Some(VideoError::Helper(m))) if m.contains("flush")),
+        &flushed,
+    );
+    let ignored = failure_on_cancel(exe, "ignore_cancel");
     all &= check("video: a helper that ignores cancel is stopped", matches!(&ignored, Some((VideoError::Helper(m), false)) if m.contains("cancel")), &ignored);
 
     // 3 stops turn the helper off until the user retries.
@@ -329,8 +401,8 @@ pub fn run_checks(exe: &Path) -> bool {
     all
 }
 
-fn failure_on_cancel(exe: &Path) -> Option<(VideoError, bool)> {
-    let mut h = start(exe, "ignore_cancel", 500).ok()?;
+fn failure_on_cancel(exe: &Path, scenario: &str) -> Option<(VideoError, bool)> {
+    let mut h = start(exe, scenario, 500).ok()?;
     let job = h.open_encoder(&params()).ok()?.job;
     let e = h.cancel(job).err()?;
     Some((e, h.is_running()))
