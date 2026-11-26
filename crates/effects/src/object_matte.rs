@@ -283,8 +283,11 @@ fn known_models() -> impl Iterator<Item = &'static str> {
 
 /// Reassign the Input Key of a freeze whose matte settings and original key still match.
 /// The native-project importer does this after reassigning the IDs of otherwise unchanged inputs.
-pub fn rekey_frozen_input(params: &Params, layer_size: [f64; 2], fps: f64, input_key: &str) -> Option<String> {
+pub fn rekey_frozen_input(params: &Params, layer_size: [f64; 2], fps: f64, input_key: &str, media_fingerprint: &str) -> Option<String> {
     let mut cache = FrozenCache::from_json(s(params, FROZEN))?;
+    if cache.media_fingerprint.as_deref().unwrap_or_default() != media_fingerprint {
+        return None;
+    }
     let old_input = s(params, INPUT_KEY);
     let model = known_models().find(|id| cache.key == frozen_key_of(params, layer_size, fps, id, old_input))?;
     cache.key = frozen_key_of(params, layer_size, fps, model, input_key);

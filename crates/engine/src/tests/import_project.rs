@@ -67,29 +67,37 @@ fn source_project(dir: &std::path::Path) -> String {
 
 #[test]
 fn import_project_preserves_a_frozen_object_matte_across_new_ids_and_reopen() {
-    check_imported_object_matte(false);
+    check_imported_object_matte("identical", false, false, false);
 }
 
 #[test]
 fn import_project_clears_the_object_matte_when_the_input_roto_freeze_is_discarded() {
-    check_imported_object_matte(true);
+    check_imported_object_matte("discarded-roto", true, false, false);
 }
 
-fn check_imported_object_matte(with_roto_brush: bool) {
+#[test]
+fn import_project_discards_a_footage_matte_when_media_identity_cannot_be_verified() {
+    check_imported_object_matte("replaced", false, true, false);
+    check_imported_object_matte("legacy", false, false, true);
+}
+
+fn check_imported_object_matte(case: &str, with_roto_brush: bool, replaced_media: bool, legacy: bool) {
     use effectcraft_effects::{
         object_matte as om,
         roto::{self, FROZEN, FrozenCache, INPUT_KEY},
     };
     use effectcraft_keyframe::Value;
     use effectcraft_project::LayerId;
+    use sha2::{Digest, Sha256};
 
-    let dir = out_dir(if with_roto_brush { "import-project-roto-stack" } else { "import-project-frozen-object-matte" });
+    let dir = out_dir(&format!("import-project-frozen-object-matte-{case}"));
     let width = 18;
     let height = 12;
     let mut s = Session::default();
     s.execute("comp.new", json!({"name": "Matte template", "width": width, "height": height, "frameRate": 25, "duration": 1})).unwrap();
     let comp = s.active_comp_id().unwrap();
-    std::fs::write(dir.join("clip.mov"), b"placeholder footage").unwrap();
+    let footage = [1u8; 32];
+    std::fs::write(dir.join("clip.mov"), footage).unwrap();
     let item = std::sync::Arc::make_mut(&mut s.project).add_item(
         "Source",
         Default::default(),
@@ -121,6 +129,12 @@ fn check_imported_object_matte(with_roto_brush: bool) {
     let fps = c.frame_rate.as_f64();
     let alpha: Vec<_> = (0..width * height).map(|i| if i % width < width / 2 { 1.0 } else { 0.0 }).collect();
     let mut frozen = FrozenCache { key: om::frozen_key(&params, layer_size, fps, None), size: [width, height], ..Default::default() };
+    if !legacy {
+        let mut media = Sha256::new();
+        media.update(1u64.to_le_bytes()); // One file in this source.
+        media.update(Sha256::digest(footage));
+        frozen.media_fingerprint = Some(format!("{:x}", media.finalize()));
+    }
     frozen.frames.insert(0, roto::freeze_frame(&alpha, &[]));
     let group = std::sync::Arc::make_mut(&mut s.project).comp_mut(comp).unwrap().layer_mut(layer).unwrap().props.find_group_mut(effect).unwrap();
     group.get_mut(FROZEN).unwrap().value = Value::Str(frozen.to_json());
@@ -128,13 +142,17 @@ fn check_imported_object_matte(with_roto_brush: bool) {
     assert_eq!(om::frozen_alpha(&source_params, layer_size, fps, 0, width, height, None), Some(alpha.clone()));
     let source = dir.join("Source.ecproj").to_string_lossy().into_owned();
     s.execute("file.saveAs", json!({"path": source})).unwrap();
+    if replaced_media {
+        // Same length, same path, same saved metadata, different bytes.
+        std::fs::write(dir.join("clip.mov"), [2u8; 32]).unwrap();
+    }
 
     let mut destination = Session::default();
     destination.execute("comp.new", json!({"name": "Destination"})).unwrap();
     let imported = destination.execute("file.importProject", json!({"path": source})).unwrap();
     let comp = ItemId(imported["primaryComp"].as_u64().unwrap());
     assert_eq!(imported["missingMedia"], json!([]));
-    if with_roto_brush {
+    if with_roto_brush || replaced_media || legacy {
         let l = &destination.project.comp(comp).unwrap().layers[0];
         let matte = l.effects().unwrap().groups().find(|g| g.match_id == om::ID).unwrap();
         assert_eq!(matte.get(FROZEN).unwrap().value, Value::Str(String::new()));
@@ -176,11 +194,15 @@ fn import_discards_a_frozen_object_matte_if_its_nested_input_changes() {
 
     let (width, height) = (18, 12);
     let alpha: Vec<_> = (0..width * height).map(|i| if i % width < width / 2 { 1.0 } else { 0.0 }).collect();
-    for (case, switches, changes_nested_input) in [
-        ("unchanged", None, false),
-        ("changed", Some((true, true)), true),
-        ("effects-off", Some((false, true)), false),
-        ("effect-disabled", Some((true, false)), false),
+    for (case, switches, through_effect, guide, changes_nested_input) in [
+        ("unchanged", None, false, false, false),
+        ("changed", Some((true, true)), false, false, true),
+        ("effects-off", Some((false, true)), false, false, false),
+        ("effect-disabled", Some((true, false)), false, false, false),
+        ("read-by-set-channels", Some((true, true)), true, false, true),
+        ("ignored-guide", Some((true, true)), true, true, false),
+        ("sample-image-guide", Some((true, true)), true, true, true),
+        ("sample-image-parent", Some((true, true)), true, true, true),
     ] {
         let dir = out_dir(&format!("import-frozen-{case}-precomp"));
         let mut s = Session::default();
@@ -204,14 +226,38 @@ fn import_discards_a_frozen_object_matte_if_its_nested_input_changes() {
             cache.frames.insert(0, roto::freeze_frame(&alpha, &[]));
             let layer = std::sync::Arc::make_mut(&mut s.project).comp_mut(inner).unwrap().layer_mut(solid).unwrap();
             layer.switches.effects = effects_on;
+            layer.switches.guide = guide;
             let brush = layer.props.find_group_mut(uid).unwrap();
             brush.enabled = brush_enabled;
             brush.get_mut(FROZEN).unwrap().value = Value::Str(cache.to_json());
         }
+        if case.starts_with("sample-image-") {
+            let reader = LayerId(s.execute("layer.newSolid", json!({"name": "Reads guide"})).unwrap()["layer"].as_u64().unwrap());
+            let (reads, prop, text) = if case == "sample-image-parent" {
+                let parent = s.execute("layer.newNull", json!({"name": "Parent"})).unwrap()["layer"].as_u64().unwrap();
+                s.execute("layer.setParent", json!({"layers": [reader.0], "parent": parent})).unwrap();
+                (LayerId(parent), "transform/position", "[thisComp.layer('Solid')['sample' + 'Image']([7, 6])[3] * 10, 0, 0]")
+            } else {
+                (reader, "transform/opacity", "thisComp.layer('Solid').sampleImage([7, 6])[3] * 100")
+            };
+            let reads = std::sync::Arc::make_mut(&mut s.project).comp_mut(inner).unwrap().layer_mut(reads).unwrap();
+            reads.props.prop_mut(prop).unwrap().expr = Some(effectcraft_project::Expression { text: text.into(), enabled: true });
+        }
         s.open_comp(middle);
         s.execute("layer.addItem", json!({"item": inner.0, "time": 0.0})).unwrap();
         s.open_comp(outer);
-        let layer = LayerId(s.execute("layer.addItem", json!({"item": middle.0, "time": 0.0})).unwrap()["layer"].as_u64().unwrap());
+        let source_layer = LayerId(s.execute("layer.addItem", json!({"item": middle.0, "time": 0.0})).unwrap()["layer"].as_u64().unwrap());
+        let layer = if through_effect {
+            let target = LayerId(s.execute("layer.newSolid", json!({"name": "Receives new alpha"})).unwrap()["layer"].as_u64().unwrap());
+            let set_channels = s.execute("effect.apply", json!({"layer": target.0, "effect": "Set Channels"})).unwrap()["effects"][0].as_u64().unwrap();
+            let layer = std::sync::Arc::make_mut(&mut s.project).comp_mut(outer).unwrap().layer_mut(target).unwrap();
+            let group = layer.props.find_group_mut(set_channels).unwrap();
+            group.get_mut("sourceLayer4").unwrap().value = Value::Layer(Some(source_layer.0));
+            group.get_mut("sourceLayer4Source").unwrap().value = Value::Enum(2);
+            target
+        } else {
+            source_layer
+        };
         let effect = s.execute("objectMatte.apply", json!({"layer": layer.0, "point": [7, 6]})).unwrap()["effect"].as_u64().unwrap();
         let g = s.project.comp(outer).unwrap().layer(layer).unwrap().props.find_group(effect).unwrap();
         let key = om::frozen_key(&crate::roto::params_static(g), [width as f64, height as f64], 25.0, None);
@@ -226,12 +272,20 @@ fn import_discards_a_frozen_object_matte_if_its_nested_input_changes() {
         destination.execute("comp.new", json!({"name": "Destination"})).unwrap();
         let imported = destination.execute("file.importProject", json!({"path": path})).unwrap();
         let comp = ItemId(imported["primaryComp"].as_u64().unwrap());
-        let layer = &destination.project.comp(comp).unwrap().layers[0];
-        let matte = layer.effects().unwrap().groups().find(|g| g.match_id == om::ID).unwrap();
+        let outer = destination.project.comp(comp).unwrap();
+        let (layer, matte) = outer.layers.iter().find_map(|l| l.effects()?.groups().find(|g| g.match_id == om::ID).map(|g| (l, g))).unwrap();
         if switches.is_some() {
-            let middle = destination.project.comp(layer.source.item().unwrap()).unwrap();
+            let nested = outer
+                .layers
+                .iter()
+                .find_map(|l| match l.source {
+                    LayerSource::Comp { item } => Some(item),
+                    _ => None,
+                })
+                .unwrap();
+            let middle = destination.project.comp(nested).unwrap();
             let inner = destination.project.comp(middle.layers[0].source.item().unwrap()).unwrap();
-            let brush = inner.layers[0].effects().unwrap().groups().find(|g| crate::roto::is_roto(g)).unwrap();
+            let brush = inner.layers.iter().filter_map(|l| l.effects()).flat_map(|fx| fx.groups()).find(|g| crate::roto::is_roto(g)).unwrap();
             assert_eq!(brush.get(FROZEN).unwrap().value, Value::Str(String::new()), "{case}: the inner freeze is cleared on import");
         }
         let params = crate::roto::params_static(matte);

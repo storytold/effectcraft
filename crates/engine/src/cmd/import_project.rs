@@ -75,7 +75,7 @@ fn import_project(s: &mut Session, p: &Value) -> Result<Value> {
     }
     freezes.extend(crate::roto::imported_object_matte_freezes(&sub));
     essential::offset_ids(&mut sub, base);
-    let preserved = crate::roto::rekey_imported_object_mattes(&mut sub, base, freezes, s.expr.as_deref());
+    let preserved = crate::roto::rekey_imported_object_mattes(&mut sub, base, freezes, s.expr.as_deref(), s.services.as_ref(), &s.stored_paths);
     let roots: Vec<ItemId> = root_comps(&sub);
     let folder_name = file.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "Imported Project".into());
     let (folder, items) = s.edit("Import Project", None, |proj, st| {

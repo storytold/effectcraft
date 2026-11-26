@@ -1,8 +1,13 @@
 use super::config;
+use sha2::{Digest, Sha256};
 
 /// Host services (file access) injected by the frontend.
 pub trait Services: Send + Sync {
     fn read_file(&self, path: &str) -> std::io::Result<Vec<u8>>;
+    /// Content identity for media, independent of its stored path.
+    fn file_fingerprint(&self, path: &str) -> std::io::Result<[u8; 32]> {
+        Ok(Sha256::digest(self.read_file(path)?).into())
+    }
     /// [`Services::read_file`] for a copy that must not load an unbounded file: more than `max`
     /// bytes is an error. The native one opens the file once, reads its size from that handle and
     /// reads through a [`std::io::Read::take`] limit, so a file grown or swapped after the check
@@ -61,6 +66,24 @@ pub trait Services: Send + Sync {
 pub struct FsServices;
 
 impl Services for FsServices {
+    fn file_fingerprint(&self, path: &str) -> std::io::Result<[u8; 32]> {
+        use std::io::{Error, ErrorKind, Read};
+        if !std::fs::metadata(path)?.is_file() {
+            return Err(Error::new(ErrorKind::InvalidInput, "not a regular media file"));
+        }
+        let file = std::fs::File::open(path)?;
+        let before = file.metadata()?;
+        if !before.is_file() {
+            return Err(Error::new(ErrorKind::InvalidInput, "not a regular media file"));
+        }
+        let mut digest = Sha256::new();
+        let read = std::io::copy(&mut (&file).take(before.len().saturating_add(1)), &mut digest)?;
+        if read != before.len() || file.metadata()?.modified()? != before.modified()? {
+            return Err(Error::new(ErrorKind::InvalidData, "media changed while being read"));
+        }
+        Ok(digest.finalize().into())
+    }
+
     /// Refuses what isn't a regular file: a project can name `/dev/zero` or a FIFO, and reading
     /// those never ends (#2134).
     fn read_file(&self, path: &str) -> std::io::Result<Vec<u8>> {

@@ -17,7 +17,7 @@
 //! to an instance's frames or prompt queues it for background tracking like a Roto Brush.
 
 use crate::offload::JobKind;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -33,7 +33,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::analysis::frames_key::{self, Era};
 use crate::tracking::lock;
-use crate::{Event, Session};
+use crate::{Event, Services, Session, doc_path::StoredPaths};
+
+mod freeze_inputs;
+use freeze_inputs::{EffectId, FreezeInputs, comps_with_unverified_image_reads};
 
 /// Roto Brush / Refine Edge tool options (serde: `roto.options`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -232,8 +235,8 @@ fn has_frozen_matte(g: &PropGroup) -> bool {
 }
 
 /// Object Matte freezes whose inputs are valid in the source project before IDs are shifted.
-pub(crate) fn imported_object_matte_freezes(p: &Project) -> std::collections::HashSet<(ItemId, LayerId, Uid)> {
-    let mut freezes = std::collections::HashSet::new();
+pub(crate) fn imported_object_matte_freezes(p: &Project) -> HashSet<EffectId> {
+    let mut freezes = HashSet::new();
     for (&cid, comp) in p.comps() {
         for l in &comp.layers {
             let Some(effects) = l.effects() else { continue };
@@ -251,16 +254,15 @@ pub(crate) fn imported_object_matte_freezes(p: &Project) -> std::collections::Ha
 pub(crate) fn rekey_imported_object_mattes(
     p: &mut Project,
     offset: u64,
-    freezes: std::collections::HashSet<(ItemId, LayerId, Uid)>,
+    freezes: HashSet<EffectId>,
     expr: Option<&dyn ExprHost>,
-) -> std::collections::HashSet<(ItemId, LayerId, Uid)> {
-    let shifted: std::collections::HashSet<_> = freezes
+    services: &dyn Services,
+    paths: &StoredPaths,
+) -> HashSet<EffectId> {
+    let shifted: HashSet<_> = freezes
         .into_iter()
         .map(|(cid, lid, uid)| (ItemId(cid.0.saturating_add(offset)), LayerId(lid.0.saturating_add(offset)), uid.saturating_add(offset)))
         .collect();
-    if shifted.is_empty() {
-        return shifted;
-    }
     // Settle upstream effects first: clearing a Roto Brush freeze changes the frames a lower
     // Object Matte was frozen from. A remapped ID alone leaves those frames unchanged.
     let mut stacks = Vec::new();
@@ -274,8 +276,10 @@ pub(crate) fn rekey_imported_object_mattes(
         }
     }
 
-    let mut preserved = std::collections::HashSet::new();
-    let mut changed_comps = std::collections::HashSet::new();
+    let mut preserved = HashMap::new();
+    let mut changed = HashSet::new();
+    let mut files = HashMap::new();
+    let unverified_image_reads = if shifted.is_empty() { HashSet::new() } else { comps_with_unverified_image_reads(p) };
     for (cid, lid, groups) in stacks {
         let mut input_changed = false;
         for uid in groups {
@@ -284,27 +288,29 @@ pub(crate) fn rekey_imported_object_mattes(
             let Some(g) = l.props.find_group(uid) else { continue };
             let saved = str_of(g, INPUT_KEY);
             let next = input_key(p, cid, l, uid);
-            let candidate = shifted.contains(&(cid, lid, uid));
-            let frozen = if candidate && !input_changed {
+            let id = (cid, lid, uid);
+            let candidate = shifted.contains(&id);
+            let inputs = (candidate && !input_changed).then(|| FreezeInputs::collect(p, id, &unverified_image_reads));
+            let frozen = inputs.as_ref().and_then(|inputs| {
+                let media = inputs.media_fingerprint(services, paths, &mut files)?;
                 // Use the same reference time as Freeze, including animated parameters.
                 let t = comp_time_of(c, l, om::reference_frame(&params_static(g)));
                 let params = params_at(p, cid, l, g, t, expr);
-                om::rekey_frozen_input(&params, layer_size(p, c, l), c.frame_rate.as_f64(), &next)
-            } else {
-                None
-            };
+                om::rekey_frozen_input(&params, layer_size(p, c, l), c.frame_rate.as_f64(), &next, &media)
+            });
+            let inputs = inputs.map(|inputs| inputs.effects);
             let matches = next == saved || saved_input_matches(p, cid, l, uid, &saved);
-            let clear = frozen.is_none() && (candidate || (!matches && !saved.is_empty()));
+            let clear = frozen.is_none() && ((is_object_matte(g) && has_frozen_matte(g)) || (!matches && !saved.is_empty()));
             // The renderer skips disabled effects, including when another layer reads this one.
             if clear && l.switches.effects && g.enabled && (has_frozen_matte(g) || !str_of(g, TRACKED).is_empty()) {
                 input_changed = true;
-                changed_comps.insert(cid);
+                changed.insert(id);
             }
             if let Some(g) = p.comp_mut(cid).and_then(|c| c.layer_mut(lid)).and_then(|l| l.props.find_group_mut(uid)) {
-                if let Some(frozen) = frozen {
+                if let Some((frozen, inputs)) = frozen.zip(inputs) {
                     set_str(g, INPUT_KEY, next);
                     set_str(g, FROZEN, frozen);
-                    preserved.insert((cid, lid, uid));
+                    preserved.insert(id, inputs);
                 } else if clear || !matches {
                     set_str(g, INPUT_KEY, next);
                     if clear {
@@ -315,29 +321,21 @@ pub(crate) fn rekey_imported_object_mattes(
             }
         }
     }
-    // An Input Key records the source comp's timing and dimensions, not the contents of
-    // its layers. Discard a freeze if this import actually changed a nested source.
-    if !changed_comps.is_empty() {
-        let mut affected_sources = std::collections::HashMap::new();
-        let stale: Vec<_> = preserved
-            .iter()
-            .copied()
-            .filter(|&(cid, lid, _)| {
-                let Some(effectcraft_project::LayerSource::Comp { item }) = p.comp(cid).and_then(|c| c.layer(lid)).map(|l| &l.source) else {
-                    return false;
-                };
-                *affected_sources.entry(*item).or_insert_with(|| changed_comps.iter().any(|changed| p.comp_contains(*item, *changed)))
-            })
-            .collect();
+    // A discarded freeze can change another effect's input through a precomp or a layer
+    // parameter. Repeat until the invalidation has reached every dependent matte.
+    while !changed.is_empty() {
+        let stale: Vec<_> = preserved.iter().filter_map(|(&id, inputs)| (!inputs.is_disjoint(&changed)).then_some(id)).collect();
+        changed.clear();
         for (cid, lid, uid) in stale {
             preserved.remove(&(cid, lid, uid));
             if let Some(g) = p.comp_mut(cid).and_then(|c| c.layer_mut(lid)).and_then(|l| l.props.find_group_mut(uid)) {
                 set_str(g, FROZEN, String::new());
                 set_str(g, TRACKED, String::new());
+                changed.insert((cid, lid, uid));
             }
         }
     }
-    preserved
+    preserved.into_keys().collect()
 }
 
 /// After an edit: refresh Input Keys (Roto Brush and Object Matte); frozen mattes made from
@@ -424,10 +422,14 @@ pub(crate) fn comp_time_of(comp: &effectcraft_project::Comp, layer: &Layer, f: i
 struct Work {
     project: Arc<Project>,
     footage: Arc<dyn FootageSource>,
+    services: Arc<dyn Services>,
+    stored_paths: StoredPaths,
     expr: Option<Arc<dyn ExprHost>>,
     cache: Arc<LayerCache>,
+    disk_cache: Option<Arc<effectcraft_render::disk_cache::DiskCache>>,
     comp: ItemId,
     layer: LayerId,
+    effect: Uid,
     effect_index: usize,
     params: Params,
     size: [f64; 2],
@@ -534,7 +536,7 @@ impl<'a> FrameSource<'a> {
     }
 }
 
-async fn run_work(w: Work, shared: &RotoShared) {
+async fn run_work(mut w: Work, shared: &RotoShared) {
     let t0 = web_time::Instant::now();
     // A browser job worker's GPU (deferred readbacks): input frames render in passes.
     let accel = crate::offload::job_accel();
@@ -545,8 +547,6 @@ async fn run_work(w: Work, shared: &RotoShared) {
     };
     let Some(comp) = w.project.comp(w.comp) else { return fail("composition missing") };
     let Some(layer) = comp.layer(w.layer) else { return fail("layer missing") };
-    let mut src =
-        FrameSource::new(&w.project, w.footage.as_ref(), w.expr.as_deref(), &w.cache, w.comp, comp, layer, w.effect_index, w.size).with_accel(accel.as_deref());
     {
         let mut s = lock(&shared.state);
         s.task = Some(w.task);
@@ -560,7 +560,37 @@ async fn run_work(w: Work, shared: &RotoShared) {
     }
     let model = fx::installed_model();
     let key = if w.object_matte { om::frozen_key(&w.params, w.size, w.fps, model.as_deref()) } else { fx::frozen_key(&w.params, w.size, w.fps) };
-    let mut frozen = FrozenCache { key, ..Default::default() };
+    let mut files = HashMap::new();
+    let media_fingerprint = if w.object_matte && w.task == RotoTask::Freeze {
+        let unverified = comps_with_unverified_image_reads(&w.project);
+        let inputs = FreezeInputs::collect(&w.project, (w.comp, w.layer, w.effect), &unverified);
+        inputs.media_fingerprint(w.services.as_ref(), &w.stored_paths, &mut files)
+    } else {
+        None
+    };
+    let verified_media = media_fingerprint.as_deref().filter(|fp| !fp.is_empty());
+    if let Some(media) = verified_media
+        && let Some(Value::Str(input)) = w.params.values.get_mut(INPUT_KEY)
+    {
+        // Segmentation for this freeze must not reuse entries keyed only by saved metadata.
+        // The stored matte key above still matches the instance's ordinary Input Key.
+        input.push(':');
+        input.push_str(media);
+    }
+    let fresh_frames = verified_media.map(|_| {
+        // Metadata-only decoders and layer caches can also still hold the old pixels.
+        for path in files.keys() {
+            w.footage.forget(path);
+        }
+        if let Some(disk) = &w.disk_cache {
+            disk.drop_files(files.keys().map(String::as_str));
+        }
+        LayerCache::default()
+    });
+    let cache = fresh_frames.as_ref().unwrap_or(&w.cache);
+    let mut src =
+        FrameSource::new(&w.project, w.footage.as_ref(), w.expr.as_deref(), cache, w.comp, comp, layer, w.effect_index, w.size).with_accel(accel.as_deref());
+    let mut frozen = FrozenCache { key, media_fingerprint, ..Default::default() };
     // A tracking model (SAM 2) follows the object through the whole span in one pass; the loop
     // below then finds every frame cached. Without one (or if it fails) nothing changes: the
     // classic engine runs frame by frame.
@@ -837,10 +867,14 @@ impl Session {
         let work = Work {
             project: self.project.clone(),
             footage: self.footage.clone(),
+            services: self.services.clone(),
+            stored_paths: self.stored_paths.clone(),
             expr: self.expr.clone(),
             cache: self.layer_cache.clone(),
+            disk_cache: self.disk_cache.clone(),
             comp,
             layer,
+            effect,
             effect_index: index,
             params,
             size,

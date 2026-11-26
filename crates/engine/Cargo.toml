@@ -33,6 +33,7 @@ effectcraft-svg = { workspace = true }
 effectcraft-pdf = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = "0.10"
 thiserror = { workspace = true }
 log = { workspace = true }
 chrono = { workspace = true }
