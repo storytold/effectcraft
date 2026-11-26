@@ -1,8 +1,9 @@
 # Video helper protocol (proposed)
 
-**Status: proposed, not implemented.** This page specifies how EffectCraft will talk to a
-hardware video helper, as decided in [RFC-0031][rfc-0031] (hardware video in a helper process).
-Nothing here exists in the app yet. Phase 1 covers **encoding**; decoding is reserved for phase 2
+**Status: proposed.** This page specifies how EffectCraft talks to a hardware video helper, as
+decided in [RFC-0031][rfc-0031] (hardware video in a helper process). The host side is in
+`crates/helper-host` (`video`), tested against a stand-in helper; there is no real helper yet and
+export does not use it. Phase 1 covers **encoding**; decoding is reserved for phase 2
 ([decoding](#decoding-phase-2)). Where this page is more specific than the RFC or differs from it,
 [Differences from RFC-0031](#differences-from-rfc-0031) lists it.
 
@@ -72,7 +73,7 @@ encode.open → encode.opened → (encode.frame → encode.packets)… → encod
 
 | Request | Reply | |
 |---|---|---|
-| `{"op":"encode.open","job":1,"device":"nvenc:0","codec":"h264","width":1920,"height":1080,"rate":[30,1],"bitrate_kbps":15000,"profile":"high","keyint":60,"colour":{"primaries":1,"transfer":1,"matrix":1,"range":"limited"},"slots":[{"in":{"offset":0,"len":3110400},"out":{"offset":3110400,"len":1048576}},…]}` | `{"op":"encode.opened","job":1,"codec_config":"<base64 avcC>","delay":2}` | `job` is chosen by EffectCraft and is never reused. `slots` is the memory the helper may use, decided by EffectCraft. `codec_config` is the `avcC` (H.264) or `hvcC` (HEVC) record for the MP4 sample entry. `delay` is the number of frames the encoder holds back (B-frames). |
+| `{"op":"encode.open","job":1,"device":"nvenc:0","codec":"h264","width":1920,"height":1080,"rate":[30,1],"bitrate_kbps":15000,"profile":"high","keyint":60,"colour":{"primaries":1,"transfer":1,"matrix":1,"range":"limited"},"slots":[{"in":{"offset":0,"len":3110400},"out":{"offset":3110400,"len":1048576}},…]}` | `{"op":"encode.opened","job":1,"codec_config":"<base64 avcC>","delay":2}` | `job` is chosen by EffectCraft and is never reused. `slots` is the memory the helper may use, decided by EffectCraft. `codec_config` is the `avcC` (H.264) or `hvcC` (HEVC) record for the MP4 sample entry. `delay` is the number of frames the encoder holds back (B-frames), at most 64; a larger `delay` is a protocol break. |
 | `{"op":"encode.frame","job":1,"frame":0,"slot":0,"planes":[{"offset":0,"stride":1920,"size":[1920,1080],"len":2073600},{"offset":2073600,"stride":960,"size":[960,540],"len":518400},{"offset":2592000,"stride":960,"size":[960,540],"len":518400}]}` | `{"op":"encode.packets","job":1,"frame":0,"packets":[{"offset":0,"len":41230,"pts":0,"dts":-2,"key":true}]}` | The picture is in `slots[0].in`. `planes` lists Y, U and V: `offset` is from the start of the file, `size` is in samples, `len` is `stride × height` bytes. EffectCraft sets them, and the helper reads only them. The reply means the slot may be reused and says where the packets are, inside `slots[0].out`. It may hold no packets (the encoder is still holding frames) or several. |
 | `{"op":"encode.flush","job":1,"out":{"offset":…,"len":…}}` | `{"op":"encode.packets","job":1,"frame":null,"packets":[…]}` then `{"op":"encode.flushed","job":1}` | EffectCraft sends it only after every `encode.frame` has been answered, and after it sends only `cancel` or `encode.close`. The helper answers with exactly one `encode.packets` with `"frame":null` (its `packets` may be empty), then exactly one `encode.flushed`. The packets are the rest of the stream, inside `out`, and their offsets are counted from it. EffectCraft sizes `out` for the frames the encoder still holds: at least `(delay + 1)` times the length of a slot's `out` region. If the encoder's output still does not fit, the helper answers `error` with code `packet_too_large`. |
 | `{"op":"encode.close","job":1}` | none | Free everything for the job. EffectCraft sends it after `encode.flushed` or `cancelled`, and frees or reuses the job's regions only then. If the helper was stopped first, there is no reply to wait for: the exchange file is dropped and its regions are never reused (see [stopping](#timeouts-and-errors)). |
@@ -121,7 +122,8 @@ sends `encode.close` as soon as it reads `encode.flushed`) and is dropped.
 ### Job and frame ids
 
 `job` is a positive whole number that EffectCraft takes from a counter that only goes up, so an id
-is never reused, not even after the helper is restarted. `frame` counts from 0 inside a job and is
+is never reused within one helper process. A helper that is restarted, or a second helper process,
+is a separate connection and may see the same number again. `frame` counts from 0 inside a job and is
 never reused in it. Every id EffectCraft has sent is **issued**. A job is **open** from
 `encode.open` until EffectCraft sends `cancel` or `encode.close`; after that it is **ended**, and
 it stays ended. An id EffectCraft has not sent is **never issued**.
@@ -141,11 +143,12 @@ and the helper carries on; it does not count.
 | No reply to `encode.open`, `encode.frame`, or `encode.flush` (the batch and `encode.flushed` both count) in time | Protocol break: EffectCraft stops the helper ([timeouts](#timeouts-and-errors)). |
 | `encode.packets` or `error` for an open job with a `frame` that was never sent, already answered, or not the oldest outstanding; or `error` without `frame` when no `encode.open` or `encode.flush` is outstanding | Protocol break. |
 | `encode.packets` with a packet whose `offset + len` is outside its region | Protocol break. |
+| `encode.opened` with a `delay` over 64 | Protocol break. |
 | `error` without `frame` while an `encode.open` or `encode.flush` is outstanding (for a flush, instead of the batch or of `encode.flushed`) | Job error: EffectCraft sends `cancel`, then `encode.close`. |
 | `error` with `packet_too_large`: the helper says the encoder's output does not fit the `out` region it was given, and it did not write past it | Job error. |
 | `cancelled` for a job EffectCraft sent `cancel` for | Accepts it; the job's frames are over. |
 | `cancelled` for an open job | Protocol break. |
-| Any other reply for an **ended** job (late replies for frames that were in flight, a second `cancelled`) | Dropped and logged. The regions it names are not read. Not a break. |
+| Any other reply for an **ended** job (late replies for frames that were in flight, a second `cancelled`), and any reply except `cancelled` for a job that has just answered with an `error` and has not been cancelled yet | Dropped and logged. The regions it names are not read. Not a break. |
 | Any reply for a job that was **never issued** | Protocol break. |
 | A line that does not parse, or is over 1 MiB | Protocol break. |
 
@@ -156,7 +159,9 @@ and the helper carries on; it does not count.
   timeout (30 s by default, set with `EFFECTCRAFT_HELPER_VIDEO_TIMEOUT`, as
   `EFFECTCRAFT_HELPER_TIMEOUT` is for effects), EffectCraft stops (kills) the helper and waits for
   it to exit. A GPU that hangs without exiting ends the helper instead of making the export look
-  busy. `encode.open` and `encode.flush` use the load timeout (600 s); for a flush it covers the
+  busy. The timeout detects a hung helper; it is not a strict arrival deadline: a reply that is
+  already queued when EffectCraft next reads is accepted even if it came after the timeout.
+  `encode.open` and `encode.flush` use the load timeout (600 s); for a flush it covers the
   `encode.packets` and the `encode.flushed` together. After `cancel` the frames of that job have no
   timeout; `cancelled` is due within the same 30 s, or EffectCraft stops the helper.
 - **`{"op":"error","job":1,"frame":3,"code":"…","message":"…"}`** answers one request. `frame` is
@@ -175,11 +180,10 @@ and the helper carries on; it does not count.
   next helper a new one, so a stray process can only write into a file nobody reads. Regions are
   reused only inside one helper process that is still running, after `encode.flushed` or
   `cancelled`.
-- **Stopping the helper is bounded.** EffectCraft starts the helper in its own process group (Unix)
-  or a job object that kills its members when it closes (Windows) and kills the whole group or
-  job. It waits for the helper process to exit for at most 5 s. If something is stuck (for example
-  in an uninterruptible driver call), it gives up waiting, logs it, and the export fails with an
-  error instead of hanging.
+- **Stopping the helper is bounded.** EffectCraft kills the helper process and waits for it to
+  exit for at most 5 s. If it is stuck (for example in an uninterruptible driver call), EffectCraft
+  gives up waiting, logs it, and the export fails with an error instead of hanging. Processes the
+  helper started are not tracked or killed: the rule above is what keeps their writes harmless.
 
 What EffectCraft does with a failure:
 
