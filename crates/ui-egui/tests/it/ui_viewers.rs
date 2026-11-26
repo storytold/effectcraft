@@ -42,11 +42,15 @@ fn click(h: &mut Harness<'_, EffectcraftApp>, id: &str) {
     h.run_steps(3);
 }
 
-/// Double-click element `id` (in one frame: the harness' frame time is longer than a double-click's).
+/// Double-click element `id`, one press per step as the runtime takes them: the releases are one
+/// step (0.25 s) apart, within egui's double-click interval (0.3 s).
 fn double_click(h: &mut Harness<'_, EffectcraftApp>, id: &str) {
     let p = hover(h, id);
     for pressed in [true, false, true, false] {
         button(h, p, pressed);
+        if pressed {
+            h.step();
+        }
     }
     h.run_steps(3);
 }
@@ -65,7 +69,10 @@ fn new_viewers_lock_route_comps_and_activate_on_click() {
     let c = new_comp(&mut s, "C");
     let b = new_comp(&mut s, "B");
     let a = new_comp(&mut s, "A");
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(s));
     h.run_steps(3);
     // View ▸ New Viewer: viewer 1 shows A too, viewer 0 (the Composition panel) is locked.
     invoke(&mut h, "view.newViewer", json!({}));
@@ -74,13 +81,13 @@ fn new_viewers_lock_route_comps_and_activate_on_click() {
     assert_eq!((h.state().ui.active_viewer, shows(&h, 0), shows(&h, 1)), (1, Some(a), Some(a)));
     // Side by side, so both draw.
     h.state_mut()
-        .apply_dock(craft_ui::docking::Action::Move {
-            panel: PanelKind::Viewer(1),
-            anchor: PanelKind::Composition,
-            placement: craft_ui::docking::Placement::Split(craft_ui::docking::Zone::Right),
-        })
+        .apply_dock(craft_behavior::dock::Action::move_beside(
+            PanelKind::Viewer(1),
+            PanelKind::Composition,
+            craft_behavior::dock::DockPlacement::Split(craft_behavior::DockSide::End),
+        ))
         .unwrap();
-    h.state_mut().apply_dock(craft_ui::docking::Action::Activate { panel: PanelKind::Composition }).unwrap();
+    h.state_mut().apply_dock(craft_behavior::dock::Action::activate(PanelKind::Composition)).unwrap();
     h.run_steps(3);
     // Opening B shows it in the active (unlocked) viewer; the locked one keeps A.
     invoke(&mut h, "comp.open", json!({"comp": b}));
@@ -127,7 +134,10 @@ fn a_locked_viewer_keeps_its_comp_when_the_project_panel_opens_another() {
     let mut s = Session::default();
     let b = new_comp(&mut s, "B");
     let a = new_comp(&mut s, "A");
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(s));
     h.run_steps(3);
     // Viewer 0 locked to A, and B in viewer 1 (a tab next to it).
     invoke(&mut h, "view.newViewer", json!({}));
@@ -150,17 +160,20 @@ fn viewers_snapshot() {
     let mut s = Session::default();
     s.execute("file.openDemoProject", json!({})).unwrap();
     let other = s.project.items.values().filter(|i| i.as_comp().is_some()).map(|i| i.id).find(|id| Some(*id) != s.active_comp_id()).unwrap();
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(s));
     h.run_steps(3);
     invoke(&mut h, "view.newViewer", json!({}));
     h.state_mut()
-        .apply_dock(craft_ui::docking::Action::Move {
-            panel: PanelKind::Viewer(1),
-            anchor: PanelKind::Composition,
-            placement: craft_ui::docking::Placement::Split(craft_ui::docking::Zone::Right),
-        })
+        .apply_dock(craft_behavior::dock::Action::move_beside(
+            PanelKind::Viewer(1),
+            PanelKind::Composition,
+            craft_behavior::dock::DockPlacement::Split(craft_behavior::DockSide::End),
+        ))
         .unwrap();
-    h.state_mut().apply_dock(craft_ui::docking::Action::Activate { panel: PanelKind::Composition }).unwrap();
+    h.state_mut().apply_dock(craft_behavior::dock::Action::activate(PanelKind::Composition)).unwrap();
     invoke(&mut h, "comp.open", json!({"comp": other.0}));
     for _ in 0..300 {
         h.step();

@@ -224,6 +224,32 @@ mod tests {
     }
 
     #[test]
+    fn gif_probe_and_playback_respect_text_control_scope() {
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = gif::Encoder::new(&mut bytes, 2, 2, &[255, 0, 0, 0, 0, 255]).unwrap();
+            for (index, delay, transparent) in [(0, 23, Some(0)), (1, 7, None)] {
+                let frame = gif::Frame { width: 2, height: 2, delay, transparent, buffer: vec![index; 4].into(), ..gif::Frame::default() };
+                encoder.write_frame(&frame).unwrap();
+            }
+        }
+        let offset = craft_gif::scan(&bytes, 1).unwrap().frames[0].offset;
+        // A text grid consumes the first Graphic Control Extension. The first
+        // image then uses the app's default display delay of 100 ms.
+        let text = [0x21, 0x01, 12, 0, 0, 0, 0, 2, 0, 2, 0, 1, 1, 1, 0, 1, b'X', 0];
+        bytes.splice(offset..offset, text);
+        let bytes: std::sync::Arc<[u8]> = bytes.into();
+        let footage = probe_bytes("text-control.gif", bytes.clone()).unwrap();
+        let pool = MediaPool::new();
+        pool.add_bytes("text-control.gif", bytes);
+
+        assert_eq!(
+            (footage.duration, colour_at(&pool, &footage, 0.09), colour_at(&pool, &footage, 0.11)),
+            (Tick::from_units(17, 100), [1.0, 0.0, 0.0], [0.0, 0.0, 1.0])
+        );
+    }
+
+    #[test]
     fn a_zero_delay_is_ten_hundredths_like_in_browsers() {
         let f = probe_bytes("a.gif", gif(&[(RED, 0), (GREEN, 1)]).into()).unwrap();
         assert_eq!(f.frame_rate, FrameRate::new(10, 1));

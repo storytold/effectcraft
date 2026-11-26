@@ -37,6 +37,7 @@ mod copy_frame_tests {
         session.execute("layer.newSolid", json!({"color": "#ff0000"})).unwrap();
         let mut app = EffectcraftApp::new(session);
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
             crate::menus::invoke(&mut app, ui.ctx(), "comp.copyFrame", json!({})).unwrap();
             app.handle_events(ui.ctx());
@@ -52,6 +53,7 @@ mod copy_frame_tests {
     #[test]
     fn a_malformed_image_is_an_error_not_a_crash() {
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
             assert!(copy_image(ui.ctx(), 4, 4, &[0; 10]).is_err());
             assert!(copy_image(ui.ctx(), 0, 4, &[]).is_err());

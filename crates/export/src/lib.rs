@@ -127,6 +127,11 @@ pub struct JobOptions<'a> {
     /// a GPU frame measured a frame's working memory. `None`: CPU frames are capped only by
     /// `EFFECTCRAFT_CPU_INFLIGHT`.
     pub free_memory: Option<&'a (dyn Fn() -> Option<u64> + Sync)>,
+    /// What each of the job's own two layer caches (one per compositor) may hold when it has no
+    /// Render Queue run's caches (#3941): the session's budget for an export's caches. Both are
+    /// in the memory accountant's common budget, so together with the other caches they stay
+    /// within it. `None`: [`CACHE_BUDGET`].
+    pub cache_budget: Option<usize>,
 }
 
 /// The layer caches of a Render Queue run (see [`JobOptions::caches`]): one per compositor,
@@ -408,9 +413,16 @@ fn write_still<W: std::io::Write + std::io::Seek>(cx: &Cx, file: &mut W, img: &I
             };
             match fmt {
                 OutputFormat::PngSequence => image::codecs::png::PngEncoder::new(file).write_image(&data, w, h, ct),
-                // Uncompressed (the encoder's run-length compression is off), top-left origin, the
-                // alpha bits in the image descriptor: 8 for RGB + Alpha, 0 otherwise.
-                OutputFormat::TargaSequence => image::codecs::tga::TgaEncoder::new(file).disable_rle().write_image(&data, w, h, ct),
+                // The shared footerless writer: uncompressed, top-left origin, the alpha bits in the
+                // image descriptor: 8 for RGB + Alpha, 0 otherwise.
+                OutputFormat::TargaSequence => {
+                    let layout = match channels {
+                        Channels::Rgba => craft_tga::Layout::Rgba,
+                        Channels::Alpha => craft_tga::Layout::Gray,
+                        Channels::Rgb => craft_tga::Layout::Rgb,
+                    };
+                    return craft_tga::write_top_left_raw(file, w, h, layout, &data).map_err(|e| ExportError::Encode(e.to_string()));
+                }
                 // (the TIFF encoder needs Seek)
                 _ => image::codecs::tiff::TiffEncoder::new(file).write_image(&data, w, h, ct),
             }

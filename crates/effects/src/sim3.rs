@@ -27,8 +27,8 @@ use effectcraft_project::ParamUi;
 use effectcraft_raster::{Image, Px};
 use rayon::prelude::*;
 
-use crate::sim::{Acc, Post, SPS, Shape, Sprite, SpritePlan, Tint, combine, splat, steps_at};
-use crate::util::{SimCache, hash1, params_key, point_in_poly, unpremul};
+use crate::sim::{Acc, Post, ProducerPath, SPS, Shape, Sprite, SpritePlan, Tint, combine, splat, steps_at};
+use crate::util::{SimCache, hash1, params_key_except, point_in_poly, unpremul};
 use crate::{Buf, EffectCtx, EffectSpec, col, num, p, popup, slider};
 
 fn spec(id: &'static str, name: &'static str, params: Vec<crate::ParamSpec>, render: crate::RenderFn) -> EffectSpec {
@@ -108,6 +108,8 @@ pub struct PgState {
     pub parts: Vec<PgParticle>,
     carry: f64,
     next_id: u32,
+    /// Fingerprint of the producer positions of the steps so far.
+    producer_hist: u64,
 }
 
 /// A map layer sampled in layer coordinates.
@@ -346,7 +348,6 @@ impl Mapper {
 struct Pg {
     // Cannon
     cannon: bool,
-    pos: [f32; 2],
     barrel_angle: f32,
     barrel_radius: f32,
     rate: f64,
@@ -380,7 +381,8 @@ struct Pg {
 }
 
 impl Pg {
-    fn spawn(&self, id: u32) -> PgParticle {
+    /// Spawn a cannon particle at `producer` (the cannon's position during its birth step).
+    fn spawn_at(&self, id: u32, producer: [f32; 2]) -> PgParticle {
         let s = self.seed;
         let h = |k: u32| hash1(id, k, s) * 2.0 - 1.0;
         // AE angles: 0° = up, clockwise.
@@ -395,12 +397,18 @@ impl Pg {
             let (a, rr) = (hash1(id, 5, s) * std::f32::consts::TAU, hash1(id, 6, s).sqrt() * -r);
             [a.cos() * rr, a.sin() * rr]
         };
-        let p = [self.pos[0] + off[0], self.pos[1] + off[1]];
+        let p = [producer[0] + off[0], producer[1] + off[1]];
         let mut q = PgParticle::new(p, [d[0] * speed, d[1] * speed], self.color, self.radius, id, SRC_CANNON);
         if !self.cannon_text.is_empty() {
             q.ch = self.cannon_text[id as usize % self.cannon_text.len()] as u32;
         }
         q
+    }
+
+    /// Spawn a cannon particle at the origin (the tests' reference).
+    #[cfg(test)]
+    fn spawn(&self, id: u32) -> PgParticle {
+        self.spawn_at(id, [0.0; 2])
     }
 
     /// The particle as the ephemeral mapper sees it this step (unchanged without one).
@@ -412,7 +420,8 @@ impl Pg {
         e
     }
 
-    fn step(&self, st: &mut PgState) {
+    /// Advance the simulation one step, using `producer` for particles born in that step.
+    fn step_at(&self, st: &mut PgState, producer: [f32; 2]) {
         let dt = (1.0 / SPS) as f32;
         let s = self.seed;
         // Persistent Property Mapper: the mapped values stay with the particle.
@@ -534,17 +543,35 @@ impl Pg {
                 }
                 let id = st.next_id;
                 st.next_id = st.next_id.wrapping_add(1);
-                let mut q = self.spawn(id);
+                let mut q = self.spawn_at(id, producer);
                 // Sub-step birth offset keeps streams smooth.
                 let frac = hash1(id, 9, s) * dt;
                 q.p = [q.p[0] + q.v[0] * frac, q.p[1] + q.v[1] * frac];
                 st.parts.push(q);
             }
         }
+        st.producer_hist = crate::psim::producer_hash_step(st.producer_hist, [producer[0], producer[1], 0.0]);
+    }
+
+    /// Advance one step with the origin as its producer (the tests' reference).
+    #[cfg(test)]
+    fn step(&self, st: &mut PgState) {
+        self.step_at(st, [0.0; 2]);
     }
 }
 
 static PG_CACHE: SimCache<PgState> = SimCache::new(6);
+
+/// The cannon's position history is sampled in layer pixels, not in the shared systems'
+/// height-relative coordinates.
+const PG_PRODUCER: ProducerPath = ProducerPath::Point { id: "cannon/cannonPosition", by_height: false };
+
+/// The simulation key without the cannon's current position: its history is fingerprinted
+/// separately, so moving the cannon does not make every simulation restart.
+fn pg_key(ctx: &EffectCtx) -> u64 {
+    let skip = PG_PRODUCER.cache_skips();
+    params_key_except(ctx, &Buf { img: Image::new(0, 0), offset: [0.0; 2], scale: 1.0 }, 0x7067, &skip)
+}
 
 fn image_key(img: &Image) -> u64 {
     use std::hash::{Hash, Hasher};
@@ -615,7 +642,6 @@ fn pg_of(ctx: &EffectCtx) -> Pg {
     let ephemeral = mapper_from(ctx, "ephemeralPropertyMapper", true);
     Pg {
         cannon: pr.b("cannonEnabled"),
-        pos: { pr.v2("cannon/cannonPosition").map(|v| v as f32) },
         barrel_angle: pr.f("cannon/barrelAngle") as f32,
         barrel_radius: pr.f("cannon/barrelRadius") as f32,
         rate: pr.f("cannon/particlesPerSecond").max(0.0),
@@ -665,12 +691,14 @@ impl Affects {
 }
 
 /// Particle Playground cannons with gravity only, simulated by the host's particle backend.
-fn pg_accelerated(ctx: &EffectCtx, key: u64, pg: &Pg) -> Option<std::sync::Arc<PgState>> {
+fn pg_accelerated(ctx: &EffectCtx, key: u64, pg: &Pg, producers: &[[f32; 3]]) -> Option<std::sync::Arc<PgState>> {
     let backend = ctx.env.host?.particles()?;
     let steps = steps_at(ctx.time);
+    if producers.len() < usize::try_from(steps).ok()? {
+        return None;
+    }
     let births = crate::psim::births(pg.rate, steps, 60_000)?;
     let desc = crate::psim::CannonDesc {
-        pos: pg.pos,
         barrel_angle: pg.barrel_angle,
         barrel_radius: pg.barrel_radius,
         dir_spread: pg.dir_spread,
@@ -681,19 +709,22 @@ fn pg_accelerated(ctx: &EffectCtx, key: u64, pg: &Pg) -> Option<std::sync::Arc<P
         seed: pg.seed,
         bounds: pg.bounds,
     };
-    let req = crate::psim::SimRequest { key, steps, births: &births, system: crate::psim::ParticleSystem::Cannon(desc) };
+    let req = crate::psim::SimRequest { key, steps, births: &births, producers, system: crate::psim::ParticleSystem::Cannon(desc) };
     let parts = backend.simulate(&req)?;
-    Some(std::sync::Arc::new(PgState {
-        parts: parts
-            .into_iter()
-            .map(|q| {
-                let born = pg.spawn(q.id);
-                PgParticle { p: [q.p[0], q.p[1]], v: [q.v[0], q.v[1]], ..born }
-            })
-            .collect(),
-        carry: 0.0,
-        next_id: births.len() as u32,
-    }))
+    let parts = parts
+        .into_iter()
+        .map(|q| {
+            let birth = *births.get(q.id as usize)?;
+            let producer = *producers.get(birth as usize)?;
+            // The GPU returns the particle's actual position; use its birth step for the
+            // particle's birth metadata (origin, colour, radius and text).
+            let mut born = pg.spawn_at(q.id, [producer[0], producer[1]]);
+            born.p = [q.p[0], q.p[1]];
+            born.v = [q.v[0], q.v[1]];
+            Some(born)
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(std::sync::Arc::new(PgState { parts, carry: 0.0, next_id: births.len() as u32, producer_hist: crate::psim::producer_hash(producers, steps) }))
 }
 
 /// The live particles of a Particle Playground whose cannon is the only producer and force
@@ -707,8 +738,19 @@ pub fn playground_state(ctx: &EffectCtx) -> Option<Vec<crate::psim::SimParticle>
     if !pg.cannon_only() || grid || exploder {
         return None;
     }
-    let key = params_key(ctx, &Buf { img: Image::new(0, 0), offset: [0.0; 2], scale: 1.0 }, 0x7067);
-    let st = pg_accelerated(ctx, key, &pg).unwrap_or_else(|| PG_CACHE.run(key, steps_at(ctx.time), PgState::default, |st, _| pg.step(st)));
+    let producers = PG_PRODUCER.history(ctx);
+    let producer_prefix = crate::psim::producer_prefixes(&producers);
+    let key = pg_key(ctx);
+    let producer = |i: u64| producers.get(i as usize).map(|p| [p[0], p[1]]).unwrap_or([0.0; 2]);
+    let st = pg_accelerated(ctx, key, &pg, &producers).unwrap_or_else(|| {
+        PG_CACHE.run_where(
+            key,
+            steps_at(ctx.time),
+            PgState::default,
+            |st, i| pg.step_at(st, producer(i)),
+            |s, st| producer_prefix.get(s as usize) == Some(&st.producer_hist),
+        )
+    });
     Some(
         st.parts
             .iter()
@@ -748,7 +790,7 @@ pub fn playground_plan(ctx: &EffectCtx, b: &Buf) -> PgPlan {
     let ex_r = pr.f("layerExploder/radiusOfNewParticles").max(0.5) as f32;
     let ex_disp = pr.f("layerExploder/velocityDispersion") as f32;
 
-    let mut key = params_key(ctx, &Buf { img: Image::new(0, 0), offset: [0.0; 2], scale: 1.0 }, 0x7067);
+    let mut key = pg_key(ctx);
     for m in [&pg.persistent, &pg.ephemeral].into_iter().flatten() {
         key ^= image_key(&m.map.img).rotate_left(7);
     }
@@ -819,8 +861,19 @@ pub fn playground_plan(ctx: &EffectCtx, b: &Buf) -> PgPlan {
     };
     // A cannon with gravity only: every particle moves on its own (GPU particles).
     let independent = pg.cannon_only() && !(grid_on && across > 0 && down > 0) && exploder.is_none();
-    let gpu = if independent { pg_accelerated(ctx, key, &pg) } else { None };
-    let st = gpu.unwrap_or_else(|| PG_CACHE.run(key, steps_at(ctx.time), init, |st, _| pg.step(st)));
+    let producers = PG_PRODUCER.history(ctx);
+    let producer_prefix = crate::psim::producer_prefixes(&producers);
+    let producer = |i: u64| producers.get(i as usize).map(|p| [p[0], p[1]]).unwrap_or([0.0; 2]);
+    let gpu = if independent { pg_accelerated(ctx, key, &pg, &producers) } else { None };
+    let st = gpu.unwrap_or_else(|| {
+        PG_CACHE.run_where(
+            key,
+            steps_at(ctx.time),
+            init,
+            |st, i| pg.step_at(st, producer(i)),
+            |s, st| producer_prefix.get(s as usize) == Some(&st.producer_hist),
+        )
+    });
     // Render: what the ephemeral mapper changes shows for this frame only.
     let parts: Vec<PgParticle> = st.parts.iter().map(|q| pg.ephemeral(q)).collect();
     let auto_orient = pr.b("options/autoOrientRotation");

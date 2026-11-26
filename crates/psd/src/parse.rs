@@ -1,6 +1,6 @@
 use super::limits::{Error, Result};
 use super::model::{Adjustment, ChannelInfo, ColorMode, Layer, LayerMask, LinkedFile, MAX_GROUP_DEPTH, Node, Rect, Section, SubPath, TextInfo, VectorMask};
-use super::{Psd, Reader, descriptor, engine_data, placed};
+use super::{Psd, descriptor, engine_data, placed};
 use std::sync::Arc;
 
 /// Whether `bytes` start like a Photoshop document.
@@ -102,7 +102,7 @@ impl Psd {
             hidden: rec.flags.hidden(),
             protect_transparency: rec.flags.transparency_protected(),
             channels,
-            name: mac_roman_string(&rec.name),
+            name: crate::read::decode_mac_roman(&rec.name),
             ..Default::default()
         };
         if let craft_psd::MaskData::Mask(m) = &rec.mask {
@@ -114,7 +114,7 @@ impl Psd {
             // A malformed optional block only loses that block's information.
             // Unsupported modern placement geometry must not silently become an
             // unwarped layer or fall back to a less expressive PlLd in either order.
-            match self.layer_block(&mut l, &b.key, &b.data) {
+            match self.layer_block(&mut l, b) {
                 Err(e @ Error::Unsupported(_)) if matches!(&b.key, b"SoLd" | b"SoLE") => return Err(e),
                 _ => {}
             }
@@ -140,8 +140,9 @@ impl Psd {
         }
     }
 
-    fn layer_block(&self, l: &mut Layer, key: &[u8; 4], b: &[u8]) -> Result<()> {
-        let mut r = Reader::new(b);
+    fn layer_block(&self, l: &mut Layer, block: &craft_psd::tagged::TaggedBlock) -> Result<()> {
+        let key = &block.key;
+        let b = block.data.as_slice();
         match key {
             b"luni" => {
                 // Shared framing rejects truncated counts/payloads before allocation. Only
@@ -155,32 +156,37 @@ impl Psd {
                     l.name = name;
                 }
             }
-            b"lyid" => l.id = Some(r.u32()?),
-            b"iOpa" => l.fill_opacity = r.u8()?,
+            b"lyid" | b"iOpa" => {
+                use craft_psd::tagged::BlockData;
+                // Borrow the original block; short fields keep the previous value,
+                // while complete prefixes retain the shared parser's trailing-byte policy.
+                match block.parsed().transpose().map_err(|e| error(&e))? {
+                    Some(BlockData::LayerId(id)) => l.id = Some(id),
+                    Some(BlockData::FillOpacity(opacity)) => l.fill_opacity = opacity,
+                    _ => {}
+                }
+            }
             b"lsct" | b"lsdk" => {
-                l.section = match r.u32()? {
-                    1 => Section::OpenFolder,
-                    2 => Section::ClosedFolder,
-                    3 => Section::Divider,
+                use craft_psd::tagged::{SectionDivider, SectionType};
+                let divider = SectionDivider::from_bytes_recovering_blend(b).map_err(|e| error(&e))?;
+                l.section = match divider.kind {
+                    SectionType::OpenFolder => Section::OpenFolder,
+                    SectionType::ClosedFolder => Section::ClosedFolder,
+                    SectionType::BoundingDivider => Section::Divider,
                     _ => Section::Layer,
                 };
-                if b.len() >= 12 && &b[4..8] == b"8BIM" {
-                    l.blend.copy_from_slice(&b[8..12]);
+                if let Some(blend) = divider.blend_mode {
+                    l.blend = blend.key();
                 }
             }
             b"TySh" => {
-                let _ver = r.u16()?;
-                let mut t = [0.0; 6];
-                for v in &mut t {
-                    *v = r.f64()?;
-                }
+                let prefix = craft_psd::text::TypeLayerPrefix::from_bytes_with_limits(b, descriptor::PARSE_LIMITS).map_err(descriptor::desc_err)?;
+                let mut t = prefix.transform;
                 // A transform with NaN/inf is unusable: fall back to the identity.
                 if t.iter().any(|v| !v.is_finite()) {
                     t = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
                 }
-                let _text_ver = r.u16()?;
-                let _desc_ver = r.u32()?;
-                let d = descriptor::read_descriptor(&mut r)?;
+                let d = descriptor::from_craft_descriptor(prefix.descriptor);
                 let text = d.text("Txt ").unwrap_or_default().replace("\r\n", "\n").replace('\r', "\n");
                 let text = text.strip_suffix('\n').map(str::to_string).unwrap_or(text);
                 let style = d.raw("EngineData").map(|e| engine_data::text_style(&engine_data::parse_lossy(e))).unwrap_or_default();
@@ -188,15 +194,21 @@ impl Psd {
                     d.obj("bounds").or_else(|| d.obj("boundingBox")).and_then(|o| Some([o.num("Left")?, o.num("Top ")?, o.num("Rght")?, o.num("Btom")?]));
                 l.text = Some(TextInfo { text, transform: t, style, bounds });
             }
-            b"lfx2" => {
-                let _ver = r.u32()?;
-                let _dver = r.u32()?;
-                l.effects = Some(descriptor::read_descriptor(&mut r)?);
-            }
-            b"SoCo" => {
-                let _ver = r.u32()?;
-                let d = descriptor::read_descriptor(&mut r)?;
-                l.fill = d.color("Clr ");
+            b"lfx2" | b"SoCo" | b"CgEd" => {
+                if let Some(parsed) = block.descriptor_prefix_recovering_versions_with_limits(descriptor::PARSE_LIMITS) {
+                    let d = descriptor::from_craft_descriptor(parsed.map_err(descriptor::desc_err)?);
+                    match key {
+                        b"lfx2" => l.effects = Some(d),
+                        b"SoCo" => l.fill = d.color("Clr "),
+                        _ => {
+                            l.adjustment = Some(Adjustment::BrightnessContrast {
+                                brightness: d.num("Brgh").unwrap_or(0.0),
+                                contrast: d.num("Cntr").unwrap_or(0.0),
+                                legacy: d.bool("useLegacy").unwrap_or(false),
+                            });
+                        }
+                    }
+                }
             }
             b"nvrt" => l.adjustment = Some(Adjustment::Invert),
             b"brit" | b"hue2" | b"hue " | b"levl" | b"expA" => {
@@ -208,15 +220,6 @@ impl Psd {
                         l.adjustment = Some(from_shared_adjustment(adjustment));
                     }
                 }
-            }
-            b"CgEd" => {
-                let _ver = r.u32()?;
-                let d = descriptor::read_descriptor(&mut r)?;
-                l.adjustment = Some(Adjustment::BrightnessContrast {
-                    brightness: d.num("Brgh").unwrap_or(0.0),
-                    contrast: d.num("Cntr").unwrap_or(0.0),
-                    legacy: d.bool("useLegacy").unwrap_or(false),
-                });
             }
             b"curv" | b"blnc" | b"post" | b"thrs" | b"selc" | b"mixr" | b"phfl" | b"vibA" | b"blwh" | b"grdm" | b"clrL" if l.adjustment.is_none() => {
                 l.adjustment = Some(Adjustment::Other(String::from_utf8_lossy(key).into_owned()));
@@ -230,45 +233,37 @@ impl Psd {
                 l.smart_object = Some(placed::from_craft_smart(craft_psd::smart::SmartObject::from_placed_layer(b).map_err(|e| error(&e))?));
             }
             b"vmsk" | b"vsms" => {
-                let _ver = r.u32()?;
-                let flags = r.u32()?;
-                l.vector_mask = Some(self.vector_paths(&mut r, flags)?);
+                let block = craft_psd::path::VectorMaskBlock::from_bytes(b).map_err(|e| error(&e))?;
+                l.vector_mask = Some(self.vector_paths(&block));
             }
             _ => {}
         }
         Ok(())
     }
 
-    fn vector_paths(&self, r: &mut Reader, flags: u32) -> Result<VectorMask> {
+    fn vector_paths(&self, block: &craft_psd::path::VectorMaskBlock) -> VectorMask {
+        use craft_psd::path::{VectorMaskBlock, selector};
         let (w, h) = (self.width as f64, self.height as f64);
-        let mut vm = VectorMask { inverted: flags & 1 != 0, disabled: flags & 4 != 0, subpaths: vec![] };
-        let fixed = |r: &mut Reader| -> Result<f64> { Ok(r.i32()? as f64 / (1 << 24) as f64) };
-        while r.remaining() >= 26 {
-            let sel = r.u16()?;
-            match sel {
-                0 | 3 => {
-                    let _n = r.u16()?;
-                    r.skip(22)?;
-                    vm.subpaths.push(SubPath { closed: sel == 0, knots: vec![] });
-                }
-                1 | 2 | 4 | 5 => {
-                    let mut pts = [[0.0; 2]; 3];
-                    for p in &mut pts {
-                        let y = fixed(r)?;
-                        let x = fixed(r)?;
-                        *p = [x * w, y * h];
-                    }
-                    if let Some(sp) = vm.subpaths.last_mut() {
-                        sp.knots.push(pts);
-                    }
-                }
-                _ => r.skip(24)?,
+        let mut vm = VectorMask {
+            inverted: block.flags & VectorMaskBlock::FLAG_INVERT != 0,
+            disabled: block.flags & VectorMaskBlock::FLAG_DISABLED != 0,
+            subpaths: vec![],
+        };
+        // Keep Effect's recovery policy: ignore declared counts and orphan knots, and
+        // keep mixed open/closed knot selectors in the last declared subpath.
+        // PathData::subpaths deliberately has a different, more permissive policy.
+        for record in &block.path.records {
+            if record.is_length() {
+                vm.subpaths.push(SubPath { closed: record.selector == selector::CLOSED_LENGTH, knots: vec![] });
+            } else if let Some(knot) = record.knot()
+                && let Some(sp) = vm.subpaths.last_mut()
+            {
+                sp.knots.push([knot.pre, knot.anchor, knot.post].map(|(x, y)| [x * w, y * h]));
             }
         }
         vm.subpaths.retain(|s| !s.knots.is_empty());
-        Ok(vm)
+        vm
     }
-
     /// The layer tree, top of the stack first. Groups nest at most [`MAX_GROUP_DEPTH`] deep (see
     /// [`Psd::tree_report`]).
     pub fn tree(&self) -> Vec<Node> {
@@ -492,11 +487,6 @@ fn error(e: &craft_psd::PsdError) -> Error {
         craft_psd::PsdError::Unsupported(s) => Error::Unsupported(s.clone()),
         other => Error::Invalid(other.to_string()),
     }
-}
-
-/// A Pascal string's bytes in the system (Mac Roman) encoding; ASCII covers the common case.
-fn mac_roman_string(b: &[u8]) -> String {
-    b.iter().map(|&b| if b < 0x80 { b as char } else { super::read::mac_roman(b) }).collect()
 }
 
 /// App representation only; binary field framing belongs to craft-psd.

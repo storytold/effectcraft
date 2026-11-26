@@ -31,7 +31,10 @@ fn the_timeline_gradient_value_opens_an_editor() {
     let l = s.execute("layer.newShape", json!({"kind": "rect"})).unwrap()["layer"].as_u64().unwrap();
     s.execute("layer.addShapeItem", json!({"layer": l, "kind": "gfill"})).unwrap();
     let (groups, colors) = gradient_fill(&s.active_comp().unwrap().layer(LayerId(l)).unwrap().props).expect("a Gradient Fill");
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(s));
     h.state_mut().ui.timeline.open_layers.insert(l);
     h.state_mut().ui.timeline.open_groups.extend(groups);
     h.run_steps(3);

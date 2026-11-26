@@ -118,18 +118,28 @@ pub fn session_marker(id: &str) -> String {
     format!("crash-report session {id}")
 }
 
-/// Start before heavy work. A missing helper is a warning, never a reason to refuse the app.
-pub fn start(id: &str, log: Option<&Path>, reports: &Path, interactive: bool) -> io::Result<Reporter> {
-    let exe = std::env::current_exe()?;
-    let args = [
+/// The helper's own command line: this program re-run with [`FLAG`] and no profile tokens.
+pub fn helper_args(id: &str, log: Option<&Path>, reports: &Path, interactive: bool) -> [OsString; 6] {
+    [
         OsString::from(FLAG),
         OsString::from(id),
         log.map_or_else(OsString::new, |p| p.as_os_str().to_owned()),
         reports.as_os_str().to_owned(),
         OsString::from(if interactive { "1" } else { "0" }),
         OsString::from(std::process::id().to_string()),
-    ];
-    spawn(&exe, &args)
+    ]
+}
+
+/// Whether these arguments ask for the internal helper rather than a session. `main` must answer
+/// this before the launch-profile bootstrap, which refuses a Nightly start with no profile.
+pub fn is_helper(args: &[OsString]) -> bool {
+    args.first().map(OsString::as_os_str) == Some(OsStr::new(FLAG))
+}
+
+/// Start before heavy work. A missing helper is a warning, never a reason to refuse the app.
+pub fn start(id: &str, log: Option<&Path>, reports: &Path, interactive: bool) -> io::Result<Reporter> {
+    let exe = std::env::current_exe()?;
+    spawn(&exe, &helper_args(id, log, reports, interactive))
 }
 
 fn spawn(exe: &Path, args: &[OsString]) -> io::Result<Reporter> {
@@ -182,7 +192,7 @@ fn ready(child: &mut Child) -> io::Result<()> {
 /// Handle the internal mode before logging, argument parsing, updates or GUI initialization.
 /// The callback is a native dialog on this helper's main thread, not on the failed GUI's.
 pub fn maybe_run(args: &[OsString], show: impl FnOnce(&str)) -> bool {
-    if args.first().map(OsString::as_os_str) != Some(OsStr::new(FLAG)) {
+    if !is_helper(args) {
         return false;
     }
     let parsed = match args {
@@ -448,6 +458,27 @@ mod tests {
             thread::sleep(Duration::from_millis(20));
         }
         assert!(path.is_file(), "report did not arrive: {}", path.display());
+    }
+
+    /// The helper re-runs this program with no profile tokens, so the Nightly flavor refuses that
+    /// argv as a bare start: `main` must answer the helper before the launch-profile bootstrap.
+    #[test]
+    fn the_helper_command_line_is_recognized_before_the_launch_profile_bootstrap() {
+        let dir = folder();
+        let args = helper_args("7-9", None, dir.as_path(), true);
+        assert!(is_helper(&args));
+        assert!(args.iter().all(|arg| arg != "--launch-profile" && arg != "--profile-root"));
+        let parsed = crate::launch_profile::parse(args.to_vec()).unwrap();
+        assert_eq!(parsed.profile, crate::launch_profile::Profile::Stable, "no profile tokens in the helper's argv");
+        assert!(
+            crate::build_flavor::require_profile(crate::build_flavor::BuildFlavor::NightlyV1, &parsed.profile).is_err(),
+            "a Nightly build refuses the helper's argv as a session"
+        );
+        // A session's own command line is never the helper's, before or after `--`.
+        for session in [vec![], vec![OsString::from("--")], vec![OsString::from("--"), OsString::from(FLAG)]] {
+            assert!(!is_helper(&session), "{session:?}");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

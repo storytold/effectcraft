@@ -132,7 +132,7 @@ pub(crate) fn entry_enabled(app: &EffectcraftApp, e: &MenuEntry) -> bool {
         return !app.session.is_rendering() && !app.session.project.render_queue.is_empty();
     }
     if e.command == "file.close" && super::invoke::no_params(&e.params) && app.ui.focused == PanelKind::RenderQueue {
-        return !app.ui.dock.locked;
+        return !app.ui.dock_locked;
     }
     if e.command == "window.panel" {
         return true;
