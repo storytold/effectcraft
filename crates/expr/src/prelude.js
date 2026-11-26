@@ -870,14 +870,18 @@ Prop.prototype = {
   propertyGroup: function (n) { return __ancestor(this.__c, this.__l, this.__p, n); },
   __wrap: function (v) {
     var kind = this.__info[2];
-    if (kind === 'layer') return v === null ? null : __layer(this.__c, v);
+    // A layer parameter set to None is the layer it sits on, as in After Effects.
+    if (kind === 'layer') return __layer(this.__c, v === null ? this.__l : v);
     if (kind === 'path' && v !== null) return new __Path(v[0], v[1], v[2], v[3]);
     return v;
   },
-  get value() { return this.__self ? value : this.valueAtTime(time); },
+  get value() { return this.__self ? this.__selfValue() : this.valueAtTime(time); },
+  // The evaluated property's own value: a layer parameter reads as its layer here too.
+  // (After posterizeTime, `value` may already be the layer.)
+  __selfValue: function () { return this.__info[2] === 'layer' && !value?.__isLayer ? this.__wrap(value) : value; },
   valueAtTime: function (t) {
     t = __v(t);
-    if (this.__self && t === time) return value;
+    if (this.__self && t === time) return this.__selfValue();
     return this.__wrap(__h(__VALUE, this.__c, this.__l, this.__p, t, this.__self));
   },
   velocityAtTime: function (t) {

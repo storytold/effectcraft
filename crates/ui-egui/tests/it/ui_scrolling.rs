@@ -17,7 +17,8 @@ use super::ui_tail::drag;
 fn harness(w: f32, h: f32) -> Harness<'static, EffectcraftApp> {
     let mut s = Session::default();
     s.execute("file.openDemoProject", json!({})).unwrap();
-    let mut h = Harness::builder().with_size(vec2(w, h)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h =
+        Harness::builder().with_size(vec2(w, h)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| EffectcraftApp::new(s));
     h.run_steps(3);
     h
 }
@@ -462,7 +463,8 @@ fn effect_values_stay_clear_of_the_keyframe_navigator() {
     app.session.execute("prop.toggleAnimation", json!({"layer": lid, "path": path})).unwrap();
     app.session.execute("prop.set", json!({"layer": lid, "path": path, "value": [123456.7, 123456.7]})).unwrap();
     let uid = app.session.active_comp().unwrap().layer(effectcraft_engine::project::LayerId(lid)).unwrap().props.prop(path).unwrap().uid;
-    app.apply_dock(craft_ui::docking::Action::Float { panel: PanelKind::EffectControls, rect: [300.0, 150.0, 330.0, 500.0] }).unwrap();
+    app.apply_dock(craft_behavior::dock::Action::float(PanelKind::EffectControls, effectcraft_ui_egui::dock_command::rect_of([300.0, 150.0, 330.0, 500.0])))
+        .unwrap();
     h.run_steps(3);
     let value = rect(&h, &format!("effectControls.prop.{uid}.value.1"));
     let nav = rect(&h, &format!("effectControls.prop.{uid}.prevKey"));
@@ -539,7 +541,7 @@ fn settings_page_column_fits_japanese_names() {
         eprintln!("required Japanese input {expected:?}: {:?}", face.info);
     }
 
-    let mut h = Harness::builder().with_size(vec2(1400.0, 900.0)).build_eframe(|_| app);
+    let mut h = Harness::builder().with_size(vec2(1400.0, 900.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app);
     h.run_steps(3);
     let ctx = h.ctx.clone();
     effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "app.settings", json!({"page": "scripting"})).unwrap();

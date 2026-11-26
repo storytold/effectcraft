@@ -289,8 +289,24 @@ fn box_pass(gid: vec3<u32>, horizontal: bool) {
     }
     let norm = 1.0 / f32(2 * r + 1);
     var acc = vec4<f32>(0.0);
-    for (var i = b0 - r; i <= b0 + r; i++) {
+    // The starting window, as the CPU sums it: the pixels inside the line once each, and the
+    // repeated edge pixels counted rather than visited (a radius far past the line, such as
+    // Gaussian Blur's at Blurriness 30000, would otherwise loop over it once per pixel).
+    let lo = b0 - r;
+    let hi = b0 + r;
+    for (var i = max(lo, 0); i <= min(hi, n - 1); i++) {
         acc += line_get(horizontal, line, i, n, repeat);
+    }
+    if (repeat) {
+        let before = f32(max(-lo, 0));
+        let after = f32(max(hi - (n - 1), 0));
+        // A zero count adds nothing (0 * NaN would be NaN).
+        if (before > 0.0) {
+            acc += line_get(horizontal, line, 0, n, repeat) * before;
+        }
+        if (after > 0.0) {
+            acc += line_get(horizontal, line, n - 1, n, repeat) * after;
+        }
     }
     let b1 = min(b0 + block, n);
     for (var i = b0; i < b1; i++) {

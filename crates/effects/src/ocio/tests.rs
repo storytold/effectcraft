@@ -547,3 +547,45 @@ fn an_ocio_transform_file_is_read_again_once_it_changes() {
     assert!(Arc::ptr_eq(&inline, &load_file(BLACK).unwrap()));
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn a_3dl_with_a_hostile_mesh_is_refused_without_overflow() {
+    // #3830: 2 642 246³ is past usize::MAX, so cubing the mesh length overflowed.
+    let huge = "0 ".repeat(2_642_246) + "\n0 0 0\n";
+    assert!(parse_file(&huge, "3dl").is_none());
+    // A mesh whose rows run out.
+    let short = (0..17).map(|i| (i * 64).to_string()).collect::<Vec<_>>().join(" ") + "\n0 0 0\n1 1 1\n";
+    assert!(parse_file(&short, "3dl").is_none());
+    // A normal small table still loads.
+    let mut ok = String::from("0 511 1023\n");
+    for k in 0..27 {
+        ok += &format!("{} {} {}\n", k * 30, k * 30, k * 30);
+    }
+    assert!(matches!(parse_file(&ok, "3dl"), Some(FileXform::Lut { lut, .. }) if lut.n3 == 3 && lut.d3.len() == 27));
+}
+
+/// A complete `.3dl` table of side `n`, with its input mesh line or without one.
+fn table_3dl(n: usize, mesh: bool) -> String {
+    let mut text = if mesh { (0..n).map(|i| (i * 1023 / (n - 1)).to_string()).collect::<Vec<_>>().join(" ") + "\n" } else { String::new() };
+    for k in 0..n * n * n {
+        text += &format!("{} {} {}\n", k % 1024, k % 1024, k % 1024);
+    }
+    text
+}
+
+#[test]
+fn a_3dl_lattice_is_capped_at_the_largest_side() {
+    // #3830: a complete table at the cap loads, and one a side larger is refused, with or without
+    // its mesh line (without one, row collection stops at the cap's volume).
+    for mesh in [true, false] {
+        let at = lut::parse_3dl_limited(&table_3dl(4, mesh), 4);
+        assert!(at.is_some_and(|l| l.n3 == 4 && l.d3.len() == 64), "mesh {mesh}");
+        assert!(lut::parse_3dl_limited(&table_3dl(5, mesh), 4).is_none(), "mesh {mesh}");
+        assert!(lut::parse_3dl_limited(&table_3dl(5, mesh), 5).is_some(), "mesh {mesh}");
+    }
+    // A 3-entry mesh reads as a 28th row until the count separates it, and a four-value row is
+    // still refused at the smallest limit.
+    assert!(lut::parse_3dl_limited(&table_3dl(3, true), 3).is_some_and(|l| l.n3 == 3));
+    let four = table_3dl(2, false).replacen("7 7 7", "7 7 7 7", 1);
+    assert!(lut::parse_3dl_limited(&four, 2).is_none());
+}

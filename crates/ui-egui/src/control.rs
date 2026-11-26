@@ -813,9 +813,9 @@ pub fn base64(data: &[u8]) -> String {
 pub fn inspect(app: &EffectcraftApp, ctx: &egui::Context) -> Value {
     // A logic-only tick refreshes the viewport information but not `InputState`'s screen rect.
     let size = ctx.input(|i| i.viewport().inner_rect).map_or_else(|| ctx.content_rect().size(), |r| r.size());
-    let keyboard_focus = ctx.memory(|m| m.focused()).map(|id| {
-        let response = ctx.read_response(id);
-        let rect = response.as_ref().map(|r| [r.rect.min.x, r.rect.min.y, r.rect.width(), r.rect.height()]);
+    let keyboard_focus = craft_ui::runtime::access::focused_node(ctx).or_else(|| ctx.memory(|m| m.focused())).map(|id| {
+        let automation = app.auto.elements.iter().chain(app.auto.previous.iter()).find(|e| e.response_id == Some(id));
+        let rect = ctx.read_response(id).map(|r| [r.rect.min.x, r.rect.min.y, r.rect.width(), r.rect.height()]).or_else(|| automation.map(|e| e.rect));
         // The registry names screen elements independently of egui's internal ids. Report
         // exact rectangle matches rather than guessing which enclosing panel owns focus.
         let candidates: Vec<&str> = app
@@ -825,7 +825,7 @@ pub fn inspect(app: &EffectcraftApp, ctx: &egui::Context) -> Value {
             .filter(|e| rect.is_some_and(|r| e.rect.iter().zip(r).all(|(a, b)| (*a - b).abs() < 0.01)))
             .map(|e| e.id.as_str())
             .collect();
-        let automation_id = app.auto.elements.iter().chain(app.auto.previous.iter()).find(|e| e.response_id == Some(id)).map(|e| e.id.as_str());
+        let automation_id = automation.map(|e| e.id.as_str());
         json!({"id": format!("{:016x}", id.value()), "rect": rect, "automationId": automation_id, "registryCandidates": candidates})
     });
     let mut ui = json!(app.ui);
