@@ -23,7 +23,10 @@ fn effect_drag_highlights_the_layer_under_the_pointer() {
     s.execute("comp.new", json!({"name": "Main", "width": 640, "height": 360, "duration": 4})).unwrap();
     let a = s.execute("layer.newNull", json!({})).unwrap()["layer"].as_u64().unwrap();
     let b = s.execute("layer.newNull", json!({})).unwrap()["layer"].as_u64().unwrap();
-    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(vec2(1600.0, 1000.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(s));
     h.run_steps(3);
     assert!(h.state().auto.find("timeline.dropTarget").is_none(), "nothing is lit without a drag");
     let (row_a, row_b) = (rect(&h, &format!("timeline.layer.{a}.row")), rect(&h, &format!("timeline.layer.{b}.row")));

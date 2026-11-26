@@ -14,7 +14,11 @@ fn harness() -> (Harness<'static, EffectcraftApp>, u64) {
     let comp = s.active_comp_id().unwrap().0;
     // Arabic, Hebrew, Devanagari and Thai names typed below need installed system faces: draw
     // tofu on a host without them rather than failing the missing-glyph gate.
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).allow_missing_glyphs().build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .allow_missing_glyphs()
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(s));
     h.run_steps(4);
     (h, comp)
 }
@@ -27,10 +31,13 @@ fn center(h: &Harness<'_, EffectcraftApp>, id: &str) -> Pos2 {
 fn click(h: &mut Harness<'_, EffectcraftApp>, p: Pos2, times: usize) {
     h.input_mut().events.push(Event::PointerMoved(p));
     h.step();
-    // All in one frame (the harness' frames are longer apart than a double-click).
+    // One press per step, as the runtime takes them: the releases are one step (0.25 s) apart,
+    // within egui's double-click interval (0.3 s).
+    let button = |pressed| Event::PointerButton { pos: p, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
     for _ in 0..times {
-        h.input_mut().events.push(Event::PointerButton { pos: p, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
-        h.input_mut().events.push(Event::PointerButton { pos: p, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+        h.input_mut().events.push(button(true));
+        h.step();
+        h.input_mut().events.push(button(false));
     }
     h.run_steps(3);
 }
@@ -497,7 +504,9 @@ fn click_with(h: &mut Harness<'_, EffectcraftApp>, p: Pos2, modifiers: Modifiers
     h.input_mut().events.push(Event::PointerMoved(p));
     h.input_mut().events.push(Event::ModifiersChanged(modifiers));
     h.step();
+    // One press per step: the release comes a step later, still with the modifiers held.
     h.input_mut().events.push(Event::PointerButton { pos: p, button: PointerButton::Primary, pressed: true, modifiers });
+    h.step();
     h.input_mut().events.push(Event::PointerButton { pos: p, button: PointerButton::Primary, pressed: false, modifiers });
     h.step();
     h.input_mut().events.push(Event::ModifiersChanged(Modifiers::NONE));

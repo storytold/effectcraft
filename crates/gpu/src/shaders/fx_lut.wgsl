@@ -120,6 +120,14 @@ fn mix_exact(a: vec3<f32>, b: vec3<f32>, t: f32) -> vec3<f32> {
     return a + (b - a) * t;
 }
 
+// Halvings for the partition searches (fxl_shape, fxl_inv_1d): written per dispatch by fx_lut.rs
+// (enough for the largest table the program searches) and capped here. Every invocation runs the
+// same count, so the loops stay bounded and non-divergent, but because the count isn't known when
+// the shader is compiled, a software driver doesn't unroll every search into the kernel.
+fn fxl_search_steps() -> u32 {
+    return min(P.u[0].y, 32u);
+}
+
 // ocio::shape over `n` (x, y) points at `at` (`flip`: the curve with x and y swapped).
 fn fxl_shape(at: u32, n: u32, x: f32, flip: bool) -> f32 {
     if (n < 2u) {
@@ -130,8 +138,8 @@ fn fxl_shape(at: u32, n: u32, x: f32, flip: bool) -> f32 {
     // partition_point(|p| p.x < x).
     var lo = 0u;
     var hi = n;
-    // Bound the partition search as for inverse 1D LUTs below.
-    for (var step = 0u; step < 32u; step++) {
+    // Bounded as for inverse 1D LUTs below.
+    for (var step = 0u; step < fxl_search_steps(); step++) {
         if (lo < hi) {
             let mid = lo + (hi - lo) / 2u;
             if (data[at + mid * 2u + kx] < x) {
@@ -161,14 +169,17 @@ fn fxl_shaper_at(s: u32, k: u32) -> vec2<u32> {
 
 // Evaluate independent shaper channels without dynamically writing vector lanes.
 fn fxl_shaper_apply(sh: u32, c: vec3<f32>, flip: bool) -> vec3<f32> {
-    let r = fxl_shaper_at(sh, 0u);
-    let g = fxl_shaper_at(sh, 1u);
-    let b = fxl_shaper_at(sh, 2u);
-    return vec3<f32>(
-        fxl_shape(r.x, r.y, c.x, flip),
-        fxl_shape(g.x, g.y, c.y, flip),
-        fxl_shape(b.x, b.y, c.z, flip)
-    );
+    // One search per kernel instead of three: a software driver unrolls each fixed-length
+    // search, so every extra call multiplies compile time. Lanes are read and written with
+    // select(), never by a dynamic index.
+    var r = c;
+    for (var k = 0u; k < 3u; k++) {
+        let lane = vec3<bool>(k == 0u, k == 1u, k == 2u);
+        let a = fxl_shaper_at(sh, k);
+        let v = fxl_shape(a.x, a.y, select(select(c.z, c.y, k == 1u), c.x, k == 0u), flip);
+        r = select(r, vec3<f32>(v), lane);
+    }
+    return r;
 }
 
 fn fxl_file_fwd(o: u32, sh: i32, c0: vec3<f32>, interp: u32) -> vec3<f32> {
@@ -188,9 +199,10 @@ fn fxl_inv_1d(o: u32, i: u32, y: f32) -> f32 {
     // partition_point over the table's values.
     var lo = 0u;
     var hi = n;
-    // A u32 interval needs at most 32 halvings. A fixed trip count avoids
-    // a divergent data-dependent loop on software Vulkan without changing lookup.
-    for (var step = 0u; step < 32u; step++) {
+    // fxl_search_steps() halvings cover every table this program searches. A trip count shared
+    // by every invocation avoids a divergent data-dependent loop on software Vulkan without
+    // changing lookup.
+    for (var step = 0u; step < fxl_search_steps(); step++) {
         if (lo < hi) {
             let mid = lo + (hi - lo) / 2u;
             if (data[b1 + mid * 3u + i] < y) {
@@ -218,7 +230,12 @@ fn fxl_file(o: u32, sh: i32, c: vec3<f32>, interp: u32, inverse: bool) -> vec3<f
     if (n3 == 0u) {
         var x = c;
         if (n1 > 1u) {
-            x = vec3<f32>(fxl_inv_1d(o, 0u, c.x), fxl_inv_1d(o, 1u, c.y), fxl_inv_1d(o, 2u, c.z));
+            // One search call for all three channels, as in fxl_shaper_apply.
+            for (var k = 0u; k < 3u; k++) {
+                let lane = vec3<bool>(k == 0u, k == 1u, k == 2u);
+                let v = fxl_inv_1d(o, k, select(select(c.z, c.y, k == 1u), c.x, k == 0u));
+                x = select(x, vec3<f32>(v), lane);
+            }
         }
         if (sh >= 0) {
             x = fxl_shaper_apply(u32(sh), x, true);

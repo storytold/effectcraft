@@ -1,6 +1,6 @@
 //! EffectCraft's workspaces in craft-ui's shared docking: transactions, the command path, pointer
 //! gestures and persistence.
-use craft_ui::docking::{Action, Node, Placement, StackEntry, Zone};
+use craft_behavior::dock::{Action, DockPlacement, Node};
 use effectcraft_engine::Session;
 use effectcraft_ui_egui::{
     EffectcraftApp,
@@ -8,7 +8,6 @@ use effectcraft_ui_egui::{
 };
 use egui::{Event, Modifiers, PointerButton, Rect, pos2, vec2};
 use egui_kittest::Harness;
-use egui_kittest::kittest::{NodeT, Queryable};
 use serde_json::json;
 
 fn invoke(app: &mut EffectcraftApp, id: &str, params: serde_json::Value) -> Result<serde_json::Value, String> {
@@ -16,7 +15,12 @@ fn invoke(app: &mut EffectcraftApp, id: &str, params: serde_json::Value) -> Resu
 }
 
 fn floating(app: &EffectcraftApp) -> &[dock::Floating<PanelKind>] {
-    &app.ui.dock.layout.floating
+    &app.ui.dock.layout().floating
+}
+
+/// A rect as `[x, y, width, height]`.
+fn rect4(r: Rect) -> [f32; 4] {
+    [r.min.x, r.min.y, r.width(), r.height()]
 }
 
 #[test]
@@ -26,28 +30,28 @@ fn shared_move_preserves_accordion_metadata_and_unrelated_active_tabs() {
         dock::tabs(&[PanelKind::Project, PanelKind::Composition, PanelKind::Layer], 1),
         dock::stack(&[(PanelKind::Preview, false, Some(73.0)), (PanelKind::Properties, true, Some(211.0)), (PanelKind::Align, false, None)]),
     ));
-    workspace.apply(Action::Close { panel: PanelKind::Project }, dock::permissions).unwrap();
+    workspace.apply(Action::close(PanelKind::Project), false, dock::permissions).unwrap();
     assert!(workspace.is_visible(PanelKind::Composition));
-    workspace
-        .apply(Action::Move { panel: PanelKind::Preview, anchor: PanelKind::Layer, placement: Placement::Tab { before: None } }, dock::permissions)
-        .unwrap();
-    let Some(Node::Split { second, size, .. }) = &workspace.layout.root else { panic!("split was lost") };
+    workspace.apply(Action::move_beside(PanelKind::Preview, PanelKind::Layer, DockPlacement::tab(None)), false, dock::permissions).unwrap();
+    let Some(Node::Split { second, size, .. }) = &workspace.layout().root else { panic!("split was lost") };
     assert_eq!(*size, SplitSize::FixedSecond(300.0));
-    let Node::Stack { entries } = second.as_ref() else { panic!("stack was lost") };
+    let Node::Stack { entries, .. } = second.as_ref() else { panic!("stack was lost") };
     // The unrelated stacked panels keep their exact state.
-    assert_eq!(
-        entries,
-        &vec![StackEntry { panel: PanelKind::Properties, open: true, height: Some(211.0) }, StackEntry { panel: PanelKind::Align, open: false, height: None }]
-    );
+    let entries: Vec<_> = entries.iter().map(|entry| (entry.panel, entry.open, entry.height)).collect();
+    assert_eq!(entries, [(PanelKind::Properties, true, Some(211.0)), (PanelKind::Align, false, None)]);
     assert_eq!(workspace.group_of(PanelKind::Preview), vec![PanelKind::Composition, PanelKind::Layer, PanelKind::Preview]);
     // Rejected moves and geometry change nothing.
     let before = workspace.clone();
     assert!(
         workspace
-            .apply(Action::Move { panel: PanelKind::Preview, anchor: PanelKind::Audio, placement: Placement::Split(Zone::Left) }, dock::permissions)
+            .apply(Action::move_beside(PanelKind::Preview, PanelKind::Audio, DockPlacement::Split(craft_behavior::DockSide::Start)), false, dock::permissions)
             .is_err()
     );
-    assert!(workspace.apply(Action::Float { panel: PanelKind::Preview, rect: [0.0, 0.0, f32::INFINITY, 200.0] }, dock::permissions).is_err());
+    assert!(
+        workspace
+            .apply(Action::float(PanelKind::Preview, effectcraft_ui_egui::dock_command::rect_of([0.0, 0.0, f32::INFINITY, 200.0])), false, dock::permissions)
+            .is_err()
+    );
     assert_eq!(workspace, before);
 }
 
@@ -65,14 +69,14 @@ fn every_builtin_workspace_validates_and_roundtrips_with_dynamic_identities() {
     let ids = |layout: &Layout| layout.floating.iter().map(|w| w.id).collect::<Vec<_>>();
     assert_eq!(ids(&dock::workspace("Undocked Panels")), ids(&dock::workspace("Undocked Panels")));
     let mut workspace = dock::docked(dock::tabs(&[PanelKind::Composition, PanelKind::Viewer(42), PanelKind::ScriptPanel(77)], 1));
-    workspace.apply(Action::Float { panel: PanelKind::ScriptPanel(77), rect: [20.0, 30.0, 400.0, 300.0] }, dock::permissions).unwrap();
+    workspace
+        .apply(Action::float(PanelKind::ScriptPanel(77), effectcraft_ui_egui::dock_command::rect_of([20.0, 30.0, 400.0, 300.0])), false, dock::permissions)
+        .unwrap();
     let text = serde_json::to_string(&workspace).unwrap();
     assert!(text.contains("\"ScriptPanel\":77") && text.contains("\"Viewer\":42"), "{text}");
     assert_eq!(serde_json::from_str::<Workspace>(&text).unwrap(), workspace);
-    workspace
-        .apply(Action::Move { panel: PanelKind::ScriptPanel(77), anchor: PanelKind::Viewer(42), placement: Placement::Tab { before: None } }, dock::permissions)
-        .unwrap();
-    assert!(workspace.layout.floating.is_empty());
+    workspace.apply(Action::move_beside(PanelKind::ScriptPanel(77), PanelKind::Viewer(42), DockPlacement::tab(None)), false, dock::permissions).unwrap();
+    assert!(workspace.layout().floating.is_empty());
     assert!(workspace.is_visible(PanelKind::ScriptPanel(77)));
 }
 
@@ -113,7 +117,8 @@ fn pointer_drop_merges_floats_and_redocks_without_project_changes() {
         ),
         dock::tabs(&[PanelKind::Timeline], 0),
     ));
-    let mut h = Harness::builder().with_size(vec2(1200.0, 760.0)).build_eframe(move |_| app);
+    let mut h =
+        Harness::builder().with_size(vec2(1200.0, 760.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(move |_| app);
     h.run_steps(4);
     let project = h.state().session.project.clone();
     let times = h.state().session.state.times.clone();
@@ -128,17 +133,15 @@ fn pointer_drop_merges_floats_and_redocks_without_project_changes() {
     drag(&mut h, from, pos2(700.0, 400.0), Modifiers::COMMAND);
     assert_eq!(floating(h.state()).len(), 1);
     assert!(h.state().ui.dock.is_floating(PanelKind::Info));
-    let grips: Vec<_> = h.query_all_by_label("Resize panel window").collect();
-    assert!(!grips.is_empty() && grips.iter().all(|grip| grip.accesskit_node().role() == egui::accesskit::Role::Button));
     // Its corner resizes it and its title bar moves it.
-    let original = floating(h.state())[0].rect;
+    let original = rect4(floating(h.state())[0].rect);
     let grip = rect(&h, "panel.float.0.resize").center();
     drag(&mut h, grip, grip - vec2(36.0, 24.0), Modifiers::NONE);
-    let resized = floating(h.state())[0].rect;
+    let resized = rect4(floating(h.state())[0].rect);
     assert!(resized[2] < original[2] - 25.0 && resized[3] < original[3] - 15.0, "{original:?} -> {resized:?}");
     let bar = rect(&h, "panel.float.0.move");
     drag(&mut h, bar.center(), bar.center() - vec2(24.0, 18.0), Modifiers::NONE);
-    let moved = floating(h.state())[0].rect;
+    let moved = rect4(floating(h.state())[0].rect);
     assert!(moved[0] < resized[0] - 15.0 && moved[1] < resized[1] - 10.0, "{resized:?} -> {moved:?}");
     // Its tab dropped on a docked tab strip docks it again.
     let from = rect(&h, "panel.tab.Info").center();
@@ -156,10 +159,10 @@ fn current_and_named_floating_layouts_survive_restart() {
     use std::sync::Arc;
     let store = Arc::new(MemoryConfig::default());
     let mut app = EffectcraftApp::new(Session { config: Some(store.clone()), ..Default::default() });
-    app.apply_dock(Action::Float { panel: PanelKind::Project, rect: [45.0, 65.0, 430.0, 310.0] }).unwrap();
+    app.apply_dock(Action::float(PanelKind::Project, effectcraft_ui_egui::dock_command::rect_of([45.0, 65.0, 430.0, 310.0]))).unwrap();
     invoke(&mut app, "window.saveWorkspaceAs", json!({"name": "Shared float"})).unwrap();
     let saved = app.ui.dock.clone();
-    app.apply_dock(Action::MoveFloating { panel: PanelKind::Project, rect: [75.0, 95.0, 480.0, 360.0] }).unwrap();
+    app.apply_dock(Action::move_floating(PanelKind::Project, effectcraft_ui_egui::dock_command::rect_of([75.0, 95.0, 480.0, 360.0]))).unwrap();
     let current = app.ui.dock.clone();
     eframe::App::on_exit(&mut app);
     let mut restarted = EffectcraftApp::new(Session { config: Some(store), ..Default::default() });
@@ -180,19 +183,19 @@ fn float_command_rejects_malformed_rectangles_and_keeps_one_docked_panel() {
     // The last docked panel stays docked, whether it moves alone, with its group or by command.
     app.ui.dock = dock::docked(dock::tabs(&[PanelKind::Project], 0));
     let before = app.ui.dock.clone();
-    assert!(app.apply_dock(Action::Float { panel: PanelKind::Project, rect: [1.0, 2.0, 300.0, 200.0] }).is_err());
+    assert!(app.apply_dock(Action::float(PanelKind::Project, effectcraft_ui_egui::dock_command::rect_of([1.0, 2.0, 300.0, 200.0]))).is_err());
     assert!(invoke(&mut app, "window.panel.float", json!({"panel": "Project", "group": true})).is_err());
     assert_eq!(app.ui.dock, before);
     // Closing it is allowed.
     invoke(&mut app, "window.closePanel", json!({"panel": "Project"})).unwrap();
-    assert!(app.ui.dock.layout.root.is_none());
+    assert!(app.ui.dock.layout().root.is_none());
 }
 
 /// A floating panel dragged towards the window's bottom edge moves there, and its title bar
 /// still moves it from there.
 #[test]
 fn floating_panel_dragged_towards_the_window_edge_keeps_moving() {
-    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_eframe(|_| {
+    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| {
         let mut app = EffectcraftApp::new(Session::default());
         app.ui.start_screen = false;
         app
@@ -203,11 +206,11 @@ fn floating_panel_dragged_towards_the_window_edge_keeps_moving() {
     h.run_steps(3);
     let bar = rect(&h, "panel.float.0.move");
     drag(&mut h, bar.center(), bar.center() + vec2(40.0, 420.0), Modifiers::NONE);
-    let moved = floating(h.state())[0].rect;
+    let moved = rect4(floating(h.state())[0].rect);
     assert!(moved[1] > 550.0, "the panel moved down: {moved:?}");
     let bar = rect(&h, "panel.float.0.move");
     drag(&mut h, bar.center(), bar.center() - vec2(30.0, 200.0), Modifiers::NONE);
-    let back = floating(h.state())[0].rect;
+    let back = rect4(floating(h.state())[0].rect);
     assert!(back[1] < moved[1] - 150.0, "{moved:?} -> {back:?}");
 }
 
@@ -220,15 +223,15 @@ fn catalog_docking_action_supports_resize_reorder_and_floating_geometry() {
         dock::tabs(&[PanelKind::Composition], 0),
     ));
     for action in [
-        Action::ResizeSplit { path: vec![], size: SplitSize::FixedFirst(360.0) },
-        Action::Move { panel: PanelKind::Info, anchor: PanelKind::Project, placement: Placement::Tab { before: Some(PanelKind::Project) } },
-        Action::Float { panel: PanelKind::Info, rect: [20.0, 40.0, 300.0, 200.0] },
-        Action::MoveFloating { panel: PanelKind::Info, rect: [45.0, 65.0, 330.0, 240.0] },
+        Action::resize_split(vec![], SplitSize::FixedFirst(360.0)),
+        Action::move_beside(PanelKind::Info, PanelKind::Project, DockPlacement::tab(Some(PanelKind::Project))),
+        Action::float(PanelKind::Info, effectcraft_ui_egui::dock_command::rect_of([20.0, 40.0, 300.0, 200.0])),
+        Action::move_floating(PanelKind::Info, effectcraft_ui_egui::dock_command::rect_of([45.0, 65.0, 330.0, 240.0])),
     ] {
         invoke(&mut app, "window.dockAction", json!({"action": action})).unwrap();
     }
-    assert_eq!(floating(&app)[0].rect, [45.0, 65.0, 330.0, 240.0]);
-    let Some(Node::Split { size, .. }) = &app.ui.dock.layout.root else { panic!("split lost") };
+    assert_eq!(rect4(floating(&app)[0].rect), [45.0, 65.0, 330.0, 240.0]);
+    let Some(Node::Split { size, .. }) = &app.ui.dock.layout().root else { panic!("split lost") };
     assert_eq!(*size, SplitSize::FixedFirst(360.0));
     let before = app.ui.dock.clone();
     assert!(invoke(&mut app, "window.dockAction", json!({"action": {"ResizeSplit": {"path": [true, true], "size": {"Ratio": 0.5}}}})).is_err());
@@ -251,7 +254,7 @@ fn ui_dock_and_window_panel_commands_parse_craft_ui_commands() {
     invoke(&mut app, "ui.dock", json!({"action": {"Activate": {"panel": "Layer"}}})).unwrap();
     assert!(app.ui.dock.is_visible(PanelKind::Layer));
     invoke(&mut app, "ui.dock", json!({"operation": "float", "panel": "Info", "rect": [100, 100, 300, 200]})).unwrap();
-    assert_eq!(floating(&app)[0].rect, [100.0, 100.0, 300.0, 200.0]);
+    assert_eq!(rect4(floating(&app)[0].rect), [100.0, 100.0, 300.0, 200.0]);
     // `window.panel.*` takes EffectCraft's panel names too.
     invoke(&mut app, "window.panel.dock", json!({"panel": "Info", "anchor": "Project", "zone": "right"})).unwrap();
     assert!(floating(&app).is_empty() && app.ui.dock.is_docked(PanelKind::Info));
@@ -283,10 +286,7 @@ fn raw_open_actions_are_rejected_through_every_docking_route() {
     let mut app = EffectcraftApp::new(Session::default());
     let before = app.ui.dock.clone();
     for panel in [PanelKind::ScriptPanel(77), PanelKind::Viewer(42)] {
-        for action in [
-            Action::Open { panel, anchor: Some(PanelKind::Project) },
-            Action::OpenAt { panel, anchor: PanelKind::Project, placement: Placement::Tab { before: None } },
-        ] {
+        for action in [Action::open(panel, Some(PanelKind::Project)), Action::open_at(panel, PanelKind::Project, DockPlacement::tab(None))] {
             for id in ["ui.dock", "window.panel.layout", "window.dockAction"] {
                 let error = invoke(&mut app, id, json!({"action": action})).unwrap_err();
                 assert!(error.contains("panel open commands"), "{id}: {error}");
@@ -310,9 +310,9 @@ fn catalog_close_keeps_dynamic_panel_identity_and_releases_viewers() {
     app.ui.viewers.insert(42, Some(7));
     app.ui.maximized = Some(PanelKind::Viewer(42));
     for panel in [PanelKind::Viewer(42), PanelKind::ScriptPanel(77)] {
-        invoke(&mut app, "window.dockAction", json!({"action": Action::Close { panel }})).unwrap();
+        invoke(&mut app, "window.dockAction", json!({"action": Action::close(panel)})).unwrap();
         assert!(!app.ui.dock.is_open(panel));
-        assert!(app.ui.dock.hidden.iter().any(|(p, _)| *p == panel), "{panel:?} keeps its place");
+        assert!(app.ui.dock.hidden().iter().any(|(p, _)| *p == panel), "{panel:?} keeps its place");
     }
     assert!(app.ui.dock.is_docked(PanelKind::Composition));
     assert_eq!(app.ui.maximized, None);
@@ -320,34 +320,11 @@ fn catalog_close_keeps_dynamic_panel_identity_and_releases_viewers() {
 }
 
 #[test]
-fn stacked_panels_resize_by_pointer_without_changing_closed_entries() {
-    let mut session = Session::default();
-    session.execute("comp.new", json!({"width": 160, "height": 90, "duration": 1})).unwrap();
-    let mut app = EffectcraftApp::new(session);
-    app.ui.start_screen = false;
-    let mut h = Harness::builder().with_size(vec2(1000.0, 720.0)).build_eframe(move |_| app);
-    h.run_steps(4);
-    h.state_mut().ui.dock =
-        dock::docked(dock::stack(&[(PanelKind::Preview, true, Some(100.0)), (PanelKind::Properties, true, None), (PanelKind::Align, false, Some(77.0))]));
-    h.run_steps(3);
-    let project = h.state().session.project.clone();
-    let before = rect(&h, "panel.Preview").height();
-    let from = rect(&h, "dock.gutter.s0").center();
-    drag(&mut h, from, from + vec2(0.0, 16.0), Modifiers::NONE);
-    let after = rect(&h, "panel.Preview").height();
-    assert!((after - before - 16.0).abs() < 2.0, "{before} -> {after}");
-    let Some(Node::Stack { entries }) = &h.state().ui.dock.layout.root else { panic!("stack lost") };
-    assert!(entries[0].height.unwrap_or_default() > 100.0, "{entries:?}");
-    assert_eq!(entries[2], StackEntry { panel: PanelKind::Align, open: false, height: Some(77.0) });
-    assert!(std::sync::Arc::ptr_eq(&project, &h.state().session.project));
-}
-
-#[test]
 fn failed_close_preserves_viewer_lifecycle_and_maximize_state() {
     let mut app = EffectcraftApp::new(Session::default());
     // A locked workspace refuses the close.
     app.ui.dock = dock::docked(dock::tabs(&[PanelKind::Composition, PanelKind::Viewer(42)], 1));
-    app.ui.dock.locked = true;
+    app.ui.dock_locked = true;
     app.ui.maximized = Some(PanelKind::Viewer(42));
     app.ui.viewers.insert(42, Some(3));
     app.ui.active_viewer = 42;

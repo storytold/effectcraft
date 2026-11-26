@@ -583,6 +583,7 @@ mod tests {
         s.prefs.push_recent("/projects/Alpha.ecproj");
         let mut app = EffectcraftApp::new(s);
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         crate::theme::install(&ctx, &app.tokens, crate::i18n::language(&app));
         ctx.run_ui(Default::default(), |_| {}).textures_delta.clear();
         ctx.run_ui(Default::default(), |ui| {
@@ -616,6 +617,7 @@ mod tests {
         app.ui.start_screen = true;
         app.ui.home_learn = true;
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         crate::theme::install(&ctx, &app.tokens, crate::i18n::language(&app));
         let frame = |app: &mut EffectcraftApp| {
             ctx.run_ui(Default::default(), |ui| {

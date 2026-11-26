@@ -22,7 +22,10 @@ fn harness() -> Harness<'static, EffectcraftApp> {
     s.execute("file.openDemoProject", json!({})).unwrap();
     // A text layer under edit gives the Character / Paragraph panels their controls.
     let _ = s.execute("layer.select", json!({"layers": ["EFFECTCRAFT"]}));
-    Harness::builder().with_size(egui::vec2(1680.0, 1020.0)).build_eframe(|_| EffectcraftApp::new(s))
+    Harness::builder()
+        .with_size(egui::vec2(1680.0, 1020.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(s))
 }
 
 #[test]
