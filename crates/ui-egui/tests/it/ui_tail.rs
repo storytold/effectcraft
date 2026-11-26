@@ -15,7 +15,8 @@ fn harness_at(size: egui::Vec2) -> Harness<'static, EffectcraftApp> {
     let mut s = Session::default();
     s.execute("comp.new", json!({"name": "Tail", "width": 640, "height": 360, "duration": 4})).unwrap();
     s.execute("layer.newSolid", json!({"name": "Plate", "color": "#406080", "width": 640, "height": 360})).unwrap();
-    let mut h = Harness::builder().with_size(size).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h =
+        Harness::builder().with_size(size).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| EffectcraftApp::new(s));
     h.run_steps(3);
     h
 }
@@ -364,8 +365,10 @@ fn project_name_column_edge_resizes_and_fits_again() {
     let edge = rect(&h, "project.nameColumn.edge").center();
     assert!((edge.x - (before.x + 80.0)).abs() < 2.0, "{edge:?} after dragging from {before:?}");
     h.input_mut().events.push(Event::PointerMoved(edge));
+    // A double-click, one press per step as the runtime takes them.
     for _ in 0..2 {
         h.input_mut().events.push(Event::PointerButton { pos: edge, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+        h.step();
         h.input_mut().events.push(Event::PointerButton { pos: edge, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
     }
     h.run_steps(3);

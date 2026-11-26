@@ -28,6 +28,10 @@ struct Snapshot {
     focused: PanelKind,
     maximized: Option<PanelKind>,
     saved_workspaces: BTreeMap<String, Workspace>,
+    /// Lock Workspace. A file without it loads unlocked, unless its workspace carries the
+    /// earlier format's own `locked` ([`WorkspaceStore::load`]).
+    #[serde(default)]
+    locked: bool,
 }
 
 impl Snapshot {
@@ -39,6 +43,7 @@ impl Snapshot {
             focused: ui.focused,
             maximized: ui.maximized,
             saved_workspaces: ui.saved_workspaces.clone(),
+            locked: ui.dock_locked,
         }
     }
 
@@ -48,12 +53,7 @@ impl Snapshot {
         ui.focused = self.focused;
         ui.maximized = self.maximized;
         ui.saved_workspaces = self.saved_workspaces;
-        // A native window's place is made safe to hand to the windowing system.
-        for workspace in std::iter::once(&mut ui.dock).chain(ui.saved_workspaces.values_mut()) {
-            for window in &mut workspace.layout.floating {
-                window.native = window.native.map(crate::dock_ui::sanitized_window_rect);
-            }
-        }
+        ui.dock_locked = self.locked;
         // Reserve restored viewer slots without restoring any project-specific composition
         // links. New Viewer allocates from this map, including after switching named layouts.
         for workspace in std::iter::once(&ui.dock).chain(ui.saved_workspaces.values()) {
@@ -107,19 +107,23 @@ pub(crate) struct WorkspaceStore {
 impl WorkspaceStore {
     pub(crate) fn load(config: Option<&dyn ConfigStore>, ui: &mut UiState) -> Self {
         let mut original = None;
-        let mut outer = Vec::new();
         let loaded = config.map_or(Ok(None), |c| c.read_bounded(FILE, MAX_BYTES)).map_err(|e| e.to_string()).and_then(|text| {
             text.map(|text| {
                 let value: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
                 let snapshot = if legacy::is_legacy(&value) {
-                    let (snapshot, windows) = legacy::migrate(value, ui)?;
+                    let snapshot = legacy::migrate(value, ui)?;
                     original = Some(text);
-                    outer = windows;
                     snapshot
                 } else if value.get("version").is_none() {
                     return Err("not a workspace file".to_string());
                 } else {
-                    serde_json::from_value::<Snapshot>(value).map_err(|e| e.to_string())?
+                    // A file written before the lock moved out of the workspace keeps its lock once.
+                    let earlier_lock = value.get("locked").is_none().then(|| value.pointer("/dock/locked").and_then(serde_json::Value::as_bool)).flatten();
+                    let mut snapshot = serde_json::from_value::<Snapshot>(value).map_err(|e| e.to_string())?;
+                    if let Some(locked) = earlier_lock {
+                        snapshot.locked = locked;
+                    }
+                    snapshot
                 };
                 snapshot.validate()?;
                 Ok(snapshot)
@@ -129,7 +133,6 @@ impl WorkspaceStore {
         let error = match loaded {
             Ok(Some(snapshot)) => {
                 snapshot.apply(ui);
-                ui.native_outer = outer;
                 None
             }
             Ok(None) => None,
@@ -163,12 +166,12 @@ impl WorkspaceStore {
             || self.saved.focused != ui.focused
             || self.saved.maximized != ui.maximized
             || self.saved.saved_workspaces != ui.saved_workspaces
+            || self.saved.locked != ui.dock_locked
     }
 
     pub(crate) fn save(&mut self, config: Option<&dyn ConfigStore>, ui: &UiState) -> Result<bool, String> {
         let Some(config) = config else { return Ok(false) };
-        // A window still at its outer position would be saved as if that were its content's.
-        if !self.has_changes(ui) || !ui.native_outer.is_empty() {
+        if !self.has_changes(ui) {
             return Ok(false);
         }
         let snapshot = Snapshot::capture(ui);
@@ -197,19 +200,8 @@ impl WorkspaceStore {
             let path = config.dir().map_or_else(|| FILE.to_string(), |dir| dir.join(FILE).display().to_string());
             return Err(format!("{path} couldn't be loaded at startup, so it is left untouched; fix or move it and restart"));
         }
-        ensure_positions_ready(ui)?;
         self.save(Some(config), ui).map(|_| ())
     }
-}
-
-/// Explicit saves must wait until migrated native-window positions refer to their content.
-/// Check before capturing a named layout too, so a later background save cannot persist
-/// a snapshot made with the old outer-window positions.
-pub(crate) fn ensure_positions_ready(ui: &UiState) -> Result<(), String> {
-    if !ui.native_outer.is_empty() {
-        return Err("workspace window positions are still being restored; try saving again in a moment".into());
-    }
-    Ok(())
 }
 
 #[cfg(test)]

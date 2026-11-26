@@ -16,6 +16,7 @@ fn zoom_steps_land_on_whole_screen_magnifications() {
 #[test]
 fn shortcut_passes_share_frame_start_modifiers() {
     let ctx = egui::Context::default();
+    crate::framework::install_headless(&ctx);
     let mut starts = Vec::new();
     let mut output = ctx.run_ui(egui::RawInput { events: vec![egui::Event::ModifiersChanged(egui::Modifiers::SHIFT)], ..Default::default() }, |ui| {
         let ctx = ui.ctx();
@@ -84,6 +85,7 @@ fn ctrl_backslash_maximizes_or_restores_the_window() {
     assert!(m.command && k == egui::Key::Backslash, "{m:?} {k:?}");
     assert!(bindings(&app.session).iter().any(|b| (b.0, b.1) == (m, k) && b.2 == "window.maximizeApp"));
     let ctx = egui::Context::default();
+    crate::framework::install_headless(&ctx);
     let run = |app: &mut EffectcraftApp, maximized: bool| {
         let input = egui::RawInput {
             viewports: std::iter::once((egui::ViewportId::ROOT, egui::ViewportInfo { maximized: Some(maximized), ..Default::default() })).collect(),
@@ -408,6 +410,7 @@ fn file_dialogs_block_floating_windows_only_while_up() {
     use std::sync::{Arc, Mutex};
     let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
     let ctx = egui::Context::default();
+    crate::framework::install_headless(&ctx);
     let pending: Arc<Mutex<Vec<crate::DialogDone>>> = Arc::default();
     let queue = pending.clone();
     app.hooks.file_dialog_async = Some(Box::new(move |_dialog, done| queue.lock().unwrap().push(done)));
@@ -491,6 +494,7 @@ fn a_dialog_that_cannot_open_reports_an_error() {
     use std::sync::{Arc, Mutex};
     let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
     let ctx = egui::Context::default();
+    crate::framework::install_headless(&ctx);
     let pending: Arc<Mutex<Vec<crate::DialogDone>>> = Arc::default();
     let queue = pending.clone();
     app.hooks.file_dialog_async = Some(Box::new(move |_dialog, done| queue.lock().unwrap().push(done)));
@@ -591,6 +595,7 @@ fn dropped_files_keep_import_errors_alongside_local_drop_errors() {
         let mut app = EffectcraftApp::new(effectcraft_host::session());
         app.session.prefs.import.drag_import_as = "comp".into();
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         let mut dropped_files: Vec<egui::DroppedFileHandle> = vec![std::sync::Arc::new(Drop("no-local-path".into()))];
         if bad_import {
             dropped_files.push(std::sync::Arc::new(Drop(path.clone())));
@@ -683,7 +688,7 @@ fn closing_the_render_queue_reveals_the_panel_receiving_focus() {
         assert!(!app.ui.dock.is_visible(PanelKind::Project));
         app.show_panel(PanelKind::RenderQueue);
         if maximized {
-            app.apply_dock(craft_ui::docking::Action::Float { panel: PanelKind::RenderQueue, rect: [50.0, 60.0, 400.0, 200.0] }).unwrap();
+            app.apply_dock(craft_behavior::dock::Action::float(PanelKind::RenderQueue, crate::dock_command::rect_of([50.0, 60.0, 400.0, 200.0]))).unwrap();
             app.toggle_maximize(PanelKind::EffectControls);
             app.ui.focused = PanelKind::RenderQueue;
             assert!(app.ui.dock.is_floating(PanelKind::RenderQueue));
@@ -700,13 +705,16 @@ fn closing_the_render_queue_reveals_the_panel_receiving_focus() {
 fn closing_a_floating_queue_preserves_the_maximized_composition() {
     let mut session = effectcraft_engine::Session::default();
     session.execute("comp.new", json!({"name": "A", "width": 32, "height": 32, "duration": 2})).unwrap();
-    let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1200.0, 800.0)).build_eframe(|_| EffectcraftApp::new(session));
+    let mut h = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1200.0, 800.0))
+        .with_context_setup(crate::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(session));
     h.run_steps(3);
     let ctx = h.ctx.clone();
     let app = h.state_mut();
     app.show_panel(PanelKind::Composition);
     app.show_panel(PanelKind::RenderQueue);
-    app.apply_dock(craft_ui::docking::Action::Float { panel: PanelKind::RenderQueue, rect: [50.0, 60.0, 400.0, 200.0] }).unwrap();
+    app.apply_dock(craft_behavior::dock::Action::float(PanelKind::RenderQueue, crate::dock_command::rect_of([50.0, 60.0, 400.0, 200.0]))).unwrap();
     app.toggle_maximize(PanelKind::Composition);
     app.ui.focused = PanelKind::RenderQueue;
     assert!(app.ui.dock.is_visible(PanelKind::Timeline), "the hidden underlying tab triggers the regression");
@@ -725,7 +733,7 @@ fn queue_close_preserves_state_when_workspace_is_locked() {
     let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
     app.session.execute("comp.new", json!({"name": "A", "duration": 2})).unwrap();
     app.show_panel(PanelKind::RenderQueue);
-    app.ui.dock.locked = true;
+    app.ui.dock_locked = true;
     let workspace = app.ui.dock.clone();
     let comp = app.session.active_comp_id();
     for _ in 0..2 {
@@ -735,7 +743,7 @@ fn queue_close_preserves_state_when_workspace_is_locked() {
         assert_eq!(app.session.active_comp_id(), comp);
     }
     assert!(!menu_items(&app).iter().find(|item| item.id == "file.close").unwrap().enabled);
-    app.ui.dock.locked = false;
+    app.ui.dock_locked = false;
     invoke(&mut app, &ctx, "file.close", Value::Null).unwrap();
     assert!(!app.ui.dock.is_open(PanelKind::RenderQueue));
 }
@@ -750,12 +758,8 @@ fn queue_close_preserves_viewer_command_target() {
     app.ui.viewers.insert(0, Some(a));
     app.ui.viewers.insert(1, Some(b));
     app.ui.active_viewer = 1;
-    app.apply_dock(craft_ui::docking::Action::Move {
-        panel: PanelKind::Timeline,
-        anchor: PanelKind::Composition,
-        placement: craft_ui::docking::Placement::Tab { before: None },
-    })
-    .unwrap();
+    app.apply_dock(craft_behavior::dock::Action::move_beside(PanelKind::Timeline, PanelKind::Composition, craft_behavior::dock::DockPlacement::tab(None)))
+        .unwrap();
     app.close_panel(PanelKind::Timeline);
     app.show_panel(PanelKind::Composition);
     app.show_panel(PanelKind::RenderQueue);
@@ -774,7 +778,10 @@ fn queue_close_keeps_passive_viewer_focus_across_frames() {
     let mut session = effectcraft_engine::Session::default();
     let a = session.execute("comp.new", json!({"name": "A", "width": 32, "height": 32, "duration": 2})).unwrap()["comp"].as_u64().unwrap();
     let b = session.execute("comp.new", json!({"name": "B", "width": 32, "height": 32, "duration": 2})).unwrap()["comp"].as_u64().unwrap();
-    let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1200.0, 800.0)).build_eframe(|_| EffectcraftApp::new(session));
+    let mut h = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1200.0, 800.0))
+        .with_context_setup(crate::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(session));
     h.run_steps(3);
     let ctx = h.ctx.clone();
     let app = h.state_mut();
@@ -782,12 +789,8 @@ fn queue_close_keeps_passive_viewer_focus_across_frames() {
     app.ui.viewers.insert(0, Some(a));
     app.ui.viewers.insert(1, Some(b));
     app.ui.active_viewer = 1;
-    app.apply_dock(craft_ui::docking::Action::Move {
-        panel: PanelKind::Timeline,
-        anchor: PanelKind::Composition,
-        placement: craft_ui::docking::Placement::Tab { before: None },
-    })
-    .unwrap();
+    app.apply_dock(craft_behavior::dock::Action::move_beside(PanelKind::Timeline, PanelKind::Composition, craft_behavior::dock::DockPlacement::tab(None)))
+        .unwrap();
     app.close_panel(PanelKind::Timeline);
     app.show_panel(PanelKind::Composition);
     app.show_panel(PanelKind::RenderQueue);

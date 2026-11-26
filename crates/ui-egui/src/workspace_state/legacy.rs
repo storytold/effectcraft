@@ -9,16 +9,16 @@
 //!   group with all its tabs; a frame with a height keeps it as a fixed size (its tab strip
 //!   added), and the others share the rest. A closed frame's tabs join the open frame above it
 //!   (below it, at the top of the column), as a split has no collapsed frames.
-//! - A floating group in its own native window (`panel_windows`) keeps that place as the
-//!   window's native rect. The earlier version stored the OS window's outer position, so the
-//!   window's id is returned for [`crate::dock_ui::native_outer_to_content`] to move it to its
-//!   content position once the main window reports its frame.
+//! - A floating group in its own native window (`panel_windows`) floats where it was in the
+//!   main window; the dock places its OS window again.
 //! - Closed panels had no recorded place: they stay closed and reopen at their default place.
 
 use std::collections::BTreeMap;
 
-use craft_ui::docking::{Floating, Node};
-use craft_ui::layout::{SplitAxis, SplitSize};
+use craft_behavior::dock::SplitSize;
+use craft_behavior::dock::{Floating, Node};
+use craft_behavior::flow::Axis;
+use egui::{Rect, pos2, vec2};
 use serde::Deserialize;
 
 use super::{Snapshot, VERSION};
@@ -63,13 +63,6 @@ struct OldFloating {
     rect: [f32; 4],
 }
 
-/// The floating group holding `panel` shows in its own native window at `rect`.
-#[derive(Deserialize)]
-struct OldPanelWindow {
-    panel: PanelKind,
-    rect: [f32; 4],
-}
-
 #[derive(Deserialize)]
 struct OldSnapshot {
     workspace: String,
@@ -79,8 +72,6 @@ struct OldSnapshot {
     maximized: Option<PanelKind>,
     saved_workspaces: BTreeMap<String, OldNode>,
     saved_floating: BTreeMap<String, Vec<OldFloating>>,
-    #[serde(default)]
-    panel_windows: Vec<OldPanelWindow>,
 }
 
 #[derive(Deserialize)]
@@ -99,28 +90,25 @@ pub(super) fn is_legacy(value: &serde_json::Value) -> bool {
     }
 }
 
-/// The snapshot an earlier version's file describes, and the ids of its floating windows whose
-/// native rect holds the OS window's outer position. `ui` supplies what an unversioned record
+/// The snapshot an earlier version's file describes. `ui` supplies what an unversioned record
 /// leaves out (the current arrangement). The caller validates the result.
-pub(super) fn migrate(value: serde_json::Value, ui: &UiState) -> Result<(Snapshot, Vec<u64>), String> {
+pub(super) fn migrate(value: serde_json::Value, ui: &UiState) -> Result<Snapshot, String> {
     if value.get("version").is_none() {
         let record: OldRecord = serde_json::from_value(value).map_err(|e| e.to_string())?;
         let mut snapshot = Snapshot::capture(ui);
         snapshot.saved_workspaces = named(record.workspaces, record.floating)?;
-        return Ok((snapshot, Vec::new()));
+        return Ok(snapshot);
     }
     let old: OldSnapshot = serde_json::from_value(value).map_err(|e| e.to_string())?;
-    let dock = workspace(old.dock, old.floating, &old.panel_windows)?;
-    let outer = dock.layout.floating.iter().filter(|window| window.native.is_some()).map(|window| window.id).collect();
-    let snapshot = Snapshot {
+    Ok(Snapshot {
         version: VERSION,
         workspace: old.workspace,
-        dock,
+        dock: workspace(old.dock, old.floating)?,
         focused: old.focused,
         maximized: old.maximized,
         saved_workspaces: named(old.saved_workspaces, old.saved_floating)?,
-    };
-    Ok((snapshot, outer))
+        locked: false,
+    })
 }
 
 /// Named workspaces with their floating groups; floating groups of no named workspace are
@@ -130,12 +118,12 @@ fn named(roots: BTreeMap<String, OldNode>, mut floating: BTreeMap<String, Vec<Ol
         .into_iter()
         .map(|(name, root)| {
             let groups = floating.remove(&name).unwrap_or_default();
-            workspace(root, groups, &[]).map(|workspace| (name, workspace))
+            workspace(root, groups).map(|workspace| (name, workspace))
         })
         .collect()
 }
 
-fn workspace(root: OldNode, floating: Vec<OldFloating>, windows: &[OldPanelWindow]) -> Result<Workspace, String> {
+fn workspace(root: OldNode, floating: Vec<OldFloating>) -> Result<Workspace, String> {
     // Closing the last docked panel left an empty tab group as the root.
     let root = match root {
         OldNode::Tabs { panels, .. } if panels.is_empty() => None,
@@ -143,32 +131,31 @@ fn workspace(root: OldNode, floating: Vec<OldFloating>, windows: &[OldPanelWindo
     };
     let floating = floating
         .into_iter()
-        .map(|group| {
-            let native = windows.iter().find(|window| group.panels.contains(&window.panel)).map(|window| window.rect);
-            let mut window = Floating::single(group.panels, group.active, group.rect);
-            window.native = native.map(crate::dock_ui::sanitized_window_rect);
-            window
+        .zip(1_u64..)
+        .map(|(group, id)| {
+            let [x, y, w, h] = group.rect;
+            Floating::single(id, group.panels, group.active, Rect::from_min_size(pos2(x, y), vec2(w, h)))
         })
         .collect();
-    Ok(Workspace::new(Layout { root, floating }))
+    Ok(Workspace::new(Layout::new(root, floating)))
 }
 
 fn node(old: OldNode, depth: usize) -> Result<Node<PanelKind>, String> {
-    if depth > craft_ui::docking::MAX_DEPTH {
+    if depth > craft_behavior::dock::MAX_DEPTH {
         return Err("workspace dock tree exceeds supported limits".into());
     }
     Ok(match old {
-        OldNode::Tabs { panels, active } => Node::Tabs { panels, active },
-        OldNode::Split { vertical, size, a, b } => Node::Split {
-            axis: if vertical { SplitAxis::Vertical } else { SplitAxis::Horizontal },
-            size: match size {
+        OldNode::Tabs { panels, active } => Node::tabs(panels, active),
+        OldNode::Split { vertical, size, a, b } => Node::split(
+            if vertical { Axis::Y } else { Axis::X },
+            match size {
                 OldSplitSize::Ratio(value) => SplitSize::Ratio(value),
                 OldSplitSize::FixedA(value) => SplitSize::FixedFirst(value),
                 OldSplitSize::FixedB(value) => SplitSize::FixedSecond(value),
             },
-            first: Box::new(node(*a, depth.saturating_add(1))?),
-            second: Box::new(node(*b, depth.saturating_add(1))?),
-        },
+            node(*a, depth.saturating_add(1))?,
+            node(*b, depth.saturating_add(1))?,
+        ),
         OldNode::Stack { entries } => column(entries, depth)?,
     })
 }
@@ -202,7 +189,7 @@ fn column(entries: Vec<OldStackEntry>, depth: usize) -> Result<Node<PanelKind>, 
         }
         let active = entry.active.min(panels.len().saturating_sub(1));
         if entry.open {
-            if depth.saturating_add(frames.len()) > craft_ui::docking::MAX_DEPTH {
+            if depth.saturating_add(frames.len()) > craft_behavior::dock::MAX_DEPTH {
                 return Err("workspace dock tree exceeds supported limits".into());
             }
             let height = entry.height.filter(|h| h.is_finite() && *h > 0.0).map(|h| h.min(MAX_FRAME));
@@ -226,7 +213,7 @@ fn column(entries: Vec<OldStackEntry>, depth: usize) -> Result<Node<PanelKind>, 
     for frame in frames.into_iter().rev() {
         let own = frame_size(&frame);
         let gap = if node.is_some() { FRAME_GAP } else { 0.0 };
-        let tabs = Node::Tabs { panels: frame.panels, active: frame.active };
+        let tabs = Node::tabs(frame.panels, frame.active);
         node = Some(match node {
             None => tabs,
             Some(rest) => {
@@ -236,7 +223,7 @@ fn column(entries: Vec<OldStackEntry>, depth: usize) -> Result<Node<PanelKind>, 
                     // Shares the rest with the flexible frames below.
                     (None, None) => SplitSize::Ratio(1.0 / (below_flexible as f32 + 1.0)),
                 };
-                Node::Split { axis: SplitAxis::Vertical, size, first: Box::new(tabs), second: Box::new(rest) }
+                Node::split(Axis::Y, size, tabs, rest)
             }
         });
         below_fixed = match (own, below_fixed) {

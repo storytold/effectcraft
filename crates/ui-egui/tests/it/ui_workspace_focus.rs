@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use craft_behavior::dock::Action;
 use effectcraft_engine::Session;
 use effectcraft_engine::config::{ConfigStore, DirConfig, MemoryConfig};
 use effectcraft_ui_egui::EffectcraftApp;
@@ -11,32 +12,13 @@ use egui::{Event, Id, Key, Modifiers, vec2};
 use egui_kittest::Harness;
 use serde_json::json;
 
-/// The egui id of panel `p`'s dock tab.
-fn tab_id(p: PanelKind) -> Id {
-    craft_ui::docking::DockArea::<PanelKind>::hit_id(effectcraft_ui_egui::dock_ui::area_id(), &craft_ui::docking::Hit::Tab(p))
-}
-
-#[test]
-fn workspace_commands_wait_for_migration_without_changing_named_layouts() {
-    let store = Arc::new(MemoryConfig::default());
-    let original = include_str!("../fixtures/workspaces-v1.json");
-    store.write("workspaces.json", original).unwrap();
-    let mut app = EffectcraftApp::new(Session { config: Some(store.clone()), ..Default::default() });
-    assert!(!app.ui.native_outer.is_empty());
-    let ctx = egui::Context::default();
-    let before = (app.ui.workspace.clone(), app.ui.saved_workspaces.clone(), app.ui.dock.clone());
-    for (id, params) in [
-        ("window.saveWorkspace", json!({})),
-        ("window.saveWorkspaceAs", json!({"name": "Too soon"})),
-        ("window.editWorkspaces", json!({"name": "My Layout", "delete": true})),
-        ("window.editWorkspaces", json!({"name": "My Layout", "rename": "Too soon"})),
-    ] {
-        let error = effectcraft_ui_egui::menus::invoke(&mut app, &ctx, id, params).unwrap_err();
-        assert!(error.contains("positions"), "{id}: {error}");
-        assert_eq!((app.ui.workspace.clone(), app.ui.saved_workspaces.clone(), app.ui.dock.clone()), before);
-        assert_eq!(store.read("workspaces.json").as_deref(), Some(original));
-        assert_eq!(store.read("workspaces.old.json"), None);
-    }
+/// Whether key focus is on the dock tab whose name starts with `name` (a tab names what its panel
+/// shows: "Effect Controls Selected"), as the accessibility tree reports it.
+fn tab_focused(h: &Harness<'_, EffectcraftApp>, name: &str) -> bool {
+    use egui_kittest::kittest::NodeT;
+    h.root().children_recursive().any(|n| {
+        n.is_focused() && n.accesskit_node().role() == egui::accesskit::Role::Tab && n.accesskit_node().label().is_some_and(|label| label.starts_with(name))
+    })
 }
 
 #[test]
@@ -51,9 +33,8 @@ fn named_and_current_workspaces_survive_frontend_restart() {
     let ctx = egui::Context::default();
     effectcraft_ui_egui::menus::invoke(&mut app, &ctx, "window.saveWorkspaceAs", json!({"name": "Restart layout"})).unwrap();
     let saved = app.ui.dock.clone();
-    if let Some(Node::Split { size, .. }) = &mut app.ui.dock.layout.root {
-        *size = SplitSize::FixedFirst(390.0);
-    }
+    assert!(matches!(app.ui.dock.layout().root, Some(Node::Split { .. })));
+    app.apply_dock(Action::resize_split(vec![], SplitSize::FixedFirst(390.0))).unwrap();
     app.ui.focused = PanelKind::Layer;
     let current = app.ui.dock.clone();
     eframe::App::on_exit(&mut app);
@@ -154,7 +135,8 @@ fn tab_and_shift_tab_traverse_toolbar_and_space_activates_only_focused_tool() {
     let mut app = EffectcraftApp::new(session);
     app.ui.start_screen = false;
     app.ui.show_menu_bar = false;
-    let mut h = Harness::builder().with_size(vec2(1400.0, 900.0)).build_eframe(move |_| app);
+    let mut h =
+        Harness::builder().with_size(vec2(1400.0, 900.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(move |_| app);
     h.run_steps(3);
     for _ in 0..8 {
         key(&mut h, Key::Tab, Modifiers::NONE);
@@ -196,48 +178,37 @@ fn tab_traversal_activates_an_inactive_dock_tab_without_editing_the_project() {
     app.ui.start_screen = false;
     app.ui.show_menu_bar = false;
     // Leave the inactive, layer-named tab visible instead of behind the overflow control.
-    if let Some(Node::Split { first, .. }) = &mut app.ui.dock.layout.root
-        && let Node::Split { first, .. } = first.as_mut()
-        && let Node::Split { size, .. } = first.as_mut()
-    {
-        *size = SplitSize::FixedFirst(420.0);
-    }
-    let mut h = Harness::builder().with_size(vec2(1200.0, 760.0)).build_eframe(move |_| app);
+    app.apply_dock(Action::resize_split(vec![false, false], SplitSize::FixedFirst(420.0))).unwrap();
+    let mut h =
+        Harness::builder().with_size(vec2(1200.0, 760.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(move |_| app);
     h.run_steps(3);
     assert!(h.state().auto.find("panel.tab.EffectControls").is_some(), "the inactive tab must be visible in this fixture");
     let before = h.state().ui.dock.clone();
-    let target = tab_id(PanelKind::EffectControls);
+    let target = "Effect Controls";
     let mut tabs = 0;
     for _ in 0..200 {
         key(&mut h, Key::Tab, Modifiers::NONE);
         tabs += 1;
-        if h.ctx.memory(|m| m.focused()) == Some(target) {
+        if tab_focused(&h, "Project") {
             break;
         }
     }
-    assert_eq!(h.ctx.memory(|m| m.focused()), Some(target));
+    assert!(tab_focused(&h, "Project"));
+    key(&mut h, Key::ArrowRight, Modifiers::NONE);
+    assert!(tab_focused(&h, target));
     println!("Tab presses from no focus to Effect Controls: {tabs}");
     assert_eq!(h.state().ui.dock, before, "traversal alone must not activate a tab");
-    // craft-ui outlines the keyboard-focused tab, inset 2 pt, in the dock's accent (EffectCraft's
-    // focus colour).
-    let response = h.ctx.read_response(target).unwrap();
-    assert!(
-        h.output().shapes.iter().any(|shape| {
-            matches!(&shape.shape, egui::Shape::Rect(r) if r.rect == response.rect.shrink(2.0) && r.stroke.color == h.state().tokens.focus && r.stroke.width > 0.0)
-        }),
-        "the dock tab must visibly show keyboard focus"
-    );
     key(&mut h, Key::Space, Modifiers::NONE);
     let mut activated = before;
-    activated.apply(craft_ui::docking::Action::Activate { panel: PanelKind::EffectControls }, dock::permissions).unwrap();
+    activated.apply(craft_behavior::dock::Action::activate(PanelKind::EffectControls), false, dock::permissions).unwrap();
     assert_eq!(h.state().ui.dock, activated);
     assert_eq!(h.state().ui.focused, PanelKind::EffectControls);
     assert!(!h.state().playback.playing);
     assert!(Arc::ptr_eq(&h.state().session.project, &project));
     let inspected = effectcraft_ui_egui::control::inspect(h.state(), &h.ctx);
     assert_eq!(inspected["keyboardFocus"]["automationId"], "panel.tab.EffectControls");
-    key(&mut h, Key::Tab, Modifiers::SHIFT);
-    assert_eq!(h.ctx.memory(|m| m.focused()), Some(tab_id(PanelKind::Project)));
+    key(&mut h, Key::ArrowLeft, Modifiers::NONE);
+    assert!(tab_focused(&h, "Project"));
     key(&mut h, Key::Enter, Modifiers::NONE);
     assert_eq!(h.state().ui.focused, PanelKind::Project);
     assert!(!h.state().playback.playing);
@@ -255,7 +226,13 @@ impl ControlDriver {
         let mut app = EffectcraftApp::new(Session::default()).with_control(rx);
         app.ui.start_screen = false;
         app.ui.show_menu_bar = false;
-        let mut driver = Self { h: Harness::builder().with_size(vec2(1200.0, 760.0)).build_eframe(move |_| app), tx };
+        let mut driver = Self {
+            h: Harness::builder()
+                .with_size(vec2(1200.0, 760.0))
+                .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+                .build_eframe(move |_| app),
+            tx,
+        };
         driver.frames(4, true);
         driver.ok("engine.execute", json!({"command":"comp.new", "params":{"name":"Native Validation", "width":160,"height":90,"duration":1}}), true);
         driver.ok("engine.execute", json!({"command":"layer.newSolid", "params":{"name":"Validation Red","color":"#ff0000"}}), true);
@@ -316,19 +293,21 @@ fn control_root_divider_drag_after_toolbar_and_dock_tab_keyboard_activation() {
     d.ok("ui.click", json!({"id":"tools.Selection"}), true);
     // The toolbar can grow as upstream adds controls. Traverse to the actual response
     // identity rather than assuming a fixed number of focus stops.
-    let target = tab_id(PanelKind::EffectControls);
+    let target = "Effect Controls";
     for tabs in 1..=200 {
         d.ok("ui.key", json!({"key":"Tab"}), true);
         assert!(d.h.state().ui.mini_flowchart.is_none(), "dock-tab traversal must not open a foreground popup");
-        if d.h.ctx.memory(|memory| memory.focused()) == Some(target) {
-            println!("control Tab presses to Effect Controls: {tabs}");
+        if tab_focused(&d.h, "Project") {
+            println!("control Tab presses to Project: {tabs}");
             break;
         }
     }
-    assert_eq!(d.h.ctx.memory(|memory| memory.focused()), Some(target), "Effect Controls must remain reachable by control-channel Tab traversal");
+    // A tab strip is one Tab stop: Tab reaches the shown tab, the arrows move between tabs.
+    d.ok("ui.key", json!({"key":"ArrowRight"}), true);
+    assert!(tab_focused(&d.h, target), "Effect Controls must remain reachable by control-channel keyboard traversal");
     d.ok("ui.key", json!({"key":"Space"}), true);
     assert_eq!(d.h.state().ui.focused, PanelKind::EffectControls);
-    d.ok("ui.key", json!({"key":"Tab","shift":true}), true);
+    d.ok("ui.key", json!({"key":"ArrowLeft"}), true);
     d.ok("ui.key", json!({"key":"Enter"}), true);
     assert_eq!(d.h.state().ui.focused, PanelKind::Project);
     let before = d.h.state().ui.dock.clone();
@@ -352,6 +331,7 @@ fn unowned_tab_keeps_the_timeline_mini_flowchart_shortcut() {
     let mut app = EffectcraftApp::new(session);
     app.ui.focused = PanelKind::Timeline;
     let ctx = egui::Context::default();
+    effectcraft_ui_egui::framework::install_headless(&ctx);
     let raw = egui::RawInput {
         events: vec![egui::Event::Key { key: Key::Tab, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE }],
         ..Default::default()

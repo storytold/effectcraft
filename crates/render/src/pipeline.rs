@@ -9,7 +9,7 @@ use super::{
     ItemId, ItemKind, Layer, LayerCache, LayerSource, Params, Project, Quality, Region, Renderer, Tick, cache, color, masks, shapes, styles, text, three_d,
     vec2,
 };
-use effectcraft_keyframe::Value;
+use effectcraft_keyframe::{Keyframe, Value};
 use effectcraft_project::LayerId;
 
 /// Coordinate space and stack range shared by CPU and accelerated effect evaluation.
@@ -44,6 +44,8 @@ pub struct PropertyOverride {
     pub(crate) layer: LayerId,
     pub(crate) prop: u64,
     pub(crate) value: Value,
+    /// The override's keyframes, in the target layer's time.
+    pub(crate) keys: Vec<Keyframe>,
     /// A Font control changes only the font of the target text, not its text.
     pub(crate) font: bool,
 }
@@ -122,28 +124,29 @@ fn collapsed_instance(ctx: &EvalCtx, layer: &Layer, item: ItemId) -> Option<(Vec
     if over.is_empty() {
         return Some((vec![], vec![]));
     }
-    let g = essential::group(layer)?;
-    let eg = ctx.project.comp(item)?.essential.as_ref()?;
+    essential::group(layer)?;
+    let nc = ctx.project.comp(item)?;
+    let eg = nc.essential.as_ref()?;
     let mut property = vec![];
     let mut fonts: Vec<PropertyOverride> = vec![];
     let mut media = vec![];
-    g.walk("", &mut |_, p| {
-        if !over.contains(&p.uid) {
-            return;
-        }
-        let Some(control) = essential::control_of(&p.match_id) else { return };
-        let Some(ctl) = eg.resolve(control) else { return };
-        let value = ctx.value(layer, p);
+    for over in essential_overrides(ctx, layer) {
+        let Some(ctl) = eg.resolve(over.control) else { continue };
         match &ctl.kind {
             EgKind::Property { .. } => {
                 let font = ctl.as_type == Some(ControlType::Font);
-                for (layer, prop) in ctl.kind.targets() {
-                    let o = PropertyOverride { layer, prop, value: value.clone(), font };
+                for (target_layer, prop) in ctl.kind.targets() {
+                    let keys = if font {
+                        vec![]
+                    } else {
+                        nc.layer(target_layer).map(|target| essential::keys_in_layer_time(&over.keys, target.start_time, target.stretch)).unwrap_or_default()
+                    };
+                    let o = PropertyOverride { layer: target_layer, prop, value: over.value.clone(), keys, font };
                     if font { fonts.push(o) } else { property.push(o) }
                 }
             }
             EgKind::Media { layer: target } => {
-                let Value::Scalar(id) = value else { return };
+                let Value::Scalar(id) = over.value else { continue };
                 let item = ItemId(id.max(0.0) as u64);
                 if matches!(ctx.project.item(item).map(|i| &i.kind), Some(ItemKind::Footage(_))) {
                     media.push(MediaOverride { layer: *target, item });
@@ -151,12 +154,17 @@ fn collapsed_instance(ctx: &EvalCtx, layer: &Layer, item: ItemId) -> Option<(Vec
             }
             _ => {}
         }
-    });
+    }
     // A Font control merges into the text its instance shows, after a whole-value (Text) override
     // of the same property, as `essential::with_overrides` does: keep one entry per property.
     for f in fonts {
         match property.iter_mut().rev().find(|o| o.layer == f.layer && o.prop == f.prop) {
-            Some(o) => effectcraft_project::essential::merge_font(&mut o.value, &f.value),
+            Some(o) => {
+                effectcraft_project::essential::merge_font(&mut o.value, &f.value);
+                for key in &mut o.keys {
+                    effectcraft_project::essential::merge_font(&mut key.value, &f.value);
+                }
+            }
             None => property.push(f),
         }
     }
