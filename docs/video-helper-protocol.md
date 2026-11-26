@@ -1,8 +1,9 @@
 # Video helper protocol (proposed)
 
-**Status: proposed, not implemented.** This page specifies how EffectCraft will talk to a
-hardware video helper, as decided in [RFC-0031][rfc-0031] (hardware video in a helper process).
-Nothing here exists in the app yet. Phase 1 covers **encoding**; decoding is reserved for phase 2
+**Status: proposed.** This page specifies how EffectCraft talks to a hardware video helper, as
+decided in [RFC-0031][rfc-0031] (hardware video in a helper process). The host side is in
+`crates/helper-host` (`video`), tested against a stand-in helper; there is no real helper yet and
+export does not use it. Phase 1 covers **encoding**; decoding is reserved for phase 2
 ([decoding](#decoding-phase-2)). Where this page is more specific than the RFC or differs from it,
 [Differences from RFC-0031](#differences-from-rfc-0031) lists it.
 
@@ -145,7 +146,7 @@ and the helper carries on; it does not count.
 | `error` with `packet_too_large`: the helper says the encoder's output does not fit the `out` region it was given, and it did not write past it | Job error. |
 | `cancelled` for a job EffectCraft sent `cancel` for | Accepts it; the job's frames are over. |
 | `cancelled` for an open job | Protocol break. |
-| Any other reply for an **ended** job (late replies for frames that were in flight, a second `cancelled`) | Dropped and logged. The regions it names are not read. Not a break. |
+| Any other reply for an **ended** job (late replies for frames that were in flight, a second `cancelled`), or for a job that has just answered with an `error` and has not been cancelled yet | Dropped and logged. The regions it names are not read. Not a break. |
 | Any reply for a job that was **never issued** | Protocol break. |
 | A line that does not parse, or is over 1 MiB | Protocol break. |
 
@@ -175,11 +176,10 @@ and the helper carries on; it does not count.
   next helper a new one, so a stray process can only write into a file nobody reads. Regions are
   reused only inside one helper process that is still running, after `encode.flushed` or
   `cancelled`.
-- **Stopping the helper is bounded.** EffectCraft starts the helper in its own process group (Unix)
-  or a job object that kills its members when it closes (Windows) and kills the whole group or
-  job. It waits for the helper process to exit for at most 5 s. If something is stuck (for example
-  in an uninterruptible driver call), it gives up waiting, logs it, and the export fails with an
-  error instead of hanging.
+- **Stopping the helper is bounded.** EffectCraft kills the helper process and waits for it to
+  exit for at most 5 s. If it is stuck (for example in an uninterruptible driver call), EffectCraft
+  gives up waiting, logs it, and the export fails with an error instead of hanging. Processes the
+  helper started are not tracked or killed: the rule above is what keeps their writes harmless.
 
 What EffectCraft does with a failure:
 

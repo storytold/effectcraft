@@ -1,7 +1,8 @@
 //! EffectCraft's side of hardware video helpers (`docs/video-helper-protocol.md`, RFC-0031): the
-//! messages ([`wire`]), the rules for each reply ([`jobs`]), and here, finding the program and
-//! checking its `hello`. Starting the helper and driving a job are not here yet.
+//! messages ([`wire`]), the rules for each reply ([`jobs`]), the running helper and its encode
+//! jobs ([`client`]), and here, finding the program and checking its `hello`.
 
+pub mod client;
 pub mod jobs;
 pub mod wire;
 
