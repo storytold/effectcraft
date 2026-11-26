@@ -73,8 +73,10 @@ fn picking_on_a_cryptomatte_exr_edits_the_selection_and_the_matte() {
     let _ = std::fs::remove_dir_all(std::path::Path::new(&path).parent().unwrap());
 }
 
-/// At half resolution a preview pixel shows the aux texel at its centre (layer x 3 for preview
-/// pixel 1): `scale` makes the pick read that one, so what is clicked is what lights up.
+/// At half resolution the pick reads the aux texel at the preview pixel's centre (layer x 3 for
+/// preview pixel 1): `scale` makes the pick read that one, so what is clicked lights up. The
+/// preview pixel shows the matte box-filtered over the two layer pixels it covers (#3334): Left's
+/// x 2 and Right's x 3, half lit.
 #[test]
 fn a_pick_at_preview_resolution_reads_the_pixel_the_preview_shows() {
     let (mut s, path) = footage("half", 3);
@@ -83,7 +85,8 @@ fn a_pick_at_preview_resolution_reads_the_pixel_the_preview_shows() {
     assert_eq!(r["name"], RIGHT, "{r}");
     let opts = effectcraft_engine::render::RenderOpts { scale: 0.5, ..Default::default() };
     // Matte Only: the matte in RGB over alpha 1 (#3127).
-    assert_eq!(s.render(s.active_comp_id().unwrap(), Tick::ZERO, opts).get(1, 0), [1.0; 4]);
+    // (0.5 at 8 bpc)
+    assert_eq!(s.render(s.active_comp_id().unwrap(), Tick::ZERO, opts).get(1, 0), [128.0 / 255.0, 128.0 / 255.0, 128.0 / 255.0, 1.0]);
     // At full resolution the same point is Left's pixel.
     let r = s.execute_checked("effect.cryptomatteAt", json!({"effect": 1, "x": 2.5, "y": 1.5})).unwrap();
     assert_eq!(r["name"], "Left");

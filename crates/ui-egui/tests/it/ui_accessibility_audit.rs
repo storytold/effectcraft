@@ -142,7 +142,10 @@ fn app_session() -> Session {
 }
 
 fn harness() -> Harness<'static, EffectcraftApp> {
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(app_session()));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(app_session()));
     // The default workspace gives Preview a short frame at the top of the right column; its
     // controls below that frame stay in the tree and would be counted against the panel under it.
     // The per-panel pass opens Preview again for its own scenario.

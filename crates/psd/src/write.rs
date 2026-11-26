@@ -10,7 +10,7 @@ use craft_psd::{
     BlendMode, BlendingRanges, ChannelData, Compression, GlobalLayerMask, Header, ImageData, LayerFlags, LayerInfoPlacement, MaskData, PsdFile, Version,
 };
 
-use crate::descriptor::{self, DValue, Descriptor, put_u16, put_u32, put_utf16};
+use crate::descriptor::{DValue, Descriptor, put_u16, put_u32, put_utf16};
 use crate::limits::finite_sample;
 use crate::{ColorMode, Rect, Section, engine_data};
 
@@ -383,81 +383,48 @@ pub fn smart_object_block_warped(uuid: &str, quad: [[f64; 2]; 4], size: [f64; 2]
     if let Some(w) = warp {
         d = d.with("warp", DValue::Descriptor(w));
     }
-    let mut out = b"soLD".to_vec();
-    put_u32(&mut out, 4);
-    put_u32(&mut out, 16);
-    descriptor::write_descriptor(&mut out, &d);
+    let mut out = vec![];
+    craft_psd::tagged::append_smart_object_data(&mut out, &d);
     (*b"SoLd", out)
 }
 
 /// `TySh`: a type layer with one style run; the text origin sits at `origin`.
 pub fn text_block(text: &str, origin: [f64; 2], font: &str, size: f64, color: [f64; 3], justification: u8) -> ([u8; 4], Vec<u8>) {
     let mut d = vec![];
-    put_u16(&mut d, 1);
-    for v in [1.0, 0.0, 0.0, 1.0, origin[0], origin[1]] {
-        d.extend_from_slice(&f64::to_be_bytes(v));
-    }
-    put_u16(&mut d, 50);
-    put_u32(&mut d, 16);
     let desc = Descriptor::new("TxLr")
         .with("Txt ", DValue::Text(text.replace('\n', "\r")))
         .with("textGridding", DValue::Enum("textGridding".into(), "None".into()))
         .with("Ornt", DValue::Enum("Ornt".into(), "Hrzn".into()))
         .with("EngineData", DValue::Raw(engine_data::minimal(text, font, size, color, justification)));
-    descriptor::write_descriptor(&mut d, &desc);
-    // Warp: version, descriptor version, an empty warp descriptor.
-    put_u16(&mut d, 1);
-    put_u32(&mut d, 16);
-    descriptor::write_descriptor(&mut d, &Descriptor::new("warp").with("warpStyle", DValue::Enum("warpStyle".into(), "warpNone".into())));
-    for _ in 0..4 {
-        put_u32(&mut d, 0);
-    }
+    let warp = Descriptor::new("warp").with("warpStyle", DValue::Enum("warpStyle".into(), "warpNone".into()));
+    craft_psd::text::append_type_layer_data_with_zero_bounds(&mut d, &[1.0, 0.0, 0.0, 1.0, origin[0], origin[1]], &desc, &warp);
     (*b"TySh", d)
 }
 
 /// `lfx2`: layer effects from an effects descriptor (`null` class with `DrSh`, `FrFX`…).
 pub fn effects_block(desc: &Descriptor) -> ([u8; 4], Vec<u8>) {
     let mut d = vec![];
-    put_u32(&mut d, 0);
-    put_u32(&mut d, 16);
-    descriptor::write_descriptor(&mut d, desc);
+    craft_psd::tagged::append_layer_effects_data(&mut d, desc);
     (*b"lfx2", d)
 }
 
 /// `SoCo`: solid colour fill.
 pub fn solid_color_block(rgb: [f64; 3]) -> ([u8; 4], Vec<u8>) {
     let mut d = vec![];
-    put_u32(&mut d, 16);
-    descriptor::write_descriptor(&mut d, &Descriptor::new("null").with("Clr ", DValue::Descriptor(Descriptor::rgb(rgb))));
+    craft_psd::tagged::append_solid_color_data(&mut d, &Descriptor::new("null").with("Clr ", DValue::Descriptor(Descriptor::rgb(rgb))));
     (*b"SoCo", d)
 }
 
 /// `hue2`: Hue/Saturation (master).
 pub fn hue_sat_block(hue: i16, sat: i16, light: i16) -> ([u8; 4], Vec<u8>) {
-    let mut d = vec![];
-    put_u16(&mut d, 2);
-    d.extend_from_slice(&[0, 0]);
-    for v in [0i16, 0, 0, hue, sat, light] {
-        d.extend_from_slice(&v.to_be_bytes());
-    }
-    // Six colour ranges (unused).
-    d.resize(d.len() + 6 * 24, 0);
-    (*b"hue2", d)
+    let block = craft_psd::adjust::hue_saturation_block(hue, sat, light);
+    (block.key, block.data)
 }
 
 /// `levl`: Levels (composite record).
 pub fn levels_block(in_black: i16, in_white: i16, out_black: i16, out_white: i16, gamma: f64) -> ([u8; 4], Vec<u8>) {
-    let mut d = vec![];
-    put_u16(&mut d, 2);
-    for v in [in_black, in_white, out_black, out_white, (gamma * 100.0).round() as i16] {
-        d.extend_from_slice(&v.to_be_bytes());
-    }
-    for _ in 0..28 {
-        for v in [0i16, 255, 0, 255, 100] {
-            d.extend_from_slice(&v.to_be_bytes());
-        }
-    }
-    (*b"levl", d)
+    let block = craft_psd::adjust::levels_block(in_black, in_white, out_black, out_white, (gamma * 100.0).round() as i16);
+    (block.key, block.data)
 }
 
 pub fn invert_block() -> ([u8; 4], Vec<u8>) {
@@ -465,21 +432,13 @@ pub fn invert_block() -> ([u8; 4], Vec<u8>) {
 }
 
 pub fn brightness_block(brightness: i16, contrast: i16) -> ([u8; 4], Vec<u8>) {
-    let mut d = vec![];
-    for v in [brightness, contrast, 127] {
-        d.extend_from_slice(&v.to_be_bytes());
-    }
-    d.push(0);
-    (*b"brit", d)
+    let block = craft_psd::adjust::brightness_contrast_block(brightness, contrast);
+    (block.key, block.data)
 }
 
 pub fn exposure_block(exposure: f32, offset: f32, gamma: f32) -> ([u8; 4], Vec<u8>) {
-    let mut d = vec![];
-    put_u16(&mut d, 1);
-    for v in [exposure, offset, gamma] {
-        d.extend_from_slice(&v.to_be_bytes());
-    }
-    (*b"expA", d)
+    let block = craft_psd::adjust::exposure_block(exposure, offset, gamma);
+    (block.key, block.data)
 }
 
 /// `vmsk`: a vector mask from closed polygons/curves given as (in, anchor, out) knots in pixels.

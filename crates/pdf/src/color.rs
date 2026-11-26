@@ -53,10 +53,7 @@ impl Cs {
         match self {
             Cs::Gray => [g(0); 3],
             Cs::Rgb | Cs::Pattern => [g(0), g(1), g(2)],
-            Cs::Cmyk => {
-                let k = g(3);
-                [(1.0 - g(0)) * (1.0 - k), (1.0 - g(1)) * (1.0 - k), (1.0 - g(2)) * (1.0 - k)]
-            }
+            Cs::Cmyk => cmyk_to_rgb(g(0), g(1), g(2), g(3)),
             Cs::Lab => lab_to_rgb(c.first().copied().unwrap_or(0.0), c.get(1).copied().unwrap_or(0.0), c.get(2).copied().unwrap_or(0.0)),
             Cs::Indexed { base, hival, lookup } => {
                 let i = (c.first().copied().unwrap_or(0.0).round().max(0.0) as usize).min(*hival);
@@ -67,6 +64,38 @@ impl Cs {
             Cs::Tint { alt, func, .. } => alt.to_rgb(&func.eval(c)),
         }
     }
+}
+
+/// The screen colour of each solid overprint of cyan, magenta and yellow, indexed by
+/// `c * 4 + m * 2 + y`. Paper is white.
+const INK_SOLIDS: [[f64; 3]; 8] = [
+    [1.0, 1.0, 1.0],
+    [0.9422, 0.9861, 0.1296],
+    [0.9734, 0.1382, 0.5601],
+    [1.0, 0.1424, 0.0305],
+    [0.0754, 0.6765, 0.8047],
+    [0.0, 0.5965, 0.2797],
+    [0.2292, 0.0166, 0.5538],
+    [0.0251, 0.002, 0.0],
+];
+/// How each ink's value (C, M, Y, K) becomes the area it covers.
+const INK_COVERAGE: [f64; 4] = [1.0774, 1.0434, 1.0474, 1.1823];
+
+/// DeviceCMYK (each 0 to 1) to RGB, as the Neugebauer equations model halftone printing: the
+/// solid colour of every combination of the inks, weighted by the area that combination
+/// covers. The solids and the coverage curves are fitted to what After Effects shows for a
+/// chart of 1,296 CMYK patches. `(1 - c)(1 - k)` makes every pale pink a bright magenta.
+pub(crate) fn cmyk_to_rgb(c: f64, m: f64, y: f64, k: f64) -> [f64; 3] {
+    let area = |i: usize, v: f64| v.clamp(0.0, 1.0).powf(INK_COVERAGE[i]);
+    let (ac, am, ay, ak) = (area(0, c), area(1, m), area(2, y), area(3, k));
+    let mut out = [0.0; 3];
+    for (i, solid) in INK_SOLIDS.iter().enumerate() {
+        let w = (if i & 4 != 0 { ac } else { 1.0 - ac }) * (if i & 2 != 0 { am } else { 1.0 - am }) * (if i & 1 != 0 { ay } else { 1.0 - ay });
+        for (o, s) in out.iter_mut().zip(solid) {
+            *o += w * s;
+        }
+    }
+    out.map(|v| v * (1.0 - ak))
 }
 
 fn lab_to_rgb(l: f64, a: f64, b: f64) -> [f64; 3] {

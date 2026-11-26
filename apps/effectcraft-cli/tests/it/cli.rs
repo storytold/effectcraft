@@ -40,6 +40,21 @@ fn tmp(name: &str) -> PathBuf {
     canonical(&d).unwrap_or(d).join(name)
 }
 
+/// #3941: a command-line session reads the system's memory at start, so its caches share the
+/// budget of the installed RAM (as in the desktop app), not the budget for unknown RAM.
+#[test]
+fn the_caches_follow_the_installed_ram() {
+    let Some(memory) = effectcraft_engine::sysinfo::memory() else {
+        eprintln!("the system's memory can't be read here: not checked");
+        return;
+    };
+    let v = ok_json(&["exec", "help.systemReport", r#"{"quiet":true}"#, "--empty"]);
+    let reduced = v["caches"]["reduced"].as_bool().unwrap();
+    let want = effectcraft_engine::prefs::Prefs::default().memory_budget(Some(memory), reduced).bytes;
+    let gb = |b: usize| format!("{:.1} GB", b as f64 / (1u64 << 30) as f64);
+    assert_eq!(v["caches"]["budget"], gb(want), "{v}");
+}
+
 #[test]
 fn info_and_commands() {
     let v = ok_json(&["info"]);
@@ -457,6 +472,24 @@ fn unknown_options_are_usage_errors() {
     for (flag, alpha) in [(None, 255), (Some("--transparent"), 0)] {
         ok_json(&[&["render-frame", p, "--out", o][..], flag.as_slice()].concat());
         assert_eq!(image::open(&png).unwrap().to_rgba8().get_pixel(0, 0)[3], alpha, "{flag:?}");
+    }
+}
+
+/// The desktop Nightly profile flags belong to the Launcher and the GUI: the headless CLI refuses
+/// both spellings (and their `=` forms) as a usage error before anything runs.
+#[test]
+fn the_desktop_nightly_profile_flags_are_refused() {
+    for args in [
+        &["info", "--launch-profile", "nightly-v1", "--profile-root", "/somewhere", "--json"][..],
+        &["info", "--launch-profile=nightly-v1", "--json"],
+        &["render-frame", "--profile-root=/somewhere", "--out", "x.png"],
+        &["--launch-profile", "nightly-v1", "--version"],
+    ] {
+        let out = bin().args(args).output().unwrap();
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {err}");
+        assert!(err.contains("has no launch profile"), "{args:?}: {err}");
+        assert!(out.stdout.is_empty(), "{args:?}: nothing ran");
     }
 }
 

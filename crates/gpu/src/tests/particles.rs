@@ -3,7 +3,7 @@
 //! ids) at positions within tolerance, from scratch and when advancing / seeking from GPU
 //! checkpoints.
 
-use effectcraft_effects::psim::{ParticleSim, SimParticle};
+use effectcraft_effects::psim::{EngineDesc, ParticleSim, ParticleSystem, SimParticle, SimRequest};
 use effectcraft_effects::{EffectCtx, EffectEnv, EffectHost, LayerPixels, Params};
 use effectcraft_keyframe::Value;
 
@@ -21,6 +21,39 @@ impl EffectHost for Host {
     }
     fn particles(&self) -> Option<&dyn ParticleSim> {
         Some(self.0)
+    }
+}
+
+/// A host whose producer moves from `start_x` at layer time 0 to `start_x + 60 · t`.
+struct MovingProducer {
+    gpu: Option<&'static Gpu>,
+    index: usize,
+    start_x: f64,
+}
+
+impl EffectHost for MovingProducer {
+    fn layer(&self, _id: u64, _masks_and_effects: bool) -> Option<LayerPixels> {
+        None
+    }
+    fn audio(&self, _id: u64, _start: f64, _frames: usize, _rate: u32) -> Option<Vec<f32>> {
+        None
+    }
+    fn particles(&self) -> Option<&dyn ParticleSim> {
+        self.gpu.map(|g| g as &dyn ParticleSim)
+    }
+    fn param_at(&self, effect_index: usize, id: &str, t: f64) -> Option<Value> {
+        if effect_index != self.index {
+            return None;
+        }
+        let x = self.start_x + 60.0 * t;
+        match id {
+            "producer/position" | "producer" => Some(Value::Vec2([x, 50.0])),
+            "producer/producerX" => Some(n(x)),
+            "producer/producerY" => Some(n(50.0)),
+            "producer/producerZ" => Some(n(0.0)),
+            "cannon/cannonPosition" => Some(Value::Vec2([x, 50.0])),
+            _ => None,
+        }
     }
 }
 
@@ -177,6 +210,111 @@ fn particle_systems_ii_matches_the_cpu() {
         let tol = if anim == 8 { 1e-3 } else { 1e-4 };
         agree(&format!("particle systems ii anim {anim}"), &cpu, &gpu, tol, cpu.len() / 100 + 1);
     }
+}
+
+/// #1955: a moving producer is sampled at every simulation step on both the CPU and the GPU.
+#[test]
+fn moving_producers_match_the_cpu_on_the_gpu() {
+    let Some(g) = gpu() else { return };
+    for id in ["ec.sim.ccparticleworld", "ec.sim.ccparticlesystems2"] {
+        let p = if id == "ec.sim.ccparticleworld" {
+            params(
+                id,
+                &[
+                    ("birthRate", n(2.0)),
+                    ("longevity", n(5.0)),
+                    ("producer/producerX", n(80.0)),
+                    ("producer/producerY", n(50.0)),
+                    ("producer/producerZ", n(0.0)),
+                    ("producer/radiusX", n(0.0)),
+                    ("producer/radiusY", n(0.0)),
+                    ("producer/radiusZ", n(0.0)),
+                    ("physics/animation", Value::Enum(4)),
+                    ("physics/velocity", n(0.0)),
+                    ("physics/gravity", n(0.0)),
+                ],
+            )
+        } else {
+            params(
+                id,
+                &[
+                    ("birthRate", n(2.0)),
+                    ("longevity", n(5.0)),
+                    ("producer/position", Value::Vec2([80.0, 50.0])),
+                    ("producer/radiusX", n(0.0)),
+                    ("producer/radiusY", n(0.0)),
+                    ("physics/animation", Value::Enum(5)),
+                    ("physics/velocity", n(0.0)),
+                    ("physics/gravity", n(0.0)),
+                ],
+            )
+        };
+        let cpu_host = MovingProducer { gpu: None, index: 0, start_x: 20.0 };
+        let gpu_host = MovingProducer { gpu: Some(g), index: 0, start_x: 20.0 };
+        let ctx = |env| EffectCtx { params: &p, time: 1.0, layer_size: [320.0, 240.0], seed: 31, adjustment: false, env };
+        let cpu = effectcraft_effects::particle_state(id, &ctx(EffectEnv { host: Some(&cpu_host), ..Default::default() })).unwrap();
+        let before = crate::particles::DISPATCHES.load(std::sync::atomic::Ordering::Relaxed);
+        let gpu = effectcraft_effects::particle_state(id, &ctx(EffectEnv { host: Some(&gpu_host), ..Default::default() })).unwrap();
+        assert!(crate::particles::DISPATCHES.load(std::sync::atomic::Ordering::Relaxed) > before, "{id}: simulated on the GPU");
+        agree(&format!("{id} moving producer"), &cpu, &gpu, 1e-4, cpu.len() / 100 + 1);
+    }
+
+    let p = params(
+        "ec.sim.particleplayground",
+        &[
+            ("cannonEnabled", Value::Bool(true)),
+            ("grid/particlesAcross", n(0.0)),
+            ("grid/particlesDown", n(0.0)),
+            ("cannon/barrelRadius", n(0.0)),
+            ("cannon/particlesPerSecond", n(60.0)),
+            ("cannon/velocity", n(0.0)),
+            ("cannon/velocityRandomSpread", n(0.0)),
+            ("gravity/gravityForce", n(0.0)),
+        ],
+    );
+    let cpu_host = MovingProducer { gpu: None, index: 0, start_x: 20.0 };
+    let gpu_host = MovingProducer { gpu: Some(g), index: 0, start_x: 20.0 };
+    let ctx = |env| EffectCtx { params: &p, time: 1.0, layer_size: [320.0, 240.0], seed: 32, adjustment: false, env };
+    let cpu = effectcraft_effects::playground_state(&ctx(EffectEnv { host: Some(&cpu_host), ..Default::default() })).unwrap();
+    let before = crate::particles::DISPATCHES.load(std::sync::atomic::Ordering::Relaxed);
+    let gpu = effectcraft_effects::playground_state(&ctx(EffectEnv { host: Some(&gpu_host), ..Default::default() })).unwrap();
+    assert!(crate::particles::DISPATCHES.load(std::sync::atomic::Ordering::Relaxed) > before, "particle playground: simulated on the GPU");
+    agree("particle playground moving producer", &cpu, &gpu, 1e-4, cpu.len() / 100 + 1);
+    let births = effectcraft_effects::psim::births(60.0, 60, 60_000).unwrap();
+    for q in &gpu {
+        let birth = births[q.id as usize] as f32;
+        assert!((q.p[0] - (20.0 + birth)).abs() < 1e-4, "particle {} at {:?}, expected {}", q.id, q.p, 20.0 + birth);
+    }
+}
+
+/// A checkpoint reached with one producer history is not reused for another history, even
+/// when the current producer position and the system's key are unchanged.
+#[test]
+fn a_changed_gpu_producer_history_drops_a_stale_checkpoint() {
+    let Some(g) = gpu() else { return };
+    let system = ParticleSystem::Engine(EngineDesc {
+        life: 10.0,
+        radius: [0.0; 3],
+        anim: 0,
+        speed: 0.0,
+        gravity: [0.0; 3],
+        axis: [0.0, -1.0, 0.0],
+        extra: 0.0,
+        cone: 0.0,
+        damp: 1.0,
+        seed: 41,
+        flat: true,
+    });
+    let births_one = [0u32];
+    let producers_one = [[10.0, 0.0, 0.0]];
+    let first = g.simulate(&SimRequest { key: 0x1955, steps: 1, births: &births_one, producers: &producers_one, system }).unwrap();
+    assert!((first[0].p[0] - 10.0).abs() < 1e-4, "{:?}", first[0].p);
+
+    let births_two = [0u32, 1u32];
+    let producers_two = [[99.0, 0.0, 0.0], [20.0, 0.0, 0.0]];
+    let second = g.simulate(&SimRequest { key: 0x1955, steps: 2, births: &births_two, producers: &producers_two, system }).unwrap();
+    assert!((second[0].p[0] - 99.0).abs() < 1e-4, "the old checkpoint was reused: {:?}", second[0].p);
+    assert!((second[1].p[0] - 20.0).abs() < 1e-4, "{:?}", second[1].p);
 }
 
 #[test]

@@ -29,6 +29,12 @@ pub enum Role {
     Hide,
     HideOthers,
     ShowAll,
+    SelectAll,
+    Cut,
+    Copy,
+    Paste,
+    Undo,
+    Redo,
 }
 
 /// One node of the native menu.
@@ -151,8 +157,36 @@ pub fn build_now(app: &EffectcraftApp, ctx: &egui::Context) -> NativeMenu {
         }
     }
     let mut menu = build(app);
-    if text_field_window(ctx).is_some() {
+    // On macOS a file dialog takes the keys over the field behind it (#1986).
+    let dialog = cfg!(target_os = "macos") && app.file_dialogs.count() > 0;
+    if text_field_window(ctx).is_some() && !dialog {
         enable(app, &mut menu.menus);
+    }
+    if dialog {
+        // The sandboxed open panel is a remote view: it gets Cmd+A, C, X, V, Z through the host's
+        // standard Edit items (first-responder selectors), not through items that run our
+        // commands, which swallow the key or leave the panel without one (#1986).
+        fn standard(nodes: &mut [NativeNode]) {
+            for node in nodes {
+                match node {
+                    NativeNode::Item(item) => {
+                        let role = match item.command.as_str() {
+                            "edit.selectAll" => Role::SelectAll,
+                            "edit.cut" => Role::Cut,
+                            "edit.copy" => Role::Copy,
+                            "edit.paste" => Role::Paste,
+                            "edit.undo" => Role::Undo,
+                            "edit.redo" => Role::Redo,
+                            _ => continue,
+                        };
+                        *node = NativeNode::Predefined { role, label: item.label.clone(), command: item.command.clone() };
+                    }
+                    NativeNode::Submenu { children, .. } => standard(children),
+                    _ => {}
+                }
+            }
+        }
+        standard(&mut menu.menus);
     }
     menu
 }
@@ -374,17 +408,45 @@ pub fn state_key(app: &EffectcraftApp) -> u64 {
     s.keymaps.active.hash(&mut h);
     let v = &app.ui.viewer;
     (v.rulers, v.guides, v.snap_guides, v.lock_guides, v.grid, v.snap_grid, v.show_layer_controls, v.pasteboard).hash(&mut h);
-    (app.ui.cache_when_idle, app.session.prefs.preview.active().include_audio, &app.ui.workspace, app.dialog.is_some()).hash(&mut h);
+    (app.ui.cache_when_idle, app.session.prefs.preview.active().include_audio, &app.ui.workspace, app.dialog.is_some(), app.file_dialogs.count()).hash(&mut h);
     // Window menu check marks: the panels on screen.
     crate::dock::PanelKind::ALL.iter().filter(|p| crate::menus::panel_shown(app, **p)).for_each(|p| p.hash(&mut h));
     h.finish()
 }
 
+/// Keeps the native menu in step with native file dialogs within a frame. The menu syncs at the
+/// frame's start, but a dialog opened by the frame's commands is counted only after that: sync
+/// again then, so its Edit items step aside before the next key (#1986). The second sync runs
+/// only when the dialog count changed.
+#[derive(Default)]
+pub struct MenuSync {
+    /// Native file dialogs on screen at the last sync.
+    dialogs: usize,
+}
+
+impl MenuSync {
+    /// The frame's sync, before its commands run.
+    pub fn before(&mut self, app: &mut EffectcraftApp, update: impl FnOnce(&mut EffectcraftApp)) {
+        update(app);
+        self.dialogs = app.file_dialogs.count();
+    }
+
+    /// After the frame's commands: sync again if a file dialog opened or closed meanwhile.
+    pub fn after(&mut self, app: &mut EffectcraftApp, update: impl FnOnce(&mut EffectcraftApp)) {
+        if app.file_dialogs.count() != self.dialogs {
+            self.before(app, update);
+        }
+    }
+}
+
 /// The window whose text field has the keyboard: a floating panel's own OS window, or the main
 /// window, where any widget that holds the keyboard counts (the Viewer's text editor is not an
-/// egui text field).
+/// egui text field) except the Composition viewer itself.
 pub fn text_field_window(ctx: &egui::Context) -> Option<egui::ViewportId> {
-    craft_ui::docking::typing_window(ctx).or_else(|| ctx.egui_wants_keyboard_input().then_some(egui::ViewportId::ROOT))
+    let host = craft_ui::runtime::windows::WindowHost::of(ctx);
+    let window = host.key_window();
+    let floating = (window != egui::ViewportId::ROOT && host.typing()).then_some(window);
+    floating.or_else(|| crate::framework::widget_has_keyboard(ctx).then_some(egui::ViewportId::ROOT))
 }
 
 /// Whether a focused text field takes the menu command `command` ([`activate`]): the native menu
@@ -417,8 +479,9 @@ fn text_field_event(command: &str) -> Option<Vec<egui::Event>> {
 
 /// Hand a text field's Edit command to the window `window` whose field has the keyboard. The
 /// main window gets the clipboard text itself and the events through the synthetic queue; a
-/// floating panel's OS window gets each key pressed and released, and asks for the clipboard
-/// text on Cmd+V (`craft_ui::docking::send_keys`).
+/// floating panel's OS window gets each command as the key equivalent the platform's menu took
+/// from it (Copy and Cut as egui's copy and cut events, the rest as the key's tap), and the
+/// clipboard text as typed text on Cmd+V.
 fn send_to_text_field(app: &mut EffectcraftApp, ctx: &egui::Context, window: egui::ViewportId, events: Vec<egui::Event>) {
     if window == egui::ViewportId::ROOT {
         for event in events {
@@ -434,19 +497,27 @@ fn send_to_text_field(app: &mut EffectcraftApp, ctx: &egui::Context, window: egu
         ctx.request_repaint();
         return;
     }
-    let events = events
-        .into_iter()
-        .flat_map(|event| {
-            let release = match &event {
-                egui::Event::Key { key, physical_key, modifiers, .. } => {
-                    Some(egui::Event::Key { key: *key, physical_key: *physical_key, pressed: false, repeat: false, modifiers: *modifiers })
+    use craft_ui::runtime::windows::{KeyEquivalent, WindowHost};
+    let host = WindowHost::of(ctx);
+    let platform = craft_keymap::egui::platform(ctx);
+    for event in events {
+        let equivalent = match event {
+            egui::Event::Key { key: egui::Key::V, .. } => {
+                if let Some(text) = app.hooks.clipboard_text.as_ref().and_then(|f| f()) {
+                    host.inject_text(window, &text);
                 }
-                _ => None,
-            };
-            std::iter::once(event).chain(release)
-        })
-        .collect();
-    craft_ui::docking::send_keys(ctx, window, events);
+                continue;
+            }
+            egui::Event::Key { key, modifiers, .. } => match craft_keymap::Key::from_egui(key) {
+                Some(key) => KeyEquivalent::Tap(craft_keymap::Chord::new(craft_keymap::Mods::from_egui(&modifiers, platform), key)),
+                None => continue,
+            },
+            egui::Event::Copy => KeyEquivalent::Copy,
+            egui::Event::Cut => KeyEquivalent::Cut,
+            _ => continue,
+        };
+        host.key_equivalent(window, equivalent);
+    }
 }
 
 /// Run a native menu item (by id) the way the in-window menu bar does. While a text field has
@@ -490,7 +561,35 @@ mod tests {
     fn app() -> EffectcraftApp {
         let mut s = effectcraft_engine::Session::default();
         s.execute("file.openDemoProject", json!({})).unwrap();
+        // The default is "Match System": pin English so the tests do not follow the machine's locale.
+        s.execute("prefs.set", json!({"key": "general.language", "value": "en"})).unwrap();
         EffectcraftApp::new(s)
+    }
+
+    /// A file dialog opened by the frame's commands syncs the menu a second time (#1986); a
+    /// frame without one syncs it once.
+    #[test]
+    fn menu_syncs_again_when_a_frame_opens_a_file_dialog() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        let pending: std::sync::Arc<std::sync::Mutex<Vec<crate::DialogDone>>> = Default::default();
+        let queue = pending.clone();
+        app.hooks.file_dialog_async = Some(Box::new(move |_, done| queue.lock().unwrap().push(done)));
+        let mut sync = MenuSync::default();
+        // A fake menu: records the dialog count each update sees.
+        let mut updates = Vec::new();
+        let mut frame = |app: &mut EffectcraftApp, command: Option<&str>| {
+            sync.before(app, |a| updates.push(a.file_dialogs.count()));
+            if let Some(id) = command {
+                crate::menus::invoke(app, &ctx, id, json!({})).unwrap();
+            }
+            sync.after(app, |a| updates.push(a.file_dialogs.count()));
+        };
+        frame(&mut app, None);
+        frame(&mut app, Some("file.importMultiple"));
+        frame(&mut app, None);
+        assert_eq!(updates, [0, 0, 1, 1], "no dialog: one update; dialog opened: a second one that sees it");
+        assert_eq!(pending.lock().unwrap().len(), 1, "a dialog was shown");
     }
 
     #[test]
@@ -681,6 +780,7 @@ mod tests {
         let spec = build(&app);
         let dup = spec.items().into_iter().find(|i| i.command == "edit.duplicate").map(|i| i.id.clone()).unwrap();
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         app.dialog_state.delete_items.command = Some((json!({"items": []}), json!({"items": 1, "layers": 1, "comps": 1})));
         app.dialog = Some(crate::Dialog::DeleteItems);
         // Chosen with the mouse, Duplicate still runs.
@@ -822,6 +922,80 @@ mod tests {
         assert!(edits_text("edit.copy") && edits_text("edit.paste"));
         assert!(!edits_text("layer.newNull"));
     }
+    /// #1986: a file dialog opened while a text field has the keyboard takes Cmd+A: the field
+    /// behind it does not keep the Edit items enabled.
+    #[test]
+    fn a_file_dialog_takes_the_edit_keys_from_a_focused_text_field() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
+        let mut text = String::new();
+        for _ in 0..2 {
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| ui.text_edit_singleline(&mut text).request_focus());
+            out.textures_delta.clear();
+        }
+        let select_all = |m: &NativeMenu| m.items().into_iter().any(|i| i.command == "edit.selectAll" && i.enabled);
+        assert!(select_all(&build_now(&app, &ctx)));
+        app.hooks.file_dialog_async = Some(Box::new(|_, _| {}));
+        crate::menus::invoke(&mut app, &ctx, "file.importMultiple", json!({})).unwrap();
+        assert_eq!(select_all(&build_now(&app, &ctx)), !cfg!(target_os = "macos"));
+    }
+
+    /// #1986: while a file dialog is open on macOS the Edit items for select-all, cut, copy,
+    /// paste, undo and redo become the host's standard (predefined) items, keeping label and
+    /// command; without a dialog they stay plain command items.
+    #[test]
+    fn a_file_dialog_turns_the_edit_keys_into_standard_items() {
+        fn predefined(menu: &NativeMenu) -> Vec<(String, Role, String)> {
+            fn rec(n: &[NativeNode], out: &mut Vec<(String, Role, String)>) {
+                for x in n {
+                    match x {
+                        NativeNode::Predefined { role, label, command }
+                            if matches!(role, Role::SelectAll | Role::Cut | Role::Copy | Role::Paste | Role::Undo | Role::Redo) =>
+                        {
+                            out.push((command.clone(), *role, label.to_string()))
+                        }
+                        NativeNode::Submenu { children, .. } => rec(children, out),
+                        _ => {}
+                    }
+                }
+            }
+            let mut out = vec![];
+            rec(&menu.menus, &mut out);
+            out
+        }
+        fn by_command<'a>(menu: &'a NativeMenu, id: &str) -> Option<&'a NativeItem> {
+            menu.items().into_iter().find(|i| i.command == id)
+        }
+        let mut app = app();
+        let ctx = egui::Context::default();
+        let ids = ["edit.selectAll", "edit.cut", "edit.copy", "edit.paste", "edit.undo", "edit.redo"];
+        let before = build_now(&app, &ctx);
+        assert!(predefined(&before).is_empty(), "no dialog: no standard edit items");
+        let plain: Vec<_> = ids.iter().filter(|id| by_command(&before, id).is_some()).collect();
+        app.hooks.file_dialog_async = Some(Box::new(|_, _| {}));
+        crate::menus::invoke(&mut app, &ctx, "file.importMultiple", json!({})).unwrap();
+        let after = build_now(&app, &ctx);
+        let got = predefined(&after);
+        if cfg!(target_os = "macos") {
+            let want = [Role::SelectAll, Role::Cut, Role::Copy, Role::Paste, Role::Undo, Role::Redo];
+            for (id, role) in ids.iter().zip(want) {
+                if !plain.contains(&id) {
+                    continue;
+                }
+                let (_, r, label) = got.iter().find(|(c, _, _)| c == id).unwrap_or_else(|| panic!("{id} not predefined"));
+                assert_eq!(*r, role, "{id}");
+                assert_eq!(label, &by_command(&before, id).map(|i| i.label.to_string()).unwrap_or_default(), "{id} keeps its label");
+                assert!(by_command(&after, id).is_none(), "{id} no longer runs our command");
+            }
+            assert_eq!(got.len(), plain.len());
+            // Unrelated items are untouched.
+            assert!(by_command(&after, "file.importMultiple").is_some());
+        } else {
+            assert!(got.is_empty());
+        }
+    }
+
     /// #2459: while a text field has the keyboard the Edit menu's Undo and Redo act on the field and
     /// read plain "Undo" / "Redo"; the project history labels come back once focus leaves.
     #[test]
@@ -836,6 +1010,7 @@ mod tests {
             app.session.execute("layer.newNull", json!({})).unwrap();
             app.session.execute("edit.undo", json!({})).unwrap();
             let ctx = egui::Context::default();
+            crate::framework::install_headless(&ctx);
             let history = label(&build_now(&app, &ctx), "edit.undo");
             let redo_history = label(&build_now(&app, &ctx), "edit.redo");
             assert!(history.starts_with(undo) && history != undo, "{history}");
