@@ -48,7 +48,6 @@
 //! (`VR`, `OCIO`, `PS`, `HDR`) stays and follows the French word order (`Flou VR`,
 //! `Transformation CDL OCIO`).
 
-// Russian translation © 2026 SuperSfera LLC, MIT OR Apache-2.0
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
@@ -2239,7 +2238,6 @@ const SWEDISH_CATEGORIES: &[(&str, &str)] = &[
 /// the Russian word order (`Размытие VR`, `Преобразование CDL OCIO`).
 
 
-// Russian translation © 2026 SuperSfera LLC, MIT OR Apache-2.0
 const RUSSIAN: &[Row] = &[
     ("ec.3d.channelextract", "3D Channel Extract", "Извлечение канала 3D"),
     ("ec.3d.cryptomatte", "Cryptomatte", "Cryptomatte"),
@@ -2551,7 +2549,6 @@ const RUSSIAN: &[Row] = &[
     ("ec.vr.spheretoplane", "VR Sphere to Plane", "Сфера в плоскость VR"),
 ];
 
-// Russian translation © 2026 SuperSfera LLC, MIT OR Apache-2.0
 const RUSSIAN_CATEGORIES: &[(&str, &str)] = &[
     ("3D Channel", "Канал 3D"),
     ("Audio", "Звук"),

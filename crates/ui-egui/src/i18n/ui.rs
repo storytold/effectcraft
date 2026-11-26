@@ -16,7 +16,6 @@
 //! A language may lack rows: the English source shows instead, and the `missing_translations_report`
 //! test (run by `cargo xtask ci`) lists what each language lacks.
 
-// Russian translation © 2026 SuperSfera LLC, MIT OR Apache-2.0
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::fmt::Display;
@@ -10411,7 +10410,6 @@ const FRENCH: &[(&str, &str)] = &[
 /// department glossary. Names of products and technical tokens stay in the original
 /// Latin spelling. The rows were written from the English meaning; they do not come
 /// from another application's interface.
-// Russian translation © 2026 SuperSfera LLC, MIT OR Apache-2.0
 const RUSSIAN: &[(&str, &str)] = &[
     ("Views:", "Виды:"),
     ("Appearance Settings…", "Параметры оформления…"),
