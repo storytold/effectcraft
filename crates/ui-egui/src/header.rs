@@ -975,6 +975,50 @@ mod tests {
         assert!(!app.auto.elements.iter().any(|w| w.id == "tools.select.TypeVertical"));
     }
 
+    /// The Orbit, Pan and Dolly slots carry After Effects' variants of each camera tool, each
+    /// picked from the slot's flyout by its automation id (#2586).
+    #[test]
+    fn every_camera_tool_is_picked_from_its_flyout() {
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx, &app.tokens, crate::i18n::language(&app));
+        frame(&mut app, &ctx, 0.0, vec![]);
+        frame(&mut app, &ctx, 0.1, vec![]);
+        let center = |element: &crate::automation::Element| {
+            let [x, y, w, h] = element.rect;
+            egui::pos2(x + w / 2.0, y + h / 2.0)
+        };
+        let pointer = |pos, pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() };
+        let picks = [
+            (3, Tool::OrbitScene),
+            (3, Tool::OrbitTarget),
+            (3, Tool::Orbit),
+            (4, Tool::PanTarget),
+            (4, Tool::PanCamera),
+            (5, Tool::DollyToCursor),
+            (5, Tool::DollyTarget),
+            (5, Tool::Dolly),
+        ];
+        let mut time = 1.0;
+        for (slot, tool) in picks {
+            let shown = app.ui.slot_tools[slot];
+            let at = center(app.auto.elements.iter().find(|w| w.id == format!("tools.{shown:?}")).unwrap_or_else(|| panic!("no slot tools.{shown:?}")));
+            // Press and hold opens the flyout.
+            frame(&mut app, &ctx, time, vec![egui::Event::PointerMoved(at), pointer(at, true)]);
+            frame(&mut app, &ctx, time + 0.36, vec![]);
+            frame(&mut app, &ctx, time + 0.4, vec![pointer(at, false)]);
+            frame(&mut app, &ctx, time + 0.45, vec![]);
+            let id = format!("tools.select.{tool:?}");
+            let row = center(app.auto.elements.iter().find(|w| w.id == id).unwrap_or_else(|| panic!("no {id}")));
+            frame(&mut app, &ctx, time + 0.6, vec![egui::Event::PointerMoved(row), pointer(row, true)]);
+            frame(&mut app, &ctx, time + 0.65, vec![pointer(row, false)]);
+            assert_eq!(app.ui.tool, tool, "{id}");
+            assert_eq!(app.ui.slot_tools[slot], tool);
+            frame(&mut app, &ctx, time + 0.7, vec![]);
+            time += 1.0;
+        }
+    }
+
     /// Alt/Option-click cycles a Tools-bar flyout slot without opening the menu.
     #[test]
     fn alt_click_cycles_the_type_slot() {

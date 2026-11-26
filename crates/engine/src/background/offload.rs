@@ -914,6 +914,7 @@ impl Session {
                             seconds: 0.0,
                             output: None,
                             reused_exr_frames: false,
+                            timing: None,
                         });
                     }
                 }

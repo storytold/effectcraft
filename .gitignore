@@ -9,3 +9,10 @@ __pycache__/
 
 # After Effects test corpus fetched by `cargo xtask aep-corpus`
 /corpus/
+
+# Checked out into the workspace by the shared nightly workflows; the nightly packaging requires a
+# clean tree, so these must never show up as untracked files.
+/.nightly-tools
+/.nightly-input
+/craft-i18n
+/craft-fonts

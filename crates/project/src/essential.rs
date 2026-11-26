@@ -650,7 +650,7 @@ pub fn sync_project(before: &Project, after: &mut Project) {
 
 /// Keys given in comp time, in the time of a layer that starts at `start` and is stretched to
 /// `stretch` percent. Empty when the stretch is not a usable factor.
-fn keys_in_layer_time(keys: &[Keyframe], start: Tick, stretch: f64) -> Vec<Keyframe> {
+pub fn keys_in_layer_time(keys: &[Keyframe], start: Tick, stretch: f64) -> Vec<Keyframe> {
     if stretch.is_finite() && stretch > 0.0 { keys.iter().map(|k| key_in_layer_time(k, start, stretch)).collect() } else { vec![] }
 }
 

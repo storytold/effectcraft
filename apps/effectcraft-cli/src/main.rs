@@ -317,6 +317,16 @@ fn main() {
         Ok(raw) => raw,
         Err(e) => fail_usage(&e),
     };
+    // The Launcher's Nightly profile flags belong to the desktop app only. Refuse them before any
+    // argument is parsed, so no script can drive a profile outside the Launcher's control (exit 2).
+    // Written without a leading `--` in the literal so the option table stays the one place that
+    // declares options (`every_option_read_is_declared`).
+    const DESKTOP_PROFILE_FLAGS: [&str; 2] = ["launch-profile", "profile-root"];
+    if let Some(flag) =
+        raw.iter().find(|a| a.starts_with('-') && DESKTOP_PROFILE_FLAGS.iter().any(|name| a.trim_start_matches('-').split('=').next() == Some(*name)))
+    {
+        fail_usage(&format!("`{flag}` selects the desktop Nightly profile; effectcraft-cli has no launch profile"));
+    }
     if matches!(raw.first().map(String::as_str), Some("--version" | "-V" | "version")) {
         say!("effectcraft-cli {}", env!("CARGO_PKG_VERSION"));
         return;
@@ -1019,7 +1029,10 @@ fn render(args: &Args, json_out: bool) -> Result<(), Failure> {
         match &it.status {
             RenderStatus::Done => {
                 note!("done: {name} → {} in {:.2}s", it.last_output.as_deref().unwrap_or("?"), it.render_time.unwrap_or(0.0));
-                results.push(json!({"comp": name, "output": it.last_output, "seconds": it.render_time}));
+                if let Some(t) = &it.last_timing {
+                    note!("timing: {}", t.summary());
+                }
+                results.push(json!({"comp": name, "output": it.last_output, "seconds": it.render_time, "timing": it.last_timing, "timingSummary": it.last_timing.as_ref().map(|t| t.summary())}));
             }
             RenderStatus::Failed(e) => failed.push(format!("{name}: {e}")),
             other => failed.push(format!("{name}: {}", other.label())),

@@ -11,7 +11,9 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use effectcraft_project::render_queue::{OutputFormat, OutputModule, PostRenderAction, RenderQueueItem, RenderStatus, TemplateVars, expand_template};
+use effectcraft_project::render_queue::{
+    OutputFormat, OutputModule, PostRenderAction, RenderQueueItem, RenderStatus, RenderTiming, TemplateVars, expand_template,
+};
 use effectcraft_project::{ItemId, ItemKind, LayerSource, Project};
 use effectcraft_render::{ExprHost, FootageSource};
 use serde::{Deserialize, Serialize};
@@ -103,6 +105,9 @@ pub struct ExportResult {
     /// Files that went to storage overflow folders.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub overflow: Vec<String>,
+    /// Where the time went and what ran the job (the render log's summary line).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timing: Option<RenderTiming>,
 }
 
 /// Encodes render queue items (implemented by the export layer).
@@ -167,6 +172,9 @@ pub enum ItemUpdate {
         output: Option<String>,
         #[serde(default)]
         reused_exr_frames: bool,
+        /// Where the time went (done items only).
+        #[serde(default)]
+        timing: Option<RenderTiming>,
     },
 }
 
@@ -219,8 +227,14 @@ impl JobShared {
                     item.insert("statusLabel".into(), json!(RenderStatus::Rendering.label()));
                     item.insert("started".into(), json!(unix));
                     item.insert("render_time".into(), Value::Null);
+                    item.remove("last_timing");
                 }
-                ItemUpdate::Finished { status, seconds, output, .. } => {
+                ItemUpdate::Finished { status, seconds, output, timing, .. } => {
+                    // Each finish reports its own run: an item stopped before it started has no timing
+                    match timing {
+                        Some(timing) => item.insert("last_timing".into(), json!(timing)),
+                        None => item.remove("last_timing"),
+                    };
                     item.insert("status".into(), json!(status));
                     item.insert("statusLabel".into(), json!(status.label()));
                     item.insert("render_time".into(), json!(seconds));
@@ -419,6 +433,7 @@ async fn run_work(w: Work, shared: &JobShared, notify: &mut dyn FnMut(&JobShared
                 seconds: 0.0,
                 output: None,
                 reused_exr_frames: false,
+                timing: None,
             });
             continue;
         }
@@ -470,6 +485,8 @@ async fn run_work(w: Work, shared: &JobShared, notify: &mut dyn FnMut(&JobShared
                     !shared.cancel.load(Ordering::Relaxed)
                 })
                 .await;
+            // (the item's timing and output are those of the first output module's export; the
+            // others, and the later segments of a split output, are not part of it)
             match rr {
                 Ok(res) if mi == 0 => r = Ok(res),
                 Ok(_) => {}
@@ -487,13 +504,14 @@ async fn run_work(w: Work, shared: &JobShared, notify: &mut dyn FnMut(&JobShared
                 seconds,
                 output: Some(res.path),
                 reused_exr_frames: item.output.format == OutputFormat::ExrSequence && res.reused_frames,
+                timing: res.timing,
             },
             Err(e) if e == CANCELLED => {
-                ItemUpdate::Finished { id: item.id, status: RenderStatus::UserStopped, seconds, output: None, reused_exr_frames: false }
+                ItemUpdate::Finished { id: item.id, status: RenderStatus::UserStopped, seconds, output: None, reused_exr_frames: false, timing: None }
             }
             Err(e) => {
                 log::warn!("render queue: item {} failed: {e}", item.id);
-                ItemUpdate::Finished { id: item.id, status: RenderStatus::Failed(e), seconds, output: None, reused_exr_frames: false }
+                ItemUpdate::Finished { id: item.id, status: RenderStatus::Failed(e), seconds, output: None, reused_exr_frames: false, timing: None }
             }
         };
         lock(&shared.updates).push(up);
@@ -751,6 +769,7 @@ impl Session {
                                     seconds: 0.0,
                                     output: None,
                                     reused_exr_frames: false,
+                                    timing: None,
                                 });
                             }
                         }
@@ -789,6 +808,7 @@ impl Session {
                                 seconds: 0.0,
                                 output: None,
                                 reused_exr_frames: false,
+                                timing: None,
                             });
                         }
                     }
@@ -821,15 +841,17 @@ impl Session {
                             i.status = RenderStatus::Rendering;
                             i.started = Some(*unix);
                             i.render_time = None;
+                            i.last_timing = None;
                         }
                     }
-                    ItemUpdate::Finished { id, status, seconds, output, reused_exr_frames } => {
+                    ItemUpdate::Finished { id, status, seconds, output, reused_exr_frames, timing } => {
                         if let Some(i) = p.render_queue.iter_mut().find(|i| i.id == *id) {
                             i.status = status.clone();
                             i.render_time = Some(*seconds);
                             if output.is_some() {
                                 i.last_output = output.clone();
                             }
+                            i.last_timing = timing.clone();
                             if let (RenderStatus::Done, Some(o)) = (status, output)
                                 && !i.post_render.is_none()
                             {

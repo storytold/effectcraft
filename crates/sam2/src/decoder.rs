@@ -313,6 +313,77 @@ mod tests {
         (a - b).unwrap().abs().unwrap().flatten_all().unwrap().max(0).unwrap().to_scalar::<f32>().unwrap()
     }
 
+    /// Compare each f32 reduction with an f64 oracle, not with another rounded f32 sum.
+    fn assert_transposed_roundoff(x: &Tensor, k: &Tensor, want: &Tensor, got: &Tensor) {
+        let c = k.dim(0).unwrap() as f64;
+        let x64 = x.to_dtype(DType::F64).unwrap();
+        let k64 = k.to_dtype(DType::F64).unwrap();
+        let reference = x64.conv_transpose2d(&k64, 0, 0, 2, 1).unwrap().flatten_all().unwrap().to_vec1::<f64>().unwrap();
+        let magnitude = x64.abs().unwrap().conv_transpose2d(&k64.abs().unwrap(), 0, 0, 2, 1).unwrap().flatten_all().unwrap().to_vec1::<f64>().unwrap();
+        // A c-term dot product has forward error <= gamma_c * sum |x_i k_i|,
+        // gamma_c = c*u/(1-c*u), u = half the machine epsilon, in any summation order
+        // (Higham, Accuracy and Stability of Numerical Algorithms, eq. 3.5). Without
+        // FMA each term sees one multiply and at most c-1 additions; with FMA at most
+        // c fused operations. Either way that is at most c roundings per term.
+        // Account for the f64 oracle and magnitude sum's own rounding as well.
+        let gamma32 = c * (f64::from(f32::EPSILON) / 2.0) / (1.0 - c * (f64::from(f32::EPSILON) / 2.0));
+        let gamma64 = c * (f64::EPSILON / 2.0) / (1.0 - c * (f64::EPSILON / 2.0));
+        // Also cover flushed subnormal products/sums; no empirical absolute floor.
+        let underflow = c * f64::from(f32::MIN_POSITIVE) / (1.0 - c * (f64::from(f32::EPSILON) / 2.0));
+        for (name, output) in [("convolution", want), ("matrix product", got)] {
+            assert_eq!(output.dims(), [1, k.dim(1).unwrap(), 2 * x.dim(2).unwrap(), 2 * x.dim(3).unwrap()]);
+            let values = output.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+            for (i, ((value, exact), sumabs)) in values.iter().zip(&reference).zip(&magnitude).enumerate() {
+                let bound = (gamma32 + gamma64) * sumabs / (1.0 - gamma64) + underflow;
+                let error = (f64::from(*value) - exact).abs();
+                assert!(bound.is_finite() && error <= bound, "{name} {:?} output {i}: error {error:e} > bound {bound:e}", x.dims());
+            }
+        }
+    }
+
+    /// Original synthetic inputs: numerators <= 15 and <= 256 channels keep every
+    /// product and partial sum exact in f32, independent of the reduction order.
+    #[test]
+    fn transposed_convolution_preserves_signed_channel_and_pixel_indices_exactly() {
+        let d = &Device::Cpu;
+        for (c, o, h, w) in [(256, 5, 3, 7), (3, 5, 7, 11), (5, 3, 1, 9), (4, 2, 9, 1), (1, 1, 1, 1), (17, 1, 3, 5), (1, 19, 6, 2)] {
+            let xv: Vec<f32> = (0..c * h * w).map(|i| ((i * 17 % 31) as f32 - 15.0) / 16.0).collect();
+            let kv: Vec<f32> = (0..c * o * 4).map(|i| ((i * 11 % 29) as f32 - 14.0) / 16.0).collect();
+            let x = Tensor::from_vec(xv.clone(), (1, c, h, w), d).unwrap();
+            let k = Tensor::from_vec(kv.clone(), (c, o, 2, 2), d).unwrap();
+            let output = conv_transpose_2x2_image(&x, &k).unwrap();
+            assert_eq!(output.dims(), [1, o, 2 * h, 2 * w]);
+            let got = output.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+            for oc in 0..o {
+                for y in 0..2 * h {
+                    for x in 0..2 * w {
+                        let expected: f32 = (0..c).map(|ic| xv[(ic * h + y / 2) * w + x / 2] * kv[((ic * o + oc) * 2 + y % 2) * 2 + x % 2]).sum();
+                        assert_eq!(got[(oc * 2 * h + y) * 2 * w + x], expected, "c{c} o{o} {h}x{w}: channel {oc}, pixel ({x},{y})");
+                    }
+                }
+            }
+        }
+    }
+
+    /// The exact dot is one, but separate f32 products may cancel to zero. The
+    /// more accurate fused result must not be rejected for differing from it.
+    #[test]
+    fn transposed_convolution_roundoff_handles_cancellation() {
+        let mut xv = vec![0f32; 256];
+        let mut kv = vec![0f32; 256 * 4];
+        xv[0] = 4096.0;
+        xv[1] = 4097.0;
+        for p in 0..4 {
+            kv[p] = -4098.0;
+            kv[4 + p] = 4097.0;
+        }
+        let x = Tensor::from_vec(xv, (1, 256, 1, 1), &Device::Cpu).unwrap();
+        let k = Tensor::from_vec(kv, (256, 1, 2, 2), &Device::Cpu).unwrap();
+        let want = x.conv_transpose2d(&k, 0, 0, 2, 1).unwrap();
+        let got = conv_transpose_2x2_image(&x, &k).unwrap();
+        assert_transposed_roundoff(&x, &k, &want, &got);
+    }
+
     /// The matrix-product form equals `conv_transpose2d` (kernel 2, stride 2, no padding, the only
     /// variant the decoder uses) to rounding, for the decoder's two sizes and for odd ones.
     #[test]
@@ -327,11 +398,7 @@ mod tests {
                 let k = Tensor::randn(0f32, scale, (c, o, 2, 2), d).unwrap();
                 let want = x.conv_transpose2d(&k, 0, 0, 2, 1).unwrap();
                 let got = conv_transpose_2x2_image(&x, &k).unwrap();
-                // 1e-6 of the largest output value (at least 1e-6 absolute): float rounding only
-                let peak = want.abs().unwrap().flatten_all().unwrap().max(0).unwrap().to_scalar::<f32>().unwrap();
-                let tol = 1e-6 * peak.max(1.0);
-                let diff = max_diff(&want, &got);
-                assert!(diff <= tol, "c{c} o{o} {h}x{w} std {std}: max diff {diff:e} > {tol:e}");
+                assert_transposed_roundoff(&x, &k, &want, &got);
             }
         }
     }

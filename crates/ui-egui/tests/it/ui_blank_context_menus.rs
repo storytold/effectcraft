@@ -12,7 +12,10 @@ use serde_json::json;
 fn harness() -> Harness<'static, EffectcraftApp> {
     let mut session = Session::default();
     session.execute("comp.new", json!({"name":"Empty", "width":640,"height":360,"duration":4})).unwrap();
-    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(session));
+    let mut h = Harness::builder()
+        .with_size(vec2(1600.0, 1000.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(session));
     // English whatever the system language: the menu items found below by label are translated.
     h.state_mut().session.prefs.general.language = "en".into();
     h.run_steps(3);

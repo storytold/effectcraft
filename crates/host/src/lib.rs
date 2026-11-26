@@ -85,6 +85,7 @@ impl Exporter for FileExporter {
                     reused_frames: r.reused_frames,
                     log: r.log,
                     overflow: r.overflow,
+                    timing: Some(r.timing),
                 }),
                 Err(effectcraft_export::ExportError::Cancelled) => Err(effectcraft_engine::render_queue::CANCELLED.into()),
                 Err(e) => Err(e.to_string()),
@@ -171,7 +172,8 @@ pub fn stop_helpers() {
 /// The platform config directory for EffectCraft (`EFFECTCRAFT_CONFIG_DIR` overrides):
 /// `~/Library/Application Support/EffectCraft` (macOS), `%APPDATA%\EffectCraft` (Windows),
 /// `$XDG_CONFIG_HOME/effectcraft` or `~/.config/effectcraft` (Linux and others). A `portable.txt`
-/// beside the executable puts it in `EffectCraftData` there instead ([`app_dirs`]).
+/// beside the executable puts it in `EffectCraftData` there instead ([`app_dirs`]). A Nightly launch
+/// uses the private profile root its launcher selected (`app_dirs::set_profile_root`).
 pub fn config_dir() -> Option<std::path::PathBuf> {
     app_dirs::current().dir.clone()
 }

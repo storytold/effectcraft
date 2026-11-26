@@ -4,7 +4,9 @@
 
 use std::sync::Mutex;
 
-use effectcraft_project::render_queue::{AlphaMode, Channels, CurrentOrOff, EffectsMode, FrameSample, RenderLog, ResizeQuality, SwitchOverride, log_path};
+use effectcraft_project::render_queue::{
+    AlphaMode, Channels, CurrentOrOff, EffectsMode, FrameSample, OutputFormat, OutputModule, RenderLog, RenderTiming, ResizeQuality, SwitchOverride, log_path,
+};
 use effectcraft_project::{BitDepth, Comp, LayerId, Project};
 use effectcraft_raster::Image;
 use effectcraft_render::{Backend, LayerCache, RenderOpts, Renderer};
@@ -273,6 +275,46 @@ pub(crate) struct Cx<'a> {
     /// Files written to an overflow folder.
     pub overflowed: Mutex<Vec<String>>,
     written: Mutex<Vec<String>>,
+    /// Busy time per stage, for the log's timing line (#3713).
+    phases: Phases,
+}
+
+/// The stages of a job whose busy time is measured.
+#[derive(Clone, Copy)]
+pub(crate) enum Stage {
+    /// Rendering frames (and, for formats that encode and write inside the frame loop, that too).
+    Render,
+    Encode,
+    Write,
+    Audio,
+    /// An encoder that writes as it encodes (the GIF writer): the two are not apart.
+    EncodeWrite,
+}
+
+/// Busy time per [`Stage`] in nanoseconds. The stages overlap (the encoder works on one batch
+/// while the next renders), so each is its own total, not a share of the wall time.
+#[derive(Default)]
+struct Phases {
+    nanos: [std::sync::atomic::AtomicU64; 5],
+    /// Bit per stage that was timed: a stage a format doesn't have has no time, not zero.
+    used: std::sync::atomic::AtomicU8,
+}
+
+impl Phases {
+    fn add(&self, stage: Stage, since: Instant) {
+        self.used.fetch_or(1 << stage as u8, std::sync::atomic::Ordering::Relaxed);
+        let n = u64::try_from(since.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        if let Some(slot) = self.nanos.get(stage as usize) {
+            slot.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    fn seconds(&self, stage: Stage) -> f64 {
+        self.nanos.get(stage as usize).map_or(0.0, |n| n.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e9)
+    }
+    /// The stage's busy time, or `None` when the format never timed it.
+    fn measured(&self, stage: Stage) -> Option<f64> {
+        (self.used.load(std::sync::atomic::Ordering::Relaxed) & (1 << stage as u8) != 0).then(|| self.seconds(stage))
+    }
 }
 
 /// A job's layer caches: its own, or those of the Render Queue run it belongs to.
@@ -366,11 +408,48 @@ impl<'a> Cx<'a> {
             frame_times,
             overflowed: Mutex::new(vec![]),
             written: Mutex::new(vec![]),
+            phases: Phases::default(),
         };
         if let Some(c) = cx.fixed_choice(std::env::var(RENDERER_ENV).ok().as_deref()) {
             cx.decide(c);
         }
         cx
+    }
+
+    /// Run `f` and add its time to `stage`'s busy time. Formats that encode and write outside
+    /// the frame loop time those stages this way; a stage never timed is reported as measured
+    /// together with rendering.
+    pub(crate) fn timed<T>(&self, stage: Stage, f: impl FnOnce() -> T) -> T {
+        let t = Instant::now();
+        let out = f();
+        self.add_time(stage, t);
+        out
+    }
+
+    /// [`Cx::timed`] when `on`; otherwise just run `f` (a stage the job doesn't have).
+    pub(crate) fn timed_if<T>(&self, on: bool, stage: Stage, f: impl FnOnce() -> T) -> T {
+        if on { self.timed(stage, f) } else { f() }
+    }
+
+    /// Add the time since `since` to `stage`'s busy time (where a closure cannot wrap the work).
+    pub(crate) fn add_time(&self, stage: Stage, since: Instant) {
+        self.phases.add(stage, since);
+    }
+
+    /// Where the job's time went, for the render log and the [`crate::Report`].
+    pub(crate) fn timing(&self, wall: f64, frames: u64) -> RenderTiming {
+        RenderTiming {
+            wall_seconds: wall,
+            render_seconds: self.phases.seconds(Stage::Render),
+            encode_seconds: self.phases.measured(Stage::Encode),
+            write_seconds: self.phases.measured(Stage::Write),
+            encode_write_seconds: self.phases.measured(Stage::EncodeWrite),
+            audio_seconds: self.phases.measured(Stage::Audio),
+            frames,
+            frames_per_second: if wall > 0.0 { frames as f64 / wall } else { 0.0 },
+            renderer: self.choice().map_or_else(|| "none was needed".to_string(), |c| describe_choice(&c)),
+            encoder: describe_encoder(self.job.output),
+        }
     }
 
     /// The project's compositor: the GPU's for GPU Acceleration with an accelerator.
@@ -496,15 +575,19 @@ impl<'a> Cx<'a> {
     /// Output frames `ks`, each mapped by `f` (encoding): rendered in parallel batches, or one
     /// by one in passes when readbacks are deferred ([`Cx::deferred`]).
     pub async fn frames<T: Send>(&self, comp: &Comp, ks: Vec<u64>, f: impl Fn(u64, Image) -> T + Sync + Send) -> Vec<T> {
-        if self.deferred() {
+        let t = Instant::now();
+        let out = if self.deferred() {
             let mut out = Vec::with_capacity(ks.len());
             for k in ks {
                 let img = self.frame_async(comp, k).await;
                 out.push(f(k, img));
             }
-            return out;
-        }
-        self.render_frames(ks, |k, on| self.frame_on(comp, k, on), f)
+            out
+        } else {
+            self.render_frames(ks, |k, on| self.frame_on(comp, k, on), f)
+        };
+        self.phases.add(Stage::Render, t);
+        out
     }
 
     /// `render` then `encode` over the frames `ks` on the job's compositor, results in `ks`
@@ -837,14 +920,17 @@ impl<'a> Cx<'a> {
         fallback: impl Fn(u64, Image) -> T + Sync + Send,
     ) -> Vec<T> {
         // As in `frames`: once the GPU has stopped for good, the rest render in parallel.
-        self.render_frames(
+        let t = Instant::now();
+        let out = self.render_frames(
             ks,
             |k, on| self.yuv420_frame(comp, k, w, h, on).ok_or_else(|| self.frame_on(comp, k, on)),
             |k, r| match r {
                 Ok(p) => planes(p),
                 Err(img) => fallback(k, img),
             },
-        )
+        );
+        self.phases.add(Stage::Render, t);
+        out
     }
 
     /// Output Module ▸ Crop, then Resize.
@@ -957,7 +1043,7 @@ impl<'a> Cx<'a> {
     }
 
     /// Write the render log next to the output, as the Log setting asks. Returns its path.
-    pub fn write_log(&self, result: &Result<crate::Report, crate::ExportError>, seconds: f64) -> Option<String> {
+    pub fn write_log(&self, result: &Result<crate::Report, crate::ExportError>, seconds: f64, timing: Option<&RenderTiming>) -> Option<String> {
         let level = self.job.options.log;
         // Errors Only: a log for failures (a user stop is not an error).
         if level == RenderLog::ErrorsOnly && matches!(result, Ok(_) | Err(crate::ExportError::Cancelled)) {
@@ -975,6 +1061,14 @@ impl<'a> Cx<'a> {
         }
         if let Some(c) = self.choice() {
             s.push_str(&format!("Renderer: {}\n", describe_choice(&c)));
+        }
+        if let Some(t) = timing {
+            // (a failed job has no frame count: the line says what ran before it stopped)
+            let line = if result.is_err() { t.summary_of_unfinished("failed") } else { t.summary() };
+            s.push_str(&format!(
+                "Timing: {line}
+"
+            ));
         }
         if self.backend() == crate::JobRenderer::Gpu
             && let Some((n, why)) = &*self.gpu_frames.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1010,6 +1104,34 @@ impl<'a> Cx<'a> {
         f.finish().ok()?;
         Some(path)
     }
+}
+
+/// The render log's account of the encoder: every encoder here is built in and runs on the
+/// CPU (no hardware encoder is used), with the codec settings of the Output Module.
+pub(crate) fn describe_encoder(om: &OutputModule) -> String {
+    use effectcraft_project::render_queue::{ProResProfile, WebmVideoCodec};
+    let rate = |om: &OutputModule| match om.codec.rate_control {
+        effectcraft_project::render_queue::RateControlMode::Bitrate => format!("{} kbps", om.bitrate_kbps),
+        effectcraft_project::render_queue::RateControlMode::Quality => format!("constant quality {}", om.codec.quality),
+    };
+    let mut label = om.format.label().to_string();
+    let settings = match om.format {
+        OutputFormat::H264 => format!(", {} kbps", om.bitrate_kbps),
+        OutputFormat::Hevc | OutputFormat::Av1 => format!(", profile {}, {}", om.codec.profile.label(), rate(om)),
+        // (alpha needs a 4444 flavour: the encoder promotes the profile, so the log names that one)
+        OutputFormat::ProRes => {
+            let profile = if om.channels == Channels::Rgba && !om.prores_profile.is_4444() { ProResProfile::P4444 } else { om.prores_profile };
+            format!(", profile {}", profile.label())
+        }
+        // (WebM carries VP9 or AV1: the log names the one that is written)
+        OutputFormat::WebM if om.webm_codec == WebmVideoCodec::Av1 => {
+            label = "WebM (AV1 + Opus)".to_string();
+            format!(", profile {}, {}", om.codec.profile.label(), rate(om))
+        }
+        OutputFormat::WebM => format!(", {:?}{}", om.webm_codec, if om.webm_bitrate { format!(", {} kbps", om.bitrate_kbps) } else { String::new() }),
+        _ => String::new(),
+    };
+    format!("{label}{settings}, built-in software encoder (not a hardware encoder)")
 }
 
 /// The render log's account of a job's compositor: which, why, and what was measured.
@@ -1116,6 +1238,25 @@ mod tests {
     use super::*;
     use rayon::prelude::*;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    /// #3724 review: the log names the profile and codec that are written: alpha promotes ProRes
+    /// to 4444, and WebM with AV1 says AV1 (not VP9).
+    #[test]
+    fn the_encoder_description_names_what_is_written() {
+        use effectcraft_project::render_queue::{Channels, ProResProfile, WebmVideoCodec};
+        let mut om = OutputModule { format: OutputFormat::ProRes, prores_profile: ProResProfile::Hq, channels: Channels::Rgb, ..OutputModule::default() };
+        let hq = describe_encoder(&om);
+        assert!(hq.contains(ProResProfile::Hq.label()) && !hq.contains("4444"), "{hq}");
+        om.channels = Channels::Rgba;
+        let alpha = describe_encoder(&om);
+        assert!(alpha.contains(ProResProfile::P4444.label()) && !alpha.contains(ProResProfile::Hq.label()), "{alpha}");
+        let mut web = OutputModule { format: OutputFormat::WebM, webm_codec: WebmVideoCodec::Av1, ..OutputModule::default() };
+        let av1 = describe_encoder(&web);
+        assert!(av1.starts_with("WebM (AV1 + Opus)") && !av1.contains("VP9") && av1.contains("profile"), "{av1}");
+        web.webm_codec = WebmVideoCodec::Vp9;
+        let vp9 = describe_encoder(&web);
+        assert!(vp9.starts_with("WebM (VP9 + Opus)") && !vp9.contains("AV1"), "{vp9}");
+    }
 
     /// Dither may round a colour up while alpha rounds down; premultiplied colour stays at or
     /// below the written alpha at every pixel.

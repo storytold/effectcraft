@@ -440,7 +440,7 @@ mod tests {
         // The decoded image has already taken four pixels from this budget.
         let mut pixels_left = 4;
         let mut warnings = vec![];
-        let clamped = cm::TextureRef { image: 0, uv_set: 0, wrap: [cm::Wrap::Clamp; 2] };
+        let clamped = cm::TextureRef { image: 0, uv_set: 0, wrap: [cm::Wrap::Clamp; 2], transform: None };
 
         let first = ensure_texture(&scene, &decoded, clamped, &mut textures, &mut texture_of, &mut pixels_left, &mut warnings).unwrap();
         let shared = ensure_texture(&scene, &decoded, clamped, &mut textures, &mut texture_of, &mut pixels_left, &mut warnings).unwrap();

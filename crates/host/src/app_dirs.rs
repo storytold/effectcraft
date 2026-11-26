@@ -2,13 +2,15 @@
 //! plug-ins): the one directory [`config_dir`](crate::config_dir) returns.
 //!
 //! In order:
-//! 1. `EFFECTCRAFT_CONFIG_DIR`, when set (tests, agents, custom setups).
-//! 2. **Portable mode** (#993): a marker file ([`PORTABLE_MARKERS`]) beside the executable puts
+//! 1. A validated Nightly profile root (`set_profile_root`), set once at startup by the desktop
+//!    app before anything reads this module: every file below then stays in that private folder.
+//! 2. `EFFECTCRAFT_CONFIG_DIR`, when set (tests, agents, custom setups).
+//! 3. **Portable mode** (#993): a marker file ([`PORTABLE_MARKERS`]) beside the executable puts
 //!    everything in `<exe dir>/EffectCraftData`, so a portable copy on a USB stick leaves nothing in
 //!    `%APPDATA%`. The Windows portable zip ships with `portable.txt`; the MSI doesn't. If that
 //!    folder can't be written (read-only medium, Program Files), a warning is logged and the
 //!    platform folder is used.
-//! 3. The platform convention: macOS `~/Library/Application Support/EffectCraft`, Windows
+//! 4. The platform convention: macOS `~/Library/Application Support/EffectCraft`, Windows
 //!    `%APPDATA%\EffectCraft`, Linux `$XDG_CONFIG_HOME/effectcraft` or `~/.config/effectcraft`.
 
 use std::ffi::OsString;
@@ -41,17 +43,42 @@ pub struct DataDir {
     pub warning: Option<String>,
 }
 
+/// A validated Nightly profile root, set once before any data root is first read. A stable launch
+/// never sets it, so nothing about stable resolution changes.
+static PROFILE_ROOT: OnceLock<PathBuf> = OnceLock::new();
+
+/// Select the private Nightly profile root. Only the desktop app's launch-profile bootstrap calls
+/// this, after the root passed `profile_root::validate`.
+pub fn set_profile_root(root: PathBuf) -> Result<(), &'static str> {
+    PROFILE_ROOT.set(root).map_err(|_| "the Nightly profile root was already selected")
+}
+
+/// The Nightly profile root, when this process is a Nightly launch.
+pub fn profile_root() -> Option<&'static Path> {
+    PROFILE_ROOT.get().map(PathBuf::as_path)
+}
+
 /// The data directory for this process, resolved once (the portable check probes the disk).
 pub fn current() -> &'static DataDir {
     static DIR: OnceLock<DataDir> = OnceLock::new();
     DIR.get_or_init(|| {
         let exe = std::env::current_exe().ok();
-        let d = resolve(|k| std::env::var_os(k), exe.as_deref().and_then(Path::parent));
+        let d = resolve_with_profile(profile_root(), |k| std::env::var_os(k), exe.as_deref().and_then(Path::parent));
         if let Some(w) = &d.warning {
             log::warn!("{w}");
         }
         d
     })
+}
+
+/// Resolve the data directory with an optional validated Nightly profile root, which wins over
+/// every stable choice: no environment override or portable marker can point a Nightly session
+/// back at stable files.
+pub fn resolve_with_profile(profile: Option<&Path>, env: impl Fn(&str) -> Option<OsString>, exe_dir: Option<&Path>) -> DataDir {
+    if let Some(root) = profile {
+        return DataDir { dir: Some(root.to_path_buf()), mode: Mode::Override, warning: None };
+    }
+    resolve(env, exe_dir)
 }
 
 /// Resolve the data directory from the environment (`env`) and the executable's folder.
@@ -93,7 +120,7 @@ pub fn portable_marker(exe_dir: &Path) -> Option<PathBuf> {
 }
 
 /// Create `dir` and prove a file can be written in it (a folder can exist yet be read-only).
-fn ensure_writable(dir: &Path) -> std::io::Result<()> {
+pub fn ensure_writable(dir: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
     let probe = dir.join(format!(".write-test-{}", std::process::id()));
     std::fs::write(&probe, b"")?;
@@ -208,6 +235,24 @@ mod tests {
         let d = resolve(env_of(&[("EFFECTCRAFT_CONFIG_DIR", &custom)]), Some(&exe));
         assert_eq!((d.mode, d.dir), (Mode::Override, Some(custom)));
         assert!(!exe.join(PORTABLE_DATA_DIR).exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_validated_profile_root_wins_over_every_stable_choice() {
+        let root = temp("profile-root");
+        let exe = root.join("bin");
+        std::fs::create_dir_all(&exe).unwrap();
+        std::fs::write(exe.join(PORTABLE_MARKERS[0]), b"").unwrap();
+        let custom = root.join("custom");
+        let env = env_of(&[("EFFECTCRAFT_CONFIG_DIR", &custom), ("HOME", &root), ("APPDATA", &root)]);
+        let profile = root.join("launcher/profiles/effectcraft");
+        let d = resolve_with_profile(Some(&profile), &env, Some(&exe));
+        assert_eq!((d.mode, d.dir.as_deref()), (Mode::Override, Some(profile.as_path())));
+        assert!(d.warning.is_none());
+        assert!(!profile.exists(), "resolving must not create anything");
+        assert!(!exe.join(PORTABLE_DATA_DIR).exists(), "no portable folder is created for a Nightly launch");
+        assert_eq!(resolve_with_profile(None, &env, Some(&exe)).dir, Some(custom), "stable keeps its own override");
         let _ = std::fs::remove_dir_all(&root);
     }
 

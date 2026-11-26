@@ -126,7 +126,19 @@ fn check_frame(img: &Image, k: u64, tol: f32) {
     assert!(near([c[0], c[1], c[2]], want, tol), "frame {k} centre {c:?} want {want:?}");
 }
 
-fn decode_movie(path: &Path, frames: u64, tol: f32) -> effectcraft_project::Footage {
+/// Write to the test process's stderr, not libtest's buffered per-test capture: nextest can
+/// then show the last stage even when it has to terminate a stuck process.
+fn prores_stage(trace: bool, stage: std::fmt::Arguments<'_>) {
+    use std::io::Write as _;
+
+    if trace {
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(stderr, "ProRes MOV roundtrip: {stage}").and_then(|()| stderr.flush());
+    }
+}
+
+fn decode_movie(path: &Path, frames: u64, tol: f32, trace: bool) -> effectcraft_project::Footage {
+    prores_stage(trace, format_args!("native probe"));
     let f = effectcraft_media::probe(path).expect("probe our output");
     assert_eq!((f.width, f.height), (W, H));
     assert!(f.has_video);
@@ -134,6 +146,7 @@ fn decode_movie(path: &Path, frames: u64, tol: f32) -> effectcraft_project::Foot
     assert_eq!(n as u64, frames, "frame count from duration {:?} @ {:?}", f.duration, f.frame_rate);
     let pool = MediaPool::new();
     for k in 0..frames {
+        prores_stage(trace, format_args!("native decode frame {k}"));
         let img = pool.frame_at(&f, f.frame_rate.tick_of(k as i64)).expect("decode");
         check_frame(&img, k, tol);
     }
@@ -153,8 +166,9 @@ fn ffprobe(path: &Path) -> Option<String> {
 }
 
 /// Frame `k` decoded by ffmpeg (external oracle) as RGBA, or `None` without ffmpeg.
-fn ffmpeg_frame(path: &Path, k: u64) -> Option<Image> {
+fn ffmpeg_frame(path: &Path, k: u64, trace: bool) -> Option<Image> {
     let png = path.with_extension(format!("ffmpeg-{k}.png"));
+    prores_stage(trace, format_args!("FFmpeg decode frame {k}"));
     let st = Command::new("ffmpeg")
         .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
         .arg(path)
@@ -163,13 +177,14 @@ fn ffmpeg_frame(path: &Path, k: u64) -> Option<Image> {
         .status()
         .ok()?;
     assert!(st.success(), "ffmpeg failed to decode {}", path.display());
+    prores_stage(trace, format_args!("read FFmpeg oracle PNG for frame {k}"));
     let img = image::open(&png).expect("ffmpeg png").to_rgba8();
     Some(Image::from_rgba8(img.width(), img.height(), img.as_raw()))
 }
 
-fn ffmpeg_check(path: &Path, tol: f32) {
+fn ffmpeg_check(path: &Path, tol: f32, trace: bool) {
     for k in [0, 4, 5, FRAMES - 1] {
-        match ffmpeg_frame(path, k) {
+        match ffmpeg_frame(path, k, trace) {
             Some(img) => check_frame(&img, k, tol),
             None => {
                 eprintln!("ffmpeg not found: skipping oracle decode");
@@ -187,8 +202,8 @@ fn h264_mp4_roundtrip() {
     let path = d.join("comp.mp4");
     let r = run(&p, cid, &NoFootage, &om, &path);
     assert!(r.bytes > 100 && !r.audio);
-    decode_movie(&path, FRAMES, 0.08);
-    ffmpeg_check(&path, 0.08);
+    decode_movie(&path, FRAMES, 0.08, false);
+    ffmpeg_check(&path, 0.08, false);
     if let Some(s) = ffprobe(&path) {
         assert!(s.contains("h264|64|48|yuv420p"), "{s}");
         assert!(s.lines().next().unwrap_or("").ends_with("|12"), "{s}");
@@ -223,17 +238,21 @@ fn h264_odd_size_is_cropped_even() {
 
 #[test]
 fn prores_mov_roundtrip() {
+    prores_stage(true, format_args!("fixture setup"));
     let d = out_dir("prores");
     let (p, cid) = project(None);
     let om = OutputModule::for_format(OutputFormat::ProRes);
     let path = d.join("comp.mov");
+    prores_stage(true, format_args!("native export"));
     run(&p, cid, &NoFootage, &om, &path);
-    decode_movie(&path, FRAMES, 0.03);
-    ffmpeg_check(&path, 0.03);
+    decode_movie(&path, FRAMES, 0.03, true);
+    ffmpeg_check(&path, 0.03, true);
+    prores_stage(true, format_args!("ffprobe metadata"));
     if let Some(s) = ffprobe(&path) {
         assert!(s.starts_with("prores|64|48"), "{s}");
         assert!(s.lines().next().unwrap_or("").ends_with("|12"), "{s}");
     }
+    prores_stage(true, format_args!("complete"));
 }
 
 #[test]
@@ -888,12 +907,12 @@ fn webm_vp9_opus_roundtrip() {
     let r = run(&p, cid, &pool, &om, &path);
     assert!(r.audio && r.bytes > 200, "{r:?}");
     // Decoded back through FilmCraft (Matroska demuxer, VP9 and Opus decoders).
-    let f = decode_movie(&path, FRAMES, 0.08);
+    let f = decode_movie(&path, FRAMES, 0.08, false);
     assert!(f.has_audio);
     let s = MediaPool::new().audio_samples(&f, Tick::from_seconds_f64(0.3), 24_000, 48_000);
     let l = rms(s.iter().step_by(2).copied());
     assert!((l - 0.3536).abs() < 0.06, "left RMS {l}");
-    ffmpeg_check(&path, 0.08);
+    ffmpeg_check(&path, 0.08, false);
     if let Some(s) = ffprobe(&path) {
         assert!(s.contains("vp9|64|48|yuv420p"), "{s}");
         assert!(s.contains("opus"), "{s}");

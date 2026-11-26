@@ -731,6 +731,7 @@ fn duplicate(s: &mut Session, p: &Value) -> Result<Value> {
         it.started = None;
         it.render_time = None;
         it.last_output = None;
+        it.last_timing = None;
         let id = it.id;
         proj.render_queue.insert(i + 1, it);
         Ok(id)

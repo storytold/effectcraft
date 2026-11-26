@@ -19,7 +19,10 @@ fn harness() -> Harness<'static, EffectcraftApp> {
         let comp = s.execute("comp.new", json!({"name": name, "width": 320, "height": 180, "duration": 4})).unwrap()["comp"].as_u64().unwrap();
         s.execute("renderQueue.add", json!({"comp": comp})).unwrap();
     }
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(s));
     h.state_mut().show_panel(PanelKind::RenderQueue);
     h.run_steps(4);
     h
