@@ -5,7 +5,7 @@
 
 use std::sync::{Mutex, OnceLock};
 
-use effectcraft_effects::psim::{ParticleSystem, SimParticle, SimRequest};
+use effectcraft_effects::psim::{ParticleSystem, SimParticle, SimRequest, producer_prefixes};
 
 use crate::context::GpuContext;
 
@@ -25,6 +25,8 @@ struct Checkpoint {
     n: u32,
     /// The birth steps of its particles (see [`born`]).
     born: u64,
+    /// Fingerprint of the producer history that reached this checkpoint.
+    producer: u64,
     buf: wgpu::Buffer,
     used: u64,
 }
@@ -74,6 +76,7 @@ fn pipes(g: &GpuContext) -> &Pipes {
                 buffer(1, wgpu::BufferBindingType::Storage { read_only: true }),
                 buffer(2, wgpu::BufferBindingType::Storage { read_only: true }),
                 buffer(3, wgpu::BufferBindingType::Storage { read_only: false }),
+                buffer(4, wgpu::BufferBindingType::Storage { read_only: true }),
             ],
         });
         let layout = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -93,6 +96,18 @@ fn pipes(g: &GpuContext) -> &Pipes {
     })
 }
 
+/// Producer positions packed for the shader's `vec4<f32>` storage buffer.
+fn packed_producers(producers: &[[f32; 3]]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for position in producers {
+        out.extend_from_slice(&position[0].to_le_bytes());
+        out.extend_from_slice(&position[1].to_le_bytes());
+        out.extend_from_slice(&position[2].to_le_bytes());
+        out.extend_from_slice(&0.0f32.to_le_bytes());
+    }
+    out
+}
+
 /// The shader's parameter block.
 fn uniforms(req: &SimRequest, n: u32, s0: u64, prev_n: u32) -> Vec<u8> {
     let dt = (1.0 / effectcraft_effects::psim::SPS) as f32;
@@ -103,8 +118,7 @@ fn uniforms(req: &SimRequest, n: u32, s0: u64, prev_n: u32) -> Vec<u8> {
         ParticleSystem::Engine(e) => {
             u2 = [e.anim, e.flat as u32, e.seed, prev_n];
             f[0] = [e.life, e.speed, e.extra, e.cone];
-            f[1] = [e.producer[0], e.producer[1], e.producer[2], 0.0];
-            f[2] = [e.radius[0], e.radius[1], e.radius[2], 0.0];
+            f[1] = [e.radius[0], e.radius[1], e.radius[2], 0.0];
             f[3] = [e.gravity[0], e.gravity[1], e.gravity[2], 0.0];
             f[4] = [e.axis[0], e.axis[1], e.axis[2], 0.0];
             f[5] = [e.damp, dt, 0.0, 0.0];
@@ -112,9 +126,9 @@ fn uniforms(req: &SimRequest, n: u32, s0: u64, prev_n: u32) -> Vec<u8> {
         ParticleSystem::Cannon(c) => {
             u[3] = 1;
             u2 = [0, 1, c.seed, prev_n];
-            f[0] = [c.pos[0], c.pos[1], c.barrel_angle, c.barrel_radius];
-            f[1] = [c.dir_spread, c.vel, c.vel_spread, c.grav_spread];
-            f[2] = [c.gravity[0], c.gravity[1], dt, 0.0];
+            f[0] = [c.barrel_angle, c.barrel_radius, c.dir_spread, c.vel];
+            f[1] = [c.vel_spread, c.grav_spread, dt, 0.0];
+            f[2] = [c.gravity[0], c.gravity[1], 0.0, 0.0];
             f[3] = c.bounds;
         }
     }
@@ -141,10 +155,24 @@ pub(crate) fn simulate(g: &GpuContext, req: &SimRequest) -> Option<Vec<SimPartic
     if !g.can_readback() || req.steps > u32::MAX as u64 {
         return None;
     }
-    let n = req.births.len() as u32;
+    let n = u32::try_from(req.births.len()).ok()?;
     if n == 0 {
         return Some(vec![]);
     }
+    let steps = usize::try_from(req.steps).ok()?;
+    if steps == 0 {
+        return None;
+    }
+    if req.producers.len() < steps {
+        return None;
+    }
+    // Check the storage-buffer size before allocating the history fingerprint or its bytes.
+    let producer_size = steps.checked_mul(16)?;
+    if u64::try_from(producer_size).ok()? > g.device.limits().max_storage_buffer_binding_size {
+        return None;
+    }
+    let producers = &req.producers[..steps];
+    let producer_prefix = producer_prefixes(producers);
     let deferred = g.deferred.clone();
     let key = deferred.as_ref().map(|_| sim_key(req));
     if let (Some(d), Some(k)) = (&deferred, key) {
@@ -167,7 +195,17 @@ pub(crate) fn simulate(g: &GpuContext, req: &SimRequest) -> Option<Vec<SimPartic
         let mut c = g.particle_states.lock().ok()?;
         c.clock += 1;
         let now = c.clock;
-        match c.list.iter_mut().filter(|k| k.key == req.key && k.steps <= req.steps && born(req.births, k.steps) == (k.n, k.born)).max_by_key(|k| k.steps) {
+        match c
+            .list
+            .iter_mut()
+            .filter(|k| {
+                k.key == req.key
+                    && k.steps <= req.steps
+                    && born(req.births, k.steps) == (k.n, k.born)
+                    && producer_prefix.get(k.steps as usize) == Some(&k.producer)
+            })
+            .max_by_key(|k| k.steps)
+        {
             Some(k) => {
                 k.used = now;
                 (k.steps, Some(k.buf.clone()), k.n)
@@ -178,6 +216,8 @@ pub(crate) fn simulate(g: &GpuContext, req: &SimRequest) -> Option<Vec<SimPartic
     let d = &g.device;
     let births: Vec<u8> = req.births.iter().flat_map(|b| b.to_le_bytes()).collect();
     let births = g.buffer_init(Some("births"), &births, wgpu::BufferUsages::STORAGE);
+    let producer_bytes = packed_producers(producers);
+    let producers = g.buffer_init(Some("particle producers"), &producer_bytes, wgpu::BufferUsages::STORAGE);
     let prev = prev.unwrap_or_else(|| {
         d.create_buffer(&wgpu::BufferDescriptor { label: Some("particles"), size: STATE_BYTES, usage: wgpu::BufferUsages::STORAGE, mapped_at_creation: false })
     });
@@ -196,6 +236,7 @@ pub(crate) fn simulate(g: &GpuContext, req: &SimRequest) -> Option<Vec<SimPartic
             wgpu::BindGroupEntry { binding: 1, resource: births.as_entire_binding() },
             wgpu::BindGroupEntry { binding: 2, resource: prev.as_entire_binding() },
             wgpu::BindGroupEntry { binding: 3, resource: next.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 4, resource: producers.as_entire_binding() },
         ],
     });
     let read = d.create_buffer(&wgpu::BufferDescriptor {
@@ -221,14 +262,14 @@ pub(crate) fn simulate(g: &GpuContext, req: &SimRequest) -> Option<Vec<SimPartic
         g.map_readback(&read, row, row, 1, move |r| done(r.map_err(|e| log::error!("gpu particle readback: {e}")).ok()));
         #[cfg(not(target_arch = "wasm32"))]
         let _ = g.poll_readbacks(wgpu::PollType::Poll);
-        keep_checkpoint(g, req, n, next);
+        keep_checkpoint(g, req, n, next, &producer_prefix);
         d.miss();
         return Some(vec![]);
     }
     let row = usize::try_from(size).ok()?;
     let bytes = g.read_buffer(&read, row, row, 1).map_err(|e| log::error!("gpu particle readback: {e}")).ok()?;
     let parts = parse(&bytes);
-    keep_checkpoint(g, req, n, next);
+    keep_checkpoint(g, req, n, next, &producer_prefix);
     Some(parts)
 }
 
@@ -239,6 +280,9 @@ fn sim_key(req: &SimRequest) -> u128 {
     k.u64(req.steps);
     k.u64(req.births.len() as u64);
     k.bytes(&req.births.iter().flat_map(|b| b.to_le_bytes()).collect::<Vec<u8>>());
+    let producer_count = usize::try_from(req.steps).ok().and_then(|steps| req.producers.get(..steps)).map_or(0, |producers| producers.len());
+    k.u64(producer_count as u64);
+    k.bytes(&packed_producers(req.producers.get(..producer_count).unwrap_or(&[])));
     k.debug(&req.system);
     k.finish()
 }
@@ -256,12 +300,13 @@ fn parse(bytes: &[u8]) -> Vec<SimParticle> {
 }
 
 /// Keep a simulated state on the GPU as a checkpoint (the oldest go beyond the limit).
-fn keep_checkpoint(g: &GpuContext, req: &SimRequest, n: u32, next: wgpu::Buffer) {
+fn keep_checkpoint(g: &GpuContext, req: &SimRequest, n: u32, next: wgpu::Buffer, producer_prefix: &[u64]) {
     if let Ok(mut c) = g.particle_states.lock() {
         let now = c.clock;
         c.list.retain(|k| !(k.key == req.key && k.steps == req.steps));
         let (_, h) = born(req.births, req.steps);
-        c.list.push(Checkpoint { key: req.key, steps: req.steps, n, born: h, buf: next, used: now });
+        let producer = producer_prefix.get(req.steps as usize).copied().unwrap_or(0);
+        c.list.push(Checkpoint { key: req.key, steps: req.steps, n, born: h, producer, buf: next, used: now });
         while c.list.len() > CHECKPOINTS {
             let Some(i) = c.list.iter().enumerate().min_by_key(|(_, k)| k.used).map(|(i, _)| i) else { break };
             c.list.remove(i);

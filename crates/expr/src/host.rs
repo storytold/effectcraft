@@ -469,8 +469,10 @@ impl<'a> Resolver<'a> {
             Req::PropInfo { comp, layer, path } => {
                 let (l, p) = self.prop(*comp, *layer, path)?;
                 let dims = prop_dims(l, p);
-                let times = p.keys.iter().map(|k| Resp::Num(l.comp_time(k.time).seconds())).collect();
-                let values = p.keys.iter().map(|k| value_resp(&k.value, dims)).collect();
+                let ctx = self.ctx_at(*comp, self.ctx.time.seconds())?;
+                let effective = ctx.effective_property(l, p);
+                let times = effective.keys.iter().map(|k| Resp::Num(l.comp_time(k.time).seconds())).collect();
+                let values = effective.keys.iter().map(|k| value_resp(&k.value, dims)).collect();
                 let index = path.rsplit('/').next().and_then(|last| {
                     let parent = path.rsplit_once('/').map(|(g, _)| g);
                     let g = match parent {
@@ -497,13 +499,15 @@ impl<'a> Resolver<'a> {
             Req::Value { comp, layer, path, t, pre } => {
                 let (l, p) = self.prop(*comp, *layer, path)?;
                 let t = f64::from_bits(*t);
-                let v = if *pre { p.value_at(l.layer_time(Tick::from_seconds_f64(t))) } else { self.ctx_at(*comp, t)?.value(l, p) };
+                let ctx = self.ctx_at(*comp, t)?;
+                let v = if *pre { ctx.effective_property(l, p).value_at(l.layer_time(Tick::from_seconds_f64(t))) } else { ctx.value(l, p) };
                 value_resp(&v, prop_dims(l, p))
             }
             Req::Doc { comp, layer, path, t, pre } => {
                 let (l, p) = self.prop(*comp, *layer, path)?;
                 let t = f64::from_bits(*t);
-                let v = if *pre { p.value_at(l.layer_time(Tick::from_seconds_f64(t))) } else { self.ctx_at(*comp, t)?.value(l, p) };
+                let ctx = self.ctx_at(*comp, t)?;
+                let v = if *pre { ctx.effective_property(l, p).value_at(l.layer_time(Tick::from_seconds_f64(t))) } else { ctx.value(l, p) };
                 match v {
                     Value::Text(d) => Resp::Str(doc_json(&d)),
                     Value::Str(s) => Resp::Str(doc_json(&effectcraft_keyframe::TextDoc::plain(&s))),

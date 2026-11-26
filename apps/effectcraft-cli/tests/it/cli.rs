@@ -475,6 +475,24 @@ fn unknown_options_are_usage_errors() {
     }
 }
 
+/// The desktop Nightly profile flags belong to the Launcher and the GUI: the headless CLI refuses
+/// both spellings (and their `=` forms) as a usage error before anything runs.
+#[test]
+fn the_desktop_nightly_profile_flags_are_refused() {
+    for args in [
+        &["info", "--launch-profile", "nightly-v1", "--profile-root", "/somewhere", "--json"][..],
+        &["info", "--launch-profile=nightly-v1", "--json"],
+        &["render-frame", "--profile-root=/somewhere", "--out", "x.png"],
+        &["--launch-profile", "nightly-v1", "--version"],
+    ] {
+        let out = bin().args(args).output().unwrap();
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {err}");
+        assert!(err.contains("has no launch profile"), "{args:?}: {err}");
+        assert!(out.stdout.is_empty(), "{args:?}: nothing ran");
+    }
+}
+
 /// An argument that is not Unicode (a Latin-1 file name on Linux) is a usage error (exit 2)
 /// naming it, before anything runs: `std::env::args` panicked on one (exit 101).
 #[cfg(unix)]

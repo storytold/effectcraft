@@ -430,7 +430,12 @@ fn run_startup(s: &mut Session, _: &Value) -> Result<Value> {
 /// (frontends call it as the app quits, after the unsaved-changes prompt).
 fn run_shutdown(s: &mut Session, _: &Value) -> Result<Value> {
     s.replace_project(effectcraft_project::Project::default(), None);
-    Ok(run_folder(s, SHUTDOWN_DIR, true))
+    // The app is quitting: nothing would show a Shutdown script's file dialog (File.saveDialog…),
+    // so it gets null at once instead of waiting.
+    let answers = std::mem::replace(&mut s.script_ui.answers_file_dialogs, false);
+    let r = run_folder(s, SHUTDOWN_DIR, true);
+    s.script_ui.answers_file_dialogs = answers;
+    Ok(r)
 }
 
 /// Window ▸ `<ScriptUI panel>`: run the panel script (or bring its panel forward).
@@ -598,6 +603,21 @@ pub fn specs() -> Vec<CommandSpec> {
             "{window?, result? (a dialog's show() returns it; default 2 = Cancel)}",
             always,
             scriptui::close
+        ),
+        crate::query!(
+            "scriptui.fileDialogs",
+            "Script File Dialogs",
+            "{} → [{id, host, kind: open|save|folder, prompt, exts, label, any, many, start, shown}]: the file dialogs scripts wait on (File.openDialog, File.saveDialog, Folder.selectDialog…)",
+            scriptui::file_dialogs
+        ),
+        cmd!(
+            "scriptui.fileDialog",
+            "Answer Script File Dialog",
+            [],
+            None,
+            "{id? (from scriptui.fileDialogs; default the only one), host?, paths: [path…] | null (cancelled)} → the waiting script goes on with the picked files",
+            always,
+            scriptui::file_dialog
         ),
     ]
 }

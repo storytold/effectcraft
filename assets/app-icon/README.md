@@ -34,6 +34,19 @@ Licence: see [LICENSE.txt](LICENSE.txt) (MIT OR Apache-2.0, like the repo).
 
 App ID: `ai.storyteller.effectcraft` (Wayland app ID, `packaging/linux/ai.storyteller.effectcraft.desktop`).
 
+## Nightly channel
+
+The nightly derivatives keep the foreground artwork, alpha and Mac padding unchanged. Only the
+background contribution changes: the stable pink field `#e0368f` becomes the deeper `#5e2443`.
+There is no letter badge or crescent; the app, its window and the Launcher identify the channel in
+text.
+
+`effectcraft-nightly.png` and its nine-frame ICO (16–256 px) use the existing native 256 px master.
+`effectcraft-nightly-1024.png`, `effectcraft-nightly-macos-512.png` and the eleven-slot ICNS use the
+padded Mac masters, never an upscale. Input/output hashes, the palette-fit recipe and container
+members are recorded in [`nightly-provenance.json`](nightly-provenance.json). Stable source files
+are not recoloured.
+
 ## Regenerate
 
 After replacing `effectcraft.svg` / `effectcraft-small.svg`, run `packaging/icons.sh` (needs `resvg`; `iconutil`

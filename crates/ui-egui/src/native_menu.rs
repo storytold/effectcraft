@@ -441,9 +441,12 @@ impl MenuSync {
 
 /// The window whose text field has the keyboard: a floating panel's own OS window, or the main
 /// window, where any widget that holds the keyboard counts (the Viewer's text editor is not an
-/// egui text field).
+/// egui text field) except the Composition viewer itself.
 pub fn text_field_window(ctx: &egui::Context) -> Option<egui::ViewportId> {
-    craft_ui::docking::typing_window(ctx).or_else(|| ctx.egui_wants_keyboard_input().then_some(egui::ViewportId::ROOT))
+    let host = craft_ui::runtime::windows::WindowHost::of(ctx);
+    let window = host.key_window();
+    let floating = (window != egui::ViewportId::ROOT && host.typing()).then_some(window);
+    floating.or_else(|| crate::framework::widget_has_keyboard(ctx).then_some(egui::ViewportId::ROOT))
 }
 
 /// Whether a focused text field takes the menu command `command` ([`activate`]): the native menu
@@ -476,8 +479,9 @@ fn text_field_event(command: &str) -> Option<Vec<egui::Event>> {
 
 /// Hand a text field's Edit command to the window `window` whose field has the keyboard. The
 /// main window gets the clipboard text itself and the events through the synthetic queue; a
-/// floating panel's OS window gets each key pressed and released, and asks for the clipboard
-/// text on Cmd+V (`craft_ui::docking::send_keys`).
+/// floating panel's OS window gets each command as the key equivalent the platform's menu took
+/// from it (Copy and Cut as egui's copy and cut events, the rest as the key's tap), and the
+/// clipboard text as typed text on Cmd+V.
 fn send_to_text_field(app: &mut EffectcraftApp, ctx: &egui::Context, window: egui::ViewportId, events: Vec<egui::Event>) {
     if window == egui::ViewportId::ROOT {
         for event in events {
@@ -493,19 +497,27 @@ fn send_to_text_field(app: &mut EffectcraftApp, ctx: &egui::Context, window: egu
         ctx.request_repaint();
         return;
     }
-    let events = events
-        .into_iter()
-        .flat_map(|event| {
-            let release = match &event {
-                egui::Event::Key { key, physical_key, modifiers, .. } => {
-                    Some(egui::Event::Key { key: *key, physical_key: *physical_key, pressed: false, repeat: false, modifiers: *modifiers })
+    use craft_ui::runtime::windows::{KeyEquivalent, WindowHost};
+    let host = WindowHost::of(ctx);
+    let platform = craft_keymap::egui::platform(ctx);
+    for event in events {
+        let equivalent = match event {
+            egui::Event::Key { key: egui::Key::V, .. } => {
+                if let Some(text) = app.hooks.clipboard_text.as_ref().and_then(|f| f()) {
+                    host.inject_text(window, &text);
                 }
-                _ => None,
-            };
-            std::iter::once(event).chain(release)
-        })
-        .collect();
-    craft_ui::docking::send_keys(ctx, window, events);
+                continue;
+            }
+            egui::Event::Key { key, modifiers, .. } => match craft_keymap::Key::from_egui(key) {
+                Some(key) => KeyEquivalent::Tap(craft_keymap::Chord::new(craft_keymap::Mods::from_egui(&modifiers, platform), key)),
+                None => continue,
+            },
+            egui::Event::Copy => KeyEquivalent::Copy,
+            egui::Event::Cut => KeyEquivalent::Cut,
+            _ => continue,
+        };
+        host.key_equivalent(window, equivalent);
+    }
 }
 
 /// Run a native menu item (by id) the way the in-window menu bar does. While a text field has
@@ -768,6 +780,7 @@ mod tests {
         let spec = build(&app);
         let dup = spec.items().into_iter().find(|i| i.command == "edit.duplicate").map(|i| i.id.clone()).unwrap();
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         app.dialog_state.delete_items.command = Some((json!({"items": []}), json!({"items": 1, "layers": 1, "comps": 1})));
         app.dialog = Some(crate::Dialog::DeleteItems);
         // Chosen with the mouse, Duplicate still runs.
@@ -915,6 +928,7 @@ mod tests {
     fn a_file_dialog_takes_the_edit_keys_from_a_focused_text_field() {
         let mut app = app();
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         let mut text = String::new();
         for _ in 0..2 {
             let mut out = ctx.run_ui(egui::RawInput::default(), |ui| ui.text_edit_singleline(&mut text).request_focus());
@@ -996,6 +1010,7 @@ mod tests {
             app.session.execute("layer.newNull", json!({})).unwrap();
             app.session.execute("edit.undo", json!({})).unwrap();
             let ctx = egui::Context::default();
+            crate::framework::install_headless(&ctx);
             let history = label(&build_now(&app, &ctx), "edit.undo");
             let redo_history = label(&build_now(&app, &ctx), "edit.redo");
             assert!(history.starts_with(undo) && history != undo, "{history}");

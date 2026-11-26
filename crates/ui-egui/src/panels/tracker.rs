@@ -541,7 +541,7 @@ pub fn options_dialog(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens)
                 (LowConfidence::Adapt, "Adapt Feature"),
             ];
             let cur = actions.iter().find(|(a, _)| *a == d.opts.action).map(|(_, l)| *l).unwrap_or("Adapt Feature");
-            let r = craft_ui::ComboBox::from_id_salt("track-action")
+            let r = egui::ComboBox::from_id_salt("track-action")
                 .selected_text(cur)
                 .show_ui(ui, |ui| {
                     for (a, l) in actions {
@@ -594,7 +594,7 @@ pub fn target_dialog(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) 
         ui.horizontal(|ui| {
             ui.label(crate::i18n::tr("Layer:"));
             let cur = d.target.and_then(|id| layers.iter().find(|(l, _)| *l == id)).map(|(_, n)| n.clone()).unwrap_or_else(|| "None".into());
-            let r = craft_ui::ComboBox::from_id_salt("track-target")
+            let r = egui::ComboBox::from_id_salt("track-target")
                 .selected_text(cur)
                 .width(240.0)
                 .show_ui(ui, |ui| {
@@ -627,7 +627,7 @@ pub fn apply_dialog(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
         ui.horizontal(|ui| {
             ui.label(crate::i18n::tr("Apply Dimensions:"));
             let labels = [crate::i18n::tr("X and Y"), crate::i18n::tr("X only"), crate::i18n::tr("Y only")];
-            let r = craft_ui::ComboBox::from_id_salt("track-apply-dims")
+            let r = egui::ComboBox::from_id_salt("track-apply-dims")
                 .selected_text(labels[d.dims.min(2)])
                 .show_ui(ui, |ui| {
                     for (i, l) in labels.iter().enumerate() {

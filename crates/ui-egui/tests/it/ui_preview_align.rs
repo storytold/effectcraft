@@ -16,7 +16,10 @@ fn harness() -> Harness<'static, EffectcraftApp> {
     s.execute("comp.new", json!({"name": "Preview", "width": 320, "height": 180, "frameRate": 24, "duration": 10})).unwrap();
     s.execute("layer.newSolid", json!({"name": "A", "color": "#406080", "width": 40, "height": 30})).unwrap();
     s.execute("layer.newSolid", json!({"name": "B", "color": "#806040", "width": 60, "height": 20})).unwrap();
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(s));
     h.run_steps(3);
     h
 }
@@ -273,13 +276,16 @@ fn playback_prefetches_past_the_cached_frames_ahead() {
     for f in 0..120 {
         h.state().request_frame(cid, f, scale);
     }
-    for _ in 0..4000 {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while std::time::Instant::now() < deadline {
         if h.state().frames.cached_frames(&series).len() >= 120 && h.state().frames.inflight() == 0 {
             break;
         }
+        h.step();
         std::thread::sleep(std::time::Duration::from_millis(2));
     }
-    assert_eq!(h.state().frames.cached_frames(&series), (0..120).collect::<Vec<_>>());
+    let cached = h.state().frames.cached_frames(&series);
+    assert_eq!(cached, (0..120).collect::<Vec<_>>(), "setup cached {} frames before playback: {cached:?}", cached.len());
     // Rendering/instrumentation time must not move the playhead near the end of the
     // cached run. Exercise real prefetch workers while holding playback in its first second.
     h.state_mut().use_manual_clock();

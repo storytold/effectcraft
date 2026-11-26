@@ -14,7 +14,7 @@ fn physical_shortcuts_distinguish_azerty_zoom_keys() {
     for (command, keys) in [("timeline.zoomIn", "Physical+6"), ("timeline.zoomOut", "Physical+Minus")] {
         app.session.execute("shortcuts.set", json!({"command": command, "keys": keys})).unwrap();
     }
-    let mut h = Harness::builder().with_size(vec2(1200.0, 800.0)).build_eframe(|_| app);
+    let mut h = Harness::builder().with_size(vec2(1200.0, 800.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app);
     h.run_steps(3);
     h.state_mut().ui.timeline.pps = Some(100.0);
     for (physical, expected) in [(Key::Num6, 150.0), (Key::Minus, 100.0)] {
@@ -49,7 +49,7 @@ fn shifted_one_toggles_only_selected_video_and_iso_key_maximizes() {
     let mut app = EffectcraftApp::new(s);
     app.session.execute("shortcuts.set", json!({"command": "layer.setSwitch", "params": {"switch": "video"}, "keys": "Shift+1"})).unwrap();
     app.session.execute("shortcuts.set", json!({"command": "window.maximizePanel", "keys": "IntlBackslash"})).unwrap();
-    let mut h = Harness::builder().with_size(vec2(1200.0, 800.0)).build_eframe(|_| app);
+    let mut h = Harness::builder().with_size(vec2(1200.0, 800.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app);
     h.run_steps(3);
     for visible in [false, true] {
         h.event(Event::Key { key: Key::Num1, physical_key: Some(Key::Num1), pressed: true, repeat: false, modifiers: Modifiers::SHIFT });
@@ -72,7 +72,7 @@ fn timeline_shift_p_reveals_instead_of_adding_a_text_animator() {
     s.execute("layer.newSolid", json!({"name": "Box"})).unwrap();
     let mut app = EffectcraftApp::new(s);
     app.session.execute("shortcuts.set", json!({"command": "layer.addTextAnimator", "params": {"properties": ["position"]}, "keys": "Shift+P"})).unwrap();
-    let mut h = Harness::builder().with_size(vec2(1200.0, 800.0)).build_eframe(|_| app);
+    let mut h = Harness::builder().with_size(vec2(1200.0, 800.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app);
     h.run_steps(3);
     h.state_mut().ui.focused = effectcraft_ui_egui::dock::PanelKind::Timeline;
     h.event(Event::Key { key: Key::P, physical_key: Some(Key::P), pressed: true, repeat: false, modifiers: Modifiers::SHIFT });

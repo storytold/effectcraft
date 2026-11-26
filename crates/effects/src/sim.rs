@@ -28,10 +28,10 @@ mod weather;
 pub(crate) use common::{h, hs, pct, pt, spec};
 pub use engine::particle_state;
 #[cfg(test)]
-use engine::{MERCURY, PS2, PW_EFFECT_CAMERA, Stepped, rate_history, sim_key, simulate_rates};
+use engine::{MERCURY, PS2, PW, PW_EFFECT_CAMERA, Stepped, rate_history, sim_key, simulate_rates};
 #[cfg(test)]
 pub(crate) use engine::{PState, PW_ANIMS, Phys, simulate};
-pub(crate) use engine::{SPS, steps_at};
+pub(crate) use engine::{ProducerPath, SPS, steps_at};
 pub(crate) use particle_fx::particle_world_textured;
 pub use particle_fx::{Blob, mercury_blobs};
 #[cfg(test)]
