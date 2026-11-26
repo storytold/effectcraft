@@ -2479,14 +2479,15 @@ fn push_decoded(
     track_idx: usize,
 ) -> Result<()> {
     for vf in frames {
-        stats::frames(1);
-        if vf.draft {
-            stats::draft(1);
-        }
+        let picture_draft = vf.draft;
         let pts = vf.pts.unwrap_or(0);
-        state.emitted_max_pts = Some(state.emitted_max_pts.map_or(pts, |max| max.max(pts)));
         let pts_tick = file.pts_to_tick(track_idx, pts);
         let frame = Arc::new(to_craft_frame(vf, presentation, pts_tick)?);
+        state.emitted_max_pts = Some(state.emitted_max_pts.map_or(pts, |max| max.max(pts)));
+        stats::frames(1);
+        if picture_draft {
+            stats::draft(1);
+        }
         state.cached_bytes = state.cached_bytes.saturating_add(frame.byte_size());
         state.decoded.push(CachedFrame { pts, draft, frame });
     }
