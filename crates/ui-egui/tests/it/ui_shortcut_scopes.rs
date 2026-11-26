@@ -20,6 +20,7 @@ fn app() -> EffectcraftApp {
 /// Press `key` with `modifiers` and run the shortcut dispatcher on it.
 fn press(app: &mut EffectcraftApp, key: Key, modifiers: Modifiers) {
     let ctx = egui::Context::default();
+    effectcraft_ui_egui::framework::install_headless(&ctx);
     press_in(&ctx, app, key, modifiers);
 }
 
@@ -114,6 +115,7 @@ fn cmd_d_duplicates_the_selected_render_queue_item() {
     assert_eq!(ids.len(), 2);
     app.ui.focused = PanelKind::RenderQueue;
     let ctx = egui::Context::default();
+    effectcraft_ui_egui::framework::install_headless(&ctx);
     select(&ctx, Some(ids[0]));
 
     press_in(&ctx, &mut app, Key::D, Modifiers::COMMAND);
@@ -137,6 +139,7 @@ fn cmd_d_in_the_render_queue_needs_a_selected_item() {
     let mut app = app();
     app.ui.focused = PanelKind::RenderQueue;
     let ctx = egui::Context::default();
+    effectcraft_ui_egui::framework::install_headless(&ctx);
     select(&ctx, None);
     press_in(&ctx, &mut app, Key::D, Modifiers::COMMAND);
     assert_eq!(render_items(&app), 1);

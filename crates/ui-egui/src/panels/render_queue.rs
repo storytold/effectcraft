@@ -746,7 +746,7 @@ fn delete_selected(app: &EffectcraftApp, ui: &egui::Ui, allowed: bool, on_row: b
         && !crate::widgets::any_menu_open(ui.ctx())
         && ui.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace))
         // (A focused queue row is not typing; any other focused widget may be.)
-        && (on_row || !ui.ctx().egui_wants_keyboard_input())
+        && (on_row || !crate::framework::widget_has_keyboard(ui.ctx()))
     {
         actions.push(("renderQueue.remove", json!({"item": id})));
         *selected = None;
@@ -767,7 +767,7 @@ fn list_keys(
     tops: &[(u64, f32)],
     list_h: f32,
 ) -> bool {
-    let focused = ctx.memory(|m| m.focused());
+    let focused = crate::framework::focused_widget(ctx);
     let on_row = focused.is_some_and(|f| queue.iter().any(|i| row_id(i.id) == f));
     let by_mouse = focused.is_none() && app.ui.focused == crate::dock::PanelKind::RenderQueue;
     if (on_row || by_mouse) && can_navigate && app.dialog.is_none() && !widgets::any_menu_open(ctx) {

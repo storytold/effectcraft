@@ -61,7 +61,7 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
                 ui.label(slot.label());
                 let cur = templates.default_name(k, slot);
                 let mut pick = cur.clone();
-                let r = craft_ui::ComboBox::from_id_salt(("tpl-def", slot.label())).selected_text(&cur).width(300.0).show_ui(ui, |ui| {
+                let r = egui::ComboBox::from_id_salt(("tpl-def", slot.label())).selected_text(&cur).width(300.0).show_ui(ui, |ui| {
                     for n in &list {
                         ui.selectable_value(&mut pick, n.clone(), n);
                     }
@@ -79,7 +79,7 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
         ui.label(egui::RichText::new(tr("Settings")).font(Tokens::semibold(12.5)).color(t.text));
         ui.horizontal(|ui| {
             ui.label(tr("Settings Name:"));
-            let r = craft_ui::ComboBox::from_id_salt("tpl-select").selected_text(&st.selected).width(300.0).show_ui(ui, |ui| {
+            let r = egui::ComboBox::from_id_salt("tpl-select").selected_text(&st.selected).width(300.0).show_ui(ui, |ui| {
                 for n in &list {
                     ui.selectable_value(&mut st.selected, n.clone(), n);
                 }

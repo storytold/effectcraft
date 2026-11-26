@@ -74,7 +74,10 @@ fn the_boundary_view_outlines_each_object_and_show_object_picks_one() {
 
     // object 0 keeps the boundary colour (pink by default), object 1 is the first palette colour (blue-green)
     let (pink, cyan) = ([255, 64, 191], [60, 200, 255]);
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(move |_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(move |_| EffectcraftApp::new(s));
     h.run_steps(3);
     h.state_mut().session.execute("layer.select", json!({"layers": [id]})).unwrap();
     let ctx = h.ctx.clone();

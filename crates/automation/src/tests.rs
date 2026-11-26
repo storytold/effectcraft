@@ -1587,6 +1587,7 @@ fn automation_roots_refuse_running_script_code() {
         ("scriptui.set", json!({"window": 1, "widget": 2, "value": 1})),
         ("scriptui.mouse", json!({"window": 1, "widget": 2, "type": "click"})),
         ("scriptui.close", json!({"window": 1})),
+        ("scriptui.fileDialog", json!({"host": 1, "paths": null})),
     ] {
         let msg = refused(&mut s, "execute_command", json!({"command": command, "params": params}));
         assert!(msg.contains("not available while file access is confined"), "`{command}`: {msg}");
@@ -2111,4 +2112,29 @@ fn bridged_contact_sheet_keeps_the_times_asked_for() {
     let mut s = McpServer::new(Backend::bridge(&port.to_string()).unwrap());
     let info = call_json(&mut s, "render_frame", json!({"times": [1.5, 0.25, 3], "inline": false}));
     assert_eq!(info["times"], json!([1.5, 0.25, 3.0]));
+}
+
+#[test]
+fn stdio_batch_transcript() {
+    let input = concat!(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\"}}\n",
+        "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n",
+        "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/cancelled\",\"params\":{\"requestId\":1,\"reason\":\"client\"}}\n",
+        "[]\n",
+        "[{\"jsonrpc\":\"2.0\",\"method\":\"notifications/cancelled\",\"params\":{\"requestId\":9}}]\n",
+        "[{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\"},{\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\"}]\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"ping\",\"params\":{}}\n"
+    );
+    let mut s = server();
+    let mut out = Vec::new();
+    s.serve(std::io::Cursor::new(input), &mut out).unwrap();
+
+    let replies: Vec<Value> = String::from_utf8(out).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    assert_eq!(replies.len(), 4, "{replies:?}");
+    assert_eq!(replies[0]["id"], 1);
+    assert_eq!(replies[0]["result"]["serverInfo"]["name"], "effectcraft");
+    assert_eq!(replies[1]["id"], Value::Null);
+    assert_eq!(replies[1]["error"]["code"], -32600);
+    assert_eq!(replies[2], json!([{"jsonrpc": "2.0", "id": 2, "result": {}}]));
+    assert_eq!(replies[3], json!({"jsonrpc": "2.0", "id": 3, "result": {}}));
 }

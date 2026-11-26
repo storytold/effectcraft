@@ -104,7 +104,11 @@ fn header_arrow_harness() -> (Harness<'static, EffectcraftApp>, LayerId, [(u64, 
     let mut app = EffectcraftApp::new(s);
     app.show_panel(PanelKind::EffectControls);
     app.toggle_maximize(PanelKind::EffectControls);
-    let mut h = Harness::builder().with_size(egui::vec2(1000.0, 700.0)).with_step_dt(1.0 / 60.0).build_eframe(|_| app);
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1000.0, 700.0))
+        .with_step_dt(1.0 / 60.0)
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| app);
     h.run_steps(4);
     (h, LayerId(lid), effects)
 }
@@ -165,7 +169,12 @@ fn effect_header_arrows_ignore_hidden_panels_with_stale_focus() {
             "closed" => h.state_mut().close_panel(PanelKind::EffectControls),
             "maximized" => h.state_mut().toggle_maximize(PanelKind::Composition),
             "floating under maximized" => {
-                h.state_mut().apply_dock(craft_ui::docking::Action::Float { panel: PanelKind::EffectControls, rect: [40.0, 40.0, 600.0, 400.0] }).unwrap();
+                h.state_mut()
+                    .apply_dock(craft_behavior::dock::Action::float(
+                        PanelKind::EffectControls,
+                        effectcraft_ui_egui::dock_command::rect_of([40.0, 40.0, 600.0, 400.0]),
+                    ))
+                    .unwrap();
                 h.state_mut().toggle_maximize(PanelKind::Composition);
             }
             _ => h.state_mut().ui.start_screen = true,
@@ -187,10 +196,15 @@ fn effect_header_arrows_work_wherever_effect_controls_is_on_screen() {
         let (mut h, lid, [(fx, prop), _, _]) = header_arrow_harness();
         h.state_mut().toggle_maximize(PanelKind::EffectControls);
         if place == "floating" {
-            h.state_mut().apply_dock(craft_ui::docking::Action::Float { panel: PanelKind::EffectControls, rect: [40.0, 40.0, 600.0, 400.0] }).unwrap();
+            h.state_mut()
+                .apply_dock(craft_behavior::dock::Action::float(
+                    PanelKind::EffectControls,
+                    effectcraft_ui_egui::dock_command::rect_of([40.0, 40.0, 600.0, 400.0]),
+                ))
+                .unwrap();
         } else {
-            let placement = craft_ui::docking::Placement::Tab { before: None };
-            h.state_mut().apply_dock(craft_ui::docking::Action::Move { panel: PanelKind::EffectControls, anchor: PanelKind::Composition, placement }).unwrap();
+            let placement = craft_behavior::dock::DockPlacement::tab(None);
+            h.state_mut().apply_dock(craft_behavior::dock::Action::move_beside(PanelKind::EffectControls, PanelKind::Composition, placement)).unwrap();
             h.state_mut().toggle_maximize(PanelKind::Composition);
             assert_eq!(h.state().ui.maximized, Some(PanelKind::Composition), "the frame was maximized from its Composition tab");
         }
@@ -264,10 +278,211 @@ fn effect_header_arrows_leave_viewer_text_editing_alone() {
     assert_eq!(h.state().ui.fx_closed.iter().copied().collect::<Vec<_>>(), vec![fx], "with the edit over, Left collapses the effect");
 }
 
+/// The x and y of `lid`'s Position, which the arrows' layer nudge moves.
+fn position(h: &Harness<'_, EffectcraftApp>, lid: LayerId) -> [f64; 2] {
+    let p = layer(&h.state().session, lid.0).props.prop("transform/position").unwrap().value.as_vec3();
+    [p[0], p[1]]
+}
+
+/// #3585: plain Down / Up select the next / previous effect, a collapsed one too, and stop at the
+/// last / first one without nudging the layer. Only the selection changes: not the document, the
+/// time, the history or what is open.
+#[test]
+fn effect_header_down_and_up_select_the_next_and_previous_effect() {
+    let (mut h, lid, [(first, _), (second, _), (third, _)]) = header_arrow_harness();
+    let at = rect_of(&h, &format!("effectControls.effect.{first}.name")).center();
+    click(&mut h, at);
+    assert_eq!(h.state().session.state.selected_props, vec![(lid, first)]);
+    h.state_mut().ui.fx_closed.insert(second);
+    let project = serde_json::to_value(&h.state().session.project).unwrap();
+    let time = h.state().session.time();
+    let history = (h.state().session.history.undo.len(), h.state().session.history.redo.len());
+    let closed = h.state().ui.fx_closed.clone();
+    let (down, up) = (egui::Key::ArrowDown, egui::Key::ArrowUp);
+    for (key, want) in [(down, second), (down, third), (down, third), (up, second), (up, first), (up, first)] {
+        header_arrow_key(&mut h, key, egui::Modifiers::NONE);
+        assert_eq!(h.state().session.state.selected_props, vec![(lid, want)], "{key:?}");
+        assert_eq!(serde_json::to_value(&h.state().session.project).unwrap(), project, "{key:?}: the layer is not nudged");
+        assert_eq!(h.state().session.time(), time, "{key:?}");
+        assert_eq!((h.state().session.history.undo.len(), h.state().session.history.redo.len()), history, "{key:?}: no undo step");
+        assert_eq!(h.state().ui.fx_closed, closed, "{key:?}: nothing opens or closes");
+        assert_eq!(h.state().ui.focused, PanelKind::EffectControls);
+    }
+}
+
+/// #3585: with several effects selected, Down goes on from the lowest one and Up from the highest,
+/// leaving one effect selected. Headers of other layers, stale ids and parameters don't count.
+#[test]
+fn effect_header_down_and_up_go_on_from_the_ends_of_a_multiple_selection() {
+    let (mut h, lid, [(first, _), (second, prop), (third, _)]) = header_arrow_harness();
+    for (picked, key, want) in [
+        (vec![(lid, second), (lid, first)], egui::Key::ArrowDown, third),
+        (vec![(lid, third), (lid, second)], egui::Key::ArrowUp, first),
+        (vec![(lid, first), (lid, third)], egui::Key::ArrowDown, third),
+        (vec![(lid, first), (lid, third)], egui::Key::ArrowUp, first),
+        (vec![(LayerId(0), first), (lid, u64::MAX), (lid, prop), (lid, second)], egui::Key::ArrowDown, third),
+    ] {
+        h.state_mut().session.state.selected_props = picked.clone();
+        header_arrow_key(&mut h, key, egui::Modifiers::NONE);
+        assert_eq!(h.state().session.state.selected_props, vec![(lid, want)], "{picked:?} {key:?}");
+    }
+    // A shift-click range, picked from the third effect up to the first, as a user would.
+    let at = rect_of(&h, &format!("effectControls.effect.{third}.name")).center();
+    click(&mut h, at);
+    let at = rect_of(&h, &format!("effectControls.effect.{first}.name")).center();
+    h.event(egui::Event::ModifiersChanged(egui::Modifiers::SHIFT));
+    click(&mut h, at);
+    h.event(egui::Event::ModifiersChanged(Default::default()));
+    h.step();
+    assert_eq!(h.state().session.state.selected_props.len(), 3, "the range is selected");
+    header_arrow_key(&mut h, egui::Key::ArrowUp, egui::Modifiers::NONE);
+    assert_eq!(h.state().session.state.selected_props, vec![(lid, first)]);
+}
+
+/// #3585: without an effect header selected on the panel's layer, or with the panel or the
+/// keyboard elsewhere, plain Up / Down keep nudging the layer (or go to whoever owns the keys),
+/// and the effect selection stays.
+#[test]
+fn effect_header_down_and_up_leave_the_nudge_and_other_keyboard_owners_alone() {
+    let (mut h, lid, [(first, _), (second, prop), _]) = header_arrow_harness();
+    // A parameter, a stale header and another layer's header: the layer moves down, then up.
+    let picked = vec![(lid, prop), (lid, u64::MAX), (LayerId(0), first)];
+    h.state_mut().session.state.selected_props = picked.clone();
+    let y = position(&h, lid)[1];
+    header_arrow_key(&mut h, egui::Key::ArrowDown, egui::Modifiers::NONE);
+    // (One pixel at the viewer's magnification.)
+    let step = position(&h, lid)[1] - y;
+    assert!(step > 0.0, "Down still nudges the layer");
+    header_arrow_key(&mut h, egui::Key::ArrowUp, egui::Modifiers::NONE);
+    assert!((position(&h, lid)[1] - y).abs() < 1e-6, "Up still nudges the layer");
+    assert_eq!(h.state().session.state.selected_props, picked);
+
+    // With an effect selected: Shift nudges ten pixels, Cmd/Ctrl keeps its own meaning.
+    h.state_mut().session.state.selected_props = vec![(lid, second)];
+    header_arrow_key(&mut h, egui::Key::ArrowDown, egui::Modifiers::SHIFT);
+    assert!((position(&h, lid)[1] - (y + 10.0 * step)).abs() < 1e-6, "Shift+Down nudges ten pixels");
+    header_arrow_key(&mut h, egui::Key::ArrowUp, egui::Modifiers::SHIFT);
+    assert!((position(&h, lid)[1] - y).abs() < 1e-6);
+    header_arrow_key(&mut h, egui::Key::ArrowDown, egui::Modifiers::COMMAND);
+    assert_eq!(h.state().session.state.selected_props, vec![(lid, second)], "Cmd/Ctrl+Down keeps the effect selection");
+
+    // Another panel, a dialog, the context menu and the rename field own the arrows.
+    let stays = |h: &mut Harness<'_, EffectcraftApp>, why: &str| {
+        for key in [egui::Key::ArrowDown, egui::Key::ArrowUp] {
+            header_arrow_key(h, key, egui::Modifiers::NONE);
+            assert_eq!(h.state().session.state.selected_props, vec![(lid, second)], "{why}: {key:?}");
+        }
+    };
+    h.state_mut().ui.focused = PanelKind::Composition;
+    stays(&mut h, "another panel");
+    h.state_mut().ui.focused = PanelKind::EffectControls;
+    h.state_mut().dialog = Some(effectcraft_ui_egui::Dialog::About);
+    stays(&mut h, "a dialog");
+    h.state_mut().dialog = None;
+    h.run_steps(3);
+    let at = rect_of(&h, &format!("effectControls.effect.{second}.name")).center();
+    h.event(egui::Event::PointerMoved(at));
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Secondary, pressed, modifiers: egui::Modifiers::NONE });
+        h.step();
+    }
+    h.run_steps(2);
+    assert!(egui::Popup::is_any_open(&h.ctx), "the effect context menu is open");
+    stays(&mut h, "the context menu");
+    header_arrow_key(&mut h, egui::Key::Escape, egui::Modifiers::NONE);
+    h.run_steps(3);
+    double_click(&mut h, at);
+    h.run_steps(3);
+    assert!(h.state().auto.find(&format!("effectControls.effect.{second}.nameEdit")).is_some(), "the rename field is open");
+    stays(&mut h, "the rename field");
+    assert!(h.state().auto.find(&format!("effectControls.effect.{second}.nameEdit")).is_some());
+}
+
+/// #3585: a hidden Effect Controls (closed, under a maximized frame, behind Home) with the focus
+/// left on it doesn't take Up / Down: they nudge the layer.
+#[test]
+fn effect_header_down_and_up_ignore_a_hidden_panel() {
+    for hidden in ["closed", "maximized", "home"] {
+        let (mut h, lid, [(fx, _), _, _]) = header_arrow_harness();
+        h.state_mut().session.state.selected_props = vec![(lid, fx)];
+        match hidden {
+            "closed" => h.state_mut().close_panel(PanelKind::EffectControls),
+            "maximized" => h.state_mut().toggle_maximize(PanelKind::Composition),
+            _ => h.state_mut().ui.start_screen = true,
+        }
+        h.run_steps(2);
+        assert_eq!(h.state().ui.focused, PanelKind::EffectControls, "{hidden}: stale focus is preserved");
+        let y = position(&h, lid)[1];
+        header_arrow_key(&mut h, egui::Key::ArrowDown, egui::Modifiers::NONE);
+        assert_eq!(h.state().session.state.selected_props, vec![(lid, fx)], "{hidden}");
+        assert!(position(&h, lid)[1] > y, "{hidden}: Down still nudges the layer");
+    }
+}
+
+/// #3585: locked to a layer that isn't selected, Effect Controls' arrows act on the effects it
+/// shows: Down / Up select among them and Left / Right close and open them.
+#[test]
+fn effect_header_arrows_act_on_the_locked_layer() {
+    let (mut h, lid, [(first, _), (second, _), _]) = header_arrow_harness();
+    let comp = h.state().session.active_comp_id().unwrap().0;
+    let other = h.state_mut().session.execute("layer.newSolid", json!({"name": "Other", "color": "#202020"})).unwrap()["layer"].as_u64().unwrap();
+    h.state_mut().ui.effect_controls_lock = Some(effectcraft_ui_egui::state::EffectControlsLock { comp, layer: lid.0 });
+    h.state_mut().session.state.selected_layers = vec![LayerId(other)];
+    h.state_mut().session.state.selected_props = vec![(lid, first)];
+    h.state_mut().ui.focused = PanelKind::EffectControls;
+    h.run_steps(3);
+    assert!(shows_effect(&h, first), "the locked panel shows the first layer");
+    header_arrow_key(&mut h, egui::Key::ArrowDown, egui::Modifiers::NONE);
+    assert_eq!(h.state().session.state.selected_props, vec![(lid, second)]);
+    header_arrow_key(&mut h, egui::Key::ArrowLeft, egui::Modifiers::NONE);
+    assert_eq!(h.state().ui.fx_closed.iter().copied().collect::<Vec<_>>(), vec![second], "Left closes the locked layer's effect");
+    header_arrow_key(&mut h, egui::Key::ArrowRight, egui::Modifiers::NONE);
+    assert!(h.state().ui.fx_closed.is_empty());
+}
+
+/// #3585: a long effect list scrolls so the effect Down / Up picks stays in view.
+#[test]
+fn effect_header_down_and_up_scroll_the_picked_effect_into_view() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Long", "width": 32, "height": 18, "frameRate": 30, "duration": 2})).unwrap();
+    let lid = s.execute("layer.newSolid", json!({"name": "Controls", "color": "#40b080"})).unwrap()["layer"].as_u64().unwrap();
+    let fx: Vec<u64> =
+        (0..16).map(|_| s.execute("effect.apply", json!({"layers": [lid], "effect": "Point Control"})).unwrap()["effects"][0].as_u64().unwrap()).collect();
+    s.state.selected_props = vec![(LayerId(lid), fx[0])];
+    let mut app = EffectcraftApp::new(s);
+    app.show_panel(PanelKind::EffectControls);
+    app.toggle_maximize(PanelKind::EffectControls);
+    app.ui.focused = PanelKind::EffectControls;
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(800.0, 300.0))
+        .with_step_dt(1.0 / 60.0)
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| app);
+    h.run_steps(4);
+    let panel = rect_of(&h, "panel.EffectControls");
+    let last = fx[fx.len() - 1];
+    assert!(!panel.contains_rect(rect_of(&h, &format!("effectControls.effect.{last}"))), "the last effect starts out of view");
+    for _ in 1..fx.len() {
+        header_arrow_key(&mut h, egui::Key::ArrowDown, egui::Modifiers::NONE);
+        h.run_steps(2);
+        let (_, uid) = h.state().session.state.selected_props[0];
+        assert!(panel.contains_rect(rect_of(&h, &format!("effectControls.effect.{uid}"))), "Down keeps effect {uid} in view");
+    }
+    assert_eq!(h.state().session.state.selected_props, vec![(LayerId(lid), last)]);
+    for _ in 1..fx.len() {
+        header_arrow_key(&mut h, egui::Key::ArrowUp, egui::Modifiers::NONE);
+        h.run_steps(2);
+        let (_, uid) = h.state().session.state.selected_props[0];
+        assert!(panel.contains_rect(rect_of(&h, &format!("effectControls.effect.{uid}"))), "Up keeps effect {uid} in view");
+    }
+    assert_eq!(h.state().session.state.selected_props, vec![(LayerId(lid), fx[0])]);
+}
+
 #[test]
 fn effect_controls_widgets_register_automation_ids() {
     let (app, x) = app();
-    let mut h = Harness::builder().with_size(egui::vec2(1700.0, 1100.0)).build_eframe(|_| app);
+    let mut h =
+        Harness::builder().with_size(egui::vec2(1700.0, 1100.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app);
     settle(&mut h);
     let have = ids(&h);
     let want = [
@@ -319,7 +534,8 @@ fn tint_swap_button_targets_its_instance_and_undoes_both_colors() {
     let blur = s.execute("effect.apply", json!({"effect": "Gaussian Blur"})).unwrap()["effects"][0].as_u64().unwrap();
     let mut app = EffectcraftApp::new(s);
     app.show_panel(PanelKind::EffectControls);
-    let mut h = Harness::builder().with_size(egui::vec2(1700.0, 1100.0)).build_eframe(|_| app);
+    let mut h =
+        Harness::builder().with_size(egui::vec2(1700.0, 1100.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app);
     h.run_steps(4);
     let id = format!("effectControls.effect.{target}.swapColors");
     let rect = h.state().auto.find(&id).unwrap().rect;
@@ -346,7 +562,8 @@ fn tint_swap_button_targets_its_instance_and_undoes_both_colors() {
 #[test]
 fn crosshair_and_eyedropper_pick_from_the_viewer() {
     let (app, x) = app();
-    let mut h = Harness::builder().with_size(egui::vec2(1700.0, 1100.0)).build_eframe(|_| app);
+    let mut h =
+        Harness::builder().with_size(egui::vec2(1700.0, 1100.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app);
     settle(&mut h);
     // Crosshair: a click at comp (330, 190) is layer (105, 55) on the 200%-scaled layer
     // (anchor (100, 50) at position (320, 180)).
@@ -384,7 +601,8 @@ fn the_eyedropper_samples_under_the_pointer_in_a_region_of_interest() {
     app.session.execute("view.setRegionOfInterest", json!({"rect": [0.0, 0.0, 320.0, 180.0]})).unwrap();
     // (Not the red it will pick.)
     app.session.execute("prop.set", json!({"layer": x.small, "prop": x.color, "value": [0.0, 0.0, 1.0, 1.0]})).unwrap();
-    let mut h = Harness::builder().with_size(egui::vec2(1700.0, 1100.0)).build_eframe(|_| app);
+    let mut h =
+        Harness::builder().with_size(egui::vec2(1700.0, 1100.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app);
     settle(&mut h);
     h.state_mut().ui.fx_pick = Some(FxPick { kind: "color".into(), layer: x.small, prop: x.color, name: "Color".into() });
     h.step();
@@ -415,7 +633,10 @@ fn the_eyedropper_stays_armed_until_the_viewer_has_a_frame() {
         let KV::Color(c) = v else { panic!("{v:?}") };
         c
     };
-    let mut h = Harness::builder().with_size(egui::vec2(1700.0, 1100.0)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1700.0, 1100.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(s));
     h.state_mut().ui.fx_pick = Some(FxPick { kind: "color".into(), layer: top, prop, name: "Color".into() });
     h.step();
     let pos = effectcraft_ui_egui::panels::viewer::comp_to_screen(&h.ctx, [100.0, 100.0]).unwrap();
@@ -446,7 +667,8 @@ fn keyer_eyedropper_picks_the_screen_from_the_effect_input() {
     s.state.selected_layers = vec![LayerId(screen)];
     let mut app = EffectcraftApp::new(s);
     app.show_panel(PanelKind::EffectControls);
-    let mut h = Harness::builder().with_size(egui::vec2(1700.0, 1100.0)).build_eframe(|_| app);
+    let mut h =
+        Harness::builder().with_size(egui::vec2(1700.0, 1100.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app);
     settle(&mut h);
     h.state_mut().ui.fx_pick = Some(FxPick { kind: "color".into(), layer: screen, prop, name: "Screen Colour".into() });
     h.step();
@@ -468,7 +690,8 @@ fn keyer_eyedropper_picks_the_screen_from_the_effect_input() {
 #[test]
 fn command_clicking_an_effect_twirl_closes_and_opens_its_groups() {
     let (app, x) = app();
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| app);
+    let mut h =
+        Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app);
     let fx = h.state_mut().session.execute("effect.apply", json!({"layers": [x.small], "effect": "Color Grading"})).unwrap()["effects"][0].as_u64().unwrap();
     // Only this effect open, so its header is on screen.
     let l = layer(&h.state().session, x.small);
@@ -498,7 +721,8 @@ fn command_clicking_an_effect_twirl_closes_and_opens_its_groups() {
 #[test]
 fn shift_click_on_effect_headers_selects_a_range_and_command_toggles() {
     let (app, x) = app();
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| app);
+    let mut h =
+        Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app);
     let fx: Vec<u64> = layer(&h.state().session, x.small).effects().unwrap().groups().map(|g| g.uid).collect();
     // All twirled closed, so every header is on screen.
     h.state_mut().ui.fx_closed.extend(fx.iter().copied());
@@ -560,7 +784,8 @@ fn type_into(h: &mut Harness<'_, EffectcraftApp>, id: &str, text: &str) {
 #[test]
 fn angle_revolutions_scrub_and_take_typing() {
     let (app, x) = app();
-    let mut h = Harness::builder().with_size(egui::vec2(1700.0, 1100.0)).build_eframe(|_| app);
+    let mut h =
+        Harness::builder().with_size(egui::vec2(1700.0, 1100.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app);
     settle(&mut h);
     let angle = |h: &Harness<'_, EffectcraftApp>| layer(&h.state().session, x.small).effects().unwrap().find(x.angle).unwrap().value.as_f64();
     h.state_mut().session.execute("prop.set", json!({"layer": x.small, "prop": x.angle, "value": 45.0})).unwrap();
@@ -624,7 +849,8 @@ fn right_click_in_effect_controls_shows_the_effect_menu() {
     s.state.selected_layers = vec![LayerId(b), LayerId(a)];
     let mut app = EffectcraftApp::new(s);
     app.show_panel(PanelKind::EffectControls);
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| app);
+    let mut h =
+        Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app);
     h.run_steps(3);
     let category = " Blur & Sharpen";
     // An effect's header: its own menu.
@@ -687,7 +913,8 @@ fn extractor_offers_the_exr_layers_and_channels() {
     s.state.selected_layers = vec![LayerId(l)];
     let mut app = EffectcraftApp::new(s);
     app.show_panel(PanelKind::EffectControls);
-    let mut h = Harness::builder().with_size(egui::vec2(1700.0, 1100.0)).build_eframe(|_| app);
+    let mut h =
+        Harness::builder().with_size(egui::vec2(1700.0, 1100.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app);
     settle(&mut h);
     let values = |h: &Harness<'_, EffectcraftApp>| -> Vec<String> {
         let l = layer(&h.state().session, l);
@@ -760,7 +987,8 @@ fn cryptomatte_layer_popup_follows_the_footage() {
     s.state.selected_layers = vec![LayerId(l)];
     let mut app = EffectcraftApp::new(s);
     app.show_panel(PanelKind::EffectControls);
-    let mut h = Harness::builder().with_size(egui::vec2(1700.0, 1100.0)).build_eframe(|_| app);
+    let mut h =
+        Harness::builder().with_size(egui::vec2(1700.0, 1100.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app);
     settle(&mut h);
     // The file has only CryptoMaterial, so that is what the closed popup shows, and all it lists.
     assert!(h.query_by_label("CryptoMaterial").is_some() && h.query_by_label("CryptoObject").is_none());
@@ -800,7 +1028,8 @@ fn point_picker_handle_follows_hover_then_commits_once_across_effects() {
         app.show_panel(PanelKind::EffectControls);
         app.ui.viewer.zoom = Some(0.85);
         app.ui.viewer.pan = [25.0, -10.0];
-        let mut h = Harness::builder().with_size(egui::vec2(1700.0, 1100.0)).build_eframe(|_| app);
+        let mut h =
+            Harness::builder().with_size(egui::vec2(1700.0, 1100.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app);
         settle(&mut h);
         let id = format!("viewer.effectPoint.{point}");
         let original = rect_of(&h, &id).center();
@@ -831,7 +1060,8 @@ fn point_picker_handle_follows_hover_then_commits_once_across_effects() {
 #[test]
 fn point_picker_preview_cancels_and_works_with_layer_controls_hidden() {
     let (app, x) = app();
-    let mut h = Harness::builder().with_size(egui::vec2(1700.0, 1100.0)).build_eframe(|_| app);
+    let mut h =
+        Harness::builder().with_size(egui::vec2(1700.0, 1100.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app);
     settle(&mut h);
     let value = layer(&h.state().session, x.small).props.find(x.point).unwrap().value.clone();
     let undo = h.state().session.history.undo.len();
@@ -862,7 +1092,8 @@ fn radial_center_stays_draggable_when_its_property_is_selected() {
     let effect = l.effects().unwrap().groups().find(|g| g.match_id == "ec.blur.ccradialfast").unwrap();
     let point = effect.get("center").unwrap().uid;
     app.session.state.selected_props = vec![(LayerId(x.small), point)];
-    let mut h = Harness::builder().with_size(egui::vec2(1700.0, 1100.0)).build_eframe(|_| app);
+    let mut h =
+        Harness::builder().with_size(egui::vec2(1700.0, 1100.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app);
     settle(&mut h);
     let id = format!("viewer.effectPoint.{point}");
     assert!(ids(&h).contains(&id), "selected point must keep its handle");
@@ -889,7 +1120,11 @@ fn radial_center_stays_draggable_when_its_property_is_selected() {
 #[test]
 fn clicking_an_effect_parameter_activates_its_header_and_handles() {
     let (app, x) = app();
-    let mut h = Harness::builder().with_size(egui::vec2(1700.0, 1100.0)).with_step_dt(1.0 / 60.0).build_eframe(|_| app);
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1700.0, 1100.0))
+        .with_step_dt(1.0 / 60.0)
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| app);
     settle(&mut h);
     let name = rect_of(&h, &format!("effectControls.prop.{}.name", x.point)).center();
     click(&mut h, name);
@@ -915,7 +1150,8 @@ fn non_point_parameters_activate_handles_across_effect_families() {
         s.state.selected_props.clear();
         let mut app = EffectcraftApp::new(s);
         app.show_panel(PanelKind::EffectControls);
-        let mut h = Harness::builder().with_size(egui::vec2(1700.0, 1100.0)).build_eframe(|_| app);
+        let mut h =
+            Harness::builder().with_size(egui::vec2(1700.0, 1100.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app);
         settle(&mut h);
         let name = rect_of(&h, &format!("effectControls.prop.{prop}.name")).center();
         click(&mut h, name);
@@ -929,7 +1165,8 @@ fn non_point_parameters_activate_handles_across_effect_families() {
 #[test]
 fn custom_effect_editors_activate_their_owner() {
     let (app, x) = app();
-    let mut h = Harness::builder().with_size(egui::vec2(1700.0, 1100.0)).build_eframe(|_| app);
+    let mut h =
+        Harness::builder().with_size(egui::vec2(1700.0, 1100.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app);
     settle(&mut h);
     let graph = rect_of(&h, &format!("effectControls.effect.{}.curves.graph", x.curves)).center();
     click(&mut h, graph);
@@ -971,7 +1208,8 @@ fn file_and_text_parameters_have_widgets() {
         assert_eq!(exts, ["cube"]);
         vec![pick.lock().unwrap().clone()]
     }));
-    let mut h = Harness::builder().with_size(egui::vec2(1700.0, 1100.0)).build_eframe(|_| app);
+    let mut h =
+        Harness::builder().with_size(egui::vec2(1700.0, 1100.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app);
     settle(&mut h);
     let ctx = h.ctx.clone();
     let r = effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "effect.apply", json!({"effect": "Apply Color LUT"})).unwrap();
@@ -1021,7 +1259,11 @@ fn file_and_text_parameters_have_widgets() {
 #[test]
 fn effect_control_name_can_be_renamed_from_its_header() {
     let (app, x) = app();
-    let mut h = Harness::builder().with_size(egui::vec2(1700.0, 1100.0)).with_step_dt(1.0 / 60.0).build_eframe(|_| app);
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1700.0, 1100.0))
+        .with_step_dt(1.0 / 60.0)
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| app);
     settle(&mut h);
     let name = format!("effectControls.effect.{}.name", x.point_fx);
     let point = rect_of(&h, &name).center();
@@ -1046,7 +1288,11 @@ fn effect_control_name_can_be_renamed_from_its_header() {
 #[test]
 fn effect_rename_opens_with_the_name_selected() {
     let (app, x) = app();
-    let mut h = Harness::builder().with_size(egui::vec2(1700.0, 1100.0)).with_step_dt(1.0 / 60.0).build_eframe(|_| app);
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1700.0, 1100.0))
+        .with_step_dt(1.0 / 60.0)
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| app);
     settle(&mut h);
     let edit = format!("effectControls.effect.{}.nameEdit", x.point_fx);
     let current_name =
@@ -1098,7 +1344,11 @@ fn effect_rename_opens_with_the_name_selected() {
 #[test]
 fn double_clicking_an_effect_property_name_reveals_it_in_the_timeline() {
     let (app, x) = app();
-    let mut h = Harness::builder().with_size(egui::vec2(1700.0, 1100.0)).with_step_dt(1.0 / 60.0).build_eframe(|_| app);
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1700.0, 1100.0))
+        .with_step_dt(1.0 / 60.0)
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| app);
     settle(&mut h);
     let row = format!("timeline.prop.{}.name", x.point);
     assert!(!ids(&h).contains(&row), "the effect's property is not in the Timeline before the double-click");
@@ -1113,7 +1363,11 @@ fn double_clicking_an_effect_property_name_reveals_it_in_the_timeline() {
 #[test]
 fn effect_rename_escape_keeps_the_name() {
     let (app, x) = app();
-    let mut h = Harness::builder().with_size(egui::vec2(1700.0, 1100.0)).with_step_dt(1.0 / 60.0).build_eframe(|_| app);
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1700.0, 1100.0))
+        .with_step_dt(1.0 / 60.0)
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| app);
     settle(&mut h);
     let point = rect_of(&h, &format!("effectControls.effect.{}.name", x.point_fx)).center();
     double_click(&mut h, point);
@@ -1175,7 +1429,8 @@ fn select_layer(h: &mut Harness<'_, EffectcraftApp>, layer: u64) {
 #[test]
 fn locked_effect_controls_keep_their_layer_until_it_is_deleted() {
     let (app, a, b, fa, fb) = two_layers();
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| app);
+    let mut h =
+        Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app);
     h.run_steps(4);
     assert!(shows_effect(&h, fa) && !shows_effect(&h, fb), "A is shown before locking");
     let comp = h.state().session.active_comp_id().unwrap().0;
@@ -1228,7 +1483,8 @@ fn locked_effect_controls_keep_their_layer_until_it_is_deleted() {
 #[test]
 fn replacing_the_project_unlocks_effect_controls() {
     let (app, a, b, _, _) = two_layers();
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| app);
+    let mut h =
+        Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app);
     h.run_steps(4);
     let lock = rect_of(&h, "panel.tab.EffectControls.lock").center();
     click(&mut h, lock);
@@ -1257,7 +1513,8 @@ fn a_lock_request_with_no_layer_shown_fails_and_keeps_the_other_comps_lock() {
         }
     }
     let (app, a, _, _, _) = two_layers();
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| app);
+    let mut h =
+        Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app);
     h.run_steps(4);
     assert_eq!(send(&mut h)["ok"], true);
     let kept = h.state().ui.effect_controls_lock;
@@ -1288,7 +1545,8 @@ fn a_lock_request_while_locked_in_another_comp_fails() {
         }
     }
     let (app, a, _, _, _) = two_layers();
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| app);
+    let mut h =
+        Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app);
     h.run_steps(4);
     assert_eq!(send(&mut h)["ok"], true);
     let kept = h.state().ui.effect_controls_lock;
@@ -1320,7 +1578,8 @@ fn a_lock_request_after_a_project_replacement_does_not_report_the_old_lock() {
         }
     }
     let (app, a, _, _, _) = two_layers();
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| app);
+    let mut h =
+        Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app);
     h.run_steps(4);
     assert_eq!(send(&mut h)["ok"], true);
     assert_eq!(h.state().ui.effect_controls_lock.map(|l| l.layer), Some(a));
@@ -1336,7 +1595,8 @@ fn a_lock_request_after_a_project_replacement_does_not_report_the_old_lock() {
 #[test]
 fn applying_an_effect_while_locked_keeps_the_selection() {
     let (app, a, b, fa, _) = two_layers();
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| app);
+    let mut h =
+        Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app);
     h.run_steps(4);
     let lock = rect_of(&h, "panel.tab.EffectControls.lock").center();
     click(&mut h, lock);
@@ -1371,7 +1631,8 @@ fn effect_controls_lock_over_the_control_channel() {
         }
     }
     let (app, a, b, fa, fb) = two_layers();
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| app);
+    let mut h =
+        Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app);
     h.run_steps(4);
     assert_eq!(send(&mut h, json!({"effectControlsLocked": true}))["ok"], true);
     assert_eq!(h.state().ui.effect_controls_lock.map(|l| l.layer), Some(a));

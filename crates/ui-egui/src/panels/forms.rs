@@ -146,9 +146,10 @@ fn is_layered(p: &Value) -> bool {
     imports_ext(p, &["psd", "psb"])
 }
 
-/// The import includes a PDF or Illustrator file (which may have several pages).
+/// The import includes a PDF or Illustrator file, or a VectorCraft document read through its
+/// PDF (which may have several pages).
 fn is_pdf(p: &Value) -> bool {
-    imports_ext(p, &["pdf", "ai"])
+    imports_ext(p, &["pdf", "ai", "vectorcraft"])
 }
 
 /// File ▸ Import ▸ File… picked numbered stills that import as image sequences: ask, as After
@@ -904,7 +905,7 @@ fn form_grid(ui: &mut egui::Ui, f: &mut Form, regs: &mut Vec<(String, egui::Rect
                     let cur = options.get(*sel).map(|o| o.0.clone()).unwrap_or_default();
                     // The column keeps its width: a long choice (a GPU adapter's name) ends in an
                     // ellipsis instead of widening the form past the dialog (#978).
-                    craft_ui::ComboBox::from_id_salt(("form", fl.key.as_str()))
+                    egui::ComboBox::from_id_salt(("form", fl.key.as_str()))
                         .selected_text(tr(&cur))
                         .width(240.0)
                         .truncate()
@@ -991,8 +992,9 @@ pub fn show_form(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
     if ok || enter {
         app.dialog = None;
         let params = f.params();
-        if let Err(e) = app.session.execute(&f.command, params) {
-            app.ui.status = e.to_string();
+        match app.session.execute(&f.command, params) {
+            Ok(r) => app.report_import_errors(&f.command, &r),
+            Err(e) => app.ui.status = e.to_string(),
         }
         return;
     }
@@ -1079,12 +1081,45 @@ mod tests {
         assert_eq!(f.params(), json!({"prop": "position", "value": [10.0, 20.0], "mode": "b"}));
     }
 
+    #[test]
+    fn import_form_shows_errors_returned_in_a_successful_result() {
+        let folder = std::env::temp_dir().join(format!("effectcraft-form-import-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let path = folder.join("no-pdf.vectorcraft");
+        std::fs::write(&path, br#"{"format":"vectorcraft","version":4,"document":{"artboards":[],"layers":[]}}"#).unwrap();
+        for (import_as, background) in [("footage", false), ("composition", true), ("compositionLayerSizes", true)] {
+            let mut app = EffectcraftApp::new(effectcraft_host::session());
+            let ctx = egui::Context::default();
+            crate::framework::install_headless(&ctx);
+            crate::theme::install(&ctx, &app.tokens, crate::i18n::language(&app));
+            app.dialog_state.form = Form {
+                title: "Import".into(),
+                command: "file.import".into(),
+                base: json!({"paths": [path, path], "importAs": import_as, "background": background}),
+                fields: vec![],
+            };
+            app.dialog = Some(Dialog::Form);
+            let raw = egui::RawInput {
+                events: vec![egui::Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() }],
+                ..Default::default()
+            };
+            let tokens = app.tokens;
+            ctx.run_ui(raw, |ui| show_form(&mut app, ui.ctx(), &tokens)).textures_delta.clear();
+            assert!(app.dialog.is_none());
+            assert!(app.ui.status.contains("no-pdf.vectorcraft") && app.ui.status.contains("Create PDF-Compatible File"), "{import_as}: {}", app.ui.status);
+            assert!(app.ui.status.ends_with("(and 1 more)"), "{}", app.ui.status);
+            assert!(!app.ui.status.contains('\n'));
+        }
+        std::fs::remove_dir_all(folder).unwrap();
+    }
+
     /// A numeric form (Layer ▸ Transform ▸ Position…) opens with its first number being edited
     /// and selected: typing replaces it, and one Enter confirms.
     #[test]
     fn a_numeric_form_opens_with_its_first_number_selected() {
         let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         crate::theme::install(&ctx, &app.tokens, crate::i18n::language(&app));
         app.dialog_state.form = Form {
             title: "Position".into(),
@@ -1152,6 +1187,7 @@ mod tests {
     fn premiere_export_dialog() {
         let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         crate::theme::install(&ctx, &app.tokens, crate::i18n::language(&app));
         app.session.execute("comp.new", json!({"name": "Spot", "width": 64, "height": 36, "frameRate": 25, "duration": 1})).unwrap();
         app.session.execute("layer.newSolid", json!({"color": "#ff0000"})).unwrap();

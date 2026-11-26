@@ -18,7 +18,6 @@ cpal or muda. Everything in L0 to L4, the egui UI and the web app also build for
 | L0 | `time` | `Tick` (254 016 000 000 per second), rational frame rates incl. NTSC, SMPTE and drop-frame timecode |
 | L0 | `geom` | Vectors, matrices, quaternions, the layer transform (anchor, position, scale, orientation, rotation) |
 | L0 | `color` | sRGB and linear, HSL/HSV, luminance, the 38 blend modes, label colors |
-| L0 | `opusenc` | Opus encoder: RFC 6716 SILK (NB/MB/WB), hybrid (SWB/FB) and CELT (FB) modes chosen by bitrate and application (audio / voice), 48 kHz 20 ms packets, mono/stereo, and the RFC 7845 `OpusHead`, for WebM export audio |
 | L1 | `raster` | Premultiplied float images, sampling, affine and projective warps, blurs, compositing (parallel with rayon) |
 | L1 | `keyframe` | Animated values, keyframes with temporal ease and spatial Bezier, roving, hold, velocity |
 | L1 | `segment` | Swappable trained models for Roto Brush and face tracking: the `MaskModel` and `FaceModel` interfaces, a registry of open-licensed models (authors, licence, URL, size, SHA-256), PyTorch checkpoint and TensorFlow Lite readers (with an interpreter), SHA-256, MobileSAM (TinyViT + Segment Anything decoder) and MediaPipe Face Landmarker (BlazeFace + Face Mesh V2) on rayon and ndarray's safe GEMM |
@@ -121,6 +120,44 @@ their bottom-right quarter. Tracking data of effects that analyse footage (Warp 
 Camera Tracker, Tracked Shape Matte) is left as it is: footage has a source rectangle, whose effect space
 did not change.
 
+Cineon Converter has a hidden Version parameter (`version`). In version 2, Log to Linear raises
+the exposure to `1 / gamma` before subtracting the black offset and normalizing at the white
+point. Highlight Rolloff then limits highlights. Linear to Log reverses those operations. Log to
+Log raises the normalized code value to `1 / gamma` at the default black and white points. Custom
+points use a Gamma 1 conversion before that power. In version 1, Log to Linear raises the
+black-offset normalized value to `1.7 / gamma`, and Log to Log uses its original reference curve.
+A new instance is version 2 with
+Gamma 1.7. An instance saved before the parameter existed opens as version 1
+(`migrate::legacy_default`), with its Gamma, keyframes and expressions unchanged, and renders as
+it did. A whole Cineon Converter applied from an animation preset saved before the parameter
+existed is also version 1. Opening a project does not change any expression or the project schema.
+Reset keeps an instance's Version and sets Gamma to 1.7.
+
+A project saved with the Version parameter opens in an earlier build, since its schema is still 2.
+That build keeps the Version parameter it does not know and reads every Gamma on version 1's
+scale. A version 1 instance renders there as it did before. A version 2 instance's Gamma is read
+there as a version 1 Gamma, so its default Gamma 1.7 renders as linear. It renders lighter in this
+build. Earlier builds apply format 4 animation presets the same way and ignore
+`cineonVersion`.
+
+Animation presets are format 4 (`effectcraftAnimationPreset: 4`). A saved property that is a
+Cineon Converter's Gamma records that instance's version at the current time in `cineonVersion`.
+So does an Essential Properties value whose control drives only Cineon Converter Gammas of one
+version, directly or through nested comps. A keyframed Version counts there only when its keys
+that play hold one value without easing between them. A Version that an expression sets has no
+version to record. The Gamma properties of format 1 to 3 presets are version 1 Gammas. Applying a
+Gamma to a Cineon Converter on the layer sets that instance's Version to the recorded one. When
+that Version is keyframed, its keys stay and the Gamma is converted to the one version they hold;
+the Gamma is skipped when the keys hold several versions or an expression sets the Version. A
+preset that also holds the Version sets it from that property.
+Applying it to an Essential Properties value converts the value, its keyframes and their speeds to
+the version of the Gammas that the control drives (dividing by 1.7 from version 1 to version 2).
+That conversion aligns the linear points, but the two versions use different curves at other
+Gamma values. Interpret Footage Cineon Settings continues to apply Gamma after black-offset
+normalization, so its output agrees with version 2 Converter at Gamma 1.
+Expressions in a preset are applied as saved, and an Essential Properties Gamma with an enabled
+expression that was saved on another version is skipped.
+
 ## 4. Rendering
 
 `Renderer::comp_frame(comp, t)` walks the layers bottom to top. For each visible layer it renders
@@ -205,8 +242,9 @@ and undo can reuse earlier content. During rapid edits at the same time and view
 shows the newest completed revision while the exact requested revision renders; out-of-order
 completions cannot move it backwards. This avoids freezing until a slider or layer drag stops.
 Frames at other times or with other render options are never substituted. Obsolete queued jobs
-are dropped; running jobs finish into the cache. When the budget (Settings ▸ Memory & CPU) is
-full the least recently shown frames go first. The timeline's green bar counts cached frames
+are dropped; running jobs finish into the cache. The frames share one memory budget with
+the other big caches (Settings ▸ Memory & CPU); when it is full the memory accountant frees the
+least valuable data first, by cost to make again per byte and time since last use. The timeline's green bar counts cached frames
 of the current content and viewer settings.
 Resolution Auto renders the pixels the magnification needs, as in After Effects (Full above
 50 %, Half down to 33.3 %, Third down to 25 %, then Quarter). The Resolution is the comp's
@@ -443,12 +481,14 @@ Playground cannons without interacting forces evolve every particle independentl
 backend (reached through `EffectHost::particles` when the GPU compositor is active) simulates one
 particle per invocation from the CPU's birth schedule and keeps per-key state checkpoints on the
 GPU, like `SimCache`; the CPU simulation stays the oracle (tests compare ids and positions).
-Particle Emitter 3D, Particle Emitter 2D and Liquid Particles sample their Birth Rate at every
-step (`EffectHost::param_at`, #1373), so a keyed rate only decides the births of its own time;
-the rate is left out of the simulation key, and a checkpoint is resumed only with the same rate history (the CPU state's `hist`, the GPU
-checkpoint's births). The rate's keyframes are read at the step's exact layer time
+Particle Emitter 3D, Particle Emitter 2D and Liquid Particles sample their Birth Rate and producer
+position at every step (`EffectHost::param_at`, #1373), so a keyed rate only decides the births of
+its own time and a particle is born where its producer was during that step. The rate and producer
+are left out of the simulation key; a checkpoint is resumed only with the same rate and producer
+histories (the CPU state's `hist` and `producer_hist`, the GPU checkpoint's births and producer
+fingerprint). The values are read at the step's exact layer time
 (`EvalCtx::value_at_layer_time`; mapping it to comp time and back rounds under a fractional
-stretch), a rate without keyframes or an expression isn't sampled, and a layer of one of them with
+stretch), a value without keyframes or an expression isn't sampled, and a layer of one of them with
 expressions isn't layer cached (its key can't see what an expression returned at earlier times).
 `effectcraft-cli bench --gpu` reports CPU vs GPU ms/frame, speed-up, Auto's ms/frame, pixel
 agreement and the steady-state upload / readback MB per frame for every comp plus an

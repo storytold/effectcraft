@@ -75,7 +75,10 @@ fn the_span_bar_shows_the_trackers_confidence() {
     // the model stays loaded while the panel draws (its id is part of the cache keys)
     s.execute("roto.propagate", json!({"layer": id, "direction": "both", "wait": true})).unwrap();
 
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(move |_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(move |_| EffectcraftApp::new(s));
     h.run_steps(3);
     h.state_mut().session.execute("layer.select", json!({"layers": [id]})).unwrap();
     let ctx = h.ctx.clone();

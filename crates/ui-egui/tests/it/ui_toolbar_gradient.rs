@@ -38,7 +38,10 @@ fn setup(items: &[&str], tool: serde_json::Value, select: bool) -> (Harness<'sta
     }
     s.state.selected_layers = if select { vec![LayerId(l)] } else { vec![] };
     s.state.selected_props.clear();
-    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(vec2(1600.0, 1000.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(s));
     // With no shape layer selected, Fill / Stroke show while a shape tool is active.
     if !select {
         h.state_mut().ui.tool = Tool::Rectangle;

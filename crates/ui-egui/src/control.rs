@@ -803,19 +803,7 @@ fn render_frame(app: &EffectcraftApp, p: &Value) -> Outcome {
 
 /// Standard base64 (RFC 4648, padded).
 pub fn base64(data: &[u8]) -> String {
-    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut s = String::with_capacity(data.len().div_ceil(3) * 4);
-    for c in data.chunks(3) {
-        let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
-        for i in 0..4 {
-            if i <= c.len() {
-                s.push(A[(n >> (18 - 6 * i) & 63) as usize] as char);
-            } else {
-                s.push('=');
-            }
-        }
-    }
-    s
+    craft_mime::base64::STANDARD.encode(data)
 }
 
 /// Builds the `ui.inspect` reply: window size and pixels per point, fps, UI state with the
@@ -825,9 +813,9 @@ pub fn base64(data: &[u8]) -> String {
 pub fn inspect(app: &EffectcraftApp, ctx: &egui::Context) -> Value {
     // A logic-only tick refreshes the viewport information but not `InputState`'s screen rect.
     let size = ctx.input(|i| i.viewport().inner_rect).map_or_else(|| ctx.content_rect().size(), |r| r.size());
-    let keyboard_focus = ctx.memory(|m| m.focused()).map(|id| {
-        let response = ctx.read_response(id);
-        let rect = response.as_ref().map(|r| [r.rect.min.x, r.rect.min.y, r.rect.width(), r.rect.height()]);
+    let keyboard_focus = craft_ui::runtime::access::focused_node(ctx).or_else(|| ctx.memory(|m| m.focused())).map(|id| {
+        let automation = app.auto.elements.iter().chain(app.auto.previous.iter()).find(|e| e.response_id == Some(id));
+        let rect = ctx.read_response(id).map(|r| [r.rect.min.x, r.rect.min.y, r.rect.width(), r.rect.height()]).or_else(|| automation.map(|e| e.rect));
         // The registry names screen elements independently of egui's internal ids. Report
         // exact rectangle matches rather than guessing which enclosing panel owns focus.
         let candidates: Vec<&str> = app
@@ -837,7 +825,7 @@ pub fn inspect(app: &EffectcraftApp, ctx: &egui::Context) -> Value {
             .filter(|e| rect.is_some_and(|r| e.rect.iter().zip(r).all(|(a, b)| (*a - b).abs() < 0.01)))
             .map(|e| e.id.as_str())
             .collect();
-        let automation_id = app.auto.elements.iter().chain(app.auto.previous.iter()).find(|e| e.response_id == Some(id)).map(|e| e.id.as_str());
+        let automation_id = automation.map(|e| e.id.as_str());
         json!({"id": format!("{:016x}", id.value()), "rect": rect, "automationId": automation_id, "registryCandidates": candidates})
     });
     let mut ui = json!(app.ui);
