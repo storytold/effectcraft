@@ -88,7 +88,7 @@ fn initialize_nightly_process_identity() -> Result<(), process_identity::Identit
 }
 
 /// Whether a refusal may also open a native message box. Standard error always carries the reason;
-/// this only adds a box where one renders without the app's event loop. Never on macOS: rfd's alert
+/// this only adds a box where one renders without the app's event loop. Never on macOS: the dialog library's alert
 /// there needs the AppKit run loop this start has not reached, so a refused nightly launch hung in
 /// an invisible modal instead of exiting (GridCraft Mac smoke, 2026-11-26).
 fn refusal_dialog(flavor: build_flavor::BuildFlavor, desktop_session: bool, macos: bool) -> bool {
