@@ -3,6 +3,7 @@
 //! passes; and the job loops' pass driver (`effectcraft_render::passes`) settles natively.
 
 use effectcraft_effects::EffectCtx;
+use effectcraft_effects::psim::{EngineDesc, ParticleSim, ParticleSystem, SimRequest};
 use effectcraft_project::BitDepth;
 use effectcraft_render::three_d::adv;
 use effectcraft_render::{Accelerator, Backend, LayerCache, NoFootage, RenderOpts, Renderer};
@@ -45,6 +46,46 @@ fn particles_resolve_in_passes() {
         assert!(!g.pass_missed(), "{id}: served from the readback");
         agree(&format!("deferred {id}"), &cpu, &gpu, 0.01, cpu.len() / 100 + 1);
     }
+}
+
+/// The deferred readback key includes the producer history: a request with a different history
+/// starts its own readback instead of returning the previous history's particles.
+#[test]
+fn particle_producer_history_is_part_of_the_deferred_key() {
+    let Some((g, _lock)) = deferred_gpu() else { return };
+    let system = ParticleSystem::Engine(EngineDesc {
+        life: 10.0,
+        radius: [0.0; 3],
+        anim: 0,
+        speed: 0.0,
+        gravity: [0.0; 3],
+        axis: [0.0, -1.0, 0.0],
+        extra: 0.0,
+        cone: 0.0,
+        damp: 1.0,
+        seed: 51,
+        flat: true,
+    });
+    let births = [0u32];
+    let first_producers = [[10.0, 0.0, 0.0]];
+    let first = SimRequest { key: 0x1955_0def, steps: 1, births: &births, producers: &first_producers, system };
+    g.frame_begin();
+    g.pass_begin();
+    assert!(g.simulate(&first).unwrap().is_empty() && g.pass_missed(), "the first readback starts");
+    settle(g);
+    g.pass_begin();
+    let ready = g.simulate(&first).unwrap();
+    assert!(!ready.is_empty() && !g.pass_missed(), "the first readback is ready");
+    assert!((ready[0].p[0] - 10.0).abs() < 1e-4, "{:?}", ready[0].p);
+
+    let changed_producers = [[99.0, 0.0, 0.0]];
+    let changed = SimRequest { key: first.key, steps: 1, births: &births, producers: &changed_producers, system };
+    g.pass_begin();
+    assert!(g.simulate(&changed).unwrap().is_empty() && g.pass_missed(), "the producer history was not part of the deferred key");
+    settle(g);
+    g.pass_begin();
+    let changed = g.simulate(&changed).unwrap();
+    assert!(!changed.is_empty() && (changed[0].p[0] - 99.0).abs() < 1e-4, "{:?}", changed[0].p);
 }
 
 #[test]

@@ -18,6 +18,7 @@ craft-video = { workspace = true }
 craft-audio = { workspace = true }
 craft-media = { workspace = true }
 craft-gif = { workspace = true }
+craft-tga = { workspace = true }
 craft-exr = { workspace = true, features = ["decode"] }
 image = { workspace = true, features = ["png", "jpeg", "tiff", "exr", "tga"] }
 rayon = { workspace = true }

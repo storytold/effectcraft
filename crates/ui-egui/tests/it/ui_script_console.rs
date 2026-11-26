@@ -19,7 +19,10 @@ fn click(h: &mut Harness<'_, EffectcraftApp>, id: &str) {
 #[test]
 fn script_console_runs_scripts() {
     let s = effectcraft_host::session();
-    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1400.0, 900.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(s));
     h.state_mut().show_panel(PanelKind::ScriptConsole);
     h.run_steps(3);
     for id in ["scriptConsole.input", "scriptConsole.output", "scriptConsole.run", "scriptConsole.clear"] {
@@ -50,7 +53,10 @@ fn script_console_runs_scripts() {
 #[ignore]
 fn script_console_snapshot() {
     let s = effectcraft_host::session();
-    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1400.0, 900.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(s));
     h.state_mut().show_panel(PanelKind::ScriptConsole);
     h.run_steps(2);
     for code in ["var c = app.project.items.addComp('Console', 320, 180, 1, 2, 24); writeLn('made ' + c.name); c.id", "c.layers.addText('Hi').name", "nope()"] {
