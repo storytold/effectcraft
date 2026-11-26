@@ -65,6 +65,22 @@ fn version_is_a_flag_not_a_subcommand() {
     usage_error(&["version"], "unrecognized subcommand 'version'");
 }
 
+/// RFC-0018 rule 1.1: `--version` and `-V` work on every subcommand, print one line on stdout and
+/// return without running it (`mcp` would otherwise wait for a client).
+#[test]
+fn every_subcommand_prints_the_version() {
+    let command = effectcraft_cli::command();
+    let subcommands: Vec<&str> = command.get_subcommands().map(|s| s.get_name()).filter(|n| *n != "help").collect();
+    assert!(subcommands.contains(&"replay") && subcommands.contains(&"mcp"), "{subcommands:?}");
+    for sub in subcommands {
+        for flag in ["--version", "-V"] {
+            let r = invoke(&[sub, flag]);
+            let want = format!("effectcraft-cli-{sub} {}\n", env!("CARGO_PKG_VERSION"));
+            assert_eq!((r.code, r.stdout.as_str(), r.stderr.as_str()), (0, want.as_str(), ""), "{sub} {flag}");
+        }
+    }
+}
+
 #[test]
 fn no_arguments_is_a_usage_error_with_the_help_on_stderr() {
     let r = invoke(&[]);
