@@ -413,9 +413,16 @@ fn write_still<W: std::io::Write + std::io::Seek>(cx: &Cx, file: &mut W, img: &I
             };
             match fmt {
                 OutputFormat::PngSequence => image::codecs::png::PngEncoder::new(file).write_image(&data, w, h, ct),
-                // Uncompressed (the encoder's run-length compression is off), top-left origin, the
-                // alpha bits in the image descriptor: 8 for RGB + Alpha, 0 otherwise.
-                OutputFormat::TargaSequence => image::codecs::tga::TgaEncoder::new(file).disable_rle().write_image(&data, w, h, ct),
+                // The shared footerless writer: uncompressed, top-left origin, the alpha bits in the
+                // image descriptor: 8 for RGB + Alpha, 0 otherwise.
+                OutputFormat::TargaSequence => {
+                    let layout = match channels {
+                        Channels::Rgba => craft_tga::Layout::Rgba,
+                        Channels::Alpha => craft_tga::Layout::Gray,
+                        Channels::Rgb => craft_tga::Layout::Rgb,
+                    };
+                    return craft_tga::write_top_left_raw(file, w, h, layout, &data).map_err(|e| ExportError::Encode(e.to_string()));
+                }
                 // (the TIFF encoder needs Seek)
                 _ => image::codecs::tiff::TiffEncoder::new(file).write_image(&data, w, h, ct),
             }

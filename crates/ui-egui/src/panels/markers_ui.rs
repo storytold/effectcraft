@@ -197,7 +197,7 @@ pub fn dialog(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
             ui.label(tr("Label:"));
             let labels = effectcraft_engine::color::Label::ALL;
             let cur = labels.get(d.label).copied().unwrap_or_default();
-            let r = craft_ui::ComboBox::from_id_salt("dialog.marker.label").selected_text(app.session.prefs.label_name(cur)).show_ui(ui, |ui| {
+            let r = egui::ComboBox::from_id_salt("dialog.marker.label").selected_text(app.session.prefs.label_name(cur)).show_ui(ui, |ui| {
                 for (i, l) in labels.into_iter().enumerate() {
                     if crate::widgets::label_entry(ui, l, &app.session.prefs.label_name(l), d.label == i, &app.tokens).clicked() {
                         d.label = i;
@@ -446,7 +446,16 @@ pub(crate) fn marker_bin(app: &mut EffectcraftApp, ui: &mut egui::Ui, comp: &Com
         ui.ctx().set_cursor_icon(if resp.dragged() { egui::CursorIcon::Grabbing } else { egui::CursorIcon::Grab });
     }
     icons::paint(ui.painter(), bin, Icon::MarkerBin, if hot { t.icon_active } else { t.icon });
-    let at = resp.interact_pointer_pos().filter(|p| p.x >= strip.min.x && p.x < strip.max.x).map(|p| {
+    // A drag ends where its button came up: a later press in the same pass (one press per pass
+    // follows a release) has moved the pointer on.
+    let released_at = ui.input(|i| {
+        i.events.iter().find_map(|e| match e {
+            egui::Event::PointerButton { button: egui::PointerButton::Primary, pressed: false, pos, .. } => Some(*pos),
+            _ => None,
+        })
+    });
+    let pointer = if resp.drag_stopped() { released_at.or(resp.interact_pointer_pos()) } else { resp.interact_pointer_pos() };
+    let at = pointer.filter(|p| p.x >= strip.min.x && p.x < strip.max.x).map(|p| {
         let snapped = snap(app, comp, tm, tm.t(p.x), MarkerRef { layer: None, index: usize::MAX });
         snapped.min(comp.duration.seconds())
     });
@@ -629,6 +638,7 @@ mod tests {
         assert_eq!(app.session.execute("markers.list", json!({})).unwrap()[0]["chapter"], "");
         // Enter is OK and Cmd+Backspace is Delete.
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         crate::theme::install(&ctx, &app.tokens, crate::i18n::language(&app));
         // The dialog opens with Comment focused (#922), a multi-line field where Enter types a
         // new line; with the focus elsewhere, Enter is OK.

@@ -97,3 +97,77 @@ fn raw_rgb_avi_with_dropped_slot_keeps_legacy_playback() -> Result<(), Box<dyn s
     assert_eq!((frame.width, frame.height), (WIDTH, HEIGHT));
     Ok(())
 }
+
+fn audio_header(bytes: &[u8]) -> Result<usize, &'static str> {
+    bytes.windows(12).position(|window| &window[..4] == b"strh" && &window[8..] == b"auds").map(|offset| offset + 8).ok_or("AVI audio stream header")
+}
+
+#[test]
+fn delayed_avi_pcm_keeps_raw_rgb_and_reports_the_later_audio_end() -> Result<(), Box<dyn std::error::Error>> {
+    let mut bytes = fixture(24, true, false)?;
+    let at = audio_header(&bytes)?;
+    let delay = AUDIO_PER_FRAME as u32 + 13;
+    bytes[at + 28..at + 32].copy_from_slice(&delay.to_le_bytes()); // dwStart
+    bytes[at + 32..at + 36].copy_from_slice(&1u32.to_le_bytes()); // stale dwLength
+
+    let bytes: Arc<[u8]> = bytes.into();
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("delayed-rgb.avi");
+    std::fs::write(&path, &bytes)?;
+    let end = Tick::from_units(i64::from(delay) + 3 * AUDIO_PER_FRAME as i64, i64::from(AUDIO_RATE));
+    for info in [crate::probe::probe(&path)?, crate::probe::probe_bytes("delayed-rgb.avi", bytes.clone())?] {
+        assert_eq!(info.duration.0, end.0);
+        assert!(info.has_audio && info.has_video);
+    }
+    let disk = stream::open_source(&path).ok_or("unrecognized AVI")?.0?;
+    let memory = stream::open_bytes("delayed-rgb.avi", bytes)?;
+    for opened in [disk, memory] {
+        let MediaSource::Craft(source) = opened else { panic!("delayed fixed-size PCM should stay on the shared RGB route") };
+        let frame = source.video_frame(FrameRequest { time: Tick::from_units(1, i64::from(FPS)), scale: 1.0 })?;
+        let PixelData::Rgba8(pixels) = &frame.data else { panic!("expected RGBA picture") };
+        assert_eq!(&pixels[..4], &rgba(1, 0, 0));
+
+        let delay = i64::from(delay);
+        let after = source.audio(delay + AUDIO_PER_FRAME as i64, 2, AUDIO_RATE)?;
+        assert_eq!(after.channels[0], [2000.0 / 32768.0; 2]);
+        let first = source.audio(delay - 2, 4, AUDIO_RATE)?;
+        assert_eq!(first.channels[0], [0.0, 0.0, 1000.0 / 32768.0, 1000.0 / 32768.0]);
+    }
+    Ok(())
+}
+
+#[test]
+fn delayed_avi_pcm_audio_only_uses_the_stream_clock_and_indexed_samples() -> Result<(), Box<dyn std::error::Error>> {
+    let audio = avi::StreamSpec::Audio(avi::AudioSpec::pcm(AUDIO_RATE, 1, 16));
+    let mut writer = avi::AviWriter::new(Cursor::new(Vec::new()), vec![audio], avi::MuxOptions::default())?;
+    writer.write_chunk(0, &8192i16.to_le_bytes().repeat(5), true)?;
+    writer.write_chunk(0, &16384i16.to_le_bytes().repeat(9), true)?;
+    let mut bytes = writer.finish()?.into_inner();
+    let at = audio_header(&bytes)?;
+    // This stream clock places dwStart at 4.8 native samples, truncated to 4.
+    bytes[at + 20..at + 24].copy_from_slice(&1u32.to_le_bytes());
+    bytes[at + 24..at + 28].copy_from_slice(&5000u32.to_le_bytes());
+    bytes[at + 28..at + 32].copy_from_slice(&3u32.to_le_bytes());
+    bytes[at + 32..at + 36].copy_from_slice(&200u32.to_le_bytes());
+
+    let bytes: Arc<[u8]> = bytes.into();
+    let opened = stream::open_bytes("delayed-pcm.avi", bytes.clone())?;
+    let MediaSource::Craft(source) = opened else { panic!("expected shared PCM reader") };
+    assert_eq!(source.audio(0, 6, AUDIO_RATE)?.channels[0], [0.0, 0.0, 0.0, 0.0, 0.25, 0.25]);
+    assert_eq!(source.audio(17, 2, AUDIO_RATE)?.channels[0], [0.5, 0.0]);
+    let info = crate::probe::probe_bytes("delayed-pcm.avi", bytes)?;
+    assert_eq!(info.duration.0, Tick::from_units(18, i64::from(AUDIO_RATE)).0);
+    Ok(())
+}
+
+#[test]
+fn delayed_avi_pcm_with_conflicting_block_size_keeps_legacy_rgb_route() -> Result<(), Box<dyn std::error::Error>> {
+    let mut bytes = fixture(24, true, false)?;
+    let at = audio_header(&bytes)?;
+    bytes[at + 28..at + 32].copy_from_slice(&16u32.to_le_bytes());
+    bytes[at + 44..at + 48].copy_from_slice(&1u32.to_le_bytes()); // dwSampleSize
+    let opened = stream::open_bytes("delayed-pcm-block.avi", bytes.into())?;
+    let MediaSource::Film(source) = opened else { panic!("expected legacy PCM block alignment") };
+    assert_eq!(source.audio(15, 2, AUDIO_RATE)?.channels[0], [0.0, 1000.0 / 32768.0]);
+    Ok(())
+}

@@ -347,7 +347,7 @@ pub fn viewer_hook(
         && app.dialog.is_none()
         && !selected.is_empty()
         && ui.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace))
-        && !ctx.egui_wants_keyboard_input()
+        && !crate::framework::widget_has_keyboard(&ctx)
     {
         run(app, &ctx, "camera.deletePoints", json!({"layer": a.layer.0, "effect": a.uid, "points": selected}));
     }

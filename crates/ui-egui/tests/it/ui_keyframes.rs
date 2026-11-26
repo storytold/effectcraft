@@ -21,7 +21,10 @@ fn harness() -> (Harness<'static, EffectcraftApp>, LayerId, u64) {
     }
     let uid = s.active_comp().unwrap().layer(id).unwrap().props.prop("transform/opacity").unwrap().uid;
     s.execute("layer.select", json!({"layers": [id.0]})).unwrap();
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(s));
     h.run_steps(3);
     let ctx = h.ctx.clone();
     effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "timeline.reveal.opacity", json!({})).unwrap();
@@ -518,7 +521,10 @@ fn properties_panel_edits_every_selected_layer() {
     s.execute("layer.select", json!({"layers": ids})).unwrap();
     let first = s.state.selected_layers[0];
     let uid = s.active_comp().unwrap().layer(first).unwrap().props.prop("transform/position").unwrap().uid;
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(s));
     h.state_mut().show_panel(effectcraft_ui_egui::dock::PanelKind::Properties);
     h.run_steps(4);
     assert_eq!(h.state().auto.find("properties.selectedObjects").map(|e| e.label.clone()), Some("(3) Selected Objects".into()));
@@ -571,7 +577,10 @@ fn ctrl_alt_scrub_in_the_timeline_is_proportional() {
     }
     let middle = ids[1];
     let uid = s.active_comp().unwrap().layer(LayerId(middle)).unwrap().props.prop("transform/position").unwrap().uid;
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(s));
     h.run_steps(3);
     let ctx = h.ctx.clone();
     effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "timeline.reveal.position", json!({})).unwrap();

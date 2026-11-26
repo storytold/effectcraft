@@ -1399,6 +1399,7 @@ mod tests {
     #[test]
     fn inline_editors_select_all_only_as_they_open() {
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         let mut text = String::from("Comp 1");
         let mut id = egui::Id::NULL;
         let frame = |ctx: &egui::Context, text: &mut String, id: &mut egui::Id| {
@@ -1438,6 +1439,7 @@ mod tests {
     #[test]
     fn field_text_is_vertically_centred() {
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         let t = Tokens::for_kind(Default::default());
         for h in [22.0, 26.0, 30.0] {
             let field = Rect::from_min_size(pos2(20.0, 40.0), vec2(220.0, h));
