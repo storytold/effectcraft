@@ -2422,3 +2422,36 @@ fn a_frame_memo_gives_a_circle_of_expressions_the_values_it_has_without_one() {
         assert_eq!(order.map(opacity), want, "and again, remembered");
     }
 }
+
+/// A camera whose Focus Distance reads its own `toWorld` needs itself: the read inside its
+/// expression is cut (it gets the camera with the keyframed focus) and the expression goes on.
+/// That cut inside must not stop the camera from being remembered at the top: it is the camera
+/// of every frame of such a comp, asked for by every 3D layer.
+#[test]
+fn a_camera_whose_focus_reads_its_own_to_world_is_still_remembered() {
+    use effectcraft_render::ExprHost;
+    use effectcraft_render::three_d::active_camera;
+    let mut f = fx();
+    let comp = f.p.comp(f.cid).unwrap().clone();
+    let mut cam = build::layer(&mut f.p, &comp, "Cam", LayerSource::Camera, (comp.width, comp.height), None);
+    cam.props.prop_mut("cameraOptions/dof").unwrap().value = Value::Bool(true);
+    cam.props.prop_mut("cameraOptions/focusDistance").unwrap().expr =
+        Some(Expression { text: "length(toWorld([0, 0, 0]), thisComp.layer('B').toWorld([0, 0, 0]))".into(), enabled: true });
+    f.p.comp_mut(f.cid).unwrap().layers.push(cam);
+    let c = f.p.comp(f.cid).unwrap();
+    let ctx = EvalCtx { expr: Some(&Expressions), ..EvalCtx::new(&f.p, f.cid, c, Tick::ZERO) };
+    let faults = || Expressions.faults().expect("the engine counts");
+
+    let before = faults();
+    let plain = active_camera(&ctx);
+    assert!(faults() > before, "the fixture's camera must need itself");
+    let focus = plain.dof.expect("depth of field is on").focus;
+
+    let _memo = effectcraft_render::three_d::EvalMemo::scope(&f.p);
+    let first = active_camera(&ctx);
+    assert_eq!(first.dof.map(|d| d.focus), Some(focus), "the camera is the one worked out without the memo");
+    let at = faults();
+    let again = active_camera(&ctx);
+    assert_eq!(faults(), at, "the second read ran no expression: nothing was cut again");
+    assert_eq!(again.dof.map(|d| d.focus), Some(focus));
+}
