@@ -111,6 +111,13 @@ Commands (CLI, MCP, control channel):
   names it and why). `EFFECTCRAFT_RQ_RENDERER` set to `gpu` or `cpu` skips it and renders on
   that compositor; `auto` (the default) measures. A queue item's later output modules reuse its
   first one's choice, and Software Rendering projects always render on the CPU.
+  When a job ends, the log target `effectcraft_export` gets one timing line, and the render log
+  gets it as a `Timing:` line when its Log setting writes a log for that outcome (under the
+  default Errors Only, failed jobs only; a failed job's line says how long it ran and what ran
+  before it stopped): the wall time, the busy time of rendering, the encoder and writing the file
+  (the stages overlap, so they are not a sum), the compositor and why, the encoder and its
+  settings, and frames per second ([#3713](https://github.com/storytold/effectcraft/issues/3713)).
+  `effectcraft-cli render --json` returns it as `timing` and `timingSummary`.
 - `threeD.defaultRenderer`: Default 3D Renderer
 - `labels.N.name` / `labels.N.color`: the 16 label names and colours, used by the Label menu,
   the timeline, project panel, render queue and viewer handles
