@@ -83,6 +83,78 @@ fn worker_cap() -> usize {
     std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(1, MAX_WORKERS)
 }
 
+/// Process-wide counters for the shared decoder routes, added to the FilmCraft counters by
+/// [`crate::gop_stats`].
+pub(crate) mod stats {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use filmcraft_codecs::GopStats;
+
+    static HITS: AtomicU64 = AtomicU64::new(0);
+    static MISSES: AtomicU64 = AtomicU64::new(0);
+    static SEEKS: AtomicU64 = AtomicU64::new(0);
+    static DECODED: AtomicU64 = AtomicU64::new(0);
+    static EVICTED: AtomicU64 = AtomicU64::new(0);
+    static DECODE_NS: AtomicU64 = AtomicU64::new(0);
+    static DRAFT: AtomicU64 = AtomicU64::new(0);
+    static FRAMES: AtomicU64 = AtomicU64::new(0);
+
+    pub(crate) fn hit() {
+        HITS.fetch_add(1, Ordering::Relaxed);
+    }
+    pub(crate) fn miss() {
+        MISSES.fetch_add(1, Ordering::Relaxed);
+    }
+    pub(crate) fn seek() {
+        SEEKS.fetch_add(1, Ordering::Relaxed);
+    }
+    pub(crate) fn decoded(n: u64) {
+        DECODED.fetch_add(n, Ordering::Relaxed);
+    }
+    pub(crate) fn evicted(n: u64) {
+        EVICTED.fetch_add(n, Ordering::Relaxed);
+    }
+    pub(crate) fn draft(n: u64) {
+        DRAFT.fetch_add(n, Ordering::Relaxed);
+    }
+    pub(crate) fn frames(n: u64) {
+        FRAMES.fetch_add(n, Ordering::Relaxed);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) type Timer = std::time::Instant;
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) type Timer = ();
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn timer() -> Timer {
+        std::time::Instant::now()
+    }
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn timer() -> Timer {}
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn add_decode_time(start: Timer) {
+        DECODE_NS.fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn add_decode_time(_: Timer) {}
+
+    pub(crate) fn snapshot() -> GopStats {
+        GopStats {
+            hits: HITS.load(Ordering::Relaxed),
+            misses: MISSES.load(Ordering::Relaxed),
+            seeks: SEEKS.load(Ordering::Relaxed),
+            decoded: DECODED.load(Ordering::Relaxed),
+            evicted: EVICTED.load(Ordering::Relaxed),
+            decode_ns: DECODE_NS.load(Ordering::Relaxed),
+            skipped: 0,
+            draft: DRAFT.load(Ordering::Relaxed),
+            frames: FRAMES.load(Ordering::Relaxed),
+        }
+    }
+}
+
 fn prores_has_alpha(packet_size: u32, read: impl FnOnce() -> Option<Vec<u8>>) -> Option<bool> {
     if packet_size > MAX_PRORES_ALPHA_SAMPLE_BYTES {
         return None;
@@ -1785,7 +1857,10 @@ fn apv_cache_fits_pair(a: usize, b: usize) -> bool {
 impl ApvFrameCache {
     fn get(&self, pts: i64) -> Option<Arc<VideoFrame>> {
         let entries = self.entries.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        entries.iter().find(|entry| entry.pts == pts).map(|entry| entry.frame.clone())
+        entries.iter().find(|entry| entry.pts == pts).map(|entry| {
+            stats::hit();
+            entry.frame.clone()
+        })
     }
 
     fn get_or_decode(&self, pts: i64, decode: impl FnOnce() -> Result<VideoFrame>) -> Result<Arc<VideoFrame>> {
@@ -1798,12 +1873,19 @@ impl ApvFrameCache {
         if let Some(frame) = self.get(pts) {
             return Ok(frame);
         }
+        stats::miss();
+        let started = stats::timer();
         let frame = Arc::new(decode()?);
+        stats::add_decode_time(started);
+        stats::decoded(1);
+        stats::frames(1);
         let mut entries = self.entries.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if entries.len() == 2 {
             entries.remove(0);
+            stats::evicted(1);
         }
         if entries.first().is_some_and(|other| !apv_cache_fits_pair(other.frame.byte_size(), frame.byte_size())) {
+            stats::evicted(entries.len() as u64);
             entries.clear();
         }
         // Like Film, keep the current frame even if it alone exceeds the cache ceiling.
@@ -1878,8 +1960,10 @@ impl MediaSource for CraftMediaSource {
         let supports_draft = matches!(state.decoder.codec(), CodecId::H264 | CodecId::Hevc | CodecId::Vp9 | CodecId::Av1);
         let want_draft = req.scale < 0.99 && supports_draft;
         if let Some(hit) = state.decoded.iter().find(|c| c.pts == target_pts && c.draft == want_draft) {
+            stats::hit();
             return Ok(hit.frame.clone());
         }
+        stats::miss();
 
         // A scan cannot identify AVI keyframes, but each nonempty ProRes chunk is
         // an independent picture. Do not read an earlier, possibly damaged chunk.
@@ -1900,6 +1984,8 @@ impl MediaSource for CraftMediaSource {
         let jump_ahead = sync_idx > state.gop_start_idx && sync_idx >= state.next_decode_idx;
         let mode_changed_in_flight = draft_changed && target_idx < state.next_decode_idx;
         if mode_changed_in_flight || target_passed || before_gop || jump_ahead {
+            stats::seek();
+            stats::evicted(state.decoded.len() as u64);
             state.decoder.reset().map_err(video_decode_error)?;
             state.decoded.clear();
             state.cached_bytes = 0;
@@ -1919,11 +2005,16 @@ impl MediaSource for CraftMediaSource {
                 let idx = state.next_decode_idx;
                 let pts = self.file.sample_pts(video_idx, idx);
                 let pkt = self.file.read_sample(&*self.source, video_idx, idx)?;
+                let started = stats::timer();
                 let frames = decode_track_packet(&mut state.decoder, is_isobmff, &pkt, pts, prores::decode_frame_with).map_err(video_decode_error)?;
+                stats::add_decode_time(started);
+                stats::decoded(1);
                 state.next_decode_idx = idx + 1;
                 push_decoded(state, frames, want_draft, self.presentation, &self.file, video_idx)?;
             } else if !state.flushed {
+                let started = stats::timer();
                 let frames = state.decoder.flush().map_err(video_decode_error)?;
+                stats::add_decode_time(started);
                 state.flushed = true;
                 push_decoded(state, frames, want_draft, self.presentation, &self.file, video_idx)?;
                 break;
@@ -2386,6 +2477,10 @@ fn push_decoded(
     track_idx: usize,
 ) -> Result<()> {
     for vf in frames {
+        stats::frames(1);
+        if vf.draft {
+            stats::draft(1);
+        }
         let pts = vf.pts.unwrap_or(0);
         state.emitted_max_pts = Some(state.emitted_max_pts.map_or(pts, |max| max.max(pts)));
         let pts_tick = file.pts_to_tick(track_idx, pts);
@@ -2393,10 +2488,13 @@ fn push_decoded(
         state.cached_bytes = state.cached_bytes.saturating_add(frame.byte_size());
         state.decoded.push(CachedFrame { pts, draft, frame });
     }
+    let mut evicted = 0;
     while state.decoded.len() > MAX_CACHED_FRAMES || (state.cached_bytes > MAX_CACHED_BYTES && state.decoded.len() > 1) {
         let removed = state.decoded.remove(0);
         state.cached_bytes = state.cached_bytes.saturating_sub(removed.frame.byte_size());
+        evicted += 1;
     }
+    stats::evicted(evicted);
     Ok(())
 }
 
@@ -4838,7 +4936,7 @@ mod tests {
 
     impl ByteSource for CountingKeyReads {
         fn len(&self) -> u64 {
-            self.bytes.len() as u64
+            self.bytes.len()
         }
         fn read_at(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<()> {
             if let Some(i) = self.keyframes.iter().position(|&(start, size)| start == offset && size == buf.len()) {
@@ -4913,6 +5011,18 @@ mod tests {
         let full = media.video_frame(FrameRequest::full(Tick::from_units(39, 25))).expect("full frame 39");
         assert_eq!(full.pts, Tick::from_units(39, 25));
         assert_eq!(source.reads[0].load(Ordering::Relaxed), 2, "a full request for a fed draft frame resets");
+    }
+
+    #[test]
+    fn shared_decoder_stats_reach_the_public_counters() {
+        let before = crate::gop_stats();
+        let movie = generated_h264_movie(2, 2);
+        let source = crate::stream::open_bytes("stats.mp4", movie.bytes).expect("shared route");
+        let _ = source.video_frame(effectcraft_time::Tick::ZERO, 1.0).expect("frame");
+        let after = crate::gop_stats();
+        assert!(after.decoded > before.decoded, "shared samples are counted");
+        assert!(after.frames > before.frames, "shared output is counted");
+        assert!(after.misses > before.misses, "the first shared read is a miss");
     }
 
     fn generated_two_frame_ts() -> Vec<u8> {
