@@ -60,11 +60,9 @@ impl Watcher {
             .name("project-watch".into())
             .spawn(move || {
                 let mut interval = FOCUSED_INTERVAL;
-                loop {
-                    match rx.recv_timeout(interval) {
-                        Ok(()) | Err(RecvTimeoutError::Timeout) => {}
-                        Err(RecvTimeoutError::Disconnected) => break,
-                    }
+                // A wake (`Ok`) or the poll interval (`Timeout`) runs one check; a dropped
+                // `Watcher` (`Disconnected`) ends the thread.
+                while !matches!(rx.recv_timeout(interval), Err(RecvTimeoutError::Disconnected)) {
                     let (path, focused) = {
                         let s = lock(&st);
                         (s.path.clone(), s.focused)
@@ -195,11 +193,10 @@ mod tests {
         (d, path)
     }
 
-    fn start(d: Arc<Disk>, wakes: Arc<AtomicUsize>) -> Watcher {
+    fn start(d: Arc<Disk>, wakes: Arc<AtomicUsize>) -> Option<Watcher> {
         Watcher::start(d, move || {
             wakes.fetch_add(1, Ordering::SeqCst);
         })
-        .unwrap()
     }
 
     fn wait_for(what: &str, mut ready: impl FnMut() -> bool) {
@@ -214,7 +211,7 @@ mod tests {
     fn the_first_sighting_only_sets_the_baseline() {
         let (d, path) = disk((100, 1));
         let wakes = Arc::new(AtomicUsize::new(0));
-        let mut w = start(d, Arc::clone(&wakes));
+        let mut w = start(d, Arc::clone(&wakes)).unwrap();
         w.set_watched(Some(path), None, false);
         wait_for("first baseline", || w.baseline().is_some());
         std::thread::sleep(Duration::from_millis(200));
@@ -226,7 +223,7 @@ mod tests {
     fn an_unverified_path_reports_its_first_stamp() {
         let (d, path) = disk((100, 1));
         let wakes = Arc::new(AtomicUsize::new(0));
-        let mut w = start(d, Arc::clone(&wakes));
+        let mut w = start(d, Arc::clone(&wakes)).unwrap();
         w.set_watched(Some(path.clone()), None, true);
         wait_for("wake", || wakes.load(Ordering::SeqCst) >= 1);
         assert_eq!(w.take(), Some((path, (100, 1))));
@@ -236,7 +233,7 @@ mod tests {
     fn an_external_write_wakes_and_reports_the_new_stamp() {
         let (d, path) = disk((100, 1));
         let wakes = Arc::new(AtomicUsize::new(0));
-        let mut w = start(d.clone(), Arc::clone(&wakes));
+        let mut w = start(d.clone(), Arc::clone(&wakes)).unwrap();
         // The session's loaded stamp is installed synchronously with the path.
         w.set_watched(Some(path.clone()), Some((100, 1)), false);
         assert_eq!(w.baseline(), Some((100, 1)));
@@ -250,7 +247,7 @@ mod tests {
     fn acknowledging_a_reported_change_does_not_report_it_again() {
         let (d, path) = disk((100, 1));
         let wakes = Arc::new(AtomicUsize::new(0));
-        let mut w = start(d.clone(), Arc::clone(&wakes));
+        let mut w = start(d.clone(), Arc::clone(&wakes)).unwrap();
         w.set_watched(Some(path.clone()), Some((100, 1)), false);
         assert_eq!(w.baseline(), Some((100, 1)));
         lock(&d.stamps).insert(path.clone(), (120, 2));
@@ -275,29 +272,29 @@ mod bench {
 
     /// (process CPU seconds, working set bytes) for this test process, read by an external
     /// `Get-Process` so the reading itself costs this process nothing.
-    fn sample() -> (f64, usize) {
+    fn sample() -> Option<(f64, usize)> {
         let pid = std::process::id();
         let out = std::process::Command::new("powershell")
             .args(["-NoProfile", "-Command", &format!("$p=Get-Process -Id {pid}; \"$($p.TotalProcessorTime.TotalSeconds) $($p.WorkingSet64)\"")])
             .output()
-            .unwrap();
+            .ok()?;
         let text = String::from_utf8_lossy(&out.stdout);
         let mut it = text.split_whitespace();
-        (it.next().unwrap().replace(',', ".").parse().unwrap(), it.next().unwrap().parse().unwrap())
+        Some((it.next()?.replace(',', ".").parse().ok()?, it.next()?.parse().ok()?))
     }
 
-    fn cpu() -> f64 {
-        sample().0
+    fn cpu() -> Option<f64> {
+        Some(sample()?.0)
     }
 
-    fn rss() -> usize {
-        sample().1
+    fn rss() -> Option<usize> {
+        Some(sample()?.1)
     }
 
-    fn idle_cpu_pct(secs: u64) -> f64 {
-        let c0 = cpu();
+    fn idle_cpu_pct(secs: u64) -> Option<f64> {
+        let c0 = cpu()?;
         std::thread::sleep(Duration::from_secs(secs));
-        (cpu() - c0) / secs as f64 * 100.0
+        Some((cpu()? - c0) / secs as f64 * 100.0)
     }
 
     fn mb(b: usize) -> f64 {
@@ -315,7 +312,7 @@ mod bench {
         let services = crate::Session::default().services.clone();
 
         let secs = 60;
-        let without = idle_cpu_pct(secs);
+        let without = idle_cpu_pct(secs).unwrap();
         let wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let w2 = Arc::clone(&wakes);
         let mut w = Watcher::start(services.clone(), move || {
@@ -324,15 +321,17 @@ mod bench {
         .unwrap();
         w.set_focused(true);
         w.set_watched(Some(path.clone()), services.stamp(&path), false);
-        let focused = idle_cpu_pct(secs);
+        let focused = idle_cpu_pct(secs).unwrap();
         w.set_focused(false);
-        let background = idle_cpu_pct(secs);
-        println!("BENCH idle CPU over {secs}s each: no watcher {without:.4}% | watcher focused (1 s poll) {focused:.4}% | watcher background (5 s poll) {background:.4}%");
+        let background = idle_cpu_pct(secs).unwrap();
+        println!(
+            "BENCH idle CPU over {secs}s each: no watcher {without:.4}% | watcher focused (1 s poll) {focused:.4}% | watcher background (5 s poll) {background:.4}%"
+        );
         println!("BENCH watcher-only CPU: focused {:.4}% | background {:.4}%", focused - without, background - without);
 
         // 100 external writes, each detected and acknowledged as the UI does.
         w.set_focused(true);
-        let rss0 = rss();
+        let rss0 = rss().unwrap();
         let mut detect = Vec::with_capacity(100);
         for i in 0..100u32 {
             let body = format!("{{\"n\":{i},\"pad\":\"{}\"}}", "x".repeat(i as usize));
@@ -348,13 +347,26 @@ mod bench {
             }
             detect.push(t0.elapsed().as_secs_f64() * 1000.0);
         }
-        let rss1 = rss();
+        let rss1 = rss().unwrap();
         std::thread::sleep(Duration::from_secs(30));
-        let rss2 = rss();
+        let rss2 = rss().unwrap();
         detect.sort_by(f64::total_cmp);
         let p = |q: f64| detect[((detect.len() as f64 * q).ceil() as usize).saturating_sub(1)];
-        println!("BENCH detect latency (write -> take, focused, 100 writes): p50 {:.0} ms | p95 {:.0} ms | p99 {:.0} ms | max {:.0} ms", p(0.5), p(0.95), p(0.99), p(1.0));
-        println!("BENCH RSS: before {:.2} MB | after 100 reloads {:.2} MB ({:+.2} MB) | after 30 s idle {:.2} MB ({:+.2} MB)", mb(rss0), mb(rss1), mb(rss1) - mb(rss0), mb(rss2), mb(rss2) - mb(rss0));
+        println!(
+            "BENCH detect latency (write -> take, focused, 100 writes): p50 {:.0} ms | p95 {:.0} ms | p99 {:.0} ms | max {:.0} ms",
+            p(0.5),
+            p(0.95),
+            p(0.99),
+            p(1.0)
+        );
+        println!(
+            "BENCH RSS: before {:.2} MB | after 100 reloads {:.2} MB ({:+.2} MB) | after 30 s idle {:.2} MB ({:+.2} MB)",
+            mb(rss0),
+            mb(rss1),
+            mb(rss1) - mb(rss0),
+            mb(rss2),
+            mb(rss2) - mb(rss0)
+        );
         drop(w);
         let _ = std::fs::remove_dir_all(dir);
     }

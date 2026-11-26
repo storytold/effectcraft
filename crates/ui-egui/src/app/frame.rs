@@ -773,13 +773,12 @@ impl EffectcraftApp {
         watcher.set_watched(self.session.path.clone(), self.session.project_stamp, self.session.project_stamp_unverified);
         if self.project_reload_pending.is_none()
             && let Some(change) = watcher.take()
+            && Some(&change.0) == self.session.path.as_ref()
         {
-            if Some(&change.0) == self.session.path.as_ref() {
-                // Read the disk stamp once for this observation and keep it through deferral,
-                // instead of doing file I/O on every frame while a change is held.
-                let disk = self.session.services.stamp(&change.0);
-                self.project_reload_pending = Some((change.0, change.1, disk));
-            }
+            // Read the disk stamp once for this observation and keep it through deferral,
+            // instead of doing file I/O on every frame while a change is held.
+            let disk = self.session.services.stamp(&change.0);
+            self.project_reload_pending = Some((change.0, change.1, disk));
         }
         let Some((path, stamp, disk_stamp)) = self.project_reload_pending.clone() else { return };
         if Some(&path) != self.session.path.as_ref() {
@@ -799,7 +798,11 @@ impl EffectcraftApp {
             self.project_reload_pending = None;
             return;
         }
-        if self.session.is_dirty() || self.session.script_ui.render_host.is_some() || !self.session.script_ui.file_dialogs.is_empty() || self.session.render_job.is_some() {
+        if self.session.is_dirty()
+            || self.session.script_ui.render_host.is_some()
+            || !self.session.script_ui.file_dialogs.is_empty()
+            || self.session.render_job.is_some()
+        {
             self.ui.status = "Project changed on disk. To keep your changes, use File ▸ Save As ▸ Save a Copy... Then File ▸ Revert loads the disk version; Revert discards unsaved changes.".into();
             return;
         }
@@ -1215,9 +1218,7 @@ mod tests {
         // The desktop session has unsaved work, so the external change is held.
         app.session.execute("layer.newNull", serde_json::json!({"name": "local edit"})).unwrap();
         app.project_reload_pending = Some((path.clone(), (external.len() as u64, 1), None));
-        app.session
-            .execute("prefs.set", serde_json::json!({"values": {"autoSave.enabled": true, "autoSave.intervalMinutes": 1}}))
-            .unwrap();
+        app.session.execute("prefs.set", serde_json::json!({"values": {"autoSave.enabled": true, "autoSave.intervalMinutes": 1}})).unwrap();
 
         let ctx = egui::Context::default();
         app.now = 1000.0;
