@@ -114,7 +114,7 @@ pub(super) fn editor_height(effect: &str, g: &PropGroup, width: f32) -> f32 {
         }
         "ec.color.curves" => 34.0 + curves_size(width) + 26.0,
         effectcraft_engine::effects::warp_stab::ID => 50.0,
-        effectcraft_engine::effects::camera_tracker::ID => crate::panels::camera_tracker_ui::EDITOR_HEIGHT,
+        effectcraft_engine::effects::camera_tracker::ID => crate::panels::camera_tracker_ui::editor_height(g),
         effectcraft_engine::effects::roto::ID | effectcraft_engine::effects::object_matte::ID => 50.0,
         "ec.color.levels" | "ec.color.levelsic" => 34.0 + 80.0 + 58.0,
         "ec.color.autolevels" | "ec.color.autocontrast" | "ec.color.autocolor" => 24.0 + 80.0 + 12.0,

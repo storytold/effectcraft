@@ -5,9 +5,6 @@
 # .icns. The outputs are committed, so builds and packaging never need these tools.
 #
 #   packaging/icons.sh
-#
-# effectcraft.svg and effectcraft-small.svg (the lighter 1024 px trace) come from craftrules
-# (assets/app-icons/effectcraft/, which also keeps the source drawing) and are copied in by hand.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIR="$ROOT/assets/app-icon"

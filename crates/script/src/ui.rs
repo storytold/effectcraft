@@ -3,7 +3,8 @@
 //!
 //! * **Script files** (native builds) run on a *script-host thread*. The caller's session moves
 //!   to that thread while JavaScript runs and comes back whenever the script stops: at the end,
-//!   or while a modal dialog waits in `show()`. Each [`ScriptUiEvent`] moves the session there
+//!   while a modal dialog waits in `show()`, or while an opted-in frontend waits for rendering.
+//!   Each [`ScriptUiEvent`] moves the session there
 //!   again, runs the handler, and brings it back with the windows' new state. The host ends
 //!   when its last window closes. Only one side holds the session at a time, so nothing runs
 //!   concurrently and every edit is still an ordinary undoable engine command.
@@ -17,7 +18,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use boa_engine::{Context, JsResult, JsValue, js_string};
 use effectcraft_engine::Session;
-use effectcraft_engine::scriptui::{ScriptUiEvent, ScriptWindow, layout};
+use effectcraft_engine::scriptui::{FILE_DIALOG_EVENT, FileDialogKind, ScriptFileDialog, ScriptUiEvent, ScriptWindow, layout};
 use serde_json::{Value as J, json};
 use web_time::Instant;
 
@@ -125,6 +126,116 @@ pub(crate) fn native_modal(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> 
     }
 }
 
+/// The extensions a ScriptUI file filter names, lower case: `"*.wav"`, `"Audio:*.mp3;*.wav,All
+/// files:*.*"` (Windows), `"Audio (*.mp3, *.wav)|*.mp3;*.wav"`… Wildcard-only patterns (`*.*`)
+/// name none; a filter without extensions (or a macOS filter function) offers every file.
+pub(crate) fn filter_exts(filter: &str) -> Vec<String> {
+    const MAX_EXTS: usize = 64;
+    const MAX_LEN: usize = 16;
+    let mut out: Vec<String> = vec![];
+    for part in filter.split("*.").skip(1) {
+        let ext: String = part.chars().take_while(char::is_ascii_alphanumeric).collect();
+        if ext.is_empty() || ext.len() > MAX_LEN {
+            continue;
+        }
+        let ext = ext.to_ascii_lowercase();
+        if !out.contains(&ext) {
+            out.push(ext);
+        }
+        if out.len() >= MAX_EXTS {
+            break;
+        }
+    }
+    out
+}
+
+/// The name a ScriptUI file filter gives its first entry (`"Audio"` in `"Audio:*.mp3;*.wav"`,
+/// `"Audio (*.mp3)|*.mp3"`); empty when it gives none.
+pub(crate) fn filter_label(filter: &str) -> String {
+    const MAX_LEN: usize = 64;
+    let Some(end) = filter.find([':', '|']) else { return String::new() };
+    // "Audio (*.mp3, *.wav)": the name without its list of patterns.
+    let label = filter.get(..end).unwrap_or_default();
+    let label = label.split('(').next().unwrap_or_default().trim();
+    if label.contains('*') { String::new() } else { label.chars().take(MAX_LEN).collect() }
+}
+
+/// Whether a ScriptUI file filter also offers every file (`*.*`, or a bare `*` pattern).
+pub(crate) fn filter_any(filter: &str) -> bool {
+    filter.contains("*.*") || filter.split([':', '|', ';', ',']).any(|p| p.trim() == "*")
+}
+
+static NEXT_FILE_DIALOG: AtomicU32 = AtomicU32::new(1);
+
+/// Argument `i` as text; empty when null or missing.
+fn text_arg(args: &[JsValue], i: usize, ctx: &mut Context) -> JsResult<String> {
+    match args.get(i) {
+        None => Ok(String::new()),
+        Some(v) if v.is_null() || v.is_undefined() => Ok(String::new()),
+        Some(v) => Ok(v.to_string(ctx)?.to_std_string_escaped()),
+    }
+}
+
+/// `__fileDialog(kind, prompt, filter, multiSelect, start)` → `[path…]` JSON or `null`:
+/// `File.openDialog`, `File.saveDialog`, `Folder.selectDialog` and the instance `openDlg` /
+/// `saveDlg` / `selectDlg` (#2778). On a script-host thread, with a frontend that shows the
+/// scripts' file dialogs ([`effectcraft_engine::scriptui::ScriptUi::answers_file_dialogs`]), it
+/// asks for the dialog ([`ScriptFileDialog`]), hands the session back to the caller like a modal
+/// dialog does and waits for `scriptui.fileDialog`'s answer. Elsewhere (the Script Console, the
+/// web, headless runs) there is no dialog to wait on: `null`, as a cancelled dialog.
+pub(crate) fn native_file_dialog(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let kind = match arg_string(args, 0, ctx)?.as_str() {
+        "save" => FileDialogKind::Save,
+        "folder" => FileDialogKind::Folder,
+        _ => FileDialogKind::Open,
+    };
+    let prompt = text_arg(args, 1, ctx)?;
+    let filter = text_arg(args, 2, ctx)?;
+    let start = text_arg(args, 4, ctx)?;
+    let many = kind == FileDialogKind::Open && args.get(3).is_some_and(JsValue::to_boolean);
+    let id = NEXT_FILE_DIALOG.fetch_add(1, Ordering::Relaxed);
+    let asked = with_active(|a| {
+        if a.link.is_none() || !a.session.script_ui.answers_file_dialogs {
+            return Ok(false);
+        }
+        // One dialog at a time per script.
+        a.session.script_ui.file_dialogs.retain(|d| d.host != a.host);
+        let folder = kind == FileDialogKind::Folder;
+        let (exts, label, any) = if folder { (vec![], String::new(), false) } else { (filter_exts(&filter), filter_label(&filter), filter_any(&filter)) };
+        a.session.script_ui.file_dialogs.push(ScriptFileDialog { id, host: a.host, kind, prompt, exts, label, any, many, start, shown: false });
+        Ok(true)
+    })
+    .unwrap_or(false);
+    if !asked {
+        return Ok(JsValue::null());
+    }
+    let forget = || {
+        let _ = with_active(|a| {
+            a.session.script_ui.file_dialogs.retain(|d| d.id != id);
+            Ok(())
+        });
+    };
+    loop {
+        let windows = snapshot(ctx);
+        let out = crate::Outcome { output: settle(), waiting: true, ..Default::default() };
+        // The caller went away: as cancelled.
+        let Some(ev) = yield_wait(out, windows, false) else { return Ok(JsValue::null()) };
+        if ev.kind == FILE_DIALOG_EVENT {
+            // An answer to an earlier dialog of this script is not this one's.
+            if ev.value.get("id").and_then(J::as_u64) == Some(u64::from(id)) {
+                forget();
+                let paths = ev.value.get("paths").cloned().unwrap_or(J::Null);
+                return Ok(js_str(&paths.to_string()));
+            }
+        } else if ev.kind == "close" {
+            // `dispatch_ui` refuses the script's window events while it waits; a close that got
+            // here all the same ends the wait as cancelled, so the window can be closed.
+            forget();
+            return Ok(JsValue::null());
+        }
+    }
+}
+
 // ---------------------------------------------------------------- script-host threads
 
 pub(crate) enum ToHost {
@@ -137,6 +248,8 @@ pub(crate) enum ToHost {
     /// script-host threads).
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     Tick(Session, Instant),
+    /// Resume the suspended native render call, never a callback or scheduled task.
+    ResumeRender(Session),
 }
 
 impl ToHost {
@@ -145,7 +258,7 @@ impl ToHost {
         match self {
             #[cfg(not(target_arch = "wasm32"))]
             ToHost::Start(s) => s,
-            ToHost::Event(s, _) | ToHost::Tick(s, _) => s,
+            ToHost::Event(s, _) | ToHost::Tick(s, _) | ToHost::ResumeRender(s) => s,
         }
     }
 }
@@ -159,6 +272,7 @@ pub(crate) struct FromHost {
     done: bool,
     /// When its next scheduled task is due.
     next_due: Option<Instant>,
+    render_wait: bool,
 }
 
 /// The host thread's end of the hand-off.
@@ -177,6 +291,8 @@ struct HostEnd {
     /// [`effectcraft_engine::scriptui::ScriptUi::project_epoch`] when the host last ran.
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     epoch: u64,
+    /// Retained across render yields so a later error still names its included source file.
+    source_map: Option<crate::include::Expanded>,
 }
 
 fn hosts() -> &'static std::sync::Mutex<BTreeMap<u32, HostEnd>> {
@@ -195,6 +311,7 @@ enum Wake {
     Event(ScriptUiEvent),
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     Tick(Instant),
+    Render,
 }
 
 /// On the host thread: hand the session (with the windows' state and what the script printed)
@@ -206,18 +323,20 @@ fn yield_wait(outcome: crate::Outcome, windows: Vec<ScriptWindow>, done: bool) -
         match yield_wake(out, windows.clone(), done, None)? {
             Wake::Event(ev) => return Some(ev),
             Wake::Tick(_) => out = crate::Outcome { waiting: true, ..Default::default() },
+            Wake::Render => return None,
         }
     }
 }
 
 /// [`yield_wait`] that also wakes for the scheduled tasks due at `next_due`.
 fn yield_wake(outcome: crate::Outcome, windows: Vec<ScriptWindow>, done: bool, next_due: Option<Instant>) -> Option<Wake> {
+    let render_wait = outcome.render_host.is_some();
     let (session, link, name) = ACTIVE.with(|a| {
         let mut a = a.borrow_mut();
         let a = a.as_mut()?;
         Some((std::mem::take(&mut a.session), a.link.take()?, a.name.clone()))
     })?;
-    if link.tx.send(FromHost { session, outcome, windows, name, done, next_due }).is_err() {
+    if link.tx.send(FromHost { session, outcome, windows, name, done, next_due, render_wait }).is_err() {
         return None;
     }
     if done {
@@ -226,6 +345,7 @@ fn yield_wake(outcome: crate::Outcome, windows: Vec<ScriptWindow>, done: bool, n
     let (s, wake) = match link.rx.recv() {
         Ok(ToHost::Event(s, ev)) => (s, Wake::Event(ev)),
         Ok(ToHost::Tick(s, now)) => (s, Wake::Tick(now)),
+        Ok(ToHost::ResumeRender(s)) => (s, Wake::Render),
         _ => return None,
     };
     ACTIVE.with(|a| {
@@ -269,8 +389,9 @@ fn host_main(host: u32, name: String, code: String, link: Link) {
                 }
                 Some(Wake::Tick(now)) => {
                     let (ran, error) = crate::tasks::run_due(&mut ctx, host, now);
-                    out = crate::Outcome { result: json!(ran), output: settle(), error, waiting: false };
+                    out = crate::Outcome { result: json!(ran), output: settle(), error, ..Default::default() };
                 }
+                Some(Wake::Render) => break,
                 None => break,
             }
         }
@@ -283,19 +404,33 @@ fn host_main(host: u32, name: String, code: String, link: Link) {
     {
         let message = if body.is_err() { "the script engine stopped unexpectedly" } else { "the script ended" };
         let out = crate::Outcome { error: Some(ScriptError { message: message.into(), file, ..Default::default() }), ..Default::default() };
-        let _ = link.tx.send(FromHost { session: std::mem::take(&mut a.session), outcome: out, windows: vec![], name, done: true, next_due: None });
+        let _ = link.tx.send(FromHost {
+            session: std::mem::take(&mut a.session),
+            outcome: out,
+            windows: vec![],
+            name,
+            done: true,
+            next_due: None,
+            render_wait: false,
+        });
     }
 }
 
 /// Wait for the host to hand the session back; keep its link while it has windows open.
 fn receive(session: &mut Session, host: u32, end: HostEnd) -> crate::Outcome {
     match end.rx.recv() {
-        Ok(FromHost { session: s, outcome, windows, name, done, next_due }) => {
+        Ok(FromHost { session: s, mut outcome, windows, name, done, next_due, render_wait }) => {
             *session = s;
+            session.script_ui.render_host = render_wait.then_some(host);
+            if !render_wait
+                && let Some(map) = &end.source_map
+                && let Some(error) = &mut outcome.error
+            {
+                map.locate(error);
+            }
             publish(session, host, &name, windows);
             if done {
-                session.script_ui.windows.retain(|w| w.host != host);
-                session.script_ui.revision += 1;
+                forget_host(session, host);
             } else if let Ok(mut h) = hosts().lock() {
                 h.insert(host, HostEnd { next_due, epoch: session.script_ui.project_epoch, ..end });
             }
@@ -303,6 +438,13 @@ fn receive(session: &mut Session, host: u32, end: HostEnd) -> crate::Outcome {
         }
         Err(_) => crate::Outcome { error: Some(ScriptError { message: "the script host stopped".into(), ..Default::default() }), ..Default::default() },
     }
+}
+
+/// A script host has ended: its windows close and nothing waits on its file dialogs.
+fn forget_host(session: &mut Session, host: u32) {
+    session.script_ui.windows.retain(|w| w.host != host);
+    session.script_ui.file_dialogs.retain(|d| d.host != host);
+    session.script_ui.revision += 1;
 }
 
 /// Run a script file on a new script-host thread (see the module docs). Not on the web, where
@@ -324,7 +466,61 @@ pub(crate) fn run_threaded(session: &mut Session, req: &effectcraft_engine::Scri
         *session = msg.into_session();
         return crate::Outcome { error: Some(ScriptError { message: "the script host did not start".into(), ..Default::default() }), ..Default::default() };
     }
-    receive(session, host, HostEnd { tx: to_tx, rx: from_rx, next_due: None, epoch: 0 })
+    receive(session, host, HostEnd { tx: to_tx, rx: from_rx, next_due: None, epoch: 0, source_map: None })
+}
+
+/// Suspend only the JavaScript stack, not the window's event loop (#3289). Keep the output
+/// and open undo groups in `Active`: settling here would split the script's undo transaction.
+pub(crate) fn wait_for_render(ctx: &mut Context, mut result: J) -> Result<J, String> {
+    let host = with_active(|a| Ok(a.host))?;
+    let windows = snapshot(ctx);
+    let out = crate::Outcome { render_host: Some(host), ..Default::default() };
+    if !matches!(yield_wake(out, windows, false, None), Some(Wake::Render)) {
+        return Err("the frontend stopped waiting for the script's render".into());
+    }
+    with_active(|a| {
+        let list = a.session.execute_for_script("renderQueue.list", json!({})).map_err(|e| e.to_string())?;
+        let ids: Vec<J> = result["items"].as_array().into_iter().flatten().map(|i| i["id"].clone()).collect();
+        result["items"] = json!(list["items"].as_array().into_iter().flatten().filter(|i| ids.contains(&i["id"])).collect::<Vec<_>>());
+        result["rendering"] = list["rendering"].clone();
+        Ok(result)
+    })
+}
+
+pub(crate) fn keep_render_source_map(host: u32, map: crate::include::Expanded) {
+    if let Ok(mut h) = hosts().lock()
+        && let Some(end) = h.get_mut(&host)
+    {
+        end.source_map = Some(map);
+    }
+}
+
+/// Called by the native frontend while its normal editing/callback tick is paused. Polling
+/// applies terminal statuses and post-render actions before the suspended JS call returns.
+pub(crate) fn poll_render_wait(session: &mut Session) -> Option<J> {
+    let host = session.script_ui.render_host?;
+    // Only this completion boundary may apply the render's own import/proxy undo steps.
+    session.script_ui.render_host = None;
+    session.poll_render();
+    if session.is_rendering() {
+        session.script_ui.render_host = Some(host);
+        return None;
+    }
+    session.script_ui.render_host = None;
+    let fail = |message: &str| crate::Outcome { error: Some(ScriptError { message: message.into(), ..Default::default() }), ..Default::default() }.to_json();
+    let Some(end) = hosts().lock().ok().and_then(|mut h| h.remove(&host)) else {
+        return Some(fail("the script host stopped while rendering"));
+    };
+    if end.epoch != session.script_ui.project_epoch {
+        return Some(fail("the project changed while the script was rendering"));
+    }
+    if let Err(std::sync::mpsc::SendError(msg)) = end.tx.send(ToHost::ResumeRender(std::mem::take(session))) {
+        *session = msg.into_session();
+        return Some(fail("the script host stopped while rendering"));
+    }
+    let out = receive(session, host, end);
+    // A second render in this invocation keeps the original control reply pending.
+    out.render_host.is_none().then(|| out.to_json())
 }
 
 /// Record the windows a host published (named after the script that made them).
@@ -354,22 +550,33 @@ pub fn dispatch_ui(session: &mut Session, ev: &ScriptUiEvent) -> Result<J, Strin
     if ACTIVE.with(|a| a.try_borrow().map(|g| g.is_some()).unwrap_or(true)) {
         return Err("scripts can't drive script windows".into());
     }
-    let w = session.script_ui.window(ev.window).ok_or_else(|| format!("no script window {}", ev.window))?;
-    let (host, name) = (w.host, w.script.clone());
-    let inline = host == CONSOLE_HOST || INLINE.with(|m| m.borrow().contains_key(&host));
-    if inline {
-        return Ok(dispatch_inline(session, host, &name, ev).to_json());
-    }
+    let host = if ev.kind == FILE_DIALOG_EVENT {
+        // The answer to a file dialog goes to the script waiting on it (only script-host
+        // threads wait on one, see [`native_file_dialog`]).
+        let id = ev.value.get("id").and_then(J::as_u64);
+        let asked = session.script_ui.file_dialogs.iter().find(|d| Some(u64::from(d.id)) == id);
+        asked.map(|d| d.host).ok_or("no such file dialog")?
+    } else {
+        let w = session.script_ui.window(ev.window).ok_or_else(|| format!("no script window {}", ev.window))?;
+        let (host, name) = (w.host, w.script.clone());
+        // The script is inside its file dialog's call: its windows wait for the answer.
+        if session.script_ui.file_dialogs.iter().any(|d| d.host == host) {
+            return Err("the script is waiting for its file dialog".into());
+        }
+        let inline = host == CONSOLE_HOST || INLINE.with(|m| m.borrow().contains_key(&host));
+        if inline {
+            return Ok(dispatch_inline(session, host, &name, ev).to_json());
+        }
+        host
+    };
     let end = hosts().lock().ok().and_then(|mut h| h.remove(&host));
     let Some(end) = end else {
-        session.script_ui.windows.retain(|w| w.host != host);
-        session.script_ui.revision += 1;
+        forget_host(session, host);
         return Err("the script that made this window has ended".into());
     };
     if let Err(std::sync::mpsc::SendError(msg)) = end.tx.send(ToHost::Event(std::mem::take(session), ev.clone())) {
         *session = msg.into_session();
-        session.script_ui.windows.retain(|w| w.host != host);
-        session.script_ui.revision += 1;
+        forget_host(session, host);
         return Err("the script that made this window has ended".into());
     }
     Ok(receive(session, host, end).to_json())
@@ -407,7 +614,10 @@ fn dispatch_inline(session: &mut Session, host: u32, name: &str, ev: &ScriptUiEv
 /// Whether `host`'s tasks stop now that the project it ran with was closed: it has no window
 /// open and is not a Startup script's.
 fn ends_with_project(session: &Session, host: u32) -> bool {
-    !session.script_ui.windows.iter().any(|w| w.host == host) && !session.script_ui.startup_hosts.contains(&host)
+    // A script waiting on its file dialog goes on when it is answered.
+    !session.script_ui.windows.iter().any(|w| w.host == host)
+        && !session.script_ui.startup_hosts.contains(&host)
+        && !session.script_ui.file_dialogs.iter().any(|d| d.host == host)
 }
 
 /// Run the due tasks of the script-host threads; hosts without windows whose project was closed
@@ -421,19 +631,24 @@ pub(crate) fn tick_threaded(session: &mut Session, now: Instant, report: &mut cr
             let Some(end) = h.get(&host) else { continue };
             if end.epoch != epoch && ends_with_project(session, host) {
                 // Dropping its end lets the host thread finish.
-                stale.extend(h.remove(&host));
+                stale.extend(h.remove(&host).map(|end| (host, end)));
             } else if end.next_due.is_some_and(|d| d <= now) {
                 due.push(host);
             }
         }
     }
-    drop(stale);
+    for end in stale {
+        forget_host(session, end.0);
+        drop(end.1);
+    }
     for host in due {
+        if session.script_ui.render_host.is_some() {
+            break;
+        }
         let Some(end) = hosts().lock().ok().and_then(|mut h| h.remove(&host)) else { continue };
         if let Err(std::sync::mpsc::SendError(msg)) = end.tx.send(ToHost::Tick(std::mem::take(session), now)) {
             *session = msg.into_session();
-            session.script_ui.windows.retain(|w| w.host != host);
-            session.script_ui.revision += 1;
+            forget_host(session, host);
             continue;
         }
         report.add(receive(session, host, end));
@@ -490,7 +705,7 @@ fn tick_inline_host(session: &mut Session, host: u32, name: &str, now: Instant) 
     drop(guard);
     crate::tasks::set_epoch(host, session.script_ui.project_epoch);
     publish(session, host, name, windows);
-    crate::Outcome { result: json!(ran), output, error, waiting: false }
+    crate::Outcome { result: json!(ran), output, error, ..Default::default() }
 }
 
 /// Forget the session's task hosts that have ended (inline ones: that have no tasks left).

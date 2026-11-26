@@ -42,9 +42,10 @@
 //! resolving named transforms [`MAX_NAMED_DEPTH`] levels down or past [`MAX_OPS`] steps
 //! (a config that refers to itself in a loop), so a hostile config can't exhaust the stack.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
+
+use crate::file_cache::{self, Registered};
 
 use super::ocio::{ACES_CG, ACES2065_1, Cdl, D65, FileXform, P3, REC709, REC2020, Space, Tf, load_file, matrix, sp};
 
@@ -168,19 +169,29 @@ fn split_key(s: &str) -> Option<(String, &str)> {
     None
 }
 
-/// Bracket balance of a flow fragment (outside quotes).
-fn balance(s: &str) -> i32 {
-    let (mut sq, mut dq, mut d) = (false, false, 0i32);
-    for c in s.chars() {
-        match c {
-            '\'' if !dq => sq = !sq,
-            '"' if !sq => dq = !dq,
-            '{' | '[' if !sq && !dq => d = d.saturating_add(1),
-            '}' | ']' if !sq && !dq => d = d.saturating_sub(1),
-            _ => {}
+/// Bracket balance of a flow fragment (outside quotes), kept as lines are appended so each
+/// character is looked at once however many lines a collection spans.
+#[derive(Default)]
+struct Balance {
+    sq: bool,
+    dq: bool,
+    d: i32,
+}
+
+impl Balance {
+    /// Takes in the next piece of the fragment and returns the balance so far.
+    fn feed(&mut self, s: &str) -> i32 {
+        for c in s.chars() {
+            match c {
+                '\'' if !self.dq => self.sq = !self.sq,
+                '"' if !self.sq => self.dq = !self.dq,
+                '{' | '[' if !self.sq && !self.dq => self.d = self.d.saturating_add(1),
+                '}' | ']' if !self.sq && !self.dq => self.d = self.d.saturating_sub(1),
+                _ => {}
+            }
         }
+        self.d
     }
-    d
 }
 
 struct Flow<'a> {
@@ -223,12 +234,19 @@ impl Flow<'_> {
                             self.i += 1;
                             break;
                         }
+                        // A `]` cannot close a mapping: the text is malformed, so the rest is
+                        // skipped (as past the depth limit) instead of read again and again.
+                        Some(b']') => {
+                            self.i = self.s.len();
+                            break;
+                        }
                         Some(b',') => {
                             self.i += 1;
                             continue;
                         }
                         _ => {}
                     }
+                    let start = self.i;
                     let k = self.scalar(true);
                     self.ws();
                     if self.peek() == Some(b':') {
@@ -236,6 +254,11 @@ impl Flow<'_> {
                     }
                     let v = self.nested();
                     m.push((unquote(&k), v));
+                    // Every entry consumes text; one that did not would repeat forever.
+                    if self.i == start {
+                        self.i = self.s.len();
+                        break;
+                    }
                 }
                 Yaml::Map(m)
             }
@@ -250,11 +273,23 @@ impl Flow<'_> {
                             self.i += 1;
                             break;
                         }
+                        // A `}` cannot close a sequence: skip the malformed rest (see above).
+                        Some(b'}') => {
+                            self.i = self.s.len();
+                            break;
+                        }
                         Some(b',') => {
                             self.i += 1;
                             continue;
                         }
-                        _ => v.push(self.nested()),
+                        _ => {
+                            let start = self.i;
+                            v.push(self.nested());
+                            if self.i == start {
+                                self.i = self.s.len();
+                                break;
+                            }
+                        }
                     }
                 }
                 Yaml::Seq(v)
@@ -364,11 +399,14 @@ impl Lines {
         if rest.starts_with('{') || rest.starts_with('[') || (rest.starts_with('!') && (rest.contains('{') || rest.contains('['))) {
             // Flow collections may continue on the next lines.
             let mut text = rest.to_string();
-            while balance(&text) > 0
+            let mut bal = Balance::default();
+            let mut open = bal.feed(&text);
+            while open > 0
                 && let Some((_, next)) = self.v.get(*i)
             {
                 text.push(' ');
                 text.push_str(next);
+                open = bal.feed(next);
                 *i += 1;
             }
             return flow(&text, depth);
@@ -845,13 +883,21 @@ fn resolve(src: &str, dir: &Path, search: &[String]) -> Option<PathBuf> {
     if src.trim().is_empty() {
         return None;
     }
+    // (a candidate not there is noted: the config is read again once it appears)
+    let found = |c: PathBuf| {
+        let there = c.exists();
+        if !there {
+            file_cache::note_missing(&c.to_string_lossy());
+        }
+        there.then_some(c)
+    };
     let p = Path::new(src);
     if p.is_absolute() {
-        return p.exists().then(|| p.to_path_buf());
+        return found(p.to_path_buf());
     }
     let mut dirs: Vec<PathBuf> = search.iter().map(|s| dir.join(s)).collect();
     dirs.push(dir.to_path_buf());
-    dirs.into_iter().map(|d| d.join(src)).find(|c| c.exists())
+    dirs.into_iter().map(|d| d.join(src)).find_map(found)
 }
 
 // ---------------------------------------------------------------- the config
@@ -1301,33 +1347,34 @@ impl<'c> Build<'c> {
     }
 }
 
-type ConfigCache = Mutex<HashMap<String, Result<Arc<Config>, String>>>;
+/// [`load_config`]'s cache, by parameter text.
+static CONFIGS: Registered<Result<Arc<Config>, String>> = Registered::new(16, 64 << 20);
+
+/// The files the config cached for `src` was read from: the `.ocio` file, the files its
+/// `FileTransform`s read and the places it looked for missing ones.
+pub(crate) fn cached_files(src: &str) -> Option<Vec<String>> {
+    file_cache::lock(CONFIGS.get()).files(src)
+}
 
 /// Load (and cache) a config from a `.ocio` path or the config text itself; why not, when it
-/// can't be read.
+/// can't be read. The config file and the files its `FileTransform`s read are stamped (one
+/// `metadata` call each) on every load, and the config is read again once one of them moved or a
+/// missing one appeared (see [`crate::file_cache`]).
 pub fn load_config(src: &str) -> Result<Arc<Config>, String> {
     let t = src.trim();
     if t.is_empty() {
         return Err("no config file chosen".into());
     }
-    static CACHE: OnceLock<ConfigCache> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Ok(m) = cache.lock()
-        && let Some(v) = m.get(src)
-    {
-        return v.clone();
-    }
-    let parsed = if src.contains('\n') {
-        Config::parse(src, Path::new("."))
-    } else {
+    file_cache::cached(CONFIGS.get(), src, || {
+        if src.contains('\n') {
+            return (Config::parse(src, Path::new(".")).map(Arc::new), 0);
+        }
         let p = Path::new(t);
-        std::fs::read_to_string(p).map_err(|e| format!("{t}: {e}")).and_then(|text| Config::parse(&text, p.parent().unwrap_or(Path::new("."))))
-    }
-    .map(Arc::new);
-    if let Ok(mut m) = cache.lock() {
-        m.insert(src.to_string(), parsed.clone());
-    }
-    parsed
+        match file_cache::read(t) {
+            Ok(text) => (Config::parse(&text, p.parent().unwrap_or(Path::new("."))).map(Arc::new), text.len()),
+            Err(e) => (Err(format!("{t}: {e}")), 0),
+        }
+    })
 }
 
 #[cfg(test)]

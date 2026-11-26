@@ -28,7 +28,11 @@ fn harness() -> (Harness<'static, EffectcraftApp>, Fx) {
         s.active_comp().unwrap().layer(effectcraft_engine::project::LayerId(l)).unwrap().props.group(path).unwrap().groups().next().unwrap().uid
     };
     let (anim, mask, group) = (first(&s, text, "text/animators"), first(&s, shape, "masks"), first(&s, shape, "contents"));
-    let mut h = Harness::builder().with_size(egui::vec2(1700.0, 1100.0)).with_step_dt(1.0 / 60.0).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1700.0, 1100.0))
+        .with_step_dt(1.0 / 60.0)
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(s));
     h.run_steps(6);
     (h, Fx { text, shape, effect, anim, mask, group })
 }
@@ -63,7 +67,8 @@ fn rename_with_enter(h: &mut Harness<'_, EffectcraftApp>, layer: u64, uid: u64, 
     select(h, layer, uid);
     key(h, Key::Enter);
     assert!(editing(h, uid), "Enter opens a rename field on group {uid}");
-    h.key_press_modifiers(Modifiers::COMMAND, Key::A);
+    // The field has the keyboard with the whole name selected: typing replaces it (#3198).
+    assert!(h.ctx.egui_wants_keyboard_input(), "the rename field on group {uid} has the keyboard");
     h.event(Event::Text(new.into()));
     h.step();
     key(h, Key::Enter);

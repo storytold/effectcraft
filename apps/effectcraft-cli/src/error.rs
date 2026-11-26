@@ -23,6 +23,8 @@ pub enum UsageError {
     TemplateWithProject,
     #[error("--ops and --roto run on generated projects: they take no project")]
     BenchModeWithProject,
+    #[error("`{0}` selects the desktop Nightly profile; effectcraft-cli has no launch profile")]
+    DesktopProfile(String),
     #[error("params are given twice, as --params and as an argument: use one")]
     TwoParams,
     #[error("params are not valid JSON: {0}")]
@@ -180,6 +182,14 @@ pub enum CliError {
     Items(String),
     #[error("render: no composition")]
     NoComp,
+    #[error("{path} is larger than {megabytes} MB")]
+    ScriptTooBig { path: String, megabytes: usize },
+    /// A replay's first failure.
+    #[error("{0}")]
+    Replay(String),
+    /// A `--save` run's project is not there.
+    #[error("cannot read {path}: {source}")]
+    ReadProject { path: String, source: std::io::Error },
 }
 
 impl CliError {

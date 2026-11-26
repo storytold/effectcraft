@@ -17,7 +17,7 @@
 //! `shortcuts.resetPreset`, `shortcuts.close`.
 
 use crate::i18n::{tr, tr_args};
-use effectcraft_engine::shortcuts::{APP_SCOPE, Bindable, DEFAULT_PRESET, normalize};
+use effectcraft_engine::shortcuts::{APP_SCOPE, Bindable, DEFAULT_PRESET, normalize, scope_label};
 use egui::{Align2, Color32, Rect, RichText, Sense, Stroke, StrokeKind, pos2, vec2};
 use serde_json::{Value, json};
 
@@ -244,11 +244,13 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
     let mods = if held.iter().any(|m| *m) && !st.recording { held } else { st.mods };
 
     let table = app.session.shortcuts().clone();
+    // Once per frame: the keyboard draw reads it for every key.
+    let bindings = table.bindings();
     let presets = app.session.keymaps.names();
     let active = app.session.keymaps.active.clone();
     // key name → (app?, panel?) for the current modifiers.
     let mut keymap: std::collections::HashMap<String, (bool, bool)> = Default::default();
-    for (sc, b) in table.bindings() {
+    for (sc, b) in bindings.iter().copied() {
         let (m, k) = split(sc);
         if m == mods {
             let e = keymap.entry(k).or_default();
@@ -266,7 +268,7 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
         // ---- preset bar
         ui.horizontal(|ui| {
             ui.label(tr("Preset:"));
-            let r = craft_ui::ComboBox::from_id_salt("sc-preset").selected_text(&active).width(220.0).show_ui(ui, |ui| {
+            let r = egui::ComboBox::from_id_salt("sc-preset").selected_text(&active).width(220.0).show_ui(ui, |ui| {
                 for n in &presets {
                     if ui.selectable_label(*n == active, n).clicked() {
                         run.push(("shortcuts.preset".into(), json!({"op": "select", "name": n})));
@@ -395,8 +397,7 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
                 }
             }
             if !name.starts_with('#') {
-                let who: Vec<String> =
-                    table.bindings().into_iter().filter(|(sc, _)| split(sc) == (mods, name.to_string())).map(|(_, b)| b.label.clone()).collect();
+                let who: Vec<String> = bindings.iter().copied().filter(|(sc, _)| split(sc) == (mods, name.to_string())).map(|(_, b)| b.label.clone()).collect();
                 if !who.is_empty() {
                     resp.on_hover_text(who.join("\n"));
                 }
@@ -428,7 +429,7 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
             p.text(info.left_top() + vec2(8.0, 6.0), Align2::LEFT_TOP, tr_args("Key: {}", &[&k]), Tokens::semibold(12.0), t.tab_text_active);
             let mut yy = info.min.y + 26.0;
             let mut list: Vec<(String, String, String)> =
-                table.bindings().into_iter().filter(|(sc, _)| split(sc).1 == *k).map(|(sc, b)| (sc.to_string(), b.label.clone(), b.scope.clone())).collect();
+                bindings.iter().copied().filter(|(sc, _)| split(sc).1 == *k).map(|(sc, b)| (sc.to_string(), b.label.clone(), b.scope.clone())).collect();
             list.sort();
             if list.is_empty() {
                 p.text(pos2(info.min.x + 8.0, yy), Align2::LEFT_TOP, tr("Not assigned"), Tokens::ui(11.5), t.text_dim);
@@ -517,7 +518,7 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
                     return;
                 };
                 ui.label(RichText::new(&b.label).font(Tokens::semibold(13.0)).color(t.tab_text_active));
-                ui.label(RichText::new(format!("{} • {}", b.command, b.scope)).color(t.text_faint));
+                ui.label(RichText::new(format!("{} • {}", b.command, scope_label(&b.scope))).color(t.text_faint));
                 ui.add_space(6.0);
                 let keys = table.keys.get(&b.key).cloned().unwrap_or_default();
                 if keys.is_empty() {
@@ -565,7 +566,7 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
                         ui.add_space(4.0);
                         ui.label(RichText::new(tr_args("⚠ {} is used by:", &[&(crate::menus::shortcut_text(&k))])).color(t.warning));
                         for c in conflicts.iter().take(4) {
-                            ui.label(RichText::new(format!("   {} ({})", c.label, c.scope)).color(t.warning));
+                            ui.label(RichText::new(format!("   {} ({})", c.label, scope_label(&c.scope))).color(t.warning));
                         }
                     }
                 }
@@ -675,6 +676,7 @@ mod tests {
     fn the_ok_button_stays_inside_the_dialog_in_a_small_window() {
         let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         crate::theme::install(&ctx, &app.tokens, crate::i18n::language(&app));
         open(&mut app);
         for size in [vec2(1680.0, 1020.0), vec2(1280.0, 720.0)] {

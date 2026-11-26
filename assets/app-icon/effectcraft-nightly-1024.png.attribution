@@ -1,0 +1,9 @@
+asset:        effectcraft-nightly-1024.png
+title:        EffectCraft nightly app icon, padded macOS 1024 px
+author:       EffectCraft contributors (drawing by the project owner in ArtCraft)
+source:       original work
+license:      MIT OR Apache-2.0
+license-file: assets/app-icon/LICENSE.txt
+added:        2026-11-24 by EffectCraft contributors (Claude agent, nightly icon derivatives)
+notes:        Derived from assets/app-icon/effectcraft-1024.png by moving only the background colour to #5e2443 (assets/app-icon/nightly-provenance.json).
+

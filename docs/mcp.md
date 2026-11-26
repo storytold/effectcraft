@@ -13,7 +13,9 @@ parameters must be absolute paths inside the roots (symbolic links resolved, no 
 any other absolute path in its parameters. Save, Increment and Save and rendering the Render
 Queue are checked against the files they write (the open project's, the queued outputs);
 `renderQueue.add`, `render.preRender` and `file.createProxy` without an output file need a saved
-project, since an unsaved one's default output would go to the home folder (#2479). Scripts
+project, since an unsaved one's default output would go to the home folder (#2479). In a headless
+session the footage a project names, and what an imported file pulls in, is read only inside the
+roots too: footage outside them shows as missing (#2131). Scripts
 (`run_script`, `file.runScript`…), Execute File, Reveal in Finder, `$N` references to file paths
 in a batch, and the bridge's UI-driving tools (`ui_click`, `ui_key`, `ui_type`, `ui_drag`,
 `ui_set`, `script_ui`, `control`) are refused while confined. Without the flags nothing changes.
@@ -26,7 +28,7 @@ The server provides the same core conventions as FilmCraft #28:
 | `command_run` | `id`, `params?` | Engine command result |
 | `command_batch` | `steps: [{id, params?}]`, `stop_on_error?` | `completed`, `failed`, per-step `results` |
 | `doc_inspect` | none | Project overview and active composition |
-| `render_preview` | `comp?`, `time?`, `max_side?`, `transparent?` | PNG and frame information |
+| `render_preview` | `comp?`, `time?` or `times?`, `columns?`, `labels?`, `max_side?`, `transparent?` | PNG and frame information; with `times`, one contact-sheet PNG and its layout (`columns`, `rows`, `cellWidth`, `cellHeight`, `width`, `height`) |
 
 `command_batch` stops at the first error by default; false continues. Each edit has its
 own undo step. The existing `batch` tool retains its atomic undo grouping and result references.

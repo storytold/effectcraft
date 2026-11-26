@@ -1,5 +1,6 @@
 # Parity with After Effects
 
+> **Last reviewed:** 2026-11-15 · **Last updated:** 2026-11-15 · **Change:** minor (ROADMAP sync over 5–15 November: .aep export, drag-and-drop import, hostile-input audit and loss reporting, effect placeholders and mappings, 2.6× GPU rendering, EXR output options, eighteen aligned effect ranges and a broad editor/expression fix batch; releases v0.22.0–v0.24.1. No parity numbers re-measured; the 10 October re-measure and all readiness estimates are unchanged) · **Target:** Adobe After Effects 2026 (26.5.0.89)
 > **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-12 · **Change:** minor (issue, catalog and export-format references re-audited against `upstream/main` 470ea7a3; the 10 October re-measure is otherwise unchanged) · **Target:** Adobe After Effects 2026 (26.5.0.89)
 
 The authoritative assessment of how close EffectCraft is to After Effects, and how much work is
@@ -171,8 +172,7 @@ Checked on 10 October 2026 when the mainstream and essentials numbers were added
 
 ## Mainstream practitioner and essentials user
 
-Two narrower questions, computed the same way in every craft app (craftrules
-`standards/progress-docs.md`, "Numbers"). The stage still follows the full-target number and the
+Two narrower questions, computed the same way in every craft app. The stage still follows the full-target number and the
 [alpha gate](roadmap.md#alpha-gate).
 
 ### Mainstream practitioner
@@ -454,7 +454,7 @@ Mocha and Cineware are third-party and not counted.
 
 | Category | Effects | Notes |
 |---|---|---|
-| 3D Channel | 3D Channel Extract, Cryptomatte, Depth Matte, Depth of Field, EXtractoR, Fog 3D, ID Matte, IDentifier | Read auxiliary channels: multi-layer OpenEXR (any `layer.channel`, Cryptomatte manifests from the header; EXtractoR picks a layer and channels from popups of the footage's layers and channels, `layer.channels`, #295; the footage itself shows the beauty pass, never Cryptomatte or depth, #412) or the compositor's own depth / layer-ID / normal / UV / Cryptomatte pass for precomps of 3D comps. |
+| 3D Channel | 3D Channel Extract, Cryptomatte, Depth Matte, Depth of Field, EXtractoR, Fog 3D, ID Matte, IDentifier | Read auxiliary channels: multi-layer OpenEXR (any `layer.channel`, Cryptomatte manifests from the header; EXtractoR picks a layer and channels from popups of the footage's layers and channels, `layer.channels`, #295; the footage itself shows After Effects' main picture: the unprefixed RGB(A), else Y, else black) or the compositor's own depth / layer-ID / normal / UV / Cryptomatte pass for precomps of 3D comps. |
 | Immersive Video | VR Blur, VR Chromatic Aberrations, VR Color Gradients, VR Converter, VR De-Noise, VR Digital Glitch, VR Fractal Noise, VR Glow, VR Plane to Sphere, VR Rotate Sphere, VR Sharpen, VR Sphere to Plane | Seam-aware equirectangular processing (wrap-around, pole continuation, latitude-scaled filters), mono / over-under / side-by-side layouts; VR Converter between equirectangular, cube maps (4:3, 3:2, 6:1), sphere map and 2D. |
 | Color Correction | OCIO CDL / Color Space / Display / File / Look Transform, Color Stabilizer | Built-in minimal OCIO-style config (ACES2065-1, ACEScg, ACEScct, sRGB, Rec.709, Rec.2020, Display P3, linear variants, XYZ) from published matrices and transfer functions; `.cube` / `.3dl` / `.csp` / `.spi1d` / `.spi3d` / `.spimtx` LUTs and ASC `.cc` / `.ccc` / `.cdl`. Custom `.ocio` config files are read from the OCIO v2 documentation (Configuration ▸ Custom: colorspaces and display colorspaces with the scene / display reference spaces joined by the default view transform, roles, displays with v1 and v2 views, view transforms, looks; Matrix, File, Exponent, ExponentWithLinear, Log, LogAffine, CDL, Range, Allocation, ColorSpace, Look, DisplayView, Builtin (matrices and display curves) and Group transforms), so Blender 4.x / 5.x configs give the Standard, AgX, Filmic and False Color views (#410). Grading Primary / Tone transforms, the ACES output and gamut-compression builtins and HLG pass colours through, and the effect shows a warning naming them (`effect.warning`). |
 | Distort | CC Flo Motion, Liquify, Rolling Shutter Repair | Liquify strokes are effect data replayed into a displacement mesh (`liquify.stroke` / `liquify.clear` commands; no interactive viewer brush yet). Rolling Shutter Repair uses the KLT tracker. |

@@ -19,6 +19,9 @@ const IMG: usize = 1024;
 const EMB: usize = 64;
 const DIM: usize = 256;
 const LOW: usize = 256;
+/// Most prompt points the decoder takes (each is an attention token, and self-attention is
+/// quadratic in them); SAM is used with a handful. More are thinned evenly, keeping both ends.
+const MAX_POINTS: usize = 256;
 const MEAN: [f32; 3] = [123.675, 116.28, 103.53];
 const STD: [f32; 3] = [58.395, 57.12, 57.375];
 
@@ -609,7 +612,7 @@ impl MobileSam {
     /// Foreground probability (`w×h`) for a prompt on an embedded image, and the predicted IoU.
     pub fn predict(&self, e: &Embedding, prompt: &Prompt) -> (Vec<f32>, f32) {
         let s = e.scale;
-        let points: Vec<([f32; 2], bool)> = prompt.points.iter().map(|(p, fg)| ([p[0] * s, p[1] * s], *fg)).collect();
+        let points: Vec<([f32; 2], bool)> = thin(&prompt.points).iter().map(|(p, fg)| ([p[0] * s, p[1] * s], *fg)).collect();
         let bbox = prompt.bbox.map(|b| b.map(|v| v * s));
         // A prior mask (probabilities at image size) → logits on the low-res grid.
         let mask: Option<Vec<f32>> = prompt.mask.as_ref().filter(|m| m.len() == e.w * e.h).map(|m| {
@@ -674,4 +677,29 @@ fn sample(rgb: &[[f32; 3]], w: usize, h: usize, x: f32, y: f32, foot: f32) -> [f
         }
     }
     s.map(|v| v / f32::max(n, 1.0))
+}
+
+/// `points`, or `MAX_POINTS` evenly spaced ones (first and last kept) when there are more.
+fn thin(points: &[([f32; 2], bool)]) -> Vec<([f32; 2], bool)> {
+    let n = points.len();
+    if n <= MAX_POINTS {
+        return points.to_vec();
+    }
+    (0..MAX_POINTS).filter_map(|i| points.get(i * (n - 1) / (MAX_POINTS - 1)).copied()).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn many_prompt_points_are_thinned_to_the_budget() {
+        let few: Vec<_> = (0..MAX_POINTS).map(|i| ([i as f32, 0.0], i % 2 == 0)).collect();
+        assert_eq!(thin(&few), few, "a prompt within the budget is untouched");
+        let many: Vec<_> = (0..1_000_000).map(|i| ([i as f32, 0.0], i % 2 == 0)).collect();
+        let t = thin(&many);
+        assert_eq!(t.len(), MAX_POINTS);
+        assert_eq!((t[0].0, t[MAX_POINTS - 1].0), (many[0].0, many[many.len() - 1].0));
+        assert!(t.windows(2).all(|w| w[0].0[0] < w[1].0[0]), "spread in order");
+    }
 }

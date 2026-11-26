@@ -113,6 +113,7 @@ fn render_tex(
                 footage: None,
                 property_overrides: &[],
                 media_overrides: &[],
+                reads: None,
             };
             let mut r = Renderer::new(&app.session.project, &*app.session.footage, RenderOpts { scale, ..Default::default() });
             r.expr = app.session.expr.as_deref();

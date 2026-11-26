@@ -53,10 +53,7 @@ impl Cs {
         match self {
             Cs::Gray => [g(0); 3],
             Cs::Rgb | Cs::Pattern => [g(0), g(1), g(2)],
-            Cs::Cmyk => {
-                let k = g(3);
-                [(1.0 - g(0)) * (1.0 - k), (1.0 - g(1)) * (1.0 - k), (1.0 - g(2)) * (1.0 - k)]
-            }
+            Cs::Cmyk => cmyk_to_rgb(g(0), g(1), g(2), g(3)),
             Cs::Lab => lab_to_rgb(c.first().copied().unwrap_or(0.0), c.get(1).copied().unwrap_or(0.0), c.get(2).copied().unwrap_or(0.0)),
             Cs::Indexed { base, hival, lookup } => {
                 let i = (c.first().copied().unwrap_or(0.0).round().max(0.0) as usize).min(*hival);
@@ -67,6 +64,38 @@ impl Cs {
             Cs::Tint { alt, func, .. } => alt.to_rgb(&func.eval(c)),
         }
     }
+}
+
+/// The screen colour of each solid overprint of cyan, magenta and yellow, indexed by
+/// `c * 4 + m * 2 + y`. Paper is white.
+const INK_SOLIDS: [[f64; 3]; 8] = [
+    [1.0, 1.0, 1.0],
+    [0.9422, 0.9861, 0.1296],
+    [0.9734, 0.1382, 0.5601],
+    [1.0, 0.1424, 0.0305],
+    [0.0754, 0.6765, 0.8047],
+    [0.0, 0.5965, 0.2797],
+    [0.2292, 0.0166, 0.5538],
+    [0.0251, 0.002, 0.0],
+];
+/// How each ink's value (C, M, Y, K) becomes the area it covers.
+const INK_COVERAGE: [f64; 4] = [1.0774, 1.0434, 1.0474, 1.1823];
+
+/// DeviceCMYK (each 0 to 1) to RGB, as the Neugebauer equations model halftone printing: the
+/// solid colour of every combination of the inks, weighted by the area that combination
+/// covers. The solids and the coverage curves are fitted to what After Effects shows for a
+/// chart of 1,296 CMYK patches. `(1 - c)(1 - k)` makes every pale pink a bright magenta.
+pub(crate) fn cmyk_to_rgb(c: f64, m: f64, y: f64, k: f64) -> [f64; 3] {
+    let area = |i: usize, v: f64| v.clamp(0.0, 1.0).powf(INK_COVERAGE[i]);
+    let (ac, am, ay, ak) = (area(0, c), area(1, m), area(2, y), area(3, k));
+    let mut out = [0.0; 3];
+    for (i, solid) in INK_SOLIDS.iter().enumerate() {
+        let w = (if i & 4 != 0 { ac } else { 1.0 - ac }) * (if i & 2 != 0 { am } else { 1.0 - am }) * (if i & 1 != 0 { ay } else { 1.0 - ay });
+        for (o, s) in out.iter_mut().zip(solid) {
+            *o += w * s;
+        }
+    }
+    out.map(|v| v * (1.0 - ak))
 }
 
 fn lab_to_rgb(l: f64, a: f64, b: f64) -> [f64; 3] {
@@ -215,19 +244,44 @@ pub enum PsOp {
     Proc(Vec<PsOp>),
 }
 
-fn ps_parse(lx: &mut crate::object::Lexer, depth: usize) -> Vec<PsOp> {
+/// Parse a procedure. `ops` counts the tokens read (those skipped as unsupported included); past
+/// [`MAX_CALC_OPS`] the rest is not read, so an oversized program is never fully scanned or built
+/// (the caller rejects it when `ops` ends past the cap).
+fn ps_parse(lx: &mut crate::object::Lexer, depth: usize, ops: &mut usize) -> Vec<PsOp> {
     let mut out = vec![];
-    while let Some(o) = lx.next() {
-        match o {
-            Obj::Num(n) => out.push(PsOp::Num(n)),
-            Obj::Bool(b) => out.push(PsOp::Num(if b { 1.0 } else { 0.0 })),
-            Obj::Op(op) if op == "{" && depth < 32 => out.push(PsOp::Proc(ps_parse(lx, depth + 1))),
-            // Nested too deep: skip the procedure's opening brace (never push it as an operator).
-            Obj::Op(op) if op == "{" => {}
-            Obj::Op(op) if op == "}" => return out,
-            Obj::Op(op) => out.push(PsOp::Op(op)),
-            _ => {}
+    loop {
+        // A calculator holds no arrays or dictionaries: one is skipped as a single token without
+        // being built (the lexer would allocate every element before this counted it).
+        if lx.at_compound() {
+            if *ops > MAX_CALC_OPS {
+                break;
+            }
+            lx.skip_compound();
+            *ops += 1;
+            continue;
         }
+        let Some(o) = lx.next() else { break };
+        if *ops > MAX_CALC_OPS {
+            break;
+        }
+        let op = match o {
+            Obj::Num(n) => PsOp::Num(n),
+            Obj::Bool(b) => PsOp::Num(if b { 1.0 } else { 0.0 }),
+            Obj::Op(op) if op == "{" && depth < 32 => PsOp::Proc(ps_parse(lx, depth + 1, ops)),
+            // Nested too deep: skip the procedure's opening brace (never push it as an operator).
+            Obj::Op(op) if op == "{" => {
+                *ops += 1;
+                continue;
+            }
+            Obj::Op(op) if op == "}" => return out,
+            Obj::Op(op) => PsOp::Op(op),
+            _ => {
+                *ops += 1;
+                continue;
+            }
+        };
+        *ops += 1;
+        out.push(op);
     }
     out
 }
@@ -241,6 +295,15 @@ fn ps_push(st: &mut Vec<f64>, v: f64) {
     if st.len() < MAX_STACK {
         st.push(v);
     }
+}
+
+/// The most operators and operands a calculator program may hold (nested procedures included).
+/// It has no loops, so this bounds what one evaluation runs; real programs hold a few dozen.
+const MAX_CALC_OPS: usize = 4096;
+
+/// The operators and operands in `code`, nested procedures included.
+fn ps_len(code: &[PsOp]) -> usize {
+    code.iter().map(|op| if let PsOp::Proc(p) = op { 1 + ps_len(p) } else { 1 }).sum()
 }
 
 fn ps_run(code: &[PsOp], st: &mut Vec<f64>, depth: usize) {
@@ -431,6 +494,12 @@ impl Budget {
         Budget { nodes: MAX_NODES, samples: MAX_SAMPLES, overrun: false }
     }
 
+    /// Charge `n` retained values (coefficients, bounds, program operators) as nodes, eight to a
+    /// node, so a cached copy of a function is charged for what it holds, not just its node.
+    fn take_values(&mut self, n: usize) -> bool {
+        self.take_nodes(n.div_ceil(8))
+    }
+
     /// Charge `n` nodes; `false` (and the read is abandoned) once the cap is passed.
     fn take_nodes(&mut self, n: usize) -> bool {
         match self.nodes.checked_sub(n) {
@@ -484,7 +553,8 @@ impl Func {
     /// [`Func::read`] nested `depth` levels deep, charging `budget`: unsupported past [`MAX_DEPTH`]
     /// or once the budget is spent.
     fn read_at(file: &File, o: &Obj, depth: usize, budget: &mut Budget) -> Func {
-        if depth >= MAX_DEPTH || !budget.take_nodes(1) {
+        // Charged first: the fallback past the depth limit is a node a copy keeps too.
+        if !budget.take_nodes(1) || depth >= MAX_DEPTH {
             return Func::Unsupported;
         }
         let o = file.resolve(o);
@@ -499,12 +569,14 @@ impl Func {
         let dom = file.get(d, "Domain").map(|x| file.nums(x)).unwrap_or_default();
         let domain = [dom.first().copied().unwrap_or(0.0), dom.get(1).copied().unwrap_or(1.0)];
         match file.get_num(d, "FunctionType").unwrap_or(-1.0) as i32 {
-            2 => Func::Exp {
-                domain,
-                c0: file.get(d, "C0").map(|x| file.nums(x)).unwrap_or_else(|| vec![0.0]),
-                c1: file.get(d, "C1").map(|x| file.nums(x)).unwrap_or_else(|| vec![1.0]),
-                n: file.get_num(d, "N").unwrap_or(1.0),
-            },
+            2 => {
+                let c0 = file.get(d, "C0").map(|x| file.nums(x)).unwrap_or_else(|| vec![0.0]);
+                let c1 = file.get(d, "C1").map(|x| file.nums(x)).unwrap_or_else(|| vec![1.0]);
+                if !budget.take_values(c0.len() + c1.len()) {
+                    return Func::Unsupported;
+                }
+                Func::Exp { domain, c0, c1, n: file.get_num(d, "N").unwrap_or(1.0) }
+            }
             3 => {
                 // A stitching function's pieces: no element cap (a repeating gradient lists one
                 // piece once per repeat); the budget bounds the total work.
@@ -513,12 +585,12 @@ impl Func {
                     None => Some(vec![]),
                 };
                 let Some(funcs) = funcs else { return Func::Unsupported };
-                Func::Stitch {
-                    domain,
-                    funcs,
-                    bounds: file.get(d, "Bounds").map(|x| file.nums(x)).unwrap_or_default(),
-                    encode: file.get(d, "Encode").map(|x| file.nums(x)).unwrap_or_default(),
+                let bounds = file.get(d, "Bounds").map(|x| file.nums(x)).unwrap_or_default();
+                let encode = file.get(d, "Encode").map(|x| file.nums(x)).unwrap_or_default();
+                if !budget.take_values(bounds.len() + encode.len()) {
+                    return Func::Unsupported;
                 }
+                Func::Stitch { domain, funcs, bounds, encode }
             }
             0 => {
                 let Obj::Stream(sd, raw) = o else { return Func::Unsupported };
@@ -535,6 +607,10 @@ impl Func {
                 let Some(total) = total else { return Func::Unsupported };
                 let Some(count) = sample_count(total, outputs) else { return Func::Unsupported };
                 if !budget.take_samples(count) {
+                    return Func::Unsupported;
+                }
+                // The stream must hold the table: missing bytes are not made up as zeros.
+                if count.checked_mul(bps).is_none_or(|bits| bits.div_ceil(8) > data.len()) {
                     return Func::Unsupported;
                 }
                 let enc = file.get(d, "Encode").map(|x| file.nums(x)).unwrap_or_default();
@@ -567,10 +643,15 @@ impl Func {
                 let Some(data) = decode_stream(file, sd, raw) else { return Func::Unsupported };
                 let mut lx = crate::object::Lexer::new(&data, 0);
                 // The program is one procedure: `{ … }`.
-                let code = match ps_parse(&mut lx, 0).into_iter().next() {
+                let mut scanned = 0;
+                let code = match ps_parse(&mut lx, 0, &mut scanned).into_iter().next() {
                     Some(PsOp::Proc(p)) => p,
                     _ => return Func::Unsupported,
                 };
+                let ops = ps_len(&code);
+                if scanned > MAX_CALC_OPS || ops > MAX_CALC_OPS || !budget.take_values(ops) {
+                    return Func::Unsupported;
+                }
                 Func::Calc { domain: dom, range: file.get(d, "Range").map(|x| file.nums(x)).unwrap_or_default(), code }
             }
             _ => Func::Unsupported,
@@ -727,7 +808,24 @@ impl Func {
     }
 }
 
-/// PDF text string → Rust string (UTF-16BE with a byte-order mark, else PDFDocEncoding ≈ Latin-1).
+/// PDFDocEncoding (ISO 32000-2 Annex D) where it differs from Latin-1: bytes 0x18–0x1F and
+/// 0x80–0xA0 (0x9F is undefined).
+const PDFDOC_LOW: [char; 8] = ['˘', 'ˇ', 'ˆ', '˙', '˝', '˛', '˚', '˜'];
+const PDFDOC_HIGH: [char; 33] = [
+    '•', '†', '‡', '…', '—', '–', 'ƒ', '⁄', '‹', '›', '−', '‰', '„', '“', '”', '‘', '’', '‚', '™', 'ﬁ', 'ﬂ', 'Ł', 'Œ', 'Š', 'Ÿ', 'Ž', 'ı', 'ł', 'œ', 'š', 'ž',
+    '\u{FFFD}', '€',
+];
+
+fn pdfdoc_char(c: u8) -> char {
+    match c {
+        0x18..=0x1F => PDFDOC_LOW[usize::from(c - 0x18)],
+        0x80..=0xA0 => PDFDOC_HIGH[usize::from(c - 0x80)],
+        _ => char::from(c),
+    }
+}
+
+/// PDF text string → Rust string (UTF-16BE with a byte-order mark, UTF-8 with one, else
+/// PDFDocEncoding).
 pub fn text_string(b: &[u8]) -> String {
     if b.starts_with(&[0xFE, 0xFF]) {
         let u: Vec<u16> = b[2..].as_chunks::<2>().0.iter().map(|c| u16::from_be_bytes([c[0], c[1]])).collect();
@@ -736,12 +834,18 @@ pub fn text_string(b: &[u8]) -> String {
     if let Some(rest) = b.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
         return String::from_utf8_lossy(rest).into_owned();
     }
-    b.iter().map(|&c| c as char).collect()
+    b.iter().map(|&c| pdfdoc_char(c)).collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_strings_without_a_bom_are_pdfdocencoding() {
+        assert_eq!(text_string(b"a\x80b\x92\xa0\x18\xe9"), "a•b™€˘é");
+        assert_eq!(text_string(b"\xfe\xff\x00A\x20\x22"), "A•");
+    }
 
     #[test]
     fn sample_count_at_and_over_the_cap() {
@@ -757,11 +861,55 @@ mod tests {
     }
 
     #[test]
+    fn oversized_calculator_program_is_cut_short() {
+        let src = format!("{{ {}}}", "1 ".repeat(MAX_CALC_OPS + 10));
+        let mut lx = crate::object::Lexer::new(src.as_bytes(), 0);
+        let Some(PsOp::Proc(code)) = ps_parse(&mut lx, 0, &mut 0).into_iter().next() else { panic!() };
+        assert_eq!(ps_len(&code), MAX_CALC_OPS + 1);
+    }
+
+    #[test]
+    fn arrays_and_dictionaries_in_a_calculator_are_skipped_whole() {
+        // Strings with brackets, nested arrays and a dictionary are one skipped token each; the
+        // operators around them still parse.
+        let src = b"{ 1 [ (a]b) [1 2] << /K [3 4] /S (>>) >> 5 ] 2 add << /A 1 >> mul }";
+        let mut lx = crate::object::Lexer::new(src, 0);
+        let Some(PsOp::Proc(code)) = ps_parse(&mut lx, 0, &mut 0).into_iter().next() else { panic!() };
+        assert_eq!(code, vec![PsOp::Num(1.0), PsOp::Num(2.0), PsOp::Op("add".into()), PsOp::Op("mul".into())]);
+        // A huge array is skipped once the cap is passed, not read to its end.
+        let src = format!("{{ [ {}] 1 }}", "0 ".repeat(MAX_CALC_OPS * 100));
+        let mut lx = crate::object::Lexer::new(src.as_bytes(), 0);
+        let mut scanned = 0;
+        let Some(PsOp::Proc(code)) = ps_parse(&mut lx, 0, &mut scanned).into_iter().next() else { panic!() };
+        assert_eq!(code, vec![PsOp::Num(1.0)]);
+        // A large string inside a skipped array is passed over, not decoded: escapes, nested
+        // parentheses, a hexadecimal string and names all end where the lexer would end them.
+        let big = format!("{{ [ ({}) <{}> /{} (a\\)b(c)) 7 ] 1 }}", "x".repeat(1 << 20), "ab".repeat(1 << 19), "N".repeat(1 << 10));
+        let mut lx = crate::object::Lexer::new(big.as_bytes(), 0);
+        let Some(PsOp::Proc(code)) = ps_parse(&mut lx, 0, &mut 0).into_iter().next() else { panic!() };
+        assert_eq!(code, vec![PsOp::Num(1.0)]);
+        // An unclosed one ends at the end of the data.
+        let mut lx = crate::object::Lexer::new(b"[ 1 2 ", 0);
+        lx.skip_compound();
+        assert_eq!(lx.pos, 6);
+    }
+
+    #[test]
+    fn skipped_calculator_tokens_count_toward_the_cap() {
+        // `null` is not a calculator token: skipped, but still scanned.
+        let src = format!("{{ {}}}", "null ".repeat(MAX_CALC_OPS + 10));
+        let mut lx = crate::object::Lexer::new(src.as_bytes(), 0);
+        let mut scanned = 0;
+        ps_parse(&mut lx, 0, &mut scanned);
+        assert!(scanned > MAX_CALC_OPS && scanned < MAX_CALC_OPS + 10, "parsing stops once the cap is passed ({scanned})");
+    }
+
+    #[test]
     fn calculator_functions() {
         // Two inputs → three outputs: { 2 copy mul 3 1 roll add 2 div  dup 0.5 gt { pop 1 } if  0 }
         let code = b"{ 2 copy mul 3 1 roll add 2 div dup 0.5 gt { pop 1 } { 0.25 mul } ifelse 0 }";
         let mut lx = crate::object::Lexer::new(code, 0);
-        let Some(PsOp::Proc(code)) = ps_parse(&mut lx, 0).into_iter().next() else { panic!() };
+        let Some(PsOp::Proc(code)) = ps_parse(&mut lx, 0, &mut 0).into_iter().next() else { panic!() };
         let f = Func::Calc { domain: vec![0.0, 1.0, 0.0, 1.0], range: vec![0.0, 1.0, 0.0, 1.0, 0.0, 1.0], code };
         assert_eq!(f.eval(&[0.5, 0.4]), vec![0.2, 0.1125, 0.0]);
         assert_eq!(f.eval(&[1.0, 0.8]), vec![0.8, 1.0, 0.0]);
@@ -771,7 +919,7 @@ mod tests {
     fn run(src: &str, mut st: Vec<f64>) -> Vec<f64> {
         let src = format!("{{ {src} }}");
         let mut lx = crate::object::Lexer::new(src.as_bytes(), 0);
-        let Some(PsOp::Proc(code)) = ps_parse(&mut lx, 0).into_iter().next() else { panic!() };
+        let Some(PsOp::Proc(code)) = ps_parse(&mut lx, 0, &mut 0).into_iter().next() else { panic!() };
         ps_run(&code, &mut st, 0);
         st
     }

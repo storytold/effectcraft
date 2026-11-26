@@ -171,3 +171,70 @@ fn an_unknown_comp_is_named_in_the_error() {
         assert!(e.contains(&format!("no composition {name}")), "{cmd}: {e}");
     }
 }
+
+/// OpenEXR compression and bit depth over the command API (#2911): set on add, on an Output
+/// Module and on a second module, listed by `renderQueue.formats`, refused when unknown, and kept
+/// through a project save and load. A module that doesn't name them stays ZIP, 32-bit float.
+#[test]
+fn exr_compression_and_bit_depth_options() {
+    use effectcraft_project::render_queue::{ExrBitDepth, ExrCompression};
+    let mut s = session();
+    let a = s.execute("renderQueue.add", json!({"format": "exr"})).unwrap();
+    let om = &s.project.render_queue[0].output;
+    assert_eq!((om.format, om.exr_compression, om.exr_bit_depth), (OutputFormat::ExrSequence, ExrCompression::Zip, ExrBitDepth::Float));
+    let id = a["item"].clone();
+    s.execute("renderQueue.setOutputModule", json!({"item": id, "exrCompression": "piz", "exrBitDepth": "half"})).unwrap();
+    let om = &s.project.render_queue[0].output;
+    assert_eq!((om.exr_compression, om.exr_bit_depth, om.name.as_str()), (ExrCompression::Piz, ExrBitDepth::Half, "Custom"));
+    s.execute("renderQueue.setOutputModule", json!({"item": id, "exrCompression": "DWAB", "exrBitDepth": 32})).unwrap();
+    let om = &s.project.render_queue[0].output;
+    assert_eq!((om.exr_compression, om.exr_bit_depth), (ExrCompression::Dwab, ExrBitDepth::Float));
+    for bad in [json!({"exrCompression": "htj2k"}), json!({"exrBitDepth": "8"}), json!({"exrCompression": 3})] {
+        let mut p = bad.clone();
+        p["item"] = id.clone();
+        assert!(s.execute("renderQueue.setOutputModule", p).is_err(), "{bad}");
+    }
+    assert_eq!(s.project.render_queue[0].output.exr_compression, ExrCompression::Dwab, "a refused value changes nothing");
+    s.execute("render.addOutputModule", json!({"item": id, "format": "exr", "exrCompression": "b44a", "exrBitDepth": "half"})).unwrap();
+    let extra = &s.project.render_queue[0].extra_outputs[0];
+    assert_eq!((extra.exr_compression, extra.exr_bit_depth), (ExrCompression::B44a, ExrBitDepth::Half));
+    let b = s.execute("renderQueue.add", json!({"format": "exr", "exrCompression": "rle", "exrBitDepth": "16"})).unwrap();
+    assert_eq!(b["output"]["exr_compression"], "Rle", "{b}");
+    let log = s.project.render_queue[1].output.describe();
+    assert!(log.contains(&("Compression", "RLE".to_string())) && log.contains(&("Bit Depth", "16-bit Half Float".to_string())), "{log:?}");
+
+    let f = s.execute("renderQueue.formats", json!({})).unwrap();
+    let ids: Vec<&str> = f["exrCompressions"].as_array().unwrap().iter().filter_map(|c| c["id"].as_str()).collect();
+    assert_eq!(ids, ["none", "rle", "zips", "zip", "piz", "pxr24", "b44", "b44a", "dwaa", "dwab"]);
+    assert_eq!(f["exrBitDepths"], json!(["half", "float"]));
+
+    // Saved and opened again, the project keeps them.
+    let dir = std::env::temp_dir().join(format!("ec-exr-options-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("exr.ecproj");
+    std::fs::write(&path, s.project.to_file_json().unwrap()).unwrap();
+    let mut t = Session::default();
+    t.execute("file.open", json!({"path": path})).unwrap();
+    let q = &t.project.render_queue;
+    assert_eq!((q[0].output.exr_compression, q[0].output.exr_bit_depth), (ExrCompression::Dwab, ExrBitDepth::Float));
+    assert_eq!((q[0].extra_outputs[0].exr_compression, q[0].extra_outputs[0].exr_bit_depth), (ExrCompression::B44a, ExrBitDepth::Half));
+    assert_eq!((q[1].output.exr_compression, q[1].output.exr_bit_depth), (ExrCompression::Rle, ExrBitDepth::Half));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Settings ▸ Export ▸ Append Bit Depth to File Name names a half-float OpenEXR module's frames
+/// `_16bpc` and a 32-bit one's `_32bpc` (#2911).
+#[test]
+fn append_bit_depth_follows_the_exr_bit_depth() {
+    use effectcraft_project::render_queue::{ExrBitDepth, RenderQueueItem};
+    let mut s = session();
+    s.execute("prefs.set", json!({"values": {"export.appendBitsToName": true}})).unwrap();
+    let mut item = RenderQueueItem::new(1, s.active_comp_id().unwrap());
+    item.output = effectcraft_project::render_queue::OutputModule::for_format(OutputFormat::ExrSequence);
+    item.output.output = "/out/Main_[#####].exr".into();
+    for (depth, tag) in [(ExrBitDepth::Half, "_16bpc"), (ExrBitDepth::Float, "_32bpc")] {
+        item.output.exr_bit_depth = depth;
+        let outs = s.outputs_of(&item, None).unwrap();
+        assert!(outs.iter().all(|(_, p)| p.contains(tag)), "{depth:?}: {outs:?}");
+    }
+}

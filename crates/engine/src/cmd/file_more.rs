@@ -30,10 +30,13 @@ fn has_comp_selection(s: &Session) -> std::result::Result<(), String> {
     if s.state.project_selection.iter().any(|i| s.project.comp(*i).is_some()) { Ok(()) } else { Err("select compositions in the Project panel".into()) }
 }
 
+fn is_footage(s: &Session, i: ItemId) -> bool {
+    matches!(s.project.item(i).map(|x| &x.kind), Some(ItemKind::Footage(_)))
+}
+
 /// Selected project items that are footage (or the source of the selected layer).
 fn selected_footage(s: &Session) -> Vec<ItemId> {
-    let mut v: Vec<ItemId> =
-        s.state.project_selection.iter().copied().filter(|i| matches!(s.project.item(*i).map(|x| &x.kind), Some(ItemKind::Footage(_)))).collect();
+    let mut v: Vec<ItemId> = s.state.project_selection.iter().copied().filter(|i| is_footage(s, *i)).collect();
     if v.is_empty()
         && let Some(c) = s.active_comp()
     {
@@ -56,15 +59,50 @@ fn items_p(s: &Session, p: &Value) -> Vec<ItemId> {
     }
 }
 
+/// The items `file.interpretFootage` changes for parameters `p` (with `proxy`, the items whose
+/// proxy `file.interpretProxy` changes): `items`/`item`, else the selection, keeping only
+/// footage (items with a proxy), as the commands skip the rest. The Interpret Footage dialog
+/// shows the first one, so OK writes its settings back to the footage they came from.
+pub fn interpretation_targets(s: &Session, p: &Value, proxy: bool) -> Vec<ItemId> {
+    if proxy {
+        return super::proxy::proxied(s, p);
+    }
+    items_p(s, p).into_iter().filter(|i| is_footage(s, *i)).collect()
+}
+
+/// `project.newFolder {name?, parent?, items?}`. With `items` (ids or names), they move into the
+/// new folder in the same undo step: Project items dropped on the panel's New Folder button, as
+/// in After Effects (#3196). A folder can't end up inside itself.
 fn new_folder(s: &mut Session, p: &Value) -> Result<Value> {
+    let c = "project.newFolder";
     let name = str_p(p, "name").unwrap_or("Untitled Folder").to_string();
     let parent = p.get("parent").and_then(Value::as_u64).map(ItemId).filter(|i| s.project.item(*i).is_some_and(|x| x.is_folder()));
+    let mut items: Vec<ItemId> = vec![];
+    if let Some(v) = p.get("items") {
+        let Value::Array(a) = v else { return Err(bad(c, "`items` must be an array of item ids or names")) };
+        for v in a {
+            let id = super::project_items::item_ref(s, v, c)?;
+            if !items.contains(&id) {
+                items.push(id);
+            }
+        }
+        if let Some(f) = parent
+            && let Some(inside) = items.iter().find(|i| super::project_items::is_within(&s.project, f, **i))
+        {
+            return Err(bad(c, format!("can't move folder {} into a folder inside itself", inside.0)));
+        }
+    }
     let id = s.edit("New Folder", None, |proj, st| {
         let id = proj.add_item(&name, Label::Yellow, parent, ItemKind::Folder);
+        for i in &items {
+            if let Some(it) = proj.item_mut(*i) {
+                it.parent = Some(id);
+            }
+        }
         st.project_selection = vec![id];
         Ok(id)
     })?;
-    Ok(json!({"item": id.0}))
+    if p.get("items").is_some() { Ok(json!({"item": id.0, "moved": items.len()})) } else { Ok(json!({"item": id.0})) }
 }
 
 fn close(s: &mut Session, p: &Value) -> Result<Value> {
@@ -395,6 +433,9 @@ fn collect_files(s: &mut Session, p: &Value) -> Result<Value> {
     // reads (other footage, a proxy, the project file itself), and then nothing is written.
     let protected = s.protected_files();
     let mut used_names = BTreeSet::new();
+    // Where each file name's numbering resumes: a name repeated many times is numbered from its
+    // own file name, not by prefixing the previous candidate again.
+    let mut next_k: BTreeMap<String, usize> = BTreeMap::new();
     let mut plan: Vec<(ItemId, Vec<(String, String)>)> = vec![];
     for it in s.project.items.values() {
         let ItemKind::Footage(f) = &it.kind else { continue };
@@ -404,11 +445,17 @@ fn collect_files(s: &mut Session, p: &Value) -> Result<Value> {
         let files: Vec<&String> = if f.sequence.is_empty() { vec![&f.path] } else { f.sequence.iter().collect() };
         let mut pairs = vec![];
         for src in files {
-            let mut name = std::path::Path::new(src).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "footage".into());
-            let mut k = 2;
-            while !used_names.insert(name.clone()) {
-                name = format!("{k}_{name}");
-                k += 1;
+            let file = std::path::Path::new(src).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "footage".into());
+            let mut name = file.clone();
+            if !used_names.insert(name.clone()) {
+                let k = next_k.entry(file.clone()).or_insert(2);
+                loop {
+                    name = format!("{k}_{file}");
+                    *k += 1;
+                    if used_names.insert(name.clone()) {
+                        break;
+                    }
+                }
             }
             let dst = format!("{folder}/(Footage)/{name}");
             // A file that is already where its copy goes stays (it is not copied onto itself).
@@ -1202,7 +1249,15 @@ fn reveal_in_finder(s: &mut Session, p: &Value) -> Result<Value> {
 
 pub fn specs() -> Vec<CommandSpec> {
     vec![
-        cmd!("project.newFolder", "New Folder", ["File", "New"], Some("Cmd+Alt+Shift+N"), "{name?, parent?}", always, new_folder),
+        cmd!(
+            "project.newFolder",
+            "New Folder",
+            ["File", "New"],
+            Some("Cmd+Alt+Shift+N"),
+            "{name?, parent?, items?: [id|name] (moved into it)}",
+            always,
+            new_folder
+        ),
         cmd!("file.close", "Close", ["File"], Some("Cmd+W"), "{comp?}", has_comp, close),
         cmd!("file.closeProject", "Close Project", ["File"], None, "{}", always, close_project),
         cmd!("file.saveCopy", "Save a Copy...", ["File", "Save As"], None, "{path}", always, save_copy),

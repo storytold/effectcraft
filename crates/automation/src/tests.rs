@@ -504,6 +504,11 @@ fn fake_render_frame(session: &Session, params: &Value) -> Value {
 /// A fake desktop control channel: answers `engine.execute` from a real session, and canned
 /// `render.frame` / `ui.screenshot` replies.
 fn fake_app() -> u16 {
+    fake_app_with(fake_render_frame)
+}
+
+/// [`fake_app`], answering `render.frame` with `render_frame`.
+fn fake_app_with(render_frame: fn(&Session, &Value) -> Value) -> u16 {
     let l = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = l.local_addr().unwrap().port();
     std::thread::spawn(move || {
@@ -518,7 +523,7 @@ fn fake_app() -> u16 {
                     Ok(v) => json!({"ok": true, "result": v}),
                     Err(e) => json!({"ok": false, "error": e.to_string()}),
                 },
-                "render.frame" => fake_render_frame(&session, p),
+                "render.frame" => render_frame(&session, p),
                 "ui.screenshot" => {
                     let png = crate::encode_png(8, 8, vec![128; 256], 0).unwrap();
                     std::fs::write(p["path"].as_str().unwrap(), png).unwrap();
@@ -1474,6 +1479,17 @@ fn automation_roots_confine_file_access() {
     // Scripts can read and write anything: refused.
     denied(&mut s, "run_script", json!({"code": "1 + 1"}));
     denied(&mut s, "execute_command", json!({"command": "file.runScript", "params": {"path": p(&read, "x.jsx")}}));
+    // So can Plug-in Library jobs: they download modules, install code that loads at start-up and read `file://` catalogs.
+    for c in ["library.refresh", "library.install", "library.update", "library.uninstall", "library.loadInstalled", "library.preview"] {
+        let msg = denied(&mut s, "execute_command", json!({"command": c, "params": {"id": "x"}}));
+        assert!(msg.contains("not available while file access is confined"), "{msg}");
+    }
+    let steps = json!([{"command": "library.install", "params": {"id": "x"}}]);
+    denied(&mut s, "batch", json!({"steps": steps}));
+    call_json(&mut s, "execute_command", json!({"command": "library.list"}));
+    // Effect helpers are native programs: starting them or loading through them is refused too.
+    denied(&mut s, "execute_command", json!({"command": "effect.helpers.scan"}));
+    denied(&mut s, "execute_command", json!({"command": "effect.helpers.load", "params": {"path": p(&read, "x.ofx")}}));
     for (id, params) in [
         ("file.runStartupScripts", json!({})),
         ("file.runShutdownScripts", json!({})),
@@ -1571,6 +1587,7 @@ fn automation_roots_refuse_running_script_code() {
         ("scriptui.set", json!({"window": 1, "widget": 2, "value": 1})),
         ("scriptui.mouse", json!({"window": 1, "widget": 2, "type": "click"})),
         ("scriptui.close", json!({"window": 1})),
+        ("scriptui.fileDialog", json!({"host": 1, "paths": null})),
     ] {
         let msg = refused(&mut s, "execute_command", json!({"command": command, "params": params}));
         assert!(msg.contains("not available while file access is confined"), "`{command}`: {msg}");
@@ -1729,4 +1746,395 @@ fn bridged_render_frame_asks_the_app_before_it_writes() {
     assert!(!err, "{c:?}");
     assert_eq!(&std::fs::read(&free).unwrap()[..8], b"\x89PNG\r\n\x1a\n");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #2131 F-11 ("Indirect reads"): a project opened or imported from inside a read root names its
+/// footage, and those files are read when it renders. Footage outside the roots (an absolute
+/// path, `../`, a symbolic link to a file or a folder out of the root) must not reach the agent:
+/// its layer renders as missing footage, while footage inside the roots still renders.
+#[test]
+fn automation_roots_confine_the_footage_a_project_names() {
+    use crate::confine::Confinement;
+    let base = std::env::temp_dir().join(format!("ec-mcp-footage-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let (read, write, outside) = (base.join("in"), base.join("out"), base.join("elsewhere"));
+    for d in [&read, &write, &outside] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let red = image::RgbaImage::from_pixel(8, 8, image::Rgba([255, 0, 0, 255]));
+    red.save(outside.join("secret.png")).unwrap();
+    red.save(read.join("own.png")).unwrap();
+    let p = |d: &std::path::Path, f: &str| d.join(f).to_string_lossy().into_owned();
+    // A project in the read root showing `footage`, saved unconfined.
+    let project = |name: &str, footage: &str| {
+        let mut s = McpServer::new(Backend::headless(effectcraft_host::session()));
+        call_json(&mut s, "execute_command", json!({"command": "comp.new", "params": {"name": "C", "width": 8, "height": 8}}));
+        let imported = call_json(&mut s, "execute_command", json!({"command": "file.import", "params": {"paths": [footage]}}));
+        let item = imported["items"][0].as_u64().or_else(|| imported["item"].as_u64()).unwrap_or_else(|| panic!("{imported}"));
+        call_json(&mut s, "execute_command", json!({"command": "layer.addItem", "params": {"comp": "C", "item": item}}));
+        let path = p(&read, name);
+        call_json(&mut s, "save_project", json!({"path": path}));
+        path
+    };
+    // The middle pixel of comp C: red when the footage was read.
+    let shows_red = |s: &mut McpServer| {
+        let (c, err) = call(s, "render_frame", json!({"comp": "C"}));
+        assert!(!err, "{c:?}");
+        let png = base64::decode(c[0]["data"].as_str().unwrap()).unwrap();
+        let px = image::load_from_memory(&png).unwrap().to_rgba8().get_pixel(4, 4).0;
+        px[0] > 200 && px[3] > 200
+    };
+    let mut projects = vec![("absolute", project("absolute.ecproj", &p(&outside, "secret.png")))];
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(outside.join("secret.png"), read.join("link.png")).unwrap();
+        std::os::unix::fs::symlink(&outside, read.join("dir")).unwrap();
+        projects.push(("linked file", project("linked-file.ecproj", &p(&read, "link.png"))));
+        projects.push(("linked folder", project("linked-folder.ecproj", &p(&read.join("dir"), "secret.png"))));
+    }
+    // Relative to the project: `../elsewhere/secret.png`, written into a copy of a project.
+    let own = project("own.ecproj", &p(&read, "own.png"));
+    let text = std::fs::read_to_string(&own).unwrap();
+    assert!(text.contains(&p(&read, "own.png")) || text.contains("own.png"), "{text}");
+    let relative = text.replace(&p(&read, "own.png"), "../elsewhere/secret.png").replace("\"own.png\"", "\"../elsewhere/secret.png\"");
+    std::fs::write(read.join("relative.ecproj"), relative).unwrap();
+    projects.push(("relative", p(&read, "relative.ecproj")));
+
+    let confined = || {
+        let mut s = McpServer::new(Backend::headless(effectcraft_host::session()));
+        s.backend().confine(Confinement::new(std::slice::from_ref(&read), std::slice::from_ref(&write)).unwrap());
+        s
+    };
+    // Footage inside the read root renders.
+    let mut s = confined();
+    call_json(&mut s, "open_project", json!({"path": own}));
+    assert!(shows_red(&mut s), "footage inside the read root");
+    for (how, path) in &projects {
+        // Unconfined, the project shows the outside file.
+        let mut s = McpServer::new(Backend::headless(effectcraft_host::session()));
+        call_json(&mut s, "open_project", json!({"path": path}));
+        assert!(shows_red(&mut s), "{how}: unconfined shows the footage");
+        // Confined: opened, or imported into the open project.
+        let mut s = confined();
+        call_json(&mut s, "open_project", json!({"path": path}));
+        assert!(!shows_red(&mut s), "{how}: opened, the footage outside the roots was read");
+        let mut s = confined();
+        call_json(&mut s, "execute_command", json!({"command": "file.importProject", "params": {"path": path}}));
+        assert!(!shows_red(&mut s), "{how}: imported, the footage outside the roots was read");
+    }
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// A symbolic link inside the read root, read once while it pointed inside, is checked again
+/// on every read: pointed outside afterwards, its footage must not come back once the frame
+/// cache is emptied.
+#[cfg(unix)]
+#[test]
+fn automation_roots_check_relinked_footage_again() {
+    use crate::confine::Confinement;
+    let base = std::env::temp_dir().join(format!("ec-mcp-relink-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let (read, write, outside) = (base.join("in"), base.join("out"), base.join("elsewhere"));
+    for d in [&read, &write, &outside] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    image::RgbaImage::from_pixel(8, 8, image::Rgba([0, 0, 255, 255])).save(read.join("own.png")).unwrap();
+    image::RgbaImage::from_pixel(8, 8, image::Rgba([255, 0, 0, 255])).save(outside.join("secret.png")).unwrap();
+    let link = read.join("link.png");
+    std::os::unix::fs::symlink(read.join("own.png"), &link).unwrap();
+    let link_path = link.to_string_lossy().into_owned();
+    let project = read.join("relink.ecproj").to_string_lossy().into_owned();
+    {
+        let mut s = McpServer::new(Backend::headless(effectcraft_host::session()));
+        call_json(&mut s, "execute_command", json!({"command": "comp.new", "params": {"name": "C", "width": 8, "height": 8}}));
+        let imported = call_json(&mut s, "execute_command", json!({"command": "file.import", "params": {"paths": [link_path]}}));
+        let item = imported["items"][0].as_u64().or_else(|| imported["item"].as_u64()).unwrap_or_else(|| panic!("{imported}"));
+        call_json(&mut s, "execute_command", json!({"command": "layer.addItem", "params": {"comp": "C", "item": item}}));
+        call_json(&mut s, "save_project", json!({"path": project}));
+    }
+    // The middle pixel of comp C.
+    let pixel = |s: &mut McpServer| {
+        let (c, err) = call(s, "render_frame", json!({"comp": "C"}));
+        assert!(!err, "{c:?}");
+        let png = base64::decode(c[0]["data"].as_str().unwrap()).unwrap();
+        image::load_from_memory(&png).unwrap().to_rgba8().get_pixel(4, 4).0
+    };
+    let mut s = McpServer::new(Backend::headless(effectcraft_host::session()));
+    s.backend().confine(Confinement::new(std::slice::from_ref(&read), std::slice::from_ref(&write)).unwrap());
+    call_json(&mut s, "open_project", json!({"path": project}));
+    let px = pixel(&mut s);
+    assert!(px[2] > 200 && px[0] < 50, "the link pointing inside renders: {px:?}");
+    std::fs::remove_file(&link).unwrap();
+    std::os::unix::fs::symlink(outside.join("secret.png"), &link).unwrap();
+    call_json(&mut s, "execute_command", json!({"command": "edit.purge", "params": {"what": "memory"}}));
+    let px = pixel(&mut s);
+    assert!(!(px[0] > 200 && px[3] > 200), "the link pointed outside afterwards was read: {px:?}");
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// Exporting a repro must not write to the settings store outside the automation roots.
+#[test]
+fn confined_repro_export_requires_an_explicit_writable_path() {
+    use crate::confine::Confinement;
+    use effectcraft_engine::config::{ConfigStore, MemoryConfig};
+    use std::sync::Arc;
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(MemoryConfig::default());
+    let session = Session { config: Some(store.clone()), ..Default::default() };
+    let mut s = McpServer::new(Backend::headless(session));
+    s.backend().confine(Confinement::new(&[], &[dir.path().to_path_buf()]).unwrap());
+    for params in [json!({}), json!({"path": null}), json!({"path": []}), json!({"path": [dir.path().join("repro.jsonl")]})] {
+        let (content, error) = call(&mut s, "execute_command", json!({"command": "help.exportRepro", "params": params}));
+        assert!(error, "{content:?}");
+        assert!(store.list("Repros").is_empty(), "implicit settings-store writes must be refused");
+    }
+    let path = dir.path().join("repro.jsonl");
+    call_json(&mut s, "execute_command", json!({"command": "help.exportRepro", "params": {"path": path}}));
+    assert!(path.is_file());
+    let journal = call_json(&mut s, "execute_command", json!({"command": "journal.export"}));
+    assert!(journal["script"].is_string(), "in-memory exports need no write root");
+    assert!(store.list("Repros").is_empty());
+}
+
+// ------------------------------------------------------------------ contact sheets (#3593)
+
+/// A 64 × 64 comp with a white solid fading in from 0 s to 2 s: each time renders another grey.
+/// Returns the comp's id.
+fn fading_comp(s: &mut McpServer) -> Value {
+    call_json(s, "execute_command", json!({"command": "comp.new", "params": {"name": "Fade", "width": 64, "height": 64, "duration": 4}}));
+    let l = call_json(s, "execute_command", json!({"command": "layer.newSolid", "params": {"color": "#ffffff", "width": 64, "height": 64}}))["layer"].clone();
+    let keys = json!([{"time": 0, "value": 0}, {"time": 2, "value": 100}]);
+    call_json(s, "add_keyframe", json!({"layer": l, "path": "transform/opacity", "keys": keys, "interpolation": "linear"}));
+    call_json(s, "get_comp", json!({}))["id"].clone()
+}
+
+/// The image and the metadata of a successful render reply.
+fn image_reply(c: &[Value]) -> (image::RgbaImage, Value) {
+    assert_eq!(c.len(), 2, "one image and its metadata: {c:?}");
+    assert_eq!(c[0]["type"], "image");
+    assert_eq!(c[0]["mimeType"], "image/png");
+    let png = base64::decode(c[0]["data"].as_str().unwrap()).unwrap();
+    (image::load_from_memory(&png).unwrap().to_rgba8(), serde_json::from_str(c[1]["text"].as_str().unwrap()).unwrap())
+}
+
+#[test]
+fn render_tools_list_the_contact_sheet_arguments() {
+    let mut s = server();
+    let tools = rpc(&mut s, 1, "tools/list", json!({}));
+    for name in ["render_frame", "render_preview"] {
+        let tool = tools["tools"].as_array().unwrap().iter().find(|t| t["name"] == name).unwrap();
+        let props = &tool["inputSchema"]["properties"];
+        assert_eq!(props["times"]["type"], "array", "{name}");
+        assert_eq!(props["times"]["items"]["type"], "number", "{name}");
+        assert_eq!(props["times"]["minItems"], 1, "{name}");
+        assert_eq!(props["times"]["maxItems"], crate::sheet::MAX_CELLS, "{name}");
+        assert_eq!(props["columns"]["type"], "integer", "{name}");
+        assert_eq!(props["labels"]["type"], "boolean", "{name}");
+        assert!(tool["description"].as_str().unwrap().contains("`times`"), "{name}");
+    }
+    let preview = tools["tools"].as_array().unwrap().iter().find(|t| t["name"] == "render_preview").unwrap();
+    assert!(preview["inputSchema"]["properties"].get("path").is_none(), "render_preview still writes no file");
+    assert_eq!(preview["annotations"]["readOnlyHint"], true);
+}
+
+/// One call, one PNG: the frames at the times given, row by row in that order (#3593).
+#[test]
+fn times_render_one_contact_sheet_in_the_order_given() {
+    let mut s = server();
+    let comp = fading_comp(&mut s);
+    for tool in ["render_frame", "render_preview"] {
+        let (c, err) = call(&mut s, tool, json!({"times": [2, 0, 1], "max_side": 16, "labels": false}));
+        assert!(!err, "{tool}: {c:?}");
+        let (sheet, info) = image_reply(&c);
+        assert_eq!(
+            info,
+            json!({"comp": comp, "times": [2.0, 0.0, 1.0], "columns": 2, "rows": 2, "cellWidth": 16, "cellHeight": 16, "width": 32, "height": 32}),
+            "{tool}"
+        );
+        assert_eq!(sheet.dimensions(), (32, 32), "{tool}");
+        let grey = |x, y| sheet.get_pixel(x, y).0[0];
+        let (end, start, mid) = (grey(8, 8), grey(24, 8), grey(8, 24));
+        assert!(end > mid && mid > start, "{tool}: 2 s, 0 s, 1 s in reading order: {end} {start} {mid}");
+        assert_eq!(sheet.get_pixel(24, 24).0, [0, 0, 0, 255], "{tool}: the cell without a frame is black");
+        // Each cell is the frame render_frame renders at that time and size.
+        let (single, _) = image_reply(&call(&mut s, "render_frame", json!({"time": 2, "max_side": 16})).0);
+        assert!(single.enumerate_pixels().all(|(x, y, p)| sheet.get_pixel(x, y) == p), "{tool}");
+    }
+    // `columns` sets the width, `max_side` each cell; labels (the default) mark each cell's corner.
+    let (c, err) = call(&mut s, "render_frame", json!({"times": [0, 0.5, 1, 1.5], "columns": 4, "max_side": 64}));
+    assert!(!err, "{c:?}");
+    let (sheet, info) = image_reply(&c);
+    assert_eq!((info["columns"].as_u64(), info["rows"].as_u64(), info["width"].as_u64(), info["height"].as_u64()), (Some(4), Some(1), Some(256), Some(64)));
+    assert_eq!((info["cellWidth"].as_u64(), info["cellHeight"].as_u64()), (Some(64), Some(64)));
+    assert_eq!(sheet.dimensions(), (256, 64));
+    let (plain, _) = image_reply(&call(&mut s, "render_frame", json!({"times": [0, 0.5, 1, 1.5], "columns": 4, "max_side": 64, "labels": false})).0);
+    assert_ne!(sheet.get_pixel(2, 2), plain.get_pixel(2, 2), "a label in the corner");
+    assert_eq!(sheet.get_pixel(32, 40), plain.get_pixel(32, 40), "the rest is the frame");
+    // `inline: false` returns only the metadata.
+    let info = call_json(&mut s, "render_frame", json!({"times": [0, 1], "max_side": 16, "inline": false}));
+    assert_eq!(info["width"], 32);
+}
+
+#[test]
+fn contact_sheet_arguments_are_checked() {
+    let mut s = server();
+    fading_comp(&mut s);
+    let too_many: Vec<f64> = (0..=crate::sheet::MAX_CELLS).map(|i| i as f64 / 100.0).collect();
+    for (args, want) in [
+        (json!({"time": 1, "times": [0, 1]}), "give `time` or `times`, not both"),
+        (json!({"times": []}), "`times` is empty"),
+        (json!({"times": too_many}), "at most 64"),
+        (json!({"times": 1}), "must be an array"),
+        (json!({"times": [0, "1"]}), "comp times in seconds"),
+        (json!({"times": [0, 1], "columns": 0}), "at least 1"),
+        (json!({"times": [0, 1], "columns": 1.5}), "at least 1"),
+        (json!({"columns": 2}), "give `times`"),
+        (json!({"labels": false}), "give `times`"),
+        (json!({"times": [0, 1], "labels": "no"}), "`labels` must be true or false"),
+        (json!({"times": [0, 1], "labels": 0}), "`labels` must be true or false"),
+    ] {
+        for tool in ["render_frame", "render_preview"] {
+            let (c, err) = call(&mut s, tool, args.clone());
+            let text = c[0]["text"].as_str().unwrap();
+            assert!(err && text.contains(want), "{tool} {args}: {text}");
+        }
+    }
+    // A sheet over `sheet::MAX_SIDE` (7680) pixels on a side is refused, not allocated.
+    call_json(&mut s, "execute_command", json!({"command": "comp.new", "params": {"name": "Wide", "width": 3000, "height": 8}}));
+    let (c, err) = call(&mut s, "render_frame", json!({"comp": "Wide", "times": [0, 0, 0], "columns": 3, "max_side": 0}));
+    let text = c[0]["text"].as_str().unwrap();
+    assert!(err && text.contains("over 7680 pixels"), "{text}");
+}
+
+/// With `times`, cells default to 320 pixels on their longest side, so 64 frames of a 16:9 comp
+/// make a sheet 2560 pixels wide, not 7680; a single frame still defaults to 960.
+#[test]
+fn contact_sheet_cells_default_to_320_pixels() {
+    let mut s = server();
+    call_json(&mut s, "execute_command", json!({"command": "comp.new", "params": {"name": "HD", "width": 1280, "height": 720}}));
+    for tool in ["render_frame", "render_preview"] {
+        let (c, err) = call(&mut s, tool, json!({"times": [0, 1, 2, 3]}));
+        assert!(!err, "{tool}: {c:?}");
+        let (sheet, info) = image_reply(&c);
+        assert_eq!((info["cellWidth"].as_u64(), info["cellHeight"].as_u64()), (Some(320), Some(180)), "{tool}");
+        assert_eq!(sheet.dimensions(), (640, 360), "{tool}");
+        // An explicit `max_side` still sets each cell.
+        let (sheet, info) = image_reply(&call(&mut s, tool, json!({"times": [0, 1], "max_side": 640})).0);
+        assert_eq!((info["cellWidth"].as_u64(), sheet.dimensions()), (Some(640), (1280, 360)), "{tool}");
+        let (frame, _) = image_reply(&call(&mut s, tool, json!({"time": 0})).0);
+        assert_eq!(frame.dimensions(), (960, 540), "{tool}: a single frame keeps its default");
+    }
+}
+
+/// Without `times` the reply is the single frame it always was.
+#[test]
+fn without_times_render_tools_return_a_single_frame() {
+    let mut s = server();
+    let comp = fading_comp(&mut s);
+    for tool in ["render_frame", "render_preview"] {
+        let (c, err) = call(&mut s, tool, json!({"time": 2, "max_side": 16}));
+        assert!(!err, "{tool}: {c:?}");
+        let (img, info) = image_reply(&c);
+        assert_eq!(info, json!({"comp": comp, "time": 2.0, "width": 16, "height": 16}), "{tool}");
+        assert!(img.pixels().all(|p| p.0 == [255, 255, 255, 255]), "{tool}: no label on a single frame");
+    }
+}
+
+/// A sheet's `path` goes through the same checks as a frame's: the automation roots and the
+/// files the project reads refuse it with the same message, before anything is written.
+#[test]
+fn contact_sheet_path_is_checked_like_a_frames() {
+    use crate::confine::Confinement;
+    let base = std::env::temp_dir().join(format!("ec-mcp-sheet-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let (read, write) = (base.join("read"), base.join("write"));
+    for dir in [&read, &write] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    let mut s = server();
+    s.backend().confine(Confinement::new(std::slice::from_ref(&read), std::slice::from_ref(&write)).unwrap());
+    fading_comp(&mut s);
+    let project = write.join("Sheet.ecproj");
+    call_json(&mut s, "save_project", json!({"path": project}));
+    let saved = std::fs::read(&project).unwrap();
+    let refused = [base.join("outside.png"), read.join("read-only.png"), std::path::PathBuf::from("relative-sheet.png"), project.clone()];
+    for path in &refused {
+        let (frame, frame_err) = call(&mut s, "render_frame", json!({"time": 1, "path": path, "inline": false}));
+        let (sheet, sheet_err) = call(&mut s, "render_frame", json!({"times": [0, 1], "path": path, "inline": false}));
+        assert!(frame_err && sheet_err, "{}: {frame:?} {sheet:?}", path.display());
+        assert_eq!(sheet[0]["text"], frame[0]["text"], "{}", path.display());
+    }
+    for path in &refused[..3] {
+        assert!(!path.exists(), "{} was written", path.display());
+    }
+    assert_eq!(std::fs::read(&project).unwrap(), saved, "the project file is as it was");
+    // Inside a write root the sheet is written.
+    let out = write.join("sheet.png");
+    let info = call_json(&mut s, "render_frame", json!({"times": [0, 1, 2], "max_side": 16, "path": out, "inline": false}));
+    assert_eq!(info["path"], json!(out));
+    assert_eq!(png_size(&std::fs::read(&out).unwrap()), Some((32, 32)));
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// Bridged, the app renders each cell and the sheet comes back inline; the app only saves frames
+/// it renders, so a sheet's `path` is refused and nothing is written.
+#[test]
+fn bridged_contact_sheet_comes_back_inline() {
+    let port = fake_app();
+    let mut s = McpServer::new(Backend::bridge(&port.to_string()).unwrap());
+    call_json(&mut s, "execute_command", json!({"command": "comp.new", "params": {"width": 8, "height": 4}}));
+    let (c, err) = call(&mut s, "render_frame", json!({"times": [0, 0.5, 1]}));
+    assert!(!err, "{c:?}");
+    // The fake app renders every frame 4 × 2.
+    let (sheet, info) = image_reply(&c);
+    assert_eq!(sheet.dimensions(), (8, 4));
+    assert_eq!(
+        (info["columns"].as_u64(), info["rows"].as_u64(), info["cellWidth"].as_u64(), info["cellHeight"].as_u64()),
+        (Some(2), Some(2), Some(4), Some(2))
+    );
+    let out = std::env::temp_dir().join(format!("ec-mcp-bridged-sheet-{}.png", std::process::id()));
+    let (c, err) = call(&mut s, "render_frame", json!({"times": [0, 1], "path": out, "inline": false}));
+    let text = c[0]["text"].as_str().unwrap();
+    assert!(err && text.contains("headless"), "{text}");
+    assert!(!out.exists());
+}
+
+/// A bridged cell keeps the time it was asked for when the app's reply leaves `time` out, so its
+/// label and the metadata never claim 0 s.
+#[test]
+fn bridged_contact_sheet_keeps_the_times_asked_for() {
+    let port = fake_app_with(|session, p| {
+        let mut reply = fake_render_frame(session, p);
+        reply["result"].as_object_mut().unwrap().remove("time");
+        reply
+    });
+    let mut s = McpServer::new(Backend::bridge(&port.to_string()).unwrap());
+    let info = call_json(&mut s, "render_frame", json!({"times": [1.5, 0.25, 3], "inline": false}));
+    assert_eq!(info["times"], json!([1.5, 0.25, 3.0]));
+}
+
+#[test]
+fn stdio_batch_transcript() {
+    let input = concat!(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\"}}\n",
+        "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n",
+        "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/cancelled\",\"params\":{\"requestId\":1,\"reason\":\"client\"}}\n",
+        "[]\n",
+        "[{\"jsonrpc\":\"2.0\",\"method\":\"notifications/cancelled\",\"params\":{\"requestId\":9}}]\n",
+        "[{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\"},{\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\"}]\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"ping\",\"params\":{}}\n"
+    );
+    let mut s = server();
+    let mut out = Vec::new();
+    s.serve(std::io::Cursor::new(input), &mut out).unwrap();
+
+    let replies: Vec<Value> = String::from_utf8(out).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    assert_eq!(replies.len(), 4, "{replies:?}");
+    assert_eq!(replies[0]["id"], 1);
+    assert_eq!(replies[0]["result"]["serverInfo"]["name"], "effectcraft");
+    assert_eq!(replies[1]["id"], Value::Null);
+    assert_eq!(replies[1]["error"]["code"], -32600);
+    assert_eq!(replies[2], json!([{"jsonrpc": "2.0", "id": 2, "result": {}}]));
+    assert_eq!(replies[3], json!({"jsonrpc": "2.0", "id": 3, "result": {}}));
 }

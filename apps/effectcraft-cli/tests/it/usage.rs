@@ -1,4 +1,4 @@
-//! The command line contract (RFC-0012), run in-process through `effectcraft_cli::run`: generated
+//! The command line contract (RFC-0018), run in-process through `effectcraft_cli::run`: generated
 //! help, `--version`, exit codes, which stream each message goes to, and every kind of usage error
 //! (unknown, repeated and conflicting flags, bad values, missing arguments) refused before any work.
 

@@ -117,12 +117,15 @@ pub fn basis_view(eye: Vec3, forward: Vec3, down_hint: Vec3) -> Mat4 {
     Mat4([[r.x, r.y, r.z, 0.0], [d.x, d.y, d.z, 0.0], [f.x, f.y, f.z, 0.0], [0.0, 0.0, 0.0, 1.0]]) * Mat4::translate(-eye)
 }
 
-/// Orientation angles (degrees, AE order X→Y→Z with Z = 0) that point +z along `dir`.
+/// Orientation angles (degrees, [`Mat4::orientation`]'s order) that point +z along `dir` with
+/// the layer's x axis kept level (no roll): the pitch about x, then the turn about the world's
+/// vertical axis, written as Orientation.
 pub fn orientation_for(dir: Vec3) -> [f64; 3] {
     let d = dir.normalize();
-    let x = (-d.y).clamp(-1.0, 1.0).asin().to_degrees();
-    let y = d.x.atan2(d.z).to_degrees();
-    [norm360(x), norm360(y), 0.0]
+    let pitch = (-d.y).clamp(-1.0, 1.0).asin().to_degrees();
+    let yaw = d.x.atan2(d.z).to_degrees();
+    let o = (Mat4::rotate_y(yaw) * Mat4::rotate_x(pitch)).orientation_angles();
+    [norm360(o.x), norm360(o.y), norm360(o.z)]
 }
 
 fn norm360(a: f64) -> f64 {
@@ -177,7 +180,7 @@ pub fn layer_rotation(ctx: &EvalCtx, layer: &Layer) -> Mat4 {
     let rx = ctx.f(layer, tr, "rotationX", 0.0);
     let ry = ctx.f(layer, tr, "rotationY", 0.0);
     let rz = ctx.f(layer, tr, "rotation", 0.0);
-    Mat4::orientation(Vec3::from(o)) * Mat4::rotate_z(rz) * Mat4::rotate_y(ry) * Mat4::rotate_x(rx)
+    Mat4::orientation(Vec3::from(o)) * Mat4::rotation_xyz(rx, ry, rz)
 }
 
 /// World matrix of a layer's parent chain (identity when unparented).
@@ -299,6 +302,13 @@ pub fn auto_orient_2d(ctx: &EvalCtx, layer: &Layer) -> f64 {
     path_tangent(ctx, layer).map(|t| t.y.atan2(t.x).to_degrees()).unwrap_or(0.0)
 }
 
+/// The most camera-facing layers whose parents are evaluated inside one another.
+const MAX_ORIENT_NESTING: usize = 8;
+
+thread_local! {
+    static ORIENT_NESTING: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Whether `id` is `layer` or one of its parents.
 fn in_parent_chain(ctx: &EvalCtx, layer: &Layer, id: effectcraft_project::LayerId) -> bool {
     let mut cur = Some(layer);
@@ -333,8 +343,27 @@ pub fn auto_orient_3d(ctx: &EvalCtx, layer: &Layer, pos: Vec3) -> Option<Mat4> {
             if ctx.comp.active_camera(ctx.time).is_some_and(|c| in_parent_chain(ctx, c, layer.id)) {
                 return None;
             }
+            // The parent's world matrix evaluates the parent's own orientation: a parent cycle
+            // of camera-facing layers would recurse without end, and a chain of them is walked
+            // again from every link. Past MAX_ORIENT_NESTING the layer keeps its Orientation.
+            let nesting = ORIENT_NESTING.with(|n| n.get());
+            if nesting >= MAX_ORIENT_NESTING {
+                return None;
+            }
+            // Restored when this scope ends, a panic unwinding through it included (the CPU retry
+            // after one must not start with a raised count).
+            struct Restore(usize);
+            impl Drop for Restore {
+                fn drop(&mut self) {
+                    ORIENT_NESTING.with(|n| n.set(self.0));
+                }
+            }
+            ORIENT_NESTING.with(|n| n.set(nesting + 1));
+            let restore = Restore(nesting);
+            let parent = parent_world(ctx, layer);
+            drop(restore);
             let eye = active_camera(ctx).eye;
-            let e = parent_world(ctx, layer).inverse().unwrap_or(Mat4::IDENTITY).apply(eye);
+            let e = parent.inverse().unwrap_or(Mat4::IDENTITY).apply(eye);
             let d = pos - e;
             (d.length() > 1e-9).then(|| basis_rotation(d, vec3(0.0, 1.0, 0.0)))
         }
@@ -574,10 +603,19 @@ impl Rig {
     pub fn from_view(v: &ViewCam) -> Rig {
         Rig { eye: Vec3::from(v.eye), poi: Vec3::from(v.poi), zoom: v.zoom, ortho: v.ortho }
     }
+    /// The camera this rig looks through (screen-down hint world Y, as the tools use).
+    pub fn state(&self) -> CameraState {
+        CameraState { view: basis_view(self.eye, self.poi - self.eye, vec3(0.0, 1.0, 0.0)), eye: self.eye, zoom: self.zoom, ortho: self.ortho, dof: None }
+    }
+    /// Returns the camera's forward, right and down unit vectors.
     fn frame(&self) -> (Vec3, Vec3, Vec3) {
-        let s =
-            CameraState { view: basis_view(self.eye, self.poi - self.eye, vec3(0.0, 1.0, 0.0)), eye: self.eye, zoom: self.zoom, ortho: self.ortho, dof: None };
+        let s = self.state();
         (s.forward(), s.right(), s.down())
+    }
+    /// Every coordinate and the zoom are finite numbers (a tool step that would leave NaN or
+    /// infinity behind is dropped instead of written into the camera).
+    pub fn is_finite(&self) -> bool {
+        [self.eye, self.poi].iter().all(|v| v.x.is_finite() && v.y.is_finite() && v.z.is_finite()) && self.zoom.is_finite()
     }
     /// Orbit the eye around the point of interest: `yaw` about world Y, `pitch` about the
     /// camera's right axis (degrees). Pitch is limited short of straight up/down.
@@ -618,8 +656,138 @@ impl Rig {
             self.poi += f * amount;
         } else {
             let dist = (self.poi - self.eye).length();
-            let d = amount.min(dist - 1.0);
+            let d = amount.min((dist - 1.0).max(0.0));
             self.eye += f * d;
         }
     }
+    /// Orbit Around Cursor / Orbit Around Scene: turn the whole camera (eye and point of
+    /// interest together) about `pivot`: `yaw` about world Y, `pitch` about the camera's
+    /// horizontal right axis (degrees, same senses as [`Rig::orbit`]). The pivot keeps its place
+    /// on screen and both distances to it; the view is limited short of straight up/down.
+    pub fn orbit_about(&mut self, pivot: Vec3, yaw: f64, pitch: f64) {
+        if self.ortho || !(pivot.x.is_finite() && pivot.y.is_finite() && pivot.z.is_finite()) {
+            return;
+        }
+        let off = self.eye - self.poi;
+        let dist = off.length();
+        if !(dist.is_finite() && dist > 1e-9) {
+            return;
+        }
+        let cur = (off.y / dist).clamp(-1.0, 1.0).asin().to_degrees();
+        let pitch = (cur + pitch).clamp(-89.0, 89.0) - cur;
+        let up = vec3(0.0, 1.0, 0.0);
+        let horiz = vec3(off.x, 0.0, off.z);
+        // Rotating about (horizontal offset × up) raises the eye's offset, as `orbit` does.
+        let axis = if horiz.length() > 1e-9 { horiz.normalize().cross(up).normalize() } else { self.frame().1 };
+        let turn = |v: Vec3| rotate_about(rotate_about(v, axis, pitch), up, -yaw);
+        self.eye = pivot + turn(self.eye - pivot);
+        self.poi = pivot + turn(self.poi - pivot);
+    }
+    /// Pan Under Cursor: move the camera in its image plane so the world point `at` (the point
+    /// under the cursor) follows the drag of (`dx`, `dy`) comp pixels. Falls back to [`Rig::pan`]
+    /// (the point of interest's depth) when `at` is not in front of the camera.
+    pub fn pan_at(&mut self, dx: f64, dy: f64, at: Vec3) {
+        let (f, r, d) = self.frame();
+        let depth = (at - self.eye).dot(f);
+        if self.ortho || !(depth.is_finite() && depth > 1e-6) {
+            self.pan(dx, dy);
+            return;
+        }
+        let k = depth / self.zoom.max(1e-9);
+        let delta = r * (-dx * k) + d * (-dy * k);
+        self.eye += delta;
+        self.poi += delta;
+    }
+    /// Dolly Towards Cursor (`stop_short` false) / Dolly to Cursor (`stop_short` true): move the
+    /// camera (eye and point of interest together, so its aim is kept) by `amount` pixels along
+    /// the line from the eye through `target`, the point under the cursor, which therefore keeps
+    /// its place on screen. Dolly to Cursor stops 1 px short of the target instead of passing it.
+    /// Orthographic views scale, as [`Rig::dolly`].
+    pub fn dolly_towards(&mut self, amount: f64, target: Vec3, stop_short: bool) {
+        if self.ortho {
+            self.dolly(amount, false);
+            return;
+        }
+        let to = target - self.eye;
+        let dist = to.length();
+        if !(dist.is_finite() && dist > 1e-9) {
+            // The eye sits on the target: nothing to approach (Towards Cursor goes straight on).
+            if !stop_short {
+                self.dolly(amount, true);
+            }
+            return;
+        }
+        // Once Dolly Towards Cursor has passed the point, the line through it still runs the same
+        // way: keep moving along the view, never back towards the point.
+        let dir = to / dist;
+        let dir = if !stop_short && dir.dot(self.frame().0) < 0.0 { -dir } else { dir };
+        let d = if stop_short { amount.min((dist - 1.0).max(0.0)) } else { amount };
+        self.eye += dir * d;
+        self.poi += dir * d;
+    }
+}
+
+/// `v` turned by `deg` degrees about the unit `axis` (right-handed, Rodrigues).
+fn rotate_about(v: Vec3, axis: Vec3, deg: f64) -> Vec3 {
+    let (s, c) = deg.to_radians().sin_cos();
+    v * c + axis.cross(v) * s + axis * (axis.dot(v) * (1.0 - c))
+}
+
+/// The ray through comp pixel `px` of a `w`×`h` comp seen by `cam`: origin and direction. The
+/// direction's component along the view axis is 1, so `origin + dir * z` is the ray's point at
+/// view depth `z` (perspective and orthographic alike).
+pub fn pixel_ray(cam: &CameraState, w: f64, h: f64, px: [f64; 2]) -> (Vec3, Vec3) {
+    let zoom = if cam.zoom.is_finite() && cam.zoom.abs() > 1e-9 { cam.zoom } else { 1e-9 };
+    let (x, y) = ((px[0] - w * 0.5) / zoom, (px[1] - h * 0.5) / zoom);
+    let (f, r, d) = (cam.forward(), cam.right(), cam.down());
+    if cam.ortho { (cam.eye + r * x + d * y, f) } else { (cam.eye, r * x + d * y + f) }
+}
+
+/// The world point under comp pixel `px`: the nearest place the ray hits one of `quads` (planar
+/// layer rectangles, four corners in order), else the ray's point at the view depth of
+/// `fallback` (the point of interest), else `fallback` itself.
+pub fn point_under(cam: &CameraState, w: f64, h: f64, px: [f64; 2], quads: &[[Vec3; 4]], fallback: Vec3) -> Vec3 {
+    let (o, dir) = pixel_ray(cam, w, h, px);
+    let finite = |v: Vec3| v.x.is_finite() && v.y.is_finite() && v.z.is_finite();
+    let mut best: Option<f64> = None;
+    for q in quads {
+        let n = (q[1] - q[0]).cross(q[3] - q[0]);
+        let den = n.dot(dir);
+        if !(den.is_finite() && den.abs() > 1e-12) {
+            continue;
+        }
+        let t = n.dot(q[0] - o) / den;
+        if !(t.is_finite() && t > 1e-6) || best.is_some_and(|b| b <= t) {
+            continue;
+        }
+        // (a perspective camera sees nothing nearer than its near plane: such a layer is not under
+        // the cursor; `t` is the view depth, as the direction's part along the view is 1)
+        if !cam.ortho && t < NEAR {
+            continue;
+        }
+        let hit = o + dir * t;
+        let side = |i: usize| {
+            let (a, b) = (q[i % 4], q[(i + 1) % 4]);
+            (b - a).cross(hit - a).dot(n)
+        };
+        let s = [side(0), side(1), side(2), side(3)];
+        if s.iter().all(|v| *v >= -1e-9) || s.iter().all(|v| *v <= 1e-9) {
+            best = Some(t);
+        }
+    }
+    let at_depth = || {
+        let z = (fallback - o).dot(cam.forward());
+        (z.is_finite() && z > 1e-6).then(|| o + dir * z)
+    };
+    best.map(|t| o + dir * t).or_else(at_depth).filter(|p| finite(*p)).unwrap_or(fallback)
+}
+
+/// The centre of the box around `points` (Orbit Around Scene's pivot); None without points.
+pub fn bounds_center(points: &[Vec3]) -> Option<Vec3> {
+    let first = *points.first()?;
+    let (lo, hi) = points
+        .iter()
+        .fold((first, first), |(lo, hi), q| (vec3(lo.x.min(q.x), lo.y.min(q.y), lo.z.min(q.z)), vec3(hi.x.max(q.x), hi.y.max(q.y), hi.z.max(q.z))));
+    let c = (lo + hi) * 0.5;
+    (c.x.is_finite() && c.y.is_finite() && c.z.is_finite()).then_some(c)
 }

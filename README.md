@@ -129,17 +129,13 @@ or into the Timeline, between layers and at the time you point to.
 
 308 built-in effects across its categories, each with its parameter names, order and
 defaults: blur and sharpen, channel, color correction (Curves, Levels, Hue/Saturation, a full
-color-grading panel…), distort (Warp, Bulge, Turbulent Displace, CC Power Pin…), generate (Fractal Noise,
+color-grading panel…), distort (Warp, Bulge, Turbulent Displace, Perspective Pin…), generate (Fractal Noise,
 Gradient Ramp, Stroke, Write-on, Audio Spectrum…), keying, matte, noise and grain, perspective,
-**simulation** (CC Particle World, CC Rainfall, Shatter, Card Dance, Caustics, Wave World…),
-stylize (Glow, CC Glass…), **time** (Echo, Posterize Time, Timewarp, Time Displacement…),
+**simulation** (Particle Emitter 3D, Rainfall, Shatter, Card Dance, Caustics, Wave World…),
+stylize (Glow, Glass Relief…), **time** (Echo, Posterize Time, Timewarp, Time Displacement…),
 **audio** (Reverb, Parametric EQ, Delay, Stereo Mixer…), text, transitions, utility and expression
 controls. All nine **Layer Styles** (Drop Shadow, Inner/Outer Glow, Bevel and Emboss, Satin,
 overlays, Stroke) with Global Light. Preview plays audio in sync, with meters and waveforms.
-
-<p align="center">
-  <img src="docs/images/effectcraft-effects.png" alt="A CC Particle World burst with Glow, and the Effect Controls panel listing the particle system's parameters" width="100%">
-</p>
 
 ## 3D
 
@@ -160,7 +156,7 @@ MP4, **WebM** (VP9 with inter frames and alpha, or AV1; Opus audio), PNG, JPEG, 
 rendering with 3:2 pulldown, effect/solo/guide/depth overrides, crop, region of interest and
 resize, Render Settings and Output Module templates with defaults, post-render actions, storage
 overflow and render logs. The same queue runs from the command line. Every encoder is pure
-Rust (FilmCraft's H.264, ProRes and AAC; EffectCraft's own VP9, AV1, HEVC and Opus); there is no
+Rust (craft-libs' H.264, ProRes, HEVC, VP9, AV1 and AAC; EffectCraft's own Opus); there is no
 FFmpeg inside.
 
 **Lottie** goes both ways: File ▸ Export ▸ Lottie JSON… writes a composition (precomps, shape,
@@ -221,10 +217,11 @@ cargo run --release -p effectcraft-cli -- render --out intro.mp4    # render the
 cargo xtask web --serve 8765                # the browser build on http://127.0.0.1:8765/ (docs/web.md)
 ```
 
-New to it? [docs/footage.md](docs/footage.md) covers importing footage and image sequences and
+New to it? [docs/photocraft-import.md](docs/photocraft-import.md) describes PhotoCraft composites and saved layer pixels.
+[docs/footage.md](docs/footage.md) covers importing footage and image sequences and
 Interpret Footage.
 
-To work on it: `cargo test --workspace`, and `cargo xtask ci` before every commit (format, lints,
+To work on it: `cargo test --workspace`, and the checks for the crates you changed (`cargo xtask ci --affected`; the full `cargo xtask ci` covers format, lints,
 tests, layering, asset attribution and the WebAssembly build). See [CONTRIBUTING.md](CONTRIBUTING.md),
 [docs/architecture.md](docs/architecture.md) and [docs/testing.md](docs/testing.md).
 
@@ -344,8 +341,17 @@ stand on its own.
 | <img src="https://raw.githubusercontent.com/storytold/filmcraft/main/assets/app-icon/hicolor/64x64/apps/ai.storyteller.filmcraft.png" alt="" width="32" height="32"> | **FilmCraft** | Video editing, color and sound | [GitHub](https://github.com/storytold/filmcraft) | [Website](https://getartcraft.com/apps/filmcraft) |
 | <img src="https://raw.githubusercontent.com/storytold/lightcraft/main/assets/app-icon/hicolor/64x64/apps/ai.storyteller.lightcraft.png" alt="" width="32" height="32"> | **LightCraft** | Photo library and raw development | [GitHub](https://github.com/storytold/lightcraft) | [Website](https://getartcraft.com/apps/lightcraft) |
 | <img src="https://raw.githubusercontent.com/storytold/pdfcraft/main/assets/app-icon/hicolor/64x64/apps/ai.storyteller.pdfcraft.png" alt="" width="32" height="32"> | **PdfCraft** | Reading, organizing and protecting PDFs | [GitHub](https://github.com/storytold/pdfcraft) | [Website](https://getartcraft.com/apps/pdfcraft) |
-| <img src="https://raw.githubusercontent.com/storytold/effectcraft/main/assets/app-icon/hicolor/64x64/apps/ai.storyteller.effectcraft.png" alt="" width="32" height="32"> | **EffectCraft** | **Motion graphics and visual effects · you are here** | [GitHub](https://github.com/storytold/effectcraft) | [Website](https://getartcraft.com/apps/effectcraft) |
+| <img src="https://raw.githubusercontent.com/storytold/effectcraft/main/assets/app-icon/hicolor/64x64/apps/ai.storyteller.effectcraft.png" alt="" width="32" height="32"> | **EffectCraft** | Motion graphics and visual effects | [GitHub](https://github.com/storytold/effectcraft) | [Website](https://getartcraft.com/apps/effectcraft) |
 | <img src="https://raw.githubusercontent.com/storytold/designcraft/main/assets/app-icon/hicolor/64x64/apps/ai.storyteller.designcraft.png" alt="" width="32" height="32"> | **DesignCraft** | Page layout and publishing | [GitHub](https://github.com/storytold/designcraft) | [Website](https://getartcraft.com/apps/designcraft) |
+| <img src="https://raw.githubusercontent.com/storytold/figcraft/main/assets/app-icon/hicolor/64x64/apps/ai.storyteller.figcraft.png" alt="" width="32" height="32"> | **FigCraft** | Interface design and prototyping | [GitHub](https://github.com/storytold/figcraft) | [Website](https://getartcraft.com/apps/figcraft) |
+| <img src="https://raw.githubusercontent.com/storytold/wordcraft/main/assets/app-icon/hicolor/64x64/apps/ai.storyteller.wordcraft.png" alt="" width="32" height="32"> | **WordCraft** | Word processing and documents | [GitHub](https://github.com/storytold/wordcraft) | [Website](https://getartcraft.com/apps/wordcraft) |
+| <img src="https://raw.githubusercontent.com/storytold/soundcraft/main/assets/app-icon/hicolor/64x64/apps/ai.storyteller.soundcraft.png" alt="" width="32" height="32"> | **SoundCraft** | Audio recording and editing | [GitHub](https://github.com/storytold/soundcraft) | [Website](https://getartcraft.com/apps/soundcraft) |
+| <img src="https://raw.githubusercontent.com/storytold/deckcraft/main/assets/app-icon/hicolor/64x64/apps/ai.storyteller.deckcraft.png" alt="" width="32" height="32"> | **DeckCraft** | Presentations and slide decks | [GitHub](https://github.com/storytold/deckcraft) | [Website](https://getartcraft.com/apps/deckcraft) |
+| <img src="https://raw.githubusercontent.com/storytold/cadcraft/main/assets/app-icon/hicolor/64x64/apps/ai.storyteller.cadcraft.png" alt="" width="32" height="32"> | **CADCraft** | Computer-aided design | [GitHub](https://github.com/storytold/cadcraft) | [Website](https://getartcraft.com/apps/cadcraft) |
+| <img src="https://raw.githubusercontent.com/storytold/gridcraft/main/assets/app-icon/hicolor/64x64/apps/ai.storyteller.gridcraft.png" alt="" width="32" height="32"> | **GridCraft** | Spreadsheets and data | [GitHub](https://github.com/storytold/gridcraft) | [Website](https://getartcraft.com/apps/gridcraft) |
+| <img src="https://raw.githubusercontent.com/storytold/texturecraft/main/assets/app-icon/hicolor/64x64/apps/ai.storyteller.texturecraft.png" alt="" width="32" height="32"> | **TextureCraft** | 3D texture painting | [GitHub](https://github.com/storytold/texturecraft) | [Website](https://getartcraft.com/apps/texturecraft) |
+| <img src="https://raw.githubusercontent.com/storytold/craft-anything/main/assets/app-icon/hicolor/64x64/apps/ai.storyteller.craft-anything.png" alt="" width="32" height="32"> | **Craft Anything** | See how any software works, then build your own | [GitHub](https://github.com/storytold/craft-anything) | [Website](https://getartcraft.com/apps/craft-anything) |
+| <img src="https://raw.githubusercontent.com/tangency-labs/solidcraft/main/assets/icons/app/linux/exports/hicolor/64x64/apps/io.tangencylabs.solidcraft.png" alt="" width="32" height="32"> | **SolidCraft** | Parametric 3D CAD by Tangency Labs (community app) | [GitHub](https://github.com/tangency-labs/solidcraft) | |
 
 And [**ArtCraft**](https://getartcraft.com/) itself, our AI image and video studio for artists who want real control.
 

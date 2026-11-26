@@ -28,12 +28,24 @@ pub struct PresetFile {
 }
 
 /// Where user presets live: `$EC_PRESETS_DIR`, else `~/Documents/EffectCraft/Presets`.
+///
+/// A Nightly session keeps its presets in its private profile (`<profile>/Presets`): an inherited
+/// `EC_PRESETS_DIR` or the stable Documents folder would let two channels write each other's files.
+/// Nothing is created here; the folder appears when a preset is saved.
 pub fn presets_dir() -> Option<std::path::PathBuf> {
-    if let Ok(d) = std::env::var("EC_PRESETS_DIR") {
-        return Some(d.into());
+    let env_presets = std::env::var("EC_PRESETS_DIR").ok().map(std::path::PathBuf::from);
+    let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).ok().map(std::path::PathBuf::from);
+    presets_dir_for(crate::channel::profile_presets(), env_presets, home.as_deref())
+}
+
+fn presets_dir_for(profile: Option<&std::path::Path>, env_presets: Option<std::path::PathBuf>, home: Option<&std::path::Path>) -> Option<std::path::PathBuf> {
+    if let Some(root) = profile {
+        return Some(root.join("Presets"));
     }
-    let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).ok()?;
-    Some(std::path::Path::new(&home).join("Documents").join("EffectCraft").join("Presets"))
+    if let Some(dir) = env_presets {
+        return Some(dir);
+    }
+    home.map(|h| h.join("Documents").join("EffectCraft").join("Presets"))
 }
 
 /// The `.ecpreset` files in `dir`, sorted by name.
@@ -410,8 +422,10 @@ fn list_keys(app: &mut EffectcraftApp, ctx: &egui::Context, nav: &Nav, list: Rec
         ctx.data_mut(|d| d.remove::<egui::Id>(cursor_id()));
         ctx.request_repaint();
     }
-    let focused = ctx.memory(|m| m.focused());
+    let focused = crate::framework::focused_widget(ctx);
     let on_row = focused.is_some_and(|f| nav.rows.iter().any(|r| r.id == f || r.star == Some(f)));
+    // Enter / Space on the star are the star button's (it toggles the favourite), not the row's.
+    let on_star = focused.is_some_and(|f| nav.rows.iter().any(|r| r.star == Some(f)));
     let by_mouse = focused.is_none() && app.ui.focused == crate::dock::PanelKind::EffectsPresets;
     if (!on_row && !by_mouse) || app.dialog.is_some() || widgets::any_menu_open(ctx) {
         return None;
@@ -470,11 +484,11 @@ fn list_keys(app: &mut EffectcraftApp, ctx: &egui::Context, nav: &Nav, list: Rec
                         toggle(app, !*open);
                         None
                     }
-                    (Key::Enter, None) => {
+                    (Key::Enter, None) if !on_star => {
                         apply = row.apply.clone();
                         None
                     }
-                    (Key::Space, None) if on_row => {
+                    (Key::Space, None) if on_row && !on_star => {
                         apply = row.apply.clone();
                         None
                     }
@@ -636,8 +650,9 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let force_scan = contents_menu(app, ui, &ctx, rect, sr, &t);
     let view = app.ui.effects_view.clone();
     let list = Rect::from_min_max(pos2(rect.min.x, sr.max.y + 6.0), rect.max);
-    let lp = p.with_clip_rect(list);
     let mut scroll = widgets::PanelScroll::begin(ui, egui::Id::unique("fx-scroll"), list);
+    let list = scroll.content;
+    let lp = p.with_clip_rect(list);
     let query = q.trim().to_lowercase();
     let searching = !query.is_empty();
     let mut y = list.min.y - scroll.offset;
@@ -760,10 +775,13 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         let mut cats: Vec<&str> = effectcraft_engine::effects::categories();
         cats.retain(|c| reg.iter().any(|e| e.category == *c));
         for cat in cats {
-            let items: Vec<_> = reg.iter().filter(|e| e.category == cat && keep(e)).collect();
+            let mut items: Vec<_> = reg.iter().filter(|e| e.category == cat && keep(e)).collect();
             if items.is_empty() {
                 continue;
             }
+            // After Effects lists a category by the effect's English name, whatever the interface
+            // language draws; the registry's own order is packing order, which reads as random.
+            items.sort_by_key(|e| e.name.to_lowercase());
             // The folder draws the category in the interface language; `cat` stays the key (the
             // open/closed state and the automation id are the registry's English name).
             if !folder_row(app, ui, &lp, list, &mut y, &mut nav, cat, &crate::i18n::effects::category(cat), 1, 0.0, searching, None) {
@@ -864,6 +882,7 @@ mod tests {
         assert_eq!(v.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), vec!["bounce", "Zoom In"]);
         assert!(scan_presets(&d.join("missing")).is_empty());
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         let set_time = |time| {
             let mut output = ctx.run_ui(egui::RawInput { time: Some(time), ..Default::default() }, |_| {});
             output.textures_delta.clear();
@@ -922,5 +941,17 @@ mod tests {
         before.sort();
         after.sort();
         println!("1,000 custom presets, median per warm cache lookup: {:?} -> {:?}", before[2] / 1000, after[2] / 1000);
+    }
+    /// A Nightly session writes presets inside its profile: never the stable Documents folder and
+    /// never an inherited `EC_PRESETS_DIR`, so the two channels cannot overwrite each other.
+    #[test]
+    fn a_nightly_profile_owns_its_presets_folder() {
+        let profile = std::path::Path::new("/nightly profiles/effectcraft");
+        let stable_docs = std::path::Path::new("/home/someone");
+        let inherited = std::path::PathBuf::from("/home/someone/stable-presets");
+        assert_eq!(super::presets_dir_for(Some(profile), Some(inherited.clone()), Some(stable_docs)), Some(profile.join("Presets")));
+        assert_eq!(super::presets_dir_for(None, Some(inherited.clone()), Some(stable_docs)), Some(inherited));
+        assert_eq!(super::presets_dir_for(None, None, Some(stable_docs)), Some(stable_docs.join("Documents/EffectCraft/Presets")));
+        assert_eq!(super::presets_dir_for(None, None, None), None);
     }
 }

@@ -1,7 +1,7 @@
 # Contributing to EffectCraft
 
-Thanks for helping. Please read [AGENTS.md](AGENTS.md) first: its rules on assets and clean-room
-work apply to everyone, people and AI agents alike, and they are not negotiable.
+Thanks for helping. Please read [AGENTS.md](AGENTS.md) first: its shared rules
+apply to everyone, people and AI agents alike.
 
 ## Setup
 
@@ -26,7 +26,7 @@ that variable set.
 ```sh
 cargo run -p effectcraft -- --demo       # the desktop app, with the demo project
 cargo test --workspace
-cargo xtask ci                           # what every commit must pass
+cargo xtask ci                           # the full check (dev-profile checks and tests); `--affected` scopes it to the crates you changed
 ```
 
 The default `dev` profile keeps debug info to line tables: builds are fast and panics/backtraces
@@ -89,9 +89,8 @@ rustflags = ["-C", "link-self-contained=yes", "-L", "native=C:/gnu-import-libs"]
   widgets register an automation id.
 - **Never crash.** Non-test code returns errors instead of panicking: no `unwrap()`, `expect()`,
   `panic!`, `unreachable!`, `todo!`, `unimplemented!` or `unsafe`, checked indexing and arithmetic on
-  input-derived values, and a regression test with every crash fix. See the "Never crash" section of
-  [AGENTS.md](AGENTS.md).
-- **Tests with every change**, and green `cargo xtask ci` before every commit. One task per commit.
+  input-derived values (rule 13 of [AGENTS.md](AGENTS.md)).
+- **Tests** follow the test rules in [AGENTS.md](AGENTS.md) (27-32). Run the checks for the crates you changed (`cargo xtask ci --affected`) and say in the PR what ran.
 
 ## How to add…
 

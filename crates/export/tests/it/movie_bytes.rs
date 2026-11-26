@@ -94,13 +94,17 @@ fn export_bytes(format: OutputFormat, name: &str) -> Vec<u8> {
 #[test]
 fn h264_movie_bytes_are_pinned() {
     let data = export_bytes(OutputFormat::H264, "/out/pinned.mp4");
-    // FilmCraft 09aaf9b's encoder lists its settings in the first frame's user-data SEI (211
-    // bytes where 0.1.1's name took 50): 161 bytes more than the FilmCraft 2c5ba7a pin.
-    assert_eq!((data.len(), fnv1a(&data)), (104_341, 17_655_680_090_264_218_914), "H.264 MP4");
+    // The shared encoder revision includes craft-video's later motion-search work (four-axis
+    // sub-pel refinement and gating 16x8/8x16 searches on the 8x8 result). The app's encoder
+    // configuration and input path are unchanged, but its coded decisions and output bytes differ
+    // from the earlier craft-video pin. craft-video pins those decisions and checks bit-exact
+    // decoding against its reconstruction with FFmpeg/ffprobe oracles.
+    assert_eq!((data.len(), fnv1a(&data)), (102_462, 9_984_203_720_367_148_918), "H.264 MP4");
 }
 
 #[test]
 fn prores_movie_bytes_are_pinned() {
     let data = export_bytes(OutputFormat::ProRes, "/out/pinned.mov");
-    assert_eq!((data.len(), fnv1a(&data)), (270_094, 8_038_709_743_204_075_800), "ProRes MOV");
+    // The `nclc` colr atom (#2801) adds exactly 18 bytes; the frames don't move.
+    assert_eq!((data.len(), fnv1a(&data)), (270_112, 2_693_123_490_992_200_481), "ProRes MOV");
 }

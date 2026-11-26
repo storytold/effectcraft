@@ -14,6 +14,39 @@ pub(crate) fn color_p(p: &Value, k: &str) -> Option<[f32; 3]> {
     }
 }
 
+/// Settings ▸ General ▸ Fit New Layers to Work Area: the `(start, end)` that new text, solid,
+/// shape, null and adjustment layers in `comp` take, or `None` for the whole composition.
+pub(crate) fn new_layer_span(s: &Session, comp: &effectcraft_project::Comp) -> Option<(Tick, Tick)> {
+    let (start, end) = (comp.work_area.0, comp.work_area.1.min(comp.duration));
+    (s.prefs.general.fit_new_layers_to_work_area && start >= Tick::ZERO && start < end).then_some((start, end))
+}
+
+/// Start a new layer at `span`'s start and end it at `span`'s end, when there is a span.
+pub(crate) fn fit_span(l: &mut Layer, span: Option<(Tick, Tick)>) {
+    if let Some((start, end)) = span {
+        l.start_time = start;
+        l.in_point = start;
+        l.out_point = end;
+    }
+}
+
+/// Tools draw on the layer they create: when it was fitted to a span the playhead is outside,
+/// move `comp`'s playhead to the first frame in the span so the new layer shows. The layer's timing
+/// is kept. The work area need not sit on frames (a typed start, a frame-rate change), so the
+/// frame is rounded up from the start, not to the nearest; a span holding no frame moves nothing.
+pub(crate) fn show_span(s: &mut Session, comp: ItemId, span: Option<(Tick, Tick)>) {
+    let Some(fr) = s.project.comp(comp).map(|c| c.frame_rate) else { return };
+    if let Some((start, end)) = span
+        && !(start..end).contains(&s.time_of(comp))
+    {
+        let first = fr.snap(start);
+        let first = if first < start { fr.tick_of(fr.frame_at(start).saturating_add(1)) } else { first };
+        if first < end {
+            s.set_time_of(comp, first);
+        }
+    }
+}
+
 /// Insert a new layer above the selection (or at the top) and select it.
 pub(crate) fn insert_layer(proj: &mut Project, st: &mut crate::EditorState, cid: ItemId, layer: Layer) -> Result<LayerId> {
     insert_layer_at(proj, st, cid, layer, None)
@@ -89,10 +122,12 @@ fn new_solid_like(s: &mut Session, p: &Value, adjustment: bool) -> Result<Value>
     let pixel_aspect = pixel_aspect_p(p)?.unwrap_or(comp.pixel_aspect);
     let default_name = if adjustment { "Adjustment Layer 1".to_string() } else { "Solid 1".to_string() };
     let name = str_p(p, "name").map(str::to_string).unwrap_or(default_name);
+    let span = new_layer_span(s, &comp);
     let id = s.edit(if adjustment { "New Adjustment Layer" } else { "New Solid" }, None, |proj, st| {
         let folder = solids_folder(proj);
         let sid = proj.add_item(&name, Label::Red, Some(folder), ItemKind::Solid(Solid { color, width: w, height: h, pixel_aspect }));
         let mut l = build::layer(proj, &comp, &name, LayerSource::Solid { item: sid }, (w, h), None);
+        fit_span(&mut l, span);
         if adjustment {
             l.switches.adjustment = true;
             l.label = Label::Purple;
@@ -186,9 +221,13 @@ pub(super) fn new_text(s: &mut Session, p: &Value) -> Result<Value> {
         }
     }
     let edit = b_p(p, "edit").unwrap_or(false);
+    let span = new_layer_span(s, &comp);
     let id = s.edit("New Text Layer", None, |proj, st| {
-        let name: String = layer_name.clone().unwrap_or_else(|| doc.text.lines().next().unwrap_or("").chars().take(40).collect());
+        let name: String = layer_name.clone().unwrap_or_else(|| effectcraft_project::text_layer_name(&doc.text));
         let mut l = build::layer(proj, &comp, if name.is_empty() { "Text" } else { &name }, LayerSource::Text, (comp.width, comp.height), None);
+        fit_span(&mut l, span);
+        // Named after its text, the name follows the text until renamed; a given name does not.
+        l.name_follows_text = Some(layer_name.as_deref().is_none_or(str::is_empty));
         if let Some(pr) = l.props.prop_mut("text/sourceText") {
             pr.value = KV::Text(Box::new(doc.clone()));
         }
@@ -211,6 +250,9 @@ pub(super) fn new_text(s: &mut Session, p: &Value) -> Result<Value> {
         }
         Ok(id)
     })?;
+    if edit {
+        show_span(s, cid, span);
+    }
     Ok(json!({"layer": id.0}))
 }
 
@@ -230,8 +272,9 @@ pub(super) fn new_shape(s: &mut Session, p: &Value) -> Result<Value> {
         .and_then(|v| v.as_array())
         .map(|a| [a.first().and_then(Value::as_f64).unwrap_or(0.0), a.get(1).and_then(Value::as_f64).unwrap_or(0.0)]);
     let name = str_p(p, "name").unwrap_or("Shape Layer 1").to_string();
+    let span = new_layer_span(s, &comp);
     let id = s.edit("New Shape Layer", None, |proj, st| {
-        let lid = crate::cmd::shape_tool::new_shape_layer(proj, st, &comp, cid, Some(&name), pos)?;
+        let lid = crate::cmd::shape_tool::new_shape_layer(proj, st, &comp, cid, Some(&name), pos, span)?;
         let mut next = proj.next_id;
         let g = crate::cmd::shape_tool::shape_group(&mut Ids(&mut next), &kind, size, &paint);
         proj.next_id = next;
@@ -247,8 +290,10 @@ fn new_simple(s: &mut Session, p: &Value, src: LayerSource, name: &str, label: &
     let cid = comp_id(s, p)?;
     let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?.clone();
     let name = str_p(p, "name").unwrap_or(name).to_string();
+    let span = new_layer_span(s, &comp);
     let id = s.edit(label, None, |proj, st| {
-        let l = build::layer(proj, &comp, &name, src, (comp.width, comp.height), None);
+        let mut l = build::layer(proj, &comp, &name, src, (comp.width, comp.height), None);
+        fit_span(&mut l, span);
         insert_layer(proj, st, cid, l)
     })?;
     Ok(json!({"layer": id.0}))
@@ -256,6 +301,48 @@ fn new_simple(s: &mut Session, p: &Value, src: LayerSource, name: &str, label: &
 
 pub(super) fn new_null(s: &mut Session, p: &Value) -> Result<Value> {
     new_simple(s, p, LayerSource::Null, "Null 1", "New Null Object")
+}
+
+/// Largest `in` / `out` (s) and `anchor` coordinate (px) a command accepts.
+const MAX_PLACEMENT: f64 = 1.0e6;
+
+/// An `in` / `out` parameter: comp time in seconds, finite and within `0..=MAX_PLACEMENT`.
+fn time_param(p: &Value, key: &str, cmd: &str) -> Result<Option<Tick>> {
+    match p.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => v
+            .as_f64()
+            .filter(|t| t.is_finite() && (0.0..=MAX_PLACEMENT).contains(t))
+            .map(|t| Some(Tick::from_seconds_f64(t)))
+            .ok_or_else(|| bad(cmd, format!("{key}: seconds in the composition, 0 to {MAX_PLACEMENT}"))),
+    }
+}
+
+/// An `anchor` parameter: `[x, y]` in layer pixels (finite, within `MAX_PLACEMENT`).
+fn anchor_param(p: &Value, cmd: &str) -> Result<Option<[f64; 2]>> {
+    match p.get("anchor") {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => v
+            .as_array()
+            .filter(|a| a.len() == 2)
+            .and_then(|a| Some([a.first()?.as_f64()?, a.get(1)?.as_f64()?]))
+            .filter(|c| c.iter().all(|x| x.is_finite() && x.abs() <= MAX_PLACEMENT))
+            .map(Some)
+            .ok_or_else(|| bad(cmd, "anchor: [x, y] in layer pixels")),
+    }
+}
+
+/// Put a new layer's Anchor Point at `pos` (layer pixels), keeping its z.
+fn set_anchor(l: &mut Layer, pos: Option<[f64; 2]>) {
+    if let Some([x, y]) = pos
+        && let Some(pr) = l.props.prop_mut("transform/anchor")
+    {
+        let z = match pr.value {
+            KV::Vec3(v) => v[2],
+            _ => 0.0,
+        };
+        pr.value = KV::Vec3([x, y, z]);
+    }
 }
 
 pub(super) fn add_item(s: &mut Session, p: &Value) -> Result<Value> {
@@ -270,6 +357,13 @@ pub(super) fn add_item(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?.clone();
     let it = s.project.item(item).ok_or_else(|| bad("layer.addItem", "no such item"))?.clone();
+    let (in_p, out_p) = (time_param(p, "in", "layer.addItem")?, time_param(p, "out", "layer.addItem")?);
+    if let (Some(i), Some(o)) = (in_p, out_p)
+        && i >= o
+    {
+        return Err(bad("layer.addItem", "in must be before out"));
+    }
+    let anchor = anchor_param(p, "layer.addItem")?;
     let (src, size, dur) = match &it.kind {
         ItemKind::Comp(c) => (LayerSource::Comp { item }, (c.width, c.height), Some(c.duration)),
         ItemKind::Footage(f) if f.kind == effectcraft_project::FootageKind::Still => {
@@ -285,6 +379,9 @@ pub(super) fn add_item(s: &mut Session, p: &Value) -> Result<Value> {
             return Err(bad("layer.addItem", "data files can't be layers; read them in expressions with footage(\"name\").sourceData"));
         }
         ItemKind::Footage(f) if f.kind == effectcraft_project::FootageKind::Model => {
+            if in_p.is_some() || out_p.is_some() || anchor.is_some() {
+                return Err(bad("layer.addItem", "in, out and anchor aren't supported for 3D models"));
+            }
             return crate::cmd::model3d::new_model(
                 s,
                 &serde_json::json!({"comp": cid.0, "item": item.0, "time": f_p(p, "time"), "index": p.get("index"), "position": p.get("position")}),
@@ -308,7 +405,17 @@ pub(super) fn add_item(s: &mut Session, p: &Value) -> Result<Value> {
         // without a duration (solids, comp-length stills) end with the comp.
         let end = dur.map_or((start + comp.duration).min(comp.duration), |d| start + d);
         l.out_point = fr.snap_nearest(end).max(start + fr.frame_duration());
+        // `in` / `out` are comp times like `layer.timing`'s; each keeps at least one frame.
+        let fd = fr.frame_duration();
+        // In first, as `layer.timing` does, so an `out` before the layer's start still lands.
+        if let Some(i) = in_p {
+            l.in_point = fr.snap_nearest(i).min(l.out_point - fd);
+        }
+        if let Some(o) = out_p {
+            l.out_point = fr.snap_nearest(o).max(l.in_point + fd);
+        }
         place(&mut l, position);
+        set_anchor(&mut l, anchor);
         insert_layer_at(proj, st, cid, l, index)
     })?;
     Ok(json!({"layer": id.0}))

@@ -90,6 +90,8 @@ pub struct WebApp {
     /// Started on the demo by the config: the snapshot stays off, so the demo never replaces the
     /// last visit's project, until the user opens a project from a file or edits the demo.
     pub demo_start: bool,
+    /// The last title written to `document.title`.
+    pub document_title: String,
 }
 
 impl eframe::App for WebApp {
@@ -111,14 +113,19 @@ impl eframe::App for WebApp {
     }
 
     /// The browser host's logic tick: run queued UI actions, tick the shared app, poll API replies, flush Render
-    /// Queue downloads, persist the session snapshot when enabled, publish GPU/frame-worker/disk-cache info and close
-    /// the IME pass.
+    /// Queue downloads, persist the session snapshot when enabled, publish GPU/frame-worker/disk-cache info, close
+    /// the IME pass and run the root window's close path.
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         let actions = ACTIONS.with(|a| std::mem::take(&mut *a.borrow_mut()));
         for f in actions {
             f(&mut self.app);
         }
         self.app.tick(ctx, frame);
+        // eframe on the web ignores `ViewportCommand::Title`: the tab title follows the open document here.
+        if self.app.window_title() != self.document_title {
+            self.document_title = self.app.window_title().to_owned();
+            set_document_title(&self.document_title);
+        }
         api::poll_replies();
         // Render Queue outputs written this frame (here or by a worker) → downloads.
         files::flush_downloads();
@@ -139,10 +146,18 @@ impl eframe::App for WebApp {
         diskcache::configure(d.disk_cache_enabled, d.disk_cache_max_gb, storage::quota());
         api::set_info("diskCache", diskcache::stats());
         self.app.finish_ime_logic(ctx);
+        self.app.close_path(ctx);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.app.ui(ui, frame);
+    }
+}
+
+/// The browser tab's title.
+fn set_document_title(title: &str) {
+    if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
+        doc.set_title(title);
     }
 }
 
@@ -199,8 +214,24 @@ fn install_hooks(app: &mut EffectcraftApp) {
         }
         None
     }));
-    // Saving downloads the file: the chosen name is all a "save dialog" needs.
-    app.hooks.pick_save = Some(Box::new(|name: &str| Some(files::path_for(if name.is_empty() { "Untitled Project.ecproj" } else { name }))));
+    // Saving downloads the file: the chosen name is all a "save dialog" needs. A project (Save As,
+    // Save a Copy) asks for the name, starting from the open project's (#2788): without asking,
+    // Save As would replace the open project's file; Cancel cancels. A name that is already in
+    // browser storage asks before replacing it, as the desktop's save dialogs do.
+    app.hooks.pick_save = Some(Box::new(|name: &str| {
+        let name = if name.is_empty() { "Untitled Project.ecproj" } else { name };
+        if !std::path::Path::new(name).extension().is_some_and(|e| e.eq_ignore_ascii_case("ecproj") || e.eq_ignore_ascii_case("ecprojx")) {
+            return Some(files::path_for(name));
+        }
+        let window = web_sys::window()?;
+        let typed = window.prompt_with_message_and_default("Save project as:", name).ok().flatten();
+        let typed = crate::store::typed_save_name(name, typed)?;
+        let path = files::path_for(&typed);
+        if files::get(&path).is_some() && !window.confirm_with_message(&format!("{typed} already exists. Replace it?")).unwrap_or(false) {
+            return None;
+        }
+        Some(path)
+    }));
     app.hooks.audio_device = Some(Box::new(audio::open));
     app.hooks.audio_devices = Some(Box::new(|| vec!["Browser default output".into()]));
 }
@@ -247,6 +278,7 @@ pub async fn start(canvas_id: String) -> Result<(), JsValue> {
             canvas,
             eframe::WebOptions::default(),
             Box::new(move |cc| {
+                effectcraft_ui_egui::framework::install_headless(&cc.egui_ctx);
                 EffectcraftApp::install_ime_reset_hooks(&cc.egui_ctx);
                 CTX.with(|c| *c.borrow_mut() = Some(cc.egui_ctx.clone()));
                 // The page owns this shared presentation device; worker devices retain their
@@ -299,13 +331,13 @@ pub async fn start(canvas_id: String) -> Result<(), JsValue> {
                 if n > 0 {
                     app.frames.set_remote(Some(Arc::new(frames::WebFrames::start(n, !query_flag("nogpuworkers")))));
                 }
-                app.frames.set_virtual_media(files::STORE.media_epoch(), Arc::new(|path| files::STORE.file_identity(path)));
+                app.frames.set_virtual_id(Arc::new(|path| files::STORE.file_identity(path)));
                 let (tx, rx) = std::sync::mpsc::channel();
                 api::set_sender(tx);
                 app = app.with_control(rx);
                 let backend = cc.wgpu_render_state.as_ref().map(|rs| format!("{:?}", rs.adapter.get_info().backend));
                 api::set_info("backend", json!(backend));
-                Ok(Box::new(WebApp { app, persist: keep_session, demo_start: !empty && !keep_session }))
+                Ok(Box::new(WebApp { app, persist: keep_session, demo_start: !empty && !keep_session, document_title: String::new() }))
             }),
         )
         .await?;

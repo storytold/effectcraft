@@ -63,8 +63,23 @@ pub struct HotSpec<'a> {
 
 /// "Hot text": a blue number you drag horizontally to scrub, click to type. Tab / Shift+Tab
 /// while typing commits and types in the panel's next / previous one, as in After Effects.
+/// Typed text may be arithmetic, `960/2` or `*2` for twice the value ([`crate::num_math`]).
 /// Returns (response, Some(new value) when changed, drag finished).
 pub fn hot_number_at(ui: &mut Ui, rect_min: egui::Pos2, id: egui::Id, value: f64, spec: &HotSpec, t: &Tokens) -> (Rect, Option<f64>, bool) {
+    let (rect, out, done, _) = hot_number_step_at(ui, rect_min, id, value, spec, t);
+    (rect, out, done)
+}
+
+/// [`hot_number_at`], also returning the typed step (`*2`, `+50`) the new value came from, so
+/// that other selected layers can take the same step from their own value (#3195).
+pub fn hot_number_step_at(
+    ui: &mut Ui,
+    rect_min: egui::Pos2,
+    id: egui::Id,
+    value: f64,
+    spec: &HotSpec,
+    t: &Tokens,
+) -> (Rect, Option<f64>, bool, Option<crate::num_math::Step>) {
     let HotSpec { speed, range, decimals, suffix } = *spec;
     let editing_id = id.with("editing");
     let mut editing: Option<String> = ui.data(|d| d.get_temp(editing_id));
@@ -87,14 +102,18 @@ pub fn hot_number_at(ui: &mut Ui, rect_min: egui::Pos2, id: egui::Id, value: f64
                 .lock_focus(true),
         );
         let tab = r.has_focus().then(|| ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab).then_some(i.modifiers.shift))).flatten();
-        let mut out = None;
+        let (mut out, mut step) = (None, None);
         if r.lost_focus() || tab.is_some() {
-            let txt = buf.trim().trim_end_matches(suffix).trim().replace(',', ".");
+            // Typed arithmetic reads too (`960/2`), a leading `*`, `/` or `+` applied to the value
+            // shown (#3195).
             if !ui.input(|i| i.key_pressed(egui::Key::Escape))
-                && let Ok(v) = txt.parse::<f64>()
-                && v.is_finite()
+                && let Some(typed) = crate::num_math::read(buf.trim().trim_end_matches(suffix), true)
             {
-                out = Some(v.clamp(range.0, range.1));
+                let v = match typed {
+                    crate::num_math::Typed::Value(v) => Some(v),
+                    crate::num_math::Typed::Step(s) => s.apply(value).inspect(|_| step = Some(s)),
+                };
+                out = v.map(|v| v.clamp(range.0, range.1));
             }
             ui.data_mut(|d| d.remove::<String>(editing_id));
             if let Some(back) = tab {
@@ -106,7 +125,7 @@ pub fn hot_number_at(ui: &mut Ui, rect_min: egui::Pos2, id: egui::Id, value: f64
             keep_focus(ui.ctx(), &r, &buf);
             ui.data_mut(|d| d.insert_temp(editing_id, buf));
         }
-        return (er, out, out.is_some());
+        return (er, out, out.is_some(), step);
     }
     let resp = ui.interact(rect, id, Sense::click_and_drag());
     crate::pointer_wrap::track(&resp);
@@ -140,7 +159,21 @@ pub fn hot_number_at(ui: &mut Ui, rect_min: egui::Pos2, id: egui::Id, value: f64
     if resp.clicked() {
         ui.data_mut(|d| d.insert_temp(editing_id, format!("{value:.decimals$}")));
     }
-    (rect, out, resp.drag_stopped())
+    (rect, out, resp.drag_stopped(), None)
+}
+
+/// Mark a queued `prop.set` (with `selected`) as the typed `step` it came from, so every other
+/// selected layer takes that step from its own value rather than the edited layer's result
+/// (#3195): `+n` adds `n` to each (`addend`; not the edited layer's change, which its range may
+/// have clamped), `*n` and `/n` multiply each by the same `factor`.
+pub fn mark_step(action: Option<&mut (String, serde_json::Value)>, step: Option<crate::num_math::Step>) {
+    let (Some((_, a)), Some(step)) = (action, step) else { return };
+    match (step, step.factor()) {
+        (crate::num_math::Step::Add(n), _) => a["addend"] = serde_json::json!(n),
+        (_, Some(k)) => a["factor"] = serde_json::json!(k),
+        // (A factor too large to send: the other layers take the typed result.)
+        (_, None) => {}
+    }
 }
 
 /// Ctrl+Alt (Cmd+Opt on macOS) held while scrubbing hot text: After Effects' Proportional
@@ -162,10 +195,19 @@ pub fn slider_scrub_speed(ui: &ParamUi) -> f64 {
 
 /// [`hot_number_at`] for a whole number (an angle's revolutions): a drag steps it once every
 /// `1 / speed` pixels however slowly the pointer moves (the fractions add up between frames),
-/// and a typed value is truncated. Returns (rect, Some(new value) when changed, drag finished).
+/// and a typed value is rounded (`5/2` is 3). Returns (rect, Some(new value) when changed, drag
+/// finished).
 pub fn hot_int_at(ui: &mut Ui, rect_min: egui::Pos2, id: egui::Id, value: i64, speed: f64, suffix: &str, t: &Tokens) -> (Rect, Option<i64>, bool) {
     let (rect, nv, done) = hot_number_at(ui, rect_min, id, value as f64, &HotSpec { speed, range: (-1e6, 1e6), decimals: 0, suffix }, t);
     let acc_id = id.with("acc");
+    if let Some(n) = nv
+        && !ui.ctx().is_being_dragged(id)
+    {
+        // Typed (a drag changes the value only while it is dragged). (Within ±1e6: the cast is exact.)
+        ui.data_mut(|d| d.remove::<f64>(acc_id));
+        let typed = n.round() as i64;
+        return (rect, (typed != value).then_some(typed), done);
+    }
     let acc = ui.data(|d| d.get_temp::<f64>(acc_id)).unwrap_or(0.0) + nv.map_or(0.0, |n| n - value as f64);
     // (Ten 0.1 steps add up to just under 1.)
     let step = (acc + acc.signum() * 1e-9).trunc();
@@ -177,8 +219,11 @@ pub fn hot_int_at(ui: &mut Ui, rect_min: egui::Pos2, id: egui::Id, value: i64, s
     (rect, (step != 0.0).then(|| value.saturating_add(step as i64)), done)
 }
 
-/// Standard numeric editors use the same continuous native scrubbing as hot text.
+/// Standard numeric editors use the same continuous native scrubbing as hot text, and read typed
+/// arithmetic (`960/2`) too. They read their text on every keystroke, so a leading `*` or `/`
+/// (relative to the value) is left to hot text, where it would otherwise compound (#3195).
 pub fn drag_value(value: egui::DragValue<'_>) -> impl egui::Widget {
+    let value = value.custom_parser(|text| crate::num_math::calc(text, None));
     move |ui: &mut Ui| {
         let response = ui.add(value);
         crate::pointer_wrap::track(&response);
@@ -647,25 +692,59 @@ pub fn scroll_bar(ui: &mut Ui, auto: &mut Registry, key: &str, track: Rect, scro
     s
 }
 
+/// The width a scrolled panel keeps clear on its right for the [`scroll_bar`] (its track, and a
+/// little air before it).
+pub const SCROLL_GUTTER: f32 = 8.0;
+
+/// Whether a [`PanelScroll`]'s rows give up the [`SCROLL_GUTTER`], kept from frame to frame.
+#[derive(Clone, Copy, Default)]
+struct Gutter {
+    on: bool,
+    /// The rows' height at full width, until the first frame in the narrower width has measured
+    /// `shrunk`.
+    wide: Option<f32>,
+    /// How much shorter the rows got in the narrower width. Most rows only get taller, but a graph
+    /// sized by the width gets shorter: without this, rows that overflow at full width and fit
+    /// narrowed would drop the gutter and take it back every frame.
+    shrunk: f32,
+}
+
 /// Vertical scrolling for a panel that lays out its own rows: [`PanelScroll::begin`] gives the
-/// offset to draw them at (moved by the mouse wheel over `area`), [`PanelScroll::end`] takes the
-/// rows' height and draws a [`scroll_bar`] on the right edge while they overflow, so every
-/// panel can be scrolled without a wheel or touchpad (#271).
+/// offset to draw them at (moved by the mouse wheel over `area`) and the [`PanelScroll::content`]
+/// to lay them out in, which clips `ui` until [`PanelScroll::end`]; that takes the rows' height
+/// and draws a [`scroll_bar`] on the right edge while they overflow, so every panel can be
+/// scrolled without a wheel or touchpad (#271).
 pub struct PanelScroll {
     id: egui::Id,
     area: Rect,
+    /// `ui`'s clip before [`PanelScroll::begin`].
+    clip: Rect,
+    gutter: Gutter,
     /// How far the rows are scrolled up.
     pub offset: f32,
+    /// Where the rows go: the area, less the [`SCROLL_GUTTER`] while they overflow, so they are
+    /// cut off before the scroll bar rather than under it (#2867). Painters made before `begin`
+    /// keep their own clip: derive them from this.
+    pub content: Rect,
 }
 
 impl PanelScroll {
-    pub fn begin(ui: &Ui, id: egui::Id, area: Rect) -> Self {
+    pub fn begin(ui: &mut Ui, id: egui::Id, area: Rect) -> Self {
         // (Clamped to last frame's overflow: the rows' height is known once they are drawn.)
         let (mut offset, max): (f32, f32) = ui.data(|d| d.get_temp(id)).unwrap_or_default();
+        // (Before the clip narrows: the wheel works over the scroll bar too.)
         if ui.rect_contains_pointer(area) {
             offset -= ui.input(|i| i.smooth_scroll_delta.y);
         }
-        Self { id, area, offset: offset.clamp(0.0, max.max(0.0)) }
+        let gutter: Gutter = ui.data(|d| d.get_temp(id.with("gutter"))).unwrap_or_default();
+        let mut content = area;
+        if gutter.on {
+            content.max.x = (area.max.x - SCROLL_GUTTER).max(area.min.x);
+        }
+        // Rows scroll under whatever is around them: clip their widgets (and hit tests) too.
+        let clip = ui.clip_rect();
+        ui.set_clip_rect(content.intersect(clip));
+        Self { id, area, clip, gutter, offset: offset.clamp(0.0, max.max(0.0)), content }
     }
 
     /// Scroll the panel `id` (a [`PanelScroll`] kept under that id) so the content from `top` to
@@ -687,6 +766,7 @@ impl PanelScroll {
     /// The rows were `content` points tall: keep the offset, with the scroll bar registered for
     /// automation as `key`.
     pub fn end(self, ui: &mut Ui, auto: &mut Registry, key: &str, content: f32, t: &Tokens) {
+        ui.set_clip_rect(self.clip);
         let max = (content - self.area.height()).max(0.0);
         let mut offset = self.offset.min(max);
         if max > 0.0 {
@@ -694,6 +774,20 @@ impl PanelScroll {
             offset = scroll_bar(ui, auto, key, track, offset, max, t);
         }
         ui.data_mut(|d| d.insert_temp(self.id, (offset, max)));
+        let mut gutter = self.gutter;
+        if gutter.on {
+            if let Some(wide) = gutter.wide.take() {
+                gutter.shrunk = (wide - content).max(0.0);
+            }
+            gutter.on = content + gutter.shrunk > self.area.height();
+        } else if max > 0.0 {
+            gutter = Gutter { on: true, wide: Some(content), shrunk: 0.0 };
+        }
+        ui.data_mut(|d| d.insert_temp(self.id.with("gutter"), gutter));
+        // The rows were laid out for the other width: lay them out again.
+        if gutter.on != self.gutter.on {
+            ui.ctx().request_repaint();
+        }
     }
 }
 
@@ -1060,6 +1154,44 @@ pub(crate) fn shifted(c: &[f64], d: usize, v: f64) -> Vec<f64> {
 mod tests {
     use super::*;
 
+    /// One frame of rows `rows(width)` tall in a 100 tall `PanelScroll`: the width they got.
+    fn scroll_frame(ctx: &egui::Context, rows: &dyn Fn(f32) -> f32) -> f32 {
+        let t = Tokens::for_kind(Default::default());
+        let mut auto = Registry::default();
+        let mut width = 0.0;
+        let area = Rect::from_min_size(pos2(10.0, 10.0), vec2(300.0, 100.0));
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let outer = ui.clip_rect();
+            let scroll = PanelScroll::begin(ui, egui::Id::unique("rows"), area);
+            width = scroll.content.width();
+            assert_eq!(ui.clip_rect(), scroll.content.intersect(outer), "the widgets are clipped to the rows");
+            scroll.end(ui, &mut auto, "rows.scroll", rows(width), &t);
+            assert_eq!(ui.clip_rect(), outer, "and only until the end");
+        });
+        output.textures_delta.clear();
+        width
+    }
+
+    /// Rows that fit only in the narrower width (a graph sized by the width gets shorter) keep the
+    /// gutter instead of dropping it and taking it back every frame, and give it up once they fit
+    /// at full width too (#2867).
+    #[test]
+    fn panel_scroll_gutter_settles() {
+        let (full, narrow) = (300.0, 300.0 - SCROLL_GUTTER);
+        let ctx = egui::Context::default();
+        let widths = |tall: f32, frames: usize| {
+            let rows = move |w: f32| if w < full { tall - 8.0 } else { tall };
+            (0..frames).map(|_| scroll_frame(&ctx, &rows)).collect::<Vec<_>>()
+        };
+        assert_eq!(widths(90.0, 3), [full; 3], "rows that fit: full width");
+        assert_eq!(widths(104.0, 6), [full, narrow, narrow, narrow, narrow, narrow], "fit only narrowed: stays narrowed");
+        assert_eq!(widths(200.0, 3), [narrow; 3], "overflow: narrowed");
+        assert_eq!(widths(90.0, 3), [narrow, full, full], "fit again: full width");
+        // Rows that overflow only when narrowed stay at full width.
+        let rows = |w: f32| if w < full { 104.0 } else { 96.0 };
+        assert_eq!((0..3).map(|_| scroll_frame(&ctx, &rows)).collect::<Vec<_>>(), [full; 3]);
+    }
+
     fn checkbox_frame(ctx: &egui::Context, values: &mut [Option<bool>; 5], events: Vec<egui::Event>) {
         let t = Tokens::for_kind(Default::default());
         let input = egui::RawInput { events, ..Default::default() };
@@ -1267,6 +1399,7 @@ mod tests {
     #[test]
     fn inline_editors_select_all_only_as_they_open() {
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         let mut text = String::from("Comp 1");
         let mut id = egui::Id::NULL;
         let frame = |ctx: &egui::Context, text: &mut String, id: &mut egui::Id| {
@@ -1306,6 +1439,7 @@ mod tests {
     #[test]
     fn field_text_is_vertically_centred() {
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         let t = Tokens::for_kind(Default::default());
         for h in [22.0, 26.0, 30.0] {
             let field = Rect::from_min_size(pos2(20.0, 40.0), vec2(220.0, h));

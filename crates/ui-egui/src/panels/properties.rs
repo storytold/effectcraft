@@ -67,6 +67,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         p.text(rect.center(), Align2::CENTER_CENTER, crate::i18n::tr("Select a layer to see its properties"), Tokens::ui(12.0), t.text_faint);
         return;
     };
+    let watch = super::drag_preview::DragWatch::begin(app);
     let project = app.session.project.clone();
     let expr = app.session.expr.clone();
     let now = app.session.time();
@@ -79,10 +80,13 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         footage: None,
         property_overrides: &[],
         media_overrides: &[],
+        reads: None,
     };
+    let scroll = widgets::PanelScroll::begin(ui, egui::Id::unique("props-scroll"), rect);
+    let rect = scroll.content;
+    let p = p.with_clip_rect(rect);
     let x0 = rect.min.x + PAD;
     let w = rect.width() - 2.0 * PAD;
-    let scroll = widgets::PanelScroll::begin(ui, egui::Id::unique("props-scroll"), rect);
     let top = rect.min.y + 8.0 - scroll.offset;
     let mut y = top;
     let mut actions: Actions = vec![];
@@ -187,6 +191,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
             app.ui.status = e;
         }
     }
+    watch.end(app, &ctx);
 }
 
 fn section_header(app: &mut EffectcraftApp, p: &egui::Painter, x0: f32, w: f32, y: f32, title: &str, auto: &str) {
@@ -266,7 +271,8 @@ fn transform_row(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter,
     let resp = ui.interact(label, egui::Id::unique(("props-label", uid)), Sense::click());
     crate::a11y::role_name(&resp, egui::accesskit::Role::Button, &pr.name);
     app.auto.add(&format!("{base}.label"), label, &pr.name);
-    if resp.double_clicked() {
+    // A double click, or the keyboard's activation (a primary single click is not one).
+    if resp.double_clicked() || (resp.clicked() && !resp.clicked_by(egui::PointerButton::Primary)) {
         app.ui.timeline.search.clear();
         app.ui.timeline.scroll_to = Some(crate::state::ScrollTo::Property(uid));
         if let Err(e) = crate::menus::frontend(app, ui.ctx(), "timeline.revealProps", json!({"props": [{"layer": lid, "prop": uid}]})) {
@@ -288,16 +294,17 @@ fn transform_row(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter,
     match &value {
         Value::Scalar(v) if pr.name == "Rotation" || pr.name.ends_with(" Rotation") => {
             let (_, deg) = super::fx_widgets::split_angle(*v);
-            let (rr, dr, nv) = super::fx_widgets::angle_field(ui, pos2(vx, cy - 9.0), egui::Id::unique(("props-v", uid)), *v, decimals(deg), &vt);
+            let (rr, dr, nv, step) = super::fx_widgets::angle_field_step(ui, pos2(vx, cy - 9.0), egui::Id::unique(("props-v", uid)), *v, decimals(deg), &vt);
             app.auto.add(&format!("{base}.value"), dr, &pr.name);
             app.auto.add(&format!("{base}.revolutions"), rr, &pr.name);
             if let Some(nv) = nv {
                 set(actions, json!(nv));
+                widgets::mark_step(actions.last_mut(), step);
             }
         }
         Value::Scalar(v) => {
             let range = if pr.name == "Opacity" { (0.0, 100.0) } else { (-1e9, 1e9) };
-            let (vr, nv, _) = widgets::hot_number_at(
+            let (vr, nv, _, step) = widgets::hot_number_step_at(
                 ui,
                 pos2(vx, cy - 9.0),
                 egui::Id::unique(("props-v", uid)),
@@ -308,6 +315,7 @@ fn transform_row(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter,
             app.auto.add(&format!("{base}.value"), vr, &pr.name);
             if let Some(nv) = nv {
                 set(actions, json!(nv));
+                widgets::mark_step(actions.last_mut(), step);
             }
         }
         Value::Vec2(_) | Value::Vec3(_) => {
@@ -329,7 +337,7 @@ fn transform_row(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter,
                 }
             }
             for d in 0..n.min(c.len()) {
-                let (vr, nv, _) = widgets::hot_number_at(
+                let (vr, nv, _, step) = widgets::hot_number_step_at(
                     ui,
                     pos2(x, cy - 9.0),
                     egui::Id::unique(("props-v", uid, d)),
@@ -354,6 +362,7 @@ fn transform_row(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter,
                     if let Some((_, a)) = actions.last_mut() {
                         a["dims"] = json!((from..from + shown).collect::<Vec<_>>());
                     }
+                    widgets::mark_step(actions.last_mut(), step);
                 }
                 x = vr.max.x + 10.0;
             }

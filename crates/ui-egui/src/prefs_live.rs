@@ -59,9 +59,14 @@ pub fn dropped_files(app: &mut EffectcraftApp, ui: &egui::Ui, bounds: Rect) {
     }
 
     let mut errors = Vec::new();
+    let mut import_reported_errors = false;
     if skipped != 0 {
         errors.push(crate::i18n::tr_args("Skipped {} dropped file(s) without a local path. Use File ▸ Import ▸ File…", &[&skipped]));
     }
+
+    // Taken once per drop frame, so a handed-over flag cannot survive into a later, unrelated
+    // drop (#2661).
+    let handed_by_a_floating_window = std::mem::take(&mut app.forwarded.dropped_on_timeline);
 
     let (proj, rest): (Vec<String>, Vec<String>) = paths.into_iter().partition(|p| {
         let l = p.to_ascii_lowercase();
@@ -71,12 +76,45 @@ pub fn dropped_files(app: &mut EffectcraftApp, ui: &egui::Ui, bounds: Rect) {
     if proj.len() > 1 {
         errors.push(crate::i18n::tr_args("Only one project can be opened per drop; skipped {} more", &[&proj.len().saturating_sub(1)]));
     }
+    // While the After Effects losses prompt waits, opening a project would replace it (and the
+    // project the answer imports into): the project waits for the answer, dropped again after it.
+    let proj = if crate::panels::aep_losses::asking(app) && !proj.is_empty() {
+        errors.push(crate::i18n::tr_args("Skipped {} more file(s) while a dialog is open; import them again after it", &[&1]));
+        Vec::new()
+    } else {
+        proj
+    };
 
-    if let Some(p) = proj.first()
-        && let Err(e) = crate::menus::invoke(app, &ctx, "file.open", json!({"path": p}))
-    {
-        errors.push(crate::i18n::tr_args("Cannot open dropped project {}: {}", &[&p, &e]));
+    // After Effects projects import as projects (File ▸ Import ▸ Adobe After Effects Project…),
+    // each into a folder named after its file, opening its first composition.
+    let (aep, mut rest): (Vec<String>, Vec<String>) = rest.into_iter().partition(|p| effectcraft_engine::commands::is_aep_path(p));
+    // A project in the drop changes the active composition: the other files go to the Project
+    // panel only, not into a composition.
+    let has_project = !proj.is_empty() || !aep.is_empty();
+
+    // Opened first, so the other files land in the project it opens. While it waits on Save
+    // changes? the rest of the drop is skipped with a note: it would land in the project about
+    // to be replaced.
+    let mut waiting = false;
+    if let Some(p) = proj.first() {
+        match crate::menus::invoke(app, &ctx, "file.open", json!({"path": p})) {
+            Ok(r) => waiting = crate::menus::waits_on_dialog(&r),
+            Err(e) => errors.push(crate::i18n::tr_args("Cannot open dropped project {}: {}", &[&p, &e])),
+        }
     }
+    let mut aep = aep;
+    if waiting {
+        let skipped = rest.len() + aep.len();
+        if skipped > 0 {
+            errors.push(crate::i18n::tr_args("Skipped {} more file(s) while a dialog is open; import them again after it", &[&skipped]));
+        }
+        rest.clear();
+        aep.clear();
+    }
+
+    // One with losses asks first; the projects after it wait for the answer, the other files
+    // import meanwhile. The errors name their files.
+    errors.extend(crate::menus::import_aep_projects(app, aep));
 
     if !rest.is_empty() {
         let viewer = app
@@ -88,15 +126,16 @@ pub fn dropped_files(app: &mut EffectcraftApp, ui: &egui::Ui, bounds: Rect) {
 
         // Dropping a file on the Timeline adds it to the composition the panel shows, as it does
         // on the viewer (#2588); the import decides the layer's position.
-        let over_timeline = ctx.input(|i| i.pointer.hover_pos()).is_some_and(|p| {
-            app.auto
-                .elements
-                .iter()
-                .find(|e| e.id == "panel.Timeline")
-                .is_some_and(|e| Rect::from_min_size(egui::pos2(e.rect[0], e.rect[1]), egui::vec2(e.rect[2], e.rect[3])).contains(p))
-        });
+        let over_timeline = handed_by_a_floating_window
+            || ctx.input(|i| i.pointer.hover_pos()).is_some_and(|p| {
+                app.auto
+                    .elements
+                    .iter()
+                    .find(|e| e.id == "panel.Timeline")
+                    .is_some_and(|e| Rect::from_min_size(egui::pos2(e.rect[0], e.rect[1]), egui::vec2(e.rect[2], e.rect[3])).contains(p))
+            });
 
-        let at = if proj.is_empty() && !over_timeline {
+        let at = if !has_project && !over_timeline {
             ctx.input(|i| i.pointer.hover_pos()).filter(|p| viewer.is_some_and(|v| v.contains(*p))).and_then(|p| crate::panels::viewer::screen_to_comp(&ctx, p))
         } else {
             None
@@ -107,28 +146,34 @@ pub fn dropped_files(app: &mut EffectcraftApp, ui: &egui::Ui, bounds: Rect) {
         let alt = ctx.input(|i| i.modifiers.alt);
         // A dropped Photoshop file asks how to import it (the Import Photoshop File dialog, its
         // Import Kind starting at Default Drag Import As), as File ▸ Import ▸ File… does (#678).
-        let layered = rest.iter().any(|p| p.rsplit('.').next().is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "psd" | "psb")));
+        let layered = rest.iter().any(|p| p.rsplit('.').next().is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "psd" | "psb" | "pcraft")));
         let mut params = json!({
             "paths": rest,
             "drag": true,
-            "addToComp": at.is_some() || over_timeline,
+            "addToComp": !has_project && (at.is_some() || over_timeline),
             "position": at,
             "background": true
         });
-        if !layered {
+        // While the losses prompt of a project dropped with it shows, a Photoshop file imports
+        // with Default Drag Import As: one dialog at a time.
+        if !layered || crate::panels::aep_losses::asking(app) {
             params["importAs"] = json!(app.session.prefs.drag_import_as());
         }
         if alt {
             params["sequence"] = json!(false);
         }
 
-        if let Err(e) = crate::menus::invoke(app, &ctx, "file.import", params) {
-            errors.push(crate::i18n::tr_args("Cannot import dropped files: {}", &[&e]));
+        match crate::menus::invoke(app, &ctx, "file.import", params) {
+            Ok(result) => {
+                import_reported_errors = result["errors"].as_array().is_some_and(|errors| errors.iter().any(Value::is_string));
+            }
+            Err(e) => errors.push(crate::i18n::tr_args("Cannot import dropped files: {}", &[&e])),
         }
     }
 
     if !errors.is_empty() {
-        app.ui.status = errors.join("; ");
+        let local = errors.join("; ");
+        app.ui.status = if import_reported_errors { format!("{}; {local}", app.ui.status) } else { local };
     }
 }
 
@@ -136,6 +181,12 @@ pub fn dropped_files(app: &mut EffectcraftApp, ui: &egui::Ui, bounds: Rect) {
 /// reading starts PowerShell in the background, so it isn't done more often).
 pub(crate) fn memory_watch(app: &mut EffectcraftApp, ctx: &egui::Context, now: f64) {
     let id = egui::Id::unique("prefs-memory-watch");
+    // While free disk space keeps frames and layers out of the disk cache, the idle passes ask
+    // for no repaint (nothing to write): keep a frame coming so its free space is read again and
+    // the RAM frames are written once there is room (the reading lands between frames).
+    if app.session.disk_cache.as_ref().is_some_and(|dc| !dc.accepts_writes()) {
+        ctx.request_repaint_after(std::time::Duration::from_secs(5));
+    }
     let last = ctx.data(|d| d.get_temp::<f64>(id));
     if last.is_some_and(|t| now - t < 30.0) {
         return;

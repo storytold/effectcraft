@@ -23,7 +23,7 @@ In this order (gap numbers from [gaps.md](gaps.md)):
 
 The core workflows of a motion designer in After Effects, checked on EffectCraft's main platform
 (macOS) from the scripted UI tests, the live After Effects ease oracle and the open issues
-(standard: craftrules `standards/progress-docs.md`, "Stages"). **All six pass, so EffectCraft is
+**All six pass, so EffectCraft is
 alpha**: each works end to end and the work saves and reopens; what's rough in them is listed, but
 none blocks the workflow.
 

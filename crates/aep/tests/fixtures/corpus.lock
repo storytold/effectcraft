@@ -1,0 +1,31 @@
+# Pinned After Effects test corpus for `crates/aep` (read by `cargo xtask aep-corpus`).
+#
+#   repo      where the corpus lives (override: EFFECTCRAFT_AEP_CORPUS_REPO, e.g. a local clone)
+#   commit    the exact commit to fetch (40 hex digits; a branch or tag name is not accepted)
+#   <sha256>  <path>   the SHA-256 of every file the tests use, relative to the corpus root
+#
+# The hashes are kept here, not read from the fetched repository, so a changed corpus
+# cannot vouch for itself. To move the pin: change `commit`, then copy the new SHA256SUMS lines.
+repo https://github.com/storytold/effectcraft-corpus.git
+commit 97262276f625afdeeb61787e4cbb74b3f17af510
+
+4a51318c4b37fa95e2c02682183d3982fdfbe1870dc50ba729b776d1826f982e  aep/3d.aep
+da8ba17d095ddb1576db658ad28a3966d7231244cf0391f77d71d7aa68c6e085  aep/aepx-pair.aep
+59e79c1621de108a4960d2bb6b14bc54e39df658f459af777b50fa95f2b7b32b  aep/aepx-pair.aepx
+2e1a59562b52eb97ce32ccc7810a54f0671eae567d1d9869041b391d3cc4a20c  aep/effects.aep
+1e10b8ee47f43c5cd6e19710fbab28f498f8b73dbfa1a8f830ae41ad3b1c19ef  aep/empty.aep
+b4ee29ebd0d46b6013efc05c0f8cce4be61ce2d5b8bc38c5a814b86bceeee286  aep/footage-precomp.aep
+7e162f536d422daffbe909b50fdd83d7160c6b150ce6c34216c65dba46ab87cb  aep/fx-switch.aep
+f6ce60a8ed0fa786625078f61995e1184ef0b016efaeeb0b4ae6337831697821  aep/inputs/curves-red-mid-down.ffx
+e3992190150366b01859e32adcb9bbe2e0ef492bd2259a8b7e85b571afeca24f  aep/inputs/curves-rgb-two-points.ffx
+4a0cd5a0e52d8d14ee0f895b0a3e054199d399094b410a7b2a620eb484d5cba8  aep/inputs/meshwarp-3x3-center-right.ffx
+baad5a326f255797c03b3cc0a776524b7eabfb217fbc301b0596ac3e4e97d71b  aep/keyframes.aep
+57184fec75ec8892ac6c8ac360274fdaa4fc4ed39093f969f30a45fbf2afaf9e  aep/layers-comps.aep
+fca73b3e4f5398a0ab686b74d8eb3e1c2dd37c7db0e8a31b2e0f45ba0bb3c8ff  aep/markers.aep
+93d6a9f2a2980d999bcb628a4e7220d1922b1c535d535663f69043778322d72f  aep/masks.aep
+c3255249dd29279cc6a14c156a0acb82b0bc255a0be77c0178a9c4bc891206a5  aep/settings-a.aep
+b4a61e988743b0f6b5a7ad6875f958ccf173fcf0d7d6097c441a0aa71c5e1fd7  aep/settings-b.aep
+71ba74dade2ef411026a55a945d573cf059ff03aeb2d527fe2c6833e13174df3  aep/settings-c.aep
+9035039df7c34f04c33337719a2fef5ba93db5d2317434eb3476906571654d3b  aep/shapes.aep
+5fe35e08d05e72583fdd19e02878cc974136736e39090fab9d84d132fb2b4d35  aep/styles.aep
+fded434b54532f9001c53a3482deed0c157f76ee067b354a801ec9c2747002db  aep/text.aep

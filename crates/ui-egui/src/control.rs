@@ -21,6 +21,7 @@
 //!
 //! The full reference with examples is `docs/control-protocol.md`.
 
+use std::sync::Arc;
 use std::sync::mpsc::Sender;
 
 use serde_json::{Value, json};
@@ -60,6 +61,8 @@ pub enum Outcome {
     },
     /// Reply once background jobs end (a `wait: true` command whose job runs in a worker).
     AwaitJobs(JobWaiter),
+    /// A script yielded its session for rendering; reply after its continuation returns.
+    AwaitScript(u32),
 }
 
 /// A `wait: true` engine command whose job was sent to the session's offload (the browser's
@@ -73,6 +76,8 @@ pub struct JobWaiter {
     pub jobs: Vec<String>,
     /// Absolute completion-log position when it started (including evicted entries).
     pub log_cursor: usize,
+    /// The exact native render, not the reusable `jobs.list` identifier.
+    pub render: Option<Arc<effectcraft_engine::render_queue::JobShared>>,
 }
 
 /// Commands that block with `wait` (and its default).
@@ -81,34 +86,74 @@ fn waits(command: &str, params: &Value) -> bool {
     params.get("wait").and_then(Value::as_bool).unwrap_or(default)
 }
 
-/// Run an engine command. A waiting command (`wait: true`) whose job the session offloads
-/// runs with `wait: false` instead, and the reply waits for the job ([`Outcome::AwaitJobs`]),
-/// so the browser's UI keeps drawing while it runs.
+/// Run an engine command. A waiting offloaded command or native render runs with `wait: false`
+/// instead, and the reply waits for the job ([`Outcome::AwaitJobs`]), keeping the UI responsive.
 fn execute_engine(app: &mut EffectcraftApp, id: &str, params: Value) -> Result<Outcome, String> {
-    if !app.session.offloads() || !waits(id, &params) {
-        return app.session.execute_checked(id, params).map(ok).map_err(|e| e.to_string());
+    if !(app.session.offloads() || (cfg!(not(target_arch = "wasm32")) && id == "renderQueue.render")) || !waits(id, &params) {
+        let result = app.session.execute_checked(id, params);
+        return result.map(script_outcome).map_err(|e| e.to_string());
     }
     let before: Vec<String> = app.session.jobs().into_iter().map(|j| j.id).collect();
     let log_cursor = app.session.offload_log_start.saturating_add(app.session.offload_log.len());
     let mut p = params.clone();
-    p["wait"] = json!(false);
+    p.as_object_mut().ok_or("command params must be an object")?.insert("wait".into(), json!(false));
     let result = app.session.execute_checked(id, p).map_err(|e| e.to_string())?;
     let jobs: Vec<String> = app.session.jobs().into_iter().map(|j| j.id).filter(|j| !before.contains(j)).collect();
-    if jobs.is_empty() {
-        return Ok(ok(result));
+    let render = if cfg!(not(target_arch = "wasm32")) && id == "renderQueue.render" && !app.session.offloads() {
+        app.session.render_job.as_ref().map(|job| {
+            job.shared.retain_reply_items(result["items"].as_array().cloned().unwrap_or_default());
+            job.shared.clone()
+        })
+    } else {
+        None
+    };
+    Ok(JobWaiter { command: id.to_string(), params, result, jobs, log_cursor, render }.into_outcome())
+}
+
+fn script_outcome(result: Value) -> Outcome {
+    match result.get("renderHost").and_then(Value::as_u64).and_then(|id| u32::try_from(id).ok()) {
+        Some(host) => Outcome::AwaitScript(host),
+        None => ok(result),
     }
-    Ok(Outcome::AwaitJobs(JobWaiter { command: id.to_string(), params, result, jobs, log_cursor }))
+}
+
+/// Suspended scripts retain open undo groups. Let the UI inspect and stop the render, but
+/// never fold an unrelated edit, another script or a project replacement into that group.
+pub(crate) fn check_script_render(app: &EffectcraftApp, id: &str) -> Result<(), String> {
+    if app.session.script_ui.render_host.is_some() && !effectcraft_engine::scriptui::allowed_during_render(id) {
+        Err(effectcraft_engine::scriptui::RENDER_WAIT_MESSAGE.into())
+    } else {
+        Ok(())
+    }
 }
 
 impl JobWaiter {
+    fn into_outcome(self) -> Outcome {
+        // A finished but unpolled native worker still needs its completion boundary even
+        // when jobs() no longer lists it. Already-polled commands have their final result.
+        if self.jobs.is_empty() && self.render.is_none() { ok(self.result) } else { Outcome::AwaitJobs(self) }
+    }
+
     /// Whether its jobs are still running.
     pub fn pending(&self, app: &EffectcraftApp) -> bool {
+        if let Some(render) = &self.render {
+            return !render.reply_finished() && app.session.render_job.as_ref().is_some_and(|job| Arc::ptr_eq(render, &job.shared));
+        }
         app.session.jobs().iter().any(|j| self.jobs.contains(&j.id))
     }
 
     /// The reply: what the blocking command would have returned (`running: false`, the final
     /// progress, render items and analysis status), or the job's error.
     pub fn finish(self, app: &mut EffectcraftApp) -> Value {
+        if let Some(render) = self.render {
+            let Some(items) = render.completed_items() else {
+                return json!({"ok": false, "error": "render result unavailable: the project or render job was replaced before completion"});
+            };
+            let mut result = self.result;
+            result["items"] = json!(items);
+            result["rendering"] = json!(false);
+            return json!({"ok": true, "result": result});
+        }
         let s = &mut app.session;
         s.poll_render();
         let error = s
@@ -178,6 +223,14 @@ fn point(app: &EffectcraftApp, p: &Value) -> Result<egui::Pos2, String> {
 /// [`Outcome::AwaitJobs`] instead of replying in this call.
 pub fn handle(app: &mut EffectcraftApp, ctx: &egui::Context, req: &ControlRequest, now: f64) -> Outcome {
     let p = &req.params;
+    if app.session.script_ui.render_host.is_some()
+        && !matches!(
+            req.method.as_str(),
+            "engine.execute" | "ui.menu.invoke" | "engine.commands" | "ui.menu.list" | "ui.inspect" | "ui.elements" | "ui.resize" | "ui.focus"
+        )
+    {
+        return err(effectcraft_engine::scriptui::RENDER_WAIT_MESSAGE);
+    }
     match req.method.as_str() {
         "engine.execute" | "ui.menu.invoke" => execute_command(app, ctx, &req.method, p),
         "engine.commands" => engine_commands(app, p),
@@ -211,15 +264,25 @@ pub fn handle(app: &mut EffectcraftApp, ctx: &egui::Context, req: &ControlReques
 fn execute_command(app: &mut EffectcraftApp, ctx: &egui::Context, method: &str, p: &Value) -> Outcome {
     let s = |k: &str| p.get(k).and_then(Value::as_str);
     let Some(id) = s("command").or(s("id")) else { return err("missing `command`") };
+    if let Err(e) = check_script_render(app, id) {
+        return err(e);
+    }
     let params = p.get("params").cloned().filter(|v| !v.is_null()).unwrap_or(json!({}));
+    // Only this invocation opts in: CLI, lifecycle scripts and the inline console retain
+    // their synchronous contract. Its host remembers the opt-in across successive renders.
+    let previous = app.session.script_ui.yield_renders;
+    app.session.script_ui.yield_renders = cfg!(not(target_arch = "wasm32")) && id == "script.run";
     // `engine.execute` runs engine commands exactly as headless (never opens a dialog, e.g.
     // `comp.new {}` creates a default comp); UI-only ids (`tool.*`, `view.*`, `window.*`,
     // `playback.*` …) and `ui.menu.invoke` go through the menu dispatcher like a click.
-    let r = if method == "engine.execute" && effectcraft_engine::find_command(id).is_some() {
+    let r = if (method == "engine.execute" && effectcraft_engine::find_command(id).is_some())
+        || (id == "renderQueue.render" && params.get("wait").and_then(Value::as_bool) == Some(true))
+    {
         execute_engine(app, id, params)
     } else {
-        crate::menus::invoke(app, ctx, id, params).map(ok)
+        crate::menus::invoke(app, ctx, id, params).map(script_outcome)
     };
+    app.session.script_ui.yield_renders = previous;
     match r {
         Ok(o) => o,
         Err(e) => {
@@ -280,6 +343,21 @@ fn set_ui(app: &mut EffectcraftApp, ctx: &egui::Context, p: &Value) -> Outcome {
         && let Err(e) = apply_viewer(app, v)
     {
         return err(e);
+    }
+    // Effect Controls' tab lock: on locks it to the layer it shows. With no layer shown (the
+    // lock kept for a layer of another comp, nothing selected here) a lock request is an error
+    // and the kept lock stays.
+    if let Some(on) = p.get("effectControlsLocked").and_then(Value::as_bool) {
+        crate::panels::effect_controls::scope_lock(app);
+        let shown = crate::panels::effect_controls::shown_layer_id(app).is_some();
+        if (on && !shown) || crate::panels::effect_controls::set_lock(app, on) != on {
+            return err("effectControlsLocked: Effect Controls shows no layer to lock");
+        }
+        // Locked to a layer of another comp, the panel shows this comp's selection: the tab's
+        // lock reads locked and a click unlocks, so a lock request does not lock what is shown.
+        if on && app.ui.effect_controls_lock.is_some_and(|k| app.session.active_comp_id().is_none_or(|c| c.0 != k.comp)) {
+            return err("effectControlsLocked: Effect Controls is locked to a layer of another composition; unlock it first");
+        }
     }
     set_ui_layout(app, p)
 }
@@ -725,19 +803,7 @@ fn render_frame(app: &EffectcraftApp, p: &Value) -> Outcome {
 
 /// Standard base64 (RFC 4648, padded).
 pub fn base64(data: &[u8]) -> String {
-    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut s = String::with_capacity(data.len().div_ceil(3) * 4);
-    for c in data.chunks(3) {
-        let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
-        for i in 0..4 {
-            if i <= c.len() {
-                s.push(A[(n >> (18 - 6 * i) & 63) as usize] as char);
-            } else {
-                s.push('=');
-            }
-        }
-    }
-    s
+    craft_mime::base64::STANDARD.encode(data)
 }
 
 /// Builds the `ui.inspect` reply: window size and pixels per point, fps, UI state with the
@@ -747,9 +813,9 @@ pub fn base64(data: &[u8]) -> String {
 pub fn inspect(app: &EffectcraftApp, ctx: &egui::Context) -> Value {
     // A logic-only tick refreshes the viewport information but not `InputState`'s screen rect.
     let size = ctx.input(|i| i.viewport().inner_rect).map_or_else(|| ctx.content_rect().size(), |r| r.size());
-    let keyboard_focus = ctx.memory(|m| m.focused()).map(|id| {
-        let response = ctx.read_response(id);
-        let rect = response.as_ref().map(|r| [r.rect.min.x, r.rect.min.y, r.rect.width(), r.rect.height()]);
+    let keyboard_focus = craft_ui::runtime::access::focused_node(ctx).or_else(|| ctx.memory(|m| m.focused())).map(|id| {
+        let automation = app.auto.elements.iter().chain(app.auto.previous.iter()).find(|e| e.response_id == Some(id));
+        let rect = ctx.read_response(id).map(|r| [r.rect.min.x, r.rect.min.y, r.rect.width(), r.rect.height()]).or_else(|| automation.map(|e| e.rect));
         // The registry names screen elements independently of egui's internal ids. Report
         // exact rectangle matches rather than guessing which enclosing panel owns focus.
         let candidates: Vec<&str> = app
@@ -759,7 +825,7 @@ pub fn inspect(app: &EffectcraftApp, ctx: &egui::Context) -> Value {
             .filter(|e| rect.is_some_and(|r| e.rect.iter().zip(r).all(|(a, b)| (*a - b).abs() < 0.01)))
             .map(|e| e.id.as_str())
             .collect();
-        let automation_id = app.auto.elements.iter().chain(app.auto.previous.iter()).find(|e| e.response_id == Some(id)).map(|e| e.id.as_str());
+        let automation_id = automation.map(|e| e.id.as_str());
         json!({"id": format!("{:016x}", id.value()), "rect": rect, "automationId": automation_id, "registryCandidates": candidates})
     });
     let mut ui = json!(app.ui);
@@ -893,6 +959,26 @@ pub fn encode_png(rgba: &[u8], w: u32, h: u32) -> Result<Vec<u8>, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_native_render_with_no_running_jobs_still_checks_its_own_completion() {
+        let waiter = super::JobWaiter {
+            command: "renderQueue.render".into(),
+            params: serde_json::json!({}),
+            result: serde_json::json!({"rendering": true, "items": []}),
+            jobs: vec![],
+            log_cursor: 0,
+            render: Some(std::sync::Arc::new(effectcraft_engine::render_queue::JobShared::default())),
+        };
+        let super::Outcome::AwaitJobs(waiter) = waiter.into_outcome() else {
+            panic!("a finished native render must still pass through completion polling");
+        };
+        let mut app = crate::EffectcraftApp::new(effectcraft_engine::Session::default());
+        assert!(!waiter.pending(&app));
+        let reply = waiter.finish(&mut app);
+        assert_eq!(reply["ok"], false, "an abandoned render cannot silently report a replacement project's queue");
+        assert!(reply["error"].as_str().unwrap().contains("replaced before completion"));
+    }
+
     #[test]
     fn base64_rfc4648_vectors() {
         for (i, o) in [("", ""), ("f", "Zg=="), ("fo", "Zm8="), ("foo", "Zm9v"), ("foob", "Zm9vYg=="), ("fooba", "Zm9vYmE="), ("foobar", "Zm9vYmFy")] {

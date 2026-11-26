@@ -216,7 +216,7 @@ fn draw_widget(app: &mut EffectcraftApp, ui: &mut egui::Ui, origin: egui::Pos2, 
             let mut pick: Option<usize> = None;
             ui.add_enabled_ui(w.enabled, |ui| {
                 ui.scope_builder(UiBuilder::new().max_rect(rect), |ui| {
-                    craft_ui::ComboBox::from_id_salt(id).selected_text(cur).width(rect.width() - 8.0).show_ui(ui, |ui| {
+                    egui::ComboBox::from_id_salt(id).selected_text(cur).width(rect.width() - 8.0).show_ui(ui, |ui| {
                         for (i, it) in w.items.iter().enumerate() {
                             if it == "-" {
                                 ui.separator();
@@ -329,13 +329,28 @@ fn image_texture(ctx: &egui::Context, img: &ImageRef, services: &dyn Services) -
     if let Some(cached) = ctx.data(|d| d.get_temp::<Option<egui::TextureHandle>>(id)) {
         return cached;
     }
-    let tex = img.bytes(services).and_then(|b| image::load_from_memory(&b).ok()).map(|d| {
+    let tex = img.bytes(services).and_then(|b| decode_ui_image(&b)).map(|d| {
         let rgba = d.to_rgba8();
         let ci = egui::ColorImage::from_rgba_unmultiplied([rgba.width() as usize, rgba.height() as usize], rgba.as_raw());
         ctx.load_texture(format!("scriptui-image-{}", img.name), ci, egui::TextureOptions::LINEAR)
     });
     ctx.data_mut(|d| d.insert_temp(id, tex.clone()));
     tex
+}
+
+/// The largest side of a ScriptUI image (icons and banners are far smaller).
+const MAX_UI_IMAGE_SIDE: u32 = 4096;
+
+/// A ScriptUI image decoded within [`MAX_UI_IMAGE_SIDE`] per side and a matching allocation
+/// limit, checked from the header before the pixels (and their RGBA copy) are allocated.
+fn decode_ui_image(bytes: &[u8]) -> Option<image::DynamicImage> {
+    let mut r = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format().ok()?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_UI_IMAGE_SIDE);
+    limits.max_image_height = Some(MAX_UI_IMAGE_SIDE);
+    limits.max_alloc = Some(u64::from(MAX_UI_IMAGE_SIDE) * u64::from(MAX_UI_IMAGE_SIDE) * 16);
+    r.limits(limits);
+    r.decode().ok()
 }
 
 /// An image control's or icon button's image, fitted (aspect kept) and centred in `r`.
@@ -525,6 +540,115 @@ fn perform(app: &mut EffectcraftApp, ctx: &egui::Context, acts: Vec<Act>) {
     }
 }
 
+/// The command that answers a script's file dialog.
+pub(crate) const FILE_DIALOG_COMMAND: &str = "scriptui.fileDialog";
+
+/// The answer to a script's file dialog shown without blocking. Dropped unanswered (a dialog that
+/// ended without its completion handler, a dialog thread that didn't start) it answers
+/// "cancelled", so the script never waits for an answer that can't come.
+struct PendingAnswer {
+    tx: std::sync::mpsc::Sender<crate::DialogAnswer>,
+    answer: Option<crate::DialogAnswer>,
+}
+
+impl PendingAnswer {
+    fn send(mut self, paths: Result<Vec<String>, String>) {
+        if let Some(a) = self.answer.take() {
+            let _ = self.tx.send(crate::DialogAnswer { paths, ..a });
+        }
+    }
+}
+
+impl Drop for PendingAnswer {
+    fn drop(&mut self) {
+        if let Some(a) = self.answer.take() {
+            let _ = self.tx.send(a);
+        }
+    }
+}
+
+/// Show the file dialog a script waits on (`File.openDialog`, `File.saveDialog`,
+/// `Folder.selectDialog`… from a ScriptUI Browse… button, #2778) and hand the answer back
+/// through `scriptui.fileDialog`. Where blocking the frame is unsafe the dialog shows without
+/// blocking ([`crate::Hooks::file_dialog_async`]), one at a time, and answers when it closes; a
+/// host without a dialog answers "cancelled" at once, so the script never waits for nothing.
+pub fn serve_file_dialogs(app: &mut EffectcraftApp) {
+    use effectcraft_engine::scriptui::FileDialogKind;
+    let spawn = app.hooks.file_dialog_async.is_some();
+    // A non-blocking dialog already up: the next one shows after it.
+    if spawn && app.file_dialogs.any() {
+        return;
+    }
+    let Some(asked) = app.session.script_ui.file_dialogs.iter_mut().find(|d| !d.shown) else { return };
+    asked.shown = true;
+    let asked = asked.clone();
+    let params = json!({"id": asked.id});
+    // The save dialog's default: the script's file, else a name with the filter's extension.
+    let default = match (asked.start.is_empty(), asked.exts.first()) {
+        (false, _) => asked.start.clone(),
+        (true, Some(ext)) => format!("Untitled.{ext}"),
+        (true, None) => "Untitled".to_string(),
+    };
+    let request = match asked.kind {
+        FileDialogKind::Open => crate::FileDialog::Script {
+            label: asked.label.clone(),
+            exts: asked.exts.clone(),
+            any: asked.any,
+            many: asked.many,
+            prompt: asked.prompt.clone(),
+            start: asked.start.clone(),
+        },
+        FileDialogKind::Save => crate::FileDialog::ScriptSave {
+            default: default.clone(),
+            prompt: asked.prompt.clone(),
+            label: asked.label.clone(),
+            exts: asked.exts.clone(),
+            any: asked.any,
+        },
+        FileDialogKind::Folder => crate::FileDialog::ScriptFolder { prompt: asked.prompt.clone(), start: asked.start.clone() },
+    };
+    if let Some(spawn) = app.hooks.file_dialog_async.as_ref() {
+        let answer = crate::DialogAnswer { command: FILE_DIALOG_COMMAND.to_string(), key: "paths", params, paths: Ok(Vec::new()) };
+        let pending = PendingAnswer { tx: app.dialog_answers.0.clone(), answer: Some(answer) };
+        app.file_dialogs.opened();
+        spawn(request, Box::new(move |paths| pending.send(paths)));
+        return;
+    }
+    let paths: Vec<String> = match (&app.hooks.pick_file_dialog, asked.kind) {
+        (Some(pick), _) => pick(request),
+        (_, FileDialogKind::Open) => {
+            let exts: Vec<&str> = asked.exts.iter().map(String::as_str).collect();
+            app.hooks.pick_files.as_ref().map(|pick| pick(&exts)).unwrap_or_default()
+        }
+        (_, FileDialogKind::Save) => app.hooks.save_dialog(&default).flatten().into_iter().collect(),
+        (_, FileDialogKind::Folder) => app.hooks.pick_folder.as_ref().and_then(|pick| pick()).into_iter().collect(),
+    };
+    let paths = if asked.many { paths } else { paths.into_iter().take(1).collect() };
+    answer_file_dialog(app, &params, paths);
+}
+
+/// Answer a script's file dialog (`params`: `{id}`) with the picked `paths` (empty: cancelled);
+/// what the script then reports shows as [`perform`] shows a handler's. An answer that comes
+/// after the dialog was dropped (its script window closed meanwhile) is let go.
+pub(crate) fn answer_file_dialog(app: &mut EffectcraftApp, params: &Value, paths: Vec<String>) {
+    let id = params.get("id").and_then(Value::as_u64);
+    if !app.session.script_ui.file_dialogs.iter().any(|d| Some(u64::from(d.id)) == id) {
+        return;
+    }
+    let paths = if paths.is_empty() { Value::Null } else { json!(paths) };
+    match app.session.execute(FILE_DIALOG_COMMAND, json!({"id": id, "paths": paths})) {
+        Ok(r) => {
+            if let Some(e) = r.get("error").filter(|e| !e.is_null()) {
+                let msg = e["message"].as_str().unwrap_or("script error").to_string();
+                app.toast = Some((msg, app.now()));
+            } else if let Some(o) = r["output"].as_str().filter(|o| !o.is_empty()) {
+                app.ui.status = o.lines().last().unwrap_or_default().to_string();
+            }
+        }
+        Err(e) => app.ui.status = e.to_string(),
+    }
+}
+
 /// The floating script windows (dialogs, palettes, windows), drawn over the app.
 pub fn show_windows(app: &mut EffectcraftApp, ctx: &egui::Context) {
     let windows: Vec<ScriptWindow> = app.session.script_ui.windows.iter().filter(|w| w.kind != WindowKind::Panel).cloned().collect();
@@ -593,15 +717,44 @@ pub fn panel(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect, id: u32) {
         ui.data_mut(|d| d.insert_temp(told, dock));
         acts.push(Act::Resize(id, dock));
     }
-    let content = rect;
-    egui::ScrollArea::both().id_salt(("scriptui-panel", id)).max_width(content.width()).max_height(content.height()).show(ui, |ui| {
-        let (r, _) = ui.allocate_exact_size(vec2(w.root.bounds[2] as f32, w.root.bounds[3] as f32), Sense::hover());
+    let window = vec2(w.root.bounds[2] as f32, w.root.bounds[3] as f32);
+    panel_scroll(ui, ("scriptui-panel", id), rect.size(), window, |ui, r| {
         draw_children(app, ui, r.min, id, &w.root, &mut acts);
         mouse_events(ui, r.min, r.intersect(ui.clip_rect()), id, &w.root, !modal, &mut acts);
     });
     app.auto.add(&format!("scriptui.{id}"), rect, &w.title);
     let ctx = ui.ctx().clone();
     perform(app, &ctx, acts);
+}
+
+/// The scroll area a docked ScriptUI panel shows its `window`-sized window in, at most `dock`
+/// big, with the app's scroll style (solid bars, #269). `body` draws the window in the rect it is
+/// given.
+fn panel_scroll<R>(
+    ui: &mut egui::Ui,
+    salt: impl std::hash::Hash + std::fmt::Debug,
+    dock: egui::Vec2,
+    window: egui::Vec2,
+    body: impl FnOnce(&mut egui::Ui, Rect) -> R,
+) -> egui::scroll_area::ScrollAreaOutput<R> {
+    egui::ScrollArea::both().id_salt(salt).max_width(dock.x).max_height(dock.y).scroll_bar_visibility(panel_bars(dock, window)).show(ui, |ui| {
+        let (r, _) = ui.allocate_exact_size(window, Sense::hover());
+        body(ui, r)
+    })
+}
+
+/// Whether a docked panel's scroll bars may show: never while its window fits the dock.
+///
+/// The fit is decided from the window and the dock, not from what the scroll area has left. A
+/// solid bar, once shown, takes its width from the viewport, so a window that exactly fills its
+/// dock was "too large" for the narrower viewport and its bars never went away (#2796). The fit
+/// rounds the dock up to the whole point, as egui's scroll area does, because the script is told
+/// its dock's size rounded (#2585) and its window can be a fraction of a point bigger. A window
+/// that overflows only one way still gets both bars: the first one's width hides the edge of a
+/// window laid out at the dock's full size, and the second one scrolls to it.
+fn panel_bars(dock: egui::Vec2, window: egui::Vec2) -> egui::scroll_area::ScrollBarVisibility {
+    use egui::scroll_area::ScrollBarVisibility;
+    if window.x <= dock.x.ceil() && window.y <= dock.y.ceil() { ScrollBarVisibility::AlwaysHidden } else { ScrollBarVisibility::VisibleWhenNeeded }
 }
 
 /// Tab title of a script panel.
@@ -624,6 +777,71 @@ pub fn sync_panels(app: &mut EffectcraftApp) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const DOCK: egui::Vec2 = egui::vec2(300.0, 200.0);
+
+    /// Twelve frames of a ScriptUI panel docked in `dock`, with the app's solid scroll bars
+    /// (#269): its window is `first` big on the first frame and `then` big after that. The last
+    /// frame's scroll output (viewport and content size).
+    fn panel_frames(dock: egui::Vec2, first: egui::Vec2, then: egui::Vec2) -> (Rect, egui::Vec2) {
+        let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
+        ctx.all_styles_mut(|s| s.spacing.scroll = egui::style::ScrollStyle::solid());
+        let screen = Rect::from_min_size(egui::Pos2::ZERO, vec2(800.0, 600.0));
+        let mut last = (Rect::NOTHING, egui::Vec2::ZERO);
+        for frame in 0..12 {
+            let window = if frame == 0 { first } else { then };
+            let input = egui::RawInput { screen_rect: Some(screen), time: Some(f64::from(frame) * 0.1), predicted_dt: 0.1, ..Default::default() };
+            let mut out = ctx.run_ui(input, |ui| {
+                let mut panel = ui.new_child(UiBuilder::new().max_rect(Rect::from_min_size(egui::Pos2::ZERO, dock)));
+                let o = panel_scroll(&mut panel, "panel-test", dock, window, |_, _| ());
+                last = (o.inner_rect, o.content_size);
+            });
+            // Nothing paints these frames, and egui expects their texture uploads to be consumed.
+            out.textures_delta.clear();
+        }
+        last
+    }
+
+    /// #2796: a solid bar, once shown, took its width from the viewport, so a window that exactly
+    /// fills its dock stayed "too large" for what was left and kept its bars for good. A window
+    /// that overflowed for one frame (a dock dragged smaller before the script learns its size)
+    /// and then fits gets the whole dock back.
+    #[test]
+    fn a_panel_whose_window_fits_hides_its_bars() {
+        let (viewport, _) = panel_frames(DOCK, DOCK + vec2(40.0, 40.0), DOCK);
+        assert_eq!(viewport.size(), DOCK, "the bars go away once the window fits");
+    }
+
+    /// The script is told its dock's size rounded (#2585), so in a dock a fraction of a pixel
+    /// smaller its window is that fraction bigger. That still fits.
+    #[test]
+    fn a_panel_in_a_fractional_dock_hides_its_bars() {
+        let dock = vec2(299.6, 199.6);
+        let (viewport, _) = panel_frames(dock, dock + vec2(40.0, 40.0), DOCK);
+        // egui snaps rects to 1/32 of a point; a bar would take 10 points.
+        assert!((viewport.size() - dock).length() < 0.05, "a window within the whole pixel fits ({viewport:?})");
+    }
+
+    /// #269 holds: a window bigger than its dock keeps solid bars that take their room from the
+    /// panel, and scrolls.
+    #[test]
+    fn a_panel_whose_window_is_too_big_keeps_its_solid_bars() {
+        let big = DOCK + vec2(120.0, 80.0);
+        let (viewport, content) = panel_frames(DOCK, big, big);
+        let bar = egui::style::ScrollStyle::solid().allocated_width();
+        assert_eq!(viewport.size(), DOCK - vec2(bar, bar), "solid bars on both axes");
+        assert_eq!(content, big, "the whole window is scrollable");
+    }
+
+    #[test]
+    fn panel_bars_only_show_for_a_window_bigger_than_its_dock() {
+        use egui::scroll_area::ScrollBarVisibility::{AlwaysHidden, VisibleWhenNeeded};
+        assert_eq!(panel_bars(DOCK, DOCK), AlwaysHidden);
+        assert_eq!(panel_bars(vec2(299.4, 199.4), DOCK), AlwaysHidden);
+        assert_eq!(panel_bars(DOCK, DOCK + vec2(1.0, 0.0)), VisibleWhenNeeded);
+        assert_eq!(panel_bars(DOCK, DOCK + vec2(0.0, 1.0)), VisibleWhenNeeded);
+    }
 
     /// Script colours are sRGB, not linear: `#2B2B2B` drew as RGB 114 when read as linear light.
     #[test]

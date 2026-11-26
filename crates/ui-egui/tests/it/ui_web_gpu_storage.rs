@@ -61,7 +61,7 @@ impl RemoteFrames for GpuWorker {
     fn start(&self, job: RemoteJob, done: RemoteDone) {
         // The page reads a hit from the disk cache instead of asking the worker.
         if let Some(k) = job.disk_key
-            && let Some(f) = self.disk.lock().unwrap().get(&k).and_then(|e| disk_cache::read_frame_entry(e))
+            && let Some(f) = self.disk.lock().unwrap().get(&k).and_then(|e| disk_cache::read_frame_entry(e, None))
         {
             return done(Ok(RemoteFrame { width: f.width, height: f.height, rgba: f.rgba, ms: 0.0 }));
         }
@@ -91,8 +91,11 @@ impl RemoteFrames for GpuWorker {
         match out.into_iter().next() {
             Some((FrameReply::Frame { width, height, ms, passes, gpu, .. }, Some(rgba))) => {
                 self.rendered.lock().unwrap().push((passes, gpu));
-                if let Some(k) = job.disk_key {
-                    self.disk.lock().unwrap().insert(k, disk_cache::frame_entry(width, height, &rgba));
+                if let Some(k) = job.disk_key
+                    && let Some(files) = server.take_files()
+                    && let Some(entry) = disk_cache::frame_entry(width, height, &rgba, &files, None)
+                {
+                    self.disk.lock().unwrap().insert(k, entry);
                 }
                 done(Ok(RemoteFrame { width, height, rgba, ms }))
             }
@@ -116,7 +119,7 @@ fn source(s: &Session, gpu: Option<Gpu>) -> RenderSource {
 fn cpu_pixels(f: &FrameImage) -> Vec<egui::Color32> {
     match f {
         FrameImage::Cpu(c) => c.pixels.clone(),
-        FrameImage::Gpu(_) => panic!("expected a CPU frame"),
+        FrameImage::Gpu(_) | FrameImage::CpuF16(_) => panic!("expected an 8-bit CPU frame"),
     }
 }
 
@@ -228,7 +231,10 @@ fn settings_disk_page_shows_the_browser_storage_manager() {
     let mut s = Session::default();
     let host = Arc::new(Storage::default());
     s.storage = Some(host.clone());
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(s));
     h.run_steps(2);
     effectcraft_ui_egui::panels::settings::open(h.state_mut(), "disk");
     h.run_steps(3);
@@ -249,7 +255,10 @@ fn settings_disk_page_shows_the_browser_storage_manager() {
     assert_eq!(*host.cleared.lock().unwrap(), vec!["diskCache".to_string()]);
     assert!(*host.persist_asked.lock().unwrap());
     // Without a host (the desktop) the section is not there.
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(Session::default()));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(Session::default()));
     h.run_steps(2);
     effectcraft_ui_egui::panels::settings::open(h.state_mut(), "disk");
     h.run_steps(3);

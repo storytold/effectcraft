@@ -66,6 +66,7 @@ pub fn text_target(app: &EffectcraftApp) -> Option<TextTarget> {
         footage: None,
         property_overrides: &[],
         media_overrides: &[],
+        reads: None,
     };
     effectcraft_engine::render::text::source_text(&ectx, layer).map(|d| TextTarget { layer: layer.id.0, doc: d, range: None })
 }
@@ -281,12 +282,13 @@ fn layer_fill_stroke(app: &EffectcraftApp, layer: u64) -> u32 {
 /// edited range; failures show in `app.ui.status`.
 pub fn character(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let t = app.tokens;
-    let p = ui.painter().with_clip_rect(rect);
     let ctx = ui.ctx().clone();
     let target = text_target(app);
     let enabled = target.is_some();
     let doc = target.as_ref().map(|t| t.doc.clone()).unwrap_or_default();
     let scroll = widgets::PanelScroll::begin(ui, egui::Id::unique("character-scroll"), rect);
+    let rect = scroll.content;
+    let p = ui.painter().with_clip_rect(rect);
     let top = rect.min.y + 10.0 - scroll.offset;
     let mut y = top;
     let x0 = rect.min.x + 10.0;
@@ -602,14 +604,15 @@ pub fn paint_justify_glyph(p: &egui::Painter, r: Rect, j: Justify, c: egui::Colo
 /// target exists; failures show in `app.ui.status`.
 pub fn paragraph(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let t = app.tokens;
-    let p = ui.painter().with_clip_rect(rect);
     let ctx = ui.ctx().clone();
     let target = text_target(app);
     let enabled = target.is_some();
     let doc = target.as_ref().map(|t| t.doc.clone()).unwrap_or_default();
+    let scroll = widgets::PanelScroll::begin(ui, egui::Id::unique("paragraph-scroll"), rect);
+    let rect = scroll.content;
+    let p = ui.painter().with_clip_rect(rect);
     let x0 = rect.min.x + 10.0;
     let w = rect.width() - 20.0;
-    let scroll = widgets::PanelScroll::begin(ui, egui::Id::unique("paragraph-scroll"), rect);
     let top = rect.min.y + 10.0 - scroll.offset;
     let mut y = top;
     let mut actions: Vec<serde_json::Value> = vec![];
@@ -792,11 +795,6 @@ pub(super) fn font_picker(app: &mut EffectcraftApp, ui: &mut egui::Ui, id: egui:
     let changed = search.changed();
     let mut open = true;
     // The search lives in the field; the menu's header is the filter row, its list the fonts.
-    let menu = craft_ui::combo::Menu::new(ui, &search)
-        .open(&mut open)
-        .height(380.0)
-        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-        .style(egui::style::StyleModifier::default());
     let app_ref = &mut *app;
     let header = |ui: &mut egui::Ui| {
         ui.set_width(rect.width().max(180.0));
@@ -919,7 +917,7 @@ pub(super) fn font_picker(app: &mut EffectcraftApp, ui: &mut egui::Ui, id: egui:
         }
         chosen
     };
-    let chosen = menu.show_ui_with_header(header, list).flatten();
+    let chosen = header_menu(&search, &mut open, FONT_MENU_HEIGHT, header, list).flatten();
     if chosen.is_some() || !open || escape {
         ui.data_mut(|d| {
             d.insert_temp(id.with("open"), false);
@@ -1092,6 +1090,34 @@ fn fit_preview(lines: &[Vec<[f32; 2]>], room: Rect, baseline: f32) -> Option<(f3
     Some((k, o))
 }
 
+/// The tallest the font menu gets, its header included.
+const FONT_MENU_HEIGHT: f32 = 380.0;
+
+/// A menu under `field` while `open` is true: `header` stays at the top and the list it hands its result to scrolls
+/// under it, the whole menu up to `height` tall and at least as wide as the field. A click outside closes it (`open`
+/// turns false). Returns what `list` returned, or `None` while the menu is closed.
+fn header_menu<H, R>(
+    field: &egui::Response,
+    open: &mut bool,
+    height: f32,
+    header: impl FnOnce(&mut egui::Ui) -> H,
+    list: impl FnOnce(&mut egui::Ui, H) -> R,
+) -> Option<R> {
+    egui::Popup::from_response(field)
+        .open_bool(open)
+        .max_height_from_constrain(true)
+        .align_alternatives(&[egui::RectAlign::TOP_START])
+        .width(field.rect.width())
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .show(|ui| {
+            ui.set_min_width(ui.available_width());
+            ui.set_max_height(height.min(ui.available_height()));
+            let header = header(ui);
+            egui::ScrollArea::vertical().max_height(ui.available_height().max(0.0)).show(ui, |ui| list(ui, header)).inner
+        })
+        .map(|shown| shown.inner)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1132,6 +1158,7 @@ mod tests {
     #[test]
     fn font_menu_rows_draw_a_name_the_interface_fonts_have() {
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         crate::theme::install(&ctx, &Tokens::for_kind(Default::default()), "en");
         ctx.run_ui(Default::default(), |_| {}).textures_delta.clear();
         let row = |display: &str| effectcraft_engine::FontRow { family: "Menu Name Test".into(), display: display.into(), recent: false, variable: false };

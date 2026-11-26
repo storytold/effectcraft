@@ -21,13 +21,18 @@ pub const UPDATE_APP: craft_update::app::App = craft_update::app::App {
 pub mod audio;
 pub mod automation;
 pub mod bench;
+pub(crate) mod capture;
+pub mod channel;
 pub mod color_picker;
 pub mod control;
 pub mod credits;
+pub mod display_gpu;
 pub mod dock;
+pub mod dock_command;
 pub mod dock_ui;
 mod expression_diagnostics;
 pub mod frames;
+pub mod framework;
 pub mod gpu_failure;
 pub mod header;
 pub mod i18n;
@@ -35,6 +40,7 @@ pub mod icons;
 pub mod menu_keys;
 pub mod menus;
 pub mod native_menu;
+pub mod num_math;
 pub mod panels;
 mod pointer_wrap;
 pub mod prefs_live;
@@ -101,7 +107,7 @@ struct PendingShot {
     /// The geometry epoch bound to the issued capture command, if it was issued.
     issued: Option<DrawGeometry>,
     /// The shared completion slot; dropping it cancels a late callback.
-    slot: Option<craft_ui::capture::CaptureSlot>,
+    slot: Option<crate::capture::CaptureSlot>,
     /// Bytes reserved against [`EffectcraftApp::shot_bytes`].
     reserved_bytes: usize,
     /// Geometry retries used.
@@ -152,6 +158,11 @@ pub enum Dialog {
     UnsavedChanges,
     /// Delete Project items that compositions use? (`panels::delete_items`).
     DeleteItems,
+    /// Import an After Effects project although some of it cannot be imported exactly?
+    /// (`panels::aep_losses`).
+    AepLosses,
+    /// Un-precompose although it changes the picture or drops something? (`panels::unprecompose`).
+    Unprecompose,
     /// A gradient property's Gradient Editor (`panels::gradient_editor`, `prop.editGradient`).
     GradientEditor,
     /// Delete a user template from Home? (`panels::templates`).
@@ -163,7 +174,8 @@ pub(crate) struct DialogAnswer {
     pub command: String,
     pub key: &'static str,
     pub params: serde_json::Value,
-    pub paths: Vec<String>,
+    /// The picked paths (empty: cancelled), or why the dialog couldn't open (#3084).
+    pub paths: Result<Vec<String>, String>,
 }
 
 #[derive(Default)]
@@ -184,6 +196,9 @@ pub struct Playback {
     pub caching: bool,
     /// Resolution override while playing (pixel step), `None` = the viewer's.
     pub res: Option<u32>,
+    /// Settings ▸ Previews ▸ Lower Resolution When Playback Can't Keep Up: the lower render
+    /// scale this play stepped down to, and when (seconds). See `step_down`.
+    pub adaptive: Option<(f64, f64)>,
     /// Include Overlays / Include Layer Controls.
     pub overlays: bool,
     pub layer_controls: bool,
@@ -191,16 +206,20 @@ pub struct Playback {
     pub restore_max: Option<Option<PanelKind>>,
     /// Audio-only previews: the frame under the audible sample (the current time stays put).
     pub audio_frame: Option<i64>,
-    /// The preview's sound waits for frames: while the frames ahead aren't cached, every frame
-    /// shows as it renders, silently; the sound starts once the rest of the preview (or what
-    /// fits in the RAM preview) is cached, so it never plays over skipped frames (#103), or
-    /// sooner once the silent preview keeps real time with the frames ahead cached (#208).
+    /// The preview's sound waits for frames: a preview whose start gave up on frames that weren't
+    /// cached shows every frame as it renders, silently, and starts the sound once the frames
+    /// ahead are cached while it keeps real time (#208), or the rest of the preview is. Once the
+    /// sound plays it goes on through frames that aren't cached, and the picture drops frames to
+    /// follow it (#2473).
     pub audio_held: bool,
+    /// The project last checked for a silent preview that became audible (#2104).
+    pub silent_project: Option<Arc<effectcraft_engine::project::Project>>,
     /// Starting a preview with sound (#947): the playhead stays on the first frame while the
     /// frames ahead render (the prefetch window, at most what fits in the RAM preview), then
     /// sound and picture start together from it. Without this the picture played on silently
     /// while they rendered and the sound started at the later frame, so the opening was lost.
-    /// A stall later on still falls back to [`Playback::audio_held`].
+    /// Once the sound plays, a stall no longer stops it: the picture drops frames to follow it
+    /// (#2473).
     pub starting: bool,
     /// When the preview started (seconds): [`Playback::starting`] gives up after `STARTUP_LIMIT`.
     pub starting_since: f64,
@@ -209,6 +228,14 @@ pub struct Playback {
     pub first_cached: Option<f64>,
     /// When the last frames were shown (seconds, the last second's worth): the achieved rate.
     pub shown_at: std::collections::VecDeque<f64>,
+    /// The rate the silent clock advances at (comp frames per second, at most `fps`; 0 = the
+    /// frame rate): below real time while frames arrive slower than that, so a first playback
+    /// shows them evenly instead of in bursts between freezes (see `pace_for`).
+    pub pace: f64,
+    /// Played frames the paced clock owes (fractional), `Some` while it runs below real time.
+    pub pace_acc: Option<f64>,
+    /// When the silent clock last ran (seconds), for the pace.
+    pub paced_at: Option<f64>,
 }
 
 impl Playback {
@@ -242,6 +269,77 @@ impl Playback {
         let frame = step / self.fps.max(1.0);
         let (Some(a), Some(b)) = (self.shown_at.front(), self.shown_at.back()) else { return false };
         self.shown_at.len() >= 3 && b - a >= (2.0 * frame).max(0.25) && now - b <= 2.0 * frame && self.real_time() == Some(true)
+    }
+}
+
+/// An error awaiting its first standalone display.
+pub(crate) struct ErrorToast {
+    message: String,
+    shown_at: Option<f64>,
+    /// A status already reports this error; dismissing that same status acknowledges both.
+    reported_status: Option<String>,
+    reports: usize,
+}
+
+impl ErrorToast {
+    const MAX_PENDING: usize = 32;
+    const MAX_DETAILS: usize = 16 << 10;
+
+    fn bounded_text<'a>(messages: impl IntoIterator<Item = &'a str>) -> String {
+        let mut text = String::new();
+        let mut truncated = false;
+        for (index, part) in messages.into_iter().enumerate() {
+            let separator = usize::from(!text.is_empty());
+            let remaining = Self::MAX_DETAILS.saturating_sub(text.len() + separator);
+            if remaining == 0 || index >= Self::MAX_DETAILS {
+                truncated = true;
+                break;
+            }
+            if separator != 0 {
+                text.push('\n');
+            }
+            let end = part.floor_char_boundary(remaining.min(part.len()));
+            text.push_str(part.get(..end).unwrap_or_default());
+            if end < part.len() {
+                truncated = true;
+                break;
+            }
+        }
+        if truncated {
+            let marker = crate::i18n::ui::tr("Further error details were truncated.");
+            let marker = marker.get(..marker.floor_char_boundary(Self::MAX_DETAILS - 1)).unwrap_or_default();
+            text.truncate(text.floor_char_boundary(Self::MAX_DETAILS.saturating_sub(marker.len() + 1)));
+            text.push('\n');
+            text.push_str(marker);
+        }
+        text
+    }
+
+    fn new<'a>(messages: impl IntoIterator<Item = &'a str>, reported_status: Option<&str>) -> Self {
+        Self { message: Self::bounded_text(messages), shown_at: None, reported_status: reported_status.map(|status| Self::bounded_text([status])), reports: 1 }
+    }
+
+    fn omitted(reports: usize) -> Self {
+        let message = crate::i18n::ui::tr_args("Additional error notifications omitted: {}.", &[&reports.to_string()]);
+        Self { reports, ..Self::new([message.as_str()], None) }
+    }
+
+    fn reported_by(&self, status: &str) -> bool {
+        self.reported_status.as_deref().is_some_and(|reported| status == reported || status.strip_prefix(reported).is_some_and(|rest| rest.starts_with("; ")))
+    }
+
+    /// Pair the details with `status`, a later status line that reports the same errors.
+    fn restate(&mut self, status: &str) {
+        self.reported_status = Some(Self::bounded_text([status]));
+    }
+
+    fn message_at(&mut self, foreground_status: bool, now: f64) -> Option<&str> {
+        if self.shown_at.is_none() && !foreground_status {
+            // Only the first standalone display starts the timer. Later statuses cannot
+            // extend it, and an unseen error cannot expire behind a foreground status.
+            self.shown_at = Some(now);
+        }
+        self.shown_at.is_none_or(|at| now - at < 4.0).then_some(self.message.as_str())
     }
 }
 
@@ -294,6 +392,7 @@ pub struct EffectcraftApp {
     pub(crate) input_waiters: Vec<Sender<serde_json::Value>>,
     /// Control requests waiting for an offloaded job (`wait: true` in the browser).
     pub(crate) job_waiters: Vec<(control::JobWaiter, Sender<serde_json::Value>)>,
+    pub(crate) script_waiters: Vec<(u32, Sender<serde_json::Value>)>,
     pending_screenshots: Vec<PendingShot>,
     /// Pixels reserved by queued and in-flight screenshot requests.
     shot_bytes: usize,
@@ -303,6 +402,8 @@ pub struct EffectcraftApp {
     /// When the project last changed, and its revision then (see [`Self::editing`]).
     last_edit: (f64, u64),
     pub(crate) toast: Option<(String, f64)>,
+    /// Error details survive routine notifications and wait for a foreground status to clear.
+    pub(crate) error_toasts: std::collections::VecDeque<ErrorToast>,
     /// Texture of the last CPU frame shown in the viewer, the key it came from and the factor it
     /// was averaged down by for the magnification (`panels::viewer::minify_factor`).
     pub(crate) viewer_tex: Option<(egui::TextureHandle, FrameKey, usize)>,
@@ -311,10 +412,28 @@ pub struct EffectcraftApp {
     /// The last GPU frame shown: its egui texture id (registered with egui-wgpu), key and texture.
     pub(crate) viewer_native: Option<(egui::TextureId, FrameKey, Arc<effectcraft_gpu::DisplayFrame>)>,
     /// The texture the viewer draws and its frame key (CPU or GPU frame).
-    pub(crate) viewer_shown: Option<(egui::TextureId, FrameKey)>,
-    /// Last displayed image (Info panel colour, eyedroppers, histograms). GPU frames fill it on
-    /// demand ([`EffectcraftApp::viewer_pixels`]).
+    /// (`None` texture: a half-float frame, drawn by the display pass.)
+    pub(crate) viewer_shown: Option<(Option<egui::TextureId>, FrameKey)>,
+    /// A Cryptomatte eyedropper probe is being built (one at a time, re-arming included).
+    pub(crate) crypto_probe_busy: Arc<std::sync::atomic::AtomicBool>,
+    /// Last displayed image (Info panel colour, eyedroppers, histograms). GPU frames and
+    /// half-float frames fill it on demand ([`EffectcraftApp::viewer_pixels`]).
     pub(crate) viewer_image: Option<Arc<egui::ColorImage>>,
+    /// The half-float frame on screen (32 bpc projects; its key is `viewer_shown`'s).
+    pub(crate) viewer_f16: Option<Arc<frames::F16Frame>>,
+    /// The window's egui-wgpu device (with or without a GPU compositor on it): the display pass
+    /// runs there.
+    pub(crate) window_wgpu: Option<eframe::egui_wgpu::RenderState>,
+    /// The display pass on that device (made with the first frame that needs it), and whether
+    /// making it failed (the pass then runs on the CPU).
+    pub(crate) display_gpu: Option<Arc<display_gpu::DisplayGpu>>,
+    pub(crate) display_gpu_failed: bool,
+    /// The Composition viewer's and the snapshot's displayed textures (display pass).
+    pub(crate) viewer_bake: display_gpu::Bake,
+    pub(crate) snapshot_bake: display_gpu::Bake,
+    /// The snapshot in half floats for the display pass (the image it was made from, not kept
+    /// alive by this).
+    pub(crate) snapshot_f16: Option<(std::sync::Weak<effectcraft_engine::render::Image>, Arc<frames::F16Frame>)>,
     /// wasm32: an asynchronous readback of a GPU viewer frame (key asked for, result).
     viewer_readback: (Option<FrameKey>, Arc<std::sync::Mutex<Option<(FrameKey, Arc<egui::ColorImage>)>>>),
     /// egui-wgpu's device, once the first frame arrives (desktop and WebGPU).
@@ -332,7 +451,13 @@ pub struct EffectcraftApp {
     /// files, started with the first project that has items ([`Self::tick_footage_reload`]).
     footage_watcher: Option<effectcraft_engine::footage_reload::Watcher>,
     /// The project revision and preference the watched set was last computed for.
-    footage_watch_key: Option<(u64, String)>,
+    footage_watch_key: Option<(u64, String, bool)>,
+    /// The worker that stamps the LUT files in use ([`Self::tick_lut_files`], #3493).
+    lut_watcher: Option<effectcraft_engine::lut_reload::Watcher>,
+    /// The LUT generation the frames kept were rendered at ([`effectcraft_engine::lut_reload::generation`]).
+    lut_generation: u64,
+    /// How many times the caches were purged ([`Self::purge_stamp`]).
+    purges: u64,
     /// The graphics device was lost and the window is closing (see `close_after_device_loss`);
     /// `true` keeps crash recovery for the next launch.
     device_lost_close: Option<bool>,
@@ -351,6 +476,10 @@ pub struct EffectcraftApp {
     /// Audio scrubbing's open output (Ctrl/Cmd-drag the current time, `playback.scrubAudio`).
     pub scrub: Option<audio::AudioScrub>,
     pub(crate) updates_rt: updates_ui::Runtime,
+    /// The framework dialogs (the update dialogs), run once per pass after EffectCraft's own UI.
+    pub framework_dialogs: craft_ui::dialog::DialogHost,
+    /// Who EffectCraft is to the framework's dialogs.
+    pub(crate) framework_host: std::sync::Arc<craft_host::Host>,
     /// Audio panel VU meters.
     pub meter: audio::Meter,
     /// Waveform peak summaries per footage item (see `panels::waveform`).
@@ -363,8 +492,8 @@ pub struct EffectcraftApp {
     applied_prefs: Option<(u64, Option<bool>)>,
     /// A previous run that didn't exit cleanly (shown by `Dialog::Recovery`).
     pub recovery: Option<effectcraft_engine::autosave::Recovery>,
-    /// Docked groups laid out last frame: (active panel, group rect) — `~` maximizes the one
-    /// under the pointer.
+    /// Panels drawn last frame, docked and floating: (panel, body rect). `~` maximizes the one
+    /// under the pointer; Effect Controls' arrow keys work only while it is on screen.
     pub(crate) dock_rects: Vec<(PanelKind, egui::Rect)>,
     /// The floating panels' OS windows that drew a panel last frame; one that is gone releases
     /// its IME state.
@@ -373,6 +502,8 @@ pub struct EffectcraftApp {
     pub(crate) unpublished_viewports: Vec<egui::ViewportId>,
     /// A floating panel shown by a command: its window comes to the front next frame.
     pub(crate) pending_panel_raise: Option<PanelKind>,
+    /// What the dock area keeps between frames.
+    pub(crate) live_dock: dock_ui::LiveDock,
     /// Home screen: recent-project thumbnail textures by path (None = no thumbnail).
     pub(crate) home_thumbs: std::collections::HashMap<String, Option<egui::TextureHandle>>,
     /// The (project path, saved revision) whose thumbnail was stored last.
@@ -417,8 +548,18 @@ impl FileDialogsUp {
         self.count = self.count.saturating_add(1);
     }
 
+    /// Whether one is up.
+    pub(crate) fn any(&self) -> bool {
+        self.count > 0
+    }
+
     pub(crate) fn answered(&mut self) {
         self.count = self.count.saturating_sub(1);
+    }
+
+    /// How many dialogs are up, as last checked ([`FileDialogsUp::up`] drops those taken for gone).
+    pub(crate) fn count(&self) -> usize {
+        self.count
     }
 
     /// Whether a dialog is up at `now`, `focused`: whether one of the app's windows has the
@@ -441,7 +582,14 @@ impl FileDialogsUp {
 #[derive(Default)]
 pub(crate) struct ForwardedInput {
     pub(crate) events: Vec<egui::Event>,
+    /// Copy, Cut and Paste the runtime took from a window with no canvas ([`crate::framework`]), for the
+    /// next pass of the shortcuts to read after that pass's own events.
+    pub(crate) clips: Vec<egui::Event>,
     pub(crate) files: Vec<egui::DroppedFileHandle>,
+    /// Files handed over by a floating window whose panel under the pointer was the Timeline. The
+    /// paths lose the window they came from, so this keeps the one thing the import still needs
+    /// (#2661); each drop clears it.
+    pub(crate) dropped_on_timeline: bool,
 }
 
 /// Record the scale the viewer drew at (called by the viewer panel each pass).

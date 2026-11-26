@@ -15,9 +15,8 @@ full-bleed colour field, tight head-and-shoulders crop, the body running off the
 | Paper | `#efe9dc` | the figure |
 | Ink | `#0b0b0c` | line work and contour |
 
-**Provenance:** the project owner drew it in ArtCraft (a 2880 px engraving-style image, kept in
-craftrules at `assets/app-icons/effectcraft/source.png`). It was vectorised with craftrules
-`assets/logo-options/_tools/vectorize_tile.py`, which keys out the field and traces the ink with potrace.
+**Provenance:** the project owner drew it in ArtCraft (a 2880 px engraving-style image). It was
+vectorised with potrace, which keys out the field and traces the ink.
 Licence: see [LICENSE.txt](LICENSE.txt) (MIT OR Apache-2.0, like the repo).
 
 ## Files
@@ -35,8 +34,20 @@ Licence: see [LICENSE.txt](LICENSE.txt) (MIT OR Apache-2.0, like the repo).
 
 App ID: `ai.storyteller.effectcraft` (Wayland app ID, `packaging/linux/ai.storyteller.effectcraft.desktop`).
 
+## Nightly channel
+
+The nightly derivatives keep the foreground artwork, alpha and Mac padding unchanged. Only the
+background contribution changes: the stable pink field `#e0368f` becomes the deeper `#5e2443`.
+There is no letter badge or crescent; the app, its window and the Launcher identify the channel in
+text.
+
+`effectcraft-nightly.png` and its nine-frame ICO (16–256 px) use the existing native 256 px master.
+`effectcraft-nightly-1024.png`, `effectcraft-nightly-macos-512.png` and the eleven-slot ICNS use the
+padded Mac masters, never an upscale. Input/output hashes, the palette-fit recipe and container
+members are recorded in [`nightly-provenance.json`](nightly-provenance.json). Stable source files
+are not recoloured.
+
 ## Regenerate
 
-Copy a new `icon-master.svg` / `icon.svg` from craftrules `assets/app-icons/effectcraft/` over
-`effectcraft.svg` / `effectcraft-small.svg`, then run `packaging/icons.sh` (needs `resvg`; `iconutil`
+After replacing `effectcraft.svg` / `effectcraft-small.svg`, run `packaging/icons.sh` (needs `resvg`; `iconutil`
 on macOS for the `.icns`). Copy `effectcraft-small.svg` to `apps/effectcraft-web/web/favicon.svg` too.

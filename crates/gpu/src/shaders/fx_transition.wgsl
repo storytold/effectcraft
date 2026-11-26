@@ -224,28 +224,8 @@ fn ftr_grid(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
     let px = textureLoad(src, p, 0);
-    let d = ftr_centre(p) - P.f[0].xy;
-    let s = P.f[0].z;
-    let co = P.f[0].w;
-    let q = vec2<f32>(d.x * co + d.y * s, -d.x * s + d.y * co);
-    let cs = P.f[1].x;
-    let cc = (floor(q / cs) + 0.5) * cs;
-    var o = clamp(ftr_metric(P.u[0].x, cc) / P.f[1].y, 0.0, 1.0);
-    if (P.u[0].y != 0u) {
-        o = 1.0 - o;
-    }
-    let spread = 0.25;
-    let pr = clamp((P.f[1].z * (1.0 + spread) - o) / spread, 0.0, 1.0);
-    if (pr <= 0.0) {
-        textureStore(out, p, px);
-        return;
-    }
-    let half = cs * 0.5 * (1.0 - pr);
-    let m = max(abs(q.x - cc.x), abs(q.y - cc.y));
-    var k = select(0.0, 1.0, m < half);
-    if (P.f[1].w > 0.0) {
-        k = clamp((half - m) / P.f[1].w + 0.5, 0.0, 1.0);
-    }
+    // CPU-generated coverage preserves exact f64 tile and hard-edge decisions.
+    let k = data[gid.y * u32(out_dims().x) + gid.x];
     textureStore(out, p, px * k);
 }
 

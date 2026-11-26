@@ -155,7 +155,9 @@ of clicks, and measured confidence collapses with many (0.99 with 1–7 points, 
 ## Speed (this PC: AMD RX 7900 GRE and a 16-thread CPU, release build)
 SAM 2 runs on the GPU when there is one (wgpu compute kernels, so AMD, NVIDIA and Intel alike; candle itself has no AMD
 backend) and on the CPU otherwise. The model loads on the GPU automatically; `EFFECTCRAFT_SAM2_DEVICE=cpu` (or `gpu`)
-overrides it. A GPU that fails (no adapter, out of memory, a lost device) makes the CPU take over for the rest of the
+overrides it. wgpu's environment variables apply to the adapter it picks (`WGPU_BACKEND`, `WGPU_POWER_PREF`,
+`WGPU_ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER`…); a software adapter, or one without compute shaders, leaves SAM 2 on
+the CPU. A GPU that fails (no adapter, out of memory, a lost device) makes the CPU take over for the rest of the
 session, and `roto.status` reports `tracker.device` (the GPU's name, or `CPU`).
 
 | Step | CPU | GPU |

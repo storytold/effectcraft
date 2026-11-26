@@ -28,7 +28,10 @@ fn harness() -> (Harness<'static, EffectcraftApp>, u64) {
         s.execute("layer.newSolid", json!({"name": name, "color": "#406080"})).unwrap();
     }
     s.execute("time.set", json!({"time": 1.0})).unwrap();
-    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(vec2(1600.0, 1000.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(s));
     h.run_steps(3);
     (h, clip)
 }
@@ -299,7 +302,10 @@ fn project_footage_dropped_on_empty_timeline_creates_first_comp() {
         s.execute("file.importPlaceholder", json!({"name": "Landscape.png", "width": 640, "height": 360, "frameRate": 24, "duration": 5})).unwrap()["item"]
             .as_u64()
             .unwrap();
-    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(vec2(1600.0, 1000.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(s));
     h.run_steps(3);
     assert!(h.state().session.active_comp().is_none());
     let from = rect(&h, &format!("project.item.{footage}.name")).center();
@@ -322,7 +328,10 @@ fn multiple_selected_footage_dropped_on_empty_timeline_asks_how_to_create_comps(
     let first = s.execute("file.importPlaceholder", json!({"name": "First.png", "width": 160, "height": 90})).unwrap()["item"].as_u64().unwrap();
     let second = s.execute("file.importPlaceholder", json!({"name": "Second.png", "width": 300, "height": 200})).unwrap()["item"].as_u64().unwrap();
     s.state.project_selection = vec![effectcraft_engine::project::ItemId(first), effectcraft_engine::project::ItemId(second)];
-    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(vec2(1600.0, 1000.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(s));
     h.run_steps(3);
     let from = rect(&h, &format!("project.item.{first}.name")).center();
     let to = rect(&h, "panel.Timeline").center();
@@ -341,7 +350,10 @@ fn project_footage_dropped_on_empty_viewer_creates_first_comp() {
         s.execute("file.importPlaceholder", json!({"name": "Landscape.png", "width": 640, "height": 360, "frameRate": 24, "duration": 5})).unwrap()["item"]
             .as_u64()
             .unwrap();
-    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(vec2(1600.0, 1000.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(s));
     h.run_steps(3);
     assert!(h.state().session.active_comp().is_none());
     let from = rect(&h, &format!("project.item.{footage}.name")).center();
@@ -364,7 +376,10 @@ fn multiple_selected_footage_dropped_on_empty_viewer_asks_how_to_create_comps() 
     let first = s.execute("file.importPlaceholder", json!({"name": "First.png", "width": 160, "height": 90})).unwrap()["item"].as_u64().unwrap();
     let second = s.execute("file.importPlaceholder", json!({"name": "Second.png", "width": 300, "height": 200})).unwrap()["item"].as_u64().unwrap();
     s.state.project_selection = vec![effectcraft_engine::project::ItemId(first), effectcraft_engine::project::ItemId(second)];
-    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(vec2(1600.0, 1000.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(s));
     h.run_steps(3);
     let from = rect(&h, &format!("project.item.{first}.name")).center();
     let viewer = rect(&h, "panel.Composition");
@@ -650,7 +665,10 @@ fn import_dialog_offers_the_image_sequence_option() {
 /// of it, as in After Effects.
 #[test]
 fn new_composition_from_footage_makes_a_comp_of_the_picked_file() {
-    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(Session::default()));
+    let mut h = Harness::builder()
+        .with_size(vec2(1600.0, 1000.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(Session::default()));
     h.run_steps(3);
     let dir = frames("fromfootage", 2);
     let pick = dir.join("frame_0002.png").to_string_lossy().to_string();
@@ -667,8 +685,8 @@ fn new_composition_from_footage_makes_a_comp_of_the_picked_file() {
 }
 
 /// #297: a folder of frames dropped on the window arrives as one image sequence, and Interpret
-/// Footage shows its frames and Start Timecode (missing frames always show colour bars, as in
-/// After Effects: there is no Missing Frames choice). #431: dropped files import as stills, one
+/// Footage shows its frames and Start Timecode (a missing frame always holds the previous one:
+/// there is no Missing Frames choice). #431: dropped files import as stills, one
 /// item each, as in After Effects.
 #[test]
 fn a_dropped_folder_imports_as_one_sequence_with_sequence_interpretation() {
@@ -702,7 +720,10 @@ fn a_dropped_folder_imports_as_one_sequence_with_sequence_interpretation() {
 fn illustrator_import_offers_and_applies_retain_layer_sizes() {
     let path = std::env::temp_dir().join(format!("effectcraft-retain-ui-{}.ai", std::process::id()));
     std::fs::write(&path, b"%PDF-1.4\n1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 120 80] /Contents 4 0 R >> endobj\n4 0 obj << >> stream\n1 0 0 rg 20 15 30 20 re f\nendstream endobj\n%%EOF").unwrap();
-    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(effectcraft_host::session()));
+    let mut h = Harness::builder()
+        .with_size(vec2(1600.0, 1000.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(effectcraft_host::session()));
     h.run_steps(3);
     let ctx = h.ctx.clone();
     effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "file.import", json!({"paths": [path]})).unwrap();
@@ -721,4 +742,166 @@ fn illustrator_import_offers_and_applies_retain_layer_sizes() {
     let effectcraft_engine::project::ItemKind::Footage(f) = &s.project.item(item).unwrap().kind else { panic!("footage") };
     assert_eq!((f.width, f.height), (30, 20));
     assert!(f.layer.as_ref().unwrap().layer_size);
+}
+
+/// An After Effects project, written by File ▸ Export ▸ Adobe After Effects Project… to a folder of its
+/// own: composition "Intro" with a solid.
+fn aep_file(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("ec-ui-aep-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("Intro.aep");
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Intro", "width": 320, "height": 180, "frameRate": 30, "duration": 2})).unwrap();
+    s.execute("layer.newSolid", json!({"name": "Backdrop", "color": "#204060"})).unwrap();
+    s.execute("file.exportAep", json!({"path": path.to_string_lossy(), "allowLosses": true})).unwrap();
+    path
+}
+
+/// The open composition is "Intro", in the folder named after the imported file.
+fn intro_is_open_in_its_folder(h: &Harness<'_, EffectcraftApp>) {
+    let s = &h.state().session;
+    let comp = s.project.item(s.active_comp_id().expect("a composition is open")).unwrap();
+    assert_eq!(comp.name, "Intro");
+    let folder = s.project.item(comp.parent.expect("in a folder")).unwrap();
+    assert_eq!(folder.name, "Intro.aep");
+    assert!(matches!(folder.kind, effectcraft_engine::project::ItemKind::Folder));
+}
+
+/// Dropped After Effects projects import as File ▸ Import ▸ Adobe After Effects Project… does
+/// (they were refused as unsupported footage): each in a folder named after its file, the last
+/// one's composition open. With nothing lost, nothing is asked.
+#[test]
+fn dropped_after_effects_projects_import_and_open_their_composition() {
+    let (mut h, _) = harness();
+    let aep = aep_file("drop");
+    h.event(Event::PointerMoved(rect(&h, "viewer.area").center()));
+    h.step();
+    let outro = aep.with_file_name("Outro.aep");
+    std::fs::copy(&aep, &outro).unwrap();
+    h.input_mut().dropped_files.push(Arc::new(Dropped(outro)));
+    h.input_mut().dropped_files.push(Arc::new(Dropped(aep)));
+    h.run_steps(3);
+    assert_eq!(h.state().dialog, None, "nothing is lost, so nothing to ask");
+    assert!(h.state().session.project.items.values().any(|i| i.name == "Outro.aep"), "the first project too");
+    intro_is_open_in_its_folder(&h);
+    assert_eq!(h.state().ui.status, "", "no errors");
+}
+
+/// File ▸ Import ▸ File… offers After Effects projects; a picked one imports as a project, and
+/// the other files picked with it as footage.
+#[test]
+fn import_file_dialog_imports_a_picked_after_effects_project_with_the_other_files() {
+    let (mut h, _) = harness();
+    let aep = aep_file("pick");
+    let still = aep.with_file_name("still.png");
+    std::fs::write(&still, b"").unwrap();
+    let offered = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let seen = offered.clone();
+    let picked = vec![aep.to_string_lossy().to_string(), still.to_string_lossy().to_string()];
+    h.state_mut().session.importer = Some(Arc::new(Stills));
+    h.state_mut().hooks.pick_files = Some(Box::new(move |exts: &[&str]| {
+        *seen.lock().unwrap() = exts.iter().map(|e| e.to_string()).collect();
+        picked.clone()
+    }));
+    let ctx = h.ctx.clone();
+    effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "file.import", json!({})).unwrap();
+    assert!(["aep", "aepx"].iter().all(|e| offered.lock().unwrap().iter().any(|o| o == e)), "{:?}", offered.lock().unwrap());
+    step_until(&mut h, |h| footage_items(h).iter().any(|(n, _)| n == "still.png"));
+    intro_is_open_in_its_folder(&h);
+}
+
+/// Footage dropped with an After Effects project goes to the Project panel only, also over the
+/// Timeline: the project opens its own composition, which the footage does not join.
+#[test]
+fn footage_dropped_with_an_after_effects_project_stays_in_the_project_panel() {
+    let (mut h, _) = harness();
+    let aep = aep_file("with-footage");
+    let still = aep.with_file_name("still.png");
+    std::fs::write(&still, b"").unwrap();
+    h.state_mut().session.importer = Some(Arc::new(Stills));
+    h.event(Event::PointerMoved(rect(&h, "panel.Timeline").center()));
+    h.step();
+    h.input_mut().dropped_files.push(Arc::new(Dropped(still)));
+    h.input_mut().dropped_files.push(Arc::new(Dropped(aep)));
+    h.run_steps(3);
+    step_until(&mut h, |h| footage_items(h).iter().any(|(n, _)| n == "still.png"));
+    h.run_steps(2);
+    intro_is_open_in_its_folder(&h);
+    let s = &h.state().session;
+    assert!(s.project.comps().all(|(_, c)| c.layers.iter().all(|l| l.name != "still.png")), "no composition got a still.png layer");
+}
+
+/// A dropped After Effects project with parts that cannot come over asks first (the losses
+/// prompt). The projects dropped with it wait for the answer; the other files import meanwhile,
+/// a Photoshop file with Default Drag Import As (one dialog at a time). Cancel skips only the
+/// project it asks about; Import Anyway imports it.
+#[test]
+fn a_dropped_after_effects_project_with_losses_asks_first() {
+    let (mut h, _) = harness();
+    let intro = aep_file("losses");
+    let lossy = intro.with_file_name("Synthetic.aep");
+    std::fs::copy(concat!(env!("CARGO_MANIFEST_DIR"), "/../aep/tests/fixtures/synthetic.aep"), &lossy).unwrap();
+    h.state_mut().session.importer = Some(Arc::new(Gated { started: AtomicUsize::new(0), allow: Arc::new(AtomicUsize::new(usize::MAX)) }));
+    h.state_mut().session.prefs.import.drag_import_as = "footage".into();
+    for path in [lossy.clone(), intro.clone(), intro.with_file_name("Layers.PSD"), intro.with_file_name("still.png")] {
+        h.input_mut().dropped_files.push(Arc::new(Dropped(path)));
+    }
+    h.run_steps(3);
+    assert_eq!(h.state().dialog, Some(effectcraft_ui_egui::Dialog::AepLosses), "the drop asks first");
+    assert_eq!(h.state_mut().dialog_state_mut().aep_losses.queue, [intro.to_string_lossy().to_string()], "the other project waits");
+    let named = |h: &Harness<'_, EffectcraftApp>, name: &str| h.state().session.project.items.values().any(|i| i.name == name);
+    assert!(!named(&h, "Synthetic.aep") && !named(&h, "Intro.aep"), "no project imported before the answer");
+    step_until(&mut h, |h| ["Layers.PSD", "still.png"].iter().all(|n| footage_items(h).iter().any(|(f, _)| f == n)));
+    assert_eq!(h.state().dialog, Some(effectcraft_ui_egui::Dialog::AepLosses), "the footage did not replace the prompt");
+
+    click_id(&mut h, "dialog.aepLosses.cancel");
+    h.run_steps(2);
+    assert_eq!(h.state().dialog, None);
+    assert!(!named(&h, "Synthetic.aep"), "Cancel skips the project it asked about");
+    intro_is_open_in_its_folder(&h);
+
+    h.input_mut().dropped_files.push(Arc::new(Dropped(lossy)));
+    h.run_steps(3);
+    assert_eq!(h.state().dialog, Some(effectcraft_ui_egui::Dialog::AepLosses));
+    click_id(&mut h, "dialog.aepLosses.continue");
+    h.run_steps(2);
+    assert_eq!(h.state().dialog, None);
+    assert!(named(&h, "Synthetic.aep"), "Import Anyway imports it");
+}
+
+/// An After Effects project with nothing lost imports at once, so a Photoshop file dropped with
+/// it still asks how to import it (Import Photoshop File).
+#[test]
+fn a_photoshop_file_dropped_with_an_after_effects_project_still_asks() {
+    let (mut h, _) = harness();
+    h.state_mut().session.importer = Some(Arc::new(Gated { started: AtomicUsize::new(0), allow: Arc::new(AtomicUsize::new(usize::MAX)) }));
+    let aep = aep_file("with-psd");
+    h.input_mut().dropped_files.push(Arc::new(Dropped(aep.with_file_name("Layers.PSD"))));
+    h.input_mut().dropped_files.push(Arc::new(Dropped(aep)));
+    h.run_steps(2);
+    intro_is_open_in_its_folder(&h);
+    assert_eq!(h.state().dialog, Some(effectcraft_ui_egui::Dialog::Form), "Import Photoshop File asks");
+}
+
+/// A dropped file that is not an After Effects project reports why, changes nothing, and the
+/// other files of the drop still import.
+#[test]
+fn a_corrupt_dropped_after_effects_project_reports_and_keeps_the_other_files() {
+    let (mut h, _) = harness();
+    let dir = aep_file("corrupt").parent().unwrap().to_path_buf();
+    let broken = dir.join("Broken.aep");
+    std::fs::write(&broken, b"not an After Effects project").unwrap();
+    let still = dir.join("still.png");
+    std::fs::write(&still, b"").unwrap();
+    h.state_mut().session.importer = Some(Arc::new(Stills));
+    let comp = h.state().session.active_comp_id();
+    h.input_mut().dropped_files.push(Arc::new(Dropped(broken)));
+    h.input_mut().dropped_files.push(Arc::new(Dropped(still)));
+    h.run_steps(3);
+    step_until(&mut h, |h| footage_items(h).iter().any(|(n, _)| n == "still.png"));
+    let status = h.state().ui.status.clone();
+    assert!(status.contains("Broken.aep"), "the error names the file: {status}");
+    assert!(!h.state().session.project.items.values().any(|i| i.name == "Broken.aep"));
+    assert_eq!(h.state().session.active_comp_id(), comp, "the open composition stays");
 }

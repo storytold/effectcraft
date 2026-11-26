@@ -24,8 +24,7 @@
 //! * Configuration ▸ Custom reads a `.ocio` file instead ([`crate::ocio_config`]); what it can't
 //!   apply is reported by [`warning`].
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
 
 use effectcraft_color::ColorSpace;
 use effectcraft_color::space::{invert, mul, mul_vec, rgb_to_xyz};
@@ -51,6 +50,7 @@ pub use effects::parse_looks;
 pub use effects::{color_stabilizer_maps, warning};
 #[cfg(test)]
 use effects::{tonemap, tonemap_inv};
+pub(crate) use lut::cached_files;
 pub use lut::{FileXform, load_file};
 #[cfg(test)]
 pub use lut::{parse_file, parse_spi1d, parse_spi3d, parse_spimtx};

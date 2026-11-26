@@ -321,6 +321,58 @@ fn content_aware_fill_removes_an_object() {
     assert!(s2.execute("contentFill.generate", json!({"wait": true, "outputDir": tmp("caf2").to_string_lossy()})).is_err());
 }
 
+/// A scratch folder that cannot be created surfaces as an error, not a cancelled fill or a
+/// black frame (#2570 review).
+#[test]
+fn content_aware_fill_reports_a_spill_failure() {
+    let (mut s, _, _, _) = setup(48, 32, 0.2, |f| {
+        let mut img = Image::new(48, 32);
+        for y in 0..32 {
+            for x in 0..48 {
+                img.set(x, y, bg(x as f32 + f as f32, y as f32));
+            }
+        }
+        img
+    });
+    s.execute("layer.addMask", json!({"rect": [20.0, 10.0, 8.0, 8.0], "mode": "subtract"})).unwrap();
+    let dir = tmp("cafspill");
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("not-a-folder");
+    std::fs::write(&file, b"x").unwrap();
+    // The fill wants to create its spill here; the parent is a file.
+    let out = file.join("fills");
+    let e = s.execute("contentFill.generate", json!({"method": "object", "outputDir": out.to_string_lossy(), "wait": true})).unwrap_err();
+    // The OS wording differs ("Not a directory" on Unix, "Cannot create a file when that file
+    // already exists" on Windows), so look for the fill's own marker.
+    let msg = e.to_string();
+    assert!(msg.contains("spill: cannot make the scratch file"), "not a spill error: {msg}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A fill plan that comes back without files or frames (a job worker that wrote none) is an
+/// error, not a crash on the first file (#2570 review).
+#[test]
+fn content_aware_fill_without_files_is_an_error() {
+    let (mut s, cid, lid, _) = setup(48, 32, 0.2, |_| Image::filled(48, 32, [0.5, 0.5, 0.5, 1.0]));
+    let plan = crate::commands::content_fill::FillPlan {
+        comp: cid,
+        layer: lid,
+        name: "Clip".into(),
+        width: 48,
+        height: 32,
+        times: vec![Tick::ZERO],
+        method: "object".into(),
+        lighting: 0.0,
+        expand: 0,
+        reference: None,
+        dir: "Clip_Fill_1".into(),
+    };
+    assert!(crate::commands::content_fill::apply_plan(&mut s, &plan, vec![]).is_err());
+    let empty = crate::commands::content_fill::FillPlan { times: vec![], ..plan };
+    assert!(crate::commands::content_fill::apply_plan(&mut s, &empty, vec!["Clip_Fill_1/fill_00000.png".into()]).is_err());
+    assert_eq!(s.project.comp(cid).unwrap().layers.len(), 1, "no fill layer was added");
+}
+
 #[test]
 fn content_aware_fill_runs_in_the_background() {
     let (mut s, _, _, _) = setup(48, 32, 0.2, |f| {

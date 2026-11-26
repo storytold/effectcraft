@@ -75,7 +75,8 @@ fn click(h: &mut Harness<'_, EffectcraftApp>, at: egui::Pos2, modifiers: egui::M
 #[test]
 fn deleting_viewer_track_points_preserves_the_effect_and_layer() {
     let (a, plate, uid) = app();
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| a);
+    let mut h =
+        Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| a);
     h.state_mut().show_panel(PanelKind::Composition);
     h.run_steps(4);
     let point = rect(&h, "viewer.cameraTracker.point.7").center();
@@ -92,7 +93,8 @@ fn deleting_viewer_track_points_preserves_the_effect_and_layer() {
 #[test]
 fn viewer_points_selection_and_effect_controls() {
     let (a, plate, uid) = app();
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| a);
+    let mut h =
+        Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| a);
     h.state_mut().show_panel(PanelKind::Composition);
     h.run_steps(4);
     let all = ids(&h);
@@ -188,7 +190,7 @@ fn blender_export_button_opens_python_dialog_and_writes_scene() {
     let builder = Harness::builder().with_size(egui::vec2(1600.0, 1000.0));
     let builder = if shot.is_some() { builder.wgpu() } else { builder };
     let _device = shot.is_some().then(crate::gpu_test::lock);
-    let mut h = builder.build_eframe(|_| a);
+    let mut h = builder.with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| a);
     h.state_mut().show_panel(PanelKind::EffectControls);
     h.run_steps(5);
     let button = rect(&h, &format!("effectControls.cameraTracker.{uid}.exportBlender"));
@@ -200,6 +202,34 @@ fn blender_export_button_opens_python_dialog_and_writes_scene() {
     let script = std::fs::read_to_string(output).expect("clicking the export button saves a Python scene");
     assert!(script.contains("def import_scene():"));
     assert_eq!(h.state().session.active_comp().unwrap().layers.len(), 1, "export does not create a camera in the source project");
+}
+
+/// A solve with unsolved (interpolated) frames says so in Effect Controls, with the count, on a
+/// line of its own that pushes the Export button down.
+#[test]
+fn effect_controls_show_how_many_frames_a_partial_solve_solved() {
+    let (a, plate, uid) = app();
+    let mut h =
+        Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| a);
+    h.state_mut().show_panel(PanelKind::EffectControls);
+    h.run_steps(4);
+    let line = format!("effectControls.cameraTracker.{uid}.partialSolve");
+    let export = format!("effectControls.cameraTracker.{uid}.exportBlender");
+    assert!(!ids(&h).contains(&line), "a full solve has no partial-solve line");
+    let before = rect(&h, &export);
+
+    let g = h.state().session.active_comp().unwrap().layer(effectcraft_engine::project::LayerId(plate)).unwrap().props.find_group(uid).unwrap();
+    let mut solve = ct::solve(&effectcraft_engine::camera_track::static_params(g)).unwrap().as_ref().clone();
+    for f in solve.frames.iter_mut().skip(24) {
+        f.solved = false;
+    }
+    let s = &mut h.state_mut().session;
+    s.execute("prop.set", json!({"layer": plate, "path": "effects/#1/solve", "value": solve.to_json()})).unwrap();
+    s.camera_pending.clear();
+    h.run_steps(4);
+    let e = h.state().auto.find(&line).expect("the partial-solve line is drawn");
+    assert_eq!(e.label, "Partial solve: 24 of 60 frames solved");
+    assert!((rect(&h, &export).min.y - before.min.y - 18.0).abs() < 0.5, "the Export button moves down one line");
 }
 
 /// Drag with `button` from `from` to `to` in steps, then release.
@@ -220,7 +250,8 @@ fn drag_with(h: &mut Harness<'_, EffectcraftApp>, button: egui::PointerButton, f
 #[test]
 fn viewer_zooms_and_pans_over_the_track_points() {
     let (a, ..) = app();
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| a);
+    let mut h =
+        Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| a);
     h.state_mut().show_panel(PanelKind::Composition);
     h.run_steps(4);
     // Wheel over a point: zooms.
@@ -283,7 +314,12 @@ fn snapshot_showcase_track() {
     s.execute("layer.select", json!({"layers": ["#1"]})).unwrap();
     s.execute("track.camera", json!({"layer": "#1", "wait": true})).unwrap();
     s.execute("time.set", json!({"time": 2.0})).unwrap();
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_pixels_per_point(1.0).wgpu().build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .with_pixels_per_point(1.0)
+        .wgpu()
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(s));
     h.state_mut().show_panel(PanelKind::Composition);
     settle(&mut h);
     let pts: Vec<String> = ids(&h).into_iter().filter(|i| i.starts_with("viewer.cameraTracker.point.")).collect();

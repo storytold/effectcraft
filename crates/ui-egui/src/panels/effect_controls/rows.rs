@@ -1,7 +1,7 @@
 use super::common::{Actions, DIAL_ROW, PARAM_NAME_X, ROW, TREE_INDENT, gesture_key};
 use super::{
-    Align2, Color32, EffectcraftApp, EvalCtx, FxPick, Icon, Layer, Node, ParamUi, PropGroup, Property, Rect, Sense, Stroke, Tokens, Value, fw, icons, json,
-    pos2, vec2, widgets,
+    Align2, Color32, EffectcraftApp, EvalCtx, FxPick, GroupKind, Icon, Layer, Node, ParamUi, PropGroup, Property, Rect, Sense, Stroke, Tokens, Value, fw,
+    icons, json, pos2, vec2, widgets,
 };
 
 fn triangle(p: &egui::Painter, c: egui::Pos2, left: bool, col: Color32) {
@@ -65,6 +65,9 @@ pub(crate) fn toggle_pick(app: &mut EffectcraftApp, kind: &str, layer: &Layer, p
         app.ui.text_color_pick = None;
         app.ui.status = if kind == "point" {
             format!("Click in the Composition panel to set {}", prop.name)
+        } else if kind == crate::panels::crypto_pick::KIND {
+            let keys = crate::panels::crypto_pick::remove_keys(egui::os::OperatingSystem::from_target_os());
+            crate::i18n::tr_args("Click IDs in the Composition panel: Shift adds, {} removes, Esc ends", &[&keys])
         } else {
             format!("Click in the Composition panel to sample {}", prop.name)
         };
@@ -125,6 +128,18 @@ impl PropCx<'_> {
     }
 }
 
+/// Shows property `uid` of layer `layer` in the Timeline: its layer and groups twirled open, the
+/// property scrolled to and the Timeline brought forward (After Effects' Reveal in Timeline,
+/// which a double-click on the property's name does; #1497).
+fn reveal_in_timeline(app: &mut EffectcraftApp, ctx: &egui::Context, layer: u64, uid: u64) {
+    app.ui.timeline.search.clear();
+    app.ui.timeline.scroll_to = Some(crate::state::ScrollTo::Property(uid));
+    if let Err(e) = crate::menus::frontend(app, ctx, "timeline.revealProps", json!({"props": [{"layer": layer, "prop": uid}]})) {
+        app.ui.status = e;
+    }
+    app.show_panel(crate::dock::PanelKind::Timeline);
+}
+
 /// One property row: stopwatch, name, value control (and the keyframe navigator). Returns the
 /// value fields of a vector, one per dimension, for the pick whip.
 #[allow(clippy::too_many_arguments)]
@@ -164,7 +179,16 @@ fn prop_row(
             },
         );
         app.auto.add(&format!("effectControls.prop.{uid}.stopwatch"), swr, &prop.name);
-        if resp.clicked() {
+        if resp.clicked() && ui.input(|i| i.modifiers.alt) {
+            // Alt+click adds an expression (or removes it), as in the Timeline. Effect Controls
+            // has no expression field: the property shows in the Timeline with its new
+            // expression's editor taking the keyboard, as After Effects does (#1460).
+            actions.push(("prop.setExpression".into(), json!({"layer": layer.id.0, "prop": uid})));
+            if prop.expr.is_none() {
+                reveal_in_timeline(app, ui.ctx(), layer.id.0, uid);
+            }
+            crate::panels::timeline::expression_toggled(app, ui.ctx(), prop);
+        } else if resp.clicked() {
             actions.push(("prop.toggleAnimation".into(), json!({"layer": layer.id.0, "prop": uid, "selected": true})));
         }
     }
@@ -198,12 +222,7 @@ fn prop_row(
     p.with_clip_rect(name_clip.intersect(p.clip_rect())).text(pos2(swr.max.x + 6.0, cy), Align2::LEFT_CENTER, &prop.name, Tokens::ui(12.0), t.text);
     let name_response = ui.interact(name_clip, egui::Id::unique(("ec-prop-name", uid)), Sense::click());
     if name_response.double_clicked() {
-        app.ui.timeline.search.clear();
-        app.ui.timeline.scroll_to = Some(crate::state::ScrollTo::Property(uid));
-        if let Err(e) = crate::menus::frontend(app, ui.ctx(), "timeline.revealProps", json!({"props": [{"layer": layer.id.0, "prop": uid}]})) {
-            app.ui.status = e;
-        }
-        app.show_panel(crate::dock::PanelKind::Timeline);
+        reveal_in_timeline(app, ui.ctx(), layer.id.0, uid);
     }
     app.auto.add(&format!("effectControls.prop.{uid}.name"), name_clip, &prop.name);
     // With several layers selected the edit applies to the same effect property of each (#491).
@@ -216,6 +235,8 @@ fn prop_row(
         Value::Vec2(_) | Value::Vec3(_) => dims = value_vector(app, ui, &cx, &value, actions),
         Value::Color(_) => value_color(app, ui, &cx, &value, actions),
         Value::Bool(_) => value_toggle(app, ui, &cx, &value, actions),
+        // Cryptomatte's Layer: the Cryptomatte layers the footage's metadata names.
+        Value::Enum(_) if crate::panels::fx_editors::is_crypto_layer(group, prop) => value_crypto_layer(app, ui, &cx, &value, actions),
         Value::Enum(_) => value_popup(app, ui, &cx, &value, actions),
         Value::Layer(_) => value_layer_ref(app, ui, &cx, &value, actions),
         // EXtractoR's red / green / blue / alpha: a popup of the footage's OpenEXR channels (#295).
@@ -255,20 +276,23 @@ fn value_mask(app: &mut EffectcraftApp, ui: &mut egui::Ui, cx: &PropCx, value: &
     }
 }
 
+/// Draws an angle property's value cell as revolutions plus degrees and queues a set action when it is edited.
 fn value_angle(app: &mut EffectcraftApp, ui: &mut egui::Ui, cx: &PropCx, value: &Value, actions: &mut Actions) {
     let Value::Scalar(v) = value else {
         return;
     };
     let PropCx { uid, cy, vx, prop, .. } = *cx;
-    let (rr, dr, nv) = fw::angle_field(ui, pos2(vx, cy - 9.0), egui::Id::unique(("ec-v", uid)), *v, 1, &cx.value_tokens());
+    let (rr, dr, nv, step) = fw::angle_field_step(ui, pos2(vx, cy - 9.0), egui::Id::unique(("ec-v", uid)), *v, 1, &cx.value_tokens());
     app.auto.add(&format!("effectControls.prop.{uid}.value"), rr.union(dr), &fw::format_angle(*v, 1));
     app.auto.add(&format!("effectControls.prop.{uid}.revolutions"), rr, &prop.name);
     if let Some(nv) = nv {
         cx.set(actions, json!(nv));
+        widgets::mark_step(actions.last_mut(), step);
     }
     cx.twirl_open(app, ui);
 }
 
+/// Draws a single-number property's value cell with its range, unit suffix and scrub speed, and queues a set action when it is edited.
 fn value_scalar(app: &mut EffectcraftApp, ui: &mut egui::Ui, cx: &PropCx, value: &Value, actions: &mut Actions) {
     let Value::Scalar(v) = value else {
         return;
@@ -283,7 +307,7 @@ fn value_scalar(app: &mut EffectcraftApp, ui: &mut egui::Ui, cx: &PropCx, value:
         _ => "",
     };
     let speed = widgets::slider_scrub_speed(&prop.ui);
-    let (vr, nv, _) = widgets::hot_number_at(
+    let (vr, nv, _, step) = widgets::hot_number_step_at(
         ui,
         pos2(vx, cy - 9.0),
         egui::Id::unique(("ec-v", uid)),
@@ -294,6 +318,7 @@ fn value_scalar(app: &mut EffectcraftApp, ui: &mut egui::Ui, cx: &PropCx, value:
     app.auto.add(&format!("effectControls.prop.{uid}.value"), vr, &prop.name);
     if let Some(nv) = nv {
         cx.set(actions, json!(nv));
+        widgets::mark_step(actions.last_mut(), step);
     }
     // AE hides a slider param's slider until its twirl is opened (see `slider_row`).
     if matches!(prop.ui, ParamUi::Slider { .. }) {
@@ -301,6 +326,8 @@ fn value_scalar(app: &mut EffectcraftApp, ui: &mut egui::Ui, cx: &PropCx, value:
     }
 }
 
+/// Draws one numeric cell per component of a point or vector property, with the pick crosshair for points.
+/// Returns the cell rectangles.
 fn value_vector(app: &mut EffectcraftApp, ui: &mut egui::Ui, cx: &PropCx, value: &Value, actions: &mut Actions) -> Vec<Rect> {
     let mut dims = vec![];
     let PropCx { t, uid, cy, vx, layer, prop, .. } = *cx;
@@ -321,7 +348,7 @@ fn value_vector(app: &mut EffectcraftApp, ui: &mut egui::Ui, cx: &PropCx, value:
         x += 22.0;
     }
     for d in 0..n.min(c.len()) {
-        let (vr, nv, _) = widgets::hot_number_at(
+        let (vr, nv, _, step) = widgets::hot_number_step_at(
             ui,
             pos2(x, cy - 9.0),
             egui::Id::unique(("ec-v", uid, d)),
@@ -340,6 +367,7 @@ fn value_vector(app: &mut EffectcraftApp, ui: &mut egui::Ui, cx: &PropCx, value:
             if let Some((_, a)) = actions.last_mut() {
                 a["dims"] = json!([d]);
             }
+            widgets::mark_step(actions.last_mut(), step);
         }
         x = vr.max.x + 8.0;
     }
@@ -401,6 +429,33 @@ fn value_popup(app: &mut EffectcraftApp, ui: &mut egui::Ui, cx: &PropCx, value: 
         if let Some(ni) = widgets::popup_menu(ui, pop, dr.left_bottom(), options, Some(*i as usize)) {
             cx.set_step(actions, json!(ni));
         }
+    }
+}
+
+/// Cryptomatte's Layer popup: the Cryptomatte layers of the layer's OpenEXR footage (the three
+/// standard ones when there are none). The stored value stays the index
+/// [`effectcraft_engine::effects::crypto_layer_name`] reads, so older projects load unchanged.
+fn value_crypto_layer(app: &mut EffectcraftApp, ui: &mut egui::Ui, cx: &PropCx, value: &Value, actions: &mut Actions) {
+    let Value::Enum(i) = value else {
+        return;
+    };
+    let PropCx { t, uid, cy, vx, r, p, layer, prop, .. } = *cx;
+    // The channels of the frame the render just read: decoded files are cached.
+    let aux = app.session.layer_channels(layer.id);
+    let (choices, shown) = effectcraft_engine::effects::crypto_layer_menu(aux.as_deref(), *i as usize);
+    let names: Vec<String> = choices.iter().map(|c| c.1.clone()).collect();
+    let widest = names.iter().map(|o| p.layout_no_wrap(o.clone(), Tokens::ui(11.5), t.text).size().x).fold(0.0, f32::max);
+    let dr = Rect::from_min_size(pos2(vx, cy - 9.0), vec2((widest + 30.0).clamp(80.0, (r.max.x - vx - 56.0).max(80.0)), 18.0));
+    let pop = egui::Id::unique(("ec-epop", uid));
+    if widgets::dropdown(ui, dr, shown.as_deref().unwrap_or(""), &t, egui::Id::unique(("ec-e", uid))).clicked() {
+        widgets::open_popup(ui, pop);
+    }
+    app.auto.add(&format!("effectControls.prop.{uid}.value"), dr, &prop.name);
+    let cur = names.iter().position(|n| Some(n) == shown.as_ref());
+    if let Some(ni) = widgets::popup_menu(ui, pop, dr.left_bottom(), &names, cur)
+        && let Some(c) = choices.get(ni)
+    {
+        cx.set_step(actions, json!(c.0));
     }
 }
 
@@ -485,11 +540,27 @@ fn value_text(app: &mut EffectcraftApp, ui: &mut egui::Ui, cx: &PropCx, value: &
     let Value::Str(s) = value else {
         return;
     };
-    let PropCx { t, uid, cy, vx, r, layer, prop, .. } = *cx;
-    let fr = Rect::from_min_size(pos2(vx, cy - 9.0), vec2((r.max.x - vx - 12.0).clamp(80.0, 320.0), 18.0));
+    let PropCx { t, uid, cy, vx, r, layer, group, prop, .. } = *cx;
+    // Cryptomatte's Selection also has an eyedropper that picks IDs in the viewer (#473).
+    let crypto = matches!(&group.kind, GroupKind::Effect { effect } if effect == "ec.3d.cryptomatte") && prop.match_id == "selection";
+    let fr = Rect::from_min_size(pos2(vx, cy - 9.0), vec2((r.max.x - vx - if crypto { 36.0 } else { 12.0 }).clamp(80.0, 320.0), 18.0));
+    if crypto {
+        let er = Rect::from_center_size(pos2(fr.max.x + 14.0, cy), vec2(18.0, 18.0));
+        let active = app.ui.fx_pick.as_ref().is_some_and(|k| k.prop == uid && k.kind == crate::panels::crypto_pick::KIND);
+        if fw::eyedropper_button(ui, er, active, egui::Id::unique(("ec-eye", uid)), &t)
+            .on_hover_text(crate::i18n::tr("Eyedropper: click, then click in the Composition panel"))
+            .clicked()
+        {
+            toggle_pick(app, crate::panels::crypto_pick::KIND, layer, prop);
+        }
+        app.auto.add(&format!("effectControls.prop.{uid}.eyedropper"), er, &prop.name);
+    }
     let bid = egui::Id::unique(("ec-text", uid));
     let mut buf: String = ui.data(|d| d.get_temp(bid)).unwrap_or_else(|| s.to_owned());
     let resp = widgets::text_field(ui, fr, &mut buf, "", &t);
+    // Cut off by a narrow panel (a long Selection): the whole text on hover.
+    let cut = !resp.has_focus() && ui.painter().layout_no_wrap(buf.clone(), egui::TextStyle::Body.resolve(ui.style()), t.text).size().x > fr.width() - 17.0;
+    let resp = if cut { resp.on_hover_text(buf.clone()) } else { resp };
     // The field has no visible hint: give the screen reader the parameter's name.
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, ui.is_enabled(), &prop.name));
     app.auto.add(&format!("effectControls.prop.{uid}.value"), fr, &prop.name);

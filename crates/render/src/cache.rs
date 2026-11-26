@@ -22,40 +22,128 @@ use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
 
 use effectcraft_effects::Buf;
+use effectcraft_keyframe::Value;
 use effectcraft_project::{FootageKind, ItemKind, Layer, LayerSource, Node, PropGroup};
 
+use crate::disk_cache::{EntryFiles, SharedVirtualFileId, VirtualFileId, layer_disk_key};
 use crate::eval::EvalCtx;
+use crate::reads::ReadFiles;
 
 mod dependencies;
 
 /// Thread-safe, memory-budgeted cache of processed layer buffers, optionally backed by the
 /// persistent [`DiskCache`](crate::disk_cache::DiskCache): a memory miss reads the disk, and
-/// buffers that were slow to render are written there (keys salted per project, see
-/// [`LayerCache::set_disk`]).
+/// buffers that were slow to render are written there with the source files they were made of
+/// (keys: [`crate::disk_cache::layer_disk_key`]; an entry is used only while its files are
+/// unchanged, #3184).
 pub struct LayerCache {
     inner: Mutex<Inner>,
-    disk: Mutex<Option<(Arc<crate::disk_cache::DiskCache>, u64)>>,
+    disk: Mutex<Option<Arc<crate::disk_cache::DiskCache>>>,
     /// Another persistent store when there is no disk cache (the browser's, [`PrefetchStore`]).
-    store: Mutex<Option<(Arc<dyn LayerStore>, u64)>>,
+    store: Mutex<Option<Arc<dyn LayerStore>>>,
+    /// Size and content hash of files served from memory (the browser file table), to store
+    /// and check the source files of persistent entries.
+    virtual_id: Mutex<Option<SharedVirtualFileId>>,
     /// While set, inserts are dropped (see [`LayerCache::set_gate`]).
     gate: Mutex<Option<Arc<std::sync::atomic::AtomicBool>>>,
 }
 
 struct Entry {
     buf: Arc<Buf>,
+    /// The source files the buffer was made of (see [`crate::reads`]).
+    files: Arc<ReadFiles>,
     bytes: usize,
     last_use: u64,
+    /// When it was last used, for the memory accountant ([`crate::memory::tick`]).
+    used: u64,
+    /// What it took to make (its render, or its read from the disk cache), in microseconds.
+    cost_us: u64,
 }
 
 struct Inner {
     map: HashMap<u64, Entry>,
+    /// The keys by last use (`Entry::last_use`, unique: the clock moves on every use), oldest
+    /// first: the memory accountant asks for the oldest often, so it is not looked for.
+    order: std::collections::BTreeMap<u64, u64>,
     bytes: usize,
     budget: usize,
     clock: u64,
     hits: u64,
     misses: u64,
-    /// When each recent miss happened (to time the render that follows it).
+    /// When each recent miss happened, to time the render that follows it (the drop generation
+    /// a render's reads started at travels with its files instead, [`ReadFiles::since`]: two
+    /// renders of a key may overlap).
     missed_at: HashMap<u64, web_time::Instant>,
+    /// Keys let go of lately (newest last, at most [`EVICTED_KEPT`]) and how many of them were
+    /// asked for again: a cache that keeps making again what it just let go of is thrashing
+    /// ([`crate::memory::MemoryHolder::refills`]).
+    evicted: std::collections::VecDeque<u64>,
+    refills: u64,
+}
+
+/// Keys of evicted buffers remembered to tell a refill (#3271).
+const EVICTED_KEPT: usize = 256;
+
+impl Inner {
+    /// The least recently used entry's key.
+    fn oldest_key(&self) -> Option<u64> {
+        self.order.first_key_value().map(|(_, k)| *k)
+    }
+
+    /// The least recently used entry nobody else holds (a render using its buffer): what the
+    /// memory accountant may drop to free memory now.
+    fn oldest_free_key(&self) -> Option<u64> {
+        self.order.values().copied().find(|k| self.map.get(k).is_some_and(|e| Arc::strong_count(&e.buf) == 1))
+    }
+
+    /// Mark the entry under `key` as used at `now` (the clock), for `order` and the accountant.
+    fn touch(&mut self, key: u64, now: u64) {
+        let Some(e) = self.map.get_mut(&key) else { return };
+        self.order.remove(&e.last_use);
+        e.last_use = now;
+        e.used = crate::memory::tick();
+        self.order.insert(now, key);
+    }
+
+    /// Keep `e` under `key` (replacing what was there).
+    fn put(&mut self, key: u64, e: Entry) {
+        self.order.insert(e.last_use, key);
+        self.bytes = self.bytes.saturating_add(e.bytes);
+        if let Some(old) = self.map.insert(key, e) {
+            self.order.remove(&old.last_use);
+            self.bytes = self.bytes.saturating_sub(old.bytes);
+        }
+    }
+
+    /// Take the entry under `key` out (its bytes no longer counted).
+    fn take(&mut self, key: u64) -> Option<Entry> {
+        let e = self.map.remove(&key)?;
+        self.order.remove(&e.last_use);
+        self.bytes = self.bytes.saturating_sub(e.bytes);
+        Some(e)
+    }
+
+    /// Drop the entry under `key`, remembering its key (a refill if it is asked for again);
+    /// the bytes freed.
+    fn evict(&mut self, key: u64) -> usize {
+        let Some(e) = self.take(key) else { return 0 };
+        if self.evicted.len() >= EVICTED_KEPT {
+            self.evicted.pop_front();
+        }
+        self.evicted.push_back(key);
+        e.bytes
+    }
+
+    /// Drop least recently used entries until at most `bytes` are held, remembering their keys.
+    fn evict_to(&mut self, bytes: usize) {
+        if self.bytes <= bytes {
+            return;
+        }
+        while self.bytes > bytes {
+            let Some(k) = self.oldest_key() else { break };
+            self.evict(k);
+        }
+    }
 }
 
 /// Hit/miss counters and memory use (for perf readouts and tests).
@@ -77,9 +165,21 @@ impl LayerCache {
     /// A cache holding at most `budget` bytes of pixels.
     pub fn new(budget: usize) -> LayerCache {
         LayerCache {
-            inner: Mutex::new(Inner { map: HashMap::new(), bytes: 0, budget, clock: 0, hits: 0, misses: 0, missed_at: HashMap::new() }),
+            inner: Mutex::new(Inner {
+                map: HashMap::new(),
+                order: Default::default(),
+                bytes: 0,
+                budget,
+                clock: 0,
+                hits: 0,
+                misses: 0,
+                missed_at: HashMap::new(),
+                evicted: Default::default(),
+                refills: 0,
+            }),
             disk: Mutex::new(None),
             store: Mutex::new(None),
+            virtual_id: Mutex::new(None),
             gate: Mutex::new(None),
         }
     }
@@ -98,77 +198,81 @@ impl LayerCache {
         self.gate.lock().ok().and_then(|g| g.as_ref().map(|g| g.load(std::sync::atomic::Ordering::Relaxed))).unwrap_or(false)
     }
 
-    /// Attach (or detach) the disk cache. `salt` separates projects and footage versions (see
-    /// `footage_salt`); keys on disk are `(salt, key)`.
-    pub fn set_disk(&self, disk: Option<(Arc<crate::disk_cache::DiskCache>, u64)>) {
+    /// Attach (or detach) the disk cache. It is used at once: its entries check their own
+    /// source files when read, so nothing has to be looked at first.
+    pub fn set_disk(&self, disk: Option<Arc<crate::disk_cache::DiskCache>>) {
         if let Ok(mut d) = self.disk.lock() {
             *d = disk;
         }
     }
 
-    /// Change the disk salt (after footage changed) keeping the attached disk cache.
-    pub fn set_disk_salt(&self, salt: u64) {
-        if let Ok(mut d) = self.disk.lock()
-            && let Some((_, s)) = d.as_mut()
-        {
-            *s = salt;
-        }
-    }
-
+    /// The attached disk cache, if any.
     pub fn disk(&self) -> Option<Arc<crate::disk_cache::DiskCache>> {
-        self.disk.lock().ok()?.as_ref().map(|d| d.0.clone())
+        self.disk.lock().ok()?.clone()
     }
 
     /// Attach (or detach) a [`LayerStore`] used when no disk cache is attached (the browser's
-    /// Origin Private File System through a [`PrefetchStore`]); `salt` as in
-    /// [`LayerCache::set_disk`].
-    pub fn set_store(&self, store: Option<(Arc<dyn LayerStore>, u64)>) {
+    /// Origin Private File System through a [`PrefetchStore`]).
+    pub fn set_store(&self, store: Option<Arc<dyn LayerStore>>) {
         if let Ok(mut s) = self.store.lock() {
             *s = store;
         }
     }
 
-    /// Change the store's salt (a new project or footage), keeping the store.
-    pub fn set_store_salt(&self, salt: u64) {
-        if let Ok(mut d) = self.store.lock()
-            && let Some((_, s)) = d.as_mut()
-        {
-            *s = salt;
+    /// Size and content hash of files served from memory (the browser file table): what a
+    /// persistent entry keeps for them and checks them against.
+    pub fn set_virtual_id(&self, id: Option<SharedVirtualFileId>) {
+        if let Ok(mut v) = self.virtual_id.lock() {
+            *v = id;
         }
     }
 
-    fn disk_key(&self, key: u64) -> Option<(Arc<dyn LayerStore>, u128)> {
-        let salted = |salt: u64| ((salt as u128) << 64) | key as u128;
-        if let Some((dc, salt)) = self.disk.lock().ok()?.as_ref() {
-            return Some((dc.clone() as Arc<dyn LayerStore>, salted(*salt)));
-        }
-        let s = self.store.lock().ok()?;
-        let (st, salt) = s.as_ref()?;
-        Some((st.clone(), salted(*salt)))
+    /// The attached virtual-file identity lookup, if any.
+    fn virtual_id(&self) -> Option<SharedVirtualFileId> {
+        self.virtual_id.lock().ok()?.clone()
     }
 
-    pub fn get(&self, key: u64) -> Option<Arc<Buf>> {
-        let mut g = self.inner.lock().ok()?;
-        g.clock += 1;
-        let now = g.clock;
-        match g.map.get_mut(&key) {
-            Some(e) => {
-                e.last_use = now;
-                let b = e.buf.clone();
-                g.hits += 1;
-                Some(b)
-            }
+    /// The persistent store behind the memory: the disk cache, else the other store.
+    fn persistent(&self) -> Option<Arc<dyn LayerStore>> {
+        if let Some(dc) = self.disk.lock().ok()?.as_ref() {
+            return Some(dc.clone() as Arc<dyn LayerStore>);
+        }
+        self.store.lock().ok()?.clone()
+    }
+
+    /// The buffer kept under `key` and the source files it was made of (see [`crate::reads`]).
+    /// A buffer from the disk cache or another store comes with the files its entry lists, after
+    /// they were found unchanged. A buffer made of a file dropped since its reads began (File ▸
+    /// Reload Footage) is never served: it is forgotten, and the lookup is a miss.
+    pub fn get(&self, key: u64) -> Option<(Arc<Buf>, Arc<ReadFiles>)> {
+        match self.kept(key, true) {
+            Some(found) => Some(found),
             None => {
+                let mut g = self.inner.lock().ok()?;
                 g.misses += 1;
-                if g.missed_at.len() > 4096 {
-                    g.missed_at.clear();
+                // (made again shortly after it was let go of: a refill)
+                if let Some(at) = g.evicted.iter().position(|k| *k == key) {
+                    g.evicted.remove(at);
+                    g.refills += 1;
                 }
-                g.missed_at.insert(key, web_time::Instant::now());
                 drop(g);
-                // Disk cache: a hit comes back into memory.
-                let (dc, dk) = self.disk_key(key)?;
-                let buf = dc.get_layer(dk)?;
-                Some(self.insert_mem(key, buf))
+                let store = self.persistent();
+                // (before the entry is read: what it is made of may be dropped meanwhile)
+                let since = store.as_ref().map_or(0, |s| s.drop_generation());
+                if let Ok(mut g) = self.inner.lock() {
+                    if g.missed_at.len() > 4096 {
+                        g.missed_at.clear();
+                    }
+                    g.missed_at.insert(key, web_time::Instant::now());
+                }
+                // Disk cache: a hit comes back into memory, read at generation `since`.
+                let store = store?;
+                let id = self.virtual_id();
+                let read = web_time::Instant::now();
+                let (buf, mut files) = store.get_layer(layer_disk_key(key), id.as_deref())?;
+                files.note_since(since);
+                let files = Arc::new(files);
+                Some(self.insert_mem(key, buf, files, Some(read.elapsed())))
             }
         }
     }
@@ -178,55 +282,132 @@ impl LayerCache {
     /// together each rendered every layer; sharing the first buffer, the GPU compositor uploads
     /// and packs it once instead of once per worker, which ran it out of memory). Renders don't
     /// wait for each other: on the frame workers' shared thread pool a wait can end up under
-    /// the very work it waits for.
-    pub fn insert(&self, key: u64, buf: Arc<Buf>) -> Arc<Buf> {
+    /// the very work it waits for. `files`: the source files `buf` was made of (see
+    /// [`crate::reads`]); a buffer whose files can't all be named stays in memory. The files
+    /// returned are the ones the returned buffer was made of.
+    ///
+    /// The drop generation `buf`'s reads started at comes with `files` ([`ReadFiles::since`],
+    /// from [`LayerCache::drop_generation`] when the render began): a buffer made of a file
+    /// dropped since (File ▸ Reload Footage while it rendered) is kept neither on disk nor in
+    /// memory. A list that doesn't say counts as made before every drop. A buffer made of values
+    /// its key doesn't capture ([`ReadFiles::is_unkeyed`]) stays in memory.
+    pub fn insert(&self, key: u64, buf: Arc<Buf>, files: Arc<ReadFiles>) -> (Arc<Buf>, Arc<ReadFiles>) {
         if self.gated() {
-            return buf;
+            return (buf, files);
         }
-        if let Some(kept) = self.inner.lock().ok().and_then(|g| g.map.get(&key).map(|e| e.buf.clone())) {
+        if let Some(kept) = self.kept(key, false) {
             return kept;
         }
+        let store = self.persistent();
+        let since = files.since().unwrap_or(0);
+        // (before the miss's time is taken: it may time another render of the key)
+        if store.as_ref().is_some_and(|s| s.dropped_since(&files, since)) {
+            return (buf, files);
+        }
         let started = self.inner.lock().ok().and_then(|mut g| g.missed_at.remove(&key));
-        if let Some((dc, dk)) = self.disk_key(key) {
-            let slow = started.is_some_and(|t| t.elapsed().as_secs_f64() * 1e3 >= dc.min_layer_ms() as f64);
-            if slow {
-                dc.put_layer(dk, &buf);
+        if let Some(store) = store {
+            let id = self.virtual_id();
+            // (an incomplete list, or a file from memory without its identity: not stored)
+            if let Some(t) = started
+                && !files.is_unkeyed()
+                && t.elapsed().as_secs_f64() * 1e3 >= store.min_layer_ms() as f64
+                && let Some(entry) = EntryFiles::of(&files, id.as_deref())
+            {
+                store.put_layer(layer_disk_key(key), &buf, &entry, since);
             }
         }
-        self.insert_mem(key, buf)
+        self.insert_mem(key, buf, files, started.map(|t| t.elapsed()))
     }
 
-    /// See [`LayerCache::insert`]: the buffer kept under `key` (`buf`, unless one was kept first
-    /// or `buf` is too large to keep).
-    fn insert_mem(&self, key: u64, buf: Arc<Buf>) -> Arc<Buf> {
+    /// The buffer kept in memory under `key` with its files, if it is not made of a file dropped
+    /// since its reads began (one that is, is forgotten). `hit`: count it as a hit and as just
+    /// used. (A render that started before a drop may publish its buffer after the drop's
+    /// purge, Reload Footage clearing the cache while the buffer was being written: the check
+    /// here, not the order of the two, keeps it from being served.)
+    /// Whether a buffer is kept in memory under `key` (a peek: no hit, no miss, no disk read).
+    pub(crate) fn holds(&self, key: u64) -> bool {
+        self.kept(key, false).is_some()
+    }
+
+    fn kept(&self, key: u64, hit: bool) -> Option<(Arc<Buf>, Arc<ReadFiles>)> {
+        let found = {
+            let mut g = self.inner.lock().ok()?;
+            g.clock += 1;
+            let now = g.clock;
+            let e = g.map.get(&key)?;
+            let found = (e.buf.clone(), e.files.clone());
+            if hit {
+                g.touch(key, now);
+            }
+            found
+        };
+        if self.made_before_a_drop(&found.1) {
+            if let Ok(mut g) = self.inner.lock()
+                && g.map.get(&key).is_some_and(|e| Arc::ptr_eq(&e.files, &found.1))
+            {
+                g.take(key);
+            }
+            return None;
+        }
+        if hit && let Ok(mut g) = self.inner.lock() {
+            g.hits += 1;
+        }
+        Some(found)
+    }
+
+    /// Whether a buffer made of `files` holds a file as it was before a drop that came after its
+    /// reads began ([`ReadFiles::since`]; a list that doesn't say counts as made before every
+    /// drop).
+    fn made_before_a_drop(&self, files: &ReadFiles) -> bool {
+        self.persistent().is_some_and(|s| s.dropped_since(files, files.since().unwrap_or(0)))
+    }
+
+    /// The persistent store's drop generation now ([`LayerStore::drop_generation`]), taken by a
+    /// render before it starts reading (`None` without a store).
+    pub fn drop_generation(&self) -> Option<u64> {
+        self.persistent().map(|s| s.drop_generation())
+    }
+
+    /// See [`LayerCache::insert`]: the buffer kept under `key` and its files (`buf` and `files`,
+    /// unless one was kept first or `buf` is too large to keep).
+    /// `took`: what making it took (`None`: not timed; a typical cost is assumed,
+    /// [`crate::memory::DEFAULT_LAYER_US_PER_MB`]).
+    fn insert_mem(&self, key: u64, buf: Arc<Buf>, files: Arc<ReadFiles>, took: Option<std::time::Duration>) -> (Arc<Buf>, Arc<ReadFiles>) {
         let bytes = buf.img.data.len() * std::mem::size_of::<effectcraft_raster::Px>();
-        let Ok(mut g) = self.inner.lock() else { return buf };
+        let cost_us = took.map_or_else(
+            || crate::memory::default_cost(bytes, crate::memory::DEFAULT_LAYER_US_PER_MB),
+            |t| u64::try_from(t.as_micros()).unwrap_or(u64::MAX).max(1),
+        );
+        let Ok(mut g) = self.inner.lock() else { return (buf, files) };
         if bytes > g.budget / 4 {
-            return buf;
+            return (buf, files);
         }
         g.clock += 1;
         let now = g.clock;
-        if let Some(e) = g.map.get_mut(&key) {
-            e.last_use = now;
-            return e.buf.clone();
+        if let Some(e) = g.map.get(&key) {
+            // (one made before a drop gives way: see [`LayerCache::kept`])
+            if !self.made_before_a_drop(&e.files) {
+                let kept = (e.buf.clone(), e.files.clone());
+                g.touch(key, now);
+                return kept;
+            }
+            g.take(key);
         }
-        g.map.insert(key, Entry { buf: buf.clone(), bytes, last_use: now });
-        g.bytes += bytes;
+        // (checked again just before it is published: a drop may have come since `insert`
+        // checked; one that comes later is caught when the buffer is looked up)
+        if self.made_before_a_drop(&files) {
+            return (buf, files);
+        }
+        g.put(key, Entry { buf: buf.clone(), files: files.clone(), bytes, last_use: now, used: crate::memory::tick(), cost_us });
         if g.bytes > g.budget {
             // Evict least-recently used entries down to 3/4 of the budget.
             let target = g.budget / 4 * 3;
-            let mut by_age: Vec<(u64, u64)> = g.map.iter().map(|(k, e)| (e.last_use, *k)).collect();
-            by_age.sort_unstable();
-            for (_, k) in by_age {
-                if g.bytes <= target {
-                    break;
-                }
-                if let Some(e) = g.map.remove(&k) {
-                    g.bytes -= e.bytes;
-                }
-            }
+            g.evict_to(target);
         }
-        buf
+        drop(g);
+        // (with the lock released: the accountant asks every cache for its bytes)
+        crate::memory::Accountant::global().note_growth(bytes);
+        (buf, files)
     }
 
     /// The memory budget in bytes.
@@ -238,23 +419,13 @@ impl LayerCache {
     pub fn set_budget(&self, budget: usize) {
         let Ok(mut g) = self.inner.lock() else { return };
         g.budget = budget;
-        if g.bytes > budget {
-            let mut by_age: Vec<(u64, u64)> = g.map.iter().map(|(k, e)| (e.last_use, *k)).collect();
-            by_age.sort_unstable();
-            for (_, k) in by_age {
-                if g.bytes <= budget {
-                    break;
-                }
-                if let Some(e) = g.map.remove(&k) {
-                    g.bytes -= e.bytes;
-                }
-            }
-        }
+        g.evict_to(budget);
     }
 
     pub fn clear(&self) {
         if let Ok(mut g) = self.inner.lock() {
             g.map.clear();
+            g.order.clear();
             g.bytes = 0;
         }
     }
@@ -264,12 +435,29 @@ impl LayerCache {
     }
 }
 
-/// Persistent storage of layer buffers behind a [`LayerCache`] (keys salted per project).
+/// Persistent storage of layer buffers behind a [`LayerCache`] (keys:
+/// [`crate::disk_cache::layer_disk_key`]). Every entry keeps the source files its buffer was made
+/// of and is used only while they are unchanged (#3184).
 pub trait LayerStore: Send + Sync {
-    /// A stored buffer (synchronous: mid-render).
-    fn get_layer(&self, key: u128) -> Option<Arc<Buf>>;
-    /// Keep a buffer that was slow to render.
-    fn put_layer(&self, key: u128, buf: &Buf);
+    /// A stored buffer whose source files are unchanged, with those files (synchronous:
+    /// mid-render). An entry whose files changed, or damaged, is a miss and is dropped, so the
+    /// buffer rendered again replaces it. `virtual_id` names files served from memory.
+    fn get_layer(&self, key: u128, virtual_id: Option<VirtualFileId<'_>>) -> Option<(Arc<Buf>, ReadFiles)>;
+    /// Keep a buffer that was slow to render, with the source files it was made of (shared, so
+    /// a store can encode it off the render thread). `since`: the
+    /// [`LayerStore::drop_generation`] when its render started (a buffer made of a file dropped
+    /// after that is refused).
+    fn put_layer(&self, key: u128, buf: &Arc<Buf>, files: &EntryFiles, since: u64);
+    /// How many times files were dropped from the store (File ▸ Reload Footage,
+    /// [`crate::disk_cache::DiskCache::drop_files`]); `0` for a store that never drops.
+    fn drop_generation(&self) -> u64 {
+        0
+    }
+    /// Whether one of `files` was dropped after generation `since`: what was made of them is
+    /// from before the drop. `false` for a store that never drops.
+    fn dropped_since(&self, _files: &ReadFiles, _since: u64) -> bool {
+        false
+    }
     /// Buffers faster to render than this (ms) are not stored.
     fn min_layer_ms(&self) -> u64 {
         0
@@ -281,9 +469,10 @@ pub const PREFETCH_MIN_LAYER_MS: u64 = 20;
 
 /// A [`LayerStore`] over storage that can't be read in the middle of a render (the browser's
 /// Origin Private File System, read asynchronously). Lookups are served from buffers fetched
-/// before the frame ([`PrefetchStore::provide`]); the keys a render looked up and didn't find
-/// are recorded ([`PrefetchStore::take_misses`]) so the transport can fetch them before the next
-/// frame; buffers to store queue up as sealed entries ([`PrefetchStore::take_writes`]) for the
+/// before the frame ([`PrefetchStore::provide`]), once the files their entries list are found
+/// unchanged; the keys a render looked up and didn't find are recorded
+/// ([`PrefetchStore::take_misses`]) so the transport can fetch them before the next frame;
+/// buffers to store queue up as sealed entries ([`PrefetchStore::take_writes`]) for the
 /// transport to write after the frame. Fetched buffers are kept least recently used first, up
 /// to a byte budget.
 pub struct PrefetchStore {
@@ -292,9 +481,21 @@ pub struct PrefetchStore {
     min_ms: u64,
 }
 
+/// A fetched entry: the buffer, the source files it was made of, its last use.
+struct Fetched {
+    buf: Arc<Buf>,
+    files: Arc<EntryFiles>,
+    used: u64,
+}
+
+/// The memory a buffer's pixels take, in bytes.
+fn buf_bytes(b: &Buf) -> usize {
+    b.img.data.len().saturating_mul(std::mem::size_of::<effectcraft_raster::Px>())
+}
+
 #[derive(Default)]
 struct Prefetched {
-    ready: HashMap<u128, (Arc<Buf>, u64)>,
+    ready: HashMap<u128, Fetched>,
     bytes: usize,
     clock: u64,
     misses: Vec<u128>,
@@ -302,6 +503,22 @@ struct Prefetched {
     writes: Vec<(u128, Vec<u8>)>,
     /// Keys stored or queued (not written twice).
     known: std::collections::HashSet<u128>,
+}
+
+impl Prefetched {
+    /// Records a missed key for prefetching, up to a fixed bound.
+    fn note_miss(&mut self, key: u128) {
+        if !self.misses.contains(&key) && self.misses.len() < 1024 {
+            self.misses.push(key);
+        }
+    }
+
+    /// Drops the prefetched entry for `key` and frees its bytes.
+    fn remove(&mut self, key: u128) {
+        if let Some(f) = self.ready.remove(&key) {
+            self.bytes = self.bytes.saturating_sub(buf_bytes(&f.buf));
+        }
+    }
 }
 
 impl Default for PrefetchStore {
@@ -327,23 +544,21 @@ impl PrefetchStore {
     }
 
     /// A fetched entry (sealed bytes, [`crate::disk_cache::layer_entry`]) for `key`; `false`
-    /// when damaged.
+    /// when damaged or of another format. Its files are checked when the buffer is used.
     pub fn provide(&self, key: u128, entry: &[u8]) -> bool {
-        let Some(buf) = crate::disk_cache::read_layer_entry(entry) else { return false };
-        let bytes = buf.img.data.len() * std::mem::size_of::<effectcraft_raster::Px>();
+        let Some((buf, files)) = crate::disk_cache::read_layer_entry(entry) else { return false };
+        let buf = Arc::new(buf);
+        let bytes = buf_bytes(&buf);
         let Ok(mut s) = self.st.lock() else { return false };
         s.clock += 1;
-        let now = s.clock;
-        if let Some((old, _)) = s.ready.insert(key, (Arc::new(buf), now)) {
-            s.bytes -= old.img.data.len() * std::mem::size_of::<effectcraft_raster::Px>();
-        }
-        s.bytes += bytes;
+        let used = s.clock;
+        s.remove(key);
+        s.ready.insert(key, Fetched { buf, files: Arc::new(files), used });
+        s.bytes = s.bytes.saturating_add(bytes);
         s.known.insert(key);
         while s.bytes > self.budget {
-            let Some((&k, _)) = s.ready.iter().min_by_key(|(_, (_, t))| *t) else { break };
-            if let Some((b, _)) = s.ready.remove(&k) {
-                s.bytes -= b.img.data.len() * std::mem::size_of::<effectcraft_raster::Px>();
-            }
+            let Some(oldest) = s.ready.iter().min_by_key(|(_, f)| f.used).map(|(k, _)| *k) else { break };
+            s.remove(oldest);
         }
         true
     }
@@ -372,32 +587,46 @@ impl PrefetchStore {
 }
 
 impl LayerStore for PrefetchStore {
-    fn get_layer(&self, key: u128) -> Option<Arc<Buf>> {
+    /// The prefetched layer for `key` with its read files, or `None` when it is not ready.
+    fn get_layer(&self, key: u128, virtual_id: Option<VirtualFileId<'_>>) -> Option<(Arc<Buf>, ReadFiles)> {
+        let found = {
+            let mut s = self.st.lock().ok()?;
+            s.clock += 1;
+            let now = s.clock;
+            match s.ready.get_mut(&key) {
+                Some(f) => {
+                    f.used = now;
+                    Some((f.buf.clone(), f.files.clone()))
+                }
+                None => {
+                    s.note_miss(key);
+                    None
+                }
+            }
+        };
+        let (buf, files) = found?;
+        // (looked at without the lock: one call of the hook, or one `metadata`, per file)
+        let unchanged = files.unchanged(virtual_id);
         let mut s = self.st.lock().ok()?;
-        s.clock += 1;
-        let now = s.clock;
-        match s.ready.get_mut(&key) {
-            Some((b, t)) => {
-                *t = now;
-                let b = b.clone();
-                if !s.hits.contains(&key) {
-                    s.hits.push(key);
-                }
-                Some(b)
-            }
-            None => {
-                if !s.misses.contains(&key) && s.misses.len() < 1024 {
-                    s.misses.push(key);
-                }
-                None
-            }
+        if !unchanged {
+            // Made of files that changed since: forgotten, so the buffer rendered again is
+            // written over its entry.
+            s.remove(key);
+            s.known.remove(&key);
+            s.note_miss(key);
+            return None;
         }
+        if !s.hits.contains(&key) {
+            s.hits.push(key);
+        }
+        Some((buf, files.to_read_files()))
     }
 
-    fn put_layer(&self, key: u128, buf: &Buf) {
+    /// Queues the layer for writing to the persistent store the first time `key` is seen.
+    fn put_layer(&self, key: u128, buf: &Arc<Buf>, files: &EntryFiles, _since: u64) {
         let Ok(mut s) = self.st.lock() else { return };
         if s.known.insert(key) {
-            s.writes.push((key, crate::disk_cache::layer_entry(buf)));
+            s.writes.push((key, crate::disk_cache::layer_entry(buf, files)));
         }
     }
 
@@ -470,6 +699,12 @@ fn time_dependent(layer: &Layer, effects: bool) -> bool {
     false
 }
 
+/// A text layer with an Expression Selector: its amount is evaluated per character, and the
+/// layer's key holds only the first character's (see [`crate::reads::ReadFiles::is_unkeyed`]).
+pub(crate) fn per_character_expressions(layer: &Layer) -> bool {
+    matches!(layer.source, LayerSource::Text) && layer.props.sub("text").is_some_and(|t| group_has(t, "expressionSelector"))
+}
+
 fn group_has(g: &PropGroup, match_id: &str) -> bool {
     g.children.iter().any(|c| match c {
         Node::Group(sub) => sub.match_id == match_id || group_has(sub, match_id),
@@ -477,17 +712,33 @@ fn group_has(g: &PropGroup, match_id: &str) -> bool {
     })
 }
 
+/// A frame-blended layer's pixels also depend on how far its source runs during the comp frame:
+/// a fast-conformed clip mixes every source frame the comp frame spans (#3180), so a time
+/// stretch or remap change can alter the pixels at an unchanged source time.
+fn hash_blend_spans(h: &mut KeyHasher, ctx: &EvalCtx, layer: &Layer) {
+    if crate::frames::frame_blend_mode(ctx, layer) != effectcraft_project::FrameBlend::Off {
+        crate::frames::blend_spans(ctx, layer).hash(h);
+    }
+}
+
 /// Feed every property of `g` that can change over time (keyframes or expression) as its value
 /// at the context time. The static structure is hashed separately.
-/// Mix the collapsed-instance overrides that target `id` into a cache key. They replace values
+/// Mix the collapsed-instance overrides that target `layer` into a cache key. They replace values
 /// without editing the layer, so a key without them would reuse another instance's buffer.
-fn hash_overrides(h: &mut KeyHasher, ctx: &EvalCtx, id: effectcraft_project::LayerId) {
-    for o in ctx.property_overrides.iter().filter(|o| o.layer == id) {
+fn hash_overrides(h: &mut KeyHasher, ctx: &EvalCtx, layer: &Layer) {
+    for o in ctx.property_overrides.iter().filter(|o| o.layer == layer.id) {
         o.prop.hash(h);
         o.font.hash(h);
         hash_debug(h, &o.value);
+        hash_debug(h, &o.keys);
+        // The stored value belongs to the outer context. The nested layer can be compared with
+        // its previous frame while that value stays fixed, so hash the effective value at the
+        // target layer's exact time as well.
+        if let Some(prop) = layer.props.find(o.prop) {
+            hash_debug(h, &o.value_at_layer_time(prop, layer.layer_time(ctx.time)));
+        }
     }
-    for m in ctx.media_overrides.iter().filter(|m| m.layer == id) {
+    for m in ctx.media_overrides.iter().filter(|m| m.layer == layer.id) {
         m.item.hash(h);
     }
 }
@@ -510,8 +761,8 @@ fn hash_values(h: &mut KeyHasher, ctx: &EvalCtx, layer: &Layer, g: &PropGroup) {
 /// time, or `None` when the layer must not be cached (movie footage, precomps, cameras, adjustment
 /// layers…).
 pub fn layer_key(ctx: &EvalCtx, layer: &Layer, scale: f64, draft: bool, blur: bool) -> Option<u64> {
-    // Time effects (and CC Particle World's Birth Rate history) see property values at other
-    // times. Keyframes are part of the hashed structure (and the layer time is folded in), but
+    // Time effects (and stepped particle systems' Birth Rate and producer history) see property
+    // values at other times. Keyframes are part of the hashed structure (and the layer time is folded in), but
     // expressions may read other layers at those times, which the key cannot see: such layers
     // are not cached.
     if history_unkeyable(layer, None) {
@@ -534,15 +785,17 @@ pub fn input_key(ctx: &EvalCtx, layer: &Layer, scale: f64, draft: bool, blur: bo
 }
 
 /// Does the layer run (among its first `effects` effects, all when `None`) an effect that reads
-/// the layer at other times (Echo, Timewarp…) or its own parameters' history (CC Particle
-/// World's Birth Rate, #1373)?
+/// the layer at other times (Echo, Timewarp…) or its own parameters' history (stepped particle
+/// systems' Birth Rate and producer position, #1373)?
 fn reads_other_times(layer: &Layer, effects: Option<usize>) -> bool {
     layer.switches.effects
         && layer.effects().is_some_and(|fx| {
             fx.groups().take(effects.unwrap_or(usize::MAX)).any(|g| {
                 g.enabled
                     && matches!(&g.kind, effectcraft_project::GroupKind::Effect { effect }
-                        if effect.starts_with("ec.time.") || effectcraft_effects::reads_param_history(effect))
+                        if effect.starts_with("ec.time.")
+                            || effectcraft_effects::reads_param_history(effect)
+                            || (!effect.starts_with("ec.") && effectcraft_effects::plugin::reads_other_times(effect)))
             })
         })
 }
@@ -553,11 +806,22 @@ fn history_unkeyable(layer: &Layer, effects: Option<usize>) -> bool {
     reads_other_times(layer, effects) && layer.props.children.iter().any(|c| matches!(c, Node::Group(g) if g.match_id != "transform" && has_expression(g)))
 }
 
-/// A still image (no proxy): its layer is cached like a text or shape layer, so the GPU
-/// compositor uploads it once, not every frame (#1812: four 21120 px plates re-uploaded by every
-/// preview worker ran the GPU out of memory). Movies and sequences stay in the media pool only.
-fn still_footage(ctx: &EvalCtx, item: effectcraft_project::ItemId) -> bool {
-    ctx.project.item(item).is_some_and(|it| it.proxy.is_none() && matches!(&it.kind, ItemKind::Footage(f) if f.kind == FootageKind::Still))
+/// Footage whose processed layer is cached (keyed by item and source time for all but stills):
+/// - a still image (no proxy): its layer is cached like a text or shape layer, so the GPU
+///   compositor uploads it once, not every frame (#1812: four 21120 px plates re-uploaded by
+///   every preview worker ran the GPU out of memory);
+/// - an OpenEXR sequence (no proxy, #3271): each frame is a file read whole and its effects
+///   (EXtractoR, Cryptomatte, depth effects) are costly, so a processed frame is worth keeping in
+///   RAM and on disk. Its entries list the frame file they read, so Reload Footage and a changed
+///   file drop them as any other.
+///
+/// Movies and other sequences stay in the media pool only.
+fn cached_footage(ctx: &EvalCtx, item: effectcraft_project::ItemId) -> bool {
+    ctx.project.item(item).is_some_and(|it| {
+        it.proxy.is_none()
+            && matches!(&it.kind, ItemKind::Footage(f) if f.kind == FootageKind::Still
+                || (f.kind == FootageKind::Sequence && f.sequence.first().is_some_and(|p| p.to_ascii_lowercase().ends_with(".exr"))))
+    })
 }
 
 /// Does the layer have an animated mask that motion blur may draw at other times (Layer ▸ Mask ▸
@@ -632,7 +896,7 @@ fn key_any(ctx: &EvalCtx, layer: &Layer, scale: f64, draft: bool, blur: bool, fo
             hash_debug(&mut h, s);
         }
         LayerSource::Text | LayerSource::Shape => {}
-        LayerSource::Footage { item } if footage || still_footage(ctx, ctx.media_item(layer, *item)) => {
+        LayerSource::Footage { item } if footage || cached_footage(ctx, ctx.media_item(layer, *item)) => {
             let item = ctx.media_item(layer, *item);
             let it = ctx.project.item(item)?;
             let ItemKind::Footage(f) = &it.kind else { return None };
@@ -642,10 +906,23 @@ fn key_any(ctx: &EvalCtx, layer: &Layer, scale: f64, draft: bool, blur: bool, fo
             item.hash(&mut h);
             // A still is the same at every time (unless a proxy, which may be a movie, stands in).
             if f.kind != FootageKind::Still || it.proxy.is_some() {
-                ctx.source_time(layer).0.hash(&mut h);
+                // A sequence frame without frame blending or fields shows one file for its whole
+                // frame duration: keyed by its frame, so times within it (a faster comp, a
+                // stretched layer) share the entry (#3271).
+                let whole_frames = f.kind == FootageKind::Sequence
+                    && it.proxy.is_none()
+                    && f.fields == effectcraft_project::FieldOrder::Off
+                    && crate::frames::frame_blend_mode(ctx, layer) == effectcraft_project::FrameBlend::Off;
+                if whole_frames {
+                    0x5e9_u16.hash(&mut h);
+                    crate::frames::frame_position(ctx.source_time(layer), f.frame_rate).0.hash(&mut h);
+                } else {
+                    ctx.source_time(layer).0.hash(&mut h);
+                }
             }
             // Frame blending mixes neighbouring source frames.
             ctx.comp.enable_frame_blending.hash(&mut h);
+            hash_blend_spans(&mut h, ctx, layer);
         }
         _ => return None,
     }
@@ -660,7 +937,7 @@ fn key_any(ctx: &EvalCtx, layer: &Layer, scale: f64, draft: bool, blur: bool, fo
     // Collapsed-instance overrides replace values without editing the nested layer, so mix them
     // into the key: a Font override, effect parameter or any other source-affecting override
     // must not reuse another instance's processed buffer.
-    hash_overrides(&mut h, ctx, layer.id);
+    hash_overrides(&mut h, ctx, layer);
     hash_debug(&mut h, &layer.source);
     // (Audio, Lock and Shy don't change pixels.)
     hash_debug(&mut h, &layer.switches.pixels());
@@ -741,6 +1018,21 @@ fn key_any(ctx: &EvalCtx, layer: &Layer, scale: f64, draft: bool, blur: bool, fo
     Some(h.finish())
 }
 
+/// Does the layer read another layer through an enabled effect's layer parameter (Gradient Wipe,
+/// Set Matte…)? Those layers are drawn by the reading layer's renderer, so the switches it
+/// passes down belong in the key (`Renderer::nested_look`).
+pub(crate) fn reads_layers(ctx: &EvalCtx, layer: &Layer) -> bool {
+    /// Whether any enabled layer-valued property of `layer` points at another layer.
+    fn reads(ctx: &EvalCtx, layer: &Layer, g: &PropGroup, depth: usize) -> bool {
+        depth < 32
+            && g.children.iter().any(|n| match n {
+                Node::Prop(p) => matches!(p.value, Value::Layer(_)) && ctx.value(layer, p).as_layer().is_some_and(|id| id != layer.id.0),
+                Node::Group(sub) => sub.enabled && reads(ctx, layer, sub, depth + 1),
+            })
+    }
+    layer.switches.effects && layer.effects().is_some_and(|fx| fx.groups().any(|g| g.enabled && reads(ctx, layer, g, 0)))
+}
+
 /// Does the layer run an effect that reads the comp camera or lights (Card Dance, CC Particle
 /// World…)?
 fn reads_comp_scene(layer: &Layer) -> bool {
@@ -772,6 +1064,34 @@ pub fn derive(key: u64, i: u64) -> u64 {
     h.finish()
 }
 
+/// The layer cache in the common memory budget (#3271, #3298): each buffer is worth what
+/// rendering it took (or reading it from the disk cache), per byte.
+impl crate::memory::MemoryHolder for LayerCache {
+    fn name(&self) -> &'static str {
+        "layer cache"
+    }
+    fn bytes(&self) -> usize {
+        self.inner.lock().map(|g| g.bytes).unwrap_or(0)
+    }
+    /// Its least recently used buffer nobody else holds (dropping one a render holds would free
+    /// nothing yet), with what rendering it took.
+    fn oldest(&self) -> Option<crate::memory::Candidate> {
+        let g = self.inner.lock().ok()?;
+        let e = g.map.get(&g.oldest_free_key()?)?;
+        Some(crate::memory::Candidate { used: e.used, bytes: e.bytes, cost_us: e.cost_us, protected: false })
+    }
+    fn drop_oldest(&self) -> usize {
+        let Ok(mut g) = self.inner.lock() else { return 0 };
+        match g.oldest_free_key() {
+            Some(k) => g.evict(k),
+            None => 0,
+        }
+    }
+    fn refills(&self) -> u64 {
+        self.inner.lock().map(|g| g.refills).unwrap_or(0)
+    }
+}
+
 #[cfg(test)]
 mod shared_insert_tests {
     use std::sync::Arc;
@@ -780,14 +1100,235 @@ mod shared_insert_tests {
     use effectcraft_effects::Buf;
     use effectcraft_raster::Image;
 
+    /// #3301 review: the memory accountant is offered only buffers nobody else holds; dropping
+    /// one a render still holds would free nothing, and its bytes would be counted as freed.
+    #[test]
+    fn a_buffer_held_elsewhere_is_not_offered_to_the_accountant() {
+        use crate::memory::MemoryHolder;
+        let cache = LayerCache::default();
+        let buf = || Arc::new(Buf { img: Image::new(4, 4), offset: [0.0; 2], scale: 1.0 });
+        let held = cache.insert(1, buf(), Default::default()).0;
+        drop(cache.insert(2, buf(), Default::default()));
+        let bytes = cache.bytes();
+        let freed = cache.drop_oldest();
+        assert!(freed > 0 && cache.get(1).is_some() && cache.get(2).is_none(), "the free one goes, the held one stays");
+        assert_eq!(cache.bytes(), bytes - freed);
+        assert!(cache.oldest().is_none() && cache.drop_oldest() == 0, "only a held buffer left");
+        drop(held);
+        assert!(cache.drop_oldest() > 0, "let go: offered");
+    }
+
     /// Two renders of one layer kept under one key: both use the buffer kept first.
     #[test]
     fn the_buffer_kept_first_is_shared() {
         let cache = LayerCache::default();
         let buf = || Arc::new(Buf { img: Image::new(4, 4), offset: [0.0; 2], scale: 1.0 });
         let (a, b) = (buf(), buf());
-        assert!(Arc::ptr_eq(&cache.insert(3, a.clone()), &a));
-        assert!(Arc::ptr_eq(&cache.insert(3, b), &a), "the later render gets the first buffer");
-        assert!(Arc::ptr_eq(&cache.get(3).unwrap(), &a));
+        assert!(Arc::ptr_eq(&cache.insert(3, a.clone(), Default::default()).0, &a));
+        assert!(Arc::ptr_eq(&cache.insert(3, b, Default::default()).0, &a), "the later render gets the first buffer");
+        assert!(Arc::ptr_eq(&cache.get(3).unwrap().0, &a));
+    }
+
+    /// The browser's store (#3184): a fetched entry is used only while the files it lists are
+    /// unchanged (here from memory, through the hook), and comes with them; one made of files
+    /// that changed is dropped and counts as a miss, so the buffer rendered again is queued over
+    /// it. A buffer whose files can't all be named is not queued at all.
+    #[test]
+    fn the_prefetch_store_checks_the_files_of_its_entries() {
+        use super::{LayerStore, PrefetchStore};
+        use crate::disk_cache::{EntryFiles, layer_disk_key, layer_entry};
+        use crate::reads::{FileStamp, ReadFile, ReadFiles};
+        let buf = || Buf { img: Image::new(2, 2), offset: [0.0; 2], scale: 1.0 };
+        let files: ReadFiles = [ReadFile::new("/v.png", FileStamp::Virtual)].into_iter().collect();
+        let (one, two) = (|_: &str| Some((3, 1)), |_: &str| Some((3, 2)));
+        let entry = layer_entry(&buf(), &EntryFiles::of(&files, Some(&one)).unwrap());
+        let store = PrefetchStore::new(1 << 20).with_min_ms(0);
+        assert!(store.provide(5, &entry));
+        assert!(!store.provide(6, b"damaged"));
+        let (_, got) = store.get_layer(5, Some(&one)).unwrap();
+        assert_eq!(got, files);
+        assert_eq!(store.take_hits(), [5]);
+        // The file changed: a miss, forgotten, and the new buffer is queued over it.
+        assert!(store.get_layer(5, Some(&two)).is_none());
+        assert!(!store.has(5));
+        assert_eq!(store.take_misses(), [5]);
+        store.put_layer(5, &Arc::new(buf()), &EntryFiles::of(&files, Some(&two)).unwrap(), 0);
+        assert_eq!(store.take_writes().len(), 1, "written over the changed entry");
+        // Through the layer cache: a hit reports its files; incomplete lists are not queued.
+        let cache = LayerCache::default();
+        let store = Arc::new(PrefetchStore::new(1 << 20).with_min_ms(0));
+        cache.set_store(Some(store.clone()));
+        cache.set_virtual_id(Some(Arc::new(one)));
+        assert!(store.provide(layer_disk_key(9), &entry));
+        let (_, from_store) = cache.get(9).unwrap();
+        assert!(*from_store == files && from_store.is_complete());
+        let mut incomplete = files.clone();
+        incomplete.mark_incomplete();
+        assert!(cache.get(10).is_none());
+        cache.insert(10, Arc::new(buf()), Arc::new(incomplete));
+        assert!(cache.get(11).is_none());
+        cache.insert(11, Arc::new(buf()), Arc::new(files.clone()));
+        let written: Vec<u128> = store.take_writes().into_iter().map(|w| w.0).collect();
+        assert_eq!(written, [layer_disk_key(11)], "only the buffer whose files are all named");
+    }
+
+    /// A layer buffer whose render started before Reload Footage dropped its file (#3184) is
+    /// not written to the disk cache when it is kept afterwards; one whose render started after
+    /// the drop is.
+    #[test]
+    fn a_buffer_rendered_across_a_drop_is_not_written() {
+        use crate::disk_cache::{DiskCache, Kind, layer_disk_key};
+        use crate::reads::{FileStamp, ReadFile, ReadLog};
+        let dir = tempfile::tempdir().unwrap();
+        let dc = DiskCache::open(dir.path(), 1 << 30).unwrap();
+        dc.set_min_layer_ms(0);
+        let cache = LayerCache::default();
+        cache.set_disk(Some(dc.clone()));
+        let buf = || Arc::new(Buf { img: Image::new(2, 2), offset: [0.0; 2], scale: 1.0 });
+        // A render's files, read after it took the drop generation (`Renderer::recorded`).
+        let render = || {
+            let log = ReadLog::starting_at(cache.drop_generation().unwrap());
+            move || {
+                log.note(ReadFile::new("/a.png", FileStamp::Native { len: 3, modified: Some(1) }));
+                Arc::new(log.into_files())
+            }
+        };
+        // The miss starts the render; the file is reloaded before the buffer is kept.
+        assert!(cache.get(1).is_none());
+        let a = render();
+        dc.drop_files(["/a.png"]);
+        dc.flush();
+        // Another render of the same key starts after the drop, while the first one still runs
+        // (its miss must not lend the first render its generation).
+        assert!(cache.get(1).is_none());
+        let b = render();
+        let (stale, _) = cache.insert(1, buf(), a());
+        dc.flush();
+        assert!(!dc.contains(Kind::Layer, layer_disk_key(1)), "made of the file as it was before the drop");
+        // Not kept in memory either: the second render keeps its own buffer, and writes it.
+        let fresh = buf();
+        let (kept, _) = cache.insert(1, fresh.clone(), b());
+        assert!(Arc::ptr_eq(&kept, &fresh) && !Arc::ptr_eq(&kept, &stale));
+        // A render of another key after the drop.
+        assert!(cache.get(2).is_none());
+        cache.insert(2, buf(), render()());
+        dc.flush();
+        assert!(dc.contains(Kind::Layer, layer_disk_key(1)), "the render after the drop");
+        assert!(dc.contains(Kind::Layer, layer_disk_key(2)));
+        // A list that doesn't say when its reads began counts as made before the drop.
+        assert!(cache.get(3).is_none());
+        cache.insert(3, buf(), Arc::new([ReadFile::new("/a.png", FileStamp::Native { len: 3, modified: Some(1) })].into_iter().collect()));
+        dc.flush();
+        assert!(!dc.contains(Kind::Layer, layer_disk_key(3)));
+        drop((cache, dc));
+    }
+
+    /// A disk cache whose layer writes stop at a barrier until the test lets them go on.
+    struct PausedWrites {
+        dc: Arc<crate::disk_cache::DiskCache>,
+        arrived: std::sync::Barrier,
+        go_on: std::sync::Barrier,
+    }
+
+    impl super::LayerStore for PausedWrites {
+        fn get_layer(&self, key: u128, virtual_id: Option<crate::disk_cache::VirtualFileId<'_>>) -> Option<(Arc<Buf>, crate::reads::ReadFiles)> {
+            super::LayerStore::get_layer(&*self.dc, key, virtual_id)
+        }
+        fn put_layer(&self, key: u128, buf: &Arc<Buf>, files: &crate::disk_cache::EntryFiles, since: u64) {
+            self.arrived.wait();
+            self.go_on.wait();
+            super::LayerStore::put_layer(&*self.dc, key, buf, files, since);
+        }
+        fn drop_generation(&self) -> u64 {
+            self.dc.drop_generation()
+        }
+        fn dropped_since(&self, files: &crate::reads::ReadFiles, since: u64) -> bool {
+            self.dc.dropped_since(files, since)
+        }
+    }
+
+    /// Reload Footage while a render from before it is writing its buffer: the cache is cleared
+    /// and the file dropped after the buffer passed its check, before it is kept. The buffer
+    /// then reaches memory after the purge, but it is never served, and a render after the drop
+    /// keeps its own buffer (#3191 review).
+    #[test]
+    fn a_buffer_kept_after_the_purge_of_a_reload_is_not_served() {
+        use crate::reads::{FileStamp, ReadFile, ReadLog};
+        let dir = tempfile::tempdir().unwrap();
+        let dc = crate::disk_cache::DiskCache::open(dir.path(), 1 << 30).unwrap();
+        let store = Arc::new(PausedWrites { dc: dc.clone(), arrived: std::sync::Barrier::new(2), go_on: std::sync::Barrier::new(2) });
+        let cache = Arc::new(LayerCache::default());
+        cache.set_store(Some(store.clone()));
+        let buf = || Arc::new(Buf { img: Image::new(2, 2), offset: [0.0; 2], scale: 1.0 });
+        let files = |cache: &LayerCache| {
+            let log = ReadLog::starting_at(cache.drop_generation().unwrap());
+            log.note(ReadFile::new("/a.png", FileStamp::Native { len: 3, modified: Some(1) }));
+            Arc::new(log.into_files())
+        };
+        // The old render: a miss, its reads, then its insert, which stops in the disk write.
+        assert!(cache.get(1).is_none());
+        let old_files = files(&cache);
+        let old = buf();
+        let writer = {
+            let (cache, old) = (cache.clone(), old.clone());
+            std::thread::spawn(move || cache.insert(1, old, old_files))
+        };
+        store.arrived.wait();
+        // Reload Footage meanwhile: the layer cache is purged and the file dropped.
+        cache.clear();
+        dc.drop_files(["/a.png"]);
+        dc.flush();
+        store.go_on.wait();
+        let _ = writer.join().unwrap();
+        dc.flush();
+        assert!(!dc.contains(crate::disk_cache::Kind::Layer, crate::disk_cache::layer_disk_key(1)), "not on disk");
+        assert!(cache.get(1).is_none(), "the old pixels are not served from memory");
+        // A render after the drop keeps its own buffer.
+        let fresh = buf();
+        let new_files = files(&cache);
+        let mut kept = None;
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                store.arrived.wait();
+                store.go_on.wait();
+            });
+            kept = Some(cache.insert(1, fresh.clone(), new_files).0);
+        });
+        let kept = kept.unwrap();
+        assert!(Arc::ptr_eq(&kept, &fresh) && !Arc::ptr_eq(&kept, &old));
+        assert!(Arc::ptr_eq(&cache.get(1).unwrap().0, &fresh));
+    }
+
+    /// A render that gets another render's buffer gets that buffer's files too (#3184): when a
+    /// file changed between the two reads, its frame lists the file with both identities, so the
+    /// list is incomplete and the frame is not kept on disk with the new identity and the old
+    /// pixels.
+    #[test]
+    fn the_buffer_kept_first_brings_its_files() {
+        use crate::reads::{FileStamp, ReadFile, ReadFiles, ReadLog};
+        use crate::{NoFootage, RenderOpts, Renderer};
+        let cache = LayerCache::default();
+        let buf = || Arc::new(Buf { img: Image::new(4, 4), offset: [0.0; 2], scale: 1.0 });
+        let files = |len| Arc::new([ReadFile::new("/a.png", FileStamp::Native { len, modified: Some(1) })].into_iter().collect::<ReadFiles>());
+        let (first, second) = (files(1), files(2));
+        let a = buf();
+        cache.insert(3, a.clone(), first.clone());
+        let project = effectcraft_project::Project::default();
+        let log = ReadLog::new();
+        let mut r = Renderer::new(&project, &NoFootage, RenderOpts::default());
+        r.cache = Some(&cache);
+        r.reads = Some(&log);
+        // (what `Renderer::recorded` noted for the second render)
+        log.note_all(&second);
+        let (kept, kept_files) = r.keep(Some(3), buf(), &second);
+        assert!(Arc::ptr_eq(&kept, &a));
+        assert_eq!(kept_files, first);
+        assert!(!log.files().is_complete());
+        // The same files: nothing changes.
+        let same = ReadLog::new();
+        r.reads = Some(&same);
+        same.note_all(&first);
+        let _ = r.keep(Some(3), buf(), &files(1));
+        assert!(same.files().is_complete());
     }
 }

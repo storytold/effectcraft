@@ -14,10 +14,11 @@
 //! effectcraft-cli render [--comp C] --out FILE [--format F] …  render a comp (or `--queue`)
 //! effectcraft-cli bench [--ops | --roto | --gpu] …            render and operation timings
 //! effectcraft-cli script FILE.jsx [F.ecproj] | --eval CODE    run an After Effects-style script
+//! effectcraft-cli replay SCRIPT.jsonl [--keep-going]        replay a repro script (docs/agents.md)
 //! effectcraft-cli mcp [--autosave | --bridge PORT]            MCP server on stdio
 //! ```
 //!
-//! `--help` (and `<subcommand> --help`) is the reference; this page follows RFC-0012 (exit codes:
+//! `--help` (and `<subcommand> --help`) is the reference; this page follows RFC-0018 (exit codes:
 //! 0 success, 1 failure, 2 usage error). `<comp>` is a comp id or name (`-` = the active comp);
 //! `<layer>` an id, `#n` or name; `<value>` is JSON (`50`, `[960,540]`, `"#ff0000"`) or a bare
 //! string. See `docs/agents.md`.
@@ -33,6 +34,7 @@ mod args;
 mod bench;
 mod commands;
 mod error;
+mod project_lock;
 mod render;
 mod steps;
 mod template;
@@ -75,6 +77,7 @@ where
         Command::Render(a) => render::render(a, json_out, &mut io),
         Command::Bench(a) => bench::bench_cmd(a, json_out, &mut io),
         Command::Script(a) => commands::script(a, json_out, &mut io),
+        Command::Replay(a) => commands::replay(a, json_out, &mut io),
         Command::Mcp(a) => commands::mcp(a),
     };
     let code = match result {

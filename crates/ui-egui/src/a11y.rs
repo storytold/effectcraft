@@ -103,6 +103,17 @@ pub(crate) fn check_box(r: &Response, label: &str, checked: bool, enabled: bool)
     });
 }
 
+/// A push button that is one of a set of choices (a view-layout button): `pressed` is whether it is
+/// the current one, exposed as the toggled state. `description` says what the set is.
+pub(crate) fn choice_button(r: &Response, label: &str, description: &str, pressed: bool) {
+    node(r, |n| {
+        n.set_role(Role::Button);
+        n.set_label(label);
+        n.set_description(description);
+        n.set_toggled(if pressed { Toggled::True } else { Toggled::False });
+    });
+}
+
 /// A drop-down: `label` says what it sets and `value` is what it is set to.
 pub(crate) fn combo_box(r: &Response, label: &str, value: &str, enabled: bool) {
     node(r, |n| {
@@ -173,6 +184,49 @@ pub(crate) fn progress(r: &Response, label: &str, fraction: f32) {
         n.set_min_numeric_value(0.0);
         n.set_max_numeric_value(1.0);
         n.set_numeric_value(f64::from(fraction.clamp(0.0, 1.0)));
+    });
+}
+
+// ------------------------------------------------------------------------------------------
+// Things a panel paints that are not controls
+
+/// Make `rect` a node of the tree (egui paints text and shapes into the painter and leaves them
+/// out of it) and give it a role and a name. Not focusable: it is for assistive technology to
+/// read, not for the keyboard.
+fn static_node(ui: &egui::Ui, id: Id, rect: egui::Rect, role: Role, label: &str, value: Option<&str>) {
+    let r = ui.interact(rect, id, egui::Sense::hover());
+    node(&r, |n| {
+        n.set_role(role);
+        n.set_label(label);
+        if let Some(v) = value {
+            n.set_value(v);
+        }
+    });
+}
+
+/// A read-out painted at `rect` (a colour channel, the time, a status line): `label` is the whole
+/// sentence it shows, e.g. "Red: 128".
+pub(crate) fn readout(ui: &egui::Ui, id: Id, rect: egui::Rect, label: &str) {
+    static_node(ui, id, rect, Role::Label, label, None);
+}
+
+/// A picture with no text of its own (a colour swatch, a scope, a waveform): `label` says what it
+/// shows in a few words.
+pub(crate) fn graphic(ui: &egui::Ui, id: Id, rect: egui::Rect, label: &str) {
+    static_node(ui, id, rect, Role::Image, label, None);
+}
+
+/// A log or console output (newest line last): `label` says which, `text` is what it holds.
+pub(crate) fn log(ui: &egui::Ui, id: Id, rect: egui::Rect, label: &str, text: &str) {
+    static_node(ui, id, rect, Role::Log, label, Some(text));
+}
+
+/// A toggle button (it stays pressed while it is on).
+pub(crate) fn toggle_button(r: &Response, label: &str, on: bool) {
+    node(r, |n| {
+        n.set_role(Role::Button);
+        n.set_label(label);
+        n.set_toggled(if on { Toggled::True } else { Toggled::False });
     });
 }
 

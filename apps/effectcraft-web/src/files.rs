@@ -117,6 +117,15 @@ impl Services for WebServices {
             .map(|d| d.to_vec())
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, format!("{path}: open it with File ▸ Open (or drop it on the page)")))
     }
+    /// Checks the size before copying the stored bytes.
+    fn read_pcraft(&self, path: &str) -> std::io::Result<Vec<u8>> {
+        let data =
+            get(path).ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, format!("{path}: open it with File ▸ Open (or drop it on the page)")))?;
+        if data.len() as u64 > effectcraft_engine::PCRAFT_MAX_INPUT {
+            return Err(effectcraft_engine::pcraft_too_large());
+        }
+        Ok(data.to_vec())
+    }
     fn write_file(&self, path: &str, data: &[u8]) -> std::io::Result<()> {
         put(path, data.into());
         let quiet = {

@@ -45,12 +45,13 @@ fn has_animator(s: &Session) -> std::result::Result<(), String> {
     if any { Ok(()) } else { Err("add a text animator first".into()) }
 }
 
-fn per_char_on(l: &Layer) -> bool {
+pub(super) fn per_char_on(l: &Layer) -> bool {
     l.props.prop("text/perChar3d").is_some_and(|p| p.value.as_bool())
 }
 
-/// The animator a command targets: `animator` (uid or 1-based index), else the animator holding
-/// a selected property, else the last one.
+/// The animator a command targets: `animator` (uid or 1-based index; a uid match wins, so an
+/// animator whose uid equals an index is picked over the one at that position), else the animator
+/// holding a selected property, else the last one.
 fn animator_uid(s: &Session, l: &Layer, p: &Value, cmd: &str) -> Result<u64> {
     let anims = l.props.group("text/animators").ok_or_else(|| bad(cmd, "not a text layer"))?;
     let list: Vec<&PropGroup> = anims.groups().collect();
@@ -59,7 +60,11 @@ fn animator_uid(s: &Session, l: &Layer, p: &Value, cmd: &str) -> Result<u64> {
         if let Some(g) = list.iter().find(|g| g.uid == n) {
             return Ok(g.uid);
         }
-        return list.get((n as usize).wrapping_sub(1)).map(|g| g.uid).ok_or_else(|| bad(cmd, format!("no animator {n}")));
+        let count = if list.len() == 1 { "1 animator".to_string() } else { format!("{} animators", list.len()) };
+        return list
+            .get((n as usize).wrapping_sub(1))
+            .map(|g| g.uid)
+            .ok_or_else(|| bad(cmd, format!("no animator {n}: `animator` is a uid or a 1-based index, and the layer has {count}")));
     }
     for (lid, uid) in &s.state.selected_props {
         if *lid != l.id {
@@ -198,31 +203,37 @@ fn set_animators_3d(ids: &mut Ids, l: &mut Layer, on: bool) {
     let Some(anims) = l.props.group_mut("text/animators") else { return };
     for c in anims.children.iter_mut() {
         let Node::Group(a) = c else { continue };
-        let Some(props) = a.sub_mut("properties") else { continue };
-        for c in props.children.iter_mut() {
-            if let Node::Prop(p) = c
-                && matches!(p.match_id.as_str(), "anchor" | "position" | "scale")
-            {
-                p.shown_dims = if on { 3 } else { 2 };
-                if let KV::Vec2(v) = p.value {
-                    p.value = KV::Vec3([v[0], v[1], if p.match_id == "scale" { 100.0 } else { 0.0 }]);
-                }
-            }
-        }
-        let has_rot = props.get("rotation").is_some();
-        if on && has_rot && props.get("rotationX").is_none() {
-            let at = props.children.iter().position(|c| c.match_id() == "rotation").unwrap_or(0);
-            let rx = ids.prop("rotationX", "X Rotation", KV::Scalar(0.0)).with_ui(effectcraft_project::ParamUi::Angle);
-            let ry = ids.prop("rotationY", "Y Rotation", KV::Scalar(0.0)).with_ui(effectcraft_project::ParamUi::Angle);
-            props.children.insert(at, ry.into());
-            props.children.insert(at, rx.into());
-        }
-        if !on {
+        set_animator_3d(ids, a, on);
+        if !on && let Some(props) = a.sub_mut("properties") {
             props.children.retain(|c| !matches!(c.match_id(), "rotationX" | "rotationY"));
         }
-        if let Some(r) = props.get_mut("rotation") {
-            r.name = if on { "Z Rotation".into() } else { "Rotation".into() };
+    }
+}
+
+/// Show or hide an animator's Z components and add the X / Y rotation it lacks. X / Y rotation it
+/// has stays when `on` is false: a 2D layer doesn't draw it, and a preset's keys aren't lost.
+pub(super) fn set_animator_3d(ids: &mut Ids, a: &mut PropGroup, on: bool) {
+    let Some(props) = a.sub_mut("properties") else { return };
+    for c in props.children.iter_mut() {
+        if let Node::Prop(p) = c
+            && matches!(p.match_id.as_str(), "anchor" | "position" | "scale")
+        {
+            p.shown_dims = if on { 3 } else { 2 };
+            if let KV::Vec2(v) = p.value {
+                p.value = KV::Vec3([v[0], v[1], if p.match_id == "scale" { 100.0 } else { 0.0 }]);
+            }
         }
+    }
+    let has_rot = props.get("rotation").is_some();
+    if on && has_rot && props.get("rotationX").is_none() {
+        let at = props.children.iter().position(|c| c.match_id() == "rotation").unwrap_or(0);
+        let rx = ids.prop("rotationX", "X Rotation", KV::Scalar(0.0)).with_ui(effectcraft_project::ParamUi::Angle);
+        let ry = ids.prop("rotationY", "Y Rotation", KV::Scalar(0.0)).with_ui(effectcraft_project::ParamUi::Angle);
+        props.children.insert(at, ry.into());
+        props.children.insert(at, rx.into());
+    }
+    if let Some(r) = props.get_mut("rotation") {
+        r.name = if on { "Z Rotation".into() } else { "Rotation".into() };
     }
 }
 
@@ -454,7 +465,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Add Property",
             [],
             None,
-            "{layer?, animator?: uid|index, property: (see layer.addTextAnimator)}",
+            "{layer?, animator?: uid|index (1-based; a uid match wins over an index), property: (see layer.addTextAnimator)}",
             has_animator,
             add_animator_prop
         ),
@@ -463,7 +474,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Add Text Selector",
             [],
             None,
-            "{layer?, animator?: uid|index, kind: range|wiggly|expression}",
+            "{layer?, animator?: uid|index (1-based; a uid match wins over an index), kind: range|wiggly|expression}",
             has_animator,
             add_selector
         ),
@@ -482,7 +493,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Variable Font Axes",
             ["Animation", "Animate Text"],
             None,
-            "{layer?, axis?: tag|name (omit to list the font's axes), animator?: uid|index}",
+            "{layer?, axis?: tag|name (omit to list the font's axes), animator?: uid|index (1-based; a uid match wins over an index)}",
             has_text_layer,
             font_axes
         ),

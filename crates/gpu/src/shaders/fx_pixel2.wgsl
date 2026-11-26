@@ -258,10 +258,17 @@ fn fp2_vector(@builtin(global_invocation_id) gid: vec3<u32>) {
 // 3 CC Overbrights, 4 Color Link (alpha), 5 Color Link (blend), 6 CC Composite.
 
 // utility::Cineon::log_to_lin; c = (offset, knee, white, gamma), r = (internal black, white).
-fn fp2_log_to_lin(v: f32, c: vec4<f32>, r: vec2<f32>) -> f32 {
+// Version 1 takes the saved Gamma, where 1.7 gives linear output.
+fn fp2_log_to_lin(v: f32, c: vec4<f32>, r: vec2<f32>, version_2: bool) -> f32 {
     let code = v * 1023.0;
-    var lin = (pow(10.0, (code - c.z) * 0.002 / 0.6) - c.x) / max(1.0 - c.x, 1e-6);
-    lin = powz(max(lin, 0.0), 1.7 / max(c.w, 0.01));
+    let exposure = pow(10.0, (code - c.z) * 0.002 / 0.6);
+    var lin: f32;
+    if (version_2) {
+        let root_offset = pow(c.x, 1.0 / max(c.w, 0.001));
+        lin = max((pow(exposure, 1.0 / max(c.w, 0.001)) - root_offset) / max(1.0 - root_offset, 1e-6), 0.0);
+    } else {
+        lin = powz(max((exposure - c.x) / max(1.0 - c.x, 1e-6), 0.0), 1.7 / max(c.w, 0.01));
+    }
     let k = c.y;
     if (k < 1.0 && lin > k) {
         let w = 1.0 - k;
@@ -271,7 +278,7 @@ fn fp2_log_to_lin(v: f32, c: vec4<f32>, r: vec2<f32>) -> f32 {
 }
 
 // utility::Cineon::lin_to_log.
-fn fp2_lin_to_log(v: f32, c: vec4<f32>, r: vec2<f32>) -> f32 {
+fn fp2_lin_to_log(v: f32, c: vec4<f32>, r: vec2<f32>, version_2: bool) -> f32 {
     let d = r.y - r.x;
     var lin = (v - r.x) / select(d, 1e-6, abs(d) < 1e-6);
     let k = c.y;
@@ -279,8 +286,14 @@ fn fp2_lin_to_log(v: f32, c: vec4<f32>, r: vec2<f32>) -> f32 {
         let w = 1.0 - k;
         lin = k - w * log(max(1.0 - (lin - k) / w, 1e-6));
     }
-    lin = powz(max(lin, 0.0), max(c.w, 0.01) / 1.7);
-    let code = c.z + log(max(lin * (1.0 - c.x) + c.x, 1e-9)) * 0.4342944819032518 * 0.6 / 0.002;
+    var exposure: f32;
+    if (version_2) {
+        let root_offset = pow(c.x, 1.0 / max(c.w, 0.001));
+        exposure = powz(max(lin, 0.0) * (1.0 - root_offset) + root_offset, max(c.w, 0.001));
+    } else {
+        exposure = powz(max(lin, 0.0), max(c.w, 0.01) / 1.7) * (1.0 - c.x) + c.x;
+    }
+    let code = c.z + log(max(exposure, 1e-9)) * 0.4342944819032518 * 0.6 / 0.002;
     return code / 1023.0;
 }
 
@@ -292,15 +305,25 @@ fn fp2_spow(v: f32, e: f32) -> f32 {
 fn fp2_cineon(v: f32) -> f32 {
     let c = P.f[0];
     let r = P.f[1].xy;
+    let version_2 = P.u[0].z != 0u;
     switch P.u[0].y {
         case 0u: {
-            return fp2_lin_to_log(v, c, r);
+            return fp2_lin_to_log(v, c, r, version_2);
         }
         case 1u: {
-            return fp2_log_to_lin(v, c, r);
+            return fp2_log_to_lin(v, c, r, version_2);
         }
         default: {
-            return fp2_lin_to_log(fp2_log_to_lin(v, c, r), P.f[2], vec2<f32>(0.0, 1.0));
+            if (version_2) {
+                // Default points keep the input code; custom points pass through Gamma 1 first.
+                var code = v;
+                if (c.x != P.f[2].x || c.z != 685.0 || r.x != 0.0 || r.y != 1.0) {
+                    let unit = vec4<f32>(c.xyz, 1.0);
+                    code = fp2_lin_to_log(fp2_log_to_lin(v, unit, r, true), P.f[2], vec2<f32>(0.0, 1.0), false);
+                }
+                return powz(max(code, 0.0), 1.0 / max(c.w, 0.001));
+            }
+            return fp2_lin_to_log(fp2_log_to_lin(v, c, r, false), P.f[2], vec2<f32>(0.0, 1.0), false);
         }
     }
 }
@@ -314,7 +337,7 @@ fn fp2_point(@builtin(global_invocation_id) gid: vec3<u32>) {
     let px = textureLoad(src, p, 0);
     var o = px;
     switch P.u[0].x {
-        // f[0], f[1], f[2]: see fp2_cineon; u[0].y = conversion type.
+        // f[0], f[1], f[2]: see fp2_cineon; u[0].y = conversion type, z = version 2.
         case 0u: {
             if (px.w > 0.0) {
                 let c = px.xyz / px.w;
@@ -336,17 +359,21 @@ fn fp2_point(@builtin(global_invocation_id) gid: vec3<u32>) {
                 o = vec4<f32>(r * px.w, px.w);
             }
         }
-        // f[0].x = knee.
+        // utility::hdr_compress_pixel; f[0].x = blend t (Amount / 100).
         case 2u: {
             if (px.w > 0.0) {
                 let c = px.xyz / px.w;
-                let m = max(max(c.x, c.y), c.z);
-                let knee = P.f[0].x;
-                if (m > knee) {
-                    let w = 1.0 - knee;
-                    let k = (knee + w * (m - knee) / ((m - knee) + w)) / m;
-                    o = vec4<f32>(c * k * px.w, px.w);
-                }
+                let t = P.f[0].x;
+                let y = max(0.30 * c.x + 0.59 * c.y + 0.11 * c.z, 0.0);
+                let comp = min(c * (1.0 / (1.0 + y)), vec3<f32>(1.0));
+                let g = 0.4;
+                let mixed = vec3<f32>(
+                    (1.0 - t) * fp2_spow(c.x, g) + t * fp2_spow(comp.x, g),
+                    (1.0 - t) * fp2_spow(c.y, g) + t * fp2_spow(comp.y, g),
+                    (1.0 - t) * fp2_spow(c.z, g) + t * fp2_spow(comp.z, g),
+                );
+                let r = vec3<f32>(fp2_spow(mixed.x, 1.0 / g), fp2_spow(mixed.y, 1.0 / g), fp2_spow(mixed.z, 1.0 / g));
+                o = vec4<f32>(r * px.w, px.w);
             }
         }
         // u[0].y = channel; f[0] = highlight colour.
@@ -633,52 +660,9 @@ fn fp2_hextile(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (!fp2_inside(p)) {
         return;
     }
-    let cx = P.f[0].x;
-    let cy = P.f[0].y;
-    let r = P.f[0].z;
-    let smear = P.f[0].w;
-    let sn = P.f[1].x;
-    let cs = P.f[1].y;
-    let mode = P.u[0].x;
-    let dx = f32(p.x) + 0.5 - cx;
-    let dy = f32(p.y) + 0.5 - cy;
-    let u = dx * cs + dy * sn;
-    let v = -dx * sn + dy * cs;
-    // stylize3::hex_cell (cube rounding).
-    let q = (0.5773502691896257 * u - v / 3.0) / r;
-    let rr = (2.0 / 3.0 * v) / r;
-    // Evaluate the third cube coordinate symmetrically with q so the centerline
-    // tie is not broken by subtracting separately rounded coordinates.
-    let ccy = (-0.5773502691896257 * u - v / 3.0) / r;
-    var rx = round_away(q);
-    let ry = round_away(ccy);
-    var rz = round_away(rr);
-    let ddx = abs(rx - q);
-    let ddy = abs(ry - ccy);
-    let ddz = abs(rz - rr);
-    if (ddx > ddy && ddx > ddz) {
-        rx = -ry - rz;
-    } else if (ddy <= ddz) {
-        rz = -rx - ry;
-    }
-    let hx = r * 1.7320508075688772 * (rx + rz / 2.0);
-    let hy = r * 1.5 * rz;
-    var lu = u - hx;
-    var lv = v - hy;
-    let odd = imod(i32(rx) + i32(rz), 2) == 1;
-    if ((mode == 1u || mode == 2u) && odd) {
-        lu = -lu;
-    }
-    if (mode == 2u && odd) {
-        lv = -lv;
-    }
-    let ox = lu * cs - lv * sn;
-    let oy = lu * sn + lv * cs;
-    let tx = cx + ox;
-    let ty = cy + oy;
-    let sx = tx + (f32(p.x) + 0.5 - tx) * smear;
-    let sy = ty + (f32(p.y) + 0.5 - ty) * smear;
-    textureStore(out, p, sample_bilinear_clamped(src, sx, sy));
+    // Cell membership and reflection were decided in the CPU effect's f64 geometry.
+    let i = (gid.y * u32(out_dims().x) + gid.x) * 2u;
+    textureStore(out, p, sample_bilinear_clamped(src, data[i], data[i + 1u]));
 }
 
 // ---------------------------------------------------------------- CC Mr. Smoothie (stylize3::smoothie)

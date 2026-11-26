@@ -197,7 +197,7 @@ pub fn dialog(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
             ui.label(tr("Label:"));
             let labels = effectcraft_engine::color::Label::ALL;
             let cur = labels.get(d.label).copied().unwrap_or_default();
-            let r = craft_ui::ComboBox::from_id_salt("dialog.marker.label").selected_text(app.session.prefs.label_name(cur)).show_ui(ui, |ui| {
+            let r = egui::ComboBox::from_id_salt("dialog.marker.label").selected_text(app.session.prefs.label_name(cur)).show_ui(ui, |ui| {
                 for (i, l) in labels.into_iter().enumerate() {
                     if crate::widgets::label_entry(ui, l, &app.session.prefs.label_name(l), d.label == i, &app.tokens).clicked() {
                         d.label = i;
@@ -373,6 +373,8 @@ fn marker(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, comp: 
         run(ui, "Delete This Marker", "markers.delete", r.params(), app);
         if let Some(l) = r.layer {
             run(ui, "Delete All Markers", "layer.deleteAllMarkers", json!({"layers": [l]}), app);
+        } else {
+            run(ui, "Delete All Markers", "comp.deleteAllMarkers", json!({}), app);
         }
     });
 }
@@ -426,16 +428,34 @@ pub(crate) fn comp_markers(app: &mut EffectcraftApp, ui: &mut egui::Ui, comp: &C
 /// (#275): drag a marker out of it and it follows the pointer along the marker strip `strip`
 /// (snapping like a dragged marker); dropping it there adds a composition marker at that time,
 /// one undo step. Dropped back on the bin or outside the time graph's width, nothing is added.
+/// A double-click on the bin adds one at the current time (#1826).
 pub(crate) fn marker_bin(app: &mut EffectcraftApp, ui: &mut egui::Ui, comp: &Comp, tm: TMap, bin: Rect, strip: Rect) {
     let t = app.tokens;
     let resp = ui.interact(bin, egui::Id::unique("marker-bin"), Sense::drag()).on_hover_text(tr("Composition marker bin: drag a marker to the time ruler"));
+    // The bin senses drags only, so a drag starts as soon as it is pressed: sensing clicks too
+    // would hold that back until the pointer moved, and a drag out released within that frame
+    // would add nothing. The double-click is read from the pointer instead.
+    if bin_double_clicked(ui, resp.id, bin, resp.enabled() && (resp.contains_pointer() || resp.dragged() || resp.drag_stopped()))
+        && let Err(e) = app.session.execute("comp.addMarker", json!({}))
+    {
+        app.ui.status = e.to_string();
+    }
     app.auto.add("timeline.markerBin", bin, "Composition marker bin");
     let hot = resp.hovered() || resp.dragged();
     if hot {
         ui.ctx().set_cursor_icon(if resp.dragged() { egui::CursorIcon::Grabbing } else { egui::CursorIcon::Grab });
     }
     icons::paint(ui.painter(), bin, Icon::MarkerBin, if hot { t.icon_active } else { t.icon });
-    let at = resp.interact_pointer_pos().filter(|p| p.x >= strip.min.x && p.x < strip.max.x).map(|p| {
+    // A drag ends where its button came up: a later press in the same pass (one press per pass
+    // follows a release) has moved the pointer on.
+    let released_at = ui.input(|i| {
+        i.events.iter().find_map(|e| match e {
+            egui::Event::PointerButton { button: egui::PointerButton::Primary, pressed: false, pos, .. } => Some(*pos),
+            _ => None,
+        })
+    });
+    let pointer = if resp.drag_stopped() { released_at.or(resp.interact_pointer_pos()) } else { resp.interact_pointer_pos() };
+    let at = pointer.filter(|p| p.x >= strip.min.x && p.x < strip.max.x).map(|p| {
         let snapped = snap(app, comp, tm, tm.t(p.x), MarkerRef { layer: None, index: usize::MAX });
         snapped.min(comp.duration.seconds())
     });
@@ -451,6 +471,64 @@ pub(crate) fn marker_bin(app: &mut EffectcraftApp, ui: &mut egui::Ui, comp: &Com
     {
         app.ui.status = e.to_string();
     }
+}
+
+/// What the marker bin keeps of the primary button between frames: the press being held (when,
+/// where, and whether it has moved too far since to be a click), and the last click (when,
+/// where, and whether it was on the bin: both pressed and released there).
+#[derive(Clone, Copy, Default)]
+struct BinClicks {
+    press: Option<(f64, Pos2, bool)>,
+    last: Option<(f64, Pos2, bool)>,
+}
+
+/// Whether the marker bin `bin` (widget `id`; `over` when it is enabled and has the pointer, not
+/// something above it) was double-clicked this frame: two clicks in a row, both on the bin, each
+/// in a frame when it was `over`. egui's own
+/// double-click takes any click within a few points of the last for the first one, so a click on
+/// the ruler right beside the bin and then one on the bin would count. The bin pairs the clicks
+/// itself, in the order they came, by egui's rules: a click is released within `max_click_dist`
+/// of where it was pressed and within `max_click_duration`, and the second of a double-click comes
+/// within `max_double_click_delay` and `max_click_dist` of the first. A third click starts over.
+fn bin_double_clicked(ui: &egui::Ui, id: egui::Id, bin: Rect, over: bool) -> bool {
+    use egui::{Event, PointerButton};
+    let (dist, duration, delay) = ui.ctx().options(|o| {
+        let i = &o.input_options;
+        (i.max_click_dist, i.max_click_duration, i.max_double_click_delay)
+    });
+    let id = id.with("clicks");
+    let mut s = ui.data(|d| d.get_temp::<BinClicks>(id)).unwrap_or_default();
+    let double = ui.input(|i| {
+        let mut double = false;
+        for e in &i.events {
+            match *e {
+                Event::PointerMoved(p) => {
+                    if let Some((_, at, moved)) = &mut s.press {
+                        *moved |= at.distance(p) > dist;
+                    }
+                }
+                Event::PointerButton { button: PointerButton::Primary, pressed: true, pos, .. } => s.press = Some((i.time, pos, false)),
+                Event::PointerButton { button: PointerButton::Primary, pressed: false, pos, .. } => {
+                    let Some((pressed_at, at, moved)) = s.press.take() else { continue };
+                    if moved || at.distance(pos) > dist || i.time - pressed_at >= duration {
+                        continue;
+                    }
+                    let on = over && bin.contains(at) && bin.contains(pos);
+                    let pair = s.last.is_some_and(|(t, p, was_on)| was_on && on && i.time - t < delay && p.distance(pos) < dist);
+                    if pair {
+                        double = true;
+                        s.last = None;
+                    } else {
+                        s.last = Some((i.time, pos, on));
+                    }
+                }
+                _ => {}
+            }
+        }
+        double
+    });
+    ui.data_mut(|d| d.insert_temp(id, s));
+    double
 }
 
 /// Layer markers on a layer's row `r`; on a precomp layer, its comp's markers too (read-only,
@@ -560,6 +638,7 @@ mod tests {
         assert_eq!(app.session.execute("markers.list", json!({})).unwrap()[0]["chapter"], "");
         // Enter is OK and Cmd+Backspace is Delete.
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         crate::theme::install(&ctx, &app.tokens, crate::i18n::language(&app));
         // The dialog opens with Comment focused (#922), a multi-line field where Enter types a
         // new line; with the focus elsewhere, Enter is OK.

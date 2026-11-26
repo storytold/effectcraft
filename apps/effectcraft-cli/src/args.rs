@@ -1,4 +1,4 @@
-//! The command line, as clap types (RFC-0012). Values are parsed into their types here, so a bad
+//! The command line, as clap types (RFC-0018). Values are parsed into their types here, so a bad
 //! one is a usage error naming its flag (exit 2) before any work starts. A flag a subcommand
 //! doesn't take is a usage error too, so a typo such as `--saveas` can't be silently ignored, and
 //! so is a repeated one: `--out a --out b` is more likely a mistake than a choice. A value that
@@ -22,7 +22,7 @@ use crate::error::UsageError;
 /// is JSON (`50`, `[960,540]`, `"#ff0000"`) or a bare string. Without a project the demo project
 /// is opened (`mcp`: an empty one). See docs/agents.md.
 #[derive(Parser)]
-#[command(name = "effectcraft-cli", version, arg_required_else_help = true)]
+#[command(name = "effectcraft-cli", version, propagate_version = true, arg_required_else_help = true)]
 pub struct Cli {
     /// Print one compact JSON document on stdout; an error is {"error": …} (exit 1)
     #[arg(long, global = true)]
@@ -45,6 +45,7 @@ pub enum Command {
     Render(Box<RenderArgs>),
     Bench(Box<BenchArgs>),
     Script(ScriptArgs),
+    Replay(ReplayArgs),
     Mcp(McpArgs),
 }
 
@@ -79,7 +80,7 @@ pub struct GpuArg {
 }
 
 /// `--save` / `--save-as`, after a command that changes the project.
-#[derive(Args)]
+#[derive(Args, Debug)]
 pub struct SaveArgs {
     /// Save back to the project (--project or the *.ecproj argument)
     #[arg(long, conflicts_with = "save_as")]
@@ -363,7 +364,7 @@ pub struct TemplateArgs {
 #[command(group(ArgGroup::new("settings").args([
     "comp", "out", "format", "start", "end", "work_area", "fps", "resolution", "scale", "quality", "channels", "jpeg_quality",
     "bitrate", "prores", "audio", "profile", "level", "rate_control", "video_quality", "keyint", "webm_codec", "audio_bitrate",
-    "opus_app",
+    "opus_app", "exr_compression", "exr_depth",
 ]).multiple(true).conflicts_with("queue")))]
 #[command(group(ArgGroup::new("target").args(["out", "queue"]).required(true).multiple(true)))]
 pub struct RenderArgs {
@@ -442,6 +443,12 @@ pub struct RenderArgs {
     /// audio|voice
     #[arg(long, value_name = "APP", value_parser = NonEmptyStringValueParser::new())]
     pub opus_app: Option<String>,
+    /// none|rle|zips|zip|piz|pxr24|b44|b44a|dwaa|dwab
+    #[arg(long, value_name = "COMPRESSION", value_parser = NonEmptyStringValueParser::new())]
+    pub exr_compression: Option<String>,
+    /// half|float
+    #[arg(long, value_name = "DEPTH", value_parser = NonEmptyStringValueParser::new())]
+    pub exr_depth: Option<String>,
     /// Render the project's Render Queue instead of one comp
     #[arg(long, conflicts_with = "template")]
     pub queue: bool,
@@ -560,6 +567,24 @@ pub struct ScriptArgs {
     pub script: Option<String>,
     #[arg(skip)]
     pub project: Option<String>,
+}
+
+/// Replay a repro script headless (`journal.export`, crash repros)
+///
+/// Runs the script's steps against a headless session (its start line picks the project:
+/// `{"start": "new" | "demo" | {"project": path}}`) and reports each step, ok or error, and the
+/// first failure. Exits 1 when a step fails, an expectation is not met or a command panics;
+/// --keep-going runs the steps after a failure too. See docs/agents.md.
+#[derive(Args)]
+pub struct ReplayArgs {
+    /// The repro script, JSON lines
+    #[arg(value_name = "SCRIPT.jsonl", value_hint = ValueHint::FilePath, value_parser = NonEmptyStringValueParser::new())]
+    pub script: String,
+    /// Run the steps after a failing one as well
+    #[arg(long)]
+    pub keep_going: bool,
+    #[command(flatten)]
+    pub gpu: GpuArg,
 }
 
 /// Run the MCP server on stdio (JSON-RPC)
@@ -746,6 +771,7 @@ impl Cli {
                     a.script = Some(file);
                 }
             }
+            Command::Replay(_) => {}
             Command::Mcp(a) => {
                 a.project = single_project(a.source.project.as_ref(), &a.file)?;
                 bridge_has_no_project(&a.bridge, a.project.as_ref())?;
@@ -768,6 +794,7 @@ impl Cli {
             Command::Render(_) => "render",
             Command::Bench(_) => "bench",
             Command::Script(_) => "script",
+            Command::Replay(_) => "replay",
             Command::Mcp(_) => "mcp",
         }
     }
@@ -779,6 +806,15 @@ impl Cli {
 /// --help`), where clap would report the mistake first.
 pub fn parse(args: &[OsString]) -> Result<Cli, clap::Error> {
     let mut cmd = Cli::command();
+    // The Launcher's Nightly profile flags belong to the desktop app only. Refuse them before any
+    // argument is read, so no script can drive a profile outside the Launcher's control (exit 2).
+    // The names are written without their leading `--` so the option table stays the one place that
+    // declares options. After `--` an argument is data, not a flag.
+    const DESKTOP_PROFILE_FLAGS: [&str; 2] = ["launch-profile", "profile-root"];
+    let flags = args.iter().take_while(|a| *a != "--").filter_map(|a| a.to_str()).filter(|a| a.starts_with('-'));
+    if let Some(flag) = flags.into_iter().find(|a| DESKTOP_PROFILE_FLAGS.iter().any(|name| a.trim_start_matches('-').split('=').next() == Some(*name))) {
+        return Err(UsageError::DesktopProfile(flag.to_string()).into_clap(&mut cmd));
+    }
     let argv = std::iter::once(OsString::from("effectcraft-cli")).chain(args.iter().cloned());
     let matches = match cmd.try_get_matches_from_mut(argv) {
         Err(e) if args.iter().take_while(|a| *a != "--").any(|a| *a == "--help" || *a == "-h") => {
@@ -806,6 +842,7 @@ impl UsageError {
     pub fn into_clap(self, cmd: &mut clap::Command) -> clap::Error {
         let kind = match self {
             Self::NotAProject(_) | Self::NotANumber(_) | Self::BadParams(_) | Self::BadCommands(_) | Self::BadValue { .. } => ErrorKind::ValueValidation,
+            Self::DesktopProfile(_) => ErrorKind::UnknownArgument,
             Self::Missing(_) | Self::NoSteps => ErrorKind::MissingRequiredArgument,
             Self::Extra(_) => ErrorKind::TooManyValues,
             Self::TwoProjects(..) | Self::TwoParams | Self::StdinTwice | Self::BridgeWithProject | Self::TemplateWithProject | Self::BenchModeWithProject => {

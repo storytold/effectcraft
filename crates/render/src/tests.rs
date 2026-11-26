@@ -11,6 +11,7 @@ mod auto;
 mod aux_channels;
 mod collapse;
 mod color;
+mod drop_shadow_cover;
 mod footage_size;
 mod frame_blend;
 mod guides;
@@ -20,8 +21,11 @@ mod mask_feather;
 mod motion_tile;
 mod nested;
 mod paint;
+mod proxy_cache;
+mod raster_clip;
 mod remap;
 mod roi;
+mod stretch_limits;
 mod styles;
 mod time;
 
@@ -328,7 +332,7 @@ fn card_dance_comp_camera_matches_the_default_view() {
     assert!(img.get(10, 50)[3] < 0.01);
 }
 
-/// A black 2D solid with CC Particle World, under a camera layer panned right by `pan` px.
+/// A black 2D solid with Particle Emitter 3D, under a camera layer panned right by `pan` px.
 fn particle_world_scene(pan: f64) -> (Project, ItemId) {
     let (mut p, cid, comp) = setup();
     let mut l = solid(&mut p, &comp, [0.0, 0.0, 0.0], 200, 100);
@@ -358,7 +362,7 @@ fn particles_x(img: &crate::Image) -> f32 {
     sx / m
 }
 
-/// #397: CC Particle World on a 2D layer is seen through the comp's camera layer, and the layer
+/// #397: Particle Emitter 3D on a 2D layer is seen through the comp's camera layer, and the layer
 /// cache notices the camera moving.
 #[test]
 fn particle_world_follows_the_comp_camera() {
@@ -373,7 +377,7 @@ fn particle_world_follows_the_comp_camera() {
     assert!(b < a - 20.0, "panning the camera right moves the particles left: {a} -> {b}");
 }
 
-/// A black solid with CC Particle World whose Birth Rate is 3 until layer time `cut`, then 0 a
+/// A black solid with Particle Emitter 3D whose Birth Rate is 3 until layer time `cut`, then 0 a
 /// frame later (`None`: 3 throughout); the layer starts at comp time `start`, stretched `stretch` %.
 fn burst_scene(cut: Option<f64>, start: f64, stretch: f64) -> (Project, ItemId) {
     burst_scene_keys(cut, start, stretch, false)
@@ -482,9 +486,148 @@ impl crate::eval::ExprHost for ControllerRate {
     }
 }
 
+/// An expression that reads a file (as `sampleImage` does, into [`EvalCtx::reads`]) and keeps
+/// the value.
+///
+/// [`EvalCtx::reads`]: crate::eval::EvalCtx::reads
+struct ReadsAFile;
+
+impl crate::eval::ExprHost for ReadsAFile {
+    fn eval(&self, ctx: &crate::eval::EvalCtx, _: &effectcraft_project::Layer, _: &effectcraft_project::Property, value: &Value) -> Result<Value, String> {
+        if let Some(log) = ctx.reads {
+            log.note(crate::reads::ReadFile::new("/sampled.png", crate::reads::FileStamp::Native { len: 3, modified: Some(1) }));
+        }
+        Ok(value.clone())
+    }
+}
+
+/// What expressions read while a cached buffer is made (a mask expression, which mask motion
+/// blur also runs at shutter times the cache key doesn't see) goes to that buffer's files, not
+/// only to the frame's (#3184): a later render served the buffer lists the file too. Content,
+/// a Time effect's input and an adjustment layer's footprint.
+#[test]
+fn what_expressions_read_goes_to_the_files_of_the_buffer_they_make() {
+    use crate::reads::ReadLog;
+    use crate::{NoFootage, RenderOpts, Renderer};
+    let (mut p, cid, comp) = setup();
+    for adjustment in [false, true] {
+        let mut l = solid(&mut p, &comp, [1.0, 1.0, 1.0], 200, 100);
+        l.switches.adjustment = adjustment;
+        let mut next = p.next_id;
+        let m = build::mask(&mut Ids(&mut next), "Mask 1", ShapePath::rect([50.0, 50.0], 40.0, 40.0), MaskMode::Add, [255, 255, 0]);
+        p.next_id = next;
+        l.props.sub_mut("masks").unwrap().children.push(m.into());
+        l.props.prop_mut("masks/#1/path").unwrap().expr = Some(effectcraft_project::Expression { text: "sampled".into(), enabled: true });
+        p.comp_mut(cid).unwrap().layers.push(l);
+    }
+    let cache = crate::LayerCache::default();
+    let c = p.comp(cid).unwrap();
+    let (content, adjustment) = (&c.layers[0], &c.layers[1]);
+    // `make`, rendered once with the expressions (the files go to `log`) and then served from
+    // the cache to a render without them: the files that render lists.
+    let files_served = |what: &str, make: &dyn Fn(&Renderer, &crate::eval::EvalCtx) -> bool| {
+        let log = ReadLog::new();
+        let mut r = Renderer::new(&p, &NoFootage, RenderOpts::default());
+        r.expr = Some(&ReadsAFile);
+        r.cache = Some(&cache);
+        r.reads = Some(&log);
+        assert!(make(&r, &r.ctx(cid, c, Tick::ZERO)), "{what}");
+        assert!(log.files().get("/sampled.png").is_some(), "{what}: the frame lists the file");
+        let hits = cache.stats().hits;
+        let served = ReadLog::new();
+        r.expr = None;
+        r.reads = Some(&served);
+        assert!(make(&r, &r.ctx(cid, c, Tick::ZERO)), "{what}");
+        assert!(cache.stats().hits > hits, "{what}: served from the cache");
+        served.into_files()
+    };
+    let files = files_served("content", &|r, ctx| r.content_buf(ctx, content).is_some());
+    assert!(files.get("/sampled.png").is_some(), "content: {files:?}");
+    let files = files_served("input", &|r, ctx| r.layer_input(ctx, content, 0).is_some());
+    assert!(files.get("/sampled.png").is_some(), "input: {files:?}");
+    let files = files_served("footprint", &|r, ctx| r.adjustment_footprint(ctx, adjustment).is_some());
+    assert!(files.get("/sampled.png").is_some(), "footprint: {files:?}");
+}
+
+/// A text Expression Selector whose Amount is 0 for the first character and the width of the
+/// footage item named `ref.png` for the others (`textIndex == 1 ? 0 : footage("ref.png").width`).
+struct WidthOfRef;
+
+impl crate::eval::ExprHost for WidthOfRef {
+    fn eval(&self, _: &crate::eval::EvalCtx, _: &effectcraft_project::Layer, _: &effectcraft_project::Property, value: &Value) -> Result<Value, String> {
+        Ok(value.clone())
+    }
+    fn eval_text_selector(
+        &self,
+        ctx: &crate::eval::EvalCtx,
+        _: &effectcraft_project::Layer,
+        _: &effectcraft_project::Property,
+        index: usize,
+        _: usize,
+        _: [f64; 3],
+    ) -> Result<[f64; 3], String> {
+        let width = ctx.project.items.values().find(|i| i.name == "ref.png").and_then(|i| i.dimensions()).map_or(0.0, |d| d.0 as f64);
+        Ok([if index == 1 { 0.0 } else { width }; 3])
+    }
+}
+
+/// A text layer whose Expression Selector reads a footage item's size for every character but
+/// the first: the layer's key holds the first character's amount only, so its buffer is not
+/// stored on disk. Reopened over the same disk cache after the footage's width changed (16 to
+/// 64), the frame matches one rendered without a cache.
+#[test]
+fn a_text_expression_selector_is_not_served_from_the_disk_cache() {
+    use crate::disk_cache::{DiskCache, Kind};
+    use crate::{LayerCache, NoFootage, RenderOpts, Renderer};
+    let project = |width: u32| {
+        let (mut p, cid, comp) = setup();
+        let f = effectcraft_project::Footage { has_video: true, width, height: 16, ..Default::default() };
+        p.add_item("ref.png", Label::None, None, ItemKind::Footage(f));
+        let mut l = build::layer(&mut p, &comp, "Text", LayerSource::Text, (200, 100), None);
+        l.props.prop_mut("text/sourceText").unwrap().value = Value::Text(Box::new(TextDoc { text: "HH".into(), size: 60.0, ..Default::default() }));
+        let mut next = p.next_id;
+        let mut ids = Ids(&mut next);
+        let mut props = build::text_anim_props(&mut ids, "opacity", false);
+        for pr in &mut props {
+            pr.value = Value::Scalar(0.0);
+        }
+        let mut animator = build::text_animator(&mut ids, "Animator 1", props);
+        let sel = build::expression_selector(&mut ids, "Expression Selector 1");
+        p.next_id = next;
+        animator.sub_mut("selectors").unwrap().children.push(sel.into());
+        l.props.group_mut("text/animators").unwrap().children.push(animator.into());
+        p.comp_mut(cid).unwrap().layers.push(l);
+        (p, cid)
+    };
+    let render = |p: &Project, cid: ItemId, cache: Option<&LayerCache>| {
+        let mut r = Renderer::new(p, &NoFootage, RenderOpts::default());
+        r.expr = Some(&WidthOfRef);
+        r.cache = cache;
+        r.comp_frame(cid, Tick::ZERO)
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let dc = DiskCache::open(dir.path(), 1 << 30).unwrap();
+    dc.set_min_layer_ms(0);
+    // First session: the 16 px wide footage.
+    let (p16, cid) = project(16);
+    let cache = LayerCache::default();
+    cache.set_disk(Some(dc.clone()));
+    let first = render(&p16, cid, Some(&cache));
+    dc.flush();
+    assert!(first.data.iter().any(|px| px[3] > 0.5), "the text renders");
+    // Reopened with a fresh memory cache, the footage now 64 px wide.
+    let (p64, cid) = project(64);
+    let uncached = render(&p64, cid, None);
+    assert_ne!(uncached.data, first.data, "the second character's opacity follows the width");
+    let reopened = LayerCache::default();
+    reopened.set_disk(Some(dc.clone()));
+    assert_eq!(render(&p64, cid, Some(&reopened)).data, uncached.data, "not the buffer from before the change");
+    assert!(dc.keys(Kind::Layer).is_empty(), "the text layer's buffer is not on disk");
+}
+
 /// A Birth Rate expression reading another layer: changing that layer changes the history but
 /// not the current rate (0) nor this layer's properties, which is all the layer cache key sees.
-/// CC Particle World layers with expressions therefore aren't layer cached.
+/// Particle Emitter 3D layers with expressions therefore aren't layer cached.
 #[test]
 fn particle_world_with_a_birth_rate_expression_is_not_served_from_the_layer_cache() {
     let scene = |opacity: f64| {
@@ -517,8 +660,8 @@ fn particle_world_with_a_birth_rate_expression_is_not_served_from_the_layer_cach
     assert!(light(&b) > 1.0 && light(&b) < light(&a), "fewer births: {} vs {}", light(&b), light(&a));
 }
 
-/// A grey solid (CC Mr. Mercury shades its blobs from it) with effect `id` (CC Particle Systems
-/// II, CC Mr. Mercury): Birth Rate `rate`,
+/// A grey solid (Liquid Particles shades its blobs from it) with effect `id` (CC Particle Systems
+/// II, Liquid Particles): Birth Rate `rate`,
 /// or keyed 3 until 0.5 s and 0 a frame later (`None`); Longevity 1 s.
 fn system_scene(id: &str, rate: Option<f64>) -> (Project, ItemId) {
     let (mut p, cid, comp) = setup();
@@ -537,7 +680,7 @@ fn system_scene(id: &str, rate: Option<f64>) -> (Project, ItemId) {
     (p, cid)
 }
 
-/// #1373 for CC Particle Systems II and CC Mr. Mercury through the renderer: a keyed burst
+/// #1373 for Particle Emitter 2D and Liquid Particles through the renderer: a keyed burst
 /// draws as the constant rate during it, still draws after the rate drops to 0 (unlike a rate
 /// of 0 throughout), and draws as nothing born once Longevity has run out.
 #[test]
@@ -552,6 +695,34 @@ fn particle_systems_ii_and_mr_mercury_keep_a_burst_after_birth_rate_drops_to_zer
         assert!((light(&k) - light(&z)).abs() > 1.0, "{id}: the burst is still drawn: {} vs {}", light(&k), light(&z));
         assert_same(&render_cached(&keyed, cid, at(1.9), None), &render_cached(&none, cid, at(1.9), None), &format!("{id}: gone after Longevity"));
     }
+}
+
+/// A Particle Playground cannon-position expression reads the cannon's position at earlier
+/// times, so its layer cannot be served from a cache keyed only by the current value.
+#[test]
+fn particle_playground_with_a_cannon_position_expression_is_not_layer_cached() {
+    let (mut p, cid, comp) = setup();
+    let mut l = solid(&mut p, &comp, [0.0, 0.0, 0.0], 200, 100);
+    add_effect(
+        &mut p,
+        &mut l,
+        "ec.sim.particleplayground",
+        [200.0, 100.0],
+        &[("grid/particlesAcross", Value::Scalar(0.0)), ("grid/particlesDown", Value::Scalar(0.0)), ("cannon/particlesPerSecond", Value::Scalar(60.0))],
+    );
+    p.comp_mut(cid).unwrap().layers.push(l);
+    let c = p.comp(cid).unwrap();
+    let key = crate::cache::layer_key(&crate::eval::EvalCtx::new(&p, cid, c, Tick::from_seconds_f64(0.9)), &c.layers[0], 1.0, false, false);
+    assert!(key.is_some(), "a static cannon position is cacheable");
+
+    let fx = p.comp_mut(cid).unwrap().layers[0].props.sub_mut("effects").unwrap().children.iter_mut().find_map(|c| match c {
+        effectcraft_project::Node::Group(g) => Some(g),
+        _ => None,
+    });
+    fx.unwrap().prop_mut("cannon/cannonPosition").unwrap().expr = Some(effectcraft_project::Expression { text: "time * 10".into(), enabled: true });
+    let c = p.comp(cid).unwrap();
+    let key = crate::cache::layer_key(&crate::eval::EvalCtx::new(&p, cid, c, Tick::from_seconds_f64(0.9)), &c.layers[0], 1.0, false, false);
+    assert!(key.is_none(), "the cannon's parameter history is not cacheable");
 }
 
 /// A Birth Rate expression on any of the stepped particle systems keeps the layer out of the
@@ -784,6 +955,30 @@ fn effects_see_layer_masks() {
     assert!(img.get(150, 50)[3] > 0.99, "mode None mask does not cut the layer");
 }
 
+/// Masks come before effects: Grid (Blending Mode None) draws only inside a masked solid (#3121).
+#[test]
+fn grid_stays_inside_the_layer_mask() {
+    let (mut p, cid, comp) = setup();
+    let mut l = solid(&mut p, &comp, [1.0, 1.0, 1.0], 200, 100);
+    let mut next = p.next_id;
+    let m = build::mask(&mut Ids(&mut next), "Mask 1", ShapePath::rect([50.0, 50.0], 40.0, 40.0), MaskMode::Add, [255, 255, 0]);
+    p.next_id = next;
+    l.props.sub_mut("masks").unwrap().children.push(m.into());
+    // Inverted, the grid covers nearly every pixel, so the check does not depend on where the
+    // lines fall.
+    let set = [("width", Value::Scalar(10.0)), ("border", Value::Scalar(2.0)), ("invertGrid", Value::Bool(true))];
+    add_effect(&mut p, &mut l, "ec.generate.grid", [200.0, 100.0], &set);
+    p.comp_mut(cid).unwrap().layers.push(l);
+    let img = render_frame(&p, cid, Tick::ZERO, 1.0);
+    for y in 0..100 {
+        for x in 100..200 {
+            assert!(img.get(x, y)[3] < 0.01, "grid outside the mask at ({x}, {y}): {:?}", img.get(x, y));
+        }
+    }
+    assert!(img.get(15, 15)[3] < 0.01, "grid left of and above the mask: {:?}", img.get(15, 15));
+    assert!(img.get(55, 55)[3] > 0.5, "grid inside the mask: {:?}", img.get(55, 55));
+}
+
 /// An open mask (the Pen still drawing it) leaves the layer whole; closed, it masks (#290).
 #[test]
 fn open_masks_make_no_transparency() {
@@ -820,6 +1015,41 @@ fn effects_read_layer_params() {
     assert!(px[2] > 0.99 && px[0] < 0.01, "{px:?}");
 }
 
+/// A cached layer whose effect reads a precomp layer: how the precomp's layers render depends on
+/// Switches Affect Nested Comps (the precomp layer's Draft quality passes down) and on the
+/// switches the reading layer's own comp inherits, so the key must tell them apart (a buffer
+/// made under the other setting, from memory or disk, is stale).
+#[test]
+fn a_cached_layer_reading_a_precomp_is_keyed_by_the_nested_switches() {
+    let (mut p, cid, comp) = setup();
+    let mut inner = Comp::new(200, 100, FrameRate::FPS_30, Tick::from_seconds_f64(2.0));
+    // A rotated square off the pixel grid: Draft (nearest) and Best (bilinear) sampling differ.
+    let mut dot = solid(&mut p, &inner, [1.0, 1.0, 1.0], 40, 40);
+    dot.props.prop_mut("transform/position").unwrap().value = Value::Vec3([100.3, 50.6, 0.0]);
+    dot.props.prop_mut("transform/rotation").unwrap().value = Value::Scalar(30.0);
+    inner.layers.push(dot);
+    let iid = p.add_item("Inner", Label::Sandstone, None, ItemKind::Comp(inner.into()));
+    let mut pre = build::layer(&mut p, &comp, "Inner", LayerSource::Comp { item: iid }, (200, 100), None);
+    pre.switches.video = false;
+    pre.switches.quality = effectcraft_project::Quality::Draft;
+    let mut top = solid(&mut p, &comp, [1.0, 0.0, 0.0], 200, 100);
+    add_effect_200(&mut p, &mut top, "ec.channel.blend", &[("blendWithLayer", Value::Layer(Some(pre.id.0)))]);
+    let c = p.comp_mut(cid).unwrap();
+    c.layers.push(top);
+    c.layers.push(pre);
+    let frame = |nested_switches: bool, cache: Option<&crate::LayerCache>| {
+        let mut r = crate::Renderer::new(&p, &crate::NoFootage, crate::RenderOpts { nested_switches, ..Default::default() });
+        r.cache = cache;
+        r.comp_frame(cid, Tick::ZERO).data
+    };
+    let (on, off) = (frame(true, None), frame(false, None));
+    assert!(on != off, "the precomp layer's Draft quality passes down");
+    let cache = crate::LayerCache::default();
+    assert!(frame(true, Some(&cache)) == on);
+    assert!(frame(false, Some(&cache)) == off, "not the buffer made with switches affecting nested comps");
+    assert!(frame(true, Some(&cache)) == on, "and back");
+}
+
 /// Records whether the GPU compositor was asked to draw a frame.
 struct ProbeAccel(std::sync::atomic::AtomicBool);
 impl crate::Accelerator for ProbeAccel {
@@ -836,6 +1066,71 @@ impl crate::Accelerator for ProbeAccel {
     fn effects(&self, _chain: &[crate::FxStep], _buf: &crate::Buf, _levels: Option<f32>) -> Option<crate::Buf> {
         None
     }
+}
+
+/// Counts [`Accelerator::frame_end`] and optionally panics inside [`Accelerator::comp_frame`].
+struct EndAccel {
+    ends: std::sync::atomic::AtomicUsize,
+    panic: std::sync::atomic::AtomicBool,
+}
+impl crate::Accelerator for EndAccel {
+    fn name(&self) -> String {
+        "end".into()
+    }
+    fn comp_frame(&self, _r: &crate::Renderer, _comp: ItemId, _t: Tick) -> Option<crate::Image> {
+        if self.panic.load(std::sync::atomic::Ordering::SeqCst) {
+            panic!("comp_frame");
+        }
+        Some(crate::Image::new(1, 1))
+    }
+    fn supports_effect(&self, _id: &str) -> bool {
+        false
+    }
+    fn effects(&self, _chain: &[crate::FxStep], _buf: &crate::Buf, _levels: Option<f32>) -> Option<crate::Buf> {
+        None
+    }
+    fn frame_end(&self) {
+        self.ends.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[test]
+fn comp_frame_ends_the_frame_when_the_render_panics() {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::sync::atomic::Ordering;
+    let (mut p, cid, comp) = setup();
+    let l = solid(&mut p, &comp, [1.0, 0.0, 0.0], 50, 50);
+    p.comp_mut(cid).unwrap().layers.push(l);
+    let a = EndAccel { ends: Default::default(), panic: true.into() };
+    let mut r = crate::Renderer::new(&p, &crate::NoFootage, crate::RenderOpts { backend: crate::Backend::Gpu, ..Default::default() });
+    r.accel = Some(&a);
+    assert!(catch_unwind(AssertUnwindSafe(|| crate::passes::block_on(crate::passes::comp_frame(&r, cid, Tick::ZERO)))).is_err());
+    assert_eq!(a.ends.load(Ordering::SeqCst), 1);
+    a.panic.store(false, Ordering::SeqCst);
+    a.ends.store(0, Ordering::SeqCst);
+    let _ = crate::passes::block_on(crate::passes::comp_frame(&r, cid, Tick::ZERO));
+    assert_eq!(a.ends.load(Ordering::SeqCst), 1);
+}
+
+/// The renderer labels Project Settings ▸ Video Rendering and Effects draws parse back as the
+/// backend they name (in any case), and the older spellings still work.
+#[test]
+fn renderer_labels_parse_back_and_keep_the_older_spellings() {
+    use crate::Backend;
+    for (label, backend) in [
+        ("GPU Acceleration", Backend::Gpu),
+        ("gpu acceleration", Backend::Gpu),
+        ("Mercury GPU Acceleration", Backend::Gpu),
+        ("gpu", Backend::Gpu),
+        ("Software Rendering", Backend::Cpu),
+        ("software rendering", Backend::Cpu),
+        ("Mercury Software Only", Backend::Cpu),
+        ("cpu", Backend::Cpu),
+        ("Auto", Backend::Auto),
+    ] {
+        assert_eq!(Backend::parse(label), Some(backend), "{label}");
+    }
+    assert_eq!(Backend::parse("Vulkan"), None);
 }
 
 #[test]
@@ -1004,11 +1299,11 @@ fn effects_on_text_reach_past_the_text_bounds() {
     }
     assert!(
         painted > 50 && hi.saturating_sub(lo) > 100,
-        "CC Tiler tiles the glyphs across the layer region, not just its text bounds: {painted} painted, x-span {lo}..{hi}"
+        "Scaled Tiles tiles the glyphs across the layer region, not just its text bounds: {painted} painted, x-span {lo}..{hi}"
     );
 }
 
-/// #658: CC Smear drags text glyphs beyond the text layer's own bounds. Pixels smeared past
+/// #658: Directional Smear drags text glyphs beyond the text layer's own bounds. Pixels smeared past
 /// the painted rectangle used to fall off its edge, so the liquid trail never appeared.
 #[test]
 fn cc_smear_trails_text_past_its_bounds() {
@@ -1027,7 +1322,7 @@ fn cc_smear_trails_text_past_its_bounds() {
     );
     p.comp_mut(cid).unwrap().layers = vec![l].into();
     let smeared = right(&render_frame(&p, cid, Tick::ZERO, 1.0));
-    assert!(plain > 40 && smeared > plain + 25, "CC Smear trails the glyphs past the text bounds: right edge {plain} → {smeared}");
+    assert!(plain > 40 && smeared > plain + 25, "Directional Smear trails the glyphs past the text bounds: right edge {plain} → {smeared}");
 }
 
 /// A layer parameter pointing at a shape layer sees all of it (in its effect space), and the
@@ -1283,7 +1578,7 @@ fn solo_excludes_other_layers_outside_the_soloed_layers_range() {
     assert_eq!(second.get(100, 50), [0.0, 0.0, 1.0, 1.0], "only B inside its range");
 }
 
-/// #1252: a layer blended with a CC Particle World layer, under a camera panned by `pan` px.
+/// #1252: a layer blended with a Particle Emitter 3D layer, under a camera panned by `pan` px.
 fn scene_reader_dependency(pan: f64) -> (Project, ItemId) {
     let (mut p, cid, comp) = setup();
     let mut source = solid(&mut p, &comp, [0.0, 0.0, 0.0], 200, 100);
@@ -1540,4 +1835,236 @@ fn an_environment_light_makes_the_copy_uncached() {
     // The light off (not lighting): the cache comes back.
     q.comp_mut(cid).unwrap().layers[0].switches.video = false;
     assert!(key_at(&q).is_some(), "the light off, the read is cached again");
+}
+
+// ------------------------------------------------------------------- keyed model animation clips
+
+/// [`TRIANGLE`] with one 1 s clip: its node slides from x = -1 to x = +1 (linear).
+const SLIDING_TRIANGLE: &str = r#"{
+  "asset": {"version": "2.0"},
+  "scenes": [{"nodes": [0]}],
+  "nodes": [{"mesh": 0}],
+  "meshes": [{"primitives": [{"attributes": {"POSITION": 0, "NORMAL": 1}, "material": 0}]}],
+  "materials": [{"pbrMetallicRoughness": {"baseColorFactor": [1.0, 0.0, 0.0, 1.0]}}],
+  "animations": [{"samplers": [{"input": 2, "output": 3, "interpolation": "LINEAR"}], "channels": [{"sampler": 0, "target": {"node": 0, "path": "translation"}}]}],
+  "buffers": [{"byteLength": 104, "uri": "data:application/octet-stream;base64,AACAvwAAgL8AAAAAAACAPwAAgL8AAAAAAAAAAAAAgD8AAAAAAAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAgD8AAIC/AAAAAAAAAAAAAIA/AAAAAAAAAAA="}],
+  "bufferViews": [
+    {"buffer": 0, "byteOffset": 0, "byteLength": 36},
+    {"buffer": 0, "byteOffset": 36, "byteLength": 36},
+    {"buffer": 0, "byteOffset": 72, "byteLength": 8},
+    {"buffer": 0, "byteOffset": 80, "byteLength": 24}
+  ],
+  "accessors": [
+    {"bufferView": 0, "componentType": 5126, "type": "VEC3", "count": 3, "min": [-1.0, -1.0, 0.0], "max": [1.0, 1.0, 0.0]},
+    {"bufferView": 1, "componentType": 5126, "type": "VEC3", "count": 3},
+    {"bufferView": 2, "componentType": 5126, "type": "SCALAR", "count": 2, "min": [0.0], "max": [1.0]},
+    {"bufferView": 3, "componentType": 5126, "type": "VEC3", "count": 2}
+  ]
+}"#;
+
+struct SlidingModels;
+
+impl crate::FootageSource for SlidingModels {
+    fn frame(&self, _: ItemId, _: &effectcraft_project::Footage, _: Tick) -> Option<std::sync::Arc<crate::Image>> {
+        None
+    }
+    fn model(&self, _: ItemId, f: &effectcraft_project::Footage) -> Option<std::sync::Arc<effectcraft_model::Model>> {
+        effectcraft_model::load(&f.path, SLIDING_TRIANGLE.as_bytes(), &|_| None).ok().map(std::sync::Arc::new)
+    }
+}
+
+fn clip_comp() -> Comp {
+    let mut c = Comp::new(200, 100, FrameRate::FPS_30, Tick::from_seconds_f64(6.0));
+    c.renderer = effectcraft_project::Renderer::Advanced3D;
+    c
+}
+
+/// The sliding triangle at 20 px a model unit. `keys` key Geometry Options ▸ Animation as
+/// (layer seconds, popup value); with none, clip 1 is selected statically.
+fn sliding_model(p: &mut Project, comp: &Comp, keys: &[(f64, u32)], looping: bool) -> effectcraft_project::Layer {
+    let footage = effectcraft_project::Footage {
+        path: "Sliding.gltf".into(),
+        kind: effectcraft_project::FootageKind::Model,
+        frame_rate: FrameRate::FPS_30,
+        codec: "glTF".into(),
+        ..Default::default()
+    };
+    let mid = p.add_item("Sliding", Label::Red, None, ItemKind::Footage(footage));
+    let mut l = build::layer(p, comp, "Sliding", LayerSource::Model { item: mid }, (200, 100), None);
+    l.props.prop_mut("geometryOptions/unitScale").unwrap().value = Value::Scalar(20.0);
+    l.props.prop_mut("geometryOptions/loopAnimation").unwrap().value = Value::Bool(looping);
+    let clip = l.props.prop_mut("geometryOptions/animation").unwrap();
+    clip.value = Value::Enum(1);
+    clip.keys = keys.iter().map(|&(t, v)| Keyframe::new(Tick::from_seconds_f64(t), Value::Enum(v)).hold()).collect();
+    l
+}
+
+fn clip_scene(keys: &[(f64, u32)], looping: bool, stretch: f64, start: f64) -> (Project, ItemId) {
+    let (mut p, mut comp) = (Project::default(), clip_comp());
+    p.settings.bit_depth = effectcraft_project::BitDepth::Bpc32;
+    let mut l = sliding_model(&mut p, &comp, keys, looping);
+    l.stretch = stretch;
+    l.start_time = Tick::from_seconds_f64(start);
+    comp.layers = vec![l].into();
+    let cid = p.add_item("Comp", Label::Sandstone, None, ItemKind::Comp(comp.into()));
+    (p, cid)
+}
+
+fn clip_frame(p: &Project, cid: ItemId, t: Tick) -> crate::Image {
+    crate::Renderer::new(p, &SlidingModels, crate::RenderOpts::default()).comp_frame(cid, t)
+}
+
+/// The pose of the clip `elapsed` seconds in: clip 1 selected statically, played on the layer
+/// clock.
+fn clip_pose(looping: bool, elapsed: f64) -> crate::Image {
+    let (p, cid) = clip_scene(&[], looping, 100.0, 0.0);
+    clip_frame(&p, cid, Tick::from_seconds_f64(elapsed))
+}
+
+fn assert_poses(p: &Project, cid: ItemId, looping: bool, cases: &[(f64, f64)]) {
+    for &(t, elapsed) in cases {
+        let at = clip_frame(p, cid, Tick::from_seconds_f64(t));
+        assert_same(&at, &clip_pose(looping, elapsed), &format!("at {t}s the clip is {elapsed}s in"));
+    }
+}
+
+#[test]
+fn a_static_clip_plays_on_the_layer_clock() {
+    let xs: Vec<f32> = [0.0, 0.25, 0.75, 1.0].iter().map(|&e| cover_x(&clip_pose(false, e))).collect();
+    assert!(xs.windows(2).all(|w| w[1] > w[0] + 5.0), "the clip slides the triangle right: {xs:?}");
+    assert_same(&clip_pose(true, 1.25), &clip_pose(true, 0.25), "a looping clip wraps on the layer clock");
+}
+
+#[test]
+fn a_clip_keyed_on_later_starts_from_its_first_frame() {
+    let (p, cid) = clip_scene(&[(0.0, 0), (3.0, 1)], false, 100.0, 0.0);
+    assert_poses(&p, cid, false, &[(3.0, 0.0), (3.25, 0.25), (3.75, 0.75), (4.0, 1.0), (5.0, 1.0)]);
+}
+
+#[test]
+fn a_looping_clip_keyed_on_later_loops_from_its_activation() {
+    let (p, cid) = clip_scene(&[(0.0, 0), (2.5, 1)], true, 100.0, 0.0);
+    assert_poses(&p, cid, true, &[(2.75, 0.25), (3.75, 0.25)]);
+}
+
+#[test]
+fn a_clip_reselected_after_none_restarts() {
+    let (p, cid) = clip_scene(&[(0.0, 1), (1.5, 0), (3.0, 1)], false, 100.0, 0.0);
+    assert_poses(&p, cid, false, &[(0.5, 0.5), (3.25, 0.25)]);
+}
+
+#[test]
+fn a_repeated_key_of_the_same_clip_does_not_restart_it() {
+    let (p, cid) = clip_scene(&[(0.0, 0), (2.0, 1), (3.0, 1)], false, 100.0, 0.0);
+    assert_poses(&p, cid, false, &[(2.5, 0.5), (3.25, 1.25)]);
+}
+
+#[test]
+fn seeking_a_keyed_clip_poses_it_the_same_in_any_order() {
+    let (p, cid) = clip_scene(&[(0.0, 0), (3.0, 1)], false, 100.0, 0.0);
+    let cache = crate::LayerCache::default();
+    let mut r = crate::Renderer::new(&p, &SlidingModels, crate::RenderOpts::default());
+    r.cache = Some(&cache);
+    for (t, elapsed) in [(4.0, 1.0), (3.25, 0.25), (3.0, 0.0), (3.75, 0.75), (3.25, 0.25), (4.0, 1.0)] {
+        let at = r.comp_frame(cid, Tick::from_seconds_f64(t));
+        assert_same(&at, &clip_pose(false, elapsed), &format!("seek to {t}s: the clip is {elapsed}s in"));
+    }
+}
+
+#[test]
+fn a_stretched_layer_times_its_clip_from_activation_in_layer_time() {
+    let (p, cid) = clip_scene(&[(0.0, 0), (1.5, 1)], false, 200.0, 0.0);
+    let t = p.comp(cid).unwrap().layers[0].comp_time(Tick::from_seconds_f64(1.75));
+    assert_same(&clip_frame(&p, cid, t), &clip_pose(false, 0.25), "layer time 1.75 s: the clip is 0.25 s in");
+}
+
+#[test]
+fn a_reversed_layer_times_its_clip_from_activation_in_layer_time() {
+    let (p, cid) = clip_scene(&[(0.0, 0), (3.0, 1)], false, -100.0, 5.0);
+    let l = &p.comp(cid).unwrap().layers[0];
+    let t = l.comp_time(Tick::from_seconds_f64(3.25));
+    assert!(l.is_active_at(t), "the reversed layer is on at {t:?}");
+    assert_same(&clip_frame(&p, cid, t), &clip_pose(false, 0.25), "layer time 3.25 s: the clip is 0.25 s in");
+}
+
+#[test]
+fn an_expression_driven_clip_keeps_the_layer_clock() {
+    let (mut p, cid) = clip_scene(&[(0.0, 0), (2.5, 1)], true, 100.0, 0.0);
+    let clip = p.comp_mut(cid).unwrap().layers[0].props.prop_mut("geometryOptions/animation").unwrap();
+    clip.expr = Some(effectcraft_project::Expression { text: "value".into(), enabled: true });
+    assert_poses(&p, cid, true, &[(3.25, 3.25)]);
+    assert!((cover_x(&clip_pose(true, 3.25)) - cover_x(&clip_pose(true, 0.75))).abs() > 5.0, "the layer clock and the activation clock disagree");
+}
+
+/// The sliding model keyed None, then clip 1 at 3 s, in a collapsed 3D precomp; `overridden`
+/// sets the clip through its Essential Property, and `copy` adds a 3D Layer Instance of it.
+fn collapsed_clip_scene(overridden: bool, copy: bool) -> (Project, ItemId) {
+    use effectcraft_project::essential::{self, EgControl, EgKind, EssentialGraphics};
+    let mut p = Project::default();
+    p.settings.bit_depth = effectcraft_project::BitDepth::Bpc32;
+    let (mut inner, mut outer) = (clip_comp(), clip_comp());
+    let model = sliding_model(&mut p, &inner, &[(0.0, 0), (3.0, 1)], false);
+    let prop = model.props.prop("geometryOptions/animation").unwrap().uid;
+    let kind = EgKind::Property { layer: model.id, prop, links: vec![] };
+    inner.essential = Some(EssentialGraphics { controls: vec![EgControl { id: 1, name: "Clip".into(), kind, as_type: None }], ..Default::default() });
+    let mut layers = vec![];
+    if copy {
+        let mut owner = solid(&mut p, &inner, [1.0, 1.0, 1.0], 200, 100);
+        add_effect_200(&mut p, &mut owner, "ec.3d.instance3d", &[("layer", Value::Layer(Some(model.id.0)))]);
+        layers.push(owner);
+    }
+    layers.push(model);
+    inner.layers = layers.into();
+    let iid = p.add_item("Inner", Label::Sandstone, None, ItemKind::Comp(inner.into()));
+    let mut pre = build::layer(&mut p, &outer, "Inner", LayerSource::Comp { item: iid }, (200, 100), None);
+    pre.switches.three_d = true;
+    pre.switches.collapse = true;
+    if overridden {
+        let mut ids = Ids(&mut p.next_id);
+        let control = ids.prop(&essential::match_id(1), "Clip", Value::Enum(1));
+        let mut group = ids.group(essential::GROUP, "Essential Properties");
+        group.kind = effectcraft_project::GroupKind::Essential { overridden: vec![control.uid] };
+        group.children.push(control.into());
+        pre.props.children.push(group.into());
+    }
+    outer.layers = vec![pre].into();
+    let cid = p.add_item("Outer", Label::Sandstone, None, ItemKind::Comp(outer.into()));
+    (p, cid)
+}
+
+#[test]
+fn an_essential_property_override_of_the_clip_keeps_the_layer_clock() {
+    let (p, cid) = collapsed_clip_scene(true, false);
+    assert_poses(&p, cid, false, &[(1.0, 1.0), (3.25, 3.25)]);
+    assert!((cover_x(&clip_pose(false, 3.25)) - cover_x(&clip_pose(false, 0.25))).abs() > 5.0, "the layer clock and the activation clock disagree");
+}
+
+/// The keyed clip and its override select the same clip at 3.25 s but pose it 0.25 s and
+/// 3.25 s in: a 3D Layer Instance of one is not served the other's pixels.
+#[test]
+fn a_copy_of_an_overridden_clip_is_not_served_the_keyed_clips_pixels() {
+    let t = Tick::from_seconds_f64(3.25);
+    let cache = crate::LayerCache::default();
+    let render = |(p, cid): &(Project, ItemId), cache: Option<&crate::LayerCache>| {
+        let mut r = crate::Renderer::new(p, &SlidingModels, crate::RenderOpts::default());
+        r.cache = cache;
+        r.comp_frame(*cid, t)
+    };
+    let (keyed, overridden) = (collapsed_clip_scene(false, true), collapsed_clip_scene(true, true));
+    assert_same(&render(&keyed, Some(&cache)), &render(&keyed, None), "the keyed clip's copy");
+    assert_same(&render(&overridden, Some(&cache)), &render(&overridden, None), "the overridden clip's copy");
+}
+
+#[test]
+fn elongated_solids_stay_within_the_pixel_cap_after_rounding() {
+    use crate::pipeline::solid_size;
+    // 1 × 100 million at full scale: rounding up used to leave 40 million pixels.
+    for (w, h) in [(1u32, 100_000_000u32), (100_000_000, 1), (u32::MAX, u32::MAX), (1, u32::MAX)] {
+        let (s, pw, ph) = solid_size(w, h, 1.0);
+        assert!(s > 0.0 && f64::from(pw) * f64::from(ph) <= 16.0e6, "{w}x{h} -> {pw}x{ph} at {s}");
+    }
+    // A solid within the cap keeps its scale; an over-cap square is lowered by the exact ratio.
+    assert_eq!(solid_size(4000, 4000, 1.0), (1.0, 4000, 4000));
+    let (s, pw, ph) = solid_size(5000, 5000, 1.0);
+    assert!((s - 0.8).abs() < 0.01 && pw * ph <= 16_000_000);
 }

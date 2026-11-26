@@ -6,10 +6,12 @@ use effectcraft_automation::{Backend, McpServer};
 use serde_json::{Value, json};
 
 use crate::args::{
-    BridgeArg, CommandsArgs, ExecArgs, GetArgs, GpuArg, InfoArgs, McpArgs, PropsArgs, RenderFrameArgs, RunArgs, SaveArgs, ScriptArgs, SetArgs, SourceArgs,
+    BridgeArg, CommandsArgs, ExecArgs, GetArgs, GpuArg, InfoArgs, McpArgs, PropsArgs, RenderFrameArgs, ReplayArgs, RunArgs, SaveArgs, ScriptArgs, SetArgs,
+    SourceArgs,
 };
 use crate::error::{CliError, CommandsFileError, Result, UsageError};
 use crate::io::Io;
+use crate::project_lock;
 use crate::steps::{parse_commands, read_commands};
 use crate::template;
 
@@ -56,10 +58,11 @@ pub fn backend(sel: &Sel, default_demo: bool) -> Result<Backend> {
     Ok(b)
 }
 
-/// A wired session; `--gpu` attaches the GPU compositor (renders then follow the project's
-/// renderer setting, Mercury GPU Acceleration by default).
+/// A wired session whose caches share the budget of the installed RAM (#3941); `--gpu` attaches
+/// the GPU compositor (renders then follow the project's renderer setting, GPU Acceleration by
+/// default).
 pub fn session(sel: &Sel) -> Result<effectcraft_engine::Session> {
-    let mut s = effectcraft_host::session();
+    let mut s = effectcraft_host::headless_session();
     if sel.autosave {
         let dir = effectcraft_host::config_dir().ok_or(CliError::NoConfigDir)?;
         // Read only auto-save settings. Opting in must not change headless rendering or load
@@ -209,6 +212,7 @@ pub fn exec(a: &mut ExecArgs, json_out: bool, io: &mut Io) -> Result {
         return list_commands(&sel, a.filter.as_deref(), a.enabled, a.schemas, json_out, io);
     }
     let Some(call) = a.call.take() else { return Err(UsageError::Missing("exec <command-id> [<params JSON>]").into()) };
+    let _lock = project_lock::for_save(&sel, &a.save)?;
     let mut b = backend(&sel, true)?;
     let r = b.exec(&call.id, call.params)?;
     if let Some(message) = failed_render(&call.id, &r) {
@@ -256,7 +260,9 @@ pub fn run_cmds(a: &RunArgs, json_out: bool, io: &mut Io) -> Result {
     if steps.is_empty() {
         return Err(UsageError::BadCommands(CommandsFileError::Empty(a.commands.join(", "))).into());
     }
-    let mut b = backend(&Sel::new(&a.source, &a.bridge, &a.gpu, a.project.as_ref()), true)?;
+    let sel = Sel::new(&a.source, &a.bridge, &a.gpu, a.project.as_ref());
+    let _lock = project_lock::for_save(&sel, &a.save)?;
+    let mut b = backend(&sel, true)?;
     let mut results = vec![];
     // The step's index closes the message: a generated list repeats ids, and callers match the
     // leading `<id>: `.
@@ -294,10 +300,20 @@ pub fn props(a: &PropsArgs, json_out: bool, io: &mut Io) -> Result {
             if let Some(e) = p.get("expression").and_then(Value::as_str) {
                 extra += &format!("  expr: {e}");
             }
-            say!(io, "  {:<44} {:<8} {}{extra}", p["path"].as_str().unwrap_or(""), p["type"].as_str().unwrap_or(""), p["value"]);
+            say!(io, "  {:<44} {:<8} {}{extra}", p["path"].as_str().unwrap_or(""), p["type"].as_str().unwrap_or(""), value_text(p));
         }
     }
     Ok(())
+}
+
+/// A flat property's value for the text listing: an enum's number with the label `options` gives it
+/// (#2928), since the numbers are 0-based where After Effects scripting counts from 1.
+fn value_text(p: &Value) -> String {
+    let label = p["options"].as_array().and_then(|o| o.iter().find(|o| o["value"] == p["value"])).and_then(|o| o["label"].as_str());
+    match label {
+        Some(l) => format!("{} ({l})", p["value"]),
+        None => p["value"].to_string(),
+    }
 }
 
 pub fn get(a: &GetArgs, json_out: bool, io: &mut Io) -> Result {
@@ -313,7 +329,9 @@ pub fn set(a: &SetArgs, json_out: bool, io: &mut Io) -> Result {
         return Err(UsageError::Missing("set <comp> <layer> <path> <value>").into());
     };
     let value = a.target.get(3).map(|v| value_arg(v));
-    let mut b = backend(&Sel::new(&a.source, &a.bridge, &a.gpu, a.project.as_ref()), true)?;
+    let sel = Sel::new(&a.source, &a.bridge, &a.gpu, a.project.as_ref());
+    let _lock = project_lock::for_save(&sel, &a.save)?;
+    let mut b = backend(&sel, true)?;
     let args = json!({"comp": reference(comp), "layer": reference(layer), "path": path, "value": value, "time": a.time, "expression": a.expression});
     let v = tool(&mut b, "set_property", args)?;
     let saved = maybe_save(&mut b, &a.save)?;
@@ -364,7 +382,9 @@ pub fn script(a: &ScriptArgs, json_out: bool, io: &mut Io) -> Result {
         (None, Some(f)) => (std::fs::read_to_string(f).map_err(|source| CliError::ReadScript { path: f.clone(), source })?, f.clone()),
         (None, None) => return Err(UsageError::Missing("script FILE.jsx [F.ecproj] | --eval CODE").into()),
     };
-    let mut b = backend(&Sel::new(&a.source, &a.bridge, &a.gpu, a.project.as_ref()), false)?;
+    let sel = Sel::new(&a.source, &a.bridge, &a.gpu, a.project.as_ref());
+    let _lock = project_lock::for_save(&sel, &a.save)?;
+    let mut b = backend(&sel, false)?;
     let r = b.exec("script.run", json!({"code": code, "name": name}))?;
     let saved = maybe_save(&mut b, &a.save)?;
     if json_out {
@@ -395,6 +415,58 @@ pub fn script(a: &ScriptArgs, json_out: bool, io: &mut Io) -> Result {
         return Err(if json_out { CliError::Reported } else { CliError::Script(msg) });
     }
     Ok(())
+}
+
+/// `replay SCRIPT.jsonl`: run a repro script against a headless session (its start line picks
+/// the project) and report every step. Exits 1 when the replay fails.
+pub fn replay(a: &ReplayArgs, json_out: bool, io: &mut Io) -> Result {
+    use effectcraft_engine::replay;
+    use std::io::Read;
+    let path = std::path::Path::new(&a.script);
+    let read = |source| CliError::ReadScript { path: a.script.clone(), source };
+    let input = std::fs::File::open(path).map_err(read)?;
+    // Bound the read itself: metadata can be stale or describe a pipe rather than its contents.
+    let mut script = String::new();
+    input.take(replay::MAX_SCRIPT_BYTES as u64 + 1).read_to_string(&mut script).map_err(read)?;
+    if script.len() > replay::MAX_SCRIPT_BYTES {
+        return Err(CliError::ScriptTooBig { path: a.script.clone(), megabytes: replay::MAX_SCRIPT_BYTES >> 20 });
+    }
+    let sel = Sel { project: None, demo: false, empty: false, bridge: None, gpu: a.gpu.gpu, autosave: false };
+    let mut s = session(&sel)?;
+    let opts = replay::Options { keep_going: a.keep_going, base_dir: path.parent().map(std::path::Path::to_path_buf) };
+    let report = replay::run(&mut s, &script, &opts);
+    if json_out {
+        emit(io, &serde_json::to_value(&report).unwrap_or_else(|e| json!({"error": e.to_string()})), true);
+    } else {
+        for st in &report.steps {
+            let what = st.command.as_deref().unwrap_or(st.kind);
+            match (&st.error, st.ok) {
+                (None, _) => say!(io, "line {:>4}  ok    {what}", st.line),
+                (Some(e), true) => say!(io, "line {:>4}  ok    {what} (tolerated error: {e})", st.line),
+                (Some(e), false) => say!(io, "line {:>4}  FAIL  {what}: {e}", st.line),
+            }
+        }
+    }
+    let Some(first) = &report.first_failure else {
+        if !json_out {
+            say!(io, "replay ok: {} steps", report.steps.len());
+        }
+        return Ok(());
+    };
+    let message = format!(
+        "failed at line {} ({}){}: {}{}",
+        first.line,
+        first.command.as_deref().unwrap_or(first.kind),
+        if report.panicked { ", a command panicked" } else { "" },
+        first.error.as_deref().unwrap_or(""),
+        if report.skipped > 0 { format!(" ({} later steps not run)", report.skipped) } else { String::new() }
+    );
+    if json_out {
+        // The report is the JSON document; the reason goes to stderr.
+        note!(io, "effectcraft-cli replay: {message}");
+        return Err(CliError::Reported);
+    }
+    Err(CliError::Replay(message))
 }
 
 pub fn mcp(a: &McpArgs) -> Result {

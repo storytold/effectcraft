@@ -45,7 +45,7 @@ fn the_example_writes_the_files_the_packages_install() {
     let mut written: Vec<String> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
     written.sort();
     let completions = ["effectcraft-cli.bash", "_effectcraft-cli", "effectcraft-cli.fish", "effectcraft-cli.elv", "_effectcraft-cli.ps1"];
-    let subcommands = ["info", "commands", "exec", "run", "props", "get", "set", "render-frame", "render", "bench", "script", "mcp"];
+    let subcommands = ["info", "commands", "exec", "run", "props", "get", "set", "render-frame", "render", "bench", "script", "replay", "mcp"];
     let mut expected: Vec<String> = completions.map(String::from).into();
     expected.push("effectcraft-cli.1".into());
     expected.extend(subcommands.iter().map(|s| format!("effectcraft-cli-{s}.1")));

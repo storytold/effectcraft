@@ -8,9 +8,99 @@ use super::{Buf, EffectCtx, Image, IntoParallelRefMutIterator, ParallelIterator,
 /// Steps per second of the stepped particle simulations.
 pub(crate) const SPS: f64 = 60.0;
 
-/// Number of whole steps reached at layer time `t`.
+/// Number of whole steps reached at layer time `t` (at most [`crate::util::MAX_SIM_STEPS`]: the
+/// per-step histories built from it, such as [`rate_history`], stay bounded however late a
+/// project places the layer's time).
 pub(crate) fn steps_at(t: f64) -> u64 {
-    if t <= 0.0 { 0 } else { (t * SPS + 1e-6).floor() as u64 }
+    if t <= 0.0 { 0 } else { ((t * SPS + 1e-6).floor() as u64).min(crate::util::MAX_SIM_STEPS) }
+}
+
+/// The parameter path of a simulation producer and the coordinates its positions use.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum ProducerPath {
+    /// One point parameter. `by_height` converts layer pixels to the systems' height-relative units.
+    Point { id: &'static str, by_height: bool },
+    /// Three scalar parameters in world coordinates.
+    Components { x: &'static str, y: &'static str, z: &'static str },
+}
+
+impl ProducerPath {
+    fn raw_current(self, ctx: &EffectCtx) -> [f64; 3] {
+        match self {
+            Self::Point { id, .. } => {
+                let p = ctx.params.v2(id);
+                [p[0], p[1], 0.0]
+            }
+            Self::Components { x, y, z } => [ctx.params.f(x), ctx.params.f(y), ctx.params.f(z)],
+        }
+    }
+
+    fn convert(self, ctx: &EffectCtx, raw: [f64; 3]) -> [f32; 3] {
+        let unit = match self {
+            Self::Point { by_height: true, .. } => ctx.layer_size[1].max(1.0),
+            _ => 1.0,
+        };
+        let finite = |v: f64| if v.is_finite() { (v / unit) as f32 } else { 0.0 };
+        [finite(raw[0]), finite(raw[1]), finite(raw[2])]
+    }
+
+    /// The producer position at the start of every simulated step.
+    pub(crate) fn history(self, ctx: &EffectCtx) -> Vec<[f32; 3]> {
+        let steps = steps_at(ctx.time);
+        if steps == 0 {
+            return vec![];
+        }
+        let current_raw = self.raw_current(ctx).map(|v| if v.is_finite() { v } else { 0.0 });
+        let current = self.convert(ctx, current_raw);
+        let host = ctx.env.host;
+        let index = ctx.env.effect_index;
+        match self {
+            Self::Point { id, .. } => {
+                let dynamic = host.is_some_and(|h| !h.param_is_static(index, id));
+                if !dynamic {
+                    return vec![current; steps as usize];
+                }
+                (0..steps)
+                    .map(|i| {
+                        let raw = host
+                            .and_then(|h| h.param_at(index, id, i as f64 / SPS))
+                            .map(|v| {
+                                let p = v.as_vec2();
+                                [p[0], p[1], 0.0]
+                            })
+                            .unwrap_or(current_raw);
+                        self.convert(ctx, raw)
+                    })
+                    .collect()
+            }
+            Self::Components { x, y, z } => {
+                let static_x = host.is_some_and(|h| h.param_is_static(index, x));
+                let static_y = host.is_some_and(|h| h.param_is_static(index, y));
+                let static_z = host.is_some_and(|h| h.param_is_static(index, z));
+                (0..steps)
+                    .map(|i| {
+                        let time = i as f64 / SPS;
+                        let value = |id: &str, now: f64, is_static: bool| {
+                            if is_static {
+                                now
+                            } else {
+                                host.and_then(|h| h.param_at(index, id, time)).map(|v| v.as_f64()).filter(|v| v.is_finite()).unwrap_or(now)
+                            }
+                        };
+                        self.convert(ctx, [value(x, current_raw[0], static_x), value(y, current_raw[1], static_y), value(z, current_raw[2], static_z)])
+                    })
+                    .collect()
+            }
+        }
+    }
+
+    /// Parameter ids left out of the main cache key; their history is fingerprinted separately.
+    pub(crate) fn cache_skips(self) -> Vec<&'static str> {
+        match self {
+            Self::Point { id, .. } => vec![id],
+            Self::Components { x, y, z } => vec![x, y, z],
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -32,6 +122,9 @@ pub(crate) struct PState {
     /// The birth rates of the steps so far (see [`rates_hash`]): a checkpoint is only resumed
     /// from with the same history.
     pub hist: u64,
+    /// The producer positions of the steps so far: a checkpoint is only resumed from with the
+    /// same producer history.
+    pub producer_hist: u64,
 }
 
 /// `hist` after one more step at `rate` particles per second.
@@ -45,7 +138,6 @@ pub(crate) struct Phys {
     /// Particles per second.
     pub rate: f64,
     pub life: f32,
-    pub producer: [f32; 3],
     pub radius: [f32; 3],
     pub anim: u32,
     pub speed: f32,
@@ -80,14 +172,14 @@ fn rand_dir(i: u32, k: u32, seed: u32, flat: bool) -> [f32; 3] {
 }
 
 impl Phys {
-    fn spawn(&self, id: u32) -> Particle {
+    fn spawn(&self, id: u32, producer: [f32; 3]) -> Particle {
         let seed = self.seed;
         let mut p = [0.0f32; 3];
         // Uniform in the producer ellipsoid.
         let u = rand_dir(id, 1, seed, self.flat);
         let rr = h(id, 3, seed).powf(if self.flat { 0.5 } else { 1.0 / 3.0 });
         for k in 0..3 {
-            p[k] = self.producer[k] + u[k] * self.radius[k] * rr;
+            p[k] = producer[k] + u[k] * self.radius[k] * rr;
         }
         if self.flat {
             p[2] = 0.0;
@@ -116,13 +208,13 @@ impl Phys {
 
     /// One step at the constant [`Phys::rate`] (the tests' reference).
     #[cfg(test)]
-    pub(crate) fn step(&self, st: &mut PState, step: u64) {
-        self.step_at_rate(st, step, self.rate);
+    pub(crate) fn step(&self, st: &mut PState, step: u64, producer: [f32; 3]) {
+        self.step_at_rate(st, step, self.rate, producer);
     }
 
     /// One step with `rate` particles per second born during it (rather than [`Phys::rate`]):
     /// the rate only decides the births, particles already alive move and age as ever.
-    pub(crate) fn step_at_rate(&self, st: &mut PState, step: u64, rate: f64) {
+    pub(crate) fn step_at_rate(&self, st: &mut PState, step: u64, rate: f64, producer: [f32; 3]) {
         let dt = (1.0 / SPS) as f32;
         let t = step as f32 * dt;
         let mut drag = self.resistance;
@@ -136,19 +228,19 @@ impl Phys {
             match self.anim {
                 4 => {
                     // Twirly: swirl around the vertical axis through the producer.
-                    let (dx, dz) = (q.p[0] - self.producer[0], q.p[2] - self.producer[2]);
+                    let (dx, dz) = (q.p[0] - producer[0], q.p[2] - producer[2]);
                     let k = 4.0 * self.extra;
                     a[0] += -dz * k;
                     a[2] += dx * k;
                     if self.flat {
-                        let dy = q.p[1] - self.producer[1];
+                        let dy = q.p[1] - producer[1];
                         a[0] += -dy * k;
                         a[1] += dx * k;
                     }
                 }
                 5 => {
                     // Vortex: strong tangential + inward pull.
-                    let (dx, dy) = (q.p[0] - self.producer[0], q.p[1] - self.producer[1]);
+                    let (dx, dy) = (q.p[0] - producer[0], q.p[1] - producer[1]);
                     let k = 6.0 * self.extra;
                     a[0] += -dy * k - dx * 2.0;
                     a[1] += dx * k - dy * 2.0;
@@ -181,6 +273,7 @@ impl Phys {
         });
         st.parts.retain(|q| q.age < q.life);
         st.hist = rates_hash(st.hist, rate);
+        st.producer_hist = crate::psim::producer_hash_step(st.producer_hist, producer);
         st.carry += rate / SPS;
         let n = st.carry.floor() as u32;
         st.carry -= n as f64;
@@ -191,7 +284,7 @@ impl Phys {
             let id = st.next_id;
             st.next_id = st.next_id.wrapping_add(1);
             // Sub-step birth offset keeps continuous streams smooth.
-            let mut q = self.spawn(id);
+            let mut q = self.spawn(id, producer);
             let frac = h(id, 12, seed) * dt;
             for k in 0..3 {
                 q.p[k] += q.v[k] * frac;
@@ -212,7 +305,6 @@ impl Phys {
         let dt = (1.0 / SPS) as f32;
         crate::psim::EngineDesc {
             life: self.life,
-            producer: self.producer,
             radius: self.radius,
             anim: self.anim,
             speed: self.speed,
@@ -230,20 +322,21 @@ impl Phys {
 /// The state at layer time `ctx.time` from the host's particle backend (GPU particles), or
 /// `None` (simulate on the CPU). `rates`: the birth rate of each step, when it changes over time
 /// (else [`Phys::rate`]).
-pub(super) fn accelerated(ctx: &EffectCtx, key: u64, phys: &Phys, rates: Option<&[f64]>) -> Option<std::sync::Arc<PState>> {
+pub(super) fn accelerated(ctx: &EffectCtx, key: u64, phys: &Phys, rates: Option<&[f64]>, producers: &[[f32; 3]]) -> Option<std::sync::Arc<PState>> {
     let backend = ctx.env.host?.particles()?;
     let steps = steps_at(ctx.time);
     let births = match rates {
         Some(r) => crate::psim::births_at(steps, phys.max, |i| r.get(i as usize).copied().unwrap_or(0.0))?,
         None => crate::psim::births(phys.rate, steps, phys.max)?,
     };
-    let req = crate::psim::SimRequest { key, steps, births: &births, system: crate::psim::ParticleSystem::Engine(phys.desc()) };
+    let req = crate::psim::SimRequest { key, steps, births: &births, producers, system: crate::psim::ParticleSystem::Engine(phys.desc()) };
     let parts = backend.simulate(&req)?;
     Some(std::sync::Arc::new(PState {
         parts: parts.into_iter().map(|q| Particle { p: q.p, v: q.v, age: q.age, life: q.life, rnd: q.rnd, id: q.id }).collect(),
         carry: 0.0,
         next_id: births.len() as u32,
         hist: 0,
+        producer_hist: crate::psim::producer_hash(producers, steps),
     }))
 }
 
@@ -265,15 +358,23 @@ pub(super) fn rate_history(ctx: &EffectCtx, id: &str, k: f64) -> Vec<f64> {
 
 /// Run a particle system through `rates` (one birth rate per step, see [`rate_history`]) with
 /// `cache`, resuming only from checkpoints reached with the same rates.
-pub(super) fn simulate_rates(cache: &SimCache<PState>, key: u64, phys: &Phys, rates: &[f64]) -> std::sync::Arc<PState> {
+pub(super) fn simulate_rates(cache: &SimCache<PState>, key: u64, phys: &Phys, rates: &[f64], producers: &[[f32; 3]]) -> std::sync::Arc<PState> {
     // `hist` of the state after each number of steps.
     let mut prefix = Vec::with_capacity(rates.len() + 1);
     prefix.push(0u64);
     for r in rates {
         prefix.push(rates_hash(prefix.last().copied().unwrap_or(0), *r));
     }
+    let producer_prefix = crate::psim::producer_prefixes(producers);
     let rate = |i: u64| rates.get(i as usize).copied().unwrap_or(0.0);
-    cache.run_where(key, rates.len() as u64, PState::default, |st, i| phys.step_at_rate(st, i, rate(i)), |s, st| prefix.get(s as usize) == Some(&st.hist))
+    let producer = |i: u64| producers.get(i as usize).copied().unwrap_or([0.0; 3]);
+    cache.run_where(
+        key,
+        rates.len() as u64,
+        PState::default,
+        |st, i| phys.step_at_rate(st, i, rate(i), producer(i)),
+        |s, st| prefix.get(s as usize) == Some(&st.hist) && producer_prefix.get(s as usize) == Some(&st.producer_hist),
+    )
 }
 
 /// A stepped particle system's particles at `ctx.time`, born at the Birth Rate of their own
@@ -284,6 +385,7 @@ pub(super) struct Stepped<'a> {
     pub(super) cache: &'a SimCache<PState>,
     pub(super) salt: u64,
     pub(super) skip: &'a [&'a str],
+    pub(super) producer: ProducerPath,
     pub(super) k: f64,
     pub(super) gpu: bool,
 }
@@ -291,20 +393,31 @@ pub(super) struct Stepped<'a> {
 impl Stepped<'_> {
     pub(super) fn state(&self, ctx: &EffectCtx, phys: &Phys) -> std::sync::Arc<PState> {
         let rates = rate_history(ctx, "birthRate", self.k);
+        let producers = self.producer.history(ctx);
         let mut skip = self.skip.to_vec();
         skip.push("birthRate");
+        skip.extend(self.producer.cache_skips());
         let key = params_key_except(ctx, &Buf { img: Image::new(0, 0), offset: [0.0; 2], scale: 1.0 }, self.salt, &skip);
-        let gpu = if self.gpu { accelerated(ctx, key, phys, Some(&rates)) } else { None };
-        gpu.unwrap_or_else(|| simulate_rates(self.cache, key, phys, &rates))
+        let gpu = if self.gpu { accelerated(ctx, key, phys, Some(&rates), &producers) } else { None };
+        gpu.unwrap_or_else(|| simulate_rates(self.cache, key, phys, &rates, &producers))
     }
 }
 
 /// CC Particle World.
-const PW: Stepped = Stepped { cache: &PW_CACHE, salt: 1, skip: &[PW_EFFECT_CAMERA], k: PW_RATE, gpu: true };
+pub(super) const PW: Stepped = Stepped {
+    cache: &PW_CACHE,
+    salt: 1,
+    skip: &[PW_EFFECT_CAMERA],
+    producer: ProducerPath::Components { x: "producer/producerX", y: "producer/producerY", z: "producer/producerZ" },
+    k: PW_RATE,
+    gpu: true,
+};
 /// CC Particle Systems II.
-pub(super) const PS2: Stepped = Stepped { cache: &PS2_CACHE, salt: 2, skip: &[], k: PS2_RATE, gpu: true };
+pub(super) const PS2: Stepped =
+    Stepped { cache: &PS2_CACHE, salt: 2, skip: &[], producer: ProducerPath::Point { id: "producer/position", by_height: true }, k: PS2_RATE, gpu: true };
 /// CC Mr. Mercury (its blobs are simulated on the CPU).
-pub(super) const MERCURY: Stepped = Stepped { cache: &MERCURY_CACHE, salt: 3, skip: &[], k: MERCURY_RATE, gpu: false };
+pub(super) const MERCURY: Stepped =
+    Stepped { cache: &MERCURY_CACHE, salt: 3, skip: &[], producer: ProducerPath::Point { id: "producer", by_height: true }, k: MERCURY_RATE, gpu: false };
 
 /// CC Particle World's particles at `ctx.time`, born at the Birth Rate of their own time.
 pub(super) fn pw_state(ctx: &EffectCtx, phys: &Phys) -> std::sync::Arc<PState> {
@@ -324,17 +437,19 @@ pub fn particle_state(id: &str, ctx: &EffectCtx) -> Option<Vec<crate::psim::SimP
 }
 
 /// The simulation cache key of a stepped particle effect at a constant Birth Rate (the tests'
-/// reference): every parameter but CC Particle World's Effect Camera.
+/// reference): every parameter but CC Particle World's Effect Camera, Birth Rate and producer.
 #[cfg(test)]
 pub(super) fn sim_key(ctx: &EffectCtx, salt: u64) -> u64 {
-    params_key_except(ctx, &Buf { img: Image::new(0, 0), offset: [0.0; 2], scale: 1.0 }, salt, &[PW_EFFECT_CAMERA])
+    let mut skip = vec![PW_EFFECT_CAMERA, "birthRate"];
+    skip.extend(PW.producer.cache_skips());
+    params_key_except(ctx, &Buf { img: Image::new(0, 0), offset: [0.0; 2], scale: 1.0 }, salt, &skip)
 }
 
 /// Run a particle system at its constant [`Phys::rate`] to layer time `t` through `cache` (the
 /// tests' reference).
 #[cfg(test)]
-pub(crate) fn simulate(cache: &SimCache<PState>, key: u64, t: f64, phys: &Phys) -> std::sync::Arc<PState> {
-    cache.run(key, steps_at(t), PState::default, |st, i| phys.step(st, i))
+pub(crate) fn simulate(cache: &SimCache<PState>, key: u64, t: f64, phys: &Phys, producer: [f32; 3]) -> std::sync::Arc<PState> {
+    cache.run(key, steps_at(t), PState::default, |st, i| phys.step(st, i, producer))
 }
 
 pub(crate) const PARTICLE_TYPES: &[&str] =

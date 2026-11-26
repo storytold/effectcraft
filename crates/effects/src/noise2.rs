@@ -190,15 +190,14 @@ fn match_grain(ctx: &EffectCtx, mut b: Buf) -> Buf {
         b.img = img;
         return b;
     }
-    let src_stats = grain_stats_boxes(&source, &src_boxes);
+    // No box with an opaque surround (a small layer inside transparent pixels) means no clean
+    // sample: no grain to match, as After Effects applies none when its samples hold transparent
+    // areas. The whole-image fallback of `grain_stats_boxes` would measure the edge again.
+    let clean_stats = |img: &Image, boxes: &[(usize, usize, usize)]| if boxes.is_empty() { GrainStats::default() } else { grain_stats_boxes(img, boxes) };
+    let src_stats = clean_stats(&source, &src_boxes);
     let comp = (ctx.params.f("compensateForExistingNoise") / 100.0) as f32;
     // The own-layer boxes only matter for the compensation term; skip them when it is off.
-    let own = if comp > 0.0 {
-        let own_boxes = sampling_boxes(ctx, &b.img, b.scale);
-        grain_stats_boxes(&b.img, &own_boxes)
-    } else {
-        GrainStats::default()
-    };
+    let own = if comp > 0.0 { clean_stats(&b.img, &sampling_boxes(ctx, &b.img, b.scale)) } else { GrainStats::default() };
     let orig = (view == 0).then(|| b.img.clone());
     let look = GrainLook::from_params(ctx);
     let amp: [f32; 3] = [0, 1, 2].map(|k| {
@@ -462,6 +461,54 @@ mod tests {
         assert!(got > target * 0.4 && got < target * 2.5, "target {target} got {got}");
         let again = run_fx("ec.noise.matchgrain", &[("noiseSourceLayer", Value::Layer(Some(7)))], flat, 0.5, env);
         assert_eq!(out.img.data, again.img.data);
+    }
+
+    /// #2919: a sample box beside transparent pixels measured the edge as grain. Its own
+    /// pixels are opaque, but the high-pass blur reads 3 px around it, where transparent pixels
+    /// are black once unpremultiplied. An earlier blur pads the layer with transparent pixels,
+    /// so a clean plate got blocky colour grain on the frames whose flattest boxes sat at the
+    /// edge, and fine grain on the others.
+    #[test]
+    fn match_grain_ignores_the_edge_of_a_transparent_border() {
+        // A flat colour inside the 2 px transparent frame of a padded buffer.
+        let framed = |w: u32, h: u32, c: [f32; 4]| {
+            let mut img = Image::filled(w, h, c);
+            for y in 0..h {
+                for x in 0..w {
+                    if x < 2 || y < 2 || x >= w - 2 || y >= h - 2 {
+                        img.set(x, y, [0.0; 4]);
+                    }
+                }
+            }
+            img
+        };
+        let most_change = |a: &Image, b: &Image| a.data.iter().zip(&b.data).flat_map(|(p, q)| (0..3).map(move |k| (p[k] - q[k]).abs())).fold(0.0f32, f32::max);
+        // A noiseless sky. At 16 px no 9 px box has an opaque 3 px surround, so there is no
+        // clean sample at all (the whole-image fallback would measure the edge).
+        for (w, h, clean_boxes) in [(64u32, 48u32, true), (16, 16, false)] {
+            let sky = framed(w, h, [0.4, 0.6, 0.9, 1.0]);
+            let boxes = crate::noise::sample_boxes(&sky, 80, 9);
+            assert_eq!(!boxes.is_empty(), clean_boxes, "{w}x{h}: {boxes:?}");
+            if clean_boxes {
+                let st = grain_stats_boxes(&sky, &boxes);
+                assert!(st.std.iter().all(|s| *s < 1e-5), "{w}x{h}: {st:?} from {boxes:?}");
+            }
+            // So Match Grain finds no grain to add.
+            let host = FakeHost(sky);
+            let env = EffectEnv { host: Some(&host), ..Default::default() };
+            let target = Image::filled(w, h, [0.2, 0.3, 0.5, 1.0]);
+            let out = run_fx("ec.noise.matchgrain", &[("noiseSourceLayer", Value::Layer(Some(7)))], target.clone(), 0.5, env);
+            let most = most_change(&out.img, &target);
+            assert!(most < 1e-5, "{w}x{h}: Match Grain added {most}");
+        }
+        // Compensate for Existing Noise has no clean sample of such a layer either, so its edge
+        // doesn't cancel the source's grain.
+        let host = FakeHost(noisy(16, 16, 0.1, 3));
+        let env = EffectEnv { host: Some(&host), ..Default::default() };
+        let target = framed(16, 16, [0.9, 0.9, 0.9, 1.0]);
+        let params = [("noiseSourceLayer", Value::Layer(Some(7))), ("compensateForExistingNoise", crate::num(100.0))];
+        let out = run_fx("ec.noise.matchgrain", &params, target.clone(), 0.5, env);
+        assert!(most_change(&out.img, &target) > 0.01, "the layer's own edge cancelled the grain");
     }
 
     #[test]

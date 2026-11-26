@@ -20,7 +20,6 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use effectcraft_engine::config::{ConfigStore, FileOps};
@@ -152,6 +151,24 @@ pub fn key_path(key: &str) -> Option<&str> {
     key.strip_prefix(FILES).filter(|p| p.starts_with('/'))
 }
 
+/// The project file name typed in the web's Save As prompt (#2788): `None` when it was cancelled or
+/// left empty; folders are dropped (the file table is flat) and a name without the default's
+/// extension gets it (`Intro copy` → `Intro copy.ecproj`, `Intro.v2` → `Intro.v2.ecproj`), so the
+/// browser still opens and keeps it as a project.
+pub fn typed_save_name(default: &str, typed: Option<String>) -> Option<String> {
+    let typed = typed?;
+    let name = typed.trim().rsplit(['/', '\\']).next().unwrap_or("").trim();
+    if name.is_empty() {
+        return None;
+    }
+    let ext = Path::new(default).extension().map(|e| e.to_string_lossy().to_string()).unwrap_or_default();
+    if ext.is_empty() || Path::new(name).extension().is_some_and(|e| e.eq_ignore_ascii_case(&ext)) {
+        Some(name.to_string())
+    } else {
+        Some(format!("{name}.{ext}"))
+    }
+}
+
 /// FNV-1a 64. Computed when a disk-cache key first needs the file, not on every write.
 fn content_hash(data: &[u8]) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
@@ -169,13 +186,12 @@ pub struct Store {
     pub on_change: OnceLock<fn()>,
     /// Clock in milliseconds since the Unix epoch (tests pin it).
     pub clock: OnceLock<fn() -> f64>,
-    /// Bumped when a virtual file is written. Preview cache lookups key on it; they do not hash.
-    media_epoch: Arc<AtomicU64>,
 }
 
 impl Default for Store {
+    /// An empty store with no mirror contents, change callback or clock.
     fn default() -> Self {
-        Self { mirror: Mutex::default(), on_change: OnceLock::new(), clock: OnceLock::new(), media_epoch: Arc::new(AtomicU64::new(0)) }
+        Self { mirror: Mutex::default(), on_change: OnceLock::new(), clock: OnceLock::new() }
     }
 }
 
@@ -200,20 +216,10 @@ impl Store {
     pub fn put_file(&self, path: &str, data: Arc<[u8]>, persist: bool) {
         let now = self.now();
         let key = file_key(path);
-        let replaced = self.lock().get(&key).is_none_or(|e| !Arc::ptr_eq(&e.data, &data));
         self.lock().put(&key, data, now, persist);
-        if replaced {
-            self.media_epoch.fetch_add(1, Ordering::Relaxed);
-        }
         if persist {
             self.changed();
         }
-    }
-
-    /// The generation preview cache lookups key on. It changes when [`Self::put_file`] writes
-    /// a different blob, and it is not a content hash.
-    pub fn media_epoch(&self) -> Arc<AtomicU64> {
-        self.media_epoch.clone()
     }
 
     /// Size and content hash of the file under `path`. The hash is stored on the entry so a
@@ -436,6 +442,20 @@ pub struct SnapshotMeta {
 mod tests {
     use super::*;
 
+    #[test]
+    fn typed_save_names() {
+        let t = |s: &str| Some(s.to_string());
+        assert_eq!(typed_save_name("Intro.ecproj", t("Intro copy")).as_deref(), Some("Intro copy.ecproj"));
+        assert_eq!(typed_save_name("Intro.ecproj", t("  Other.ecproj ")).as_deref(), Some("Other.ecproj"));
+        assert_eq!(typed_save_name("Intro.ecproj", t("a/b\\Shot.ecproj")).as_deref(), Some("Shot.ecproj"));
+        assert_eq!(typed_save_name("Intro.ecproj", t("Intro.v2")).as_deref(), Some("Intro.v2.ecproj"));
+        assert_eq!(typed_save_name("Intro.ecproj", t("Intro.ECPROJ")).as_deref(), Some("Intro.ECPROJ"));
+        assert_eq!(typed_save_name("Intro.ecprojx", t("Intro")).as_deref(), Some("Intro.ecprojx"));
+        assert_eq!(typed_save_name("Intro.ecproj", t("   ")), None);
+        assert_eq!(typed_save_name("Intro.ecproj", t("folder/")), None);
+        assert_eq!(typed_save_name("Intro.ecproj", None), None);
+    }
+
     fn store() -> Arc<Store> {
         let s = Arc::new(Store::default());
         let _ = s.clock.set(|| 1_000.0);
@@ -509,11 +529,9 @@ mod tests {
         assert_ne!(a, b);
         assert_eq!(&data[..], b"blue");
         assert_eq!(s.file_versioned("/collision.png").map(|f| f.1), Some(b), "reading doesn't change it");
-        let epoch = s.media_epoch().load(Ordering::Relaxed);
         let id = s.file_identity("/collision.png").expect("identity");
         assert_eq!(id, (4, content_hash(b"blue")));
         assert_eq!(s.file_identity("/collision.png"), Some(id), "the hash is kept on the entry");
-        assert!(epoch >= 2, "each new blob bumps the generation the preview keys on");
     }
 
     /// A write that failed is flushed again with the key's latest state (#215).

@@ -1,6 +1,7 @@
 use super::frontend::run_engine;
 use super::invoke::invoke;
 use super::{EffectcraftApp, PanelKind, Value, json};
+use crate::state::Tool;
 
 /// Shortcut text in this OS's notation (`⇧⌘K` on macOS, `Ctrl+Shift+K` elsewhere).
 pub fn shortcut_text(s: &str) -> String {
@@ -179,6 +180,24 @@ pub(super) fn modifiers_at_start(ctx: &egui::Context) -> Option<egui::Modifiers>
     })
 }
 
+/// The shortcut contexts active now (`effectcraft_engine::shortcuts::CONTEXT_SCOPES`): text
+/// being edited in the viewer, a paint tool or a camera tool active, a mask selected.
+pub fn active_contexts(app: &EffectcraftApp) -> Vec<&'static str> {
+    let mut out = vec![];
+    if app.session.state.text_edit.is_some() {
+        out.push("TextEditing");
+    }
+    match app.ui.tool {
+        Tool::Brush | Tool::Clone | Tool::Eraser => out.push("Paint"),
+        t if t.is_camera() => out.push("Camera"),
+        _ => {}
+    }
+    if app.session.selected_mask().is_some() {
+        out.push("Mask");
+    }
+    out
+}
+
 /// Only Shift held (Shift+Delete, not Ctrl/Alt+Shift+Delete).
 fn only_shift(m: egui::Modifiers) -> bool {
     m.shift && !m.alt && !m.ctrl && !m.command && !m.mac_cmd
@@ -259,7 +278,7 @@ fn cancel_dialog(app: &mut EffectcraftApp, ctx: &egui::Context) {
 type KeyEvent = (egui::Key, egui::Modifiers, bool, Option<egui::Key>);
 
 /// The frame's key presses, with clipboard events mapped back to Ctrl+C / X / V.
-fn collect_key_events(ctx: &egui::Context, start: Option<egui::Modifiers>, clipboard: bool, project: bool) -> Vec<KeyEvent> {
+fn collect_key_events(ctx: &egui::Context, start: Option<egui::Modifiers>, clipboard: bool, project: bool, queued: &[egui::Event]) -> Vec<KeyEvent> {
     ctx.input(|i| {
         // The windowing layer turns Ctrl+C / Ctrl+X / Ctrl+V into clipboard events instead of
         // key presses: map them back to the keys (with the modifiers held) so Edit ▸ Copy, Cut,
@@ -271,7 +290,7 @@ fn collect_key_events(ctx: &egui::Context, start: Option<egui::Modifiers>, clipb
         let mut at = if changed { start } else { Some(i.modifiers) };
         let held = |at: Option<egui::Modifiers>| at.filter(|m| m.command).unwrap_or(egui::Modifiers::COMMAND);
         let mut out = Vec::new();
-        for e in &i.events {
+        for e in i.events.iter().chain(queued) {
             match e {
                 egui::Event::ModifiersChanged(m) => at = Some(*m),
                 // egui forgets the modifiers held when the window loses focus.
@@ -326,10 +345,12 @@ fn numpad_star_marker(app: &mut EffectcraftApp, ctx: &egui::Context) {
 
 /// Panels that handle Enter themselves (rename, apply, open the row).
 fn panel_owns_enter(kind: PanelKind) -> bool {
-    matches!(kind, PanelKind::Project | PanelKind::EffectsPresets | PanelKind::RenderQueue)
+    matches!(kind, PanelKind::Project | PanelKind::EffectsPresets | PanelKind::RenderQueue | PanelKind::Flowchart)
 }
 
 fn handle_shortcuts_impl(app: &mut EffectcraftApp, ctx: &egui::Context, tab_only: bool) {
+    // The clipboard chords of a window with no canvas wait for this frame's pass only, whatever stops it.
+    let queued = if tab_only { Vec::new() } else { std::mem::take(&mut app.forwarded.clips) };
     let start = modifiers_at_start(ctx);
     if !tab_only && app.dialog.is_some() && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
         escape_dialog(app, ctx);
@@ -337,12 +358,12 @@ fn handle_shortcuts_impl(app: &mut EffectcraftApp, ctx: &egui::Context, tab_only
     }
     // A mouse button down while Spacebar is held belongs to the Hand tool: its release won't
     // preview.
-    if ctx.input(|i| i.pointer.any_down()) || ctx.egui_wants_keyboard_input() {
+    if ctx.input(|i| i.pointer.any_down()) || crate::framework::widget_has_keyboard(ctx) {
         ctx.data_mut(|d| d.remove::<bool>(space_tap_id()));
     }
     // While a menu or popup list is open, keys go to it, not to the app (Space must not start a
     // preview behind the menu, #279).
-    if ctx.egui_wants_keyboard_input() || crate::widgets::any_menu_open(ctx) {
+    if crate::framework::widget_has_keyboard(ctx) || crate::widgets::any_menu_open(ctx) {
         return;
     }
     // Text editing in the viewer takes the clipboard events itself.
@@ -351,7 +372,7 @@ fn handle_shortcuts_impl(app: &mut EffectcraftApp, ctx: &egui::Context, tab_only
     // The paste event's text: Edit ▸ Paste pastes SVG markup as a shape layer.
     let pasted =
         if clipboard { ctx.input(|i| i.events.iter().rev().find_map(|e| if let egui::Event::Paste(t) = e { Some(t.clone()) } else { None })) } else { None };
-    let mut events = collect_key_events(ctx, start, clipboard, project);
+    let mut events = collect_key_events(ctx, start, clipboard, project, &queued);
     events.retain(|(key, _, _, _)| (*key == egui::Key::Tab) == tab_only);
     if !tab_only && clipboard && app.dialog.is_none() {
         numpad_star_marker(app, ctx);
@@ -361,6 +382,8 @@ fn handle_shortcuts_impl(app: &mut EffectcraftApp, ctx: &egui::Context, tab_only
     }
     let binds = bindings(&app.session);
     for (key, mods, pressed, physical_key) in events {
+        // (Per event: a shortcut can change the tool, the selection or the focused panel.)
+        let (focused, contexts) = (app.ui.focused.shortcut_scope(), active_contexts(app));
         // Plain Spacebar runs its shortcut (Play Current Preview) on the release: held, it is
         // the Hand tool (After Effects), and a drag with it must not start or stop playback.
         if key == egui::Key::Space && (!pressed || !mods.any()) {
@@ -380,6 +403,10 @@ fn handle_shortcuts_impl(app: &mut EffectcraftApp, ctx: &egui::Context, tab_only
             continue;
         }
         if app.dialog.is_some() {
+            continue;
+        }
+        if !mods.any() && crate::panels::effect_controls::handle_arrow_key(app, ctx, key) {
+            ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, key));
             continue;
         }
         // Enter in the Project panel renames the selected item (handled by the panel).
@@ -405,26 +432,29 @@ fn handle_shortcuts_impl(app: &mut EffectcraftApp, ctx: &egui::Context, tab_only
             let _ = invoke(app, ctx, "edit.clear", json!({}));
             continue;
         }
-        // Explicit physical bindings distinguish keys that a layout reports with the same
-        // logical name (for example AZERTY's minus and right parenthesis).
-        let physical = physical_key.and_then(|key| {
-            app.session.shortcuts().bindings().into_iter().find_map(|(sc, b)| {
-                let (m, k) = parse_shortcut(sc.strip_prefix("Physical+")?)?;
-                (k == key && mods_match(m, mods)).then(|| (b.command.clone(), b.params.clone()))
-            })
-        });
-        if let Some((id, params)) = physical {
-            if let Err(e) = invoke(app, ctx, &id, if params.is_null() { json!({}) } else { params }) {
-                app.ui.status = e;
-            }
-            continue;
-        }
-        if let Some((_, _, id, params)) = binds.iter().filter(|(m, k, ..)| *k == key && mods_match(*m, mods)).min_by_key(|(_, _, id, params)| {
-            // The focused panel wins over an application command sharing its chord.
+        // The narrowest active scope wins a chord: an active context, the focused panel, the
+        // application. A context's shortcut doesn't run outside it. Explicit physical bindings
+        // distinguish keys that a layout reports with the same logical name (for example AZERTY's
+        // minus and right parenthesis); they win over logical ones of the same scope rank.
+        let table = app.session.shortcuts();
+        let scope_of = |id: &str, params: &Value| {
             let key = effectcraft_engine::shortcuts::binding_key(id, params);
-            app.session.shortcuts().find(&key).is_none_or(|b| b.scope != app.ui.focused.id())
-        }) {
-            let (id, params) = (id.clone(), if params.is_null() { json!({}) } else { params.clone() });
+            table.find(&key).map_or(effectcraft_engine::shortcuts::APP_SCOPE, |b| b.scope.as_str())
+        };
+        let physical = table.bindings().into_iter().filter_map(|(sc, b)| {
+            let (m, k) = parse_shortcut(sc.strip_prefix("Physical+")?)?;
+            (Some(k) == physical_key && mods_match(m, mods)).then_some((b.scope.as_str(), true, (&b.command, &b.params)))
+        });
+        let logical = binds.iter().filter(|(m, k, ..)| *k == key && mods_match(*m, mods)).map(|(_, _, id, params)| (scope_of(id, params), false, (id, params)));
+        let chosen = match effectcraft_engine::shortcuts::pick(physical.chain(logical), &focused, &contexts) {
+            Ok(c) => c.map(|(id, params)| (id.clone(), if params.is_null() { json!({}) } else { params.clone() })),
+            Err(scopes) => {
+                let panels: Vec<String> = scopes.iter().map(|s| effectcraft_engine::shortcuts::scope_label(s)).collect();
+                app.ui.status = format!("This shortcut belongs to {}: focus one of them", panels.join(" and "));
+                None
+            }
+        };
+        if let Some((id, params)) = chosen {
             if id == "edit.paste"
                 && let Some(t) = &pasted
             {

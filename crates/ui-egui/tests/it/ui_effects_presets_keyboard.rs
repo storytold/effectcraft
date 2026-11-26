@@ -16,7 +16,10 @@ fn harness() -> Harness<'static, EffectcraftApp> {
     let mut s = Session::default();
     s.execute("comp.new", json!({"name": "Main", "width": 320, "height": 180, "duration": 4})).unwrap();
     s.execute("layer.newSolid", json!({"name": "Red", "color": "#c04040"})).unwrap();
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(s));
     h.state_mut().show_panel(PanelKind::EffectsPresets);
     h.run_steps(4);
     h
@@ -194,6 +197,7 @@ fn the_star_is_a_named_button_on_the_cursor_row_and_enter_toggles_it() {
     assert_eq!(name, format!("Add to favorites: {effect}"));
     key(&mut h, Key::Enter, Modifiers::NONE);
     assert_eq!(h.state().session.prefs.effects_favorites.len(), 1, "Enter on the star adds the favourite");
+    assert!(h.state().session.state.last_effect.is_none(), "Enter on the star does not also apply the effect");
     let (_, name) = focused(&h).expect("the star keeps the focus");
     assert_eq!(name, format!("Remove from favorites: {effect}"));
 }
