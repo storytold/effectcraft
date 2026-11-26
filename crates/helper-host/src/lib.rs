@@ -156,7 +156,13 @@ pub fn scan_paths(paths: &[PathBuf], retry: bool) -> Value {
                 errors.extend(errs.into_iter().map(|e| format!("{}: {e}", program.display())));
                 loaded.extend(register(&h, effects, &mut errors));
                 started.push(json!(program.to_string_lossy()));
-                lock(helpers()).push(h);
+                // Published under the registry lock: either `stop_all` sees this helper, or
+                // `SHUT_DOWN` (stored before `stop_all` takes the lock) is seen here.
+                let mut registry = lock(helpers());
+                if client::SHUT_DOWN.load(std::sync::atomic::Ordering::SeqCst) {
+                    h.stop();
+                }
+                registry.push(h);
             }
             Err(e) => errors.push(e),
         }
@@ -231,6 +237,14 @@ pub fn stop_all() {
     for h in lock(helpers()).iter() {
         h.stop();
     }
+}
+
+/// Stop every helper for good: the app is quitting. A render still running then (the viewer,
+/// say) would start a helper again, with a new exchange file that nothing removes once the
+/// process exits (on Windows the file is only removed when its [`frames::Exchange`] drops).
+pub fn shut_down() {
+    client::SHUT_DOWN.store(true, std::sync::atomic::Ordering::SeqCst);
+    stop_all();
 }
 
 #[cfg(test)]

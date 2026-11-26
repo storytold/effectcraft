@@ -19,12 +19,18 @@ pub struct Exchange {
     owned: bool,
 }
 
+/// The folder exchange files are created in: `/dev/shm` on Linux when there is one, else the
+/// temp folder.
+pub fn dir() -> PathBuf {
+    let shm = Path::new("/dev/shm");
+    if cfg!(target_os = "linux") && shm.is_dir() { shm.to_path_buf() } else { std::env::temp_dir() }
+}
+
 impl Exchange {
     /// Create a new, empty exchange file (EffectCraft's side).
     pub fn create() -> std::io::Result<Exchange> {
         static N: AtomicU64 = AtomicU64::new(0);
-        let shm = Path::new("/dev/shm");
-        let dir = if cfg!(target_os = "linux") && shm.is_dir() { shm.to_path_buf() } else { std::env::temp_dir() };
+        let dir = dir();
         let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(0);
         let path = dir.join(format!("effectcraft-helper-{}-{}-{nanos}.frames", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
         let mut opts = OpenOptions::new();
