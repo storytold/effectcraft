@@ -21,12 +21,19 @@ mod appimage;
 #[cfg(target_os = "macos")]
 mod apple_events;
 mod audio_out;
+#[cfg(test)]
+mod build_channel;
+mod build_flavor;
 mod control_server;
 mod crash_report;
 mod diagnostic_state;
 mod launch_guard;
+mod launch_profile;
 #[cfg(target_os = "macos")]
 mod native_menu;
+mod nightly_session;
+mod process_identity;
+mod profile_root;
 // Every native dialog. Built everywhere; only the macOS and Linux apps show the commands'
 // dialogs without blocking the frame.
 #[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
@@ -55,10 +62,108 @@ const ICON_PNG: &[u8] = include_bytes!("../../../assets/app-icon/hicolor/256x256
 
 fn app_icon() -> egui::IconData {
     #[cfg(target_os = "macos")]
-    let png: &[u8] = include_bytes!("../../../assets/app-icon/effectcraft-macos-512.png");
+    let png: &[u8] = if cfg!(effectcraft_nightly_v1) {
+        include_bytes!("../../../assets/app-icon/effectcraft-nightly-macos-512.png")
+    } else {
+        include_bytes!("../../../assets/app-icon/effectcraft-macos-512.png")
+    };
     #[cfg(not(target_os = "macos"))]
-    let png: &[u8] = ICON_PNG;
+    let png: &[u8] = if cfg!(effectcraft_nightly_v1) { include_bytes!("../../../assets/app-icon/effectcraft-nightly.png") } else { ICON_PNG };
     eframe::icon_data::from_png_bytes(png).unwrap_or_default()
+}
+
+/// The source commit baked into this build by `build.rs` (empty for a local stable build).
+fn build_commit() -> Option<&'static str> {
+    match env!("EFFECTCRAFT_BUILT_COMMIT") {
+        "" => None,
+        sha => Some(sha),
+    }
+}
+
+fn initialize_nightly_process_identity() -> Result<(), process_identity::IdentityError> {
+    process_identity::initialize(
+        build_flavor::COMPILED == build_flavor::BuildFlavor::NightlyV1,
+        effectcraft_ui_egui::channel::id_for(effectcraft_ui_egui::channel::LaunchIdentity::NightlyV1),
+    )
+}
+
+/// Say why a Nightly launch was refused, through a native dialog where a person is looking at one.
+fn report_launch_profile_error(error: &str) {
+    eprintln!("EffectCraft launch profile: {error}");
+    let desktop_session = cfg!(windows)
+        || cfg!(target_os = "macos")
+        || (cfg!(target_os = "linux") && ["DISPLAY", "WAYLAND_DISPLAY"].into_iter().any(|key| std::env::var_os(key).is_some_and(|v| !v.is_empty())));
+    if build_flavor::needs_native_error(build_flavor::COMPILED, desktop_session) {
+        if let Err(error) = initialize_nightly_process_identity() {
+            eprintln!("EffectCraft launch profile: {error}");
+            return;
+        }
+        file_dialogs::report_error("EffectCraft Nightly", error);
+    }
+}
+
+/// Whether this launch only asks for the version: the plain `--version`/`-V` query, or the
+/// Launcher's profile preamble followed by it. The shared smoke test and the macOS verifier ask
+/// the second form, and it answers without validating or touching the profile root.
+fn version_query(argv: &[std::ffi::OsString]) -> bool {
+    build_flavor::version_query(argv) || launch_profile::version_query(argv)
+}
+
+/// Select the immutable launch profile, its data roots and its window identity before any startup
+/// service or side effect. `None` means the version query answered and the process is done.
+fn prepare_launch() -> Option<Vec<std::ffi::OsString>> {
+    // The trusted Launcher protocol is decided before logging, the crash helper, fonts or prefs.
+    let argv: Vec<_> = std::env::args_os().skip(1).collect();
+    if build_flavor::COMPILED == build_flavor::BuildFlavor::NightlyV1 && version_query(&argv) {
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stdout(), "{}", build_flavor::version_line(build_flavor::COMPILED, env!("EFFECTCRAFT_BUILT_VERSION")));
+        return None;
+    }
+    let early = launch_profile::parse(argv)
+        .and_then(|launch| {
+            build_flavor::require_profile(build_flavor::COMPILED, &launch.profile)?;
+            initialize_nightly_process_identity().map_err(|error| error.to_string())?;
+            Ok(launch)
+        })
+        .and_then(|launch| {
+            launch_profile::prepare(launch, |root| launch_profile::validate_root(root, |key| std::env::var_os(key), std::env::current_exe().ok().as_deref()))
+        })
+        .unwrap_or_else(|error| {
+            report_launch_profile_error(&error);
+            std::process::exit(2)
+        });
+    let identity =
+        if early.profile.is_nightly() { effectcraft_ui_egui::channel::LaunchIdentity::NightlyV1 } else { effectcraft_ui_egui::channel::LaunchIdentity::Stable };
+    let installed = launch_profile::install(early.profile)
+        .and_then(|()| effectcraft_ui_egui::channel::select_identity(identity))
+        // One place redirects every data root: the settings folder (host) and, through it, logs,
+        // Plug-ins, window state, recovery and the crash reports.
+        .and_then(|()| match launch_profile::current().root() {
+            None => Ok(()),
+            Some(root) => {
+                let root = root.to_path_buf();
+                effectcraft_host::app_dirs::set_profile_root(root.clone()).map_err(str::to_owned)?;
+                // And the caches, which otherwise live in the platform cache folder.
+                effectcraft_engine::render::disk_cache::set_profile_root(root.clone()).map_err(str::to_owned)?;
+                // The UI keeps the user's animation presets in the profile too (not Documents, and
+                // not an inherited EC_PRESETS_DIR).
+                // The UI joins "Presets" itself, so the profile root is passed, not `<root>/Presets`.
+                effectcraft_ui_egui::channel::set_profile_presets(root);
+                Ok(())
+            }
+        });
+    if let Err(error) = installed {
+        report_launch_profile_error(&error);
+        std::process::exit(2);
+    }
+    effectcraft_ui_egui::channel::set_build_identity(env!("EFFECTCRAFT_BUILT_VERSION"), build_commit());
+    Some(early.args)
+}
+
+/// Whether a stable-only startup service may run: the updater, the control channel and the
+/// AppImage's desktop integration belong to a stable installation, never to a Nightly session.
+fn stable_services() -> bool {
+    effectcraft_ui_egui::channel::stable_services_allowed()
 }
 
 /// Both native JSON projects and Save a Copy As XML projects are openable on launch.
@@ -75,6 +180,17 @@ fn is_project_file(path: &str) -> bool {
 fn wayland_drop_notice(wayland_display: Option<&std::ffi::OsStr>, backend: Option<&std::ffi::OsStr>) -> Option<&'static str> {
     (wayland_display.is_some_and(|v| !v.is_empty()) && backend != Some(std::ffi::OsStr::new("x11")))
         .then_some("Native Wayland file drops are unavailable. Use File ▸ Import ▸ File… or run via XWayland (see README, Linux).")
+}
+
+/// The start-up status line. An interruption from the previous Nightly session and the launch
+/// guard's graphics notice both matter: the notice must not hide the interruption, because the
+/// interruption's record is cleared once it has been shown.
+fn startup_status(interruption: Option<&str>, notice: Option<&str>) -> Option<String> {
+    match (interruption, notice) {
+        (Some(interruption), Some(notice)) => Some(format!("{interruption} {notice}")),
+        (Some(text), None) | (None, Some(text)) => Some(text.to_owned()),
+        (None, None) => None,
+    }
 }
 
 /// The command line.
@@ -176,7 +292,9 @@ fn install_file_dialogs(app: &mut EffectcraftApp) -> Option<std::sync::mpsc::Rec
 /// writing there alone can't run code at launch. Otherwise Effect ▸ Scan for Effect Helpers
 /// starts them.
 fn start_helpers_if_opted_in(session: &mut effectcraft_engine::Session) {
-    if session.helpers.is_none() || std::env::var_os("EFFECTCRAFT_HELPERS").is_none_or(|v| v != "1") {
+    // A Nightly session starts no external helper from an inherited environment variable: the
+    // Launcher owns that session, and a stable shell's opt-in must not reach it.
+    if !stable_services() || session.helpers.is_none() || std::env::var_os("EFFECTCRAFT_HELPERS").is_none_or(|v| v != "1") {
         return;
     }
     match session.execute("effect.helpers.scan", json!({})) {
@@ -194,14 +312,18 @@ fn start_helpers_if_opted_in(session: &mut effectcraft_engine::Session) {
 /// Builds the session, loads settings, plugins, the requested project/media and the optional control server, then
 /// reports startup failure through `startup_failed`. Returns the event loop's result.
 fn main() -> eframe::Result {
-    let args: Vec<_> = std::env::args_os().skip(1).collect();
-    if crash_report::maybe_run(&args, |description| {
+    // This program's own crash-reporter helper re-runs it with no profile tokens, so its mode is
+    // answered before the launch-profile bootstrap, which would refuse it as a bare Nightly start
+    // (a dialog, a 3 s readiness timeout and no crash reporting on every launch).
+    let raw: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    if crash_report::maybe_run(&raw, |description| {
         file_dialogs::message("EffectCraft diagnostic report", description.to_owned());
     }) {
         return Ok(());
     }
+    let Some(args) = prepare_launch() else { return Ok(()) };
     let reporter = crash_report::Shutdown::default();
-    let result = run_desktop(&reporter);
+    let result = run_desktop(&reporter, &args);
     // run_desktop has dropped the app and handled any startup error with its existing dialog.
     // An unwinding panic or abort never reaches this marker.
     if let Err(error) = reporter.finish() {
@@ -210,10 +332,13 @@ fn main() -> eframe::Result {
     result
 }
 
-fn run_desktop(reporter: &crash_report::Shutdown) -> eframe::Result {
-    // Windows: the update helper is a copy of this program started with `--finish-update`.
+fn run_desktop(reporter: &crash_report::Shutdown, arguments: &[std::ffi::OsString]) -> eframe::Result {
+    // Windows: the update helper is a copy of this program started with `--finish-update`. A Nightly
+    // build is never updated by the stable feed; ArtCraft Launcher replaces it.
     #[cfg(windows)]
-    if let Some(result) = craft_update::self_update::finish(&effectcraft_ui_egui::UPDATE_APP, &std::env::args_os().skip(1).collect::<Vec<_>>()) {
+    if stable_services()
+        && let Some(result) = craft_update::self_update::finish(&effectcraft_ui_egui::UPDATE_APP, arguments)
+    {
         std::process::exit(i32::from(result.is_err()));
     }
     // First, so the panic hook and every start-up warning are recorded. Records go to stderr
@@ -221,7 +346,9 @@ fn run_desktop(reporter: &crash_report::Shutdown) -> eframe::Result {
     // feed the compatibility report.
     effectcraft_engine::logging::install();
     effectcraft_engine::logging::install_panic_hook();
-    let Args { control_port, files, demo, home } = match parse_args(std::env::args().skip(1), std::env::var("EFFECTCRAFT_CONTROL_PORT")) {
+    // A Nightly session never inherits the stable control port: its profile is driven by the Launcher.
+    let env_port = if stable_services() { std::env::var("EFFECTCRAFT_CONTROL_PORT") } else { Err(std::env::VarError::NotPresent) };
+    let Args { control_port, files, demo, home } = match parse_args(arguments.iter().map(|a| a.to_string_lossy().into_owned()), env_port) {
         Ok(Some(args)) => args,
         Ok(None) => {
             println!("effectcraft {}", env!("CARGO_PKG_VERSION"));
@@ -255,9 +382,12 @@ fn run_desktop(reporter: &crash_report::Shutdown) -> eframe::Result {
     }
     // The font menus list the installed fonts: read their names while the window opens.
     effectcraft_engine::text::fonts::scan_system_in_background();
-    // Wayland shows the window's icon from its desktop entry: an AppImage brings its own.
+    // Wayland shows the window's icon from its desktop entry: an AppImage brings its own. A Nightly
+    // tar is not an AppImage and must not write a desktop entry into the stable data folder.
     #[cfg(target_os = "linux")]
-    appimage::integrate_from_env(ICON_PNG);
+    if stable_services() {
+        appimage::integrate_from_env(ICON_PNG);
+    }
     // Settings ▸ Startup & Repair ▸ Window Graphics, switched to OpenGL when the last launch
     // stopped as its window opened (the marker alone does not establish a cause).
     let backend_override = std::env::var_os("WGPU_BACKEND");
@@ -271,16 +401,16 @@ fn run_desktop(reporter: &crash_report::Shutdown) -> eframe::Result {
     let on_gl = launch.backends == Some(eframe::wgpu::Backends::GL);
     let notice = launch.notice.take();
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("EffectCraft")
+        viewport: effectcraft_ui_egui::channel::builder()
+            .with_title(effectcraft_ui_egui::channel::name_for(effectcraft_ui_egui::channel::identity()))
             .with_inner_size(window::DEFAULT_SIZE)
             .with_min_inner_size(window::MIN_SIZE)
             .with_drag_and_drop(true)
             // Started for an agent (`--control`): open without taking the user's keyboard focus.
             .with_active(control_port.is_none())
-            .with_icon(app_icon())
-            // Wayland matches the window to `ai.storyteller.effectcraft.desktop` by this ID.
-            .with_app_id(appimage::APP_ID),
+            .with_icon(app_icon()),
+        // `builder()` carries the channel's app id: Wayland matches the stable window to
+        // `ai.storyteller.effectcraft.desktop`; a Nightly window has its own id and channel.
         event_loop_builder: agent_event_loop(control_port.is_some()),
         wgpu_options: wgpu_options(launch.backends),
         ..Default::default()
@@ -295,10 +425,27 @@ fn run_desktop(reporter: &crash_report::Shutdown) -> eframe::Result {
     #[cfg(target_os = "macos")]
     let apple_events = &apple_events;
     let desktop_reporter = reporter.clone();
+    // A Nightly session records its own health in its private profile: a live lease plus an
+    // unclean-exit record that the next owner reports. Stable has no such record.
+    let (nightly_session, session_health_warning) =
+        match nightly_session::Session::begin_with_health(launch_profile::current().root(), env!("EFFECTCRAFT_BUILT_VERSION"), build_commit()) {
+            Ok(state) => state,
+            Err(error) => {
+                log::warn!("Nightly session health is unavailable: {error}");
+                (None, true)
+            }
+        };
+    let previous_nightly_unclean = nightly_session.as_ref().is_some_and(nightly_session::Session::previous_unclean);
+    // Set once a window has shown the interruption notice; until then the record must survive.
+    let unclean_notice_shown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let shared_session: nightly_session::Shared = std::sync::Arc::new(std::sync::Mutex::new(nightly_session));
+    let session_after_loop = shared_session.clone();
+    let notice_shown_in_callback = unclean_notice_shown.clone();
     let result = eframe::run_native(
-        "EffectCraft",
+        effectcraft_ui_egui::channel::name_for(effectcraft_ui_egui::channel::identity()),
         options,
         Box::new(move |cc| {
+            effectcraft_ui_egui::framework::install(&cc.egui_ctx)?;
             EffectcraftApp::install_ime_reset_hooks(&cc.egui_ctx);
             match &cc.wgpu_render_state {
                 Some(rs) => {
@@ -387,11 +534,23 @@ fn run_desktop(reporter: &crash_report::Shutdown) -> eframe::Result {
             // reported in a toast and forgotten).
             let _ = session.execute("window.restoreScriptPanels", json!({}));
             let mut app = EffectcraftApp::new(session);
-            app.set_startup_update_check(startup_update_check(control_port));
+            app.set_startup_update_check(stable_services() && startup_update_check(control_port));
             app.set_gpu_failure_bridge(gpu_failures);
             app.ui.start_screen = show_home;
-            if let Some(n) = notice {
-                app.ui.status = n;
+            let interruption = if previous_nightly_unclean {
+                Some("The previous EffectCraft Nightly session did not finish normally. You can report a problem from About. No diagnostics have been sent.")
+            } else if session_health_warning {
+                Some(
+                    "EffectCraft Nightly could not record session health in its private profile. You can still edit, but abnormal-exit detection is unavailable.",
+                )
+            } else {
+                None
+            };
+            if let Some(status) = startup_status(interruption, notice.as_deref()) {
+                app.ui.status = status;
+            }
+            if interruption.is_some() {
+                notice_shown_in_callback.store(previous_nightly_unclean, std::sync::atomic::Ordering::Relaxed);
             }
             if let Some(r) = recovery {
                 app.offer_recovery(r);
@@ -441,11 +600,15 @@ fn run_desktop(reporter: &crash_report::Shutdown) -> eframe::Result {
                 #[cfg(target_os = "macos")]
                 menu: native_menu::NativeBar::new(&cc.egui_ctx),
                 #[cfg(target_os = "macos")]
+                menu_sync: Default::default(),
+                #[cfg(target_os = "macos")]
                 apple_events: apple_events.connect(&cc.egui_ctx),
                 app,
                 file_dialogs,
                 dialog_errors,
                 window: window::Tracker::new(opened, saved_window, control_port.is_none()),
+                nightly_session: shared_session,
+                unclean_notice_shown: notice_shown_in_callback.clone(),
                 launch,
                 drawn: false,
                 reporter: desktop_reporter,
@@ -458,6 +621,10 @@ fn run_desktop(reporter: &crash_report::Shutdown) -> eframe::Result {
         }
         startup_failed(e, !on_gl && cfg!(not(target_os = "macos")));
     }
+    // A controlled return, including a handled startup error: clear this session's record before
+    // anything else can take the profile. A renderer failure that never showed an earlier
+    // interruption keeps the record for the next start (on macOS `on_exit` may have run first).
+    nightly_session::finish_once(&session_after_loop, unclean_notice_shown.load(std::sync::atomic::Ordering::Relaxed));
     result
 }
 
@@ -531,11 +698,17 @@ struct Desktop {
     dialog_errors: std::sync::mpsc::Receiver<String>,
     #[cfg(target_os = "macos")]
     menu: native_menu::NativeBar,
+    #[cfg(target_os = "macos")]
+    menu_sync: effectcraft_ui_egui::native_menu::MenuSync,
     /// Documents opened from Finder, the Dock or `open` (macOS).
     #[cfg(target_os = "macos")]
     apple_events: apple_events::Opened,
     /// The window's size and position, saved for the next launch.
     window: window::Tracker,
+    /// This Nightly session's health record (empty for stable), finished once on the way out.
+    nightly_session: nightly_session::Shared,
+    /// Whether an interruption from an earlier session was shown, so its record may be cleared.
+    unclean_notice_shown: std::sync::Arc<std::sync::atomic::AtomicBool>,
     launch: launch_guard::Launch,
     /// The first frame was drawn (logged once).
     drawn: bool,
@@ -544,10 +717,10 @@ struct Desktop {
 
 impl eframe::App for Desktop {
     /// The desktop host's logic tick: update the macOS menu bar, run the shared app tick, close the IME pass, show the
-    /// file dialogs asked for and, last, hand a close to the platform quit.
+    /// file dialogs asked for and, last, the root window's close path.
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         #[cfg(target_os = "macos")]
-        self.menu.update(&mut self.app, ctx);
+        self.menu_sync.before(&mut self.app, |app| self.menu.update(app, ctx));
         self.app.tick(ctx, frame);
         self.app.finish_ime_logic(ctx);
         while let Ok(e) = self.dialog_errors.try_recv() {
@@ -556,11 +729,14 @@ impl eframe::App for Desktop {
         if let Some(asked) = &self.file_dialogs {
             file_dialogs::show_asked(asked, frame, ctx);
         }
-        effectcraft_ui_egui::panels::unsaved::quit_on_close(ctx);
+        self.app.close_path(ctx);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.app.ui(ui, frame);
+        // A file dialog this frame's commands opened (or one that closed) syncs the menu again.
+        #[cfg(target_os = "macos")]
+        self.menu_sync.after(&mut self.app, |app| self.menu.update(app, ui.ctx()));
         if let Some(asked) = &self.file_dialogs {
             file_dialogs::show_asked(asked, frame, ui.ctx());
         }
@@ -585,6 +761,10 @@ impl eframe::App for Desktop {
             self.launch.exited();
             self.window.save(self.app.session.config.as_deref());
             self.app.on_exit();
+            // macOS quits inside AppKit's terminate after this hook and never returns from
+            // `run_native`, so the session record is finished here too (once, whichever runs first).
+            let shown = self.unclean_notice_shown.load(std::sync::atomic::Ordering::Relaxed);
+            nightly_session::finish_once(&self.nightly_session, shown);
             effectcraft_host::stop_helpers();
             // Scripts in Scripts/Shutdown run with the project closed.
             let _ = self.app.session.execute("file.runShutdownScripts", json!({}));
@@ -654,6 +834,45 @@ mod tests {
         assert!(super::wayland_drop_notice(None, None).is_none());
         assert!(super::wayland_drop_notice(Some(OsStr::new("")), None).is_none());
         assert!(super::wayland_drop_notice(Some(OsStr::new("wayland-0")), Some(OsStr::new("x11"))).is_none());
+    }
+
+    /// The Launcher asks the version through the profile preamble; the shared smoke test and the
+    /// macOS verifier use that form, so a Nightly build must answer it like `--version`.
+    #[test]
+    fn the_launcher_version_form_is_a_version_query() {
+        fn argv(values: &[&str]) -> Vec<std::ffi::OsString> {
+            values.iter().map(std::ffi::OsString::from).collect()
+        }
+        let root = if cfg!(windows) { r"C:\NightlyData\profiles\effectcraft" } else { "/nightly-data/profiles/effectcraft" };
+        assert!(super::version_query(&argv(&["--version"])));
+        assert!(super::version_query(&argv(&["-V"])));
+        for form in [&["--launch-profile", "nightly-v1", "--profile-root", root][..], &["--profile-root", root, "--launch-profile", "nightly-v1"][..]] {
+            for flag in ["--version", "-V"] {
+                let mut query = argv(form);
+                query.push(flag.into());
+                assert!(super::version_query(&query), "{query:?}");
+            }
+        }
+        for query in [
+            argv(&["--launch-profile", "nightly-v1", "--profile-root", root, "--", "--version"]),
+            argv(&["--launch-profile", "nightly-v1", "--profile-root", root]),
+            argv(&["--launch-profile", "future-v2", "--profile-root", root, "--version"]),
+            argv(&["--demo"]),
+            argv(&[]),
+        ] {
+            assert!(!super::version_query(&query), "{query:?}");
+        }
+    }
+
+    /// The launch guard's graphics notice must not hide the previous session's interruption: its
+    /// record is cleared once the notice is on screen.
+    #[test]
+    fn the_startup_status_keeps_an_interruption_and_a_notice() {
+        assert_eq!(super::startup_status(None, None), None);
+        assert_eq!(super::startup_status(Some("interrupted"), None).as_deref(), Some("interrupted"));
+        assert_eq!(super::startup_status(None, Some("now draws with OpenGL")).as_deref(), Some("now draws with OpenGL"));
+        let both = super::startup_status(Some("interrupted"), Some("now draws with OpenGL")).unwrap();
+        assert!(both.contains("interrupted") && both.contains("now draws with OpenGL"), "{both}");
     }
 
     /// The window's wgpu instance skips indirect-call validation (Intel Metal, #1153).

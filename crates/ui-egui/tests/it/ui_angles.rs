@@ -49,7 +49,7 @@ fn harness(panel: Panel, angle: f64) -> (Harness<'static, EffectcraftApp>, u64, 
     app.toggle_maximize(panel.kind());
     app.ui.timeline.layer_reveal.insert(layer, vec!["rotation".into()]);
     app.ui.timeline.open_layers.insert(layer);
-    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_eframe(|_| app);
+    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app);
     h.run_steps(4);
     (h, layer, uid)
 }
@@ -203,6 +203,28 @@ fn commit_edits(click_away: bool) {
             assert_eq!(h.state().session.history.undo.len(), undo + 1);
             h.state_mut().session.execute("edit.undo", json!({})).unwrap();
             assert_eq!(angle(&h, layer, uid), 390.5);
+        }
+    }
+}
+
+/// #3367: on a negative angle the minus sign is part of the degrees typing replaces, so typing
+/// 50 into `0x-20.0°` sets +50°. It used to keep the sign (-50°). Committing the text as it
+/// opened keeps the angle.
+#[test]
+fn typing_into_a_negative_angle_replaces_its_sign() {
+    for panel in [Panel::EffectControls, Panel::Timeline, Panel::Properties] {
+        for (start, text, expected) in
+            [(-20.0, Some("50"), 50.0), (-20.0, Some("-50"), -50.0), (-20.0, None, -20.0), (-400.0, None, -400.0), (45.0, Some("-30"), -30.0)]
+        {
+            let (mut h, layer, uid) = harness(panel, start);
+            let p = component(&h, panel, uid, false);
+            click(&mut h, p);
+            if let Some(text) = text {
+                h.input_mut().events.push(Event::Text(text.into()));
+                h.step();
+            }
+            key(&mut h, Key::Enter, Modifiers::NONE);
+            assert_eq!(angle(&h, layer, uid), expected, "{panel:?}: {start} then {text:?}");
         }
     }
 }

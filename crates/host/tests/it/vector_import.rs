@@ -1118,3 +1118,67 @@ fn a_vectorcraft_document_without_a_pdf_reports_the_option_to_turn_on() {
         assert_eq!(r["items"], json!([]), "{import_as}: {r}");
     }
 }
+
+#[test]
+fn svg_scene_mapping_render_parity() {
+    let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="120" height="80" viewBox="10 10 60 40" preserveAspectRatio="xMidYMid meet">
+        <style>
+            .card { fill: #204080; }
+            #accent { fill: #ff6020; }
+        </style>
+        <defs>
+            <linearGradient id="sky" x1="0%" y1="0%" x2="100%" y2="100%">
+                <stop offset="0" stop-color="#102040"/>
+                <stop offset="1" stop-color="#4080c0"/>
+            </linearGradient>
+            <radialGradient id="glow" cx="50%" cy="50%" r="50%">
+                <stop offset="0" stop-color="#ffffff"/>
+                <stop offset="1" stop-color="#ff0000"/>
+            </radialGradient>
+            <symbol id="badge" viewBox="0 0 20 20">
+                <circle cx="10" cy="10" r="8" fill="currentColor"/>
+            </symbol>
+        </defs>
+        <rect x="10" y="10" width="60" height="40" fill="url(#sky)"/>
+        <g font-size="10" color="#ffff00" opacity="0.85">
+            <rect class="card" x="14" y="14" width="2em" height="1.5em" rx="2" ry="2" stroke="#ffffff" stroke-width="1"/>
+            <ellipse id="accent" cx="50" cy="24" rx="8" ry="6" transform="rotate(20 50 24)" fill="url(#glow)"/>
+            <path d="M14 34 H34 V46 H14 Z M18 37 V43 H30 V37 Z" fill="#00d080" fill-rule="evenodd"/>
+            <use href="#badge" x="42" y="34" width="12" height="12"/>
+            <rect x="58" y="36" width="8" height="8" fill="url(#missing) #ff00ff"/>
+        </g>
+    </svg>"##;
+    let path = tmp("scene-parity.svg");
+    std::fs::write(&path, svg).unwrap();
+    let doc = effectcraft_svg::parse(svg).unwrap();
+    let (w, h) = doc.pixel_size();
+    assert_eq!((w, h), (120, 80));
+
+    let mut s = effectcraft_host::session();
+    let r = s.execute_checked("file.import", json!({"paths": [path]})).unwrap();
+    assert_eq!(r["errors"], json!([]), "{r}");
+    let item = r["items"][0].as_u64().unwrap();
+    s.execute("comp.new", json!({"name": "Parity", "width": w, "height": h, "frameRate": 30, "duration": 1})).unwrap();
+    let lid = s.execute_checked("layer.addItem", json!({"item": item})).unwrap()["layer"].as_u64().unwrap();
+    let cid = s.active_comp_id().unwrap();
+    let t = effectcraft_time::Tick::ZERO;
+
+    let footage = s.render(cid, t, RenderOpts::default());
+    let direct = effectcraft_svg::rasterize(&doc, w, h, 1.0);
+    assert!(mean_diff(&footage, &direct) < 1.0 / 255.0, "footage = rasterised SVG");
+
+    s.execute("layer.select", json!({"layers": [lid]})).unwrap();
+    let r = s.execute_checked("layer.create", json!({"op": "shapesFromVector"})).unwrap();
+    let sid = r["layers"][0].as_u64().unwrap();
+    let shapes = s.render(cid, t, RenderOpts::default());
+    let d1 = mean_diff(&shapes, &direct);
+    assert!(d1 < 0.02, "shapes vs SVG mean diff {d1}");
+
+    s.execute("prop.set", json!({"layer": sid, "path": "transform/scale", "value": [300, 300]})).unwrap();
+    s.execute("prop.set", json!({"layer": sid, "path": "transform/position", "value": [0, 0]})).unwrap();
+    s.execute("prop.set", json!({"layer": sid, "path": "transform/anchor", "value": [0, 0]})).unwrap();
+    let big = s.render(cid, t, RenderOpts::default());
+    let direct3 = effectcraft_svg::rasterize(&doc, w, h, 3.0);
+    let d3 = mean_diff(&big, &direct3);
+    assert!(d3 < 0.03, "shapes x3 vs SVG x3 mean diff {d3}");
+}

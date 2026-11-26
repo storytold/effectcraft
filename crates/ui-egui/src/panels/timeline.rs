@@ -325,9 +325,27 @@ fn expr_focus_id() -> egui::Id {
     egui::Id::unique("tl-expr-focus")
 }
 
+/// Asks the expression editor of property `prop` to take the keyboard when the Timeline next
+/// draws it, selecting `select` (counts of characters before the end).
 fn focus_expression(ctx: &egui::Context, prop: u64, select: [usize; 2]) {
     let pass = ctx.cumulative_pass_nr();
     ctx.data_mut(|d| d.insert_temp(expr_focus_id(), ExprFocus { prop, select, pass }));
+    // The editor takes it in a later pass: make sure one comes without waiting for input.
+    ctx.request_repaint();
+}
+
+/// After a `prop.setExpression` toggle of `prop` was queued (an Alt-click on its stopwatch, in the
+/// Timeline or in Effect Controls): adding one, its editor opens, comes into view and takes the
+/// keyboard with the new expression selected (#1072, #1460); removing it, a pending request for
+/// its editor goes, as nothing is left to take the keyboard.
+pub(crate) fn expression_toggled(app: &mut EffectcraftApp, ctx: &egui::Context, prop: &Property) {
+    let uid = prop.uid;
+    if prop.expr.is_none() {
+        app.ui.timeline.expr_closed.remove(&uid);
+        focus_expression(ctx, uid, [usize::MAX, 0]);
+    } else if ctx.data(|d| d.get_temp::<ExprFocus>(expr_focus_id())).is_some_and(|f| f.prop == uid) {
+        ctx.data_mut(|d| d.remove::<ExprFocus>(expr_focus_id()));
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1963,6 +1981,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         return;
     };
     let Some(comp) = app.session.project.comp_arc(cid) else { return };
+    let watch = super::drag_preview::DragWatch::begin(app);
     let mut tl = layout(app, ui, rect, cid, &comp);
     let g = &mut tl;
     if !ui.input(|i| i.pointer.primary_down()) {
@@ -2022,7 +2041,8 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     drop_targets(app, ui, g);
     let Rw { tl, ui_actions, .. } = rw;
     apply_ui_acts(app, &tl.comp, ui_actions);
-    apply_actions(app, ui, &tl.ctx, tl.actions);
+    apply_actions(app, &tl.ctx, tl.actions);
+    watch.end(app, &tl.ctx);
 }
 
 /// Applies the UI-only changes the frame collected (twirls, time, ending an undo merge).
@@ -2081,11 +2101,7 @@ fn apply_ui_acts(app: &mut EffectcraftApp, comp: &Comp, ui_actions: Vec<UiAct>) 
 }
 
 /// Runs the commands the frame collected through [`crate::menus::invoke`].
-fn apply_actions(app: &mut EffectcraftApp, ui: &mut egui::Ui, ctx: &egui::Context, actions: Vec<(String, serde_json::Value)>) {
-    if ui.input(|i| i.pointer.primary_down()) && actions.iter().any(|(id, _)| id == "prop.set") {
-        app.ui.viewer.property_interacting = true;
-        ctx.request_repaint();
-    }
+fn apply_actions(app: &mut EffectcraftApp, ctx: &egui::Context, actions: Vec<(String, serde_json::Value)>) {
     for (id, params) in actions {
         if id == "__endMerge" {
             app.session.history.merge_key = None;
@@ -4054,7 +4070,10 @@ fn expr_editor_cell(app: &mut EffectcraftApp, ui: &mut egui::Ui, g: &mut Rw, rc:
     gp.rect_filled(Rect::from_min_max(pos2(graph_x0, r.min.y), r.max), 0.0, t.expr_bg);
     let er = Rect::from_min_max(pos2(graph_x0 + 8.0, r.min.y + 3.0), pos2(rect.max.x - 14.0, r.max.y - 3.0));
     let mut buf: String = ctx.data(|d| d.get_temp(buf_id)).unwrap_or_else(|| ex.text.clone());
-    if let Some(f) = ctx.data(|d| d.get_temp::<ExprFocus>(expr_focus_id())).filter(|f| f.prop == *uid) {
+    // Not in the pass it was asked for in: a click that asked for it from another panel (an
+    // Alt-click on a stopwatch in Effect Controls, drawn before the Timeline) would take the
+    // keyboard straight back as a click elsewhere (#1460).
+    if let Some(f) = ctx.data(|d| d.get_temp::<ExprFocus>(expr_focus_id())).filter(|f| f.prop == *uid && ctx.cumulative_pass_nr() > f.pass) {
         // Asked for once (a pick whip put a reference in, or an Alt-click added the
         // expression): editing starts in the expression as it is now.
         ctx.data_mut(|d| d.remove::<ExprFocus>(expr_focus_id()));
@@ -4274,19 +4293,6 @@ fn prop_context_menu(
     crate::widgets::context_menu(resp, |ui| prop_menu(ui, &mut app.auto, cid, layer, prop, &mut *actions));
     if actions.get(before..).is_some_and(|picked| picked.iter().any(|(id, _)| id == "prop.setExpression")) {
         expression_toggled(app, ctx, prop);
-    }
-}
-
-/// An expression was just added to `prop` (it had none) or removed: adding one opens its
-/// editor, which comes into view and takes the keyboard with the new expression selected
-/// (#1072); removing it leaves nothing to take the keyboard.
-fn expression_toggled(app: &mut EffectcraftApp, ctx: &egui::Context, prop: &Property) {
-    let uid = prop.uid;
-    if prop.expr.is_none() {
-        app.ui.timeline.expr_closed.remove(&uid);
-        focus_expression(ctx, uid, [usize::MAX, 0]);
-    } else if ctx.data(|d| d.get_temp::<ExprFocus>(expr_focus_id())).is_some_and(|f| f.prop == uid) {
-        ctx.data_mut(|d| d.remove::<ExprFocus>(expr_focus_id()));
     }
 }
 

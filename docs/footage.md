@@ -117,20 +117,32 @@ false` goes back to Use Source File Timecode). Cineon Settings: `{"logConversion
 
 Float OpenEXR renders hold linear light; EffectCraft sRGB-encodes them as they are read, like
 After Effects with Interpret As Linear Light for 32 bpc, unless the item preserves RGB (above).
-A multi-layer file shows its main RGBA channels, as in After Effects. Renders that keep every
-pass in named layers (Blender's `ViewLayer.Combined`, its compositor's File Output `Image`,
-Nuke's `beauty`) show the beauty pass: the layer named Combined, Beauty, Image, RGBA, RGB or
-Color, else the first colour layer that isn't a data pass. Cryptomatte, depth, mist, normals,
-vectors, positions and IDs are never the picture. EXtractoR reads every other layer and channel.
+A multi-layer file shows its main picture, as in After Effects: the channels without a layer
+prefix, `R`, `G`, `B` (and `A`) of the first part that has all three, else the first part that
+has a `Y` (its `Y` and `A`) as grey. Renders that keep every pass in named layers (Blender's
+`ViewLayer.Combined`, its compositor's File Output `Image`, Nuke's `beauty.R`) have no main
+picture and show black at the file's size, as After Effects shows them; EXtractoR (and
+Cryptomatte and the 3D Channel effects) read every layer and channel by name.
 
 Footage on its own keeps only the channels of its picture (a single-part file still
 decompresses all of its pixels to read them). Once an effect reads an item's channels
 (EXtractoR, Cryptomatte, the 3D Channel effects), each frame, the first included, is decoded
-once for the picture and the effects together, and kept for a while: about 1 GB of decoded
-channels (512 MB in the browser), a soft bound, as the newest file and files still in use
-stay whatever their size. Several frames asking for the same file at once wait for one
-decode. Once no enabled effect reads the item any more, its frames go back to the picture's
-channels alone.
+once for the picture and the effects together, and only the channels the effects pick are
+read (EXtractoR's channel names, Cryptomatte's layer, the 3D Channel effects' channel popups).
+The decoded channels are kept for a while, in the one memory budget the caches share
+(Settings ▸ Memory & CPU, see [preferences.md](preferences.md)): the least valuable item goes
+first, whichever cache holds it, and among channel sets and frames that cost the same to decode
+again, the least recently used; in the browser the channels take at most 256 MB, the footage
+frames' cap there. Files still in
+use stay whatever their size. The picture is kept once, converted: its own R, G, B and A planes are
+not kept beside it, unless an effect names one of them. Several frames asking for the same
+file at once wait for one decode. Once no enabled effect reads the item any more, its frames
+go back to the picture's channels alone.
+
+The parameters that pick channels (EXtractoR's Red, Green, Blue and Alpha, Cryptomatte's Layer
+and Layer Name, 3D Channel Extract's 3D Channel, ID Matte's Aux. Channel, IDentifier's Channel Type) can't be animated, as in After Effects, where they have no
+stopwatch either: they take no keyframes and no expression. A document that animated one
+opens with its first value.
 
 The Cryptomatte effect keys objects by their Cryptomatte ID passes, with the names from the
 file's manifest. Pick them with the eyedropper next to its Selection, then click in the

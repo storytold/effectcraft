@@ -122,11 +122,6 @@ impl EffectcraftApp {
                 }
             });
         }
-        // Do not interpret a close as permission to abandon the still-running script. Once
-        // Stop finishes it, the normal unsaved-changes prompt can handle a new close request.
-        if ctx.input(|i| i.viewport().close_requested()) {
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-        }
         self.drain_control(ctx, self.now);
         ctx.request_repaint_after(std::time::Duration::from_millis(50));
     }
@@ -159,6 +154,7 @@ impl EffectcraftApp {
                 }
                 effectcraft_engine::Event::PurgeCaches => {
                     self.frames.clear();
+                    crate::panels::project::forget_thumbnails(ctx);
                     // (frames made after it get keys of their own: see `Self::purge_stamp`)
                     self.purges = self.purges.wrapping_add(1);
                 }
@@ -169,6 +165,15 @@ impl EffectcraftApp {
                 }
             }
         }
+    }
+
+    /// The shared app's `App::logic`: `tick`, the IME pass's close and, last, the root window's close path.
+    pub(crate) fn logic_pass(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
+        // Never `ctx.input(|i| i.time)` here: `Context::run_logic` leaves events, pointer state and
+        // time at the previous full pass's values (only the viewport information is refreshed).
+        self.tick(ctx, frame);
+        self.finish_ime_logic(ctx);
+        self.close_path(ctx);
     }
 
     /// The app's only non-paint entry: one tick of background work.
@@ -186,9 +191,6 @@ impl EffectcraftApp {
         self.apply_gpu_failure(ctx);
         if self.gpu_failure_applied == Some(true) {
             self.close_after_device_loss(ctx);
-            // On macOS the app quits through `-[NSApplication terminate:]` instead of closing the
-            // window while AppKit's run loop is running (#341).
-            craft_quit::on_close_request(ctx);
             return;
         }
         if self.session.script_ui.render_host.is_some() {
@@ -280,10 +282,6 @@ impl EffectcraftApp {
             self.tick_script_render(ctx);
             return;
         }
-        // A close request (the window's button, Quit, `app.quit`) must be answered while hidden.
-        // An answered file dialog can change the project, so the answers above run first. The host
-        // calls `panels::unsaved::quit_on_close` last in its `logic`.
-        panels::unsaved::on_close_requested(self, ctx);
         let title = panels::unsaved::window_title(self);
         if title != self.window_title {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
@@ -320,15 +318,24 @@ impl EffectcraftApp {
         // A hidden window paints when work needs a UI pass: queued input and waits, a settled
         // screenshot, or playback into a child viewport.
         let focused = self.focused;
-        let child_viewports = !self.ui.dock.layout.floating.is_empty() || prefs_live::video_preview_active(self, focused);
+        let child_viewports = !self.ui.dock.layout().floating.is_empty() || prefs_live::video_preview_active(self, focused);
         let paint = self.want_paint
             || !self.synthetic.is_empty()
             || !self.input_waiters.is_empty()
             || self.pending_screenshots.iter().any(|s| s.slot.is_none())
+            || self.script_file_dialog_waits()
             || (self.playback.playing && child_viewports);
         if paint {
             self.request_hidden_paint(ctx);
         }
+    }
+
+    /// A script waits for a file dialog nobody has shown yet: dialogs are served in a UI pass
+    /// (`serve_file_dialogs`), so a minimized window must paint for it (#3253 review). Not while
+    /// a non-blocking dialog is up: the next one waits for it.
+    fn script_file_dialog_waits(&self) -> bool {
+        let one_at_a_time = self.hooks.file_dialog_async.is_some() && self.file_dialogs.any();
+        !one_at_a_time && self.session.script_ui.file_dialogs.iter().any(|d| !d.shown)
     }
 
     /// Ask the host for a UI pass even when the window is minimized or occluded.
@@ -484,6 +491,7 @@ impl EffectcraftApp {
         if let Some(rect) = crate::color_picker::take_automation(&ctx) {
             self.auto.add("colorPicker.eyedropper", rect, "Eyedropper");
         }
+        crate::framework::return_window_keys(&ctx);
         let tab_had_widget_focus = ctx.egui_wants_keyboard_input();
         menus::handle_shortcuts(self, &ctx);
         if !ctx.input(|i| i.pointer.primary_down()) {
@@ -528,9 +536,13 @@ impl EffectcraftApp {
         updates_ui::show(self, &ctx);
         panels::scriptui_view::sync_panels(self);
         panels::scriptui_view::show_windows(self, &ctx);
+        // After the windows' events and the menus' commands: a script that asked for a file
+        // dialog in this pass gets it now.
+        panels::scriptui_view::serve_file_dialogs(self);
         panels::learn::coach(self, &ctx);
         let lift = panels::media_panels::import_card(self, ui, full);
         self.draw_toast(ui, full, lift);
+        self.framework_dialogs.run(ui);
     }
 
     /// Workspace-layout auto-save: a background write that also runs while hidden, once the
@@ -750,6 +762,7 @@ mod tests {
         let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
         app.session.events.push(effectcraft_engine::Event::Toast { message: "Earlier background error".into(), error: true });
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         app.handle_events(&ctx);
         app.report_import_errors("file.import", &json!({"errors":["Later import error"]}));
         ctx.run_ui(egui::RawInput::default(), |ui| app.draw_toast(ui, ui.max_rect(), 0.0)).textures_delta.clear();
@@ -780,6 +793,7 @@ mod tests {
             app.report_import_errors("file.import", &json!({"errors":[first, "Earlier details"]}));
             app.report_import_errors("file.import", &json!({"errors":[first, "Later details"]}));
             let ctx = egui::Context::default();
+            crate::framework::install_headless(&ctx);
             ctx.run_ui(egui::RawInput::default(), |ui| app.draw_toast(ui, ui.max_rect(), 0.0)).textures_delta.clear();
             let r = app.auto.elements.iter().find(|e| e.id == "toast").unwrap().rect;
             let pos = egui::pos2(r[0] + 4.0, r[1] + 4.0);
@@ -803,6 +817,7 @@ mod tests {
         let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
         app.session.events.extend((0..40).map(|i| effectcraft_engine::Event::Toast { message: format!("Error {i}"), error: true }));
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         app.handle_events(&ctx);
         assert!(app.error_toasts.len() <= 32);
         assert_eq!(app.error_toasts.front().unwrap().message, "Error 0");
@@ -830,6 +845,7 @@ mod tests {
                 effectcraft_engine::Event::Toast { message: "Second.vectorcraft failed".into(), error: true },
             ]);
             let ctx = egui::Context::default();
+            crate::framework::install_headless(&ctx);
             app.handle_events(&ctx);
             ctx.run_ui(egui::RawInput::default(), |ui| app.draw_toast(ui, ui.max_rect(), 0.0)).textures_delta.clear();
             assert!(app.auto.elements.iter().any(|e| e.id == "toast" && e.label.contains("First.vectorcraft")));
@@ -865,6 +881,7 @@ mod tests {
         app.ui.status = "First foreground status".into();
         app.session.events.push(effectcraft_engine::Event::Toast { message: "An unseen import error".into(), error: true });
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         app.handle_events(&ctx);
         ctx.run_ui(egui::RawInput::default(), |ui| app.draw_toast(ui, ui.max_rect(), 0.0)).textures_delta.clear();
         app.ui.status = "Another foreground status".into();
@@ -882,6 +899,7 @@ mod tests {
         app.ui.status = "A local drop failed".into();
         app.session.events.push(effectcraft_engine::Event::Toast { message: "A later background import failed".into(), error: true });
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         app.handle_events(&ctx);
         ctx.run_ui(egui::RawInput::default(), |ui| app.draw_toast(ui, ui.max_rect(), 0.0)).textures_delta.clear();
         let click = |app: &mut EffectcraftApp| {
@@ -916,6 +934,7 @@ mod tests {
         let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
         app.session.events.push(effectcraft_engine::Event::Toast { message: "An earlier error".into(), error: true });
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         app.handle_events(&ctx);
         ctx.run_ui(egui::RawInput::default(), |ui| app.draw_toast(ui, ui.max_rect(), 0.0)).textures_delta.clear();
         app.ui.status = "An unrelated later status".into();
@@ -933,6 +952,7 @@ mod tests {
         app.report_import_errors("file.import", &json!({"errors": ["first failed file", "second failed file"]}));
         app.session.events.push(effectcraft_engine::Event::Toast { message: "Sequence has missing frames".into(), error: false });
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         app.handle_events(&ctx);
         ctx.run_ui(egui::RawInput::default(), |ui| app.draw_toast(ui, ui.max_rect(), 0.0)).textures_delta.clear();
         assert!(app.auto.elements.iter().any(|e| e.id == "toast" && e.label.contains("second failed file")));
@@ -945,6 +965,7 @@ mod tests {
         app.ui.status = "A foreground status".into();
         app.toast = Some(("Saved".into(), 0.0));
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         for now in [0.0, 3.0, 6.0, 6.1] {
             app.now = now;
             app.auto.elements.clear();
@@ -960,6 +981,7 @@ mod tests {
         app.toast = Some(("An old toast".into(), 0.0));
         app.now = 8.0;
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         ctx.run_ui(egui::RawInput::default(), |ui| app.draw_toast(ui, ui.max_rect(), 0.0)).textures_delta.clear();
         assert!(app.auto.elements.iter().all(|e| !e.label.contains("old toast")));
         app.ui.status.clear();
@@ -975,6 +997,7 @@ mod tests {
         app.ui.status = "A local drop failed".into();
         app.session.events.push(effectcraft_engine::Event::Toast { message: "Imported 1 item. Failed first file\nFailed second file".into(), error: true });
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         app.handle_events(&ctx);
         for now in [0.0, 3.0, 6.0] {
             app.now = now;

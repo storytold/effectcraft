@@ -10,6 +10,8 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+craft-jsonrpc = { workspace = true }
+craft-mime = { workspace = true }
 effectcraft-engine = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

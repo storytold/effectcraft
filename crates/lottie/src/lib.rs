@@ -30,7 +30,7 @@ pub mod zip;
 use effectcraft_color::BlendMode;
 use effectcraft_time::{FrameRate, TICKS_PER_SECOND, Tick};
 
-pub use export::{ExportOptions, ExportResult, export_comp, to_dotlottie};
+pub use export::{ExportOptions, ExportResult, export_comp, to_dotlottie, try_to_dotlottie};
 pub use import::{ImportResult, ImportedImage, import};
 
 #[derive(Debug, thiserror::Error)]
