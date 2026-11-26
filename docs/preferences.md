@@ -94,7 +94,14 @@ Commands (CLI, MCP, control channel):
   frames the Render Queue renders on the GPU at once. Auto measures the GPU memory after the
   job's first GPU frame and fits up to 3 frames into the GPU memory cap (by default a
   conservative 3 GiB on a discrete card, less when its memory is known, 2 GiB on an integrated
-  one; `EFFECTCRAFT_GPU_MEMCAP_MB` sets it), keeping room for the upload cache to fill. It
+  one; `EFFECTCRAFT_GPU_MEMCAP_MB` sets it), keeping room for the upload cache to fill (the
+  textures of uploaded layers: 1.5 GiB, or three eighths of the card's memory where it is
+  known: on Linux with amdgpu, on Windows, and on NVIDIA cards through `nvidia-smi`; the
+  default cap grows with it, never above
+  three quarters of the card, and a cap above 0 set with `EFFECTCRAFT_GPU_MEMCAP_MB` can only
+  lower the default budget: to at most the larger of half that cap and 1.5 GiB, so a smaller
+  default, like the 768 MiB of a 2 GiB card, stays; `EFFECTCRAFT_GPU_UPLOAD_MB` sets the budget
+  in whole MiB, 0 = default, and a budget set there is kept). It
   renders one frame at a time where the memory can't be measured (Metal, WebGPU, GL, or the
   cap turned off) and once frames have had to wait for memory. The render log names the count.
   `EFFECTCRAFT_GPU_INFLIGHT` overrides it. CPU renders have no such setting. A job on GPU

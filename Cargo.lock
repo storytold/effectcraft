@@ -2684,6 +2684,7 @@ dependencies = [
  "wasm-bindgen",
  "web-time",
  "wgpu",
+ "windows-registry",
 ]
 
 [[package]]
