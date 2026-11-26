@@ -445,6 +445,7 @@ fn run_desktop(reporter: &crash_report::Shutdown, arguments: &[std::ffi::OsStrin
         effectcraft_ui_egui::channel::name_for(effectcraft_ui_egui::channel::identity()),
         options,
         Box::new(move |cc| {
+            effectcraft_ui_egui::framework::install(&cc.egui_ctx)?;
             EffectcraftApp::install_ime_reset_hooks(&cc.egui_ctx);
             match &cc.wgpu_render_state {
                 Some(rs) => {
@@ -716,7 +717,7 @@ struct Desktop {
 
 impl eframe::App for Desktop {
     /// The desktop host's logic tick: update the macOS menu bar, run the shared app tick, close the IME pass, show the
-    /// file dialogs asked for and, last, hand a close to the platform quit.
+    /// file dialogs asked for and, last, the root window's close path.
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         #[cfg(target_os = "macos")]
         self.menu_sync.before(&mut self.app, |app| self.menu.update(app, ctx));
@@ -728,7 +729,7 @@ impl eframe::App for Desktop {
         if let Some(asked) = &self.file_dialogs {
             file_dialogs::show_asked(asked, frame, ctx);
         }
-        effectcraft_ui_egui::panels::unsaved::quit_on_close(ctx);
+        self.app.close_path(ctx);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {

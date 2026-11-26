@@ -216,7 +216,7 @@ fn draw_widget(app: &mut EffectcraftApp, ui: &mut egui::Ui, origin: egui::Pos2, 
             let mut pick: Option<usize> = None;
             ui.add_enabled_ui(w.enabled, |ui| {
                 ui.scope_builder(UiBuilder::new().max_rect(rect), |ui| {
-                    craft_ui::ComboBox::from_id_salt(id).selected_text(cur).width(rect.width() - 8.0).show_ui(ui, |ui| {
+                    egui::ComboBox::from_id_salt(id).selected_text(cur).width(rect.width() - 8.0).show_ui(ui, |ui| {
                         for (i, it) in w.items.iter().enumerate() {
                             if it == "-" {
                                 ui.separator();
@@ -785,6 +785,7 @@ mod tests {
     /// frame's scroll output (viewport and content size).
     fn panel_frames(dock: egui::Vec2, first: egui::Vec2, then: egui::Vec2) -> (Rect, egui::Vec2) {
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         ctx.all_styles_mut(|s| s.spacing.scroll = egui::style::ScrollStyle::solid());
         let screen = Rect::from_min_size(egui::Pos2::ZERO, vec2(800.0, 600.0));
         let mut last = (Rect::NOTHING, egui::Vec2::ZERO);

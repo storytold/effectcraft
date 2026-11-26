@@ -32,7 +32,10 @@ fn fixture(mode: &str) -> Fixture {
     let opacity = comp.layers.iter().find(|l| l.id.0 == solid).unwrap().props.prop("transform/opacity").unwrap().uid;
     s.execute("layer.select", json!({"layers": [solid]})).unwrap();
     s.execute("view.fastPreviewMode", json!({"mode": mode})).unwrap();
-    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(vec2(1600.0, 1000.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(s));
     h.run_steps(3);
     let ctx = h.ctx.clone();
     effectcraft_ui_egui::menus::invoke(h.state_mut(), &ctx, "timeline.reveal.opacity", json!({})).unwrap();
