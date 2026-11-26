@@ -376,13 +376,13 @@ pub fn auto_orient_3d(ctx: &EvalCtx, layer: &Layer, pos: Vec3) -> Option<Mat4> {
 /// Remembered inside an [`EvalMemo`] scope, like [`active_camera`]: the viewer draws every
 /// camera's and light's outline in each pane, each frame.
 pub fn layer_frame(ctx: &EvalCtx, layer: &Layer) -> (Vec3, Vec3, Vec3) {
-    let key = memo::frame(ctx, layer);
+    let Some(key) = memo::frame(ctx, layer) else { return eval_layer_frame(ctx, layer) };
     let mark = memo::mark(ctx);
-    if let Some(memo::Value::Frame(f)) = key.and_then(|k| memo::get(k, &mark)) {
+    if let Some(memo::Value::Frame(f)) = memo::get(key, &mark) {
         return f;
     }
-    let frame = eval_layer_frame(ctx, layer);
-    if let Some(key) = key {
+    let (frame, keep) = memo::tracked(ctx, |ctx| eval_layer_frame(ctx, layer));
+    if keep {
         memo::put(key, memo::Value::Frame(frame), ctx, &mark);
     }
     frame
@@ -437,16 +437,17 @@ pub fn layer_camera(ctx: &EvalCtx, cam: &Layer) -> CameraState {
 /// and remembered: every 3D layer's [`EvalCtx::layer_to_comp`] asks for it, and a camera driven
 /// by expressions otherwise re-runs them all for each layer, each frame.
 pub fn active_camera(ctx: &EvalCtx) -> CameraState {
-    let key = memo::camera(ctx);
-    let mark = memo::mark(ctx);
-    if let Some(memo::Value::Camera(cam)) = key.and_then(|k| memo::get(k, &mark)) {
-        return cam;
-    }
-    let cam = match ctx.comp.active_camera(ctx.time) {
+    let work = |ctx: &EvalCtx| match ctx.comp.active_camera(ctx.time) {
         Some(cam) => layer_camera(ctx, cam),
         None => default_camera(ctx.comp.width as f64, ctx.comp.height as f64),
     };
-    if let Some(key) = key {
+    let Some(key) = memo::camera(ctx) else { return work(ctx) };
+    let mark = memo::mark(ctx);
+    if let Some(memo::Value::Camera(cam)) = memo::get(key, &mark) {
+        return cam;
+    }
+    let (cam, keep) = memo::tracked(ctx, work);
+    if keep {
         memo::put(key, memo::Value::Camera(cam), ctx, &mark);
     }
     cam
@@ -482,7 +483,8 @@ impl Drop for EvalMemo<'_> {
 }
 
 /// What an [`EvalMemo`] scope remembers. Shared by every thread working on the scope's
-/// project; a value is stored only when it was worked out outside any expression (see [`put`]).
+/// project. A value is kept only when it is the same for every reader: see [`put`] for one
+/// worked out inside an expression and [`tracked`] for one that read a file.
 pub(crate) mod memo {
     use super::{CameraState, EvalCtx, Layer, Vec3};
     use effectcraft_project::Property;
@@ -521,8 +523,9 @@ pub(crate) mod memo {
         time: Tick,
         expr: usize,
         footage: usize,
-        /// The read log the evaluation reports the files it read to: each log learns of them.
-        reads: usize,
+        /// Whether the reader keeps a read log. One that does gets only values known to have read
+        /// no file ([`tracked`]); one that does not is never told of files anyway.
+        logged: bool,
     }
 
     /// The values of one project, and how many scopes keep it open.
@@ -611,10 +614,27 @@ pub(crate) mod memo {
                 time: ctx.time,
                 expr: ctx.expr.map_or(0, addr),
                 footage: ctx.footage.map_or(0, addr),
-                reads: ctx.reads.map_or(0, addr),
+                logged: ctx.reads.is_some(),
             };
             (project, key)
         })
+    }
+
+    /// Work a value out with `work` and say whether it may be kept for `ctx`'s readers.
+    ///
+    /// A reader with a read log must be told of every file its value was made of (an expression
+    /// that samples footage). A value answered from the memo would tell it nothing, so the work
+    /// reports to a log of its own, which is handed on to the reader's: only a value that read no
+    /// file is kept. (The memo once told logs apart by their address; a log that took the place
+    /// of an earlier one got that one's value without its files.)
+    pub(crate) fn tracked<T>(ctx: &EvalCtx, work: impl FnOnce(&EvalCtx) -> T) -> (T, bool) {
+        let Some(own) = ctx.reads else { return (work(ctx), true) };
+        let log = crate::reads::ReadLog::new();
+        let out = work(&EvalCtx { reads: Some(&log), ..*ctx });
+        let files = log.into_files();
+        let none = files.is_empty() && files.is_complete() && files.since().is_none() && !files.is_unkeyed();
+        own.note_all(&files);
+        (out, none)
     }
 
     /// What is known before a value is looked up or worked out: whether another expression is

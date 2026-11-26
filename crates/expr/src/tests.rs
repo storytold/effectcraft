@@ -2386,6 +2386,12 @@ fn the_host_counts_failed_expressions_and_only_those() {
     let cut = Expressions.faults();
     let _ = eval_property(&f.p, f.cid, f.a, OPA, 0.0);
     assert!(Expressions.faults() > cut, "and is cut again each time");
+    // A script that runs but returns what the property cannot take fails too, once.
+    f.set_expr(f.a, OPA, "50");
+    f.set_expr(f.b, OPA, "({})");
+    let before = Expressions.faults().expect("the engine counts");
+    assert!(eval_property(&f.p, f.cid, f.b, OPA, 0.0).is_err(), "an object is no opacity");
+    assert_eq!(Expressions.faults(), Some(before + 1), "a rejected result is one failure");
 }
 
 /// Two expressions that read each other: asked for at the top, each gets the other's value

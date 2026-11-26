@@ -1092,15 +1092,102 @@ fn a_frame_memo_keeps_a_value_worked_out_inside_an_expression_unless_one_failed(
     assert_eq!(ctx.value(l, position).as_vec3()[0], 70.0, "the stand-in was not remembered");
     assert_eq!(runs(), 1);
 
-    // A value worked out at the top while something failed is its reader-less value only: an
-    // expression reading it works it out for itself.
+    // The opacity worked out at 1 s, at the top, with the position's stand-in under it, is the
+    // frame's opacity there: later reads at the top get it as it was.
+    assert_eq!(ctx.value(l, opacity).as_f64(), 5.0);
+    assert_eq!(runs(), 0, "at the top it is remembered");
+
+    // The failed expression itself is not remembered, at the top either: its next read asks
+    // the host again.
     let ctx = at(1.5);
     host.position_fails.store(true, Relaxed);
     assert_eq!(ctx.value(l, position).as_vec3()[0], 50.0);
     assert_eq!(runs(), 1);
-    assert_eq!(ctx.value(l, position).as_vec3()[0], 50.0);
-    assert_eq!(runs(), 0, "at the top it is remembered");
     host.position_fails.store(false, Relaxed);
-    assert_eq!(ctx.value(l, opacity).as_f64(), 7.0, "the opacity's read works the position out again");
-    assert_eq!(runs(), 2);
+    assert_eq!(ctx.value(l, position).as_vec3()[0], 70.0, "the failed read's stand-in was not remembered");
+    assert_eq!(runs(), 1);
+}
+
+/// A value whose evaluation read a file (an expression that samples footage) is worked out for
+/// every reader: each reader's read log has to learn of the file. The memo told read logs apart
+/// by their address, and a log that took the place of an earlier one got that one's answer
+/// without the file.
+#[test]
+fn a_memo_never_keeps_a_value_that_read_a_file() {
+    use crate::reads::{FileStamp, ReadFile, ReadLog};
+    struct Sampling;
+    impl crate::ExprHost for Sampling {
+        fn eval(&self, ctx: &EvalCtx, _: &Layer, _: &effectcraft_project::Property, value: &Value) -> Result<Value, String> {
+            if let Some(log) = ctx.reads {
+                log.note(ReadFile::new("/footage/plate.mov", FileStamp::Native { len: 1, modified: Some(7) }));
+            }
+            Ok(value.clone())
+        }
+    }
+    let (mut p, cid, comp) = setup();
+    let mut l = solid3(&mut p, &comp, [1.0, 0.0, 0.0], 40, 20, [50.0, 30.0, 0.0]);
+    l.props.prop_mut("transform/position").unwrap().expr = Some(effectcraft_project::Expression { text: "samples".into(), enabled: true });
+    p.comp_mut(cid).unwrap().layers.push(l);
+    let c = p.comp(cid).unwrap();
+    let l = &c.layers[0];
+    let position = l.props.prop("transform/position").unwrap();
+    let _memo = EvalMemo::scope(&p);
+    let mut log = ReadLog::new();
+    for round in 0..3 {
+        let ctx = EvalCtx { expr: Some(&Sampling), reads: Some(&log), ..EvalCtx::new(&p, cid, c, Tick::ZERO) };
+        ctx.value(l, position);
+        assert_eq!(log.files().len(), 1, "read {round}: the reader's log names the file");
+        // The next reader's log, where this one was.
+        log = ReadLog::new();
+    }
+}
+
+/// A failed expression gives its reader the keyframed value for that read only. The next read
+/// asks the host again, as it does without the memo: the failure may have been a spent work
+/// budget.
+#[test]
+fn a_memo_never_keeps_the_stand_in_of_a_failed_expression() {
+    struct FailsOnce(std::sync::atomic::AtomicUsize);
+    impl crate::ExprHost for FailsOnce {
+        fn eval(&self, _: &EvalCtx, _: &Layer, _: &effectcraft_project::Property, _: &Value) -> Result<Value, String> {
+            if self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 0 { Err("out of time".into()) } else { Ok(Value::Vec3([7.0, 8.0, 9.0])) }
+        }
+    }
+    let (mut p, cid, comp) = setup();
+    let mut l = solid3(&mut p, &comp, [1.0, 0.0, 0.0], 40, 20, [50.0, 30.0, 0.0]);
+    l.props.prop_mut("transform/position").unwrap().expr = Some(effectcraft_project::Expression { text: "slow".into(), enabled: true });
+    p.comp_mut(cid).unwrap().layers.push(l);
+    let c = p.comp(cid).unwrap();
+    let l = &c.layers[0];
+    let position = l.props.prop("transform/position").unwrap();
+    let host = FailsOnce(std::sync::atomic::AtomicUsize::new(0));
+    let ctx = EvalCtx { expr: Some(&host), ..EvalCtx::new(&p, cid, c, Tick::ZERO) };
+    let _memo = EvalMemo::scope(&p);
+    assert_eq!(ctx.value(l, position), Value::Vec3([50.0, 30.0, 0.0]), "the failed read gets the keyframed value");
+    assert_eq!(ctx.value(l, position), Value::Vec3([7.0, 8.0, 9.0]), "the next read gets the expression's value");
+    assert_eq!(ctx.value(l, position), Value::Vec3([7.0, 8.0, 9.0]));
+    assert_eq!(host.0.load(std::sync::atomic::Ordering::Relaxed), 2, "and that one is kept");
+}
+
+/// A frame with no 3D layer on screen asks for no camera: a 3D layer that starts later does not
+/// make the frames before it run the camera's expressions.
+#[test]
+fn a_frame_with_no_3d_layer_on_screen_works_out_no_camera() {
+    let (mut p, cid, _) = moving_camera_comp(1);
+    let comp = p.comp(cid).unwrap().clone();
+    let mut flat = solid3(&mut p, &comp, [0.0, 1.0, 0.0], 40, 20, [60.0, 60.0, 0.0]);
+    flat.switches.three_d = false;
+    push(&mut p, cid, flat);
+    for l in &mut p.comp_mut(cid).unwrap().layers {
+        if l.is_3d() && !l.is_camera() {
+            l.in_point = Tick::from_seconds_f64(1.0);
+        }
+    }
+    let host = CameraCounting(std::sync::atomic::AtomicUsize::new(0));
+    let mut r = Renderer::new(&p, &NoFootage, RenderOpts::default());
+    r.expr = Some(&host);
+    r.comp_frame(cid, Tick::from_seconds_f64(0.5));
+    assert_eq!(host.0.load(std::sync::atomic::Ordering::Relaxed), 0, "the frame at 0.5 s draws the 2D solid only");
+    r.comp_frame(cid, Tick::from_seconds_f64(1.5));
+    assert!(host.0.load(std::sync::atomic::Ordering::Relaxed) > 0, "control: once the 3D solid is on screen the camera is asked for");
 }

@@ -117,7 +117,10 @@ impl ExprHost for Expressions {
         };
         match r {
             [Some(a), Some(b), Some(c)] if a.is_finite() && b.is_finite() && c.is_finite() => Ok([a, b, c]),
-            _ => Err("Error: expression selector amount must be a number or an array of numbers".into()),
+            _ => {
+                fault();
+                Err("Error: expression selector amount must be a number or an array of numbers".into())
+            }
         }
     }
 }
@@ -134,7 +137,17 @@ impl Drop for FrameGuard {
 /// `value`. Other properties' expressions are evaluated through `host`.
 pub fn evaluate(host: &dyn ExprHost, ctx: &EvalCtx, layer: &Layer, prop: &Property, value: &Value, text: &str) -> Result<Value, String> {
     let out = evaluate_out(host, ctx, layer, prop, value, text, TextSelector { index_total: [1.0, 1.0], value: [100.0; 3] })?;
-    runtime::to_value(&out, value)
+    let value = runtime::to_value(&out, value);
+    if value.is_err() {
+        fault();
+    }
+    value
+}
+
+/// Count a failed expression ([`ExprHost::faults`]): once each, whether the script failed or its
+/// result is not a value the property can take.
+fn fault() {
+    runtime::FAULTS.with(|n| n.set(n.get().wrapping_add(1)));
 }
 
 /// Expression Selector state: `[textIndex, textTotal]` and `selectorValue`.
@@ -156,7 +169,7 @@ fn evaluate_out(
 ) -> Result<runtime::Out, String> {
     let out = run_expression(host, ctx, layer, prop, value, text, text_selector);
     if out.is_err() {
-        runtime::FAULTS.with(|n| n.set(n.get().wrapping_add(1)));
+        fault();
     }
     out
 }

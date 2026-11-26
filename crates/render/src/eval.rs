@@ -15,7 +15,9 @@ pub trait ExprHost: Send + Sync {
     /// Evaluate the expression of `prop` (on `layer`, comp time `t`), given the keyframed value.
     fn eval(&self, ctx: &EvalCtx, layer: &Layer, prop: &Property, value: &Value) -> Result<Value, String>;
     /// Whether an expression is being evaluated on this thread: a result worked out then may
-    /// rest on a stand-in (see [`Self::faults`]).
+    /// rest on a stand-in (see [`Self::faults`]). A host that wraps another passes this and
+    /// [`Self::faults`] on: left at their defaults, values worked out inside an expression would
+    /// be taken for values worked out at the top.
     fn busy(&self) -> bool {
         false
     }
@@ -123,13 +125,16 @@ impl<'a> EvalCtx<'a> {
             // Inside a frame memo scope an expression runs once per property and time: the
             // viewer asks for a layer's transform for every view, outline and handle.
             use crate::three_d::camera::memo;
-            let key = memo::prop(self, layer, prop, lt);
+            let Some(key) = memo::prop(self, layer, prop, lt) else { return h.eval(self, layer, prop, &v).unwrap_or(v) };
             let mark = memo::mark(self);
-            if let Some(memo::Value::Prop(m)) = key.and_then(|k| memo::get(k, &mark)) {
+            if let Some(memo::Value::Prop(m)) = memo::get(key, &mark) {
                 return m;
             }
-            let out = h.eval(self, layer, prop, &v).unwrap_or(v);
-            if let Some(key) = key {
+            let (out, keep) = memo::tracked(self, |ctx| h.eval(ctx, layer, prop, &v));
+            // A failed expression's stand-in is this read's only: the next read asks the host
+            // again, as it does without the memo (the failure may be a spent work budget).
+            let Ok(out) = out else { return v };
+            if keep {
                 memo::put(key, memo::Value::Prop(out.clone()), self, &mark);
             }
             return out;

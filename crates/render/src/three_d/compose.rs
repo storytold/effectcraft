@@ -245,15 +245,16 @@ fn mb_time(ctx: &EvalCtx, i: usize, n: usize) -> Tick {
 /// [`super::EvalMemo`] scope they then find them remembered, rather than all missing at once
 /// and each working them out again.
 pub(crate) fn warm_cameras(r: &Renderer, ctx: &EvalCtx) {
-    if !ctx.comp.layers.iter().any(|l| l.switches.three_d) {
+    // Only the 3D layers this frame draws ask for a camera: one that starts later asks for none
+    // now, and an expression-driven camera is slow to work out.
+    let on_screen = r.visible_layers(ctx);
+    let on_screen = || on_screen.iter().copied().filter(|l| l.switches.three_d);
+    if on_screen().next().is_none() {
         return;
     }
     camera_for(r, ctx);
-    // The sub-sample cameras, for the blurred 3D layers this frame draws only: those on screen
-    // and the 3D layers they take as track mattes ([`matte_for`]). A blurred layer elsewhere on
-    // the timeline asks for none here, and an expression-driven camera is slow to work out.
-    let on_screen = r.visible_layers(ctx);
-    let on_screen = || on_screen.iter().copied().filter(|l| l.switches.three_d);
+    // The sub-sample cameras, for the blurred ones among them and the 3D layers they take as
+    // track mattes ([`matte_for`]).
     let mattes = on_screen().filter_map(|l| ctx.comp.layer(l.track_matte?.layer)).filter(|m| m.switches.three_d && m.is_active_at(ctx.time));
     let n = on_screen().chain(mattes).map(|l| mb_samples(r, ctx, l)).max().unwrap_or(1);
     if n > 1 {
