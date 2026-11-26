@@ -108,8 +108,12 @@ fn load(src: &str) -> Option<Arc<Vec<MochaShape>>> {
     if let Some(v) = cache.lock().ok().and_then(|c| c.get(src).cloned()) {
         return v;
     }
-    let parsed =
-        if s.starts_with('{') || s.starts_with('[') { parse_shapes(s) } else { std::fs::read_to_string(s).ok().and_then(|t| parse_shapes(&t)) }.map(Arc::new);
+    let parsed = if s.starts_with('{') || s.starts_with('[') {
+        parse_shapes(s)
+    } else {
+        crate::utility::read_text_file(std::path::Path::new(s)).ok().and_then(|t| parse_shapes(&t))
+    }
+    .map(Arc::new);
     if let Ok(mut c) = cache.lock() {
         if c.len() > 64 {
             c.clear();

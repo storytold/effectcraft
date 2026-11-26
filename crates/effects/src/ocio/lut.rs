@@ -233,7 +233,7 @@ pub fn load_file(src: &str) -> Option<Arc<FileXform>> {
             parse_file(src, "")
         } else {
             let ext = std::path::Path::new(src_t).extension().and_then(std::ffi::OsStr::to_str).unwrap_or("");
-            file_cache::read(src_t).ok().and_then(|t| parse_file(&t, ext))
+            file_cache::read(src_t).map_err(|e| log::warn!("OCIO file transform not loaded: {e}")).ok().and_then(|t| parse_file(&t, ext))
         }
         .map(Arc::new);
         let bytes = match parsed.as_deref() {

@@ -218,7 +218,7 @@ pub(crate) fn file_stamp(path: &str) -> FileStamp {
 /// after it was stamped has a newer stamp, and is read again next time).
 pub(crate) fn read(path: &str) -> std::io::Result<String> {
     note_file(path, file_stamp(path));
-    std::fs::read_to_string(path)
+    crate::utility::read_text_file(std::path::Path::new(path))
 }
 
 /// Note that the running load looked for `path` and did not find it: it loads again once the file
