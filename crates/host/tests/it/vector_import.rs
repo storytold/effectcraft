@@ -951,6 +951,17 @@ fn ai_composition_retains_layer_sizes_and_positions() {
     }
 }
 
+/// A `.vectorcraft` file (written with craft-vectorcraft-format's envelope) holding an empty
+/// document and `pdf` as the PDF it carries (Create PDF-Compatible File).
+fn vectorcraft_file(pdf: Option<&[u8]>) -> Vec<u8> {
+    let mut file = craft_vectorcraft_format::File::new(json!({"artboards": [], "layers": []}));
+    let mut tail = file.tail();
+    file.pdf = pdf.map(|b| tail.image("application/pdf", b, false));
+    let mut out = serde_json::to_vec(&file).unwrap();
+    tail.write_to(&mut out).unwrap();
+    out
+}
+
 /// An A4 page (595.28 × 841.89 pt) whose artwork sits inside a page clip and ten nested
 /// clipping groups, as PDFs exported from layout and office applications nest them: a black bar
 /// whose left edge is at x = 30 pt, from 41.89 to 191.89 pt down the page.
@@ -1024,4 +1035,129 @@ fn a4_pdf_scaled_200_percent_continuously_rasterizes_sharp() {
     assert!(soft_pixels(&on) <= 1, "on: the edge is at most one pixel wide ({} partial pixels)", soft_pixels(&on));
     // Outside the clips (x = 10 pt) nothing is drawn.
     assert!(on.get(20, 240)[3] < 0.01);
+}
+
+#[test]
+fn vectorcraft_documents_import_through_the_pdf_they_carry() {
+    let bytes = layered_pdf();
+    let doc = effectcraft_pdf::parse(&bytes).unwrap();
+    let direct = effectcraft_svg::rasterize(&doc, 120, 80, 1.0);
+    let path = tmp("art.vectorcraft");
+    std::fs::write(&path, vectorcraft_file(Some(&bytes))).unwrap();
+    // As footage: drawn as the PDF, and continuously rasterized.
+    let mut s = effectcraft_host::session();
+    let r = s.execute_checked("file.import", json!({"paths": [path]})).unwrap();
+    assert_eq!(r["errors"], json!([]), "{r}");
+    let item = r["items"][0].as_u64().unwrap();
+    let effectcraft_project::ItemKind::Footage(f) = &s.project.item(ItemId(item)).unwrap().kind else { panic!("footage") };
+    assert_eq!((f.codec.as_str(), f.width, f.height), ("VectorCraft", 120, 80));
+    s.execute("comp.new", json!({"name": "V", "width": 120, "height": 80, "frameRate": 30, "duration": 1})).unwrap();
+    let lid = s.execute_checked("layer.addItem", json!({"item": item})).unwrap()["layer"].as_u64().unwrap();
+    let cid = s.active_comp_id().unwrap();
+    let t = effectcraft_time::Tick::ZERO;
+    assert!(mean_diff(&s.render(cid, t, RenderOpts::default()), &direct) < 1.0 / 255.0, "footage = the carried PDF");
+    for (k, v) in [("transform/anchor", json!([0, 0])), ("transform/position", json!([0, 0])), ("transform/scale", json!([300, 300]))] {
+        s.execute("prop.set", json!({"layer": lid, "path": k, "value": v})).unwrap();
+    }
+    let want = effectcraft_svg::rasterize(&doc, 120, 80, 3.0);
+    s.execute("layer.setSwitch", json!({"layers": [lid], "switch": "collapse", "value": true})).unwrap();
+    let sharp = mean_diff(&s.render(cid, t, RenderOpts::default()), &want);
+    assert!(sharp < 0.004, "continuously rasterized {sharp}");
+    // As a composition: one layer per PDF layer, top first.
+    for import_as in ["composition", "compositionLayerSizes"] {
+        let mut s = effectcraft_host::session();
+        let r = s.execute_checked("file.import", json!({"paths": [path], "importAs": import_as})).unwrap();
+        assert_eq!(r["errors"], json!([]), "{r}");
+        let cid = ItemId(r["comps"][0].as_u64().unwrap());
+        let comp = s.project.comp(cid).unwrap();
+        assert_eq!(comp.layers.iter().map(|l| l.name.as_str()).collect::<Vec<_>>(), vec!["Art", "Sky"]);
+        assert_eq!((comp.width, comp.height), (120, 80));
+        let d = mean_diff(&s.render(cid, t, RenderOpts::default()), &direct);
+        assert!(d < 1.0 / 255.0, "{import_as}: comp vs page {d}");
+    }
+    // Another artboard: the carried PDF's page 2.
+    let pages = tmp("pages.vectorcraft");
+    std::fs::write(&pages, vectorcraft_file(Some(&two_page_pdf()))).unwrap();
+    let mut s = effectcraft_host::session();
+    let r = s.execute_checked("file.import", json!({"paths": [pages], "page": 2})).unwrap();
+    assert_eq!(r["errors"], json!([]), "{r}");
+    let effectcraft_project::ItemKind::Footage(f) = &s.project.item(ItemId(r["items"][0].as_u64().unwrap())).unwrap().kind else { panic!("footage") };
+    assert_eq!((f.width, f.height, f.page), (100, 60, 1));
+}
+
+#[test]
+fn a_vectorcraft_document_without_a_pdf_reports_the_option_to_turn_on() {
+    let path = tmp("no-pdf.vectorcraft");
+    std::fs::write(&path, vectorcraft_file(None)).unwrap();
+    for import_as in ["footage", "composition"] {
+        let mut s = effectcraft_host::session();
+        let r = s.execute_checked("file.import", json!({"paths": [path], "importAs": import_as})).unwrap();
+        let e = r["errors"][0].as_str().unwrap_or_default();
+        assert!(e.contains("no-pdf.vectorcraft") && e.contains("Create PDF-Compatible File"), "{import_as}: {r}");
+        assert_eq!(r["items"], json!([]), "{import_as}: {r}");
+    }
+}
+
+#[test]
+fn svg_scene_mapping_render_parity() {
+    let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="120" height="80" viewBox="10 10 60 40" preserveAspectRatio="xMidYMid meet">
+        <style>
+            .card { fill: #204080; }
+            #accent { fill: #ff6020; }
+        </style>
+        <defs>
+            <linearGradient id="sky" x1="0%" y1="0%" x2="100%" y2="100%">
+                <stop offset="0" stop-color="#102040"/>
+                <stop offset="1" stop-color="#4080c0"/>
+            </linearGradient>
+            <radialGradient id="glow" cx="50%" cy="50%" r="50%">
+                <stop offset="0" stop-color="#ffffff"/>
+                <stop offset="1" stop-color="#ff0000"/>
+            </radialGradient>
+            <symbol id="badge" viewBox="0 0 20 20">
+                <circle cx="10" cy="10" r="8" fill="currentColor"/>
+            </symbol>
+        </defs>
+        <rect x="10" y="10" width="60" height="40" fill="url(#sky)"/>
+        <g font-size="10" color="#ffff00" opacity="0.85">
+            <rect class="card" x="14" y="14" width="2em" height="1.5em" rx="2" ry="2" stroke="#ffffff" stroke-width="1"/>
+            <ellipse id="accent" cx="50" cy="24" rx="8" ry="6" transform="rotate(20 50 24)" fill="url(#glow)"/>
+            <path d="M14 34 H34 V46 H14 Z M18 37 V43 H30 V37 Z" fill="#00d080" fill-rule="evenodd"/>
+            <use href="#badge" x="42" y="34" width="12" height="12"/>
+            <rect x="58" y="36" width="8" height="8" fill="url(#missing) #ff00ff"/>
+        </g>
+    </svg>"##;
+    let path = tmp("scene-parity.svg");
+    std::fs::write(&path, svg).unwrap();
+    let doc = effectcraft_svg::parse(svg).unwrap();
+    let (w, h) = doc.pixel_size();
+    assert_eq!((w, h), (120, 80));
+
+    let mut s = effectcraft_host::session();
+    let r = s.execute_checked("file.import", json!({"paths": [path]})).unwrap();
+    assert_eq!(r["errors"], json!([]), "{r}");
+    let item = r["items"][0].as_u64().unwrap();
+    s.execute("comp.new", json!({"name": "Parity", "width": w, "height": h, "frameRate": 30, "duration": 1})).unwrap();
+    let lid = s.execute_checked("layer.addItem", json!({"item": item})).unwrap()["layer"].as_u64().unwrap();
+    let cid = s.active_comp_id().unwrap();
+    let t = effectcraft_time::Tick::ZERO;
+
+    let footage = s.render(cid, t, RenderOpts::default());
+    let direct = effectcraft_svg::rasterize(&doc, w, h, 1.0);
+    assert!(mean_diff(&footage, &direct) < 1.0 / 255.0, "footage = rasterised SVG");
+
+    s.execute("layer.select", json!({"layers": [lid]})).unwrap();
+    let r = s.execute_checked("layer.create", json!({"op": "shapesFromVector"})).unwrap();
+    let sid = r["layers"][0].as_u64().unwrap();
+    let shapes = s.render(cid, t, RenderOpts::default());
+    let d1 = mean_diff(&shapes, &direct);
+    assert!(d1 < 0.02, "shapes vs SVG mean diff {d1}");
+
+    s.execute("prop.set", json!({"layer": sid, "path": "transform/scale", "value": [300, 300]})).unwrap();
+    s.execute("prop.set", json!({"layer": sid, "path": "transform/position", "value": [0, 0]})).unwrap();
+    s.execute("prop.set", json!({"layer": sid, "path": "transform/anchor", "value": [0, 0]})).unwrap();
+    let big = s.render(cid, t, RenderOpts::default());
+    let direct3 = effectcraft_svg::rasterize(&doc, w, h, 3.0);
+    let d3 = mean_diff(&big, &direct3);
+    assert!(d3 < 0.03, "shapes x3 vs SVG x3 mean diff {d3}");
 }

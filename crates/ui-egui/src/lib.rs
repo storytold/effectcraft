@@ -21,14 +21,18 @@ pub const UPDATE_APP: craft_update::app::App = craft_update::app::App {
 pub mod audio;
 pub mod automation;
 pub mod bench;
+pub(crate) mod capture;
+pub mod channel;
 pub mod color_picker;
 pub mod control;
 pub mod credits;
 pub mod display_gpu;
 pub mod dock;
+pub mod dock_command;
 pub mod dock_ui;
 mod expression_diagnostics;
 pub mod frames;
+pub mod framework;
 pub mod gpu_failure;
 pub mod header;
 pub mod i18n;
@@ -103,7 +107,7 @@ struct PendingShot {
     /// The geometry epoch bound to the issued capture command, if it was issued.
     issued: Option<DrawGeometry>,
     /// The shared completion slot; dropping it cancels a late callback.
-    slot: Option<craft_ui::capture::CaptureSlot>,
+    slot: Option<crate::capture::CaptureSlot>,
     /// Bytes reserved against [`EffectcraftApp::shot_bytes`].
     reserved_bytes: usize,
     /// Geometry retries used.
@@ -268,6 +272,77 @@ impl Playback {
     }
 }
 
+/// An error awaiting its first standalone display.
+pub(crate) struct ErrorToast {
+    message: String,
+    shown_at: Option<f64>,
+    /// A status already reports this error; dismissing that same status acknowledges both.
+    reported_status: Option<String>,
+    reports: usize,
+}
+
+impl ErrorToast {
+    const MAX_PENDING: usize = 32;
+    const MAX_DETAILS: usize = 16 << 10;
+
+    fn bounded_text<'a>(messages: impl IntoIterator<Item = &'a str>) -> String {
+        let mut text = String::new();
+        let mut truncated = false;
+        for (index, part) in messages.into_iter().enumerate() {
+            let separator = usize::from(!text.is_empty());
+            let remaining = Self::MAX_DETAILS.saturating_sub(text.len() + separator);
+            if remaining == 0 || index >= Self::MAX_DETAILS {
+                truncated = true;
+                break;
+            }
+            if separator != 0 {
+                text.push('\n');
+            }
+            let end = part.floor_char_boundary(remaining.min(part.len()));
+            text.push_str(part.get(..end).unwrap_or_default());
+            if end < part.len() {
+                truncated = true;
+                break;
+            }
+        }
+        if truncated {
+            let marker = crate::i18n::ui::tr("Further error details were truncated.");
+            let marker = marker.get(..marker.floor_char_boundary(Self::MAX_DETAILS - 1)).unwrap_or_default();
+            text.truncate(text.floor_char_boundary(Self::MAX_DETAILS.saturating_sub(marker.len() + 1)));
+            text.push('\n');
+            text.push_str(marker);
+        }
+        text
+    }
+
+    fn new<'a>(messages: impl IntoIterator<Item = &'a str>, reported_status: Option<&str>) -> Self {
+        Self { message: Self::bounded_text(messages), shown_at: None, reported_status: reported_status.map(|status| Self::bounded_text([status])), reports: 1 }
+    }
+
+    fn omitted(reports: usize) -> Self {
+        let message = crate::i18n::ui::tr_args("Additional error notifications omitted: {}.", &[&reports.to_string()]);
+        Self { reports, ..Self::new([message.as_str()], None) }
+    }
+
+    fn reported_by(&self, status: &str) -> bool {
+        self.reported_status.as_deref().is_some_and(|reported| status == reported || status.strip_prefix(reported).is_some_and(|rest| rest.starts_with("; ")))
+    }
+
+    /// Pair the details with `status`, a later status line that reports the same errors.
+    fn restate(&mut self, status: &str) {
+        self.reported_status = Some(Self::bounded_text([status]));
+    }
+
+    fn message_at(&mut self, foreground_status: bool, now: f64) -> Option<&str> {
+        if self.shown_at.is_none() && !foreground_status {
+            // Only the first standalone display starts the timer. Later statuses cannot
+            // extend it, and an unseen error cannot expire behind a foreground status.
+            self.shown_at = Some(now);
+        }
+        self.shown_at.is_none_or(|at| now - at < 4.0).then_some(self.message.as_str())
+    }
+}
+
 pub struct EffectcraftApp {
     pub session: Session,
     pub ui: UiState,
@@ -327,6 +402,8 @@ pub struct EffectcraftApp {
     /// When the project last changed, and its revision then (see [`Self::editing`]).
     last_edit: (f64, u64),
     pub(crate) toast: Option<(String, f64)>,
+    /// Error details survive routine notifications and wait for a foreground status to clear.
+    pub(crate) error_toasts: std::collections::VecDeque<ErrorToast>,
     /// Texture of the last CPU frame shown in the viewer, the key it came from and the factor it
     /// was averaged down by for the magnification (`panels::viewer::minify_factor`).
     pub(crate) viewer_tex: Option<(egui::TextureHandle, FrameKey, usize)>,
@@ -399,6 +476,10 @@ pub struct EffectcraftApp {
     /// Audio scrubbing's open output (Ctrl/Cmd-drag the current time, `playback.scrubAudio`).
     pub scrub: Option<audio::AudioScrub>,
     pub(crate) updates_rt: updates_ui::Runtime,
+    /// The framework dialogs (the update dialogs), run once per pass after EffectCraft's own UI.
+    pub framework_dialogs: craft_ui::dialog::DialogHost,
+    /// Who EffectCraft is to the framework's dialogs.
+    pub(crate) framework_host: std::sync::Arc<craft_host::Host>,
     /// Audio panel VU meters.
     pub meter: audio::Meter,
     /// Waveform peak summaries per footage item (see `panels::waveform`).
@@ -421,6 +502,8 @@ pub struct EffectcraftApp {
     pub(crate) unpublished_viewports: Vec<egui::ViewportId>,
     /// A floating panel shown by a command: its window comes to the front next frame.
     pub(crate) pending_panel_raise: Option<PanelKind>,
+    /// What the dock area keeps between frames.
+    pub(crate) live_dock: dock_ui::LiveDock,
     /// Home screen: recent-project thumbnail textures by path (None = no thumbnail).
     pub(crate) home_thumbs: std::collections::HashMap<String, Option<egui::TextureHandle>>,
     /// The (project path, saved revision) whose thumbnail was stored last.
@@ -465,8 +548,18 @@ impl FileDialogsUp {
         self.count = self.count.saturating_add(1);
     }
 
+    /// Whether one is up.
+    pub(crate) fn any(&self) -> bool {
+        self.count > 0
+    }
+
     pub(crate) fn answered(&mut self) {
         self.count = self.count.saturating_sub(1);
+    }
+
+    /// How many dialogs are up, as last checked ([`FileDialogsUp::up`] drops those taken for gone).
+    pub(crate) fn count(&self) -> usize {
+        self.count
     }
 
     /// Whether a dialog is up at `now`, `focused`: whether one of the app's windows has the
@@ -489,6 +582,9 @@ impl FileDialogsUp {
 #[derive(Default)]
 pub(crate) struct ForwardedInput {
     pub(crate) events: Vec<egui::Event>,
+    /// Copy, Cut and Paste the runtime took from a window with no canvas ([`crate::framework`]), for the
+    /// next pass of the shortcuts to read after that pass's own events.
+    pub(crate) clips: Vec<egui::Event>,
     pub(crate) files: Vec<egui::DroppedFileHandle>,
     /// Files handed over by a floating window whose panel under the pointer was the Timeline. The
     /// paths lose the window they came from, so this keeps the one thing the import still needs

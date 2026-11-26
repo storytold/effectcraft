@@ -10,8 +10,13 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+craft-mime = { workspace = true }
 craft-ui = { workspace = true }
-craft-quit = { workspace = true, features = ["egui"] }
+craft-behavior = { workspace = true }
+craft-host = { workspace = true }
+craft-keymap = { workspace = true, features = ["egui"] }
+craft-theme = { workspace = true }
+craft-window = { workspace = true }
 effectcraft-time = { workspace = true }
 effectcraft-geom = { workspace = true }
 effectcraft-color = { workspace = true }
@@ -39,7 +44,7 @@ bytemuck = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # Floating panels open in OS windows of their own on desktop; the web keeps them in the page.
-craft-ui = { workspace = true, features = ["native-windows"] }
+craft-ui = { workspace = true }
 craft-update = { workspace = true }
 # Waits for the display pass's error scopes (immediately ready on native wgpu).
 pollster = { workspace = true }

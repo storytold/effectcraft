@@ -1,8 +1,8 @@
-//! The VP9 intra encoder (`craft_video::vp9`) round-trips through FilmCraft's VP9 decoder (and
+//! The VP9 intra encoder (`craft_video::vp9`) round-trips through craft-video's VP9 decoder (and
 //! ffmpeg as an external oracle when installed): sizes, lossless exactness, PSNR.
 
+use craft_video::vp9::decode::{Decoder, Picture, Plane};
 use craft_video::vp9::{EncoderConfig, Vp9Encoder};
-use filmcraft_vp9::{Decoder, Plane};
 
 fn plane_u8(p: &Plane) -> Vec<u8> {
     match p {
@@ -40,7 +40,7 @@ fn source(w: usize, h: usize, kind: u32) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
     (y, u, v)
 }
 
-fn decode(frame: &[u8]) -> filmcraft_vp9::Picture {
+fn decode(frame: &[u8]) -> Picture {
     let mut d = Decoder::with_threads(1);
     let mut pics = d.decode(frame, 0).expect("decode");
     assert_eq!(pics.len(), 1);
@@ -179,7 +179,7 @@ fn moving(w: usize, h: usize, t: usize, kind: u32) -> (Vec<u8>, Vec<u8>, Vec<u8>
     (y, u, v)
 }
 
-fn planes_of(p: &filmcraft_vp9::Picture, w: usize, h: usize) -> [Vec<u8>; 3] {
+fn planes_of(p: &Picture, w: usize, h: usize) -> [Vec<u8>; 3] {
     let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
     [crop(&plane_u8(&p.y), p.y_stride, w, h), crop(&plane_u8(&p.u), p.uv_stride, cw, ch), crop(&plane_u8(&p.v), p.uv_stride, cw, ch)]
 }

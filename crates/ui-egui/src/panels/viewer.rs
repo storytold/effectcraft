@@ -547,7 +547,7 @@ fn phase_layers(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, v: 
     let sel_vertices = app.session.state.selected_vertices.clone();
     // Pen path in progress ends when the tool changes or its mask is gone; Esc / Enter also end
     // free transform.
-    let finish = ui.input(|i| i.key_pressed(egui::Key::Escape) || i.key_pressed(egui::Key::Enter)) && !ctx.egui_wants_keyboard_input();
+    let finish = ui.input(|i| i.key_pressed(egui::Key::Escape) || i.key_pressed(egui::Key::Enter)) && !crate::framework::widget_has_keyboard(&ctx);
     if app.ui.tool != Tool::Pen || finish {
         ui.data_mut(|d| d.remove::<(LayerId, u64)>(pen_id()));
     }
@@ -884,7 +884,8 @@ fn phase_menu(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, v: &m
     super::viewer_drop::show(app, ui, &painter, &map, ectx);
 
     // Interaction.
-    let resp = ui.interact(area, egui::Id::unique("viewer-interact"), Sense::click_and_drag());
+    let resp = ui.interact(area, crate::framework::viewer_id(), Sense::click_and_drag());
+    crate::framework::host_canvas(ui.ctx());
     let menu_hits_id = egui::Id::unique(("viewer-menu-hits", cid.0));
     // A right-click an overlay took (the Cryptomatte eyedropper's) opens the menu too.
     let forwarded = ui.data_mut(|d| d.remove_temp::<egui::Pos2>(egui::Id::unique(FORWARDED_SECONDARY)));
@@ -1253,16 +1254,23 @@ fn phase_dragstart(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, 
                 })
             }
             Tool::MaskFeather => ov::begin_feather(app, ectx, &paths, &map, press).map(Gesture::Overlay),
-            Tool::Rotate => pick(app, ectx, cpt, mods.shift).map(|l| {
+            // The layer under the press is the one that turns.
+            Tool::Rotate => pick(app, ectx, map.to_comp(press), mods.shift).map(|l| {
                 let layer = comp.layer(l).cloned();
                 let sign = layer.as_ref().map_or(1.0, |l| rotation_sign(ectx, l));
                 let others = selected_others(app, comp, l)
                     .into_iter()
                     .filter_map(|o| Some((o.id, ectx.f(o, o.transform()?, "rotation", 0.0), rotation_sign(ectx, o) * sign)))
                     .collect();
-                let pivot = layer.as_ref().and_then(|l| anchor_in_comp(ectx, l)).unwrap_or(cpt);
+                let anchor = layer.as_ref().and_then(|l| anchor_in_comp(ectx, l));
+                let pivot = anchor.unwrap_or(cpt);
                 let rot = layer.as_ref().and_then(|l| l.transform().map(|tr| ectx.f(l, tr, "rotation", 0.0))).unwrap_or(0.0);
-                let last_angle = (cpt[1] - pivot[1]).atan2(cpt[0] - pivot[0]).to_degrees();
+                // The turn counts from where the button went down, as in After Effects: by the
+                // time the drag registers the pointer has already swept some way round the anchor.
+                // A press on the anchor (or with no anchor to turn about) has no direction, so
+                // the turn then counts from where the drag registered.
+                let seed = if anchor.is_some() && press.distance(map.to_screen(pivot)) > 3.0 { map.to_comp(press) } else { cpt };
+                let last_angle = (seed[1] - pivot[1]).atan2(seed[0] - pivot[0]).to_degrees();
                 Gesture::Rotate { layer: l, pivot, sign, last_angle, turned: 0.0, start_rot: rot, others }
             }),
             Tool::PanBehind => pick(app, ectx, cpt, false).and_then(|l| {

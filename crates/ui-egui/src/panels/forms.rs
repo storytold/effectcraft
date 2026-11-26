@@ -146,9 +146,10 @@ fn is_layered(p: &Value) -> bool {
     imports_ext(p, &["psd", "psb"])
 }
 
-/// The import includes a PDF or Illustrator file (which may have several pages).
+/// The import includes a PDF or Illustrator file, or a VectorCraft document read through its
+/// PDF (which may have several pages).
 fn is_pdf(p: &Value) -> bool {
-    imports_ext(p, &["pdf", "ai"])
+    imports_ext(p, &["pdf", "ai", "vectorcraft"])
 }
 
 /// File ▸ Import ▸ File… picked numbered stills that import as image sequences: ask, as After
@@ -232,9 +233,11 @@ fn new_comp_from_selection_form(s: &effectcraft_engine::Session) -> (String, Vec
     )
 }
 
-/// The Interpret Footage dialog for the selected footage (or its proxy), if there is one.
+/// The Interpret Footage dialog for the footage the command changes (or its proxy), if there is
+/// one: the first item the engine resolves from `items`/`item` in `base`, else from the selection.
 fn interpret_footage_form(s: &effectcraft_engine::Session, proxy: bool, base: &mut Value) -> Option<(String, Vec<Field>)> {
-    let f = s.state.project_selection.first().and_then(|i| s.project.item(*i)).and_then(|it| match (&it.kind, &it.proxy) {
+    let targets = effectcraft_engine::commands::interpretation_targets(s, base, proxy);
+    let f = targets.first().and_then(|i| s.project.item(*i)).and_then(|it| match (&it.kind, &it.proxy) {
         (_, Some(px)) if proxy => Some(px.footage.clone()),
         (effectcraft_engine::project::ItemKind::Footage(f), _) if !proxy => Some(f.clone()),
         _ => None,
@@ -904,7 +907,7 @@ fn form_grid(ui: &mut egui::Ui, f: &mut Form, regs: &mut Vec<(String, egui::Rect
                     let cur = options.get(*sel).map(|o| o.0.clone()).unwrap_or_default();
                     // The column keeps its width: a long choice (a GPU adapter's name) ends in an
                     // ellipsis instead of widening the form past the dialog (#978).
-                    craft_ui::ComboBox::from_id_salt(("form", fl.key.as_str()))
+                    egui::ComboBox::from_id_salt(("form", fl.key.as_str()))
                         .selected_text(tr(&cur))
                         .width(240.0)
                         .truncate()
@@ -991,8 +994,9 @@ pub fn show_form(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
     if ok || enter {
         app.dialog = None;
         let params = f.params();
-        if let Err(e) = app.session.execute(&f.command, params) {
-            app.ui.status = e.to_string();
+        match app.session.execute(&f.command, params) {
+            Ok(r) => app.report_import_errors(&f.command, &r),
+            Err(e) => app.ui.status = e.to_string(),
         }
         return;
     }
@@ -1079,12 +1083,45 @@ mod tests {
         assert_eq!(f.params(), json!({"prop": "position", "value": [10.0, 20.0], "mode": "b"}));
     }
 
+    #[test]
+    fn import_form_shows_errors_returned_in_a_successful_result() {
+        let folder = std::env::temp_dir().join(format!("effectcraft-form-import-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let path = folder.join("no-pdf.vectorcraft");
+        std::fs::write(&path, br#"{"format":"vectorcraft","version":4,"document":{"artboards":[],"layers":[]}}"#).unwrap();
+        for (import_as, background) in [("footage", false), ("composition", true), ("compositionLayerSizes", true)] {
+            let mut app = EffectcraftApp::new(effectcraft_host::session());
+            let ctx = egui::Context::default();
+            crate::framework::install_headless(&ctx);
+            crate::theme::install(&ctx, &app.tokens, crate::i18n::language(&app));
+            app.dialog_state.form = Form {
+                title: "Import".into(),
+                command: "file.import".into(),
+                base: json!({"paths": [path, path], "importAs": import_as, "background": background}),
+                fields: vec![],
+            };
+            app.dialog = Some(Dialog::Form);
+            let raw = egui::RawInput {
+                events: vec![egui::Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() }],
+                ..Default::default()
+            };
+            let tokens = app.tokens;
+            ctx.run_ui(raw, |ui| show_form(&mut app, ui.ctx(), &tokens)).textures_delta.clear();
+            assert!(app.dialog.is_none());
+            assert!(app.ui.status.contains("no-pdf.vectorcraft") && app.ui.status.contains("Create PDF-Compatible File"), "{import_as}: {}", app.ui.status);
+            assert!(app.ui.status.ends_with("(and 1 more)"), "{}", app.ui.status);
+            assert!(!app.ui.status.contains('\n'));
+        }
+        std::fs::remove_dir_all(folder).unwrap();
+    }
+
     /// A numeric form (Layer ▸ Transform ▸ Position…) opens with its first number being edited
     /// and selected: typing replaces it, and one Enter confirms.
     #[test]
     fn a_numeric_form_opens_with_its_first_number_selected() {
         let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         crate::theme::install(&ctx, &app.tokens, crate::i18n::language(&app));
         app.dialog_state.form = Form {
             title: "Position".into(),
@@ -1152,6 +1189,7 @@ mod tests {
     fn premiere_export_dialog() {
         let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         crate::theme::install(&ctx, &app.tokens, crate::i18n::language(&app));
         app.session.execute("comp.new", json!({"name": "Spot", "width": 64, "height": 36, "frameRate": 25, "duration": 1})).unwrap();
         app.session.execute("layer.newSolid", json!({"color": "#ff0000"})).unwrap();
@@ -1219,6 +1257,127 @@ mod tests {
             assert!(footage.cineon.log_conversion);
             assert_eq!(footage.cineon.gamma, 2.2);
             assert_eq!(footage.cineon.converted_white, 900.0);
+        }
+    }
+
+    /// Footage items A, B and C with different interpretations (with `proxy`, each also has a
+    /// proxy interpreted differently again), A selected: (app, [A, B, C]).
+    fn three_clips(proxy: bool) -> (EffectcraftApp, [effectcraft_engine::project::ItemId; 3]) {
+        use effectcraft_engine::project::{AlphaMode, ColorSpace, Footage, FootageKind, ItemKind, Proxy};
+        use effectcraft_engine::time::{FrameRate, Tick};
+        let clip = |fps: f64, loop_count: u32, alpha: AlphaMode, color_profile: Option<ColorSpace>, invert_alpha: bool| Footage {
+            path: format!("/m/clip{fps}.mov"),
+            kind: FootageKind::Video,
+            width: 4,
+            height: 4,
+            has_video: true,
+            duration: Tick::from_seconds_f64(1.0),
+            frame_rate: FrameRate::from_f64(fps),
+            native_rate: Some(FrameRate::from_f64(fps)),
+            loop_count,
+            alpha,
+            color_profile,
+            invert_alpha,
+            ..Default::default()
+        };
+        let looks = [
+            (24.0, 1, AlphaMode::Straight, None, false),
+            (30.0, 3, AlphaMode::Premultiplied, Some(ColorSpace::Rec709), true),
+            (50.0, 2, AlphaMode::Ignore, Some(ColorSpace::DisplayP3), false),
+        ];
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        let project = std::sync::Arc::make_mut(&mut app.session.project);
+        let ids = looks.map(|(fps, loops, alpha, profile, invert)| {
+            if !proxy {
+                return project.add_item("clip.mov", Default::default(), None, ItemKind::Footage(clip(fps, loops, alpha, profile, invert)));
+            }
+            let main = clip(fps + 1.0, 5, AlphaMode::Straight, Some(ColorSpace::Rec2020), false);
+            let id = project.add_item("clip.mov", Default::default(), None, ItemKind::Footage(main));
+            let footage = clip(fps, loops, alpha, profile, invert);
+            if let Some(it) = project.item_mut(id) {
+                it.proxy = Some(Box::new(Proxy { footage, enabled: true }));
+            }
+            id
+        });
+        app.session.state.project_selection = vec![ids[0]];
+        (app, ids)
+    }
+
+    /// Interpret Footage opened on named footage (`item`, or the first of `items`) through
+    /// `ui.menu.invoke` shows that footage's settings, not the selected footage's, so OK without
+    /// edits leaves it as it was (and gives the other named items its settings); with neither, it
+    /// shows the selection. Interpret Footage ▸ Proxy does the same with the items' proxies.
+    #[test]
+    fn interpret_footage_opens_on_the_named_footage() {
+        for command in ["file.interpretFootage", "file.interpretProxy"] {
+            let proxy = command == "file.interpretProxy";
+            let (mut app, [a, b, c]) = three_clips(proxy);
+            let ctx = egui::Context::default();
+            let shown = |app: &EffectcraftApp| {
+                let p = app.dialog_state.form.params();
+                (p["frameRate"].clone(), p["loop"].clone(), p["alpha"].clone(), p["colorProfile"].clone(), p["invertAlpha"].clone())
+            };
+            let b_shows = (json!(30.0), json!(3.0), json!("premultiplied"), json!("rec709"), json!(true));
+            let (a_was, b_was) = (app.session.project.item(a).cloned(), app.session.project.item(b).cloned());
+            for params in [json!({"item": b.0}), json!({"items": [b.0, c.0]})] {
+                app.dialog = None;
+                crate::menus::invoke(&mut app, &ctx, command, params.clone()).unwrap();
+                assert!(matches!(app.dialog, Some(Dialog::Form)), "{command}: {params}");
+                assert_eq!(app.dialog_state.form.command, command);
+                assert_eq!(shown(&app), b_shows, "{command}: {params}");
+                // OK.
+                let form = app.dialog_state.form.clone();
+                app.session.execute(&form.command, form.params()).unwrap();
+                assert_eq!(app.session.project.item(b).cloned(), b_was, "{command}: {params} leaves B as it was");
+                assert_eq!(app.session.project.item(a).cloned(), a_was, "{command}: {params} leaves the selected A alone");
+            }
+            // C took B's settings.
+            app.dialog = None;
+            crate::menus::invoke(&mut app, &ctx, command, json!({"item": c.0})).unwrap();
+            assert_eq!(shown(&app), b_shows, "{command}: C");
+            // Neither: the selection.
+            app.dialog = None;
+            crate::menus::invoke(&mut app, &ctx, command, json!({})).unwrap();
+            assert!(matches!(app.dialog, Some(Dialog::Form)), "{command}");
+            assert_eq!(shown(&app), (json!(24.0), json!(1.0), json!("straight"), json!("auto"), json!(false)), "{command}: {{}}");
+        }
+    }
+
+    /// Interpret Footage named at an item it can't change (missing, not footage, or for Proxy
+    /// without a proxy) doesn't open on the selected footage: as with nothing selected, the
+    /// command runs with the parameters given, and nothing changes. Main skips what isn't
+    /// footage and succeeds; Proxy reports that nothing named has a proxy.
+    #[test]
+    fn interpret_footage_named_at_no_footage_opens_no_dialog() {
+        for command in ["file.interpretFootage", "file.interpretProxy"] {
+            let proxy = command == "file.interpretProxy";
+            let (mut app, [a, ..]) = three_clips(true);
+            let ctx = egui::Context::default();
+            app.session.execute("comp.new", json!({"name": "Comp", "width": 4, "height": 4, "frameRate": 24, "duration": 1})).unwrap();
+            let comp = app.session.active_comp_id().unwrap();
+            app.session.execute("layer.newSolid", json!({"color": "#ff0000"})).unwrap();
+            let solid = app.session.project.items.values().find(|i| matches!(i.kind, effectcraft_engine::project::ItemKind::Solid(_))).unwrap().id;
+            // Footage without a proxy.
+            let kind = app.session.project.item(a).unwrap().kind.clone();
+            let plain = std::sync::Arc::make_mut(&mut app.session.project).add_item("plain.mov", Default::default(), None, kind);
+            app.session.state.project_selection = vec![a];
+            let mut invalid = vec![json!({"item": 999}), json!({"items": [999]}), json!({"item": comp.0}), json!({"item": solid.0})];
+            if proxy {
+                invalid.push(json!({"item": plain.0}));
+            }
+            let before = app.session.project.clone();
+            for params in invalid {
+                let r = crate::menus::invoke(&mut app, &ctx, command, params.clone());
+                assert!(app.dialog.is_none(), "{command}: {params}");
+                if proxy {
+                    let e = r.unwrap_err();
+                    assert!(e.contains("no proxy"), "{command}: {params}: {e}");
+                    assert_eq!(app.ui.status, e, "the status line says why");
+                } else {
+                    assert_eq!(r, Ok(json!({"items": []})), "{command}: {params}");
+                }
+            }
+            assert_eq!(*app.session.project, *before);
         }
     }
 

@@ -101,22 +101,23 @@ impl EffectcraftApp {
             }
             .filter(|q| self.ui.dock.is_open(*q));
             let mut workspace = self.ui.dock.clone();
-            let known = workspace.hidden.iter().any(|(q, _)| *q == p);
+            let known = workspace.hidden().iter().any(|(q, _)| *q == p);
             let opened = if p == PanelKind::Composition && near.is_none() && !known && self.ui.dock.is_docked(PanelKind::Timeline) {
                 workspace
                     .apply(
-                        craft_ui::docking::Action::OpenAt {
-                            panel: p,
-                            anchor: PanelKind::Timeline,
-                            placement: craft_ui::docking::Placement::Split(craft_ui::docking::Zone::Top),
-                        },
+                        craft_behavior::dock::Action::open_at(
+                            p,
+                            PanelKind::Timeline,
+                            craft_behavior::dock::DockPlacement::Split(craft_behavior::DockSide::Top),
+                        ),
+                        self.ui.dock_locked,
                         dock::permissions,
                     )
                     .map(|_| ())
             } else if known {
-                workspace.set_visible(p, true, near, dock::permissions)
+                workspace.set_visible(p, true, near, self.ui.dock_locked, dock::permissions)
             } else {
-                workspace.apply(craft_ui::docking::Action::Open { panel: p, anchor: near }, dock::permissions).map(|_| ())
+                workspace.apply(craft_behavior::dock::Action::open(p, near), self.ui.dock_locked, dock::permissions).map(|_| ())
             };
             match opened {
                 Ok(()) => self.ui.dock = workspace,
@@ -126,7 +127,7 @@ impl EffectcraftApp {
                 }
             }
         }
-        let _ = self.ui.dock.apply(craft_ui::docking::Action::Activate { panel: p }, dock::permissions);
+        let _ = self.ui.dock.apply(craft_behavior::dock::Action::activate(p), self.ui.dock_locked, dock::permissions);
         if self.ui.dock.is_floating(p) {
             self.pending_panel_raise = Some(p);
         }

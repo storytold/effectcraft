@@ -7,6 +7,7 @@
 //! the answers and runs the script again. Expressions are pure functions of these answers, so
 //! re-running is exact, and the runtime stays free of borrowed state.
 
+use effectcraft_effects::migrate::PARAM_ID_ALIASES;
 use effectcraft_geom::{Mat3, Mat4};
 use effectcraft_keyframe::Value;
 use effectcraft_project::ae_order::{self, AeChild};
@@ -300,8 +301,22 @@ fn find_child<'g>(g: &'g PropGroup, key: &Key) -> Option<&'g Node> {
                 // An effect by its After Effects match name, an imported placeholder's effect id
                 // (`effect("Pseudo/0.25")`; its match id is one path segment, `Pseudo_0_25`).
                 .or_else(|| g.children.iter().find(|n| matches!(n.as_group().map(|g| &g.kind), Some(GroupKind::Effect { effect }) if effect == name)))
+                // Last, so a legacy name never shadows a current one.
+                .or_else(|| legacy_effect_child(g, &c))
         }
     }
+}
+
+/// A parameter of an effect instance addressed by a name it had when the project was saved
+/// ([`PARAM_ID_ALIASES`]): `effect("CC Ball Action")("Instability State")` keeps reading the
+/// parameter that is now Scatter Motion. `c` is the compacted (lowercase, no spaces) name. Only
+/// renames inside the instance's own top-level group count; moves into twirl-downs do not.
+fn legacy_effect_child<'g>(g: &'g PropGroup, c: &str) -> Option<&'g Node> {
+    let GroupKind::Effect { effect } = &g.kind else { return None };
+    PARAM_ID_ALIASES
+        .iter()
+        .filter(|(e, old, new)| e == effect && !old.contains('/') && !new.contains('/') && compact(old) == c)
+        .find_map(|(_, _, new)| g.children.iter().find(|n| n.match_id() == *new))
 }
 
 impl<'a> Resolver<'a> {
@@ -454,8 +469,10 @@ impl<'a> Resolver<'a> {
             Req::PropInfo { comp, layer, path } => {
                 let (l, p) = self.prop(*comp, *layer, path)?;
                 let dims = prop_dims(l, p);
-                let times = p.keys.iter().map(|k| Resp::Num(l.comp_time(k.time).seconds())).collect();
-                let values = p.keys.iter().map(|k| value_resp(&k.value, dims)).collect();
+                let ctx = self.ctx_at(*comp, self.ctx.time.seconds())?;
+                let effective = ctx.effective_property(l, p);
+                let times = effective.keys.iter().map(|k| Resp::Num(l.comp_time(k.time).seconds())).collect();
+                let values = effective.keys.iter().map(|k| value_resp(&k.value, dims)).collect();
                 let index = path.rsplit('/').next().and_then(|last| {
                     let parent = path.rsplit_once('/').map(|(g, _)| g);
                     let g = match parent {
@@ -482,13 +499,15 @@ impl<'a> Resolver<'a> {
             Req::Value { comp, layer, path, t, pre } => {
                 let (l, p) = self.prop(*comp, *layer, path)?;
                 let t = f64::from_bits(*t);
-                let v = if *pre { p.value_at(l.layer_time(Tick::from_seconds_f64(t))) } else { self.ctx_at(*comp, t)?.value(l, p) };
+                let ctx = self.ctx_at(*comp, t)?;
+                let v = if *pre { ctx.effective_property(l, p).value_at(l.layer_time(Tick::from_seconds_f64(t))) } else { ctx.value(l, p) };
                 value_resp(&v, prop_dims(l, p))
             }
             Req::Doc { comp, layer, path, t, pre } => {
                 let (l, p) = self.prop(*comp, *layer, path)?;
                 let t = f64::from_bits(*t);
-                let v = if *pre { p.value_at(l.layer_time(Tick::from_seconds_f64(t))) } else { self.ctx_at(*comp, t)?.value(l, p) };
+                let ctx = self.ctx_at(*comp, t)?;
+                let v = if *pre { ctx.effective_property(l, p).value_at(l.layer_time(Tick::from_seconds_f64(t))) } else { ctx.value(l, p) };
                 match v {
                     Value::Text(d) => Resp::Str(doc_json(&d)),
                     Value::Str(s) => Resp::Str(doc_json(&effectcraft_keyframe::TextDoc::plain(&s))),

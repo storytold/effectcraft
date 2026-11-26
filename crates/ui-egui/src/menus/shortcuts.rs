@@ -278,7 +278,7 @@ fn cancel_dialog(app: &mut EffectcraftApp, ctx: &egui::Context) {
 type KeyEvent = (egui::Key, egui::Modifiers, bool, Option<egui::Key>);
 
 /// The frame's key presses, with clipboard events mapped back to Ctrl+C / X / V.
-fn collect_key_events(ctx: &egui::Context, start: Option<egui::Modifiers>, clipboard: bool, project: bool) -> Vec<KeyEvent> {
+fn collect_key_events(ctx: &egui::Context, start: Option<egui::Modifiers>, clipboard: bool, project: bool, queued: &[egui::Event]) -> Vec<KeyEvent> {
     ctx.input(|i| {
         // The windowing layer turns Ctrl+C / Ctrl+X / Ctrl+V into clipboard events instead of
         // key presses: map them back to the keys (with the modifiers held) so Edit ▸ Copy, Cut,
@@ -290,7 +290,7 @@ fn collect_key_events(ctx: &egui::Context, start: Option<egui::Modifiers>, clipb
         let mut at = if changed { start } else { Some(i.modifiers) };
         let held = |at: Option<egui::Modifiers>| at.filter(|m| m.command).unwrap_or(egui::Modifiers::COMMAND);
         let mut out = Vec::new();
-        for e in &i.events {
+        for e in i.events.iter().chain(queued) {
             match e {
                 egui::Event::ModifiersChanged(m) => at = Some(*m),
                 // egui forgets the modifiers held when the window loses focus.
@@ -349,6 +349,8 @@ fn panel_owns_enter(kind: PanelKind) -> bool {
 }
 
 fn handle_shortcuts_impl(app: &mut EffectcraftApp, ctx: &egui::Context, tab_only: bool) {
+    // The clipboard chords of a window with no canvas wait for this frame's pass only, whatever stops it.
+    let queued = if tab_only { Vec::new() } else { std::mem::take(&mut app.forwarded.clips) };
     let start = modifiers_at_start(ctx);
     if !tab_only && app.dialog.is_some() && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
         escape_dialog(app, ctx);
@@ -356,12 +358,12 @@ fn handle_shortcuts_impl(app: &mut EffectcraftApp, ctx: &egui::Context, tab_only
     }
     // A mouse button down while Spacebar is held belongs to the Hand tool: its release won't
     // preview.
-    if ctx.input(|i| i.pointer.any_down()) || ctx.egui_wants_keyboard_input() {
+    if ctx.input(|i| i.pointer.any_down()) || crate::framework::widget_has_keyboard(ctx) {
         ctx.data_mut(|d| d.remove::<bool>(space_tap_id()));
     }
     // While a menu or popup list is open, keys go to it, not to the app (Space must not start a
     // preview behind the menu, #279).
-    if ctx.egui_wants_keyboard_input() || crate::widgets::any_menu_open(ctx) {
+    if crate::framework::widget_has_keyboard(ctx) || crate::widgets::any_menu_open(ctx) {
         return;
     }
     // Text editing in the viewer takes the clipboard events itself.
@@ -370,7 +372,7 @@ fn handle_shortcuts_impl(app: &mut EffectcraftApp, ctx: &egui::Context, tab_only
     // The paste event's text: Edit ▸ Paste pastes SVG markup as a shape layer.
     let pasted =
         if clipboard { ctx.input(|i| i.events.iter().rev().find_map(|e| if let egui::Event::Paste(t) = e { Some(t.clone()) } else { None })) } else { None };
-    let mut events = collect_key_events(ctx, start, clipboard, project);
+    let mut events = collect_key_events(ctx, start, clipboard, project, &queued);
     events.retain(|(key, _, _, _)| (*key == egui::Key::Tab) == tab_only);
     if !tab_only && clipboard && app.dialog.is_none() {
         numpad_star_marker(app, ctx);
@@ -403,7 +405,7 @@ fn handle_shortcuts_impl(app: &mut EffectcraftApp, ctx: &egui::Context, tab_only
         if app.dialog.is_some() {
             continue;
         }
-        if !mods.any() && crate::panels::effect_controls::handle_disclosure_key(app, key) {
+        if !mods.any() && crate::panels::effect_controls::handle_arrow_key(app, ctx, key) {
             ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, key));
             continue;
         }

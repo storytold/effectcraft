@@ -1,266 +1,37 @@
-//! Markers a WAV file carries, read from its RIFF chunks.
-//!
-//! Two encodings are read and merged:
-//! - **Cue points** (the standard): a `cue ` chunk with one point per marker, named by `labl` (or
-//!   `note`) sub-chunks of a `LIST` `adtl` chunk, and given a length by `ltxt`.
-//! - **XMP** (Adobe's tools): an `_PMX` chunk holding an XMP packet whose `xmpDM:markers` list has
-//!   one entry per marker (`xmpDM:startTime`, `xmpDM:duration`, `xmpDM:name`), counted in frames
-//!   of `xmpDM:frameRate` (`f44100` for samples at 44.1 kHz).
-//!
-//! RF64 files (WAVs over 4 GB) carry a `0xFFFFFFFF` size for a chunk too big for 32 bits and give its real size in a
-//! `ds64` chunk; those sizes are resolved so the chunks after the audio are still found.
-//!
-//! The file is untrusted input: every read is bounds-checked, sizes use checked arithmetic, and
-//! the number of markers, of `adtl` sub-chunks looked at and the size of the XMP packet are capped.
-
-use std::collections::{HashMap, HashSet};
-
+//! WAV cue/adtl/RF64/XMP metadata is parsed by craft-audio; timeline policy remains here.
+use craft_audio::wav_markers as shared;
 use effectcraft_color::Label;
 use effectcraft_project::Marker;
 use effectcraft_time::Tick;
+use std::collections::HashSet;
 
-/// Most markers read from one file.
-pub const MAX_MARKERS: usize = 10_000;
-/// Largest XMP packet read (bytes).
-const MAX_XMP: usize = 4 << 20;
-/// Most `adtl` sub-chunks (`labl`, `note`, `ltxt`) looked at in one file: a few per cue point is plenty.
+pub use shared::MAX_MARKERS;
+#[cfg(test)]
 const MAX_ADTL_RECORDS: usize = 4 * MAX_MARKERS;
-/// Most entries read from an RF64 file's `ds64` size table.
-const MAX_DS64_TABLE: usize = 1_024;
-
-fn u32_at(b: &[u8], at: usize) -> Option<u32> {
-    let s = b.get(at..at.checked_add(4)?)?;
-    Some(u32::from_le_bytes(s.try_into().ok()?))
-}
-
-fn u64_at(b: &[u8], at: usize) -> Option<u64> {
-    let s = b.get(at..at.checked_add(8)?)?;
-    Some(u64::from_le_bytes(s.try_into().ok()?))
-}
-
-/// The text of a NUL-terminated label (the rest of the chunk), lossily decoded.
-fn label(b: &[u8]) -> String {
-    let end = b.iter().position(|&c| c == 0).unwrap_or(b.len());
-    String::from_utf8_lossy(b.get(..end).unwrap_or_default()).trim().to_string()
-}
 
 fn secs(frames: f64, rate: f64) -> Tick {
     if rate > 0.0 && frames.is_finite() { Tick::from_seconds_f64((frames / rate).max(0.0)) } else { Tick::ZERO }
 }
 
-/// Whether `bytes` start a RIFF/WAVE file.
-pub fn is_wav(bytes: &[u8]) -> bool {
-    matches!(bytes.get(0..4), Some(b"RIFF" | b"RF64")) && bytes.get(8..12) == Some(b"WAVE")
-}
-
-/// The sizes an RF64 file's `ds64` chunk gives for chunks too big for the 32-bit size field.
-struct Ds64 {
-    /// The `data` chunk's size.
-    data: u64,
-    /// Other chunks: `(id, size)`.
-    table: Vec<([u8; 4], u64)>,
-}
-
-impl Ds64 {
-    /// The real size of chunk `id`, when the file says.
-    fn size_of(&self, id: &[u8; 4]) -> Option<u64> {
-        if id == b"data" { Some(self.data) } else { self.table.iter().find(|(t, _)| t == id).map(|(_, size)| *size) }
-    }
-}
-
-/// The `ds64` chunk of an RF64 file (`RF64`, size, `WAVE`, then `ds64`); `None` for any other file or one whose
-/// `ds64` doesn't fit.
-fn ds64(bytes: &[u8]) -> Option<Ds64> {
-    if bytes.get(0..4) != Some(b"RF64") || bytes.get(12..16) != Some(b"ds64") {
-        return None;
-    }
-    let size = usize::try_from(u32_at(bytes, 16)?).ok()?;
-    let body = bytes.get(20..20usize.checked_add(size)?)?;
-    // riff size (8), data size (8), sample count (8), table length (4), then `(id, size)` entries of 12 bytes
-    let data = u64_at(body, 8)?;
-    let entries = usize::try_from(u32_at(body, 24)?).ok()?;
-    let mut table = Vec::new();
-    for i in 0..entries.min(MAX_DS64_TABLE) {
-        let at = 28usize.checked_add(i.checked_mul(12)?)?;
-        let id = <[u8; 4]>::try_from(body.get(at..at.checked_add(4)?)?).ok()?;
-        table.push((id, u64_at(body, at + 4)?));
-    }
-    Some(Ds64 { data, table })
-}
-
-/// The chunks of a WAVE file as `(id, body)`, stopping at the first one that doesn't fit.
-fn chunks(bytes: &[u8]) -> Vec<([u8; 4], &[u8])> {
-    let big = ds64(bytes);
-    let mut out = Vec::new();
-    let mut at = 12usize;
-    while let Some(head) = bytes.get(at..at.saturating_add(8)) {
-        let (Ok(id), Some(field)) = (<[u8; 4]>::try_from(&head[..4]), u32_at(head, 4)) else { break };
-        // In an RF64 file a size field of 0xFFFFFFFF stands for the size `ds64` gives.
-        let size = match &big {
-            Some(d) if field == u32::MAX => d.size_of(&id).unwrap_or(u64::from(field)),
-            _ => u64::from(field),
-        };
-        let start = at.saturating_add(8);
-        let Some(end) = usize::try_from(size).ok().and_then(|n| start.checked_add(n)) else { break };
-        let Some(body) = bytes.get(start..end) else { break };
-        out.push((id, body));
-        // Chunks are padded to an even size.
-        at = end.saturating_add(end & 1);
-    }
-    out
-}
-
-/// The markers `bytes` carry, in time order (empty for anything that isn't a WAV with markers).
+/// File markers in timeline order, deduplicated after the app's existing Tick quantization.
 pub fn read(bytes: &[u8]) -> Vec<Marker> {
-    if !is_wav(bytes) {
-        return Vec::new();
-    }
-    let chunks = chunks(bytes);
-    let rate = chunks.iter().find(|(id, _)| id == b"fmt ").and_then(|(_, b)| u32_at(b, 4)).map_or(0.0, f64::from);
-    let mut out = cue_markers(&chunks, rate);
-    if let Some((_, xmp)) = chunks.iter().find(|(id, _)| id == b"_PMX") {
-        // Tools that write both encodings repeat each marker.
-        let mut seen: HashSet<(String, Tick)> = out.iter().map(|o| (o.comment.clone(), o.time)).collect();
-        for m in xmp_markers(xmp, rate) {
-            if seen.insert((m.comment.clone(), m.time)) {
-                out.push(m);
-            }
+    let metadata = shared::read(bytes);
+    let map = |m: shared::Marker| Marker {
+        time: secs(m.start, m.rate),
+        duration: secs(m.duration, m.rate),
+        comment: m.name,
+        label: Label::None,
+        ..Default::default()
+    };
+    let mut out: Vec<_> = metadata.cue.into_iter().map(map).collect();
+    let mut seen: HashSet<(String, Tick)> = out.iter().map(|m| (m.comment.clone(), m.time)).collect();
+    for marker in metadata.xmp.into_iter().map(map) {
+        if seen.insert((marker.comment.clone(), marker.time)) {
+            out.push(marker);
         }
     }
     out.truncate(MAX_MARKERS);
-    out.sort_by_key(|m| m.time);
-    out
-}
-
-/// Cue points named and sized by the `adtl` list.
-fn cue_markers(chunks: &[([u8; 4], &[u8])], rate: f64) -> Vec<Marker> {
-    let Some((_, cue)) = chunks.iter().find(|(id, _)| id == b"cue ") else { return Vec::new() };
-    let count = (u32_at(cue, 0).unwrap_or(0) as usize).min(MAX_MARKERS);
-    // The cue points first: `(id, offset in samples)`.
-    let mut points = Vec::new();
-    for i in 0..count {
-        let Some(point) = cue.get(4usize.saturating_add(i.saturating_mul(24))..) else { break };
-        let (Some(id), Some(offset)) = (u32_at(point, 0), u32_at(point, 20)) else { break };
-        points.push((id, offset));
-    }
-    // Only the names and lengths of those ids are kept, so a hostile `adtl` list cannot grow them past the cue count,
-    // and each record is a lookup, not a scan.
-    let wanted: HashSet<u32> = points.iter().map(|(id, _)| *id).collect();
-    let mut names: HashMap<u32, String> = HashMap::new();
-    let mut lengths: HashMap<u32, u32> = HashMap::new();
-    let mut records = 0usize;
-    'lists: for (_, list) in chunks.iter().filter(|(id, b)| id == b"LIST" && b.get(0..4) == Some(b"adtl")) {
-        let mut at = 4usize;
-        while let Some(head) = list.get(at..at.saturating_add(8)) {
-            let (Ok(id), Some(size)) = (<[u8; 4]>::try_from(&head[..4]), u32_at(head, 4)) else { break };
-            let start = at.saturating_add(8);
-            let Some(end) = start.checked_add(size as usize) else { break };
-            let Some(body) = list.get(start..end) else { break };
-            records += 1;
-            if records > MAX_ADTL_RECORDS {
-                break 'lists;
-            }
-            if let Some(cue_id) = u32_at(body, 0).filter(|c| wanted.contains(c)) {
-                match &id {
-                    // A `labl` is the name; a `note` only when there is none.
-                    b"labl" => {
-                        names.insert(cue_id, label(body.get(4..).unwrap_or_default()));
-                    }
-                    b"note" => {
-                        names.entry(cue_id).or_insert_with(|| label(body.get(4..).unwrap_or_default()));
-                    }
-                    // The first `ltxt` of a cue point gives its length.
-                    b"ltxt" => {
-                        lengths.entry(cue_id).or_insert_with(|| u32_at(body, 4).unwrap_or(0));
-                    }
-                    _ => {}
-                }
-            }
-            at = end.saturating_add(end & 1);
-        }
-    }
-    points
-        .into_iter()
-        .map(|(id, offset)| {
-            let comment = names.get(&id).cloned().unwrap_or_default();
-            let length = lengths.get(&id).copied().unwrap_or(0);
-            Marker { time: secs(f64::from(offset), rate), duration: secs(f64::from(length), rate), comment, label: Label::None, ..Default::default() }
-        })
-        .collect()
-}
-
-/// The text of `name` in an XMP entry, as an attribute (`name="v"`) or an element
-/// (`<name>v</name>`).
-fn xmp_value(entry: &str, name: &str) -> Option<String> {
-    let attr = format!("{name}=\"");
-    if let Some(i) = entry.find(&attr) {
-        let rest = entry.get(i + attr.len()..)?;
-        return Some(unescape(rest.get(..rest.find('"')?)?));
-    }
-    let open = format!("<{name}>");
-    let i = entry.find(&open)?;
-    let rest = entry.get(i + open.len()..)?;
-    Some(unescape(rest.get(..rest.find('<')?)?))
-}
-
-fn unescape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut rest = s;
-    while let Some(i) = rest.find('&') {
-        out.push_str(rest.get(..i).unwrap_or_default());
-        let tail = rest.get(i..).unwrap_or_default();
-        let Some(semi) = tail.find(';').filter(|&n| n <= 10) else {
-            out.push('&');
-            rest = tail.get(1..).unwrap_or_default();
-            continue;
-        };
-        let ent = tail.get(1..semi).unwrap_or_default();
-        match ent {
-            "amp" => out.push('&'),
-            "lt" => out.push('<'),
-            "gt" => out.push('>'),
-            "quot" => out.push('"'),
-            "apos" => out.push('\''),
-            _ => {
-                let code = ent.strip_prefix("#x").and_then(|h| u32::from_str_radix(h, 16).ok()).or_else(|| ent.strip_prefix('#').and_then(|d| d.parse().ok()));
-                match code.and_then(char::from_u32) {
-                    Some(c) => out.push(c),
-                    None => out.push_str(tail.get(..=semi).unwrap_or_default()),
-                }
-            }
-        }
-        rest = tail.get(semi + 1..).unwrap_or_default();
-    }
-    out.push_str(rest);
-    out.trim().to_string()
-}
-
-/// A frame rate as XMP writes it: `f44100`, or `f30000s1001` (rate over scale).
-fn xmp_rate(text: &str) -> Option<f64> {
-    let t = text.trim().strip_prefix('f')?;
-    let (num, den) = t.split_once('s').unwrap_or((t, "1"));
-    let (n, d): (f64, f64) = (num.parse().ok()?, den.parse().ok()?);
-    (n > 0.0 && d > 0.0).then_some(n / d)
-}
-
-/// The markers of an XMP packet's `xmpDM:markers` entries.
-fn xmp_markers(packet: &[u8], file_rate: f64) -> Vec<Marker> {
-    let text = String::from_utf8_lossy(packet.get(..packet.len().min(MAX_XMP)).unwrap_or_default());
-    let mut out = Vec::new();
-    // The frame rate belongs to the track an entry follows.
-    let mut rate = file_rate;
-    for entry in text.split("<rdf:li").skip(1) {
-        if let Some(r) = xmp_value(entry, "xmpDM:frameRate").as_deref().and_then(xmp_rate) {
-            rate = r;
-        }
-        let Some(start) = xmp_value(entry, "xmpDM:startTime").and_then(|v| v.trim().parse::<f64>().ok()) else { continue };
-        let length = xmp_value(entry, "xmpDM:duration").and_then(|v| v.trim().parse::<f64>().ok()).unwrap_or(0.0);
-        let comment = xmp_value(entry, "xmpDM:name").unwrap_or_default();
-        out.push(Marker { time: secs(start, rate), duration: secs(length, rate), comment, label: Label::None, ..Default::default() });
-        if out.len() >= MAX_MARKERS {
-            break;
-        }
-    }
+    out.sort_by_key(|marker| marker.time);
     out
 }
 
@@ -322,6 +93,16 @@ mod tests {
         let mut b = b"adtl".to_vec();
         b.extend(subs.iter().flatten());
         chunk(b"LIST", &b)
+    }
+
+    #[test]
+    fn shared_sources_deduplicate_after_app_tick_quantization() {
+        let xmp = br#"<rdf:li xmpDM:startTime="1e-100" xmpDM:name="Same"/>"#;
+        let file = wav(&[fmt(44100), cue(&[(1, 0)]), adtl(&[labl(b"labl", 1, "Same")]), chunk(b"_PMX", xmp)]);
+        let markers = read(&file);
+        assert_eq!(markers.len(), 1);
+        assert_eq!(markers[0].time, Tick::ZERO);
+        assert_eq!(markers[0].comment, "Same");
     }
 
     #[test]

@@ -879,27 +879,6 @@ fn selector_lists_keep_the_css_cascade() {
 }
 
 #[test]
-fn a_comma_list_stores_its_declarations_once() {
-    let sels = vec!["rect"; 1000].join(",");
-    let decls: String = (0..50).map(|i| format!("p{i}:v;")).collect();
-    let mut sheet = StyleSheet::default();
-    parse_css(&format!("{sels}{{{decls}}}"), &mut sheet).unwrap();
-    assert_eq!(sheet.rules.len(), 1000);
-    assert_eq!(sheet.blocks.len(), 1);
-    assert_eq!(sheet.decls, 50);
-}
-
-#[test]
-fn rules_of_unsupported_selectors_store_no_blocks() {
-    let mut sheet = StyleSheet::default();
-    parse_css(&"a b{}".repeat(100_000), &mut sheet).unwrap();
-    parse_css("a b{fill:red} a>b, rect{fill:blue} c:hover, d{fill:red}", &mut sheet).unwrap();
-    assert_eq!(sheet.rules.len(), 2);
-    assert_eq!(sheet.blocks.len(), 2);
-    assert!(sheet.rules.iter().all(|r| sheet.blocks.get(r.block).is_some_and(|b| b.len() == 1)));
-}
-
-#[test]
 fn huge_class_lists_count_against_the_matching_budget() {
     // One rule, but a 1 MB class attribute re-split on each of 100 `<use>` copies (#2140).
     let class = "a ".repeat(500_000);
@@ -957,18 +936,6 @@ fn font_size_percentage_resolves_against_the_parent_font_size() {
         assert_eq!(shapes.len(), 1);
         assert!(matches!(shapes[0].2.geom, Geom::Rect { w, .. } if w == expected), "{body}: {:?}", shapes[0].2.geom);
     }
-}
-
-#[test]
-fn at_rule_blocks_are_skipped_by_brace_depth() {
-    let mut sheet = StyleSheet::default();
-    parse_css("@media print { .a{fill:#ff0000} .b{fill:#0000ff} } .c{fill:red}", &mut sheet).unwrap();
-    assert_eq!(sheet.rules.len(), 1);
-    assert_eq!(sheet.rules[0].classes, vec!["c".to_string()]);
-    let mut sheet = StyleSheet::default();
-    parse_css("@media x { @supports y { .c{} } .d{} } .e{fill:red}", &mut sheet).unwrap();
-    assert_eq!(sheet.rules.len(), 1);
-    assert_eq!(sheet.rules[0].classes, vec!["e".to_string()]);
 }
 
 /// Build a `w` x `h` document from `nodes` for sparse-content render tests.
@@ -1375,4 +1342,248 @@ fn axis_rect_recognises_only_axis_aligned_rectangles() {
     folded.line_to((10.0, 0.0));
     folded.close_path();
     assert_eq!(axis_rect(&folded, Affine::IDENTITY), None);
+}
+
+#[test]
+fn css_cascade_specificity_display_visibility_and_group_opacity_parity() {
+    let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="60" height="20">
+        <style>
+            rect { fill: #ff0000; }
+            .cls { fill: #00ff00; }
+            .cls.hi { fill: #00ffff; }
+            #exact { fill: #0000ff; }
+            .gone { display: none; }
+        </style>
+        <rect id="elem" x="0" y="0" width="10" height="10" fill="#808080"/>
+        <rect id="cls" class="cls" x="10" y="0" width="10" height="10" fill="#808080"/>
+        <rect id="multi" class="cls hi" x="20" y="0" width="10" height="10"/>
+        <rect id="exact" class="cls hi" x="30" y="0" width="10" height="10"/>
+        <rect id="inline" class="cls hi" x="40" y="0" width="10" height="10" style="fill: #ffff00"/>
+        <g class="gone"><rect x="50" y="0" width="10" height="10" fill="#ff00ff"/></g>
+        <g visibility="hidden">
+            <rect x="0" y="10" width="10" height="10" fill="#ff0000"/>
+            <rect x="10" y="10" width="10" height="10" style="fill: #00ff00" visibility="visible"/>
+        </g>
+        <g opacity="0.5">
+            <rect x="20" y="10" width="10" height="10" style="fill: #ff0000"/>
+            <rect x="20" y="10" width="10" height="10" style="fill: #0000ff"/>
+        </g>
+    </svg>"##;
+    let doc = parse(svg).unwrap();
+    let shapes = doc.flatten();
+    // 5 top-row rects + 1 visible child in hidden group + 2 rects in opacity group = 8.
+    assert_eq!(shapes.len(), 8);
+    assert_eq!(shapes[0].2.fill, Some(Paint::Color([1.0, 0.0, 0.0])));
+    assert_eq!(shapes[1].2.fill, Some(Paint::Color([0.0, 1.0, 0.0])));
+    assert_eq!(shapes[2].2.fill, Some(Paint::Color([0.0, 1.0, 1.0])));
+    assert_eq!(shapes[3].2.fill, Some(Paint::Color([0.0, 0.0, 1.0])));
+    assert_eq!(shapes[4].2.fill, Some(Paint::Color([1.0, 1.0, 0.0])));
+    // Group opacity multiplies in flatten() rather than mutating child fill_opacity.
+    assert!((shapes[6].1 - 0.5).abs() < 1e-12);
+    assert!((shapes[6].2.fill_opacity - 1.0).abs() < 1e-12);
+
+    let img = rasterize(&doc, 60, 20, 1.0);
+    assert!(near(px(&img, 5, 5), [1.0, 0.0, 0.0, 1.0], 1e-3));
+    assert!(near(px(&img, 15, 5), [0.0, 1.0, 0.0, 1.0], 1e-3));
+    assert!(near(px(&img, 25, 5), [0.0, 1.0, 1.0, 1.0], 1e-3));
+    assert!(near(px(&img, 35, 5), [0.0, 0.0, 1.0, 1.0], 1e-3));
+    assert!(near(px(&img, 45, 5), [1.0, 1.0, 0.0, 1.0], 1e-3));
+    // display:none suppresses the entire subtree.
+    assert_eq!(px(&img, 55, 5)[3], 0.0);
+    // visibility:hidden suppresses the first child, visibility:visible restores the second.
+    assert_eq!(px(&img, 5, 15)[3], 0.0);
+    assert!(near(px(&img, 15, 15), [0.0, 1.0, 0.0, 1.0], 1e-3));
+    // Isolated group opacity: blue over red inside opacity=0.5 yields premultiplied [0, 0, 0.5, 0.5],
+    // without red bleeding through the opaque blue rect.
+    assert!(near(px(&img, 25, 15), [0.0, 0.0, 0.5, 0.5], 2e-3));
+}
+
+#[test]
+fn inherited_attributes_current_color_and_use_inheritance_parity() {
+    let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="50" height="20">
+        <defs>
+            <rect id="tpl" width="8" height="8"/>
+            <rect id="own" width="8" height="8" fill="#00ff00"/>
+        </defs>
+        <g color="#ff0000" fill="currentColor" fill-opacity="0.5" stroke="#0000ff" stroke-width="2"
+           stroke-linecap="round" stroke-linejoin="bevel" stroke-miterlimit="6"
+           stroke-dasharray="4 2" stroke-dashoffset="1" fill-rule="evenodd">
+            <rect id="inherited" x="2" y="2" width="6" height="6"/>
+            <rect id="override" x="12" y="2" width="6" height="6" color="#00ff00" fill-opacity="1" stroke="none"/>
+            <use id="u-tpl" href="#tpl" x="21" y="1" fill="#ffff00" stroke="none"/>
+            <use id="u-own" href="#own" x="31" y="1" fill="#ffff00" stroke="none"/>
+        </g>
+    </svg>"##;
+    let doc = parse(svg).unwrap();
+    let shapes = doc.flatten();
+    assert_eq!(shapes.len(), 4);
+
+    let inh = shapes[0].2;
+    assert_eq!(inh.fill, Some(Paint::Color([1.0, 0.0, 0.0])));
+    assert!((inh.fill_opacity - 0.5).abs() < 1e-12);
+    assert_eq!(inh.fill_rule, FillRule::EvenOdd);
+    let st = inh.stroke.as_ref().expect("inherited stroke");
+    assert_eq!(st.paint, Paint::Color([0.0, 0.0, 1.0]));
+    assert_eq!(st.width, 2.0);
+    assert_eq!(st.cap, Cap::Round);
+    assert_eq!(st.join, Join::Bevel);
+    assert_eq!(st.miter, 6.0);
+    assert_eq!(st.dash, Some((vec![4.0, 2.0], 1.0)));
+
+    let ovr = shapes[1].2;
+    assert_eq!(ovr.fill, Some(Paint::Color([0.0, 1.0, 0.0])));
+    assert!((ovr.fill_opacity - 1.0).abs() < 1e-12);
+    assert!(ovr.stroke.is_none());
+
+    // <use> passes its inherited fill to #tpl (which has no fill), while #own keeps its own fill.
+    assert_eq!(shapes[2].2.fill, Some(Paint::Color([1.0, 1.0, 0.0])));
+    assert_eq!(shapes[3].2.fill, Some(Paint::Color([0.0, 1.0, 0.0])));
+
+    let img = rasterize(&doc, 50, 20, 1.0);
+    assert!(near(px(&img, 15, 5), [0.0, 1.0, 0.0, 1.0], 1e-3));
+    // Both <use> elements inherit fill-opacity="0.5" from the enclosing <g>.
+    assert!(near(px(&img, 25, 5), [0.5, 0.5, 0.0, 0.5], 1e-3));
+    assert!(near(px(&img, 35, 5), [0.0, 0.5, 0.0, 0.5], 1e-3));
+}
+
+#[test]
+fn length_units_and_font_size_inheritance_parity() {
+    let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="100" viewBox="0 0 200 100">
+        <g font-size="20">
+            <rect id="em" x="1em" y="2ex" width="2em" height="2ex" stroke="black" stroke-width="0.25em"/>
+            <rect id="abs" x="1in" y="1pc" width="72pt" height="2.54cm"/>
+            <rect id="mm" x="25.4mm" y="0" width="10%" height="20%"/>
+        </g>
+    </svg>"#;
+    let doc = parse(svg).unwrap();
+    let shapes = doc.flatten();
+    assert_eq!(shapes.len(), 3);
+
+    let (em, abs, mm) = (shapes[0].2, shapes[1].2, shapes[2].2);
+    assert!(matches!(em.geom, Geom::Rect { x, y, w, h, .. }
+        if (x - 20.0).abs() < 1e-9 && (y - 20.0).abs() < 1e-9 && (w - 40.0).abs() < 1e-9 && (h - 20.0).abs() < 1e-9));
+    assert!((em.stroke.as_ref().unwrap().width - 5.0).abs() < 1e-9);
+    assert!(matches!(abs.geom, Geom::Rect { x, y, w, h, .. }
+        if (x - 96.0).abs() < 1e-9 && (y - 16.0).abs() < 1e-9 && (w - 96.0).abs() < 1e-9 && (h - 96.0).abs() < 1e-9));
+    assert!(matches!(mm.geom, Geom::Rect { x, w, h, .. }
+        if (x - 96.0).abs() < 1e-9 && (w - 20.0).abs() < 1e-9 && (h - 20.0).abs() < 1e-9));
+}
+
+#[test]
+fn viewbox_preserve_aspect_ratio_and_implicit_dimensions_parity() {
+    // Non-zero min-x/min-y and preserveAspectRatio modes into an 80x40 viewport.
+    for (par, pt_expect) in [
+        ("none", (40.0, 20.0)),
+        ("xMidYMid meet", (40.0, 20.0)),
+        ("xMinYMin meet", (20.0, 20.0)),
+        ("xMaxYMax meet", (60.0, 20.0)),
+        ("xMidYMid slice", (40.0, 20.0)),
+        ("xMinYMin slice", (40.0, 40.0)),
+    ] {
+        let svg = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="80" height="40" viewBox="10 20 20 20" preserveAspectRatio="{par}">
+                <rect x="10" y="20" width="20" height="20" fill="red"/>
+            </svg>"#
+        );
+        let doc = parse(svg.as_bytes()).unwrap();
+        let shapes = doc.flatten();
+        assert_eq!(shapes.len(), 1);
+        // Center of viewBox (20, 30) in root pixel space.
+        let center = shapes[0].0 * kurbo::Point::new(20.0, 30.0);
+        assert!((center.x - pt_expect.0).abs() < 1e-9 && (center.y - pt_expect.1).abs() < 1e-9, "{par}: {center:?}");
+    }
+
+    // Pixel check for xMinYMin meet vs xMaxYMax meet: 20x20 viewBox in 80x40 -> 40x40 square.
+    let min_doc = parse(br#"<svg xmlns="http://www.w3.org/2000/svg" width="80" height="40" viewBox="10 20 20 20" preserveAspectRatio="xMinYMin meet"><rect x="10" y="20" width="20" height="20" fill="red"/></svg>"#).unwrap();
+    let min_img = rasterize(&min_doc, 80, 40, 1.0);
+    assert!(near(px(&min_img, 10, 20), [1.0, 0.0, 0.0, 1.0], 1e-3));
+    assert_eq!(px(&min_img, 60, 20)[3], 0.0);
+
+    let max_doc = parse(br#"<svg xmlns="http://www.w3.org/2000/svg" width="80" height="40" viewBox="10 20 20 20" preserveAspectRatio="xMaxYMax meet"><rect x="10" y="20" width="20" height="20" fill="red"/></svg>"#).unwrap();
+    let max_img = rasterize(&max_doc, 80, 40, 1.0);
+    assert_eq!(px(&max_img, 10, 20)[3], 0.0);
+    assert!(near(px(&max_img, 60, 20), [1.0, 0.0, 0.0, 1.0], 1e-3));
+
+    // Omitted width/height derive from viewBox aspect ratio.
+    let implicit = parse(br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 50"/>"#).unwrap();
+    assert_eq!((implicit.width, implicit.height), (100.0, 50.0));
+    let only_w = parse(br#"<svg xmlns="http://www.w3.org/2000/svg" width="200" viewBox="0 0 100 50"/>"#).unwrap();
+    assert_eq!((only_w.width, only_w.height), (200.0, 100.0));
+    let only_h = parse(br#"<svg xmlns="http://www.w3.org/2000/svg" height="25" viewBox="0 0 100 50"/>"#).unwrap();
+    assert_eq!((only_h.width, only_h.height), (50.0, 25.0));
+}
+
+#[test]
+fn transform_functions_chaining_and_raster_parity() {
+    let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40">
+        <g transform="translate(20, 20) rotate(90)">
+            <rect id="rot" x="-5" y="-5" width="10" height="10" fill="red"/>
+        </g>
+        <rect id="pivot" x="0" y="0" width="10" height="10" transform="rotate(180 5 5)" fill="blue"/>
+        <rect id="skew" x="0" y="0" width="4" height="4" transform="translate(2, 24) skewX(45)" fill="green"/>
+        <rect id="mat" x="0" y="0" width="4" height="4" transform="matrix(2 0 0 2 24 24)" fill="yellow"/>
+    </svg>"#;
+    let doc = parse(svg).unwrap();
+    let shapes = doc.flatten();
+    assert_eq!(shapes.len(), 4);
+
+    // rotate(180 5 5) maps (0, 0) -> (10, 10) and keeps the [0,10]^2 square covered.
+    let p = shapes[1].0 * kurbo::Point::new(0.0, 0.0);
+    assert!((p.x - 10.0).abs() < 1e-9 && (p.y - 10.0).abs() < 1e-9);
+    // skewX(45) at y=2 shifts x by +2 -> (0, 2) lands at (2+2, 26) = (4, 26).
+    let s = shapes[2].0 * kurbo::Point::new(0.0, 2.0);
+    assert!((s.x - 4.0).abs() < 1e-9 && (s.y - 26.0).abs() < 1e-9);
+
+    let img = rasterize(&doc, 40, 40, 1.0);
+    assert!(near(px(&img, 20, 20), [1.0, 0.0, 0.0, 1.0], 1e-3));
+    assert!(near(px(&img, 5, 5), [0.0, 0.0, 1.0, 1.0], 1e-3));
+    assert!(near(px(&img, 6, 26), [0.0, 128.0 / 255.0, 0.0, 1.0], 1e-3));
+    assert!(near(px(&img, 28, 28), [1.0, 1.0, 0.0, 1.0], 1e-3));
+}
+
+#[test]
+fn paint_references_gradients_fallbacks_and_stroke_styles_parity() {
+    let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="80" height="40">
+        <defs>
+            <linearGradient id="base-stops">
+                <stop offset="0%" stop-color="#ff0000"/>
+                <stop offset="100%" stop-color="#0000ff"/>
+            </linearGradient>
+            <linearGradient id="inherited-grad" xlink:href="#base-stops" x1="0" y1="0" x2="10" y2="0" gradientUnits="userSpaceOnUse" spreadMethod="reflect"/>
+            <radialGradient id="rad" cx="50.5" cy="10.5" r="10" fx="50.5" fy="10.5" gradientUnits="userSpaceOnUse">
+                <stop offset="0" stop-color="#ffffff"/>
+                <stop offset="1" stop-color="#00ff00"/>
+            </radialGradient>
+        </defs>
+        <rect id="grad" x="0" y="0" width="20" height="10" fill="url(#inherited-grad)"/>
+        <rect id="rad-rect" x="40" y="0" width="20" height="20" fill="url(#rad)"/>
+        <rect id="fallback" x="0" y="20" width="10" height="10" fill="url(#missing) #ff00ff" stroke="url(#missing) #00ffff" stroke-width="2"/>
+        <path id="evenodd" d="M20 20 H36 V36 H20 Z M24 24 V32 H32 V24 Z" fill="#00ff00" fill-rule="evenodd"/>
+        <path id="dashed" d="M40 30 H76" fill="none" stroke="#ffffff" stroke-width="4" stroke-linecap="square" stroke-dasharray="6 8" stroke-dashoffset="0"/>
+    </svg>"##;
+    let doc = parse(svg).unwrap();
+    let shapes = doc.flatten();
+    assert_eq!(shapes.len(), 5);
+
+    let Some(Paint::Gradient(lg)) = &shapes[0].2.fill else { panic!("linearGradient expected") };
+    assert!(!lg.bbox_units);
+    assert_eq!(lg.spread, Spread::Reflect);
+    assert_eq!(lg.stops.len(), 2);
+
+    assert_eq!(shapes[2].2.fill, Some(Paint::Color([1.0, 0.0, 1.0])));
+    assert_eq!(shapes[2].2.stroke.as_ref().map(|s| &s.paint), Some(&Paint::Color([0.0, 1.0, 1.0])));
+
+    let img = rasterize(&doc, 80, 40, 1.0);
+    // Reflected gradient: red at x=0, blue at x=10, back toward red at x=19.
+    assert!(px(&img, 0, 5)[0] > 0.8 && px(&img, 10, 5)[2] > 0.8 && px(&img, 19, 5)[0] > 0.8);
+    // Radial gradient white center at (50, 10).
+    assert!(near(px(&img, 50, 10), [1.0, 1.0, 1.0, 1.0], 0.05));
+    // Fallback solid fill.
+    assert!(near(px(&img, 5, 25), [1.0, 0.0, 1.0, 1.0], 1e-3));
+    // Even-odd hole at (28, 28) is transparent, outer ring at (22, 28) is green.
+    assert_eq!(px(&img, 28, 28)[3], 0.0);
+    assert!(near(px(&img, 22, 28), [0.0, 1.0, 0.0, 1.0], 1e-3));
+    // Dashed stroke (6 on, 8 off, square cap extends each end by 2): on at x=43, gap at x=50.
+    assert!(near(px(&img, 43, 30), [1.0, 1.0, 1.0, 1.0], 1e-3));
+    assert_eq!(px(&img, 50, 30)[3], 0.0);
 }

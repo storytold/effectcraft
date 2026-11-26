@@ -320,6 +320,9 @@ pub struct ViewerState {
     /// The pointer is dragging in the viewer this frame (Adaptive Resolution).
     #[serde(skip)]
     pub interacting: bool,
+    /// A drag outside the viewer changed the frame on screen: a property scrub in Effect Controls,
+    /// or any Timeline or Properties drag ([`crate::panels::drag_preview`]). Adaptive Resolution
+    /// draws a draft until the primary button is up, which clears it.
     #[serde(skip)]
     pub property_interacting: bool,
     /// Extended Viewer: the comp-space region the viewer renders this frame (comp frame plus
@@ -705,11 +708,9 @@ pub struct UiState {
     /// The panel maximized to fill the dock area (`~`), if any.
     #[serde(default)]
     pub maximized: Option<PanelKind>,
-    /// Floating windows of [`Self::dock`] whose native rect holds the OS window's outer
-    /// position, from a workspace file of an earlier version (see
-    /// `crate::dock_ui::native_outer_to_content`). Workspaces are not saved while any remain.
-    #[serde(skip)]
-    pub native_outer: Vec<u64>,
+    /// Lock Workspace: no panel of [`Self::dock`] moves, floats or closes.
+    #[serde(default)]
+    pub dock_locked: bool,
     /// Locked Composition / Timeline tabs (panel ids): opening another composition does not
     /// bring a locked panel forward (the tab's lock icon, as After Effects' viewer lock).
     #[serde(default)]
@@ -844,7 +845,7 @@ impl Default for UiState {
             workspace: "Default".into(),
             dock: crate::dock::Workspace::new(crate::dock::workspace("Default")),
             saved_workspaces: Default::default(),
-            native_outer: Vec::new(),
+            dock_locked: false,
             maximized: None,
             locked_tabs: BTreeSet::new(),
             effect_controls_lock: None,

@@ -15,7 +15,6 @@ pub(super) fn pw_phys(ctx: &EffectCtx) -> Phys {
     Phys {
         rate: pr.f("birthRate").max(0.0) * PW_RATE,
         life: pr.f("longevity").max(0.0) as f32,
-        producer: [pr.f("producer/producerX") as f32, pr.f("producer/producerY") as f32, pr.f("producer/producerZ") as f32],
         radius: [pr.f("producer/radiusX").max(0.0) as f32, pr.f("producer/radiusY").max(0.0) as f32, pr.f("producer/radiusZ").max(0.0) as f32],
         anim: pr.e("physics/animation"),
         speed: pr.f("physics/velocity") as f32 * 0.5,
@@ -251,12 +250,10 @@ pub(super) fn ps2_phys(ctx: &EffectCtx) -> Phys {
     let pr = ctx.params;
     let lh = ctx.layer_size[1] as f32;
     let unit = lh.max(1.0);
-    let pos = pr.v2("producer/position");
     let dir = (pr.f("physics/direction") as f32).to_radians();
     Phys {
         rate: pr.f("birthRate").max(0.0) * PS2_RATE,
         life: pr.f("longevity").max(0.0) as f32,
-        producer: [pos[0] as f32 / unit, pos[1] as f32 / unit, 0.0],
         radius: [pr.f("producer/radiusX").max(0.0) as f32 / unit, pr.f("producer/radiusY").max(0.0) as f32 / unit, 0.0],
         anim: [0u32, 1, 2, 3, 4, 5, 6, 7, 8, 9][pr.e("physics/animation").min(9) as usize],
         speed: pr.f("physics/velocity") as f32 * 0.25,
@@ -321,12 +318,10 @@ pub struct Blob {
 pub(super) fn mercury_phys(ctx: &EffectCtx) -> Phys {
     let pr = ctx.params;
     let unit = (ctx.layer_size[1] as f32).max(1.0);
-    let pos = pr.v2("producer");
     let dir = (pr.f("direction") as f32).to_radians();
     Phys {
         rate: pr.f("birthRate").max(0.0) * MERCURY_RATE,
         life: pr.f("longevity").max(0.0) as f32,
-        producer: [pos[0] as f32 / unit, pos[1] as f32 / unit, 0.0],
         radius: [pr.f("radiusX").max(0.0) as f32 / unit, pr.f("radiusY").max(0.0) as f32 / unit, 0.0],
         anim: [0u32, 1, 2, 3, 4, 5, 6, 7, 8, 9][pr.e("animation").min(9) as usize],
         speed: pr.f("velocity") as f32 * 0.3,

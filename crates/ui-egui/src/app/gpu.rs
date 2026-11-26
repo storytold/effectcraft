@@ -144,6 +144,16 @@ impl EffectcraftApp {
     pub(crate) fn run_dialog_answers(&mut self) {
         while let Ok(answer) = self.dialog_answers.1.try_recv() {
             self.file_dialogs.answered();
+            // A script's file dialog: answered even when cancelled (the script waits on it).
+            if answer.command == panels::scriptui_view::FILE_DIALOG_COMMAND {
+                // A dialog that couldn't open says why in the status line and counts as cancelled.
+                let paths = answer.paths.unwrap_or_else(|e| {
+                    self.ui.status = e;
+                    Vec::new()
+                });
+                panels::scriptui_view::answer_file_dialog(self, &answer.params, paths);
+                continue;
+            }
             menus::dialog_answered(self, answer);
         }
     }

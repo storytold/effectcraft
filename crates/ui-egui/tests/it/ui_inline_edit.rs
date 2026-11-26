@@ -14,7 +14,11 @@ fn harness() -> (Harness<'static, EffectcraftApp>, u64) {
     let comp = s.active_comp_id().unwrap().0;
     // Arabic, Hebrew, Devanagari and Thai names typed below need installed system faces: draw
     // tofu on a host without them rather than failing the missing-glyph gate.
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).allow_missing_glyphs().build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .allow_missing_glyphs()
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(s));
     h.run_steps(4);
     (h, comp)
 }
@@ -27,10 +31,13 @@ fn center(h: &Harness<'_, EffectcraftApp>, id: &str) -> Pos2 {
 fn click(h: &mut Harness<'_, EffectcraftApp>, p: Pos2, times: usize) {
     h.input_mut().events.push(Event::PointerMoved(p));
     h.step();
-    // All in one frame (the harness' frames are longer apart than a double-click).
+    // One press per step, as the runtime takes them: the releases are one step (0.25 s) apart,
+    // within egui's double-click interval (0.3 s).
+    let button = |pressed| Event::PointerButton { pos: p, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
     for _ in 0..times {
-        h.input_mut().events.push(Event::PointerButton { pos: p, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
-        h.input_mut().events.push(Event::PointerButton { pos: p, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+        h.input_mut().events.push(button(true));
+        h.step();
+        h.input_mut().events.push(button(false));
     }
     h.run_steps(3);
 }
@@ -497,7 +504,9 @@ fn click_with(h: &mut Harness<'_, EffectcraftApp>, p: Pos2, modifiers: Modifiers
     h.input_mut().events.push(Event::PointerMoved(p));
     h.input_mut().events.push(Event::ModifiersChanged(modifiers));
     h.step();
+    // One press per step: the release comes a step later, still with the modifiers held.
     h.input_mut().events.push(Event::PointerButton { pos: p, button: PointerButton::Primary, pressed: true, modifiers });
+    h.step();
     h.input_mut().events.push(Event::PointerButton { pos: p, button: PointerButton::Primary, pressed: false, modifiers });
     h.step();
     h.input_mut().events.push(Event::ModifiersChanged(Modifiers::NONE));
@@ -723,6 +732,54 @@ fn an_expression_added_at_the_bottom_of_the_timeline_comes_into_view() {
     type_text(&mut h, "25");
     commit_expression(&mut h);
     assert_eq!(expression(&h, layer, opacity).as_deref(), Some("25"));
+}
+
+/// #1460: Alt-clicking an effect property's stopwatch in Effect Controls adds an expression, as in
+/// the Timeline (it toggled the animation instead). Effect Controls has no expression field, so,
+/// as in After Effects, the property shows in the Timeline (its layer and effect twirled open,
+/// scrolled into view) with the new expression's editor taking the keyboard: typing replaces
+/// it. Another Alt-click removes it and leaves nothing holding the keyboard.
+#[test]
+fn alt_clicking_a_stopwatch_in_effect_controls_edits_the_expression_in_the_timeline() {
+    let (mut h, _) = harness();
+    let (layer, slider) = {
+        let s = &mut h.state_mut().session;
+        let l = s.execute("layer.newSolid", json!({"name": "Plate", "color": "#406080"})).unwrap()["layer"].as_u64().unwrap();
+        s.execute("effect.apply", json!({"layers": [l], "effect": "Slider Control"})).unwrap();
+        // Layers above push it below the bottom of the Timeline.
+        for i in 0..40 {
+            s.execute("layer.newSolid", json!({"name": format!("Layer {i}"), "color": "#204060"})).unwrap();
+        }
+        s.execute("layer.select", json!({"layers": [l]})).unwrap();
+        let slider = s.active_comp().unwrap().layer(effectcraft_engine::project::LayerId(l)).unwrap().props.prop("effects/#1/slider").unwrap().uid;
+        (l, slider)
+    };
+    h.state_mut().show_panel(effectcraft_ui_egui::dock::PanelKind::EffectControls);
+    h.run_steps(3);
+    let editor = format!("timeline.prop.{slider}.expression");
+    assert!(h.state().auto.find(&format!("timeline.prop.{slider}.row")).is_none(), "the property is not in the Timeline yet");
+    let alt = Modifiers { alt: true, ..Modifiers::NONE };
+    let at = center(&h, &format!("effectControls.prop.{slider}.stopwatch"));
+    click_with(&mut h, at, alt);
+    assert!(expression(&h, layer, slider).is_some(), "an expression was added");
+    let key = h.state().session.active_comp().unwrap().layer(effectcraft_engine::project::LayerId(layer)).unwrap().props.find(slider).unwrap().is_animated();
+    assert!(!key, "Alt-click doesn't turn on keyframing");
+    assert!(h.state().ui.timeline.reveal_props.contains(&slider), "the property is revealed in the Timeline");
+    let rows = h.state().auto.find("timeline.scroll").expect("the Timeline is shown").rect;
+    let e = h.state().auto.find(&editor).expect("the Timeline draws the expression editor").rect;
+    assert!(e[1] >= rows[1] - 0.5 && e[1] + e[3] <= rows[1] + rows[3] + 0.5, "the editor is in view: {e:?} in {rows:?}");
+    type_text(&mut h, "42");
+    commit_expression(&mut h);
+    assert_eq!(expression(&h, layer, slider).as_deref(), Some("42"), "typing replaced the new expression");
+    // Alt-click again removes the expression and its editor with it (the keyboard stays free;
+    // the editor's focus request was taken when it was added, so this doesn't exercise the
+    // cancel path).
+    let at = center(&h, &format!("effectControls.prop.{slider}.stopwatch"));
+    click_with(&mut h, at, alt);
+    h.run_steps(5);
+    assert_eq!(expression(&h, layer, slider), None);
+    assert!(h.state().auto.find(&editor).is_none(), "the expression editor is gone");
+    assert!(!h.ctx.egui_wants_keyboard_input(), "nothing has the keyboard");
 }
 
 fn right_click(h: &mut Harness<'_, EffectcraftApp>, p: Pos2) {

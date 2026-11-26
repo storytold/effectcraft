@@ -435,16 +435,36 @@ fn orientation_for_round_trips() {
     }
 }
 
-#[test]
-fn depth_of_field_blurs_out_of_focus_layers() {
+/// A comp whose camera (layer 0) has depth of field, Aperture 60 and Focus Distance `focus`, over
+/// a white `w`×`h` 3D solid (layer 1) centred in the frame at z = 0, scaled `scale` %.
+fn dof_scene(focus: f64, (w, h): (u32, u32), scale: f64) -> (Project, ItemId) {
     let (mut p, cid, comp) = setup();
     let mut cam = camera(&mut p, &comp);
     set(&mut cam, "cameraOptions/dof", Value::Bool(true));
     set(&mut cam, "cameraOptions/aperture", Value::Scalar(60.0));
-    let s = solid3(&mut p, &comp, [1.0, 1.0, 1.0], 60, 60, [100.0, 50.0, 0.0]);
+    set(&mut cam, "cameraOptions/focusDistance", Value::Scalar(focus));
+    let mut s = solid3(&mut p, &comp, [1.0, 1.0, 1.0], w, h, [100.0, 50.0, 0.0]);
+    set(&mut s, "transform/scale", Value::Vec3([scale, scale, 100.0]));
     push(&mut p, cid, cam);
     push(&mut p, cid, s);
+    (p, cid)
+}
+
+/// The blur radius map of a [`dof_scene`]'s `w`×`h` plane as its camera sees it, and the cap it
+/// is held to.
+fn plane_dof_radii(p: &Project, cid: ItemId, (w, h): (u32, u32)) -> (Vec<f32>, f64) {
+    let cp = p.comp(cid).unwrap();
+    let ctx = crate::EvalCtx::new(p, cid, cp, Tick::ZERO);
+    let cs = super::camera::layer_camera(&ctx, &cp.layers[0]);
+    let dof = cs.dof.unwrap();
+    let cap = super::compose::dof_radius_cap(&dof, w, h);
+    (super::compose::dof_radii_at(&cs, &dof, ctx.world_matrix(&cp.layers[1]), (w as usize, h as usize), [0.0; 2], 1.0, cap), cap)
+}
+
+#[test]
+fn depth_of_field_blurs_out_of_focus_layers() {
     // In focus (focus distance = zoom = distance to z=0): hard edge at x = 70.
+    let (mut p, cid) = dof_scene(zoom(), (60, 60), 100.0);
     let a = render(&p, cid);
     assert!(a.get(71, 50)[3] > 0.99 && a.get(69, 50)[3] < 0.01);
     let c = p.comp_mut(cid).unwrap();
@@ -460,14 +480,7 @@ fn depth_of_field_blurs_out_of_focus_layers() {
 #[test]
 fn dof_falls_back_when_focus_distance_is_not_finite() {
     for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-        let (mut p, cid, comp) = setup();
-        let mut cam = camera(&mut p, &comp);
-        set(&mut cam, "cameraOptions/dof", Value::Bool(true));
-        set(&mut cam, "cameraOptions/aperture", Value::Scalar(60.0));
-        set(&mut cam, "cameraOptions/focusDistance", Value::Scalar(bad));
-        let s = solid3(&mut p, &comp, [1.0, 1.0, 1.0], 60, 60, [100.0, 50.0, 0.0]);
-        push(&mut p, cid, cam);
-        push(&mut p, cid, s);
+        let (p, cid) = dof_scene(bad, (60, 60), 100.0);
         let cp = p.comp(cid).unwrap();
         let ctx = crate::EvalCtx::new(&p, cid, cp, Tick::ZERO);
         let cs = crate::three_d::camera::layer_camera(&ctx, &cp.layers[0]);
@@ -486,15 +499,7 @@ fn dof_falls_back_when_focus_distance_is_not_finite() {
 #[test]
 fn dof_blur_radius_is_bounded_for_degenerate_inputs() {
     let scene = |focus: f64, scale: f64| {
-        let (mut p, cid, comp) = setup();
-        let mut cam = camera(&mut p, &comp);
-        set(&mut cam, "cameraOptions/dof", Value::Bool(true));
-        set(&mut cam, "cameraOptions/aperture", Value::Scalar(60.0));
-        set(&mut cam, "cameraOptions/focusDistance", Value::Scalar(focus));
-        let mut s = solid3(&mut p, &comp, [1.0, 1.0, 1.0], 60, 60, [100.0, 50.0, 0.0]);
-        set(&mut s, "transform/scale", Value::Vec3([scale, scale, 100.0]));
-        push(&mut p, cid, cam);
-        push(&mut p, cid, s);
+        let (p, cid) = dof_scene(focus, (60, 60), scale);
         render(&p, cid)
     };
     let finite = |img: &effectcraft_raster::Image| img.data.iter().all(|px| px.iter().all(|c| c.is_finite()));
@@ -515,27 +520,68 @@ fn dof_blur_radius_is_bounded_for_degenerate_inputs() {
 #[test]
 fn dof_radii_skip_degenerate_planes_and_respect_the_cap() {
     let radii = |focus: f64, scale: f64| {
-        let (mut p, cid, comp) = setup();
-        let mut cam = camera(&mut p, &comp);
-        set(&mut cam, "cameraOptions/dof", Value::Bool(true));
-        set(&mut cam, "cameraOptions/aperture", Value::Scalar(60.0));
-        set(&mut cam, "cameraOptions/focusDistance", Value::Scalar(focus));
-        let mut s = solid3(&mut p, &comp, [1.0, 1.0, 1.0], 60, 60, [100.0, 50.0, 0.0]);
-        set(&mut s, "transform/scale", Value::Vec3([scale, scale, 100.0]));
-        push(&mut p, cid, cam);
-        push(&mut p, cid, s);
-        let cp = p.comp(cid).unwrap();
-        let ctx = crate::EvalCtx::new(&p, cid, cp, Tick::ZERO);
-        let cs = super::camera::layer_camera(&ctx, &cp.layers[0]);
-        let dof = cs.dof.unwrap();
-        let cap = super::compose::dof_radius_cap(&dof, 60, 60);
-        (super::compose::dof_radii_at(&cs, &dof, ctx.world_matrix(&cp.layers[1]), (60, 60), [0.0; 2], 1.0, cap), cap)
+        let (p, cid) = dof_scene(focus, (60, 60), scale);
+        plane_dof_radii(&p, cid, (60, 60))
     };
     let (r, _) = radii(zoom() + 10.0, 0.0);
     assert!(r.iter().all(|&r| r == 0.0), "a 0%-scaled plane is not blurred");
     let (r, cap) = radii(1.0e12, 100.0);
     assert!(cap > 1000.0, "a 60×60 buffer may blur by well over 1000 px: {cap}");
     assert!(r.iter().all(|&r| r as f64 <= cap && r as f64 > cap - 1.0), "huge focus: every radius at the cap {cap}");
+}
+
+/// A NaN blur radius has no defocus, so the plane isn't blurred, where `min` would make NaN the
+/// cap, the largest blur there is. Values from an expression or a script can produce one in two
+/// ways: a plane and a camera at finite but opposite extreme depths (z = ±1e308), whose depth
+/// overflows to infinity, so its slope across the buffer is ∞ − ∞ and every pixel's depth is NaN;
+/// and Aperture 1e308 at Blur Level 0 %, whose circle of confusion overflows to infinity before
+/// the blur level scales it to ∞ × 0, at a finite depth that a check on the depth alone would let
+/// through.
+#[test]
+fn dof_radii_are_zero_where_the_radius_is_nan() {
+    let radii = |edit: &dyn Fn(&mut effectcraft_project::Layers)| {
+        let (mut p, cid) = dof_scene(zoom() + 10.0, (60, 60), 100.0);
+        edit(&mut p.comp_mut(cid).unwrap().layers);
+        plane_dof_radii(&p, cid, (60, 60))
+    };
+    let nan_depth = radii(&|l| {
+        set(&mut l[0], "transform/position", Value::Vec3([100.0, 50.0, -1.0e308]));
+        set(&mut l[1], "transform/position", Value::Vec3([100.0, 50.0, 1.0e308]));
+    });
+    let nan_coc = radii(&|l| {
+        set(&mut l[0], "cameraOptions/aperture", Value::Scalar(1.0e308));
+        set(&mut l[0], "cameraOptions/blurLevel", Value::Scalar(0.0));
+    });
+    for (case, (r, cap)) in [("NaN depth", nan_depth), ("∞ × 0 circle of confusion", nan_coc)] {
+        assert!(r.iter().all(|&r| r == 0.0), "{case}: not blurred (cap {cap}): {:?}", &r[..4]);
+    }
+}
+
+/// A plane as long as a layer may be ([`effectcraft_project::limits::MAX_SIZE`]) can't be
+/// padded for its blur: the padded copy is well within the area budget, but longer on a side
+/// than a layer may be. It is drawn sharp instead, whichever side is the long one. Half as long,
+/// the same defocused plane blurs.
+#[test]
+fn dof_blur_refuses_a_padded_buffer_longer_than_a_layer() {
+    // A 20 px strip `len` px long through the centre of the frame, lying across it or up it, with
+    // a ~15 px blur radius: its soft and opaque pixels on the frame's centre line at right angles
+    // to it.
+    let strip = |len: u32, across: bool| {
+        let (p, cid) = dof_scene(zoom() * 0.5, if across { (len, 20) } else { (20, len) }, 100.0);
+        let img = render(&p, cid);
+        let line: Vec<(i64, i64)> = if across { (0..H as i64).map(|y| (100, y)).collect() } else { (0..W as i64).map(|x| (x, 50)).collect() };
+        (soft_count(&img, line.iter().copied()), line.iter().filter(|&&(x, y)| img.get(x, y)[3] > 0.99).count())
+    };
+    let max = effectcraft_project::limits::MAX_SIZE;
+    for across in [true, false] {
+        let (soft, _) = strip(max / 2, across);
+        assert!(soft > 10, "a {}-px-long plane out of focus blurs (across {across}): {soft} soft px", max / 2);
+        let (soft, opaque) = strip(max, across);
+        assert!(
+            soft == 0 && opaque == 20,
+            "a {max}-px-long plane is drawn sharp, not padded past the largest layer size (across {across}): {soft} soft px, {opaque} opaque"
+        );
+    }
 }
 
 /// Two layers that look the same on screen (400×100 at 100%, 1600×400 at 25%) at the same depth

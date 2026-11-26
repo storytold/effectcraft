@@ -50,7 +50,10 @@ fn harness(broken: fn(&Footage) -> bool, proxy: Option<Footage>) -> (Harness<'st
 
 fn open(mut s: Session) -> Harness<'static, EffectcraftApp> {
     s.execute("project.select", json!({"items": []})).unwrap();
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(s));
     h.run_steps(4);
     h
 }

@@ -116,6 +116,7 @@ pub(crate) fn name_of(kind: Kind, key: u128) -> String {
         Kind::Frame => disk_cache::entry_name(key),
         Kind::Layer => format!("layers/{}", disk_cache::entry_name(key)),
         Kind::Matte => format!("mattes/{}", disk_cache::entry_name(key)),
+        Kind::Plane => format!("planes/{}", disk_cache::entry_name(key)),
     }
 }
 
@@ -125,6 +126,9 @@ fn parse_name(name: &str) -> Option<(Kind, u128)> {
     }
     if let Some(n) = name.strip_prefix("mattes/") {
         return Some((Kind::Matte, disk_cache::parse_entry_name(n)?));
+    }
+    if let Some(n) = name.strip_prefix("planes/") {
+        return Some((Kind::Plane, disk_cache::parse_entry_name(n)?));
     }
     Some((Kind::Frame, disk_cache::parse_entry_name(name)?))
 }

@@ -243,7 +243,7 @@ pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: V
     // Close follows panel focus too: with the Render Queue active, Cmd+W closes that panel and
     // leaves the active composition open (it used to close the composition next to it).
     if id == "file.close" && no_params(&params) && app.ui.focused == PanelKind::RenderQueue {
-        app.apply_dock(craft_ui::docking::Action::Close { panel: PanelKind::RenderQueue })?;
+        app.apply_dock(craft_behavior::dock::Action::close(PanelKind::RenderQueue))?;
         // The focus goes to a panel that is still there, so the next Close acts on the composition
         // instead of on the queue that is gone.
         let next = [PanelKind::Timeline, PanelKind::Composition, PanelKind::Project].into_iter().find(|p| panel_shown(app, *p)).unwrap_or(PanelKind::Project);
@@ -453,17 +453,23 @@ pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: V
             "closePanel" => {
                 let p = panel_of("panel").ok_or("closePanel: need `panel`")??;
                 if app.ui.dock.is_open(p) {
-                    app.apply_dock(craft_ui::docking::Action::Close { panel: p })?;
+                    app.apply_dock(craft_behavior::dock::Action::close(p))?;
                 }
                 return Ok(Value::Null);
             }
             "floatPanel" => {
                 let p = panel_of("panel").ok_or("floatPanel: need `panel`")??;
                 let r = match params.get("rect") {
-                    Some(value) => serde_json::from_value::<[f32; 4]>(value.clone()).map_err(|_| "rect must contain four finite numbers")?,
+                    Some(value) => {
+                        let rect = serde_json::from_value::<[f32; 4]>(value.clone()).map_err(|_| "rect must contain four finite numbers")?;
+                        if !rect.iter().all(|v| v.is_finite()) {
+                            return Err("rect must contain four finite numbers".into());
+                        }
+                        crate::dock_command::rect_of(rect)
+                    }
                     None => crate::dock_ui::default_float_rect(ctx.content_rect()),
                 };
-                app.apply_dock(craft_ui::docking::Action::Float { panel: p, rect: r }).map_err(|e| format!("can't undock {}: {e}", p.title()))?;
+                app.apply_dock(craft_behavior::dock::Action::float(p, r)).map_err(|e| format!("can't undock {}: {e}", p.title()))?;
                 return Ok(Value::Null);
             }
             _ => {
@@ -485,8 +491,8 @@ pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: V
                 if let Some(before) = panel_of("before") {
                     command["before"] = json!(before?);
                 }
-                let command: craft_ui::docking::DockCommand<PanelKind> =
-                    serde_json::from_value(command).map_err(|e| format!("dockPanel: zone: center|tab|left|right|top|bottom|above|below ({e})"))?;
+                let command = crate::dock_command::DockCommand::parse("window.panel.dock", &command)
+                    .map_err(|e| format!("dockPanel: zone: center|tab|left|right|top|bottom|above|below ({e})"))?;
                 app.run_dock_command(ctx, command).map_err(|e| format!("can't dock {}: {e}", p.title()))?;
                 app.show_panel(p);
                 return Ok(Value::Null);

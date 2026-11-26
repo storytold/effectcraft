@@ -697,6 +697,7 @@ fn duplicate(s: &mut Session, p: &Value) -> Result<Value> {
         it.started = None;
         it.render_time = None;
         it.last_output = None;
+        it.last_timing = None;
         let id = it.id;
         proj.render_queue.insert(i + 1, it);
         Ok(id)
@@ -867,6 +868,7 @@ fn save_current_preview(s: &mut Session, p: &Value) -> Result<Value> {
         caches: None,
         renderer: None,
         gpu_frames: s.prefs.memory.gpu_frames(),
+        cache_budget: Some(s.export_cache_budget()),
     };
     let r = exporter.export(&job, &mut |_, _| true).map_err(EngineError::Other)?;
     s.toast(format!("Saved preview to {}", r.path));

@@ -12,3 +12,10 @@ gpu = { max-threads = 1 }
 [[profile.default.overrides]]
 filter = 'package(effectcraft-gpu) | package(effectcraft-ui-egui) | package(effectcraft-sam2) | (package(effectcraft-cli) & test(/^cli::gpu_adapter_name_/))'
 test-group = 'gpu'
+
+# This sub-second test can stall indefinitely. Keep its assertions and surface the last
+# flushed stage on timeout instead of waiting for the whole job to be cancelled.
+[[profile.default.overrides]]
+filter = 'binary_id(=effectcraft-export::it) & test(=roundtrip::prores_mov_roundtrip)'
+slow-timeout = { period = "60s", terminate-after = 2, on-timeout = "fail" }
+failure-output = "immediate"

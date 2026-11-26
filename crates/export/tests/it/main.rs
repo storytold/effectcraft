@@ -3,6 +3,7 @@
 mod audio_sample_positions;
 mod av1_encoder;
 mod banding;
+mod export_timing;
 mod exr_scene_linear;
 mod h264_gpu_yuv;
 mod hevc_av1_roundtrip;
@@ -18,6 +19,7 @@ mod opus_roundtrip;
 mod prores_color;
 mod render_settings;
 mod roundtrip;
+mod support;
 mod targa_sequence;
 mod uncompressed_mov;
 mod vp9_roundtrip;
