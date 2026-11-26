@@ -1473,6 +1473,93 @@ impl RenderStatus {
     }
 }
 
+/// Where one export's time went, and what it ran on (the render log's summary line, #3713).
+/// The stages overlap (the encoder works on one batch while the next renders), so the
+/// `*_seconds` are each stage's busy time and not a sum; none of them is more than `wall_seconds`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RenderTiming {
+    /// The whole job, start to end.
+    pub wall_seconds: f64,
+    /// Time rendering frames (the compositor, including the conversion to the encoder's pixels).
+    /// For formats that encode and write inside the frame loop (image sequences) it also holds
+    /// the encoding and writing: `encode_seconds` and `write_seconds` are `None`.
+    pub render_seconds: f64,
+    /// Time in the video encoder (`None`: not measured apart from rendering).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encode_seconds: Option<f64>,
+    /// Time writing and muxing the output file (`None`: not measured apart from rendering).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub write_seconds: Option<f64>,
+    /// Time in an encoder that writes as it encodes (GIF): encoding and writing are not apart.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encode_write_seconds: Option<f64>,
+    /// Time mixing and encoding the audio track (`None`: no separate audio stage).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audio_seconds: Option<f64>,
+    pub frames: u64,
+    /// Frames per second of wall time over the whole job.
+    pub frames_per_second: f64,
+    /// The compositor chosen when the job started, why, and the GPU adapter attached then. Frames
+    /// that later fell back to the CPU are counted in `gpu_fallback_frames`, not in this label.
+    pub renderer: String,
+    /// Frames asked of the GPU compositor that fell back to the CPU because the GPU became
+    /// unavailable after the job started (0: none).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub gpu_fallback_frames: u64,
+    /// The encoder: name, software or hardware, codec settings.
+    pub encoder: String,
+}
+
+impl RenderTiming {
+    /// The one-line summary for the render log.
+    pub fn summary(&self) -> String {
+        let head = format!("export took {:.2} s for {} frames ({:.2} frames/s)", self.wall_seconds, self.frames, self.frames_per_second);
+        self.line(&head)
+    }
+
+    /// The summary of a job that was stopped or failed `how` (the frames done are not counted).
+    pub fn summary_of_unfinished(&self, how: &str) -> String {
+        self.line(&format!("export {how} after {:.2} s", self.wall_seconds))
+    }
+
+    fn line(&self, head: &str) -> String {
+        let (r, mut s) = (self.render_seconds, String::new());
+        if self.encode_seconds.is_none() && self.write_seconds.is_none() && self.encode_write_seconds.is_none() {
+            s.push_str(&format!("rendering, encoding and writing measured together {r:.2} s"));
+        } else if self.encode_write_seconds.is_some() {
+            // The GIF palette is quantised on the render threads, so it counts as rendering.
+            s.push_str(&format!("rendering frames (GIF: including palette quantizing) {r:.2} s"));
+        } else if r > 0.0 {
+            s.push_str(&format!("rendering frames {r:.2} s"));
+        }
+        for (label, v) in [
+            ("encoder", self.encode_seconds),
+            ("writing output", self.write_seconds),
+            ("encoding and writing output measured together", self.encode_write_seconds),
+            ("audio", self.audio_seconds),
+        ] {
+            if let Some(v) = v {
+                s.push_str(&format!("{}{label} {v:.2} s", if s.is_empty() { "" } else { ", " }));
+            }
+        }
+        let stages = s;
+        let fallback = match (self.gpu_fallback_frames, self.frames) {
+            (0, _) => String::new(),
+            (n, 0) => format!(". Later GPU fallback: {n} frames rendered on the CPU after the GPU became unavailable"),
+            (n, m) => format!(". Later GPU fallback: {n} of {m} frames rendered on the CPU after the GPU became unavailable"),
+        };
+        format!(
+            "{head}. Busy time per stage (the stages overlap, so this is not a sum): {stages}. Initial compositor: {}{fallback}. Encoder: {}",
+            self.renderer, self.encoder
+        )
+    }
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RenderQueueItem {
     /// Stable id (unique within the queue).
@@ -1495,6 +1582,10 @@ pub struct RenderQueueItem {
     /// Resolved path of the last render (first file for sequences).
     #[serde(default)]
     pub last_output: Option<String>,
+    /// Where the last render's time went (see [`RenderTiming`]): of the first Output Module's
+    /// export; the item's own Render Time covers all of its Output Modules.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_timing: Option<RenderTiming>,
     /// Further Output Modules (Composition ▸ Add Output Module): the same frames are encoded
     /// once per module.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1624,6 +1715,7 @@ impl RenderQueueItem {
             started: None,
             render_time: None,
             last_output: None,
+            last_timing: None,
             extra_outputs: vec![],
             post_render: PostRenderAction::None,
             log: RenderLog::ErrorsOnly,

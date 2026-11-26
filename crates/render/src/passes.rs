@@ -29,6 +29,9 @@ pub struct Passed<T> {
     pub passes: u32,
     /// Rendered with the accelerator (not the CPU fallback after [`MAX_PASSES`]).
     pub accelerated: bool,
+    /// The CPU fallback ran because the accelerator was no longer available (its device was
+    /// lost), not because the passes ran out on a healthy device.
+    pub gpu_lost: bool,
 }
 
 /// Whether `accel` defers its readbacks (renders take passes).
@@ -42,21 +45,23 @@ pub fn is_deferred(accel: Option<&dyn Accelerator>) -> bool {
 /// ([`crate::LayerCache::set_gate`]).
 pub async fn in_passes<'a, T>(accel: Option<&'a dyn Accelerator>, mut render: impl FnMut(Option<&'a dyn Accelerator>) -> T) -> Passed<T> {
     let Some(a) = accel.filter(|a| a.miss_gate().is_some()) else {
-        return Passed { value: render(accel), passes: 1, accelerated: accel.is_some() };
+        return Passed { value: render(accel), passes: 1, accelerated: accel.is_some(), gpu_lost: false };
     };
     a.frame_begin();
     for pass in 1..=MAX_PASSES {
         a.pass_begin();
         let value = render(Some(a));
         if !a.pass_missed() {
-            return Passed { value, passes: pass, accelerated: true };
+            return Passed { value, passes: pass, accelerated: true, gpu_lost: false };
         }
         match a.settle() {
             Some(s) => s.await,
             None => break,
         }
     }
-    Passed { value: render(None), passes: MAX_PASSES + 1, accelerated: false }
+    // Why the frame goes to the CPU, decided here: a lost device, or passes run out on a healthy one
+    let gpu_lost = !a.available();
+    Passed { value: render(None), passes: MAX_PASSES + 1, accelerated: false, gpu_lost }
 }
 
 /// Ends the frame for the accelerator ([`Accelerator::frame_end`]) when dropped: also when the
@@ -73,10 +78,16 @@ impl Drop for FrameEnd<'_> {
 /// frame workers do. Ends the frame for the accelerator ([`Accelerator::frame_end`]) on every
 /// exit, including a panic.
 pub async fn comp_frame(r: &Renderer<'_>, comp: ItemId, t: Tick) -> Image {
-    let Some(a) = r.accel else { return r.comp_frame(comp, t) };
+    comp_frame_noting_gpu_loss(r, comp, t).await.0
+}
+
+/// [`comp_frame`], and whether the CPU rendered it because the accelerator was lost
+/// ([`Renderer::comp_frame_noting_gpu_loss`]).
+pub async fn comp_frame_noting_gpu_loss(r: &Renderer<'_>, comp: ItemId, t: Tick) -> (Image, bool) {
+    let Some(a) = r.accel else { return r.comp_frame_noting_gpu_loss(comp, t) };
     let _end = FrameEnd(a);
     if a.miss_gate().is_none() {
-        return r.comp_frame(comp, t);
+        return r.comp_frame_noting_gpu_loss(comp, t);
     }
     let mut opts = r.opts;
     let mut auto = None;
@@ -94,9 +105,11 @@ pub async fn comp_frame(r: &Renderer<'_>, comp: ItemId, t: Tick) -> Image {
     }
     let t0 = web_time::Instant::now();
     let img = if opts.backend == Backend::Cpu {
-        Renderer { opts, accel: None, ..*r }.comp_frame(comp, t)
+        (Renderer { opts, accel: None, ..*r }.comp_frame(comp, t), false)
     } else {
-        in_passes(Some(a), |acc| Renderer { opts, accel: acc, ..*r }.comp_frame(comp, t)).await.value
+        let passed = in_passes(Some(a), |acc| Renderer { opts, accel: acc, ..*r }.comp_frame_noting_gpu_loss(comp, t)).await;
+        let (img, lost) = passed.value;
+        (img, lost || passed.gpu_lost)
     };
     if let Some(t) = auto {
         t.record(t0.elapsed().as_secs_f64() * 1e3);

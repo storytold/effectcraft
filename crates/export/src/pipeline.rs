@@ -4,7 +4,9 @@
 
 use std::sync::Mutex;
 
-use effectcraft_project::render_queue::{AlphaMode, Channels, CurrentOrOff, EffectsMode, FrameSample, RenderLog, ResizeQuality, SwitchOverride, log_path};
+use effectcraft_project::render_queue::{
+    AlphaMode, Channels, CurrentOrOff, EffectsMode, FrameSample, OutputFormat, OutputModule, RenderLog, RenderTiming, ResizeQuality, SwitchOverride, log_path,
+};
 use effectcraft_project::{BitDepth, Comp, Project};
 use effectcraft_raster::Image;
 use effectcraft_render::{Backend, LayerCache, RenderOpts, Renderer};
@@ -265,6 +267,9 @@ pub(crate) struct Cx<'a> {
     gpu_frames: Mutex<Option<(usize, String)>>,
     /// A frame has rendered on the GPU compositor: its memory can be measured.
     gpu_rendered: std::sync::atomic::AtomicBool,
+    /// Frames asked of the GPU compositor that ended with the GPU unavailable: they fell back
+    /// to the CPU after the job started.
+    gpu_fallback_frames: std::sync::atomic::AtomicU64,
     /// Auto's CPU frames in flight once settled ([`Cx::auto_cpu_frames`]; `Some(None)`: not
     /// capped).
     cpu_frames: Mutex<Option<Option<usize>>>,
@@ -273,6 +278,46 @@ pub(crate) struct Cx<'a> {
     /// Files written to an overflow folder.
     pub overflowed: Mutex<Vec<String>>,
     written: Mutex<Vec<String>>,
+    /// Busy time per stage, for the log's timing line (#3713).
+    phases: Phases,
+}
+
+/// The stages of a job whose busy time is measured.
+#[derive(Clone, Copy)]
+pub(crate) enum Stage {
+    /// Rendering frames (and, for formats that encode and write inside the frame loop, that too).
+    Render,
+    Encode,
+    Write,
+    Audio,
+    /// An encoder that writes as it encodes (the GIF writer): the two are not apart.
+    EncodeWrite,
+}
+
+/// Busy time per [`Stage`] in nanoseconds. The stages overlap (the encoder works on one batch
+/// while the next renders), so each is its own total, not a share of the wall time.
+#[derive(Default)]
+struct Phases {
+    nanos: [std::sync::atomic::AtomicU64; 5],
+    /// Bit per stage that was timed: a stage a format doesn't have has no time, not zero.
+    used: std::sync::atomic::AtomicU8,
+}
+
+impl Phases {
+    fn add(&self, stage: Stage, since: Instant) {
+        self.used.fetch_or(1 << stage as u8, std::sync::atomic::Ordering::Relaxed);
+        let n = u64::try_from(since.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        if let Some(slot) = self.nanos.get(stage as usize) {
+            slot.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    fn seconds(&self, stage: Stage) -> f64 {
+        self.nanos.get(stage as usize).map_or(0.0, |n| n.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e9)
+    }
+    /// The stage's busy time, or `None` when the format never timed it.
+    fn measured(&self, stage: Stage) -> Option<f64> {
+        (self.used.load(std::sync::atomic::Ordering::Relaxed) & (1 << stage as u8) != 0).then(|| self.seconds(stage))
+    }
 }
 
 /// A job's layer caches: its own, or those of the Render Queue run it belongs to.
@@ -362,15 +407,54 @@ impl<'a> Cx<'a> {
             choice: Mutex::new(None),
             gpu_frames: Mutex::new(None),
             gpu_rendered: Default::default(),
+            gpu_fallback_frames: Default::default(),
             cpu_frames: Mutex::new(None),
             frame_times,
             overflowed: Mutex::new(vec![]),
             written: Mutex::new(vec![]),
+            phases: Phases::default(),
         };
         if let Some(c) = cx.fixed_choice(std::env::var(RENDERER_ENV).ok().as_deref()) {
             cx.decide(c);
         }
         cx
+    }
+
+    /// Run `f` and add its time to `stage`'s busy time. Formats that encode and write outside
+    /// the frame loop time those stages this way; a stage never timed is reported as measured
+    /// together with rendering.
+    pub(crate) fn timed<T>(&self, stage: Stage, f: impl FnOnce() -> T) -> T {
+        let t = Instant::now();
+        let out = f();
+        self.add_time(stage, t);
+        out
+    }
+
+    /// [`Cx::timed`] when `on`; otherwise just run `f` (a stage the job doesn't have).
+    pub(crate) fn timed_if<T>(&self, on: bool, stage: Stage, f: impl FnOnce() -> T) -> T {
+        if on { self.timed(stage, f) } else { f() }
+    }
+
+    /// Add the time since `since` to `stage`'s busy time (where a closure cannot wrap the work).
+    pub(crate) fn add_time(&self, stage: Stage, since: Instant) {
+        self.phases.add(stage, since);
+    }
+
+    /// Where the job's time went, for the render log and the [`crate::Report`].
+    pub(crate) fn timing(&self, wall: f64, frames: u64) -> RenderTiming {
+        RenderTiming {
+            wall_seconds: wall,
+            render_seconds: self.phases.seconds(Stage::Render),
+            encode_seconds: self.phases.measured(Stage::Encode),
+            write_seconds: self.phases.measured(Stage::Write),
+            encode_write_seconds: self.phases.measured(Stage::EncodeWrite),
+            audio_seconds: self.phases.measured(Stage::Audio),
+            frames,
+            frames_per_second: if wall > 0.0 { frames as f64 / wall } else { 0.0 },
+            renderer: self.choice().map_or_else(|| "none was needed".to_string(), |c| self.describe(&c)),
+            gpu_fallback_frames: self.gpu_fallback_frames.load(std::sync::atomic::Ordering::Relaxed),
+            encoder: describe_encoder(self.job.output),
+        }
     }
 
     /// The project's compositor: the GPU's for GPU Acceleration with an accelerator.
@@ -384,7 +468,10 @@ impl<'a> Cx<'a> {
     fn fixed_choice(&self, env: Option<&str>) -> Option<Choice> {
         let fixed = |renderer, why| Some(Choice { renderer, gpu_ms: None, cpu_ms: None, why });
         if self.project_renderer() == crate::JobRenderer::Cpu {
-            return fixed(crate::JobRenderer::Cpu, "the project's renderer");
+            // A project that asks for the GPU but has no accelerator in this session (the headless
+            // CLI without `--gpu`) renders on the CPU: say so, not "the project's renderer".
+            let why = if self.project.settings.gpu_acceleration { "no GPU compositor is attached to this session" } else { "the project's renderer" };
+            return fixed(crate::JobRenderer::Cpu, why);
         }
         if self.deferred() {
             return fixed(crate::JobRenderer::Gpu, "the project's renderer");
@@ -426,7 +513,18 @@ impl<'a> Cx<'a> {
                 });
             }
         }
-        log::info!(target: "effectcraft_export", "{}: {}", self.job.options.label, describe_choice(&c));
+        log::info!(target: "effectcraft_export", "{}: {}", self.job.options.label, self.describe(&c));
+    }
+
+    /// [`describe_choice`] with the GPU adapter attached to a GPU project's job, so a log shows
+    /// which device was measured. It describes the choice made at the start: a later fallback to
+    /// the CPU is counted apart ([`Cx::timing`]).
+    fn describe(&self, c: &Choice) -> String {
+        let d = describe_choice(c);
+        match self.job.accel {
+            Some(a) if self.project.settings.gpu_acceleration => format!("{d}; attached GPU adapter: {}", a.name()),
+            _ => d,
+        }
     }
 
     /// The job's choice, once made.
@@ -483,9 +581,10 @@ impl<'a> Cx<'a> {
         r
     }
 
-    async fn render_at(&self, t: Tick, on: crate::JobRenderer) -> Image {
+    /// A frame at `t`, and whether the CPU rendered it because the GPU was lost meanwhile.
+    async fn render_at(&self, t: Tick, on: crate::JobRenderer) -> (Image, bool) {
         // With deferred GPU readbacks (a browser worker) the frame renders in passes.
-        effectcraft_render::passes::comp_frame(&self.renderer_on(on), self.job.comp, t).await
+        effectcraft_render::passes::comp_frame_noting_gpu_loss(&self.renderer_on(on), self.job.comp, t).await
     }
 
     /// Whether frames render in passes (an accelerator with deferred readbacks).
@@ -496,15 +595,19 @@ impl<'a> Cx<'a> {
     /// Output frames `ks`, each mapped by `f` (encoding): rendered in parallel batches, or one
     /// by one in passes when readbacks are deferred ([`Cx::deferred`]).
     pub async fn frames<T: Send>(&self, comp: &Comp, ks: Vec<u64>, f: impl Fn(u64, Image) -> T + Sync + Send) -> Vec<T> {
-        if self.deferred() {
+        let t = Instant::now();
+        let out = if self.deferred() {
             let mut out = Vec::with_capacity(ks.len());
             for k in ks {
                 let img = self.frame_async(comp, k).await;
                 out.push(f(k, img));
             }
-            return out;
-        }
-        self.render_frames(ks, |k, on| self.frame_on(comp, k, on), f)
+            out
+        } else {
+            self.render_frames(ks, |k, on| self.frame_on(comp, k, on), f)
+        };
+        self.phases.add(Stage::Render, t);
+        out
     }
 
     /// `render` then `encode` over the frames `ks` on the job's compositor, results in `ks`
@@ -751,15 +854,26 @@ impl<'a> Cx<'a> {
     async fn frame_async_on(&self, comp: &Comp, i: u64, on: crate::JobRenderer) -> Image {
         let t0 = Instant::now();
         let gpu = on == crate::JobRenderer::Gpu && self.job.accel.is_some();
-        let img = match self.job.settings.sample(comp, i) {
+        let (img, lost) = match self.job.settings.sample(comp, i) {
             FrameSample::Progressive(t) => self.render_at(t, on).await,
             FrameSample::Fields { first, second, upper_first } => {
-                let a = self.render_at(first, on).await;
-                if second == first { a } else { interleave(&a, &self.render_at(second, on).await, upper_first) }
+                let (a, lost) = self.render_at(first, on).await;
+                if second == first {
+                    (a, lost)
+                } else {
+                    let (b, lost_b) = self.render_at(second, on).await;
+                    (interleave(&a, &b, upper_first), lost || lost_b)
+                }
             }
         };
         if gpu {
             self.gpu_rendered.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        // Counted as the frame was rendered; a probe that picks the CPU drops its GPU frames
+        let chose_gpu = self.choice().is_some_and(|c| c.renderer == crate::JobRenderer::Gpu);
+        if lost && chose_gpu {
+            self.gpu_fallback_frames.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         let img = self.crop_resize(img);
         if let Some(ft) = &self.frame_times {
@@ -818,14 +932,17 @@ impl<'a> Cx<'a> {
         fallback: impl Fn(u64, Image) -> T + Sync + Send,
     ) -> Vec<T> {
         // As in `frames`: once the GPU has stopped for good, the rest render in parallel.
-        self.render_frames(
+        let t = Instant::now();
+        let out = self.render_frames(
             ks,
             |k, on| self.yuv420_frame(comp, k, w, h, on).ok_or_else(|| self.frame_on(comp, k, on)),
             |k, r| match r {
                 Ok(p) => planes(p),
                 Err(img) => fallback(k, img),
             },
-        )
+        );
+        self.phases.add(Stage::Render, t);
+        out
     }
 
     /// Output Module ▸ Crop, then Resize.
@@ -938,7 +1055,7 @@ impl<'a> Cx<'a> {
     }
 
     /// Write the render log next to the output, as the Log setting asks. Returns its path.
-    pub fn write_log(&self, result: &Result<crate::Report, crate::ExportError>, seconds: f64) -> Option<String> {
+    pub fn write_log(&self, result: &Result<crate::Report, crate::ExportError>, seconds: f64, timing: Option<&RenderTiming>) -> Option<String> {
         let level = self.job.options.log;
         // Errors Only: a log for failures (a user stop is not an error).
         if level == RenderLog::ErrorsOnly && matches!(result, Ok(_) | Err(crate::ExportError::Cancelled)) {
@@ -956,6 +1073,14 @@ impl<'a> Cx<'a> {
         }
         if let Some(c) = self.choice() {
             s.push_str(&format!("Renderer: {}\n", describe_choice(&c)));
+        }
+        if let Some(t) = timing {
+            // (a failed job has no frame count: the line says what ran before it stopped)
+            let line = if result.is_err() { t.summary_of_unfinished("failed") } else { t.summary() };
+            s.push_str(&format!(
+                "Timing: {line}
+"
+            ));
         }
         if self.backend() == crate::JobRenderer::Gpu
             && let Some((n, why)) = &*self.gpu_frames.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -991,6 +1116,34 @@ impl<'a> Cx<'a> {
         f.finish().ok()?;
         Some(path)
     }
+}
+
+/// The render log's account of the encoder: every encoder here is built in and runs on the
+/// CPU (no hardware encoder is used), with the codec settings of the Output Module.
+pub(crate) fn describe_encoder(om: &OutputModule) -> String {
+    use effectcraft_project::render_queue::{ProResProfile, WebmVideoCodec};
+    let rate = |om: &OutputModule| match om.codec.rate_control {
+        effectcraft_project::render_queue::RateControlMode::Bitrate => format!("{} kbps", om.bitrate_kbps),
+        effectcraft_project::render_queue::RateControlMode::Quality => format!("constant quality {}", om.codec.quality),
+    };
+    let mut label = om.format.label().to_string();
+    let settings = match om.format {
+        OutputFormat::H264 => format!(", {} kbps", om.bitrate_kbps),
+        OutputFormat::Hevc | OutputFormat::Av1 => format!(", profile {}, {}", om.codec.profile.label(), rate(om)),
+        // (alpha needs a 4444 flavour: the encoder promotes the profile, so the log names that one)
+        OutputFormat::ProRes => {
+            let profile = if om.channels == Channels::Rgba && !om.prores_profile.is_4444() { ProResProfile::P4444 } else { om.prores_profile };
+            format!(", profile {}", profile.label())
+        }
+        // (WebM carries VP9 or AV1: the log names the one that is written)
+        OutputFormat::WebM if om.webm_codec == WebmVideoCodec::Av1 => {
+            label = "WebM (AV1 + Opus)".to_string();
+            format!(", profile {}, {}", om.codec.profile.label(), rate(om))
+        }
+        OutputFormat::WebM => format!(", {:?}{}", om.webm_codec, if om.webm_bitrate { format!(", {} kbps", om.bitrate_kbps) } else { String::new() }),
+        _ => String::new(),
+    };
+    format!("{label}{settings}, built-in software encoder (not a hardware encoder)")
 }
 
 /// The render log's account of a job's compositor: which, why, and what was measured.
@@ -1087,6 +1240,25 @@ mod tests {
     use super::*;
     use rayon::prelude::*;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    /// #3724 review: the log names the profile and codec that are written: alpha promotes ProRes
+    /// to 4444, and WebM with AV1 says AV1 (not VP9).
+    #[test]
+    fn the_encoder_description_names_what_is_written() {
+        use effectcraft_project::render_queue::{Channels, ProResProfile, WebmVideoCodec};
+        let mut om = OutputModule { format: OutputFormat::ProRes, prores_profile: ProResProfile::Hq, channels: Channels::Rgb, ..OutputModule::default() };
+        let hq = describe_encoder(&om);
+        assert!(hq.contains(ProResProfile::Hq.label()) && !hq.contains("4444"), "{hq}");
+        om.channels = Channels::Rgba;
+        let alpha = describe_encoder(&om);
+        assert!(alpha.contains(ProResProfile::P4444.label()) && !alpha.contains(ProResProfile::Hq.label()), "{alpha}");
+        let mut web = OutputModule { format: OutputFormat::WebM, webm_codec: WebmVideoCodec::Av1, ..OutputModule::default() };
+        let av1 = describe_encoder(&web);
+        assert!(av1.starts_with("WebM (AV1 + Opus)") && !av1.contains("VP9") && av1.contains("profile"), "{av1}");
+        web.webm_codec = WebmVideoCodec::Vp9;
+        let vp9 = describe_encoder(&web);
+        assert!(vp9.starts_with("WebM (VP9 + Opus)") && !vp9.contains("AV1"), "{vp9}");
+    }
 
     /// Dither may round a colour up while alpha rounds down; premultiplied colour stays at or
     /// below the written alpha at every pixel.
@@ -1290,6 +1462,145 @@ mod tests {
             options: Default::default(),
         };
         assert_eq!(Cx::new(&job).gpu_cap(), None, "no accelerator");
+    }
+
+    /// #3706: a project that asks for the GPU but renders in a session without an accelerator (the
+    /// headless CLI without `--gpu`) said "the project's renderer": the log gives the real reason.
+    /// With an accelerator the log names the adapter.
+    #[test]
+    fn the_log_says_why_a_gpu_project_renders_on_the_cpu_and_on_which_adapter() {
+        if std::env::var_os(RENDERER_ENV).is_some() {
+            return;
+        }
+        use effectcraft_project::render_queue::{OutputFormat, OutputModule, RenderSettings};
+        use effectcraft_render::NoFootage;
+        let (settings, output) = (RenderSettings::default(), OutputModule::for_format(OutputFormat::PngSequence));
+        let accel = NoAccel;
+        let describe = |gpu: bool, with_accel: bool| {
+            let mut p = Project::default();
+            p.settings.gpu_acceleration = gpu;
+            let job = Job {
+                project: &p,
+                footage: &NoFootage,
+                expr: None,
+                accel: if with_accel { Some(&accel) } else { None },
+                comp: effectcraft_project::ItemId(0),
+                settings: &settings,
+                output: &output,
+                path: "/c/f_[#####].png",
+                sink: None,
+                nested_switches: true,
+                options: Default::default(),
+            };
+            let cx = Cx::new(&job);
+            cx.choice().map(|c| cx.describe(&c))
+        };
+        assert_eq!(describe(true, false).as_deref(), Some("Software Rendering (no GPU compositor is attached to this session)"));
+        assert_eq!(describe(false, true).as_deref(), Some("Software Rendering (the project's renderer)"));
+        assert_eq!(describe(false, false).as_deref(), Some("Software Rendering (the project's renderer)"));
+        // A GPU project with an accelerator measures first; the adapter shows once it chose.
+        assert_eq!(describe(true, true), None);
+        let mut p = Project::default();
+        p.settings.gpu_acceleration = true;
+        let job = Job {
+            project: &p,
+            footage: &NoFootage,
+            expr: None,
+            accel: Some(&accel),
+            comp: effectcraft_project::ItemId(0),
+            settings: &settings,
+            output: &output,
+            path: "/c/f_[#####].png",
+            sink: None,
+            nested_switches: true,
+            options: Default::default(),
+        };
+        let cx = Cx::new(&job);
+        cx.decide(Choice { renderer: crate::JobRenderer::Cpu, gpu_ms: Some(164.5), cpu_ms: Some(115.6), why: "measured on the first frames" });
+        assert_eq!(
+            cx.timing(1.0, 1).renderer,
+            "Software Rendering (measured on the first frames: GPU 164.5 ms/frame, CPU 115.6 ms/frame); attached GPU adapter: none"
+        );
+    }
+
+    /// An accelerator that renders the frames before `gpu_until`, each only once another frame
+    /// has lost the device, and loses the device on the first later frame (which falls back).
+    struct LostWhileRendering {
+        lost: AtomicBool,
+        gpu_until: Tick,
+    }
+    impl effectcraft_render::Accelerator for LostWhileRendering {
+        fn name(&self) -> String {
+            "lost".into()
+        }
+        fn comp_frame(&self, _r: &Renderer, _comp: effectcraft_project::ItemId, t: Tick) -> Option<Image> {
+            if t >= self.gpu_until {
+                self.lost.store(true, Ordering::Relaxed);
+                return None;
+            }
+
+            // Bounded: with a single render thread the sibling never runs meanwhile
+            let waited = Instant::now();
+            while !self.lost.load(Ordering::Relaxed) && waited.elapsed().as_secs() < 10 {
+                std::thread::yield_now();
+            }
+            Some(Image::new(16, 8))
+        }
+        fn supports_effect(&self, _id: &str) -> bool {
+            false
+        }
+        fn effects(&self, _chain: &[effectcraft_render::FxStep], _buf: &effectcraft_effects::Buf, _levels: Option<f32>) -> Option<effectcraft_effects::Buf> {
+            None
+        }
+        fn available(&self) -> bool {
+            !self.lost.load(Ordering::Relaxed)
+        }
+    }
+
+    /// #3732 review: a GPU job whose device becomes unavailable after it started keeps its
+    /// initial choice and attached adapter as such and reports the frames that fell back apart.
+    /// Two frames are in flight: frame 0 renders on the GPU while frame 1 loses the device.
+    #[test]
+    fn a_gpu_lost_after_the_start_is_reported_apart_from_the_initial_choice() {
+        use effectcraft_project::render_queue::{OutputFormat, OutputModule, RenderSettings};
+        let (settings, output) = (RenderSettings::default(), OutputModule::for_format(OutputFormat::PngSequence));
+        let mut p = Project::default();
+        p.settings.gpu_acceleration = true;
+        let comp = Comp::new(16, 8, effectcraft_time::FrameRate::FPS_25, Tick::from_seconds_f64(12.0 / 25.0));
+        let cid = p.add_item("Comp", effectcraft_color::Label::Sandstone, None, effectcraft_project::ItemKind::Comp(comp.into()));
+        let sink: &crate::Sink = &|_: &str, _: Vec<u8>| {};
+        let export = |renderer: Option<Backend>, gpu_until: Tick| {
+            let accel = LostWhileRendering { lost: AtomicBool::new(false), gpu_until };
+            let shared = Mutex::new(renderer);
+            let job = Job {
+                project: &p,
+                footage: &effectcraft_render::NoFootage,
+                expr: None,
+                accel: Some(&accel),
+                comp: cid,
+                settings: &settings,
+                output: &output,
+                path: "/l/f_[#####].png",
+                sink: Some(sink),
+                nested_switches: true,
+                options: crate::JobOptions { renderer: Some(&shared), gpu_frames: Some(2), ..Default::default() },
+            };
+            crate::export(&job, &mut |_| true).expect("export").timing
+        };
+
+        let chosen = export(Some(Backend::Gpu), Tick::from_seconds_f64(0.5 / 25.0));
+        let measured = std::env::var_os(RENDERER_ENV).is_none().then(|| export(None, Tick(0)));
+
+        assert_eq!(chosen.renderer, "GPU Acceleration (as the queue item's first output module); attached GPU adapter: lost");
+        assert_eq!((chosen.gpu_fallback_frames, chosen.frames), (11, 12), "frame 0 rendered on the GPU before the loss counted");
+        let line = chosen.summary();
+        assert!(line.contains("Initial compositor: GPU Acceleration"), "{line}");
+        assert!(line.contains("Later GPU fallback: 11 of 12 frames rendered on the CPU after the GPU became unavailable"), "{line}");
+        // Lost while Auto measures: the job picks the CPU and the GPU's measured frames are dropped
+        if let Some(measured) = measured {
+            assert!(measured.renderer.starts_with("Software Rendering (measured on the first frames"), "{}", measured.renderer);
+            assert_eq!(measured.gpu_fallback_frames, 0, "{}", measured.summary());
+        }
     }
 
     #[test]
