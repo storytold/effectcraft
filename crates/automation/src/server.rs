@@ -17,7 +17,6 @@ const INSTRUCTIONS: &str = "EffectCraft is an After Effects-class motion graphic
 
 // JSON-RPC error codes.
 const PARSE_ERROR: i64 = -32700;
-const INVALID_REQUEST: i64 = -32600;
 const METHOD_NOT_FOUND: i64 = -32601;
 const INVALID_PARAMS: i64 = -32602;
 const INTERNAL_ERROR: i64 = -32603;
@@ -61,31 +60,16 @@ impl McpServer {
 
     /// Handle one decoded message (request, notification or batch); `None` when no reply is due.
     pub fn handle(&mut self, msg: &Value) -> Option<Value> {
-        if let Value::Array(batch) = msg {
-            if batch.is_empty() {
-                return Some(error(Value::Null, INVALID_REQUEST, "empty batch"));
-            }
-            let out: Vec<Value> = batch.iter().filter_map(|m| self.handle(m)).collect();
-            return (!out.is_empty()).then_some(Value::Array(out));
-        }
-        let Some(method) = msg.get("method").and_then(Value::as_str) else {
-            // A response from the client (we send no requests) or garbage.
-            return msg
-                .get("id")
-                .filter(|_| msg.get("result").is_none() && msg.get("error").is_none())
-                .map(|id| error(id.clone(), INVALID_REQUEST, "missing `method`"));
-        };
-        let Some(id) = msg.get("id").cloned() else {
-            return None; // notification (notifications/initialized, notifications/cancelled, ...)
-        };
-        let params = msg.get("params").cloned().unwrap_or(json!({}));
-        Some(match self.request(method, &params) {
-            Ok(mut result) => {
-                modern_result_fields(method, &params, &mut result);
-                json!({"jsonrpc": "2.0", "id": id, "result": result})
-            }
-            Err((code, m)) => error(id, code, &m),
-        })
+        craft_jsonrpc::process_legacy(
+            msg,
+            |req| {
+                let params = req.params.cloned().unwrap_or_else(|| json!({}));
+                let mut result = self.request(req.method, &params).map_err(|(code, message)| craft_jsonrpc::RpcError::new(code, message))?;
+                modern_result_fields(req.method, &params, &mut result);
+                Ok(result)
+            },
+            |_| {},
+        )
     }
 
     /// Handle one line of input; `None` when no reply is due.
@@ -304,5 +288,5 @@ pub(crate) fn modern_result_fields(method: &str, params: &Value, result: &mut Va
 }
 
 fn error(id: Value, code: i64, message: &str) -> Value {
-    json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}})
+    craft_jsonrpc::error_response(id, craft_jsonrpc::RpcError::new(code, message))
 }

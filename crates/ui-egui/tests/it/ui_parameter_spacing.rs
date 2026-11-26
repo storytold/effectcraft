@@ -33,7 +33,7 @@ fn click(h: &mut Harness<'_, EffectcraftApp>, id: &str) {
 #[test]
 fn fixed_compact_rows_preserve_checkbox_and_point_hit_targets() {
     let (a, lid, checkbox, point) = setup();
-    let mut h = Harness::builder().with_size(vec2(1500.0, 1000.0)).build_eframe(|_| a);
+    let mut h = Harness::builder().with_size(vec2(1500.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| a);
     h.run_steps(4);
     let fx = h.state().auto.find(&format!("effectControls.row.{checkbox}")).unwrap().rect;
     let tl = h.state().auto.find(&format!("timeline.prop.{checkbox}.row")).unwrap().rect;
@@ -66,7 +66,7 @@ fn nested_groups_keep_indentation_value_alignment_and_effect_gaps_at_fixed_compa
     a.show_panel(PanelKind::EffectControls);
     a.ui.fx_closed.extend(closed);
     a.ui.timeline.search = "Temperature".into();
-    let mut h = Harness::builder().with_size(vec2(1500.0, 1800.0)).build_eframe(|_| a);
+    let mut h = Harness::builder().with_size(vec2(1500.0, 1800.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| a);
     h.run_steps(4);
     let rect = |h: &Harness<'_, EffectcraftApp>, id: String| h.state().auto.find(&id).unwrap_or_else(|| panic!("no {id}")).rect;
     let name_x = |kind: &str, uid| rect(&h, format!("effectControls.{kind}.{uid}.name"))[0];

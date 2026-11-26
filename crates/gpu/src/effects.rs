@@ -411,8 +411,12 @@ fn drop_shadow(e: &mut Enc, ctx: &EffectCtx, mut b: GBuf) -> Option<GBuf> {
     let dist = ctx.params.f("distance") * b.scale;
     let soft = ctx.params.f("softness") * b.scale;
     let only = ctx.params.b("shadowOnly");
-    let pad = (dist + soft * 1.5).ceil() as u32 + 2;
+    let pad = effectcraft_effects::drop_shadow_pad(dist, soft);
     if !ctx.adjustment {
+        // A margin cut to the pixel budget: the CPU blurs on past the buffer's edge (#3464).
+        if soft > 0.0 && effectcraft_effects::pad_within_budget(b.img.width, b.img.height, pad) < pad {
+            return None;
+        }
         b.pad(e, pad)?;
     }
     let (dx, dy) = (dir.sin() * dist, -dir.cos() * dist);

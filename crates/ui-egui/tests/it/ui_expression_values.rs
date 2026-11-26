@@ -77,7 +77,7 @@ fn setup() -> (Harness<'static, EffectcraftApp>, Ids) {
     app.show_panel(PanelKind::EffectControls);
     app.ui.timeline.open_layers.insert(l);
     app.ui.timeline.open_groups.insert(transform);
-    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_eframe(|_| app);
+    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app);
     h.run_steps(4);
     (h, ids)
 }

@@ -225,7 +225,10 @@ fn main() {
 fn play(session: effectcraft_engine::Session, cid: ItemId, secs: f64, gpu: bool) {
     use effectcraft_ui_egui::{ControlRequest, EffectcraftApp};
     let (tx, rx) = std::sync::mpsc::channel::<ControlRequest>();
-    let builder = egui_kittest::Harness::builder().with_size(egui::vec2(1920.0, 1200.0)).with_pixels_per_point(1.0);
+    let builder = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1920.0, 1200.0))
+        .with_pixels_per_point(1.0)
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless);
     let builder = if gpu { builder.wgpu() } else { builder };
     let mut h = builder.build_eframe(move |_| EffectcraftApp::new(session).with_control(rx));
     {

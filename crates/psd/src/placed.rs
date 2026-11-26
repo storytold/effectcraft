@@ -14,14 +14,7 @@ use crate::{Pixels, SmartObject};
 
 /// The most pixels a baked smart object may have: 2^24 (256 MiB as float RGBA). The size comes
 /// from the file's transform, which is untrusted.
-pub const MAX_BAKE_PIXELS: u64 = 1 << 24;
-
-/// The bake's rasterising budget, in bounding-box pixels visited over all mesh triangles, as a
-/// multiple of the output pixel count. A sane warp visits about 2× the output; a hostile mesh
-/// that makes every triangle cover the whole output would visit thousands of times more.
-const BAKE_WORK_FACTOR: u64 = 8;
-/// The smallest budget, so tiny outputs are never refused for rounding at the triangle edges.
-const MIN_BAKE_WORK: u64 = 1 << 20;
+pub const MAX_BAKE_PIXELS: u64 = craft_psd::smart::MAX_BAKE_PIXELS;
 
 /// A placed layer's warp.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -61,14 +54,40 @@ pub(crate) fn floats(v: Option<&DValue>) -> Vec<f64> {
     }
 }
 
-/// The eight numbers of a transform entry (`Trnf`, `nonAffineTransform`), when it has exactly eight.
-pub(crate) fn eight(d: &Descriptor, key: &str) -> Option<[f64; 8]> {
-    floats(d.get(key)).try_into().ok()
+pub(crate) fn from_craft_smart(s: craft_psd::smart::SmartObject) -> SmartObject {
+    SmartObject { uuid: s.uuid, quad: s.quad, size: s.size, warp: s.warp.map(from_craft_warp) }
 }
 
-/// The corner quad (top-left, top-right, bottom-right, bottom-left) from x0 y0 … x3 y3.
-pub(crate) fn quad_from(t: [f64; 8]) -> [[f64; 2]; 4] {
-    [[t[0], t[1]], [t[2], t[3]], [t[4], t[5]], [t[6], t[7]]]
+fn from_craft_warp(w: craft_psd::smart::Warp) -> Warp {
+    Warp {
+        style: w.style,
+        bend: w.bend,
+        horizontal: w.horizontal,
+        vertical: w.vertical,
+        rotate_vertical: w.rotate_vertical,
+        bounds: w.bounds,
+        cols: w.cols,
+        rows: w.rows,
+        mesh: w.mesh,
+    }
+}
+
+fn to_craft_smart(s: &SmartObject) -> craft_psd::smart::SmartObject {
+    craft_psd::smart::SmartObject { uuid: s.uuid.clone(), quad: s.quad, size: s.size, warp: s.warp.as_ref().map(to_craft_warp) }
+}
+
+fn to_craft_warp(w: &Warp) -> craft_psd::smart::Warp {
+    craft_psd::smart::Warp {
+        style: w.style.clone(),
+        bend: w.bend,
+        horizontal: w.horizontal,
+        vertical: w.vertical,
+        rotate_vertical: w.rotate_vertical,
+        bounds: w.bounds,
+        cols: w.cols,
+        rows: w.rows,
+        mesh: w.mesh.clone(),
+    }
 }
 
 impl Warp {
@@ -111,7 +130,13 @@ impl Warp {
 
     /// The warp of a content point (content pixels → content pixels).
     pub fn apply(&self, p: [f64; 2], w: f64, h: f64) -> [f64; 2] {
-        let [l, t, r, b] = if self.bounds[2] > self.bounds[0] && self.bounds[3] > self.bounds[1] { self.bounds } else { [0.0, 0.0, w, h] };
+        // Keep the local mapping facade aligned with the shared bake evaluator.
+        let valid_bounds = self.bounds.iter().all(|x| x.is_finite())
+            && (self.bounds[2] - self.bounds[0]).is_finite()
+            && self.bounds[2] > self.bounds[0]
+            && (self.bounds[3] - self.bounds[1]).is_finite()
+            && self.bounds[3] > self.bounds[1];
+        let [l, t, r, b] = if valid_bounds { self.bounds } else { [0.0, 0.0, w, h] };
         let (bw, bh) = (r - l, b - t);
         let (u, v) = ((p[0] - l) / bw, (p[1] - t) / bh);
         if self.style == "warpCustom" {
@@ -313,105 +338,10 @@ impl SmartObject {
     /// `k` pixels per document pixel (into `size` pixels when given; see [`Self::placed_size`]).
     /// Returns the pixels and their document-space origin. `None` when the content is empty or
     /// the baked image would exceed [`MAX_BAKE_PIXELS`] or the mesh needs more rasterising work than
-    /// the budget allows (see [`BAKE_WORK_FACTOR`]).
+    /// the budget allows.
     pub fn render_placed(&self, content: &Pixels, k: f64, size: Option<(u32, u32)>) -> Option<(Pixels, [f64; 2])> {
-        let (cw, ch) = (content.width as f64, content.height as f64);
-        if content.width == 0 || content.height == 0 {
-            return None;
-        }
-        // The quad is solved once for the bounds, the size and the whole grid.
-        let m = square_to_quad(self.quad);
-        let bb = self.bounds_with(&m, cw, ch);
-        let (ow, oh) = match size {
-            Some((w, h)) => (w.max(1), h.max(1)),
-            None => size_for(bb, k),
-        };
-        let (ow, oh) = (ow as usize, oh as usize);
-        let count = ow.checked_mul(oh).filter(|&c| c as u64 <= MAX_BAKE_PIXELS)?;
-        // A forward grid, filled triangle by triangle with inverse barycentric sampling.
-        let n = 48usize;
-        let mut dst = Vec::with_capacity((n + 1) * (n + 1));
-        let mut src = Vec::with_capacity((n + 1) * (n + 1));
-        for j in 0..=n {
-            for i in 0..=n {
-                let s = [i as f64 / n as f64 * cw, j as f64 / n as f64 * ch];
-                let d = self.map_with(&m, s, cw, ch);
-                dst.push([(d[0] - bb[0]) * k, (d[1] - bb[1]) * k]);
-                src.push(s);
-            }
-        }
-        let mut out: Vec<[f32; 4]> = Vec::new();
-        out.try_reserve_exact(count).ok()?;
-        out.resize(count, [0.0; 4]);
-        let sample = |x: f64, y: f64| -> [f32; 4] {
-            let (fx, fy) = ((x - 0.5).clamp(0.0, cw - 1.0), (y - 0.5).clamp(0.0, ch - 1.0));
-            let (x0, y0) = (fx.floor() as usize, fy.floor() as usize);
-            let (x1, y1) = ((x0 + 1).min(content.width as usize - 1), (y0 + 1).min(content.height as usize - 1));
-            let (a, b) = ((fx - x0 as f64) as f32, (fy - y0 as f64) as f32);
-            let at = |x: usize, y: usize| {
-                let p = content.data[y * content.width as usize + x];
-                [p[0] * p[3], p[1] * p[3], p[2] * p[3], p[3]]
-            };
-            let (p00, p10, p01, p11) = (at(x0, y0), at(x1, y0), at(x0, y1), at(x1, y1));
-            let mut o = [0.0; 4];
-            for c in 0..4 {
-                o[c] = (p00[c] * (1.0 - a) + p10[c] * a) * (1.0 - b) + (p01[c] * (1.0 - a) + p11[c] * a) * b;
-            }
-            o
-        };
-        let idx = |i: usize, j: usize| j * (n + 1) + i;
-        // A sane mesh's triangles each span about one grid cell (ow/n by oh/n), rounded out to
-        // whole pixels. A thin output (16384×1) stacks every grid row onto the same pixel row, so
-        // allow each of the 2n² triangles about two cells' extent along each axis, with margin.
-        let rounding = (4 * n as u64).saturating_mul((ow as u64).saturating_add(oh as u64).saturating_add(n as u64));
-        let budget = (count as u64).saturating_mul(BAKE_WORK_FACTOR).max(MIN_BAKE_WORK).saturating_add(rounding);
-        let mut work = 0u64;
-        for j in 0..n {
-            for i in 0..n {
-                for tri in [[idx(i, j), idx(i + 1, j), idx(i + 1, j + 1)], [idx(i, j), idx(i + 1, j + 1), idx(i, j + 1)]] {
-                    let [a, b, c] = tri.map(|t| dst[t]);
-                    let den = (b[1] - c[1]) * (a[0] - c[0]) + (c[0] - b[0]) * (a[1] - c[1]);
-                    if den.abs() < 1e-12 {
-                        continue;
-                    }
-                    // Loop-invariant per triangle: the source corners and the barycentric coefficients.
-                    let [sa, sb, sc] = tri.map(|t| src[t]);
-                    let (l1y, l1x) = (b[1] - c[1], c[0] - b[0]);
-                    let (l2y, l2x) = (c[1] - a[1], a[0] - c[0]);
-                    let x0 = a[0].min(b[0]).min(c[0]).floor().max(0.0) as usize;
-                    let x1 = (a[0].max(b[0]).max(c[0]).ceil() as usize).min(ow);
-                    let y0 = a[1].min(b[1]).min(c[1]).floor().max(0.0) as usize;
-                    let y1 = (a[1].max(b[1]).max(c[1]).ceil() as usize).min(oh);
-                    work = work.saturating_add((x1.saturating_sub(x0) as u64).saturating_mul(y1.saturating_sub(y0) as u64));
-                    if work > budget {
-                        return None;
-                    }
-                    for y in y0..y1 {
-                        for x in x0..x1 {
-                            let (px, py) = (x as f64 + 0.5, y as f64 + 0.5);
-                            let l1 = (l1y * (px - c[0]) + l1x * (py - c[1])) / den;
-                            let l2 = (l2y * (px - c[0]) + l2x * (py - c[1])) / den;
-                            let l3 = 1.0 - l1 - l2;
-                            if l1 < -1e-9 || l2 < -1e-9 || l3 < -1e-9 {
-                                continue;
-                            }
-                            let sx = sa[0] * l1 + sb[0] * l2 + sc[0] * l3;
-                            let sy = sa[1] * l1 + sb[1] * l2 + sc[1] * l3;
-                            out[y * ow + x] = sample(sx, sy);
-                        }
-                    }
-                }
-            }
-        }
-        // Back to straight alpha.
-        for p in &mut out {
-            if p[3] > 0.0 {
-                for c in 0..3 {
-                    p[c] /= p[3];
-                }
-            }
-        }
-        Some((Pixels { width: ow as u32, height: oh as u32, data: out }, [bb[0], bb[1]]))
+        let (out, origin) = to_craft_smart(self).render_placed_pixels(content.width, content.height, &content.data, k, size)?;
+        Some((Pixels { width: out.width, height: out.height, data: out.data }, origin))
     }
 }
 

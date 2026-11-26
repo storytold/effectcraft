@@ -20,6 +20,7 @@ fn app() -> EffectcraftApp {
 /// Press `key` with `modifiers` and run the shortcut dispatcher on it.
 fn press(app: &mut EffectcraftApp, key: Key, modifiers: Modifiers) {
     let ctx = egui::Context::default();
+    effectcraft_ui_egui::framework::install_headless(&ctx);
     let raw = egui::RawInput { events: vec![egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers }], ..Default::default() };
     let mut output = ctx.run_ui(raw, |ui| effectcraft_ui_egui::menus::handle_shortcuts(app, ui.ctx()));
     output.textures_delta.clear();

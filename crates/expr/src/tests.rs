@@ -1929,6 +1929,121 @@ fn layer_control_property_stands_for_its_layer() {
 }
 
 #[test]
+fn an_empty_layer_control_stands_for_its_own_layer() {
+    // In After Effects a Layer Control set to None gives the layer the effect is on: truthy, named
+    // and callable as that layer. Rigs test it with `L ? … : …` and then read `L.sourceRectAtTime`.
+    let mut f = fx();
+    let spec = effectcraft_effects::find("ec.control.layer").unwrap();
+    let mut map = group_push(&mut f.p, |ids| effectcraft_effects::instantiate(spec, ids, "Map", [20.0, 20.0]));
+    map.prop_mut("layer").unwrap().value = Value::Layer(None);
+    f.p.comp_mut(f.cid).unwrap().layers[0].props.sub_mut("effects").unwrap().children.push(map.into());
+    assert_close!(f.num("effect('Map')(1) ? 1 : 0", 0.0), 1.0);
+    assert_close!(f.num("effect('Map')(1).name == thisLayer.name ? 1 : 0", 0.0), 1.0);
+    assert_close!(f.num("effect('Map')(1).index", 0.0), 1.0);
+    assert_close!(f.num("var L = effect('Map')(1); L ? L.transform.position[0] : -1", 0.0), 50.0);
+    assert_close!(f.num("effect('Map')(1).sourceRectAtTime(time).width == thisLayer.sourceRectAtTime(time).width ? 1 : 0", 0.0), 1.0);
+}
+
+#[test]
+fn a_layer_parameters_own_expression_reads_its_layer() {
+    // An expression on the layer parameter itself: `thisProperty.value` and
+    // `thisProperty.valueAtTime(time)` give the layer, as reads from other properties do.
+    let mut f = fx();
+    let spec = effectcraft_effects::find("ec.control.layer").unwrap();
+    let mut empty = group_push(&mut f.p, |ids| effectcraft_effects::instantiate(spec, ids, "Empty", [20.0, 20.0]));
+    empty.prop_mut("layer").unwrap().value = Value::Layer(None);
+    let mut set = group_push(&mut f.p, |ids| effectcraft_effects::instantiate(spec, ids, "Set", [20.0, 20.0]));
+    set.prop_mut("layer").unwrap().value = Value::Layer(Some(f.b.0));
+    let fx_group = f.p.comp_mut(f.cid).unwrap().layers[0].props.sub_mut("effects").unwrap();
+    fx_group.children.push(empty.into());
+    fx_group.children.push(set.into());
+    let n = f.p.comp(f.cid).unwrap().layers[0].props.sub("effects").unwrap().children.len();
+    let (empty_path, set_path) = (format!("effects/#{}/layer", n - 1), format!("effects/#{n}/layer"));
+    // Each expression throws unless it reads the right layer's name.
+    for (path, read, want) in [
+        (&empty_path, "thisProperty.value", "A"),
+        (&empty_path, "thisProperty.valueAtTime(time)", "A"),
+        (&set_path, "thisProperty.value", "B"),
+        (&set_path, "thisProperty.valueAtTime(time)", "B"),
+    ] {
+        let e = format!("if ({read}.name !== '{want}') throw new Error('read ' + {read}); value");
+        f.ev(f.a, path, &e, 0.0).unwrap_or_else(|err| panic!("{path} {read}: {err}"));
+        // After posterizeTime moves the sample time, `value` already holds the layer.
+        let e = format!("posterizeTime(1); if ({read}.name !== '{want}') throw new Error('read ' + {read}); value");
+        f.ev(f.a, path, &e, 0.5).unwrap_or_else(|err| panic!("posterized {path} {read}: {err}"));
+    }
+}
+
+#[test]
+fn a_collapsed_essential_override_is_the_history_an_expression_reads() {
+    use effectcraft_project::essential::{self, EgControl, EgKind, EssentialGraphics};
+    use effectcraft_project::{Expression, GroupKind};
+
+    let mut p = Project::default();
+    let mut inner = Comp::new(64, 32, FrameRate::FPS_30, Tick::from_seconds_f64(2.0));
+    let mut target = solid(&mut p, &inner, "Target", [1.0, 1.0, 1.0], 64, 32);
+    let opacity = target.props.prop_mut(OPA).unwrap();
+    opacity.keys = vec![Keyframe::new(secs(0.0), Value::Scalar(0.0)), Keyframe::new(secs(1.0), Value::Scalar(100.0))];
+    opacity.expr = Some(Expression {
+        text: "thisProperty.valueAtTime(0) + thisProperty.numKeys + thisProperty.key(1).value + thisProperty.nearestKey(0.9).value".into(),
+        enabled: true,
+    });
+    let target_id = target.id;
+    let opacity_id = opacity.uid;
+    inner.layers = vec![target].into();
+    inner.essential = Some(EssentialGraphics {
+        controls: vec![EgControl {
+            id: 1,
+            name: "Opacity".into(),
+            kind: EgKind::Property { layer: target_id, prop: opacity_id, links: vec![] },
+            as_type: None,
+        }],
+        ..Default::default()
+    });
+    let inner_id = p.add_item("Inner", Label::Sandstone, None, ItemKind::Comp(inner.into()));
+
+    let mut outer = Comp::new(64, 32, FrameRate::FPS_30, Tick::from_seconds_f64(2.0));
+    let mut instance = build::layer(&mut p, &outer, "Inner", LayerSource::Comp { item: inner_id }, (64, 32), None);
+    let mut next = p.next_id;
+    let mut ids = Ids(&mut next);
+    let mut control = ids.prop(&essential::match_id(1), "Opacity", Value::Scalar(20.0));
+    control.keys = vec![Keyframe::new(secs(0.0), Value::Scalar(20.0)), Keyframe::new(secs(1.0), Value::Scalar(80.0))];
+    let mut group = ids.group(essential::GROUP, "Essential Properties");
+    group.kind = GroupKind::Essential { overridden: vec![control.uid] };
+    group.children.push(control.into());
+    instance.props.children.push(group.into());
+    p.next_id = next;
+    instance.switches.collapse = true;
+    outer.layers = vec![instance].into();
+    let outer_id = p.add_item("Outer", Label::Sandstone, None, ItemKind::Comp(outer.into()));
+
+    // The flattened path replaces the target property's keys with the instance override's.
+    let ctx = EvalCtx::new(&p, outer_id, p.comp(outer_id).unwrap(), secs(0.25));
+    let outer_layer = &ctx.comp.layers[0];
+    let overrides = effectcraft_render::essential_overrides(&ctx, outer_layer);
+    let flat = essential::with_overrides(&p, inner_id, &overrides).unwrap();
+    let mut flat_ctx = EvalCtx::new(&flat, inner_id, flat.comp(inner_id).unwrap(), secs(0.25));
+    flat_ctx.expr = Some(&Expressions);
+    let flat_target = flat_ctx.comp.layer(target_id).unwrap();
+    let flat_value = flat_ctx.value(flat_target, flat_target.props.prop(OPA).unwrap()).as_f64();
+
+    // The collapsed path carries the same history in its override. An expression on the target
+    // reads that effective history, just as it does on the flattened path.
+    let mut r = Renderer::new(&p, &NoFootage, RenderOpts::default());
+    r.expr = Some(&Expressions);
+    let mut collapsed_ctx = EvalCtx::new(&p, outer_id, p.comp(outer_id).unwrap(), secs(0.25));
+    collapsed_ctx.expr = Some(&Expressions);
+    let outer_layer = &collapsed_ctx.comp.layers[0];
+    let collapsed = r.collapsed(&collapsed_ctx, outer_layer).expect("the precomp collapses");
+    let (_, nested_ctx) = r.collapse_into(&collapsed_ctx, outer_layer, &collapsed, 1.0).unwrap();
+    let nested_target = nested_ctx.comp.layer(target_id).unwrap();
+    let collapsed_value = nested_ctx.value(nested_target, nested_target.props.prop(OPA).unwrap()).as_f64();
+
+    assert_close!(flat_value, 122.0);
+    assert_close!(collapsed_value, flat_value);
+}
+
+#[test]
 fn time_to_frames_rounds_durations_away_from_zero() {
     let f = fx();
     // Adobe's public expression reference distinguishes durations from absolute times.

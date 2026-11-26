@@ -49,9 +49,7 @@ fn eps_with_aliased_operators_device_queries_and_embedded_data_draws() {
 fn eps_filter_on_a_string_source_does_not_skip_the_program() {
     let square = "1 0 0 setrgbcolor 50 25 moveto 150 25 lineto 150 75 lineto 50 75 lineto closepath fill\n";
     let img = "gsave 1 1 8 [1 0 0 1 0 0] (FF) /ASCIIHexDecode filter image grestore\n";
-    // Images aren't drawn yet, so this parses without `eps`'s nothing-skipped check.
-    let doc = parse(format!("%!PS-Adobe-3.0 EPSF-3.0\n%%BoundingBox: 0 0 200 100\n{img}{square}").as_bytes()).unwrap();
-    assert_eq!(doc.skipped, ["image"]);
+    let doc = eps(format!("{img}{square}").as_bytes());
     assert!(coverage(&render(&doc), 50, 25, 150, 75) > 4900.0, "drawing after an image read from a string");
 }
 
@@ -642,4 +640,58 @@ fn eps_unembedded_reencoded_accent_uses_bundled_glyph() {
     let (ia, ib) = (coverage(&a, 0, 0, 200, 100), coverage(&b, 0, 0, 200, 100));
     assert!(ia > 50.0 && (ia - ib).abs() < 1.0, "EPS accent {ia} vs PDF accent {ib}");
     assert_eq!(ink_x(&a), ink_x(&b));
+}
+
+#[test]
+fn eps_images_are_drawn() {
+    // Hexadecimal data read by a procedure; the program goes on after it.
+    let doc = eps(b"gsave 100 50 scale 2 1 8 [2 0 0 -1 0 1] { currentfile 6 string readhexstring pop } false 3 colorimage\nFF0000 00FF00\ngrestore 0 0 1 setrgbcolor 150 0 10 10 rectfill\n");
+    let img = render(&doc);
+    let (red, green) = (img.get(25, 75), img.get(75, 75));
+    assert!(red[0] > 0.9 && red[1] < 0.1 && red[3] > 0.99, "{red:?}");
+    assert!(green[1] > 0.9 && green[0] < 0.1 && green[3] > 0.99, "{green:?}");
+    assert!(img.get(155, 95)[2] > 0.99, "drawing continues after the image data");
+
+    // A stencil paints the current colour where its sample is 0.
+    let doc = eps(b"1 0 0 setrgbcolor 100 50 scale 2 1 false [2 0 0 -1 0 1] {<40>} imagemask\n");
+    let img = render(&doc);
+    assert!(img.get(25, 75)[0] > 0.9 && img.get(25, 75)[3] > 0.9, "{:?}", img.get(25, 75));
+    assert_eq!(img.get(75, 75)[3], 0.0);
+}
+
+#[test]
+fn cmyk_converts_as_the_measured_chart_does() {
+    // Measured from After Effects' rendering of a CMYK chart, within 3 of 255.
+    for (cmyk, want) in [
+        ([0.0, 0.0, 0.0, 0.0], [255.0, 255.0, 255.0]),
+        ([0.0, 0.0, 0.0, 1.0], [0.0, 0.0, 0.0]),
+        ([0.0, 0.25, 0.0, 0.0], [255.0, 205.0, 229.0]),
+        ([0.0, 0.1, 0.0, 0.0], [255.0, 235.0, 244.0]),
+    ] {
+        let got = crate::color::cmyk_to_rgb(cmyk[0], cmyk[1], cmyk[2], cmyk[3]).map(|v| v * 255.0);
+        for (g, w) in got.iter().zip(want) {
+            assert!((g - w).abs() < 3.0, "{cmyk:?}: {got:?} vs {want:?}");
+        }
+    }
+}
+
+#[test]
+fn a_prolog_keeps_the_built_in_cmyk_conversion() {
+    // The idiom of Illustrator's EPS prolog: define the operator only when it does not exist.
+    let doc = eps(b"/setcmykcolor where { pop } { /setcmykcolor { pop pop pop pop 0 1 0 setrgbcolor } def } ifelse 0 1 1 0 setcmykcolor 0 0 10 10 rectfill\n");
+    let c = render(&doc).get(5, 95);
+    assert!(c[0] > 0.9 && c[1] < 0.3, "{c:?}");
+    let doc = eps(b"0.1 0.2 0.3 0.4 setcmykcolor currentcmykcolor 0.4 eq exch 0.3 eq and exch 0.2 eq and exch 0.1 eq and { 0 0 10 10 rectfill } if\n");
+    assert_eq!(shape_names(&doc).len(), 1);
+}
+
+#[test]
+fn eps_restore_undoes_dictionary_changes() {
+    // Illustrator's prolog counts graphics states in a dictionary and relies on `restore` to
+    // take the count back down.
+    let doc = eps(b"/w 10 def /d 1 dict def d /v 1 put save /w 40 def d /v 2 put restore 0 0 w 10 rectfill d /v get 1 eq { 100 0 10 10 rectfill } if\n");
+    let img = render(&doc);
+    assert_eq!(img.get(20, 95)[3], 0.0, "w is 10 again");
+    assert!(img.get(5, 95)[3] > 0.99);
+    assert!(img.get(105, 95)[3] > 0.99, "d's entry is 1 again");
 }

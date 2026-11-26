@@ -1,6 +1,7 @@
 //! The crate's integration tests, one binary (each module is a former `tests/<name>.rs`).
 
 mod aac_layout;
+mod avi_mjpeg;
 mod downmix;
 mod exif_orientation;
 mod exr_golden;

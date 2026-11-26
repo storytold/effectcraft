@@ -1,8 +1,6 @@
 use super::limits::{Error, Result};
-use super::model::{
-    Adjustment, ChannelInfo, ColorMode, Layer, LayerMask, LinkedFile, MAX_GROUP_DEPTH, Node, Rect, Section, SmartObject, SubPath, TextInfo, VectorMask,
-};
-use super::{Psd, Reader, descriptor, engine_data, placed};
+use super::model::{Adjustment, ChannelInfo, ColorMode, Layer, LayerMask, LinkedFile, MAX_GROUP_DEPTH, Node, Rect, Section, SubPath, TextInfo, VectorMask};
+use super::{Psd, descriptor, engine_data, placed};
 use std::sync::Arc;
 
 /// Whether `bytes` start like a Photoshop document.
@@ -70,7 +68,7 @@ impl Psd {
         }
         if let Some(info) = &file.layer_info {
             psd.merged_alpha = info.merged_alpha;
-            psd.layers = info.layers.iter().enumerate().map(|(i, rec)| psd.layer(rec, i, splice)).collect();
+            psd.layers = info.layers.iter().enumerate().map(|(i, rec)| psd.layer(rec, i, splice)).collect::<Result<Vec<_>>>()?;
         }
         for b in &file.global_blocks {
             if let Some(stored) = b.stored.as_ref().filter(|_| linked(&b.key, 0)) {
@@ -83,7 +81,7 @@ impl Psd {
 
     /// One layer record of the model, its additional information read into [`Layer`].
     /// `splice` maps craft-psd's offsets back into `self.data` (see [`read_file`]).
-    fn layer(&self, rec: &craft_psd::LayerRecord, index: usize, splice: Splice) -> Layer {
+    fn layer(&self, rec: &craft_psd::LayerRecord, index: usize, splice: Splice) -> Result<Layer> {
         let channels = rec
             .channels
             .iter()
@@ -104,7 +102,7 @@ impl Psd {
             hidden: rec.flags.hidden(),
             protect_transparency: rec.flags.transparency_protected(),
             channels,
-            name: mac_roman_string(&rec.name),
+            name: crate::read::decode_mac_roman(&rec.name),
             ..Default::default()
         };
         if let craft_psd::MaskData::Mask(m) = &rec.mask {
@@ -113,10 +111,15 @@ impl Psd {
         }
         for b in &rec.blocks {
             l.keys.push(b.key);
-            // A malformed block only loses that block's information.
-            let _ = self.layer_block(&mut l, &b.key, &b.data);
+            // A malformed optional block only loses that block's information.
+            // Unsupported modern placement geometry must not silently become an
+            // unwarped layer or fall back to a less expressive PlLd in either order.
+            match self.layer_block(&mut l, b) {
+                Err(e @ Error::Unsupported(_)) if matches!(&b.key, b"SoLd" | b"SoLE") => return Err(e),
+                _ => {}
+            }
         }
-        l
+        Ok(l)
     }
 
     /// The embedded bytes of linked file `uuid`.
@@ -137,41 +140,53 @@ impl Psd {
         }
     }
 
-    fn layer_block(&self, l: &mut Layer, key: &[u8; 4], b: &[u8]) -> Result<()> {
-        let mut r = Reader::new(b);
+    fn layer_block(&self, l: &mut Layer, block: &craft_psd::tagged::TaggedBlock) -> Result<()> {
+        let key = &block.key;
+        let b = block.data.as_slice();
         match key {
             b"luni" => {
-                let name = descriptor::read_unicode(&mut r)?;
+                // Shared framing rejects truncated counts/payloads before allocation. Only
+                // the first record belongs to this block; UTF-16 repair and naming stay local.
+                let units = craft_psd::unicode_names::records(b).next().ok_or(Error::Truncated)?;
+                let mut name: String = char::decode_utf16(units.as_chunks::<2>().0.iter().map(|v| u16::from_be_bytes(*v)))
+                    .map(|v| v.unwrap_or(char::REPLACEMENT_CHARACTER))
+                    .collect();
+                name.truncate(name.trim_end_matches('\0').len());
                 if !name.is_empty() {
                     l.name = name;
                 }
             }
-            b"lyid" => l.id = Some(r.u32()?),
-            b"iOpa" => l.fill_opacity = r.u8()?,
+            b"lyid" | b"iOpa" => {
+                use craft_psd::tagged::BlockData;
+                // Borrow the original block; short fields keep the previous value,
+                // while complete prefixes retain the shared parser's trailing-byte policy.
+                match block.parsed().transpose().map_err(|e| error(&e))? {
+                    Some(BlockData::LayerId(id)) => l.id = Some(id),
+                    Some(BlockData::FillOpacity(opacity)) => l.fill_opacity = opacity,
+                    _ => {}
+                }
+            }
             b"lsct" | b"lsdk" => {
-                l.section = match r.u32()? {
-                    1 => Section::OpenFolder,
-                    2 => Section::ClosedFolder,
-                    3 => Section::Divider,
+                use craft_psd::tagged::{SectionDivider, SectionType};
+                let divider = SectionDivider::from_bytes_recovering_blend(b).map_err(|e| error(&e))?;
+                l.section = match divider.kind {
+                    SectionType::OpenFolder => Section::OpenFolder,
+                    SectionType::ClosedFolder => Section::ClosedFolder,
+                    SectionType::BoundingDivider => Section::Divider,
                     _ => Section::Layer,
                 };
-                if b.len() >= 12 && &b[4..8] == b"8BIM" {
-                    l.blend.copy_from_slice(&b[8..12]);
+                if let Some(blend) = divider.blend_mode {
+                    l.blend = blend.key();
                 }
             }
             b"TySh" => {
-                let _ver = r.u16()?;
-                let mut t = [0.0; 6];
-                for v in &mut t {
-                    *v = r.f64()?;
-                }
+                let prefix = craft_psd::text::TypeLayerPrefix::from_bytes_with_limits(b, descriptor::PARSE_LIMITS).map_err(descriptor::desc_err)?;
+                let mut t = prefix.transform;
                 // A transform with NaN/inf is unusable: fall back to the identity.
                 if t.iter().any(|v| !v.is_finite()) {
                     t = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
                 }
-                let _text_ver = r.u16()?;
-                let _desc_ver = r.u32()?;
-                let d = descriptor::read_descriptor(&mut r)?;
+                let d = descriptor::from_craft_descriptor(prefix.descriptor);
                 let text = d.text("Txt ").unwrap_or_default().replace("\r\n", "\n").replace('\r', "\n");
                 let text = text.strip_suffix('\n').map(str::to_string).unwrap_or(text);
                 let style = d.raw("EngineData").map(|e| engine_data::text_style(&engine_data::parse_lossy(e))).unwrap_or_default();
@@ -179,130 +194,76 @@ impl Psd {
                     d.obj("bounds").or_else(|| d.obj("boundingBox")).and_then(|o| Some([o.num("Left")?, o.num("Top ")?, o.num("Rght")?, o.num("Btom")?]));
                 l.text = Some(TextInfo { text, transform: t, style, bounds });
             }
-            b"lfx2" => {
-                let _ver = r.u32()?;
-                let _dver = r.u32()?;
-                l.effects = Some(descriptor::read_descriptor(&mut r)?);
-            }
-            b"SoCo" => {
-                let _ver = r.u32()?;
-                let d = descriptor::read_descriptor(&mut r)?;
-                l.fill = d.color("Clr ");
-            }
-            b"nvrt" => l.adjustment = Some(Adjustment::Invert),
-            b"brit" => {
-                let brightness = r.i16()? as f64;
-                let contrast = r.i16()? as f64;
-                if l.adjustment.is_none() {
-                    l.adjustment = Some(Adjustment::BrightnessContrast { brightness, contrast, legacy: true });
+            b"lfx2" | b"SoCo" | b"CgEd" => {
+                if let Some(parsed) = block.descriptor_prefix_recovering_versions_with_limits(descriptor::PARSE_LIMITS) {
+                    let d = descriptor::from_craft_descriptor(parsed.map_err(descriptor::desc_err)?);
+                    match key {
+                        b"lfx2" => l.effects = Some(d),
+                        b"SoCo" => l.fill = d.color("Clr "),
+                        _ => {
+                            l.adjustment = Some(Adjustment::BrightnessContrast {
+                                brightness: d.num("Brgh").unwrap_or(0.0),
+                                contrast: d.num("Cntr").unwrap_or(0.0),
+                                legacy: d.bool("useLegacy").unwrap_or(false),
+                            });
+                        }
+                    }
                 }
             }
-            b"CgEd" => {
-                let _ver = r.u32()?;
-                let d = descriptor::read_descriptor(&mut r)?;
-                l.adjustment = Some(Adjustment::BrightnessContrast {
-                    brightness: d.num("Brgh").unwrap_or(0.0),
-                    contrast: d.num("Cntr").unwrap_or(0.0),
-                    legacy: d.bool("useLegacy").unwrap_or(false),
-                });
-            }
-            b"hue2" | b"hue " => {
-                let _ver = r.u16()?;
-                let colorize = r.u8()? != 0;
-                r.skip(1)?;
-                let ch = (r.i16()? as f64, r.i16()? as f64, r.i16()? as f64);
-                let m = (r.i16()? as f64, r.i16()? as f64, r.i16()? as f64);
-                let (hue, saturation, lightness) = if colorize { ch } else { m };
-                l.adjustment = Some(Adjustment::HueSaturation { hue, saturation, lightness, colorize });
-            }
-            b"levl" => {
-                let _ver = r.u16()?;
-                let (ib, iw, ob, ow, g) = (r.i16()?, r.i16()?, r.i16()?, r.i16()?, r.i16()?);
-                l.adjustment =
-                    Some(Adjustment::Levels { in_black: ib as f64, in_white: iw as f64, gamma: g as f64 / 100.0, out_black: ob as f64, out_white: ow as f64 });
-            }
-            b"expA" => {
-                let _ver = r.u16()?;
-                let mut finite = |default: f64| -> Result<f64> {
-                    let v = f64::from(r.f32()?);
-                    Ok(if v.is_finite() { v } else { default })
-                };
-                let exposure = finite(0.0)?;
-                let offset = finite(0.0)?;
-                let gamma = finite(1.0)?;
-                l.adjustment = Some(Adjustment::Exposure { exposure, offset, gamma });
+            b"nvrt" => l.adjustment = Some(Adjustment::Invert),
+            b"brit" | b"hue2" | b"hue " | b"levl" | b"expA" => {
+                if let Some(adjustment) = craft_psd::adjust::Adjustment::from_block(key, b) {
+                    let adjustment = adjustment.map_err(|e| error(&e))?;
+                    // Photoshop can write brit beside CgEd: retain Effect's first-only
+                    // brit policy while other complete typed blocks replace prior values.
+                    if key != b"brit" || l.adjustment.is_none() {
+                        l.adjustment = Some(from_shared_adjustment(adjustment));
+                    }
+                }
             }
             b"curv" | b"blnc" | b"post" | b"thrs" | b"selc" | b"mixr" | b"phfl" | b"vibA" | b"blwh" | b"grdm" | b"clrL" if l.adjustment.is_none() => {
                 l.adjustment = Some(Adjustment::Other(String::from_utf8_lossy(key).into_owned()));
             }
             b"SoLd" | b"SoLE" => {
-                let _id = r.tag()?;
-                let _ver = r.u32()?;
-                let _dver = r.u32()?;
-                let d = descriptor::read_descriptor(&mut r)?;
-                let uuid = d.text("Idnt").unwrap_or_default().to_string();
-                let t = placed::eight(&d, "Trnf").unwrap_or([0.0; 8]);
-                // The non-affine transform when present (perspective), else the transform.
-                let t = placed::eight(&d, "nonAffineTransform").unwrap_or(t);
-                let size = d.obj("Sz  ").and_then(|s| Some([s.num("Wdth")?, s.num("Hght")?]));
-                let warp = d.obj("warp").and_then(placed::Warp::read);
-                l.smart_object = Some(SmartObject { uuid, quad: placed::quad_from(t), size, warp });
+                l.smart_object = Some(placed::from_craft_smart(
+                    craft_psd::smart::SmartObject::from_placed_layer_data_with_limits(b, crate::descriptor::PARSE_LIMITS).map_err(|e| error(&e))?,
+                ));
             }
             b"PlLd" if l.smart_object.is_none() => {
-                let _id = r.tag()?;
-                let _ver = r.u32()?;
-                let n = r.u8()? as usize;
-                let uuid = String::from_utf8_lossy(r.bytes(n)?).into_owned();
-                let _page = r.u32()?;
-                let _pages = r.u32()?;
-                let _aa = r.u32()?;
-                let _ty = r.u32()?;
-                let mut t = [0.0; 8];
-                for v in &mut t {
-                    *v = r.f64_finite()?;
-                }
-                l.smart_object = Some(SmartObject { uuid, quad: placed::quad_from(t), size: None, warp: None });
+                l.smart_object = Some(placed::from_craft_smart(craft_psd::smart::SmartObject::from_placed_layer(b).map_err(|e| error(&e))?));
             }
             b"vmsk" | b"vsms" => {
-                let _ver = r.u32()?;
-                let flags = r.u32()?;
-                l.vector_mask = Some(self.vector_paths(&mut r, flags)?);
+                let block = craft_psd::path::VectorMaskBlock::from_bytes(b).map_err(|e| error(&e))?;
+                l.vector_mask = Some(self.vector_paths(&block));
             }
             _ => {}
         }
         Ok(())
     }
 
-    fn vector_paths(&self, r: &mut Reader, flags: u32) -> Result<VectorMask> {
+    fn vector_paths(&self, block: &craft_psd::path::VectorMaskBlock) -> VectorMask {
+        use craft_psd::path::{VectorMaskBlock, selector};
         let (w, h) = (self.width as f64, self.height as f64);
-        let mut vm = VectorMask { inverted: flags & 1 != 0, disabled: flags & 4 != 0, subpaths: vec![] };
-        let fixed = |r: &mut Reader| -> Result<f64> { Ok(r.i32()? as f64 / (1 << 24) as f64) };
-        while r.remaining() >= 26 {
-            let sel = r.u16()?;
-            match sel {
-                0 | 3 => {
-                    let _n = r.u16()?;
-                    r.skip(22)?;
-                    vm.subpaths.push(SubPath { closed: sel == 0, knots: vec![] });
-                }
-                1 | 2 | 4 | 5 => {
-                    let mut pts = [[0.0; 2]; 3];
-                    for p in &mut pts {
-                        let y = fixed(r)?;
-                        let x = fixed(r)?;
-                        *p = [x * w, y * h];
-                    }
-                    if let Some(sp) = vm.subpaths.last_mut() {
-                        sp.knots.push(pts);
-                    }
-                }
-                _ => r.skip(24)?,
+        let mut vm = VectorMask {
+            inverted: block.flags & VectorMaskBlock::FLAG_INVERT != 0,
+            disabled: block.flags & VectorMaskBlock::FLAG_DISABLED != 0,
+            subpaths: vec![],
+        };
+        // Keep Effect's recovery policy: ignore declared counts and orphan knots, and
+        // keep mixed open/closed knot selectors in the last declared subpath.
+        // PathData::subpaths deliberately has a different, more permissive policy.
+        for record in &block.path.records {
+            if record.is_length() {
+                vm.subpaths.push(SubPath { closed: record.selector == selector::CLOSED_LENGTH, knots: vec![] });
+            } else if let Some(knot) = record.knot()
+                && let Some(sp) = vm.subpaths.last_mut()
+            {
+                sp.knots.push([knot.pre, knot.anchor, knot.post].map(|(x, y)| [x * w, y * h]));
             }
         }
         vm.subpaths.retain(|s| !s.knots.is_empty());
-        Ok(vm)
+        vm
     }
-
     /// The layer tree, top of the stack first. Groups nest at most [`MAX_GROUP_DEPTH`] deep (see
     /// [`Psd::tree_report`]).
     pub fn tree(&self) -> Vec<Node> {
@@ -528,7 +489,15 @@ fn error(e: &craft_psd::PsdError) -> Error {
     }
 }
 
-/// A Pascal string's bytes in the system (Mac Roman) encoding; ASCII covers the common case.
-fn mac_roman_string(b: &[u8]) -> String {
-    b.iter().map(|&b| if b < 0x80 { b as char } else { super::read::mac_roman(b) }).collect()
+/// App representation only; binary field framing belongs to craft-psd.
+fn from_shared_adjustment(value: craft_psd::adjust::Adjustment) -> Adjustment {
+    use craft_psd::adjust::Adjustment as Shared;
+    match value {
+        Shared::Invert => Adjustment::Invert,
+        Shared::BrightnessContrast { brightness, contrast, legacy } => Adjustment::BrightnessContrast { brightness, contrast, legacy },
+        Shared::HueSaturation { hue, saturation, lightness, colorize } => Adjustment::HueSaturation { hue, saturation, lightness, colorize },
+        Shared::Levels { in_black, in_white, gamma, out_black, out_white } => Adjustment::Levels { in_black, in_white, gamma, out_black, out_white },
+        Shared::Exposure { exposure, offset, gamma } => Adjustment::Exposure { exposure, offset, gamma },
+        Shared::Other(key) => Adjustment::Other(String::from_utf8_lossy(&key).into_owned()),
+    }
 }
