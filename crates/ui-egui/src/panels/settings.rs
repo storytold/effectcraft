@@ -83,7 +83,7 @@ fn page_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, page: &Page, cur: &Value
                     ui.add_sized(vec2(label_w, 18.0), egui::Label::new(tr("Default Output:")));
                     let shown = if sel.is_empty() { tr("System Default").to_string() } else { sel.clone() };
                     let shown_name = shown.clone();
-                    let r = craft_ui::ComboBox::from_id_salt(("settings", key)).selected_text(shown).width(260.0).show_ui(ui, |ui| {
+                    let r = egui::ComboBox::from_id_salt(("settings", key)).selected_text(shown).width(260.0).show_ui(ui, |ui| {
                         if ui.selectable_label(sel.is_empty(), tr("System Default")).clicked() {
                             acts.push(Act::Set(key.into(), json!("")));
                         }
@@ -173,7 +173,7 @@ fn page_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, page: &Page, cur: &Value
                                     let curv = v.as_str().map_or_else(|| v.to_string(), str::to_string);
                                     let shown = opts.iter().find(|o| o.1 == curv).map(|o| o.0).unwrap_or(curv.as_str()).to_string();
                                     value_text = tr(&shown).to_string();
-                                    craft_ui::ComboBox::from_id_salt(("settings", key))
+                                    egui::ComboBox::from_id_salt(("settings", key))
                                         .selected_text(tr(&shown))
                                         .width(220.0)
                                         .show_ui(ui, |ui| {
@@ -529,7 +529,7 @@ fn appearance_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, cur: &Value, t: &T
     ui.horizontal(|ui| {
         ui.add_sized(vec2(250.0, 18.0), egui::Label::new(format!("{}:", tr("Appearance Mode"))).truncate());
         let shown = APPEARANCE_MODES.iter().find(|(_, v)| *v == mode).map_or(mode.as_str(), |(l, _)| *l);
-        let r = craft_ui::ComboBox::from_id_salt(("settings", "appearance.appearanceMode"))
+        let r = egui::ComboBox::from_id_salt(("settings", "appearance.appearanceMode"))
             .selected_text(tr(shown))
             .width(220.0)
             .show_ui(ui, |ui| {
@@ -1331,6 +1331,7 @@ mod tests {
     fn sam2_settings_offer_file_installation_without_downloads() {
         let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         let tokens = app.tokens;
         let mut actions = vec![];
         let mut output = ctx
@@ -1356,6 +1357,7 @@ mod tests {
         app.session.sys_memory = Some(effectcraft_engine::sysinfo::SysMemory { total: 64 << 30, available: 60 << 30 });
         let page = pages().into_iter().find(|p| p.id == "memory").unwrap();
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         let tokens = app.tokens;
         let cur = serde_json::to_value(&app.session.prefs).unwrap();
         let mut actions = vec![];
@@ -1385,6 +1387,7 @@ mod tests {
             // (one frame's elements: `find` returns the first match)
             app.auto = Default::default();
             let ctx = egui::Context::default();
+            crate::framework::install_headless(&ctx);
             let (tokens, cur) = (app.tokens, serde_json::to_value(&app.session.prefs).unwrap());
             let mut actions = vec![];
             let mut output = ctx

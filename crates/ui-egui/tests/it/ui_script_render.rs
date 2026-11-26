@@ -40,7 +40,10 @@ fn harness() -> (Harness<'static, EffectcraftApp>, Arc<Gate>, std::sync::mpsc::S
     let path = std::env::temp_dir().join(format!("ec-ui-script-render-{}.mp4", std::process::id()));
     s.execute("renderQueue.add", json!({"output": path.to_string_lossy()})).unwrap();
     let (tx, rx) = std::sync::mpsc::channel();
-    let h = Harness::builder().with_size(egui::vec2(1000.0, 700.0)).build_eframe(|_| EffectcraftApp::new(s).with_control(rx));
+    let h = Harness::builder()
+        .with_size(egui::vec2(1000.0, 700.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(s).with_control(rx));
     (h, gate, tx)
 }
 

@@ -37,16 +37,29 @@ pub(crate) const IDS: &[&str] = &[
 /// Largest LUT the kernels take (floats in the storage buffer); bigger ones render on the CPU.
 const MAX_FLOATS: usize = 1 << 24;
 
+/// Most halvings the kernel's partition searches run (`fxl_search_steps` caps the count there).
+const SHADER_MAX_STEPS: u32 = 32;
+
+/// Halvings a partition search over `n` entries runs: `n`'s bit length, which every search
+/// finishes within, plus one to spare.
+const fn search_steps(n: usize) -> u32 {
+    usize::BITS - n.leading_zeros() + 1
+}
+
+// A program's tables fit in MAX_FLOATS floats, so none needs more halvings than the kernel runs.
+const _: () = assert!(search_steps(MAX_FLOATS) <= SHADER_MAX_STEPS);
+
 /// Run effect `id` (one of [`IDS`]); `None` = this parameter combination runs on the CPU.
 pub(crate) fn apply(e: &mut Enc, id: &str, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
     let (ops, straight) = effectcraft_effects::color_program(id, ctx)?;
     if ops.is_empty() {
         return Some(b);
     }
-    let data = encode(&ops)?;
+    let (data, steps) = encode(&ops)?;
     let buf = e.data(&data);
     let mut p = Params::default();
     p.u[0][0] = (straight == Straight::Divide) as u32;
+    p.u[0][1] = steps;
     let out = e.scratch(b.img.width, b.img.height);
     e.pixels("fxl_point", &p, &b.img, None, &out, Some(&buf));
     Some(GBuf { img: out, ..b })
@@ -79,11 +92,13 @@ pub(crate) fn push_lut(d: &mut Vec<f32>, lut: &Lut) -> f32 {
     at
 }
 
-/// Program layout: a stream of (opcode, arguments…) ending in 0, followed by LUT data.
-fn encode(ops: &[ColorOp]) -> Option<Vec<f32>> {
+/// Program layout: a stream of (opcode, arguments…) ending in 0, followed by LUT data; and the
+/// halvings the kernel's partition searches need for this program's tables.
+fn encode(ops: &[ColorOp]) -> Option<(Vec<f32>, u32)> {
     if ops.len() > MAX_OPS {
         return None;
     }
+    let mut steps = 0;
     let mut prog: Vec<f32> = vec![];
     let mut tables: Vec<Vec<f32>> = vec![];
     // LUT offsets are patched once the program's length is known.
@@ -142,6 +157,13 @@ fn encode(ops: &[ColorOp]) -> Option<Vec<f32>> {
                 prog.extend(lo.iter().chain(hi));
             }
             ColorOp::Lut { lut, shaper, interp, inverse } => {
+                // The kernel searches an inverted 1D table and every shaper channel.
+                if *inverse && lut.n3 == 0 {
+                    steps = steps.max(search_steps(lut.n1));
+                }
+                for channel in shaper.iter().flat_map(|s| s.iter()) {
+                    steps = steps.max(search_steps(channel.len()));
+                }
                 prog.extend([8.0, 0.0, *interp as f32, *inverse as u32 as f32, -1.0]);
                 let mut t = vec![];
                 push_lut(&mut t, lut);
@@ -179,5 +201,39 @@ fn encode(ops: &[ColorOp]) -> Option<Vec<f32>> {
     for t in tables {
         prog.extend(t);
     }
-    Some(prog)
+    Some((prog, steps))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The kernel's partition search (fxl_shape, fxl_inv_1d) run for `steps` halvings over the
+    /// sorted table 0, 1, …, n - 1: the index of the first entry not below `x`.
+    fn search(n: usize, steps: u32, x: f64) -> usize {
+        let (mut lo, mut hi) = (0, n);
+        for _ in 0..steps {
+            if lo < hi {
+                let mid = lo + (hi - lo) / 2;
+                if (mid as f64) < x {
+                    lo = mid + 1;
+                } else {
+                    hi = mid;
+                }
+            }
+        }
+        lo
+    }
+
+    #[test]
+    fn search_steps_finish_every_partition_search() {
+        for n in [1, 2, 3, 4, 5, 255, 256, 257, 1 << 16, (1 << 16) + 1, MAX_FLOATS / 3, MAX_FLOATS] {
+            let steps = search_steps(n);
+            assert!(steps <= SHADER_MAX_STEPS, "{n} entries need more halvings than the kernel runs");
+            for x in [-1.0, 0.0, 0.5, n as f64 / 3.0 + 0.5, n as f64 - 1.5, n as f64 - 0.5, n as f64 + 1.0] {
+                let want = (x.ceil().max(0.0) as usize).min(n);
+                assert_eq!(search(n, steps, x), want, "{n} entries, target {x}");
+            }
+        }
+    }
 }

@@ -368,6 +368,7 @@ mod tests {
     fn a_drag_value_reads_typed_arithmetic() {
         use egui::{Context, Event, Key, Modifiers, PointerButton, Pos2, RawInput, Rect, pos2, vec2};
         let ctx = Context::default();
+        crate::framework::install_headless(&ctx);
         let mut value = 10.0_f64;
         let mut time = 0.0;
         let field = Rect::from_min_size(pos2(100.0, 100.0), vec2(80.0, 20.0));

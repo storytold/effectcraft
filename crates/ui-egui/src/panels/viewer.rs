@@ -547,7 +547,7 @@ fn phase_layers(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, v: 
     let sel_vertices = app.session.state.selected_vertices.clone();
     // Pen path in progress ends when the tool changes or its mask is gone; Esc / Enter also end
     // free transform.
-    let finish = ui.input(|i| i.key_pressed(egui::Key::Escape) || i.key_pressed(egui::Key::Enter)) && !ctx.egui_wants_keyboard_input();
+    let finish = ui.input(|i| i.key_pressed(egui::Key::Escape) || i.key_pressed(egui::Key::Enter)) && !crate::framework::widget_has_keyboard(&ctx);
     if app.ui.tool != Tool::Pen || finish {
         ui.data_mut(|d| d.remove::<(LayerId, u64)>(pen_id()));
     }
@@ -884,7 +884,8 @@ fn phase_menu(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, v: &m
     super::viewer_drop::show(app, ui, &painter, &map, ectx);
 
     // Interaction.
-    let resp = ui.interact(area, egui::Id::unique("viewer-interact"), Sense::click_and_drag());
+    let resp = ui.interact(area, crate::framework::viewer_id(), Sense::click_and_drag());
+    crate::framework::host_canvas(ui.ctx());
     let menu_hits_id = egui::Id::unique(("viewer-menu-hits", cid.0));
     // A right-click an overlay took (the Cryptomatte eyedropper's) opens the menu too.
     let forwarded = ui.data_mut(|d| d.remove_temp::<egui::Pos2>(egui::Id::unique(FORWARDED_SECONDARY)));

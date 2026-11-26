@@ -31,7 +31,10 @@ fn render_queue_panel_snapshot() {
     }
     let ids: Vec<u64> = s.project.render_queue.iter().take(3).map(|i| i.id).collect();
     let mut app = Some(EffectcraftApp::new(s));
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| app.take().expect("app"));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| app.take().expect("app"));
     h.ctx.data_mut(|d| d.insert_temp(egui::Id::unique("rq-ui"), (ids, None::<u64>)));
     h.state_mut().show_panel(effectcraft_ui_egui::dock::PanelKind::RenderQueue);
     h.run_steps(4);
@@ -55,7 +58,10 @@ fn templates_dialog_snapshot() {
     let kind = std::env::var("RQ_TEMPLATES_KIND").unwrap_or_else(|_| "outputModule".into());
     s.execute("app.templates", json!({"kind": kind})).unwrap();
     let mut app = Some(EffectcraftApp::new(s));
-    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(|_| app.take().expect("app"));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1400.0, 900.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| app.take().expect("app"));
     h.run_steps(4);
     assert!(h.state().dialog.is_some(), "the Templates dialog is open");
     let img = h.render_serialized().expect("render");
