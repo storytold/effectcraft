@@ -1855,7 +1855,10 @@ impl MediaSource for CraftMediaSource {
                 return raw.frame(file, &*self.source, video_idx, target_idx);
             }
         };
-        let want_draft = req.scale < 0.99;
+        // Only these codecs change what they output in draft mode; the others would just
+        // reset and clear their cache for the same full-quality picture.
+        let supports_draft = matches!(state.decoder.codec(), CodecId::H264 | CodecId::Hevc | CodecId::Vp9 | CodecId::Av1);
+        let want_draft = req.scale < 0.99 && supports_draft;
         if let Some(hit) = state.decoded.iter().find(|c| c.pts == target_pts && c.draft == want_draft) {
             return Ok(hit.frame.clone());
         }
@@ -1877,7 +1880,8 @@ impl MediaSource for CraftMediaSource {
         let target_passed = state.emitted_max_pts.is_some_and(|max| target_pts <= max);
         let before_gop = sync_idx < state.gop_start_idx;
         let jump_ahead = sync_idx > state.gop_start_idx && sync_idx >= state.next_decode_idx;
-        if draft_changed || target_passed || before_gop || jump_ahead {
+        let mode_changed_in_flight = draft_changed && target_idx < state.next_decode_idx;
+        if mode_changed_in_flight || target_passed || before_gop || jump_ahead {
             state.decoder.reset().map_err(video_decode_error)?;
             state.decoded.clear();
             state.cached_bytes = 0;
@@ -4858,6 +4862,27 @@ mod tests {
         let first = media.video_frame(FrameRequest::full(Tick::ZERO)).expect("back to the first GOP");
         assert_eq!(first.pts, Tick::ZERO);
         assert_eq!((source.reads[0].load(Ordering::Relaxed), source.reads[1].load(Ordering::Relaxed)), (1, 1), "the backward seek re-read the first keyframe");
+    }
+
+    #[test]
+    fn draft_switch_does_not_reset_for_a_frame_not_yet_fed() {
+        use std::sync::atomic::Ordering;
+
+        let movie = generated_h264_movie(40, 40);
+        let source = Arc::new(CountingKeyReads { bytes: movie.bytes, keyframes: movie.keyframes, reads: vec![std::sync::atomic::AtomicUsize::new(0)] });
+        let media = open_isobmff_with_workers("draft.mp4", source.clone(), 8).expect("shared route").expect("opens");
+        source.reads[0].store(0, Ordering::Relaxed);
+        let full = media.video_frame(FrameRequest::full(Tick::ZERO)).expect("full frame 0");
+        assert_eq!(full.pts, Tick::ZERO);
+        // A reduced-size request far ahead switches draft mode without resetting: the target
+        // was not fed yet, and draft only changes non-reference pictures.
+        let draft = media.video_frame(FrameRequest { time: Tick::from_units(39, 25), scale: 0.25 }).expect("draft frame 39");
+        assert_eq!(draft.pts, Tick::from_units(39, 25));
+        assert_eq!(source.reads[0].load(Ordering::Relaxed), 1, "the draft switch re-read the keyframe");
+        // The same frame at full quality was already fed in draft mode: reset and re-decode.
+        let full = media.video_frame(FrameRequest::full(Tick::from_units(39, 25))).expect("full frame 39");
+        assert_eq!(full.pts, Tick::from_units(39, 25));
+        assert_eq!(source.reads[0].load(Ordering::Relaxed), 2, "a full request for a fed draft frame resets");
     }
 
     fn generated_two_frame_ts() -> Vec<u8> {
