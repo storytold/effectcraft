@@ -1744,13 +1744,15 @@ struct PacketVideoState {
     emitted_max_pts: Option<i64>,
     flushed: bool,
     decoded: Vec<CachedFrame>,
-    /// Decoded bytes held in `decoded`, kept beside the vector so eviction is O(1) per frame.
+    /// Decoded bytes held in `decoded`, kept beside the vector so the eviction loop updates
+    /// the total without re-measuring every cached frame.
     cached_bytes: usize,
 }
 
-/// Run one ProRes packet's bands on the dedicated decode pool when it exists. Those threads
-/// never take a frame job that could wait on the `VideoState` lock this decode holds (#4028);
-/// without the pool, decode serially on this thread.
+/// Run one ProRes packet's bands on the dedicated decode pool when it exists. That pool runs
+/// codec parallel work and never lets a worker wait for a picture, so band jobs cannot be
+/// starved by frame jobs holding the `VideoState` lock this decode holds (#4028). Without the
+/// pool, decode serially on this thread.
 #[cfg(not(target_arch = "wasm32"))]
 fn decode_prores_pooled<R>(decode: impl FnOnce(&prores::DecodeOptions) -> R + Send) -> R
 where
@@ -1778,8 +1780,8 @@ fn decode_track_packet(
         return decoder.decode(packet, pts);
     }
     // ProRes packets carry a complete picture: TrackDecoder's ProRes arm adds the PTS to this
-    // same conversion and has no draft, reset or reorder work. The bands still run on the
-    // decode pool so a band worker cannot pick up another frame request for this source.
+    // same conversion and has no draft, reset or reorder work. The bands run on the decode pool
+    // so their workers are never global-pool threads that a frame job waits on.
     let decoded = decode_prores_pooled(|options| decode_prores(packet, options))?;
     let mut frame = DecodedVideoFrame::try_from(decoded)?;
     frame.pts = Some(pts);
@@ -4890,8 +4892,9 @@ mod tests {
         keyframes: Vec<(u64, usize)>,
     }
 
-    /// A small H.264 MP4 whose frames differ in luma, with one IDR every `keyint` frames.
-    fn generated_h264_movie(frames: usize, keyint: u32) -> H264Movie {
+    /// A small H.264 MP4 whose frames differ in luma, with one IDR every `keyint` frames and
+    /// `bframes` reordered pictures between references.
+    fn generated_h264_movie(frames: usize, keyint: u32, bframes: u8) -> H264Movie {
         use craft_video::h264::{Encoder, EncoderConfig, PacketFormat, Profile, YuvFrame};
         use isobmff::{AvcConfig, Brand, Mp4Writer, SampleEntry, TrackConfig, WriteSample, WriterOptions};
 
@@ -4901,7 +4904,7 @@ mod tests {
         config.profile = Profile::Main;
         config.format = PacketFormat::LengthPrefixed;
         config.aud = false;
-        config.bframes = 0;
+        config.bframes = bframes;
         config.keyint = keyint;
         config.scenecut = false;
         config.threads = 1;
@@ -4918,8 +4921,11 @@ mod tests {
         let avcc = AvcConfig::parse(&encoder.avcc()).expect("avcC");
         let mut writer = Mp4Writer::new(std::io::Cursor::new(Vec::new()), WriterOptions::new(Brand::Mp4)).expect("MP4 writer");
         let track = writer.add_track(TrackConfig::new(SampleEntry::avc(avcc, W as u16, H as u16), 25)).expect("picture track");
-        for packet in &packets {
-            writer.write_sample(track, WriteSample { data: &packet.data, duration: 1, composition_offset: 0, is_sync: packet.keyframe }).expect("sample");
+        for (dts, packet) in packets.iter().enumerate() {
+            // Samples are written in decoding order; the composition offset puts each picture
+            // at its presentation time (negative for B-frames, as ctts version 1 allows).
+            let offset = i32::try_from(packet.pts - dts as i64).expect("composition offset");
+            writer.write_sample(track, WriteSample { data: &packet.data, duration: 1, composition_offset: offset, is_sync: packet.keyframe }).expect("sample");
         }
         let bytes: Arc<[u8]> = writer.finish().expect("MP4 finish").into_inner().into();
         let parsed = isobmff::open(bytes.as_ref()).expect("MP4 demux");
@@ -4950,7 +4956,7 @@ mod tests {
     fn sequential_h264_playback_keeps_the_running_decoder() {
         use std::sync::atomic::Ordering;
 
-        let movie = generated_h264_movie(40, 40);
+        let movie = generated_h264_movie(40, 40, 0);
         assert_eq!(movie.keyframes.len(), 1, "the fixture starts with one GOP");
         let source = Arc::new(CountingKeyReads { bytes: movie.bytes, keyframes: movie.keyframes, reads: vec![std::sync::atomic::AtomicUsize::new(0)] });
         let media = open_isobmff_with_workers("sequential.mp4", source.clone(), 8).expect("shared route").expect("opens");
@@ -4968,10 +4974,27 @@ mod tests {
     }
 
     #[test]
+    fn sequential_h264_playback_with_b_frames_keeps_the_running_decoder() {
+        use std::sync::atomic::Ordering;
+
+        let movie = generated_h264_movie(48, 48, 2);
+        assert_eq!(movie.keyframes.len(), 1, "the fixture starts with one GOP");
+        let source = Arc::new(CountingKeyReads { bytes: movie.bytes, keyframes: movie.keyframes, reads: vec![std::sync::atomic::AtomicUsize::new(0)] });
+        let media = open_isobmff_with_workers("b-frames.mp4", source.clone(), 8).expect("shared route").expect("opens");
+        source.reads[0].store(0, Ordering::Relaxed);
+        for k in 0..48 {
+            let time = Tick::from_units(k, 25);
+            let frame = media.video_frame(FrameRequest::full(time)).expect("frame");
+            assert_eq!(frame.pts, time, "frame {k}");
+        }
+        assert_eq!(source.reads[0].load(Ordering::Relaxed), 1, "sequential playback re-read the keyframe");
+    }
+
+    #[test]
     fn h264_gop_jumps_still_reset_to_the_target_keyframe() {
         use std::sync::atomic::Ordering;
 
-        let movie = generated_h264_movie(40, 20);
+        let movie = generated_h264_movie(40, 20, 0);
         assert_eq!(movie.keyframes.len(), 2, "the fixture has two GOPs");
         let source = Arc::new(CountingKeyReads {
             bytes: movie.bytes,
@@ -4996,7 +5019,7 @@ mod tests {
     fn draft_switch_does_not_reset_for_a_frame_not_yet_fed() {
         use std::sync::atomic::Ordering;
 
-        let movie = generated_h264_movie(40, 40);
+        let movie = generated_h264_movie(40, 40, 0);
         let source = Arc::new(CountingKeyReads { bytes: movie.bytes, keyframes: movie.keyframes, reads: vec![std::sync::atomic::AtomicUsize::new(0)] });
         let media = open_isobmff_with_workers("draft.mp4", source.clone(), 8).expect("shared route").expect("opens");
         source.reads[0].store(0, Ordering::Relaxed);
@@ -5016,8 +5039,9 @@ mod tests {
     #[test]
     fn shared_decoder_stats_reach_the_public_counters() {
         let before = crate::gop_stats();
-        let movie = generated_h264_movie(2, 2);
+        let movie = generated_h264_movie(2, 2, 0);
         let source = crate::stream::open_bytes("stats.mp4", movie.bytes).expect("shared route");
+        assert!(matches!(source, crate::stream::MediaSource::Craft(_)), "the stats fixture must use the shared route");
         let _ = source.video_frame(effectcraft_time::Tick::ZERO, 1.0).expect("frame");
         let after = crate::gop_stats();
         assert!(after.decoded > before.decoded, "shared samples are counted");
