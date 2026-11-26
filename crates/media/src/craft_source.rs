@@ -1676,22 +1676,40 @@ struct PacketVideoState {
     cached_bytes: usize,
 }
 
+/// Run one ProRes packet's bands on the dedicated decode pool when it exists. Those threads
+/// never take a frame job that could wait on the `VideoState` lock this decode holds (#4028);
+/// without the pool, decode serially on this thread.
+#[cfg(not(target_arch = "wasm32"))]
+fn decode_prores_pooled<R>(decode: impl FnOnce(&prores::DecodeOptions) -> R + Send) -> R
+where
+    R: Send,
+{
+    match crate::pool::decode_threads() {
+        Some(pool) => pool.install(|| decode(&prores::DecodeOptions { threads: true, ..Default::default() })),
+        None => decode(&prores::DecodeOptions { threads: false, ..Default::default() }),
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn decode_prores_pooled<R>(decode: impl FnOnce(&prores::DecodeOptions) -> R) -> R {
+    decode(&prores::DecodeOptions { threads: false, ..Default::default() })
+}
+
 fn decode_track_packet(
     decoder: &mut TrackDecoder,
     is_isobmff: bool,
     packet: &[u8],
     pts: i64,
-    decode_prores: impl FnOnce(&[u8], &prores::DecodeOptions) -> prores::Result<prores::Frame>,
+    decode_prores: impl FnOnce(&[u8], &prores::DecodeOptions) -> prores::Result<prores::Frame> + Send,
 ) -> std::result::Result<Vec<DecodedVideoFrame>, VideoError> {
     if !is_isobmff || decoder.codec() != CodecId::ProRes {
         return decoder.decode(packet, pts);
     }
-    // The caller holds this source's VideoState lock. Do not let a ProRes band
-    // job yield to another request for the same source on the decode Rayon pool.
-    // ProRes packets carry a complete picture: TrackDecoder's ProRes arm adds
-    // the PTS to this same conversion and has no draft, reset or reorder work.
-    let options = prores::DecodeOptions { threads: false, ..Default::default() };
-    let mut frame = DecodedVideoFrame::try_from(decode_prores(packet, &options)?)?;
+    // ProRes packets carry a complete picture: TrackDecoder's ProRes arm adds the PTS to this
+    // same conversion and has no draft, reset or reorder work. The bands still run on the
+    // decode pool so a band worker cannot pick up another frame request for this source.
+    let decoded = decode_prores_pooled(|options| decode_prores(packet, options))?;
+    let mut frame = DecodedVideoFrame::try_from(decoded)?;
     frame.pts = Some(pts);
     Ok(vec![frame])
 }
@@ -4157,7 +4175,7 @@ mod tests {
     }
 
     #[test]
-    fn shared_prores_mov_uses_serial_packets_with_edited_frame_and_alpha_parity() {
+    fn shared_prores_mov_uses_the_decode_pool_with_edited_frame_and_alpha_parity() {
         use isobmff::{Brand, Edit, Mp4Writer, SampleEntry, TrackConfig, WriteSample, WriterOptions};
 
         let mut encoder = prores::Encoder::new(prores::Profile::P4444, 64, 48);
@@ -4189,15 +4207,23 @@ mod tests {
         assert!(source.info().video.as_ref().expect("video").has_alpha);
 
         let mut decoder = TrackDecoder::new(&params).expect("ProRes decoder");
-        let mut passed_serial_options = false;
+        #[cfg(not(target_arch = "wasm32"))]
+        let has_pool = crate::pool::decode_threads().is_some();
+        #[cfg(target_arch = "wasm32")]
+        let has_pool = false;
+        let mut passed_pool_options = false;
         let selected = decode_track_packet(&mut decoder, true, &packets[1], 40, |packet, options| {
-            assert!(!options.threads);
+            assert_eq!(options.threads, has_pool, "the ISO-BMFF helper must use the decode pool when it exists");
+            if has_pool {
+                let name = std::thread::current().name().unwrap_or_default().to_string();
+                assert!(name.starts_with("ec-decode-"), "ProRes bands ran on {name}");
+            }
             assert!(options.bit_depth.is_none());
-            passed_serial_options = true;
+            passed_pool_options = true;
             prores::decode_frame_with(packet, options)
         })
-        .expect("serial packet");
-        assert!(passed_serial_options, "the ISO-BMFF helper must select explicit serial decoding");
+        .expect("pooled packet");
+        assert!(passed_pool_options, "the ISO-BMFF helper must select the decode pool");
         assert_eq!(selected[0].pts, Some(40));
 
         // Seek late, then backwards, then forwards. The original parallel TrackDecoder is an
@@ -4221,6 +4247,10 @@ mod tests {
             assert_eq!(alpha, expected_alpha);
             assert!(alpha[0] > 0 && alpha[0] < 4_095);
         }
+        // ProRes has no draft mode: a reduced-size request reuses the full-quality frame.
+        let full = source.video_frame(FrameRequest::full(Tick::from_units(60, 1_000))).expect("full ProRes frame");
+        let scaled = source.video_frame(FrameRequest { time: Tick::from_units(60, 1_000), scale: 0.25 }).expect("reduced-size ProRes frame");
+        assert!(Arc::ptr_eq(&full, &scaled), "a reduced-size ProRes request must not reset for draft");
 
         let regular_error = decoder.decode(&[], 0).expect_err("empty ProRes packet").to_string();
         let locked_error = decode_track_packet(&mut decoder, true, &[], 0, prores::decode_frame_with).expect_err("empty ProRes packet").to_string();
