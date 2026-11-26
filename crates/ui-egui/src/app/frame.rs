@@ -677,7 +677,11 @@ impl EffectcraftApp {
     fn tick_autosave(&mut self, ctx: &egui::Context) {
         // Monotonic app time: a wall-clock jump must not skip or repeat an auto-save.
         let now = self.now;
-        if self.project_reload_pending.is_none()
+        // Auto-saves are recovery copies at their own path, so they keep running while an
+        // external edit is pending: a crash then still has the local work. Only a target that
+        // would be the project file itself waits, so recovery never overwrites that edit.
+        let hold = self.project_reload_pending.is_some() && self.session.autosave_target_aliases_project();
+        if !hold
             && let Some(Err(e)) = self.session.autosave_tick(now)
         {
             self.ui.status = e.to_string();
@@ -1094,15 +1098,41 @@ mod tests {
     }
 
     #[test]
-    fn autosave_is_paused_while_a_project_change_is_pending() {
-        let path = "C:/test/project.ecproj".to_string();
+    fn recovery_autosave_keeps_running_while_a_project_change_is_pending() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("Live.ecproj");
+        let path = project.to_string_lossy().into_owned();
         let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
-        app.session.path = Some(path.clone());
-        app.session.mark_unsaved();
-        app.session.prefs.auto_save.enabled = true;
-        app.project_reload_pending = Some((path, (120, 2), None));
+        app.session.execute("comp.new", serde_json::json!({"name": "Main"})).unwrap();
+        app.session.execute("file.saveAs", serde_json::json!({"path": path})).unwrap();
+
+        // Another process saves the project with its own edit.
+        let mut other = effectcraft_engine::Session::default();
+        other.execute("file.open", serde_json::json!({"path": path})).unwrap();
+        other.execute("layer.newNull", serde_json::json!({"name": "external edit"})).unwrap();
+        other.execute("file.save", serde_json::json!({})).unwrap();
+        let external = std::fs::read(&project).unwrap();
+
+        // The desktop session has unsaved work, so the external change is held.
+        app.session.execute("layer.newNull", serde_json::json!({"name": "local edit"})).unwrap();
+        app.project_reload_pending = Some((path.clone(), (external.len() as u64, 1), None));
+        app.session
+            .execute("prefs.set", serde_json::json!({"values": {"autoSave.enabled": true, "autoSave.intervalMinutes": 1}}))
+            .unwrap();
+        assert!(!app.session.autosave_target_aliases_project(), "recovery copies never target the project file");
+
         let ctx = egui::Context::default();
+        app.now = 1000.0;
         app.tick_autosave(&ctx);
-        assert!(app.session.autosave.last.is_none(), "autosave was ticked while a reload was pending");
+        app.now = 1061.0;
+        app.tick_autosave(&ctx);
+        app.session.autosave_wait().unwrap();
+
+        assert!(app.project_reload_pending.is_some(), "the external change is still held");
+        assert_eq!(std::fs::read(&project).unwrap(), external, "the external project must survive untouched");
+        let recovery = dir.path().join(effectcraft_engine::autosave::AUTOSAVE_FOLDER).join("Live auto-save 1.ecproj");
+        let saved = std::fs::read_to_string(&recovery).expect("the local work has a recovery copy");
+        assert!(saved.contains("local edit"), "the recovery copy holds the unsaved local work");
+        assert!(!saved.contains("external edit"), "the recovery copy is the local session, not the disk file");
     }
 }

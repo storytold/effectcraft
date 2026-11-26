@@ -1168,6 +1168,22 @@ fn autosave_tick_waits_for_the_interval_and_changes() {
 }
 
 #[test]
+fn autosave_paths_alias_only_the_same_file() {
+    let d = tmp("alias");
+    let project = d.join("Live.ecproj");
+    std::fs::write(&project, b"{}").unwrap();
+    assert!(autosave::paths_alias(&project, &project));
+    assert!(autosave::paths_alias(&project, &d.join(".").join("Live.ecproj")), "a dotted path names the same file");
+    if cfg!(windows) {
+        let shouty = std::path::PathBuf::from(project.to_string_lossy().to_uppercase().replace('\\', "/"));
+        assert!(autosave::paths_alias(&project, &shouty), "case and slash style do not matter on Windows");
+    }
+    let recovery = d.join(autosave::AUTOSAVE_FOLDER).join(autosave::file_name("Live", 1));
+    assert!(!autosave::paths_alias(&project, &recovery), "a recovery copy is a different file");
+    let _ = std::fs::remove_dir_all(d);
+}
+
+#[test]
 fn crash_recovery_detects_an_unclean_exit() {
     let d = tmp("recovery");
     let store: Arc<dyn ConfigStore> = Arc::new(DirConfig::new(d.join("config")));

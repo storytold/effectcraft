@@ -388,6 +388,20 @@ impl Session {
         Ok(path)
     }
 
+    /// Whether the next auto-save would write over the open project file itself. Auto-saves are
+    /// recovery copies (`<name> auto-save N.ecproj` in an Auto-Save folder), so this is false
+    /// for every built-in location; the desktop app checks it before writing while an external
+    /// edit of the project is pending, so recovery never overwrites that edit.
+    pub fn autosave_target_aliases_project(&self) -> bool {
+        let Some(project) = self.path.as_deref() else { return false };
+        let root = self.default_autosave_root();
+        let prefs = self.autosave_prefs();
+        match autosave::plan_in(self.file_ops(), &prefs, Some(project), root.as_deref(), self.autosave.last_slot) {
+            Ok(plan) => autosave::paths_alias(&plan.path, Path::new(project)),
+            Err(_) => false,
+        }
+    }
+
     /// Advance recovery bookkeeping only for a successfully written snapshot.
     fn commit_autosave(&mut self, path: String, slot: u32, revision: u64) {
         self.autosave.last_slot = Some(slot);

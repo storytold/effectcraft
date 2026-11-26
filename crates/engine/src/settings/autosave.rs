@@ -115,6 +115,18 @@ pub fn folder(prefs: &Prefs, project: Option<&str>, fallback: Option<&Path>) -> 
     }
 }
 
+/// Whether two paths name the same file. Canonicalises when the file exists and compares
+/// case-insensitively with either slash on Windows; a missing file compares as written.
+pub fn paths_alias(a: &Path, b: &Path) -> bool {
+    fn norm(p: &Path) -> String {
+        let p = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        let s = p.to_string_lossy().replace('\\', "/");
+        let s = s.strip_prefix("//?/").map(str::to_string).unwrap_or(s);
+        if cfg!(windows) { s.to_lowercase() } else { s }
+    }
+    norm(a) == norm(b)
+}
+
 /// Existing auto-saves of `stem` in `dir`: (slot, path, modified).
 pub fn existing(dir: &Path, stem: &str) -> Vec<(u32, PathBuf, std::time::SystemTime)> {
     existing_in(&StdFiles, dir, stem)
