@@ -1478,22 +1478,23 @@ source = "git+https://github.com/storytold/craft-libs?rev=8fa4db64a9bb943520259e
 [[package]]
 name = "craft-exr"
 version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=33be35625e252cc4f06aa375b3b428521faea37d#33be35625e252cc4f06aa375b3b428521faea37d"
+source = "git+https://github.com/storytold/craft-libs?rev=241ed3863a4a269b414ace0faa41d4ee7a6a48a5#241ed3863a4a269b414ace0faa41d4ee7a6a48a5"
 dependencies = [
+ "exr",
  "flate2",
+ "half",
+ "serde",
  "serde_json",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
 name = "craft-exr"
 version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=8fa4db64a9bb943520259ea95331a303ba788f21#8fa4db64a9bb943520259ea95331a303ba788f21"
+source = "git+https://github.com/storytold/craft-libs?rev=33be35625e252cc4f06aa375b3b428521faea37d#33be35625e252cc4f06aa375b3b428521faea37d"
 dependencies = [
- "exr",
  "flate2",
- "half",
  "serde_json",
- "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -2615,7 +2616,7 @@ name = "effectcraft-export"
 version = "0.25.1"
 dependencies = [
  "craft-audio",
- "craft-exr 0.1.0 (git+https://github.com/storytold/craft-libs?rev=8fa4db64a9bb943520259ea95331a303ba788f21)",
+ "craft-exr 0.1.0 (git+https://github.com/storytold/craft-libs?rev=241ed3863a4a269b414ace0faa41d4ee7a6a48a5)",
  "craft-gif",
  "craft-media",
  "craft-tga",
@@ -2785,7 +2786,7 @@ dependencies = [
  "craft-doc",
  "craft-docpath",
  "craft-dpx 0.1.0 (git+https://github.com/storytold/craft-libs?rev=8fa4db64a9bb943520259ea95331a303ba788f21)",
- "craft-exr 0.1.0 (git+https://github.com/storytold/craft-libs?rev=8fa4db64a9bb943520259ea95331a303ba788f21)",
+ "craft-exr 0.1.0 (git+https://github.com/storytold/craft-libs?rev=241ed3863a4a269b414ace0faa41d4ee7a6a48a5)",
  "craft-frame",
  "craft-gif",
  "craft-media",
@@ -2904,7 +2905,7 @@ dependencies = [
 name = "effectcraft-raster"
 version = "0.25.1"
 dependencies = [
- "craft-exr 0.1.0 (git+https://github.com/storytold/craft-libs?rev=8fa4db64a9bb943520259ea95331a303ba788f21)",
+ "craft-exr 0.1.0 (git+https://github.com/storytold/craft-libs?rev=241ed3863a4a269b414ace0faa41d4ee7a6a48a5)",
  "effectcraft-color",
  "effectcraft-geom",
  "rayon",
