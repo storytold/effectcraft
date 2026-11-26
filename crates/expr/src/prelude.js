@@ -43,6 +43,58 @@ function __finish(r) {
   }
 }
 
+const __beginAudio = (function (take, begin) {
+  return function () {
+    var a = take();
+    return begin(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10]);
+  };
+})(__takeAudioInput, __begin);
+
+// Snapshot the result while the budgeted VM is still running. The host reads only data
+// properties from the snapshot, so extracting it cannot call expression code.
+const __copyAudioResult = (function (take, data, host, isArray, define, min) {
+  function unwrap(x) {
+    if (x === null || (typeof x !== 'object' && typeof x !== 'function')) return x;
+    var c, l;
+    if (data(x, '__isLayer') === true) {
+      c = data(x, '__c'); l = data(x, '__l');
+      return typeof c === 'number' && typeof l === 'number' ? data(host(3, c, l), 1) : undefined;
+    }
+    var ref = __audioPropRef(x);
+    if (ref === undefined) return x;
+    c = ref[0]; l = ref[1];
+    var path = ref[2];
+    if (typeof c !== 'number' || typeof l !== 'number' || typeof path !== 'string' || typeof time !== 'number') return undefined;
+    var v = ref[3] === true ? value : host(6, c, l, path, time, false);
+    var kind = data(host(5, c, l, path), 2);
+    if (kind === 'path' && v !== null) return new __Path(data(v, 0), data(v, 1), data(v, 2), data(v, 3));
+    if (kind === 'layer' && (v === null || typeof v === 'number')) return data(host(3, c, v === null ? l : v), 1);
+    return v;
+  }
+  return function () {
+    var remaining = 65536;
+    function copy(x, depth) {
+      if (--remaining < 0) throw new RangeError('audio expression result is too large');
+      if (x === null || x === undefined || typeof x === 'number' || typeof x === 'boolean' || typeof x === 'string') return x;
+      if (depth >= 4) return [1, '[object]'];
+      if (isArray(x)) {
+        var a = [0], n = data(x, 'length');
+        n = typeof n === 'number' ? min(n, 65536) : 0;
+        for (var i = 0; i < n; ++i) {
+          var entry = data(x, i);
+          define(a, i + 1, { __proto__: null, value: copy(depth === 0 ? unwrap(entry) : entry, depth + 1) });
+        }
+        return a;
+      }
+      if (data(x, '__style')) return [2, data(x, '__json')];
+      if (data(x, '__path')) return [3, copy(data(x, '__pts'), depth + 1), copy(data(x, '__in'), depth + 1),
+        copy(data(x, '__out'), depth + 1), !!data(x, '__closed')];
+      return [1, '[object]'];
+    }
+    return copy(unwrap(take()), 0);
+  };
+})(__takeAudioInput, __audioData, __h, Array.isArray, Object.defineProperty, Math.min);
+
 function __result(r) {
   r = __v(r);
   if (typeof r === 'function' && r.__isLayer) return r.index;
@@ -980,11 +1032,23 @@ var __propHandler = {
   },
 };
 
-var __mkProp = (function (P) {
-  return function (c, l, path) {
-    return new P(new Prop(c, l, path), __propHandler);
-  };
-})(Proxy);
+// Only the factory records proxies. Audio result extraction can read their target's
+// stored data without running a proxy trap or exposing the target to the expression.
+const [__mkProp, __audioPropRef] = (function (P, targets, data) {
+  var get = targets.get.bind(targets), set = targets.set.bind(targets);
+  return [
+    function (c, l, path) {
+      var target = new Prop(c, l, path);
+      var proxy = new P(target, __propHandler);
+      set(proxy, target);
+      return proxy;
+    },
+    function (proxy) {
+      var target = get(proxy);
+      if (target !== undefined) return [data(target, '__c'), data(target, '__l'), data(target, '__p'), data(target, '__self')];
+    },
+  ];
+})(Proxy, new WeakMap(), __audioData);
 
 // Text styles (the Source Text style API) ------------------------------------------------------
 // A TextStyle is the source document (as JSON from the host), the character index it reads its

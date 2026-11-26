@@ -993,3 +993,85 @@ fn preview_rate_audio_keeps_its_position_through_live_mute_and_unmute() {
         app.stop();
     }
 }
+
+/// Drive a real Cmd-drag from the current-time indicator, leaving the pointer held for recovery.
+fn begin_scrub(h: &mut Harness<'_, EffectcraftApp>) -> egui::Pos2 {
+    let cti = h.state().auto.find("timeline.cti").unwrap().clone();
+    let from = pos2(cti.rect[0] + cti.rect[2] / 2.0, cti.rect[1] + cti.rect[3] / 2.0);
+    h.event(Event::ModifiersChanged(Modifiers::COMMAND));
+    h.event(Event::PointerMoved(from));
+    h.step();
+    h.event(Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers: Modifiers::COMMAND });
+    h.step();
+    let to = from + egui::vec2(40.0, 0.0);
+    h.event(Event::PointerMoved(to));
+    h.step();
+    h.step();
+    to
+}
+
+/// A real scrub gesture reports a script that exceeds its limit, draws the toast, and recovers.
+/// The source-work limit (footage reads) is covered where footage exists, in the render and export tests.
+#[test]
+fn scrub_reports_excessive_audio_work() {
+    {
+        let fake = Fake::default();
+        let (mut app, cid) = setup(true, &fake);
+        // A failed new scrub must also discard the previous successful snippet.
+        app.scrub_audio(cid, Tick::ZERO, 0.0);
+        assert!(fake.0.lock().unwrap().0.as_ref().unwrap().queued_frames() > 0);
+        app.session.expr = effectcraft_host::session().expr;
+        let p = Arc::make_mut(&mut app.session.project);
+        let mut prop = effectcraft_project::build::Ids(&mut p.next_id).prop("timeRemap", "Time Remap", effectcraft_keyframe::Value::Scalar(0.0));
+        prop.expr = Some(effectcraft_project::Expression {
+            text: "function g() { for (var i=0;i<900000;i++) {} } for (var k=0;k<900000;k++) g()".into(),
+            enabled: true,
+        });
+        p.comp_mut(cid).unwrap().layers[0].props.children.push(prop.into());
+        // Check the same feed before harness startup can close an idle scrub device.
+        app.scrub_audio(cid, Tick::from_units(1, 30), 0.1);
+        let feed = fake.0.lock().unwrap().0.clone().unwrap();
+        assert_eq!(feed.queued_frames(), 0);
+        assert!(feed.error().is_some());
+        // Use a separate app/device so the gesture cannot inherit the direct call's error.
+        let project = app.session.project.clone();
+        let expr = app.session.expr.clone();
+        let layer = &mut Arc::make_mut(&mut app.session.project).comp_mut(cid).unwrap().layers[0];
+        layer.props.prop_mut("timeRemap").unwrap().expr = None;
+        app.scrub_audio(cid, Tick::from_units(1, 30), 0.2);
+        assert!(feed.queued_frames() > 0, "editing the failed frame allows a retry without moving");
+        assert!(feed.error().is_none());
+        drop(app);
+        let fake = Fake::default();
+        let (mut app, fresh_cid) = setup(true, &fake);
+        assert_eq!(fresh_cid, cid);
+        app.session.project = project;
+        app.session.expr = expr;
+        let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(|_| app);
+        h.run_steps(3);
+        assert!(h.state().ui.status.is_empty(), "the drag starts without a prior error");
+        assert!(fake.0.lock().unwrap().0.is_none(), "the drag starts with no prior audio feed");
+        let start = std::time::Instant::now();
+        let at = begin_scrub(&mut h);
+        assert!(start.elapsed() < std::time::Duration::from_secs(3), "scrub must not retry per-sample timeouts");
+        let error = "audio mixing exceeded its work limit; simplify time stretching, remapping, or nested compositions";
+        assert!(h.state().ui.status.contains(error));
+        assert!(h.output().shapes.iter().any(|s| matches!(&s.shape, egui::Shape::Text(t) if t.galley.text().contains(error))), "visible error toast");
+        assert!(h.state().session.time() > Tick::ZERO, "the gesture changed the current time");
+        let feed = fake.0.lock().unwrap().0.clone().unwrap();
+        assert_eq!(feed.queued_frames(), 0);
+        assert!(feed.error().is_some());
+        let layer = &mut Arc::make_mut(&mut h.state_mut().session.project).comp_mut(cid).unwrap().layers[0];
+        layer.stretch = 100.0;
+        if let Some(prop) = layer.props.prop_mut("timeRemap") {
+            prop.expr = None;
+        }
+        let to = at + egui::vec2(40.0, 0.0);
+        h.event(Event::PointerMoved(to));
+        h.step();
+        assert!(feed.queued_frames() > 0);
+        assert!(feed.error().is_none(), "a later successful mix recovers in the same session");
+        h.event(Event::PointerButton { pos: to, button: egui::PointerButton::Primary, pressed: false, modifiers: Modifiers::COMMAND });
+        h.step();
+    }
+}

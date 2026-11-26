@@ -73,7 +73,7 @@ fn a_file_with_an_extreme_stretch_opens_in_range_draws_and_mixes_with_bounded_re
         // The audio mixes, reading at most 100 source samples per comp sample (a stretch of 1 %).
         let (rate, n) = (8000, 4000);
         let probe = Probe::default();
-        let mixed = mix_comp(&p, &probe, None, cid, Tick::from_seconds_f64(0.5), n, rate);
+        let mixed = mix_comp(&p, &probe, None, cid, Tick::from_seconds_f64(0.5), n, rate).unwrap();
         assert_eq!(mixed.len(), n * 2, "{stored}");
         assert!(probe.longest.load(Ordering::Relaxed) <= 100 * n + 1, "{stored}: a read of {} samples", probe.longest.load(Ordering::Relaxed));
     }
@@ -89,7 +89,7 @@ fn an_in_memory_extreme_stretch_mixes_with_bounded_reads() {
         p.comp_mut(cid).unwrap().layers.iter_mut().for_each(|l| l.stretch = stretch);
         let (rate, n) = (8000, 4000);
         let probe = Probe::default();
-        let mixed = mix_comp(&p, &probe, None, cid, Tick::from_seconds_f64(0.5), n, rate);
+        let mixed = mix_comp(&p, &probe, None, cid, Tick::from_seconds_f64(0.5), n, rate).unwrap();
         assert_eq!(mixed.len(), n * 2, "{stretch}");
         assert!(probe.longest.load(Ordering::Relaxed) <= 100 * n + 1, "{stretch}: a read of {} samples", probe.longest.load(Ordering::Relaxed));
     }

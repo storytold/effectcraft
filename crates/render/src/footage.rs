@@ -228,7 +228,7 @@ impl FootageSource for CancellableFootage<'_> {
         self.read(|| self.inner.frame_at_size(item, footage, t, width, height))
     }
     fn audio(&self, item: ItemId, footage: &Footage, t: Tick, frames: usize, rate: u32) -> Option<Vec<f32>> {
-        self.inner.audio(item, footage, t, frames, rate)
+        self.read(|| self.inner.audio(item, footage, t, frames, rate))
     }
     // (decoding channels is a read like a frame's: called off with the render, between batches)
     fn aux(&self, item: ItemId, footage: &Footage, t: Tick) -> Option<Arc<effectcraft_raster::AuxChannels>> {

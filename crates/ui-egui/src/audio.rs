@@ -24,6 +24,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 use effectcraft_engine::project::{GroupKind, ItemId, ItemKind, Layer, LayerSource, Project, PropGroup};
+use effectcraft_engine::render::audio::{AudioError, MixControl, MixSources, mix_comp_with_control};
 use effectcraft_engine::time::{FrameRate, Tick};
 
 use crate::frames::RenderSource;
@@ -71,6 +72,9 @@ impl AudioOutput {
 #[derive(Default)]
 pub struct AudioFeed {
     queue: Mutex<VecDeque<f32>>,
+    /// Why the mixer stopped, when it did not reach the end of the span (cancelled or past its
+    /// work limit): shown to the user, unlike a normal finish.
+    error: Mutex<Option<String>>,
     /// Sample frames handed to the device (real audio only: underruns do not count).
     consumed: AtomicU64,
     /// Peak |sample| per channel since the last [`AudioFeed::take_peaks`] (f32 bits).
@@ -80,6 +84,21 @@ pub struct AudioFeed {
 }
 
 impl AudioFeed {
+    /// The most recent mix failure, distinct from reaching the end of the work area.
+    pub fn error(&self) -> Option<String> {
+        self.error.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+    }
+    /// Stop feeding and keep an actionable error for the UI.
+    fn fail(&self, error: String) {
+        *self.error.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(error);
+        self.finished.store(true, Ordering::Release);
+    }
+
+    fn resume(&self) {
+        *self.error.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        self.finished.store(false, Ordering::Relaxed);
+    }
+
     /// Fill `out` (interleaved stereo) from the queue; silence where the queue runs dry.
     pub fn pull(&self, out: &mut [f32]) {
         let mut real = 0usize;
@@ -140,7 +159,7 @@ impl AudioFeed {
     }
 
     pub fn finished(&self) -> bool {
-        self.finished.load(Ordering::Relaxed) && self.queued_frames() == 0
+        self.finished.load(Ordering::Acquire) && self.queued_frames() == 0
     }
 }
 
@@ -193,6 +212,14 @@ pub fn frame_of_sample(s: i64, rate: u32, fps: FrameRate) -> i64 {
 
 /// Block size the feeder mixes at a time.
 const BLOCK: usize = 1024;
+/// Smallest block retried after the browser runs out of time.
+const MIN_PUMP_BLOCK: usize = 128;
+
+/// How long one [`AudioPlayback::pump`] may spend mixing on the UI thread (wasm32).
+const PUMP_BUDGET: std::time::Duration = std::time::Duration::from_millis(8);
+
+/// How long the expressions of one playback block may run in all before the preview gives up.
+const PLAYBACK_EXPRESSION_TIME: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// A running audio preview: device + feeder thread.
 pub struct AudioPlayback {
@@ -208,6 +235,7 @@ pub struct AudioPlayback {
     pub rate: u32,
     pub span: PlaySpan,
     timeline: PreviewRate,
+    pump_block: usize,
 }
 
 /// The mixer's position and its view of the project.
@@ -266,7 +294,7 @@ impl AudioPlayback {
         let state = Arc::new(Mutex::new(Feeder { src, cursor: span.start, generation: 0 }));
         if cfg!(target_arch = "wasm32") {
             // The device takes samples only in `pump`, which fills the queue first.
-            let mut p = AudioPlayback { feed: feed.clone(), device, stop, thread: None, state, comp, mix, rate, span, timeline };
+            let mut p = AudioPlayback { feed: feed.clone(), device, stop, thread: None, state, comp, mix, rate, span, timeline, pump_block: BLOCK };
             p.device.start(feed)?;
             p.pump();
             return Ok(p);
@@ -281,9 +309,10 @@ impl AudioPlayback {
                 .name("ec-audio-feed".into())
                 .spawn(move || {
                     let target = queue_target(rate);
+                    let control = playback_control(&stop);
                     while !stop.load(Ordering::Relaxed) {
                         if feed.queued_frames() < target && !feed.finished.load(Ordering::Relaxed) {
-                            feed_block(&state, comp, &feed, &span, timeline, mix);
+                            feed_block(&state, comp, &feed, &span, timeline, mix, BLOCK, &control);
                         } else {
                             std::thread::sleep(std::time::Duration::from_millis(4));
                         }
@@ -292,7 +321,7 @@ impl AudioPlayback {
                 .map_err(|e| e.to_string())?
         };
         device.start(feed.clone())?;
-        Ok(AudioPlayback { feed, device, stop, thread: Some(thread), state, comp, mix, rate, span, timeline })
+        Ok(AudioPlayback { feed, device, stop, thread: Some(thread), state, comp, mix, rate, span, timeline, pump_block: BLOCK })
     }
 
     /// Every UI frame while playing: on wasm32 mix ahead into the feed (what the feeder thread
@@ -300,8 +329,25 @@ impl AudioPlayback {
     pub fn pump(&mut self) {
         if cfg!(target_arch = "wasm32") {
             let target = queue_target(self.rate);
-            while self.feed.queued_frames() < target && !self.feed.finished.load(Ordering::Relaxed) {
-                feed_block(&self.state, self.comp, &self.feed, &self.span, self.timeline, self.mix);
+            // No threads here: mixing runs on the UI thread, so one pump may only take a few
+            // milliseconds (the queue is topped up over the next frames).
+            let deadline = web_time::Instant::now() + PUMP_BUDGET;
+            let control = MixControl { deadline: Some(deadline), ..playback_control(&self.stop) };
+            let mut mixed = false;
+            while self.feed.queued_frames() < target && !self.feed.finished.load(Ordering::Relaxed) && web_time::Instant::now() < deadline {
+                if !feed_block(&self.state, self.comp, &self.feed, &self.span, self.timeline, self.mix, self.pump_block, &control) {
+                    // A deferred block did not advance the cursor. Try again with a fresh deadline
+                    // next frame, using smaller blocks if the first one could not finish.
+                    if !mixed {
+                        if self.pump_block == MIN_PUMP_BLOCK {
+                            self.feed.fail(AudioError::DeadlineExceeded.to_string());
+                        } else {
+                            self.pump_block /= 2;
+                        }
+                    }
+                    break;
+                }
+                mixed = true;
             }
         }
         self.device.pump();
@@ -321,7 +367,7 @@ impl AudioPlayback {
         let Some(consumed) = self.feed.discard_pending() else { return };
         s.src.project = project;
         s.generation = s.generation.wrapping_add(1);
-        self.feed.finished.store(false, Ordering::Relaxed);
+        self.feed.resume();
         // The display clock clamps to the last *audible* sample. A finished non-looping
         // feeder must instead stay at the exclusive end, never replay that last sample.
         let next = i128::from(self.span.start) + i128::from(consumed);
@@ -398,6 +444,7 @@ fn audio_changed_inner(old: &Project, new: &Project, comp: ItemId, seen: &mut Ha
                     || x.switches.solo != y.switches.solo
                     || x.switches.effects != y.switches.effects
                     || x.props.sub("audio") != y.props.sub("audio")
+                    || x.props.get("timeRemap") != y.props.get("timeRemap")
                     || audio_effects(x) != audio_effects(y)
                     || audio_has_expression(x)
                     || audio_has_expression(y)
@@ -419,6 +466,7 @@ fn audio_changed_inner(old: &Project, new: &Project, comp: ItemId, seen: &mut Ha
     fn audio_has_expression(l: &Layer) -> bool {
         l.switches.audio
             && (l.props.sub("audio").and_then(|g| g.get("levels")).is_some_and(|p| p.has_expression())
+                || l.props.get("timeRemap").is_some_and(|p| p.has_expression())
                 || (l.switches.effects && audio_effects(l).iter().any(|g| g.enabled && g.props().any(|p| p.has_expression()))))
     }
     /// The footage item's audio availability changed (relinked, missing, no audio).
@@ -435,48 +483,71 @@ fn audio_changed_inner(old: &Project, new: &Project, comp: ItemId, seen: &mut Ha
 /// Mix one block at the feeder's cursor into the feed and move the cursor on (wrapping or
 /// finishing at the work-area end). The block is mixed without holding the lock, so a project
 /// change never waits for a slow mix; a block mixed from the old project is dropped.
-fn feed_block(state: &Mutex<Feeder>, comp: ItemId, feed: &AudioFeed, span: &PlaySpan, timeline: PreviewRate, mix: u32) {
+/// Returns false when the deadline expires and the same samples should be retried.
+#[allow(clippy::too_many_arguments)]
+fn feed_block(
+    state: &Mutex<Feeder>,
+    comp: ItemId,
+    feed: &AudioFeed,
+    span: &PlaySpan,
+    timeline: PreviewRate,
+    mix: u32,
+    limit: usize,
+    control: &MixControl,
+) -> bool {
     let Ok((src, mut cursor, generation)) = state.lock().map(|s| (s.src.clone(), s.cursor, s.generation)) else {
         // Poisoned: nothing more can be mixed.
         feed.finished.store(true, Ordering::Relaxed);
-        return;
+        return true;
     };
     let mut block = None;
     if cursor >= span.wb && span.looping {
         cursor = span.wa;
     }
     if cursor < span.wb {
-        let n = span.wb.saturating_sub(cursor).clamp(0, BLOCK as i64) as usize;
-        block = Some(if timeline.normal() {
-            mix_block(&src, comp, timeline.time(cursor), n, timeline.rate(), mix)
+        let n = span.wb.saturating_sub(cursor).clamp(0, limit as i64) as usize;
+        let sources = MixSources { project: &src.project, footage: src.footage.as_ref(), expr: src.expr.as_deref() };
+        block = Some(if timeline.normal() && timeline.rate() == mix {
+            mix_comp_with_control(&sources, comp, timeline.time(cursor), n, mix, control)
         } else {
-            timeline.mix(cursor, n, mix, |t, frames| {
-                effectcraft_engine::render::audio::mix_comp(&src.project, src.footage.as_ref(), src.expr.as_deref(), comp, t, frames, mix)
-            })
+            // Use the absolute sample grid so browser retries with smaller blocks keep phase.
+            timeline.mix(cursor, n, mix, |t, frames| mix_comp_with_control(&sources, comp, t, frames, mix, control))
         });
         cursor += n as i64;
     }
-    let Ok(mut s) = state.lock() else { return };
+    let Ok(mut s) = state.lock() else { return true };
     if s.generation != generation {
-        return;
+        return true;
     }
     match block {
-        Some(b) => feed.push(&b),
+        Some(Ok(b)) => feed.push(&b),
+        Some(Err(AudioError::DeadlineExceeded)) => return false,
+        // A failed block is never played in part: the feed stops with the reason.
+        Some(Err(error)) => {
+            feed.fail(error.to_string());
+            return true;
+        }
         None => feed.finished.store(true, Ordering::Relaxed),
     }
     s.cursor = cursor;
+    true
 }
 
 /// `n` stereo frames of `comp`'s mix from comp time `t` at the device `rate`, mixed at `mix` Hz
 /// (resampled when they differ).
-fn mix_block(src: &RenderSource, comp: ItemId, t: Tick, n: usize, rate: u32, mix: u32) -> Vec<f32> {
-    let render =
-        |frames: usize, at: u32| effectcraft_engine::render::audio::mix_comp(&src.project, src.footage.as_ref(), src.expr.as_deref(), comp, t, frames, at);
+fn mix_block(sources: &MixSources<'_>, comp: ItemId, t: Tick, n: usize, rate: u32, mix: u32, control: &MixControl) -> Result<Vec<f32>, AudioError> {
+    let render = |frames: usize, at: u32| mix_comp_with_control(sources, comp, t, frames, at, control);
     if mix == rate {
         return render(n, rate);
     }
     let m = (n as u64 * mix as u64).div_ceil(rate as u64) as usize + 1;
-    resample_stereo(&render(m, mix), mix, rate, n)
+    Ok(resample_stereo(&render(m, mix)?, mix, rate, n))
+}
+
+/// The mix controls of playback: stoppable, with its expressions' time limited (footage reads are
+/// not, a slow first read of a long file must not stop the sound).
+fn playback_control(stop: &Arc<AtomicBool>) -> MixControl {
+    MixControl { cancel: Some(stop.clone()), max_expression_time: Some(PLAYBACK_EXPRESSION_TIME), ..Default::default() }
 }
 
 /// Audio scrubbing: an open output that plays a short, faded snippet of the comp's mix each time
@@ -488,6 +559,8 @@ pub struct AudioScrub {
     pub rate: u32,
     /// The comp and frame last played (holding still repeats nothing).
     last: Option<(ItemId, i64)>,
+    /// A failed attempt may be retried as soon as the project snapshot changes.
+    failed_project: Option<std::sync::Weak<Project>>,
     /// When it last played (UI seconds): an idle scrub closes the device.
     pub last_used: f64,
 }
@@ -497,7 +570,7 @@ impl AudioScrub {
         let rate = device.sample_rate().max(8000);
         let feed = Arc::new(AudioFeed::default());
         device.start(feed.clone())?;
-        Ok(AudioScrub { feed, device, rate, last: None, last_used: now })
+        Ok(AudioScrub { feed, device, rate, last: None, failed_project: None, last_used: now })
     }
 
     /// Play the frame of `comp` at `t` (one frame long, 30–100 ms) unless it was the last one
@@ -506,14 +579,25 @@ impl AudioScrub {
         self.last_used = now;
         let Some(c) = src.project.comp(comp) else { return false };
         let frame = c.frame_rate.frame_at(t);
-        if self.last == Some((comp, frame)) {
+        if self.last == Some((comp, frame)) && self.failed_project.as_ref().is_none_or(|p| p.ptr_eq(&Arc::downgrade(&src.project))) {
             return false;
         }
         self.last = Some((comp, frame));
         let rate = self.rate;
         let mix = if mix_rate == 0 { rate } else { mix_rate.clamp(8000, 192_000) };
         let n = (c.frame_duration().seconds().clamp(0.03, 0.1) * rate as f64) as usize;
-        let mut buf = mix_block(src, comp, c.frame_rate.tick_of(frame), n, rate, mix);
+        let control = MixControl { max_expression_time: Some(std::time::Duration::from_millis(50)), max_expression_yields: Some(32), ..Default::default() };
+        let sources = MixSources { project: &src.project, footage: src.footage.as_ref(), expr: src.expr.as_deref() };
+        let mut buf = match mix_block(&sources, comp, c.frame_rate.tick_of(frame), n, rate, mix, &control) {
+            Ok(buf) => buf,
+            Err(error) => {
+                // What is still queued came from another frame: drop it, then say why.
+                self.failed_project = Some(Arc::downgrade(&src.project));
+                self.feed.clear();
+                self.feed.fail(error.to_string());
+                return false;
+            }
+        };
         // 3 ms fades: no clicks where snippets meet.
         let fade = (rate as usize * 3 / 1000).clamp(1, n / 2 + 1);
         let frames = buf.len() / 2;
@@ -523,6 +607,8 @@ impl AudioScrub {
             buf[2 * i + 1] *= g;
         }
         self.feed.clear();
+        self.failed_project = None;
+        self.feed.resume();
         self.feed.push(&buf);
         true
     }

@@ -126,7 +126,8 @@ fn level_gains(layer: &Layer, levels: Option<&Property>, t: Tick) -> [f32; 2] {
 
 /// Draw `layer`'s waveform in `rect` (left channel above right), columns mapped through the
 /// timeline's time map and the layer's time mapping, limited to its [in, out) span and drawn as
-/// the layer plays (see [`played`]).
+/// the layer plays without Time Remap (see [`played`]). Remapped layers show a labelled source
+/// waveform so it can still be used to locate positions in the underlying footage.
 pub(crate) fn draw(p: &Painter, rect: Rect, tm: &TMap, layer: &Layer, s: &Summary, color: Color32) {
     let mid = [rect.min.y + rect.height() * 0.25, rect.min.y + rect.height() * 0.75];
     let half = rect.height() * 0.25 - 1.0;
@@ -221,7 +222,7 @@ mod tests {
             for s in [2.0, 2.25, 2.5, 3.0, 4.0, 6.0] {
                 let t = Tick::from_seconds_f64(s);
                 let drawn = level_gains(&l, levels, t);
-                let mixed = mix_comp(&p, &Half, None, cid, t, 1, 1000);
+                let mixed = mix_comp(&p, &Half, None, cid, t, 1, 1000).unwrap();
                 for c in 0..2 {
                     let heard = mixed.get(c).copied().unwrap_or(f32::NAN) / 0.5;
                     assert!((drawn[c] - heard).abs() < 2e-3, "stretch {stretch}, {s} s, channel {c}: drawn {} heard {heard}", drawn[c]);
@@ -300,7 +301,7 @@ mod played_tests {
 
     /// The left-channel sample the mix plays at comp time `t`.
     fn heard(p: &Project, cid: ItemId, t: f64) -> f32 {
-        mix_comp(p, &Ramp, None, cid, Tick::from_seconds_f64(t), 1, 8000).first().copied().unwrap_or(f32::NAN)
+        mix_comp(p, &Ramp, None, cid, Tick::from_seconds_f64(t), 1, 8000).unwrap_or_default().first().copied().unwrap_or(f32::NAN)
     }
 
     /// Columns of `l` over [0, 1) s: each drawn peak against what the mix plays at the column.

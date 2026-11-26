@@ -40,10 +40,12 @@ fn project(rate: FrameRate, extra: impl FnOnce(&mut Project, &mut Comp)) -> (Pro
 
 type Files = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
 
+/// Select an exact export span without changing the project's timing.
 fn custom(start: f64, end: f64) -> RenderSettings {
     RenderSettings { time_span: TimeSpan::Custom { start: Tick::from_seconds_f64(start), end: Tick::from_seconds_f64(end) }, ..Default::default() }
 }
 
+/// Collect finished in-memory outputs alongside the export result.
 fn run_with(p: &Project, cid: ItemId, s: &RenderSettings, om: &OutputModule, path: &str, options: JobOptions, cancel: bool) -> (Result<Report, String>, Files) {
     run_on(p, cid, s, om, path, options, (None, cancel))
 }
@@ -386,6 +388,7 @@ fn wav_and_aiff_channels_and_formats() {
     assert_eq!(u16::from_be_bytes([d[26], d[27]]), 24, "sample size");
 }
 
+/// Cancellation preserves unrelated and skipped files, including overflow destinations.
 #[test]
 fn cancelled_export_removes_only_files_it_opened() {
     use effectcraft_export::ExportError;
@@ -695,4 +698,132 @@ fn renderer_choice_follows_the_measurement() {
     assert_eq!(pick_renderer(None, None), JobRenderer::Gpu);
     assert_eq!(pick_renderer(Some(f64::NAN), Some(1.0)), JobRenderer::Gpu);
     assert_eq!(pick_renderer(None, Some(50.0)), JobRenderer::Cpu);
+}
+
+/// Footage whose audio is silence: unlike [`NoFootage`] it has sound to read, so mixing it costs work.
+struct SilentAudio;
+impl effectcraft_render::FootageSource for SilentAudio {
+    fn frame(&self, _: ItemId, _: &effectcraft_project::Footage, _: Tick) -> Option<Arc<Image>> {
+        None
+    }
+    fn audio(&self, _: ItemId, _: &effectcraft_project::Footage, _: Tick, frames: usize, _: u32) -> Option<Vec<f32>> {
+        Some(vec![0.0; frames * 2])
+    }
+}
+
+/// Cancellation and excessive audio work propagate through the encoder instead of producing a report.
+#[test]
+fn audio_mix_failures_abort_export() {
+    let (p, cid) = project(FrameRate::new(25, 1), |_, _| {});
+    let om = OutputModule::for_format(OutputFormat::Wav);
+    let options = JobOptions { cancel: Some(Arc::new(std::sync::atomic::AtomicBool::new(true))), ..Default::default() };
+    let (result, _) = run_with(&p, cid, &custom(0.0, 0.5), &om, "/cancel.wav", options, false);
+    assert_eq!(result.unwrap_err(), "cancelled");
+    // A footage layer whose Time Remap cycles through eight distant source times, one per output sample: each
+    // jump is a fresh source page, far more than any mix may fetch, so the export fails instead of hanging.
+    let (p, cid) = project(FrameRate::new(25, 1), |p, c| {
+        let f = effectcraft_project::Footage { has_audio: true, duration: Tick::from_seconds_f64(1.0e6), ..Default::default() };
+        let footage = p.add_item("audio", Label::SeaFoam, None, ItemKind::Footage(f));
+        let mut layer = build::layer(p, c, "audio", LayerSource::Footage { item: footage }, (0, 0), None);
+        let mut remap = build::Ids(&mut p.next_id).prop("timeRemap", "Time Remap", Value::Scalar(0.0));
+        remap.keys = (0..4000i64).map(|k| Keyframe::new(Tick::from_units(k, 8000), Value::Scalar((k % 8) as f64 * 100.0))).collect();
+        layer.props.children.push(remap.into());
+        c.layers.push(layer);
+    });
+    let mut om = om;
+    om.audio_sample_rate = 8000;
+    let settings = custom(0.0, 0.5);
+    let job = Job {
+        project: &p,
+        footage: &SilentAudio,
+        expr: None,
+        accel: None,
+        comp: cid,
+        settings: &settings,
+        output: &om,
+        path: "/limited.wav",
+        sink: Some(&|_: &str, _: Vec<u8>| {}),
+        options: JobOptions::default(),
+        nested_switches: true,
+    };
+    let result = export(&job, &mut |_| true).map_err(|e| e.to_string());
+    assert!(result.unwrap_err().contains("audio mixing exceeded its work limit"));
+}
+
+/// A single video frame can span many audio blocks. Check decoded audio at every block join.
+#[test]
+fn low_frame_rate_audio_exports_are_not_rejected_by_the_mix_limit() {
+    const RATE: u32 = 48_000;
+    const FRAMES: usize = 30 * RATE as usize;
+    const BLOCK: usize = 16_384;
+    struct Chirp;
+    fn signal(i: usize) -> f32 {
+        let t = i as f64 / f64::from(RATE);
+        (0.5 * (std::f64::consts::TAU * (173.0 * t + 3.0 * t * t)).sin()) as f32
+    }
+    impl effectcraft_render::FootageSource for Chirp {
+        fn frame(&self, _: ItemId, _: &effectcraft_project::Footage, _: Tick) -> Option<Arc<Image>> {
+            None
+        }
+        fn audio(&self, _: ItemId, _: &effectcraft_project::Footage, start: Tick, frames: usize, _: u32) -> Option<Vec<f32>> {
+            let first = usize::try_from(start.to_units_floor(i64::from(RATE))).ok()?;
+            Some((first..first + frames).flat_map(|i| [signal(i); 2]).collect())
+        }
+    }
+    let (mut p, cid) = project(FrameRate::new(1, 30), |p, comp| {
+        let f = effectcraft_project::Footage { has_audio: true, duration: Tick::from_seconds_f64(30.0), ..Default::default() };
+        let item = p.add_item("Chirp", Label::SeaFoam, None, ItemKind::Footage(f));
+        let mut layer = build::layer(p, comp, "Chirp", LayerSource::Footage { item }, (0, 0), None);
+        layer.out_point = Tick::from_seconds_f64(30.0);
+        comp.layers.push(layer);
+    });
+    p.comp_mut(cid).unwrap().duration = Tick::from_seconds_f64(30.0);
+    let dir = tempfile::tempdir().unwrap();
+    let settings = custom(0.0, 30.0);
+    for (format, codec, name) in [
+        (OutputFormat::Uncompressed, WebmVideoCodec::Vp9, "pcm.mov"),
+        (OutputFormat::WebM, WebmVideoCodec::Vp9, "vp9.webm"),
+        (OutputFormat::WebM, WebmVideoCodec::Av1, "av1.webm"),
+    ] {
+        let mut om = OutputModule::for_format(format);
+        om.webm_codec = codec;
+        om.audio = AudioOutput::On;
+        om.audio_sample_rate = RATE;
+        let files: Files = Default::default();
+        let captured = files.clone();
+        let sink = move |path: &str, data: Vec<u8>| captured.lock().unwrap().push((path.to_string(), data));
+        let job = Job {
+            project: &p,
+            footage: &Chirp,
+            expr: None,
+            accel: None,
+            comp: cid,
+            settings: &settings,
+            output: &om,
+            path: name,
+            sink: Some(&sink),
+            options: JobOptions::default(),
+            nested_switches: true,
+        };
+        assert!(export(&job, &mut |_| true).unwrap().audio, "{name}");
+        let mut files = files.lock().unwrap();
+        assert_eq!(files.len(), 1, "{name}");
+        let path = dir.path().join(name);
+        std::fs::write(&path, files.pop().unwrap().1).unwrap();
+        let footage = effectcraft_media::probe(&path).unwrap();
+        assert!((footage.duration.seconds() - 30.0).abs() < 0.03, "{name}: {:?}", footage.duration);
+        let pcm = effectcraft_media::MediaPool::new().audio_samples(&footage, Tick::ZERO, FRAMES, RATE);
+        assert_eq!(pcm.len(), FRAMES * 2, "{name}");
+        for center in (BLOCK..FRAMES - 1024).step_by(BLOCK).chain([FRAMES - 2048]) {
+            let (mut dot, mut actual, mut expected) = (0.0, 0.0, 0.0);
+            for i in center - 1024..center + 1024 {
+                let got = pcm[2 * i];
+                let want = signal(i);
+                dot += got * want;
+                actual += got * got;
+                expected += want * want;
+            }
+            assert!(actual > expected * 0.4 && dot > 0.85 * (actual * expected).sqrt(), "{name}: audio discontinuity near sample {center}");
+        }
+    }
 }

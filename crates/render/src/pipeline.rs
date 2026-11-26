@@ -206,9 +206,19 @@ impl<'a> Renderer<'a> {
     /// `read`, a read of this render's footage source, with the files it uses noted in
     /// [`Renderer::reads`] (see [`FootageSource::recording`]).
     pub(crate) fn read<R>(&self, read: impl FnOnce() -> Option<R>) -> Option<R> {
-        let Some(log) = self.reads else { return read() };
         let (mut read, mut out) = (Some(read), None);
-        self.footage.recording(log, &mut || out = read.take().and_then(|f| f()));
+        let mut run = || {
+            if let Some(log) = self.reads {
+                self.footage.recording(log, &mut || out = read.take().and_then(|f| f()));
+            } else {
+                out = read.take().and_then(|f| f());
+            }
+        };
+        if let Some(expr) = self.expr {
+            expr.with_footage_read(&mut run);
+        } else {
+            run();
+        }
         out
     }
 
