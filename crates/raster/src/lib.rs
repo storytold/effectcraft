@@ -117,6 +117,9 @@ impl Image {
     /// Bilinear sample at continuous pixel coordinates (pixel centres at +0.5); transparent outside.
     #[inline]
     pub fn sample_bilinear(&self, x: f64, y: f64) -> Px {
+        if !x.is_finite() || !y.is_finite() {
+            return [0.0; 4];
+        }
         let fx = x - 0.5;
         let fy = y - 0.5;
         let x0 = fx.floor();
