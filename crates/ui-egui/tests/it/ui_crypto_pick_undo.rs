@@ -94,7 +94,12 @@ fn harness(s: Session, size: egui::Vec2) -> Harness<'static, EffectcraftApp> {
         dock::hsplit(SplitSize::FixedSecond(420.0), dock::tabs(&[PanelKind::Composition], 0), dock::tabs(&[PanelKind::EffectControls], 0)),
         dock::hsplit(SplitSize::FixedSecond(300.0), dock::tabs(&[PanelKind::Timeline], 0), dock::tabs(&[PanelKind::History], 0)),
     ));
-    let mut h = Harness::builder().with_size(size).with_pixels_per_point(1.0).with_step_dt(0.25).build_eframe(|_| app);
+    let mut h = Harness::builder()
+        .with_size(size)
+        .with_pixels_per_point(1.0)
+        .with_step_dt(0.25)
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| app);
     settle(&mut h);
     h
 }
@@ -452,6 +457,8 @@ enum Step {
     Blur(u64, f64),
 }
 
+/// Performs one model step (a pick, an edit, undo or redo, applying or removing the effect) and
+/// records the state the model expects after it.
 fn run_step(h: &mut Harness<'_, EffectcraftApp>, f: &Fix, m: &mut Model, size: [f64; 2], step: &Step, n: usize) {
     let mut o = m.state().clone();
     let before = h.state().session.history.undo.len();
@@ -538,6 +545,8 @@ fn run_step(h: &mut Harness<'_, EffectcraftApp>, f: &Fix, m: &mut Model, size: [
         }
         Step::ApplyCrypto(layer) => {
             h.state_mut().session.execute_checked("effect.apply", json!({"comp": f.comp, "layers": [layer], "effect": "Cryptomatte"})).unwrap();
+            // Not left selected: the model covers the armed eyedropper alone (#2839).
+            h.state_mut().session.state.selected_props.clear();
             let uid = sel_uid(&h.state().session, f.comp, *layer).unwrap();
             layer_mut(&mut o, *layer).effects.push((CRYPTO.into(), Some((uid, String::new()))));
             (format!("#{n} apply Cryptomatte to {layer}"), true)

@@ -37,6 +37,7 @@ Commands (CLI, MCP, control channel):
 - `general.showToolTips`: Show Tool Tips
 - `general.viewerWheelScrubbing`: Scrub Composition Frames with Mouse Wheel (off by default). On: an unmodified mouse wheel over the Composition viewer steps frames, and the smoothed tail of that notch does not zoom or pan. Ctrl/Cmd+wheel and a trackpad still zoom and pan.
 - `general.createLayersAtCompStart`: Create Layers at Composition Start Time
+- `general.fitNewLayersToWorkArea`: Fit New Layers to Work Area (off by default). On: new text, solid, shape, null and adjustment layers start at the work area start and end at its end, ahead of Create Layers at Composition Start Time. Footage and compositions keep their own length.
 - `general.defaultSpatialLinear`: Default Spatial Interpolation to Linear
 - `startup.showHomeOnLaunch`: Show Home Screen When Launching
 - `startup.offerCrashRecovery`: Offer to Open the Latest Auto-Save After a Crash
@@ -52,10 +53,20 @@ Commands (CLI, MCP, control channel):
 - `autoSave.saveOnRenderStart`: Save When Starting Render Queue
 - `composition.showRenderingProgress`: Show Rendering Progress in Info Panel and Flowchart
 - `previews.adaptiveResolutionLimit`: Adaptive Resolution Limit (the lowest resolution Fast Previews ▸
-  Adaptive Resolution drops to while you drag; a playing preview keeps the viewer's resolution)
+  Adaptive Resolution drops to while you drag, and the lowest a playing preview steps down to)
+- `previews.adaptivePlayback`: Lower Resolution When Playback Can't Keep Up. Off by default (without it a first play renders
+  at the viewer's resolution at the rate frames arrive, and a looping preview plays its later loops
+  from the cache in real time, as in After Effects; with it the play stays lowered). A
+  preview at Resolution Auto that plays under 80 % of its frame rate (frames render slower than
+  that, so it plays them at the rate they arrive rather than freezing between them) steps
+  down a resolution (half the scale after two seconds, a quarter two seconds later if still slow,
+  no lower than the Adaptive Resolution Limit) for the rest of that play; stopping goes back to the viewer's resolution, and Cache
+  Frames When Idle fills it in. An explicit Resolution (the comp's or the Preview panel's) is
+  kept as set
 - `previews.cacheFramesWhenIdle`: Cache Frames When Idle (Composition ▸ Preview): after a second
   without input or edits, the viewer renders the work area into the RAM preview in the
-  background, from the current time on, until it is cached or the budget is full
+  background, from the current time on, until it is cached or the budget is full. On by default,
+  as in After Effects, so the first playback of a comp left alone for a second is already cached
 - `previews.fastPreviews`: Fast Previews (Draft 3D, Faster Effects)
 - `appearance.appearanceMode`: Appearance Mode (`auto` / `dark` / `light`). `auto` (Sync with System) follows the operating system's light or dark appearance while the app runs: on Linux the desktop app reads the XDG desktop portal (`org.freedesktop.appearance` `color-scheme`) once and then listens for its `SettingChanged` signal on a worker thread, repainting only when the value changes (nothing polls); `gsettings` runs at most once at start-up, by absolute path, when the portal gives no answer. Elsewhere it uses what the window system reports. With no answer it shows the dark theme. New installs stay `dark`; Sync with System is opt-in. The Tools bar's appearance button (a monitor, sun or moon) cycles Sync with System, Light and Dark (`view.theme.toggle`, Next Appearance Mode).
 - `appearance.darkTheme`: Dark Theme (`dark` / `darker`), shown in dark appearance
@@ -79,9 +90,34 @@ Commands (CLI, MCP, control channel):
 - `audio.outputDevice`: Default Output (device list from the desktop host)
 - `audio.outputLeft`: Left (Audio Output Mapping)
 - `audio.outputRight`: Right (Audio Output Mapping)
-- `memory.layerCacheMb`: Layer Cache (in the browser at most 512 MB, see [web.md](web.md))
-- `memory.mediaCacheMb`: Footage Frame Cache (in the browser at most 256 MB)
-- `memory.previewCacheMb`: Preview (RAM) Cache
+- `memory.gpuFramesInFlight`: GPU Frames Rendered at Once (`auto`, `1`, `2`, `3`): how many
+  frames the Render Queue renders on the GPU at once. Auto measures the GPU memory after the
+  job's first GPU frame and fits up to 3 frames into the GPU memory cap (by default a
+  conservative 3 GiB on a discrete card, less when its memory is known, 2 GiB on an integrated
+  one; `EFFECTCRAFT_GPU_MEMCAP_MB` sets it), keeping room for the upload cache to fill. It
+  renders one frame at a time where the memory can't be measured (Metal, WebGPU, GL, or the
+  cap turned off) and once frames have had to wait for memory. The render log names the count.
+  `EFFECTCRAFT_GPU_INFLIGHT` overrides it. CPU renders have no such setting. A job on GPU
+  Acceleration that renders on the CPU (it measured the CPU faster, or the GPU stopped) fits
+  its CPU frames in flight into half the memory the system has free, at the size a GPU frame
+  measured, from 1 to one per thread; the app log names the count. Other CPU renders (Software
+  Rendering projects) keep one frame per thread in flight, so their memory grows with the core
+  count. Set `EFFECTCRAFT_CPU_INFLIGHT` to a whole number of frames (at least 1) to cap the
+  frames in flight of every Render Queue render and export, `effectcraft-cli render` included
+  ([#1615](https://github.com/storytold/effectcraft/issues/1615)); previews don't read it. One
+  exception: while a job on GPU Acceleration times both compositors on its first frames, it
+  renders them under the cap but keeps them all (up to 12) until it has chosen. That timing
+  picks the compositor that a job of 12 frames or more renders every frame on (the render log
+  names it and why). `EFFECTCRAFT_RQ_RENDERER` set to `gpu` or `cpu` skips it and renders on
+  that compositor; `auto` (the default) measures. A queue item's later output modules reuse its
+  first one's choice, and Software Rendering projects always render on the CPU.
+  When a job ends, the log target `effectcraft_export` gets one timing line, and the render log
+  gets it as a `Timing:` line when its Log setting writes a log for that outcome (under the
+  default Errors Only, failed jobs only; a failed job's line says how long it ran and what ran
+  before it stopped): the wall time, the busy time of rendering, the encoder and writing the file
+  (the stages overlap, so they are not a sum), the compositor and why, the encoder and its
+  settings, and frames per second ([#3713](https://github.com/storytold/effectcraft/issues/3713)).
+  `effectcraft-cli render --json` returns it as `timing` and `timingSummary`.
 - `threeD.defaultRenderer`: Default 3D Renderer
 - `labels.N.name` / `labels.N.color`: the 16 label names and colours, used by the Label menu,
   the timeline, project panel, render queue and viewer handles
@@ -142,15 +178,64 @@ Commands (CLI, MCP, control channel):
   it supports it)
 - `disk.diskCacheEnabled`, `disk.diskCacheMaxGb`, `disk.diskCacheFolder`: the persistent disk
   cache of processed layers and frames (in the browser: frames in the Origin Private File System,
-  at most half the origin's quota; the folder setting does not apply there). The Disk page also
+  at most half the origin's quota; the folder setting does not apply there). On the desktop the
+  cache never fills its disk: it leaves 5% of the disk free, at least 2 GB and at most 10 GB, and
+  is smaller than `disk.diskCacheMaxGb` when free space requires it. The Disk page shows the limit
+  in effect in MB under Maximum Disk Cache Size, with a note naming the space kept free when free
+  disk space lowers it (with less than 64 MB of room nothing is written, and frames and layers
+  are not compressed for it). The Disk page also
   shows **Browser Storage** in the web app: usage and quota, persistent storage, Clear buttons
   (`storage.info` / `storage.persist` / `storage.clear`, see [web.md](web.md))
 - `disk.mediaCacheFolder`: audio waveform summaries kept between sessions (`Peaks/`)
 - `disk.conformedMediaFolder`: decoded (conformed) footage audio, written once per file and
   sample rate and read back instead of decoding again
-- `memory.ramReservedGb`: the cache budgets together leave this much physical memory free
-- `memory.reduceCacheWhenLow`: cache budgets halve while the system is low on memory (checked
-  every 30 s by the desktop app, on a background thread)
+- `disk.localizeFootage` (off by default), `disk.localizeMaxGb` (20), `disk.localizeFolder`,
+  `disk.networkFootageLocations`: OpenEXR footage on network shares is copied, one file at a
+  time on a background thread, to a local folder (by default beside the disk cache's folder),
+  and read from the copy once it is complete and the source still has the size and modification
+  time it had when copied. Network footage is UNC paths (`\\server\share\…`) and the locations
+  listed in `disk.networkFootageLocations` (`;`-separated path prefixes, such as a drive letter
+  mapped to a share: `P:\`). The copies take at most `disk.localizeMaxGb` and leave the disk
+  cache's reserve free on their disk; earlier sessions' copies are adopted. The Disk page shows
+  the local copies, what is queued and being copied, and the network locations
+- `memory.ramReservedGb`: RAM Reserved for Other Applications, the one memory setting (After
+  Effects has a setting of this name too). EffectCraft's big caches (processed layers, also those
+  of exports and Render Queue runs, decoded footage frames, decoded OpenEXR planes, RAM preview
+  frames, and the disk cache's write queue) share one budget: 80 % of the installed RAM left
+  after the reserve. The command-line tool and its MCP server read the installed RAM once at start
+  (with the default reserve: they don't read the app's settings). The other 20 % is room for
+  EffectCraft's own working memory (decoders, render buffers, undo, GPU staging, the interface).
+  With the default 6 GB reserved that is 8.0 GB on a 16 GB machine, 46.4 GB on 64 GB and 97.6 GB
+  on 128 GB. The budget is at least 192 MB for all caches together; while the installed RAM is
+  unknown (a sandbox, or the desktop before its first reading) it is 5 GB, in the browser 3.5 GB
+  (with the RAM preview at most 3 GB there). No cache has a share of its own: when they
+  hold more than the budget together, the memory accountant frees the least valuable data first,
+  whichever cache holds it, down to 90 % of the budget. An item's value is what it would cost to
+  make again (its measured render or decode time; when not measured, a typical 4 ms per MB for a
+  layer, 8 ms for a preview frame, 2 ms for footage frames and planes) per byte, divided by
+  `ln(seconds unused + 1) + 1`: a slow decay (about a fifth after a minute unused, a seventh after
+  ten), so a costly frame unused for minutes still outlives a cheap one; a copy of data another
+  cache holds (a queued disk write) is worth nothing, and a cache that had to make again what it
+  let go of shortly before is protected for a while. The frames a playing RAM preview shows next
+  go last: they may keep the caches over the budget by a tenth of it (at most 1 GB) while other
+  items can go instead. Besides the bytes the caches count, the process's measured memory is
+  watched (its resident size, read with each balance and at most every 250 ms): above 95 % of the
+  installed RAM left after the reserve the caches give way by what it is over even within their
+  budget (memory nobody counts: GPU staging, effect buffers, the allocator's fragmentation), at
+  most once per reading unless it grows; above all of it also the preview frames that would
+  play next. A frame or plane set is written to the disk cache only when making it again costs
+  more than reading it back (the measured read rate, 10 ms per MB until reads are measured); a
+  RAM eviction keeps the disk copy, and the disk cache drops its oldest entries first. At most
+  256 movie and audio files are kept open, the least recently used closed beyond that (image
+  sequences, OpenEXR included, keep no file open between decodes). In the browser the layer cache also stays within 512 MB and the footage frames within
+  256 MB (see [web.md](web.md)). The Memory & CPU page shows what EffectCraft may use, of the
+  installed RAM. Settings saved before this (version 4 and earlier) had Layer Cache, Footage
+  Frame Cache and Preview (RAM) Cache budgets (`memory.layerCacheMb`, `memory.mediaCacheMb`,
+  `memory.previewCacheMb`); they are dropped when the settings are read
+- `memory.reduceCacheWhenLow`: the budget halves while the system is low on memory (less than
+  10 % of the RAM, or less than 1 GB, available; checked every 30 s by the desktop app, on a
+  background thread). It stays halved until twice that much is available again, so freeing the
+  caches doesn't end the episode at once, and the toast saying so shows once per episode
 - `video.enableOutput`, `video.device`, `video.outputDuringPlayback`, `video.mirrorOnMonitor`,
   `video.disableWhenBackground`: Video Preview, a second window (or full screen on the display
   it is on) showing the composition frame, Mercury Transmit-style

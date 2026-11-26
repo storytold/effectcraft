@@ -5,21 +5,24 @@
 //! (size patched at the end), Info, Tracks and one Cluster per render batch. Video frames are
 //! SimpleBlocks; with alpha (Channels: RGB + Alpha) each frame is a BlockGroup whose
 //! BlockAdditional (BlockAddID 1) carries a second VP9 frame coding the alpha channel as luma,
-//! with `AlphaMode` 1 on the track, as WebM defines. VP9 comes from `effectcraft-vp9enc` (key
+//! with `AlphaMode` 1 on the track, as WebM defines. VP9 comes from `craft_video::vp9` (key
 //! frames every two seconds, inter frames between them: SimpleBlocks carry the key flag, inter
 //! BlockGroups a ReferenceBlock; the alpha stream's key frames line up with the colour stream's),
-//! Opus from `effectcraft-opusenc` (CELT, 48 kHz stereo, 20 ms packets,
+//! Opus from `craft_audio::opus::Encoder` (SILK / hybrid / CELT, 48 kHz, 20 ms packets,
 //! `CodecDelay` = pre-skip). WAV (RIFF, PCM or IEEE float) and AIFF (big-endian PCM, 80-bit
 //! extended sample rate; AIFF-C `fl32` for float) follow their published file layouts.
 
 use std::io::{Seek, SeekFrom, Write};
 
+use craft_audio::opus::encoder as opus;
 use effectcraft_project::Comp;
 use effectcraft_project::render_queue::{AudioFormat, Channels};
 use effectcraft_time::{TICKS_PER_SECOND, Tick};
+use web_time::Instant;
 
 use crate::encode::{mix, pcm_bytes};
-use crate::{Cx, Report, Result, State, batch_size, io, wants_audio};
+use crate::pipeline::Stage;
+use crate::{Cx, ExportError, Report, Result, State, batch_size, io, wants_audio};
 
 pub(crate) const OPUS_RATE: u32 = 48_000;
 
@@ -124,13 +127,18 @@ fn cluster(frames: &mut [Frame]) -> Vec<u8> {
 }
 
 /// The Opus encoder of a WebM output: the module's channel count, bitrate and application.
-pub(crate) fn opus_encoder(job: &Cx) -> effectcraft_opusenc::OpusEncoder {
+pub(crate) fn opus_encoder(job: &Cx) -> Result<opus::Encoder> {
     let channels = if job.output.audio_channels == 1 { 1 } else { 2 };
     let app = match job.output.opus_application {
-        effectcraft_project::render_queue::OpusApplication::Audio => effectcraft_opusenc::Application::Audio,
-        effectcraft_project::render_queue::OpusApplication::Voip => effectcraft_opusenc::Application::Voip,
+        effectcraft_project::render_queue::OpusApplication::Audio => opus::Application::Audio,
+        effectcraft_project::render_queue::OpusApplication::Voip => opus::Application::Voip,
     };
-    effectcraft_opusenc::OpusEncoder::with_application(channels, job.output.opus_bitrate_kbps.clamp(6, 510) * 1000, app)
+    opus::Encoder::with_application(channels, job.output.opus_bitrate_kbps.clamp(6, 510) * 1000, app).map_err(opus_error)
+}
+
+/// An Opus encoder error as an export error.
+pub(crate) fn opus_error(e: opus::Error) -> ExportError {
+    ExportError::Encode(format!("Opus: {e}"))
 }
 
 pub(crate) async fn webm(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut State<'_>) -> Result<Report> {
@@ -142,7 +150,7 @@ pub(crate) async fn webm(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut Sta
     let colour_channels = if job.output.channels == Channels::Alpha { Channels::Alpha } else { Channels::Rgb };
     let quality = job.output.quality.clamp(1, 100);
     let fps = rate.as_f64().max(1.0);
-    let cfg = effectcraft_vp9enc::EncoderConfig {
+    let cfg = craft_video::vp9::EncoderConfig {
         width: w,
         height: h,
         quality,
@@ -152,17 +160,18 @@ pub(crate) async fn webm(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut Sta
         frame_rate: fps,
         loop_filter: true,
     };
-    let mut color_enc = effectcraft_vp9enc::Vp9Encoder::new(cfg.clone());
-    let mut alpha_enc = alpha.then(|| effectcraft_vp9enc::Vp9Encoder::new(cfg.clone()));
+    let mut color_enc = craft_video::vp9::Vp9Encoder::new(cfg.clone());
+    let mut alpha_enc = alpha.then(|| craft_video::vp9::Vp9Encoder::new(cfg.clone()));
     let with_audio = wants_audio(job);
     let opus_channels = if job.output.audio_channels == 1 { 1usize } else { 2 };
-    let mut opus = with_audio.then(|| opus_encoder(job));
+    let mut opus = with_audio.then(|| opus_encoder(job)).transpose()?;
     let total = st.total;
     let frame_ms = |k: u64| -> i64 { ((k as i128 * 1000 * rate.den as i128 + rate.num as i128 / 2) / rate.num as i128) as i64 };
     let duration_ms = frame_ms(total) as f64;
 
     let path = job.place(job.path, 1);
-    let mut file = job.create(&path)?;
+    // Each write is timed before its error is passed on: a failed export's line keeps the time.
+    let mut file = job.timed(Stage::Write, || job.create(&path))?;
     // EBML header.
     let mut head = vec![];
     let mut eb = vec![];
@@ -221,7 +230,7 @@ pub(crate) async fn webm(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut Sta
         el(&mut tracks, TRACK_ENTRY, &a);
     }
     el(&mut head, TRACKS, &tracks);
-    file.write_all(&head).map_err(io)?;
+    job.timed(Stage::Write, || file.write_all(&head).map_err(io))?;
     let mut seg_len = head.len() as u64 - seg_start;
 
     // Audio: mixed in blocks, encoded in 20 ms packets.
@@ -229,8 +238,8 @@ pub(crate) async fn webm(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut Sta
     let mut cursor = span_start.to_units_floor(OPUS_RATE as i64);
     let mut pcm_left: Vec<f32> = vec![];
     let mut packets = 0u64;
-    let mut audio_until = |until: Tick, frames: &mut Vec<Frame>, finish: bool| {
-        let Some(enc) = opus.as_mut() else { return };
+    let mut audio_until = |until: Tick, frames: &mut Vec<Frame>, finish: bool| -> Result<()> {
+        let Some(enc) = opus.as_mut() else { return Ok(()) };
         let end = until.to_units_floor(OPUS_RATE as i64);
         if end > cursor {
             let n = (end - cursor) as usize;
@@ -238,18 +247,21 @@ pub(crate) async fn webm(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut Sta
             pcm_left.extend(mix(job, start, n, OPUS_RATE));
             cursor = end;
         }
-        let fs = effectcraft_opusenc::OpusEncoder::FRAME_SIZE * opus_channels;
+        let fs = craft_audio::opus::Encoder::FRAME_SIZE * opus_channels;
         if finish && !pcm_left.is_empty() {
             // Pad the last packet (pre-skip + padding cover the encoder delay).
             let pad = (fs - pcm_left.len() % fs) % fs + fs;
             pcm_left.extend(std::iter::repeat_n(0.0, pad));
         }
-        while pcm_left.len() >= fs {
-            let pkt = enc.encode_float(&pcm_left[..fs]);
-            pcm_left.drain(..fs);
+        // Packets are read in place and the encoded samples dropped once: draining each packet
+        // from the front would shift the rest of the batch's audio every 20 ms.
+        for packet in pcm_left.chunks_exact(fs) {
+            let pkt = enc.encode_float(packet).map_err(crate::webm::opus_error)?;
             frames.push(Frame { ms: packets as i64 * 20, track: 2, key: true, prev_ms: None, data: pkt, alpha: None });
             packets += 1;
         }
+        pcm_left.drain(..pcm_left.len() / fs * fs);
+        Ok(())
     };
 
     let batch = batch_size();
@@ -261,15 +273,16 @@ pub(crate) async fn webm(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut Sta
         let pixels: Vec<Vec<u8>> =
             job.frames(comp, (i..end).collect(), |_, img| job.pixels(&img, comp, if alpha { Channels::Rgba } else { colour_channels }, w, h)).await;
         let mut frames: Vec<Frame> = Vec::with_capacity(pixels.len());
+        let t = Instant::now();
         for (j, px) in pixels.iter().enumerate() {
             let (color, a) = rayon::join(
                 || {
-                    let (y, u, vv) = effectcraft_vp9enc::rgba_to_yuv420(px, w, h, false);
+                    let (y, u, vv) = craft_video::vp9::rgba_to_yuv420(px, w, h, false);
                     color_enc.encode_frame(&y, &u, &vv, false)
                 },
                 || {
                     alpha_enc.as_mut().map(|ea| {
-                        let (y, u, vv) = effectcraft_vp9enc::alpha_to_yuv420(px, w, h);
+                        let (y, u, vv) = craft_video::vp9::alpha_to_yuv420(px, w, h);
                         ea.encode_frame(&y, &u, &vv, false).data
                     })
                 },
@@ -278,32 +291,41 @@ pub(crate) async fn webm(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut Sta
             frames.push(Frame { ms: frame_ms(k), track: 1, key: color.key, prev_ms: (k > 0).then(|| frame_ms(k - 1)), data: color.data, alpha: a });
         }
         drop(pixels);
+        job.add_time(Stage::Encode, t);
         let t_end = if end >= total { span_end } else { job.settings.frame_time(comp, end) };
-        audio_until(t_end, &mut frames, end >= total);
-        let c = cluster(&mut frames);
-        file.write_all(&c).map_err(io)?;
-        seg_len += c.len() as u64;
+        job.timed_if(with_audio, Stage::Audio, || audio_until(t_end, &mut frames, end >= total))?;
+        job.timed(Stage::Write, || -> Result<()> {
+            let c = cluster(&mut frames);
+            file.write_all(&c).map_err(io)?;
+            seg_len += c.len() as u64;
+            Ok(())
+        })?;
         st.advance(end - i)?;
         i = end;
     }
     if total == 0 {
         let mut frames = vec![];
-        audio_until(span_end, &mut frames, true);
+        job.timed_if(with_audio, Stage::Audio, || audio_until(span_end, &mut frames, true))?;
         if !frames.is_empty() {
-            let c = cluster(&mut frames);
-            file.write_all(&c).map_err(io)?;
-            seg_len += c.len() as u64;
+            job.timed(Stage::Write, || -> Result<()> {
+                let c = cluster(&mut frames);
+                file.write_all(&c).map_err(io)?;
+                seg_len += c.len() as u64;
+                Ok(())
+            })?;
         }
     }
     // Patch the Segment size.
     let mut size = [0u8; 8];
     size[0] = 0x01;
     size[1..].copy_from_slice(&seg_len.to_be_bytes()[1..]);
-    file.seek(SeekFrom::Start(size_pos)).map_err(io)?;
-    file.write_all(&size).map_err(io)?;
-    file.seek(SeekFrom::End(0)).map_err(io)?;
-    let bytes = file.finish()?;
-    Ok(Report { path, frames: 0, width: w, height: h, seconds: 0.0, bytes, audio: with_audio, log: None, overflow: vec![] })
+    let bytes = job.timed(Stage::Write, || -> Result<u64> {
+        file.seek(SeekFrom::Start(size_pos)).map_err(io)?;
+        file.write_all(&size).map_err(io)?;
+        file.seek(SeekFrom::End(0)).map_err(io)?;
+        file.finish()
+    })?;
+    Ok(Report { path, frames: 0, width: w, height: h, seconds: 0.0, bytes, audio: with_audio, log: None, overflow: vec![], timing: Default::default() })
 }
 
 // ---------------------------------------------------------------- audio-only outputs
@@ -347,7 +369,7 @@ pub(crate) fn audio_file(job: &Cx, comp: &Comp, aiff: bool, st: &mut State) -> R
         let sample = start + done as i64;
         let t = Tick::from_units(sample, i64::from(sr));
         let t = if t.to_units_floor(i64::from(sr)) < sample { Tick(t.0.saturating_add(1)) } else { t };
-        pcm.extend(pcm_bytes(&mix(job, t, k, sr), fmt, aiff));
+        pcm.extend(job.timed(Stage::Audio, || pcm_bytes(&mix(job, t, k, sr), fmt, aiff)));
         done += k;
         let now = (done as u64 * total_frames / n.max(1) as u64).min(total_frames);
         if now > reported && st.total > 0 {
@@ -419,11 +441,15 @@ pub(crate) fn audio_file(job: &Cx, comp: &Comp, aiff: bool, st: &mut State) -> R
             out.push(0);
         }
     }
-    let path = job.place(job.path, out.len() as u64);
-    let mut file = job.create(&path)?;
-    file.write_all(&out).map_err(io)?;
-    let bytes = file.finish()?;
-    Ok(Report { path, frames: 0, width: 0, height: 0, seconds: 0.0, bytes, audio: true, log: None, overflow: vec![] })
+    // Timed before the error is passed on: a failed export's line keeps the time.
+    let (path, bytes) = job.timed(Stage::Write, || -> Result<(String, u64)> {
+        let path = job.place(job.path, out.len() as u64);
+        let mut file = job.create(&path)?;
+        file.write_all(&out).map_err(io)?;
+        let bytes = file.finish()?;
+        Ok((path, bytes))
+    })?;
+    Ok(Report { path, frames: 0, width: 0, height: 0, seconds: 0.0, bytes, audio: true, log: None, overflow: vec![], timing: Default::default() })
 }
 
 #[cfg(test)]

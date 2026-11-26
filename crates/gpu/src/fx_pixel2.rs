@@ -215,6 +215,8 @@ fn composite_mode(m: u32) -> BlendMode {
     }
 }
 
+/// The per-pixel effects of `fp2_point` (Cineon, HDR Compander and Highlight Compression, CC
+/// Overbrights, CC Composite, Color Link): their parameters packed for the kernel, or `None`.
 fn point(e: &mut Enc, id: &str, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
     let pr = ctx.params;
     let mut p = Params::default();
@@ -227,8 +229,11 @@ fn point(e: &mut Enc, id: &str, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
             let rolloff = pr.f("highlightRolloff") as f32;
             let offset = |black: f32, white: f32| 10f32.powf((black - white) * 0.002 / 0.6);
             let knee = 1.0 - (rolloff / 100.0).clamp(0.0, 0.99);
-            p.u[0] = [0, pr.e("conversionType"), 0, 0];
-            p.f[0] = [offset(black, white), knee, white, pr.f("gamma") as f32];
+            let version_2 = pr.f("version") >= 2.0;
+            // Version 1 keeps the saved Gamma, where 1.7 gives linear output.
+            let gamma = if version_2 { effectcraft_effects::cineon_gamma(pr) } else { pr.f("gamma") };
+            p.u[0] = [0, pr.e("conversionType"), version_2 as u32, 0];
+            p.f[0] = [offset(black, white), knee, white, gamma as f32];
             p.f[1] = [pr.f("internalBlackPoint") as f32, pr.f("internalWhitePoint") as f32, 0.0, 0.0];
             p.f[2] = [offset(95.0, 685.0), knee, 685.0, 1.7];
         }
@@ -238,11 +243,12 @@ fn point(e: &mut Enc, id: &str, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
         }
         "ec.utility.hdrcompression" => {
             let t = (pr.f("amount") / 100.0).clamp(0.0, 1.0) as f32;
-            if t <= 0.0 {
+            // A NaN Amount keeps the layer, as on the CPU.
+            if t <= 0.0 || !t.is_finite() {
                 return Some(b);
             }
             p.u[0][0] = 2;
-            p.f[0][0] = 1.0 - 0.5 * t;
+            p.f[0][0] = t;
         }
         "ec.utility.ccoverbrights" => {
             p.u[0] = [3, pr.e("channel"), 0, 0];

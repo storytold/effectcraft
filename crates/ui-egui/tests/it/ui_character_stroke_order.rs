@@ -49,7 +49,11 @@ fn character_stroke_order_menu_sets_layer_fill_and_stroke() {
     let mut app = EffectcraftApp::new(s);
     app.set_workspace("Text");
     let builder = Harness::builder().with_size(vec2(1600.0, 1400.0));
-    let mut h = if std::env::var_os("EC_SNAPSHOT_DIR").is_some() { builder.wgpu().build_eframe(|_| app) } else { builder.build_eframe(|_| app) };
+    let mut h = if std::env::var_os("EC_SNAPSHOT_DIR").is_some() {
+        builder.wgpu().with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app)
+    } else {
+        builder.with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app)
+    };
     h.state_mut().show_panel(PanelKind::Character);
     h.run_steps(4);
 

@@ -107,6 +107,8 @@ struct PrerenderCx {
     expr: Option<Arc<dyn effectcraft_render::ExprHost>>,
     accel: Option<Arc<dyn effectcraft_render::Accelerator>>,
     nested_switches: bool,
+    /// What each of a pre-render's two layer caches may hold (`Session::export_cache_budget`).
+    cache_budget: usize,
 }
 
 /// Render one layer to ProRes 4444 with alpha over its in–out span; `progress` as the exporter's.
@@ -145,6 +147,11 @@ fn prerender(
         storage: None,
         label: format!("Pre-render {}", l.name),
         nested_switches: cx.nested_switches,
+
+        caches: None,
+        renderer: None,
+        gpu_frames: None,
+        cache_budget: Some(cx.cache_budget),
     };
     let r = exporter.export(&job, progress)?;
     Ok(Prerendered { path: r.path, width: comp.width, height: comp.height, frame_rate: comp.frame_rate, duration: end - start })
@@ -187,6 +194,7 @@ fn export_timeline(s: &mut Session, p: &Value) -> Result<Value> {
         expr: s.expr.clone(),
         accel: s.accel.clone(),
         nested_switches: s.prefs.general.switches_affect_nested_comps,
+        cache_budget: s.export_cache_budget(),
     };
     // The pre-renders can take minutes: with `background` (the export dialog) they run as a job
     // in Window ▸ Progress instead of with the window waiting (#2269).

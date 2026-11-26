@@ -6,7 +6,7 @@
 //! Positions are character indices. The selection is `anchor..caret` (either order).
 
 use effectcraft_keyframe::{CharStyle, TextDoc, Value as KV};
-use effectcraft_project::{ItemId, LayerId, LayerSource};
+use effectcraft_project::{ItemId, LayerId, LayerSource, text_layer_name};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -288,10 +288,6 @@ fn session_on(s: &mut Session, lid: LayerId) -> TextEdit {
     }
 }
 
-fn first_line_name(text: &str) -> String {
-    text.lines().next().unwrap_or("").chars().take(40).collect()
-}
-
 /// Edit a layer's Source Text at the CTI (one undo step, or merged by `merge`), then set the
 /// session's selection.
 pub(crate) fn edit_doc(
@@ -319,12 +315,13 @@ pub(crate) fn edit_doc(
         // already has) must not turn a static Str into Text or add a keyframe at the CTI: that
         // would change the project and record an empty undo step.
         if doc != original {
-            let before = first_line_name(&original.text);
-            let after = first_line_name(&doc.text);
+            let before = text_layer_name(&original.text);
+            let after = text_layer_name(&doc.text);
             pr.set_value_at(lt, KV::Text(Box::new(doc)));
-            // Text layers are named after their text until renamed.
-            if before != after && !after.is_empty() && (l.name == before || l.name.starts_with("Text") || l.name.is_empty()) {
+            // Text layers are named after their text until renamed (#3233).
+            if before != after && !after.is_empty() && l.name_follows_text(&before) {
                 l.name = after;
+                l.name_follows_text = Some(true);
             }
         }
         Ok(())

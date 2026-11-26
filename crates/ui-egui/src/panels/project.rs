@@ -3,7 +3,8 @@
 //! Media Duration, Frame Rate, File Path, Comment — shown or hidden from the header's context
 //! menu), folders (drag items into and out of them), renaming (Enter, or double-click the name),
 //! the label colour picker, and the bottom bar (interpret, new folder, new comp: click, or drop
-//! items on it for a comp from them, bit depth, delete), and the keyboard (the arrow keys select,
+//! items on New Folder for a folder holding them, or on New Comp for a comp from them; bit depth,
+//! delete), and the keyboard (the arrow keys select,
 //! extend the selection and open / close folders; rows and buttons carry AccessKit names and
 //! states for screen readers). Edits are engine commands, so they are undoable.
 
@@ -119,29 +120,89 @@ pub fn drop_folder(project: &effectcraft_engine::project::Project, row: Option<I
     if it.is_folder() { Some(it.id) } else { it.parent }
 }
 
-/// A thumbnail being rendered off the UI thread: (revision, result slot).
-type PendingThumb = (u64, Arc<Mutex<Option<Option<(u32, u32, Vec<u8>)>>>>);
+/// A Project panel thumbnail: (the content key it shows, its texture).
+#[derive(Clone)]
+struct Thumb(u128, egui::TextureHandle);
 
-/// Thumbnail of a comp (its current time) or footage (first frame), cached per item/revision.
-/// Rendered on a background thread (inline on wasm32): until the new one lands the previous
-/// thumbnail stays up, so selecting a big comp or editing it never stalls the panel.
+/// A thumbnail being rendered off the UI thread: (content key, result slot).
+#[derive(Clone)]
+struct PendingThumb(u128, Arc<Mutex<Option<Option<(u32, u32, Vec<u8>)>>>>);
+
+/// The Project panel's thumbnail texture of `item`, once its render has landed.
+pub fn cached_thumbnail(ctx: &egui::Context, item: ItemId) -> Option<egui::TextureHandle> {
+    ctx.data(|d| d.get_temp::<Thumb>(egui::Id::unique(("proj-thumb", item.0)))).map(|Thumb(_, t)| t)
+}
+
+/// Let go of every Project panel thumbnail and the renders in flight for them (a cache purge, or
+/// a project closed: the next project's item ids can be the closed one's).
+pub fn forget_thumbnails(ctx: &egui::Context) {
+    ctx.data_mut(|d| {
+        d.remove_by_type::<Thumb>();
+        d.remove_by_type::<PendingThumb>();
+    });
+}
+
+/// The content key of item `it`'s thumbnail at `t` ([`effectcraft_engine::Session::thumbnail_key`]),
+/// worked out again only when the project's revision, the footage reloads (Reload Footage or a
+/// watched file that changed: the project's revision stays), the preferences (Switches Affect
+/// Nested Comps and real-time shadows change what a comp shows) or the time changed. `false`
+/// with it: the key is of an earlier state (held back while edits come fast), so no render of
+/// the state now may be made under it.
+fn thumbnail_key(app: &EffectcraftApp, ctx: &egui::Context, it: &Item, t: effectcraft_engine::time::Tick) -> (u128, bool) {
+    let id = egui::Id::unique(("proj-thumb-key", it.id.0));
+    let rev = app.session.revision;
+    let reloads = app.session.footage_reloads.load(std::sync::atomic::Ordering::Relaxed);
+    let prefs = app.session.prefs_revision;
+    let now = ctx.input(|i| i.time);
+    if let Some((r, n, pr, at, k, when)) = ctx.data(|d| d.get_temp::<ThumbKey>(id)) {
+        if r == rev && n == reloads && pr == prefs && at == t.0 {
+            return (k, true);
+        }
+        // (the key hashes the comp's content: while edits come fast, at most every 0.25 s)
+        if now - when < THUMB_KEY_EVERY {
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(THUMB_KEY_EVERY));
+            return (k, false);
+        }
+    }
+    // (no key: the revision stands in, as before)
+    let k = app.session.thumbnail_key(it.id, t, THUMB_SIDE).unwrap_or(u128::from(rev) | (1 << 127));
+    ctx.data_mut(|d| d.insert_temp::<ThumbKey>(id, (rev, reloads, prefs, t.0, k, now)));
+    (k, true)
+}
+
+/// A thumbnail's content key as last worked out: (project revision, footage reloads, preferences
+/// revision, time, key, when, in seconds of UI time).
+type ThumbKey = (u64, u64, u64, i64, u128, f64);
+
+/// The longest side of a Project panel thumbnail, in pixels.
+const THUMB_SIDE: u32 = 192;
+
+/// A thumbnail's content key is worked out again at most this often (seconds) while the
+/// project keeps changing.
+const THUMB_KEY_EVERY: f64 = 0.25;
+
+/// Thumbnail of a comp (its current time) or footage (first frame), cached per item by what it
+/// shows ([`thumbnail_key`], #3271): an edit that doesn't change the picture doesn't render it
+/// again. Rendered on a background thread (inline on wasm32): until the new one lands the
+/// previous thumbnail stays up, so selecting a big comp or editing it never stalls the panel.
 fn thumbnail(app: &EffectcraftApp, ctx: &egui::Context, it: &Item) -> Option<egui::TextureHandle> {
     let key = egui::Id::unique(("proj-thumb", it.id.0));
     let pkey = egui::Id::unique(("proj-thumb-pending", it.id.0));
-    let rev = app.session.revision;
-    let cached: Option<(u64, egui::TextureHandle)> = ctx.data(|d| d.get_temp(key));
-    let mut tex = cached.as_ref().map(|(_, t)| t.clone());
-    let have = cached.as_ref().map(|(r, _)| *r);
+    let t = app.session.state.times.get(&it.id).copied().unwrap_or_default();
+    let (rev, current) = thumbnail_key(app, ctx, it, t);
+    let cached: Option<Thumb> = ctx.data(|d| d.get_temp(key));
+    let mut tex = cached.as_ref().map(|Thumb(_, t)| t.clone());
+    let have = cached.as_ref().map(|Thumb(r, _)| *r);
     // A finished render: upload it.
     let pending: Option<PendingThumb> = ctx.data(|d| d.get_temp(pkey));
-    if let Some((prev, slot)) = &pending {
+    if let Some(PendingThumb(prev, slot)) = &pending {
         let done = slot.lock().ok().and_then(|mut s| s.take());
         match done {
             Some(Some((w, h, px))) => {
                 let ci = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &px);
                 let t = ctx.load_texture(format!("proj-thumb-{}", it.id.0), ci, egui::TextureOptions::LINEAR);
                 ctx.data_mut(|d| {
-                    d.insert_temp(key, (*prev, t.clone()));
+                    d.insert_temp(key, Thumb(*prev, t.clone()));
                     d.remove::<PendingThumb>(pkey);
                 });
                 tex = Some(t);
@@ -159,11 +220,12 @@ fn thumbnail(app: &EffectcraftApp, ctx: &egui::Context, it: &Item) -> Option<egu
             }
         }
     }
-    if have == Some(rev) {
+    // (a key held back is of an earlier state: a render of the state now must not be kept under
+    // it, so the thumbnail shown stays until the key is worked out again)
+    if have == Some(rev) || !current {
         return tex;
     }
-    let t = app.session.state.times.get(&it.id).copied().unwrap_or_default();
-    let job = app.session.thumbnail_job(it.id, t, 192)?;
+    let job = app.session.thumbnail_job(it.id, t, THUMB_SIDE)?;
     let slot: Arc<Mutex<Option<Option<(u32, u32, Vec<u8>)>>>> = Arc::default();
     if cfg!(target_arch = "wasm32") {
         *slot.lock().ok()? = Some(job());
@@ -179,7 +241,7 @@ fn thumbnail(app: &EffectcraftApp, ctx: &egui::Context, it: &Item) -> Option<egu
             return tex;
         }
     }
-    ctx.data_mut(|d| d.insert_temp::<PendingThumb>(pkey, (rev, slot)));
+    ctx.data_mut(|d| d.insert_temp(pkey, PendingThumb(rev, slot)));
     ctx.request_repaint();
     tex
 }
@@ -231,10 +293,10 @@ fn selection_seen_id() -> egui::Id {
     egui::Id::unique("proj-sel-seen")
 }
 
-/// The focused widget is one of the panel's rows, or nothing has keyboard focus: the panel's keys
+/// The focused widget is one of the panel's rows, or no widget has the keyboard: the panel's keys
 /// apply. Any other focused widget (a text field, a button reached with Tab) keeps them.
 fn keys_reach_rows(app: &EffectcraftApp, ctx: &egui::Context) -> bool {
-    match ctx.memory(|m| m.focused()) {
+    match crate::framework::focused_widget(ctx) {
         None => app.ui.focused == crate::dock::PanelKind::Project,
         Some(f) => ctx.data(|d| d.get_temp::<ItemId>(focused_row_id())).is_some_and(|row| row_id(row) == f),
     }
@@ -268,7 +330,7 @@ fn keyboard_nav(app: &mut EffectcraftApp, ctx: &egui::Context) -> Option<ItemId>
     {
         return None;
     }
-    let row_focused = ctx.memory(|m| m.focused()).is_some();
+    let row_focused = crate::framework::widget_has_keyboard(ctx);
     let mut moved = None;
     for (key, m) in keys {
         let (plain, shift) = (!m.any(), m.shift_only());
@@ -335,22 +397,43 @@ fn keyboard_nav(app: &mut EffectcraftApp, ctx: &egui::Context) -> Option<ItemId>
     moved
 }
 
+/// Match names and dependency status, retain folder ancestors, and expand them while filtering.
+/// Iterative traversal bounds cyclic document trees and builds each folder's child list once.
 pub(crate) fn visible_rows(app: &EffectcraftApp) -> Vec<(ItemId, usize)> {
-    fn walk(app: &EffectcraftApp, folder: Option<ItemId>, depth: usize, q: &str, out: &mut Vec<(ItemId, usize)>) {
-        let mut kids = app.session.project.children(folder);
-        sort_items(&mut kids, &app.ui.project_sort, app.ui.project_sort_desc);
-        for it in kids {
-            if !q.is_empty() && !it.is_folder() && !it.name.to_lowercase().contains(q) {
-                continue;
-            }
-            out.push((it.id, depth));
-            if it.is_folder() && (app.ui.project_open_folders.contains(&it.id.0) || !q.is_empty()) {
-                walk(app, Some(it.id), depth + 1, q, out);
+    let project = &app.session.project;
+    let q = app.ui.project_search.to_lowercase();
+    let filtered = !q.is_empty() || app.ui.project_status != crate::state::ProjectStatus::All;
+    let mut included = std::collections::BTreeSet::new();
+    if filtered {
+        for item in project.items.values().filter(|i| !i.is_folder() && app.ui.project_status.matches(i) && i.name.to_lowercase().contains(&q)) {
+            let mut id = Some(item.id);
+            while let Some(current) = id {
+                if !included.insert(current) {
+                    break;
+                }
+                id = project.item(current).and_then(|i| i.parent);
             }
         }
     }
-    let mut rows = vec![];
-    walk(app, None, 0, &app.ui.project_search.to_lowercase(), &mut rows);
+    let mut children: std::collections::BTreeMap<Option<ItemId>, Vec<&Item>> = std::collections::BTreeMap::new();
+    for item in project.items.values() {
+        children.entry(item.parent).or_default().push(item);
+    }
+    for kids in children.values_mut() {
+        sort_items(kids, &app.ui.project_sort, app.ui.project_sort_desc);
+    }
+    let mut pending: Vec<_> = children.get(&None).into_iter().flatten().rev().map(|i| (*i, 0usize)).collect();
+    let mut seen = std::collections::BTreeSet::new();
+    let mut rows = Vec::new();
+    while let Some((item, depth)) = pending.pop() {
+        if !seen.insert(item.id) || (filtered && !included.contains(&item.id)) {
+            continue;
+        }
+        rows.push((item.id, depth));
+        if item.is_folder() && (filtered || app.ui.project_open_folders.contains(&item.id.0)) {
+            pending.extend(children.get(&Some(item.id)).into_iter().flatten().rev().map(|i| (*i, depth.saturating_add(1))));
+        }
+    }
     rows
 }
 
@@ -375,6 +458,7 @@ pub(crate) fn reveal(app: &mut EffectcraftApp, ctx: &egui::Context, items: &[Ite
         }
     }
     app.ui.project_search.clear();
+    app.ui.project_status = crate::state::ProjectStatus::All;
     app.session.state.project_selection = items;
     // Force the panel's selection scroll on its next draw, even when the item was already selected.
     ctx.data_mut(|d| d.remove_temp::<Option<u64>>(selection_seen_id()));
@@ -493,8 +577,45 @@ impl Columns {
     }
 }
 
-fn layout_columns(app: &mut EffectcraftApp, rect: Rect) -> Columns {
-    let name_w = (rect.width() * 0.40).clamp(120.0, 260.0);
+/// Narrowest Name column (points).
+const MIN_NAME_W: f32 = 120.0;
+
+/// The Name column width that shows every listed name in full: indent, twirl and icon, the
+/// name, and room for a problem marker.
+fn name_fit(app: &EffectcraftApp, p: &egui::Painter, rows: &[(ItemId, usize)]) -> f32 {
+    rows.iter()
+        .filter_map(|(id, depth)| {
+            let it = app.session.project.item(*id)?;
+            let text = p.layout_no_wrap(it.name.clone(), Tokens::ui(12.0), Color32::WHITE).size().x;
+            Some(8.0 + 14.0 * *depth as f32 + 30.0 + text + 24.0)
+        })
+        .fold(0.0, f32::max)
+}
+
+/// [`name_fit`] of the listed rows: only an automatic width (or an invalid saved one) measures the
+/// names.
+fn auto_name_fit(app: &EffectcraftApp, p: &egui::Painter) -> f32 {
+    if app.ui.project_name_w.is_some_and(f32::is_finite) { 0.0 } else { name_fit(app, p, &visible_rows(app)) }
+}
+
+/// The part of the panel the optional columns keep next to a widest Name column (points): room
+/// for some of their content and a horizontal scroll bar track that can be dragged.
+const MIN_OPTIONAL_VIEW: f32 = 40.0;
+
+/// The widest the Name column gets in a panel `width` points wide: the width less the Label
+/// column (40 points), and less [`MIN_OPTIONAL_VIEW`] while optional columns are shown.
+fn name_max_w(app: &EffectcraftApp, width: f32) -> f32 {
+    let optional = if app.ui.project_columns.iter().any(|k| COLUMNS.iter().any(|c| c.0 == k)) { MIN_OPTIONAL_VIEW } else { 0.0 };
+    (width - 40.0 - optional).max(MIN_NAME_W)
+}
+
+/// Column positions. The Name column is as wide as the user dragged it, else wide enough for
+/// the names listed (`fit`), as After Effects shows full names; at most [`name_max_w`] (the
+/// optional columns scroll under it).
+fn layout_columns(app: &mut EffectcraftApp, rect: Rect, fit: f32) -> Columns {
+    let max_w = name_max_w(app, rect.width());
+    let auto = (rect.width() * 0.40).clamp(MIN_NAME_W, 260.0).max(fit);
+    let name_w = app.ui.project_name_w.filter(|w| w.is_finite()).unwrap_or(auto).clamp(MIN_NAME_W, max_w);
     let label_x = rect.min.x + name_w + 14.0;
     let mut cols: Vec<(&'static str, &'static str, f32, f32)> = vec![("name", "Name", rect.min.x + 26.0, name_w - 26.0), ("label", "", label_x - 8.0, 18.0)];
     // Optional columns wider than the panel scroll horizontally under the frozen Name and Label
@@ -568,6 +689,21 @@ fn draw_header(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, h
     }
     let hresp = ui.interact(Rect::from_min_max(pos2(end_x, hdr.min.y), hdr.max), egui::Id::unique("proj-hdr-rest"), Sense::CLICK);
     column_menu(app, &hresp);
+    // The Name column's right edge: drag to resize it, double-click to fit the names again.
+    let edge = Rect::from_center_size(pos2(hdr.min.x + cl.name_w + 5.0, hdr.center().y), vec2(8.0, hdr.height()));
+    let eresp = ui.interact(edge, egui::Id::unique("proj-name-edge"), Sense::click_and_drag());
+    app.auto.add("project.nameColumn.edge", edge, "Drag to resize the Name column; double-click to fit the names");
+    if eresp.hovered() || eresp.dragged() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeColumn);
+        hp.line_segment([pos2(edge.center().x, hdr.min.y + 3.0), pos2(edge.center().x, hdr.max.y - 3.0)], Stroke::new(1.0, t.text_dim));
+    }
+    if eresp.double_clicked() {
+        app.ui.project_name_w = None;
+    } else if eresp.dragged() {
+        let max_w = name_max_w(app, hdr.width());
+        app.ui.project_name_w = Some((app.ui.project_name_w.unwrap_or(cl.name_w).min(max_w) + eresp.drag_delta().x).clamp(MIN_NAME_W, max_w));
+    }
+    eresp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, crate::i18n::tr("Resize the Name column")));
     app.auto.add("project.columns", hdr, "Columns (right-click to show or hide)");
 }
 
@@ -831,17 +967,24 @@ fn footer(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, foot: 
             }
         }
         // Items dropped on Create a new Composition: New Comp from Selection with them (After
-        // Effects; several items ask how in its dialog).
-        if id == "newComp"
+        // Effects; several items ask how in its dialog). Dropped on Create a new Folder: a new
+        // folder holding them (#3196). The dragged item, or the selection it belongs to.
+        if matches!(id, "newComp" | "newFolder")
             && let Some(DragPayload::Item(iid)) = egui::DragAndDrop::payload::<DragPayload>(&ctx).as_deref()
             && ui.rect_contains_pointer(r)
         {
             p.rect_stroke(r, 4.0, Stroke::new(2.0, t.accent), egui::StrokeKind::Inside);
             if ctx.input(|i| i.pointer.any_released()) {
-                if !app.session.state.project_selection.contains(&ItemId(*iid)) {
-                    app.session.state.project_selection = vec![ItemId(*iid)];
+                let selected = app.session.state.project_selection.contains(&ItemId(*iid));
+                if id == "newComp" {
+                    if !selected {
+                        app.session.state.project_selection = vec![ItemId(*iid)];
+                    }
+                    actions.push(("file.newCompFromSelection".into(), json!({})));
+                } else {
+                    let items: Vec<u64> = if selected { app.session.state.project_selection.iter().map(|i| i.0).collect() } else { vec![*iid] };
+                    actions.push(("project.newFolder".into(), json!({"items": items})));
                 }
-                actions.push(("file.newCompFromSelection".into(), json!({})));
                 egui::DragAndDrop::clear_payload(&ctx);
             }
         }
@@ -1153,6 +1296,25 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     details_header(app, ui, &p, &ctx, head);
     // Search.
     let sr = Rect::from_min_size(pos2(rect.min.x + 8.0, head.max.y + 2.0), vec2(rect.width() - 16.0, 22.0));
+    let filter_w = 88.0_f32.min(sr.width() * 0.45);
+    let filter = Rect::from_min_max(pos2(sr.max.x - filter_w, sr.min.y), sr.max);
+    let sr = Rect::from_min_max(sr.min, pos2((filter.min.x - 4.0).max(sr.min.x), sr.max.y));
+    let id = egui::Id::unique("project-status");
+    let pop = id.with("popup");
+    let status = app.ui.project_status;
+    let response = widgets::dropdown_tip(ui, filter, crate::i18n::tr(status.label()), Some(crate::i18n::tr("Filter by footage status")), &t, id);
+    app.auto.add("project.status", filter, status.label());
+    if response.clicked() {
+        widgets::open_popup(ui, pop);
+    }
+    if widgets::popup_is_open(ui, pop) {
+        let options: Vec<_> = crate::state::ProjectStatus::ALL.iter().map(|s| crate::i18n::tr(s.label()).to_string()).collect();
+        if let Some(index) = widgets::popup_menu(ui, pop, filter.left_bottom(), &options, crate::state::ProjectStatus::ALL.iter().position(|s| *s == status))
+            && let Some(chosen) = crate::state::ProjectStatus::ALL.get(index)
+        {
+            app.ui.project_status = *chosen;
+        }
+    }
     let mut q = app.ui.project_search.clone();
     widgets::search_field(ui, sr, &mut q, crate::i18n::tr("Search project"), &t);
     app.ui.project_search = q;
@@ -1165,7 +1327,8 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let gutter_id = egui::Id::unique("project-gutter");
     let gutter = ctx.data(|d| d.get_temp::<bool>(gutter_id)).unwrap_or(false);
     let content = if gutter { Rect::from_min_max(rect.min, pos2((rect.max.x - widgets::SCROLL_GUTTER).max(rect.min.x), rect.max.y)) } else { rect };
-    let cl = layout_columns(app, content);
+    let fit = auto_name_fit(app, &p);
+    let cl = layout_columns(app, content, fit);
     let (name_w, label_x, opt_x0, overflow, hscroll) = (cl.name_w, cl.label_x, cl.opt_x0, cl.overflow, cl.hscroll);
     draw_header(app, ui, &p, hdr, &cl);
     // Rows.
@@ -1226,7 +1389,9 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         app.auto.add(&format!("project.item.{}", id.0), r, &it.name);
         // For screen readers: a tree item named by the item and its type, with its selection,
         // depth and (a folder) open state. One Tab stop per row; the panel's keys then apply.
-        let open = it.is_folder().then(|| app.ui.project_open_folders.contains(&id.0) || !app.ui.project_search.is_empty());
+        let open = it.is_folder().then(|| {
+            app.ui.project_open_folders.contains(&id.0) || !app.ui.project_search.is_empty() || app.ui.project_status != crate::state::ProjectStatus::All
+        });
         resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::TreeItem, true, format!("{}, {}", it.name, crate::i18n::tr(it.type_name()))));
         ctx.accesskit_node_builder(resp.id, |n| {
             n.set_selected(selected);
@@ -1251,7 +1416,7 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         proxy_indicator(app, ui, &g, it, &mut actions);
         // Footage (or the proxy in use) that can't be decoded (no decoder for its codec /
         // profile): a warning marker at the end of the name cell, the reason on hover.
-        let problem = app.session.footage.item_problem(it);
+        let problem = app.session.footage.item_problem(it).or_else(|| effectcraft_engine::render::missing_item_problem(it));
         let name_clip =
             Rect::from_min_max(pos2(x0 + 30.0, r.min.y), pos2(r.min.x + name_w + 4.0 - if problem.is_some() { 16.0 } else { 0.0 }, r.max.y)).intersect(list);
         if let Some(why) = &problem {
@@ -1408,6 +1573,103 @@ mod tests {
         }
     }
 
+    /// #2042: closing the project drops the Project panel's thumbnails (and renders in flight),
+    /// so their textures go with it and an item of the next project with a closed one's id never
+    /// shows the closed project's picture.
+    #[test]
+    fn closing_the_project_forgets_its_thumbnails() {
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        let ctx = egui::Context::default();
+        let (key, pkey) = (egui::Id::unique(("proj-thumb", 1u64)), egui::Id::unique(("proj-thumb-pending", 1u64)));
+        let tex = ctx.load_texture("t", egui::ColorImage::from_rgba_unmultiplied([1, 1], &[255; 4]), egui::TextureOptions::LINEAR);
+        ctx.data_mut(|d| {
+            d.insert_temp(key, Thumb(u128::from(app.session.revision), tex));
+            d.insert_temp(pkey, PendingThumb(u128::from(app.session.revision), Arc::default()));
+        });
+        app.session.execute("file.closeProject", serde_json::json!({})).unwrap();
+        app.handle_events(&ctx);
+        assert!(ctx.data(|d| d.get_temp::<Thumb>(key)).is_none(), "the closed project's thumbnail is kept");
+        assert!(ctx.data(|d| d.get_temp::<PendingThumb>(pkey)).is_none(), "a closed project's render is awaited");
+    }
+
+    /// #3301 review: while edits come fast the thumbnail's key is held back (it is of an
+    /// earlier state); no render of the state now is started under it, so it can never be kept
+    /// as the earlier state's picture. The thumbnail shown stays.
+    #[test]
+    fn no_thumbnail_render_starts_under_a_held_back_key() {
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        let comp = ItemId(
+            app.session.execute("comp.new", serde_json::json!({"name": "C", "width": 8, "height": 6, "duration": 1})).unwrap()["comp"].as_u64().unwrap(),
+        );
+        let ctx = egui::Context::default();
+        let it = app.session.project.item(comp).unwrap().clone();
+        let (key, pkey, kkey) =
+            (egui::Id::unique(("proj-thumb", comp.0)), egui::Id::unique(("proj-thumb-pending", comp.0)), egui::Id::unique(("proj-thumb-key", comp.0)));
+        let tex = ctx.load_texture("t", egui::ColorImage::from_rgba_unmultiplied([1, 1], &[255; 4]), egui::TextureOptions::LINEAR);
+        // A key worked out just now for an earlier revision, and a thumbnail of another state.
+        let now = ctx.input(|i| i.time);
+        let (rev, prefs) = (app.session.revision, app.session.prefs_revision);
+        ctx.data_mut(|d| {
+            d.insert_temp::<ThumbKey>(kkey, (rev.wrapping_sub(1), 0, prefs, 0, 7, now));
+            d.insert_temp(key, Thumb(5, tex));
+        });
+        assert!(thumbnail(&app, &ctx, &it).is_some(), "the thumbnail shown stays");
+        assert!(ctx.data(|d| d.get_temp::<PendingThumb>(pkey)).is_none(), "no render under a held-back key");
+        // Worked out again (the key is current): the render starts.
+        ctx.data_mut(|d| d.remove::<ThumbKey>(kkey));
+        thumbnail(&app, &ctx, &it);
+        assert!(ctx.data(|d| d.get_temp::<PendingThumb>(pkey)).is_some(), "a current key: rendered");
+        app.session.execute("file.closeProject", serde_json::json!({})).unwrap();
+    }
+
+    /// Long names show in full: the Name column fits them (it stopped at 260 points with "…")
+    /// up to the panel's width less the Label column and, while optional columns show, room for
+    /// them; a width the user dragged wins.
+    #[test]
+    fn the_name_column_fits_the_names_up_to_the_panel_width() {
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(700.0, 400.0));
+        assert_eq!(layout_columns(&mut app, rect, 0.0).name_w, 260.0);
+        assert_eq!(layout_columns(&mut app, rect, 400.0).name_w, 400.0);
+        // The optional columns keep 40 points more: some content and a usable scroll bar track.
+        assert!(!app.ui.project_columns.is_empty());
+        let cl = layout_columns(&mut app, rect, 2000.0);
+        assert_eq!(cl.name_w, 620.0);
+        assert!(rect.max.x - cl.opt_x0 >= 50.0, "the optional columns keep {} points", rect.max.x - cl.opt_x0);
+        let narrow = Rect::from_min_size(pos2(0.0, 0.0), vec2(100.0, 400.0));
+        assert_eq!(layout_columns(&mut app, narrow, 400.0).name_w, MIN_NAME_W);
+        app.ui.project_name_w = Some(150.0);
+        assert_eq!(layout_columns(&mut app, rect, 400.0).name_w, 150.0);
+        app.ui.project_name_w = Some(f32::NAN);
+        assert_eq!(layout_columns(&mut app, rect, 400.0).name_w, 400.0);
+        app.ui.project_name_w = Some(5000.0);
+        assert_eq!(layout_columns(&mut app, rect, 0.0).name_w, 620.0);
+        // Without optional columns the Name column may take all but the Label column.
+        app.ui.project_columns.clear();
+        assert_eq!(layout_columns(&mut app, rect, 0.0).name_w, 660.0);
+    }
+
+    #[test]
+    fn name_fit_measures_the_longest_listed_name_with_its_indent() {
+        let mut s = effectcraft_engine::Session::default();
+        let p = std::sync::Arc::make_mut(&mut s.project);
+        let folder = p.add_item("F", Label::Aqua, None, ItemKind::Folder);
+        let long = p.add_item("A rather long composition name for the list", Label::Aqua, Some(folder), ItemKind::Folder);
+        let app = EffectcraftApp::new(s);
+        let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
+        let mut fit = (0.0, 0.0);
+        ctx.run_ui(Default::default(), |ui| {
+            let painter = ui.painter();
+            let text = painter.layout_no_wrap("A rather long composition name for the list".into(), Tokens::ui(12.0), Color32::WHITE).size().x;
+            fit = (name_fit(&app, painter, &[(folder, 0), (long, 1)]), 8.0 + 14.0 + 30.0 + text + 24.0);
+        })
+        .textures_delta
+        .clear();
+        assert_eq!(fit.0, fit.1);
+        assert!(fit.0 > 260.0);
+    }
+
     #[test]
     fn size_keys_are_sampled_once_with_stable_ties() {
         let mut project = Project::default();
@@ -1548,5 +1810,42 @@ mod tests {
         set_column(&mut cols, "path", true);
         set_column(&mut cols, "size", false);
         assert_eq!(cols, ["type", "duration", "fps", "path", "comment"]);
+    }
+}
+
+#[cfg(test)]
+mod availability_filter_tests {
+    use super::*;
+    use crate::state::ProjectStatus;
+    use effectcraft_engine::project::{Footage, Proxy};
+
+    #[test]
+    fn status_and_search_keep_only_matching_items_and_their_folder_ancestors() {
+        let mut s = effectcraft_engine::Session::default();
+        let p = Arc::make_mut(&mut s.project);
+        let folder = p.add_item("Shots", Label::None, None, ItemKind::Folder);
+        let missing =
+            p.add_item("Lost plate", Label::None, Some(folder), ItemKind::Footage(Footage { path: "/gone.png".into(), missing: true, ..Default::default() }));
+        let present = p.add_item("Other plate", Label::None, None, ItemKind::Footage(Footage { path: "/here.png".into(), ..Default::default() }));
+        let mut app = EffectcraftApp::new(s);
+        app.ui.project_status = ProjectStatus::Missing;
+        app.ui.project_search = "plate".into();
+        assert_eq!(visible_rows(&app), vec![(folder, 0), (missing, 1)]);
+        app.ui.project_status = ProjectStatus::Available;
+        assert_eq!(visible_rows(&app), vec![(present, 0)]);
+        app.ui.project_search = "absent name".into();
+        assert!(visible_rows(&app).is_empty());
+    }
+
+    #[test]
+    fn unused_missing_proxy_is_in_the_missing_filter() {
+        let mut s = effectcraft_engine::Session::default();
+        let p = Arc::make_mut(&mut s.project);
+        let id = p.add_item("Plate", Label::None, None, ItemKind::Footage(Footage { path: "/original.png".into(), ..Default::default() }));
+        p.item_mut(id).unwrap().proxy =
+            Some(Box::new(Proxy { footage: Footage { path: "/proxy.png".into(), missing: true, ..Default::default() }, enabled: false }));
+        let mut app = EffectcraftApp::new(s);
+        app.ui.project_status = ProjectStatus::Missing;
+        assert_eq!(visible_rows(&app), vec![(id, 0)]);
     }
 }

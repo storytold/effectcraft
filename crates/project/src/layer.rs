@@ -1,6 +1,6 @@
 use super::item::{ItemId, LayerId};
 use super::settings::Marker;
-use super::{BlendMode, Deserialize, Label, ParamUi, PropGroup, Property, Serialize, Tick};
+use super::{BlendMode, Deserialize, GroupKind, Label, Node, ParamUi, PropGroup, Property, Serialize, Tick, Value};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LightKind {
@@ -182,29 +182,216 @@ impl Default for Switches {
     }
 }
 
-// What a frame's pixels depend on. Caches key on it: the Audio, Lock and Shy switches and Hide
-// Shy Layers don't change pixels, so toggling them keeps cached frames (#103).
+// What a frame's pixels depend on. Caches key on it: the Lock and Shy switches and Hide Shy
+// Layers never change pixels, and the Audio switch, the Audio group and audio effects change them
+// only when something draws the layer's audio (a waveform or spectrum picks it, see
+// [`crate::Project::heard_layers`]), so editing those keeps cached frames (#103).
+
+/// Is `id` an audio effect (applied by the audio mix rather than the compositor)?
+pub fn is_audio_effect(id: &str) -> bool {
+    id.starts_with("ec.audio.")
+}
+
+/// Does effect `id` read its own layer at other times (`EffectHost::self_at`, `layer_at` on
+/// itself): the time effects (Echo, Posterize Time, Timewarp…), simulations, temporal smoothing
+/// and analysis (Remove Grain, Auto Levels, Color Stabilizer's reference frame, Warp Stabilizer,
+/// Roto Brush…) and Clone strokes with a time offset? On a precomp layer, a change at one nested
+/// time then reaches frames of the layer far from where it shows. Plug-in effects (every id
+/// outside `ec.`) count too: plug-in API 2 reads the input at other times (`PluginHost`).
+// ponytail: hand-kept list of the effects that call `self_at`; a new one must be added here.
+pub fn reads_other_frames(id: &str) -> bool {
+    !id.starts_with("ec.") || id.starts_with("ec.time.") || id.starts_with("ec.sim.") || READS_OTHER_FRAMES.contains(&id)
+}
+
+/// The effects outside `ec.time.` and `ec.sim.` that read their own layer at other times.
+const READS_OTHER_FRAMES: &[&str] = &[
+    "ec.noise.removegrain",
+    "ec.color.autolevels",
+    "ec.color.autocontrast",
+    "ec.color.autocolor",
+    "ec.color.shadowhighlight",
+    "ec.color.colorstabilizer",
+    "ec.matte.refinesoft",
+    "ec.matte.refinehard",
+    "ec.matte.rotobrush",
+    "ec.matte.objectmatte",
+    "ec.blur.camerashakedeblur",
+    "ec.distort.rollingshutterrepair",
+    "ec.distort.warpstabilizer",
+    "ec.key.ccsimplewireremoval",
+    "ec.paint.paint",
+];
+
+/// Does the effect group `g` read its own parameters at times its frame doesn't show, past the
+/// comp's shutter (`EffectHost::params_at`, `param_at`)? Write-on lays a dab at every Brush
+/// Spacing from the layer's start with the Brush Position of its time, Radio Waves keeps the
+/// parameters each wave was born with for its lifespan, and Transform samples past the comp's
+/// shutter with its own Shutter Angle (up to 720°) or on a stretched layer (`unit_stretch`
+/// false: it samples in layer time). A key change of theirs then reaches frames far from the key. The time effects and simulations ([`reads_other_frames`])
+/// read them too, and reach every frame anyway.
+// ponytail: hand-kept list of the effects that call `params_at`/`param_at` beyond the comp's
+// shutter; a new one must be added here.
+fn reads_own_params_elsewhen(g: &PropGroup, unit_stretch: bool) -> bool {
+    let GroupKind::Effect { effect } = &g.kind else { return false };
+    match effect.as_str() {
+        "ec.generate.writeon" | "ec.generate.radiowaves" => true,
+        // (the comp's shutter at 100% stretch is within `Comp::shutter_margin`)
+        "ec.distort.transform" => !unit_stretch || !g.get("useCompositionShutterAngle").is_some_and(|p| p.keys.is_empty() && p.value.as_bool()),
+        _ => false,
+    }
+}
+
+/// `a` and `b` have the same header: every field but the children.
+fn same_head(a: &PropGroup, b: &PropGroup) -> bool {
+    // Every field (no `..`: a new field must be considered here).
+    let PropGroup { uid, match_id, name, kind, enabled, label, children: _ } = a;
+    *uid == b.uid && *match_id == b.match_id && *name == b.name && *kind == b.kind && *enabled == b.enabled && *label == b.label
+}
+
+/// Groups nested deeper than this in a layer's property tree count as changed everywhere.
+const MAX_PROP_DEPTH: usize = 64;
+
+/// Where a group sits in a layer's property tree, for its audio-only children ([`audio_only`]).
+#[derive(Clone, Copy, PartialEq)]
+enum Level {
+    Root,
+    /// The root's Effects group.
+    Effects,
+    Inner,
+}
+
+/// The pairs of properties that differ between `a` and `b` (groups at `level` of two layers'
+/// trees, `depth` deep), when all else is the same: the same headers, children and kinds, and
+/// every difference a property whose value at a time reaches only the frames around that time.
+/// `None` for any other difference: one in a header, a group added, removed or reordered, or a
+/// property that is read at other times (inside an effect that reads its own parameters
+/// elsewhen, [`reads_own_params_elsewhen`]; in the Essential Properties; in the audio something
+/// draws). Audio-only nodes count only when `heard`, as in [`same_picture_props`]. `unit_stretch`:
+/// the layer plays at 100%, so layer time and comp time advance alike.
+fn changed_props<'a>(
+    a: &'a PropGroup,
+    b: &'a PropGroup,
+    level: Level,
+    heard: bool,
+    unit_stretch: bool,
+    depth: usize,
+    out: &mut Vec<(&'a Property, &'a Property)>,
+) -> Option<()> {
+    if depth > MAX_PROP_DEPTH || !same_head(a, b) {
+        return None;
+    }
+    let audio = |n: &Node| match level {
+        Level::Root => audio_only(n, true),
+        Level::Effects => audio_only(n, false),
+        Level::Inner => false,
+    };
+    let mut x = a.children.iter().filter(|n| heard || !audio(n));
+    let mut y = b.children.iter().filter(|n| heard || !audio(n));
+    loop {
+        let (m, n) = match (x.next(), y.next()) {
+            (None, None) => return Some(()),
+            (Some(m), Some(n)) => (m, n),
+            _ => return None,
+        };
+        if m == n {
+            continue;
+        }
+        // Waveform and spectrum effects draw a stretch of the audio they hear; audio effects
+        // (delay, reverb) carry it on.
+        if audio(m) || audio(n) {
+            return None;
+        }
+        match (m, n) {
+            (Node::Group(g), Node::Group(h)) => {
+                // (the Essential Properties override the nested comp's controls, which reach its
+                // layers by paths this walk doesn't follow: time effects and motion blur there,
+                // mirrored masters; conservatively, their whole span)
+                if matches!(g.kind, GroupKind::Essential { .. }) || reads_own_params_elsewhen(g, unit_stretch) || reads_own_params_elsewhen(h, unit_stretch) {
+                    return None;
+                }
+                let level = if level == Level::Root && g.match_id == "effects" { Level::Effects } else { Level::Inner };
+                changed_props(g, h, level, heard, unit_stretch, depth.saturating_add(1), out)?;
+            }
+            (Node::Prop(p), Node::Prop(q)) => out.push((p, q)),
+            _ => return None,
+        }
+    }
+}
 
 impl Switches {
     /// These switches with Audio, Lock and Shy at their defaults.
     pub fn pixels(&self) -> Switches {
         Switches { audio: true, locked: false, shy: false, ..self.clone() }
     }
+
+    /// The switches that change the pixels of a layer: [`Self::pixels`], keeping Audio when
+    /// something draws the layer's audio (`heard`).
+    pub fn picture(&self, heard: bool) -> Switches {
+        Switches { audio: if heard { self.audio } else { true }, ..self.pixels() }
+    }
+}
+
+/// A node only the audio mix reads: the layer's Audio group, an audio effect.
+fn audio_only(n: &Node, root: bool) -> bool {
+    match n {
+        Node::Group(g) => (root && g.match_id == "audio") || matches!(&g.kind, GroupKind::Effect { effect } if is_audio_effect(effect)),
+        Node::Prop(_) => false,
+    }
+}
+
+/// `a` and `b` are equal but for their audio-only nodes ([`audio_only`]: the root's Audio group,
+/// the effects in its Effects group that are audio effects).
+fn same_picture_props(a: &PropGroup, b: &PropGroup) -> bool {
+    fn children(a: &PropGroup, b: &PropGroup, root: bool) -> bool {
+        let mut x = a.children.iter().filter(|n| !audio_only(n, root));
+        let mut y = b.children.iter().filter(|n| !audio_only(n, root));
+        loop {
+            match (x.next(), y.next()) {
+                (None, None) => return true,
+                (Some(Node::Group(g)), Some(Node::Group(h))) if root && g.match_id == "effects" && h.match_id == "effects" => {
+                    if !(same_head(g, h) && children(g, h, false)) {
+                        return false;
+                    }
+                }
+                (Some(m), Some(n)) if m == n => {}
+                _ => return false,
+            }
+        }
+    }
+    same_head(a, b) && children(a, b, true)
+}
+
+/// `g` (a layer's property tree) without its audio-only nodes ([`same_picture_props`]).
+fn picture_props(g: &PropGroup) -> PropGroup {
+    let mut g = g.clone();
+    g.children.retain(|n| !audio_only(n, true));
+    for n in &mut g.children {
+        if let Node::Group(e) = n
+            && e.match_id == "effects"
+        {
+            e.children.retain(|n| !audio_only(n, false));
+        }
+    }
+    g
 }
 
 impl Layer {
-    /// Draws the same pixels as `o`: equal but for the Audio, Lock and Shy switches.
+    /// Draws the same pixels as `o`: equal but for the Audio, Lock and Shy switches and what only
+    /// the audio mix reads (nothing draws its audio).
     pub fn same_pixels(&self, o: &Layer) -> bool {
-        self.same_pixels_with(o, true)
+        self.same_pixels_with(o, true, false)
     }
 
     /// [`Self::same_pixels`], with the markers counting only when `with_markers` (they are read by
-    /// expressions alone, so a project without any can edit them freely).
-    pub fn same_pixels_with(&self, o: &Layer, with_markers: bool) -> bool {
+    /// expressions alone, so a project without any can edit them freely) and the audio (the Audio
+    /// switch, the Audio group, audio effects) only when `heard`: something draws it.
+    pub fn same_pixels_with(&self, o: &Layer, with_markers: bool, heard: bool) -> bool {
         // Every field (no `..`: a new field must be considered here); the property tree last.
         let Layer {
             id,
             name,
+            // Whether the name follows the text changes no pixels until the name changes.
+            name_follows_text: _,
             source,
             label,
             comment,
@@ -233,7 +420,7 @@ impl Layer {
             && *in_point == o.in_point
             && *out_point == o.out_point
             && *stretch == o.stretch
-            && switches.pixels() == o.switches.pixels()
+            && switches.picture(heard) == o.switches.picture(heard)
             && *blend_mode == o.blend_mode
             && *preserve_transparency == o.preserve_transparency
             && *track_matte == o.track_matte
@@ -243,7 +430,117 @@ impl Layer {
             && *auto_orient == o.auto_orient
             && *environment == o.environment
             && *environment_background == o.environment_background
-            && *props == o.props
+            && (if heard { *props == o.props } else { same_picture_props(props, &o.props) })
+    }
+
+    /// The comp-time spans where `self` draws differently than `o` when the two differ only in
+    /// the keyframes of their properties (a key's value, ease or interpolation moved in the
+    /// Timeline or Graph Editor), anywhere in the property tree: Transform, effects, masks, shape
+    /// contents, text animators, layer styles… Per changed property, from two keys before the
+    /// first changed key to two after the last (auto-Bezier and continuous tangents reach the
+    /// neighbouring segments), to the layer's in or out point past the first or last key (values
+    /// hold there). A keyed value at a time comes from the keys around it, whatever its kind (a
+    /// path, a gradient, Source Text's hold keys, an orientation). `None` for any other
+    /// difference: the tree's structure (a group or effect added, removed or reordered, a
+    /// group's header), a static value, an expression on the layer (it can read the keyed
+    /// property at other times), roving or muted keys, a time remap or a time effect (it reads
+    /// other times), a property read at other times (an effect reading its own parameters
+    /// elsewhen, the Essential Properties, audio something draws, see [`changed_props`]; Position
+    /// under Auto-Orient Along Path; a model's animation clip): those reach the layer's whole span.
+    pub fn keyframe_spans(&self, o: &Layer, with_markers: bool, heard: bool) -> Option<Vec<(Tick, Tick)>> {
+        let reads_time = |l: &Layer| {
+            l.props.get("timeRemap").is_some()
+                || l.props.group("effects").is_some_and(|e| {
+                    e.children.iter().any(|n| matches!(n, Node::Group(f) if matches!(&f.kind, GroupKind::Effect { effect } if reads_other_frames(effect))))
+                })
+        };
+        let has_expr = |l: &Layer| {
+            let mut any = false;
+            l.props.walk("", &mut |_, p| any |= p.has_expression());
+            any
+        };
+        if reads_time(self) || reads_time(o) || has_expr(self) || has_expr(o) {
+            return None;
+        }
+        // Everything but the property tree's contents draws the same.
+        let shell = |l: &Layer| {
+            let mut l = l.clone();
+            l.props.children.clear();
+            l
+        };
+        if !shell(self).same_pixels_with(&shell(o), with_markers, heard) {
+            return None;
+        }
+        // Properties read at other times by the renderer: Position under Auto-Orient Along Path
+        // (where the layer holds still it keeps the direction of the last motion, any distance
+        // back) and a model's animation clip (it plays from the key that chose it).
+        fn at<'a>(l: &'a Layer, group: &str, m: &str) -> Option<&'a Property> {
+            l.props.sub(group).and_then(|g| g.get(m))
+        }
+        let along = self.auto_orient == AutoOrient::AlongPath || o.auto_orient == AutoOrient::AlongPath;
+        if (along && ["position", "positionX", "positionY", "positionZ"].iter().any(|m| at(self, "transform", m) != at(o, "transform", m)))
+            || at(self, "geometryOptions", "animation") != at(o, "geometryOptions", "animation")
+        {
+            return None;
+        }
+        let unit_stretch = (self.effective_stretch() - 100.0).abs() < 1e-9;
+        let mut pairs = Vec::new();
+        changed_props(&self.props, &o.props, Level::Root, heard, unit_stretch, 0, &mut pairs)?;
+        // (a reversed layer plays its first keys last)
+        let reversed = self.effective_stretch() < 0.0;
+        let (early, late) = if reversed { (self.out_point, self.in_point) } else { (self.in_point, self.out_point) };
+        let mut spans = Vec::new();
+        for (p1, p0) in pairs {
+            let bare = |p: &Property| Property { keys: vec![], value: Value::Scalar(0.0), ..p.clone() };
+            // (muted keys are skipped: the keys around an edit that play can be any distance away)
+            if bare(p1) != bare(p0) || p1.keys.is_empty() || p0.keys.is_empty() || p1.keys.iter().chain(&p0.keys).any(|k| k.roving || k.muted) {
+                return None;
+            }
+            // Keys only one side has as they are (added, removed, edited, moved).
+            let changed: Vec<Tick> =
+                p1.keys.iter().filter(|k| !p0.keys.contains(k)).chain(p0.keys.iter().filter(|k| !p1.keys.contains(k))).map(|k| k.time).collect();
+            let (Some(first), Some(last)) = (changed.iter().min(), changed.iter().max()) else { continue };
+            // Two keys before the first changed one and two after the last, on either side (the
+            // first or last key when there are fewer: values hold beyond it). Past the first or
+            // last key the change reaches the in or out point (`None`).
+            let mut lo = Some(Tick(i64::MAX));
+            let mut hi = Some(Tick(i64::MIN));
+            for keys in [&p1.keys, &p0.keys] {
+                let before = keys.iter().filter(|k| k.time < *first).count();
+                let back = if before == 0 { None } else { keys.get(before.saturating_sub(2)) };
+                lo = lo.zip(back).map(|(a, k)| a.min(k.time));
+                let upto = keys.iter().filter(|k| k.time <= *last).count();
+                let ahead = if upto >= keys.len() { None } else { keys.get(upto.saturating_add(1).min(keys.len().saturating_sub(1))) };
+                hi = hi.zip(ahead).map(|(a, k)| a.max(k.time));
+            }
+            let (x, y) = (lo.map_or(early, |t| self.comp_time(t)), hi.map_or(late, |t| self.comp_time(t)));
+            let (x, y) = (x.min(y).max(self.in_point), x.max(y).min(self.out_point));
+            if x <= y {
+                spans.push((x, y));
+            }
+        }
+        Some(spans)
+    }
+
+    /// This layer with what doesn't change its pixels at its defaults (see
+    /// [`Self::same_pixels_with`]), for keys that hash it; `None` when it already is.
+    pub fn picture_form(&self, heard: bool) -> Option<Layer> {
+        let switches = self.switches.picture(heard);
+        let audio = !heard
+            && (self.props.children.iter().any(|n| audio_only(n, true))
+                || self
+                    .props
+                    .children
+                    .iter()
+                    .any(|n| matches!(n, Node::Group(e) if e.match_id == "effects" && e.children.iter().any(|n| audio_only(n, false)))));
+        if switches == self.switches && !audio {
+            return None;
+        }
+        let mut l = Layer { switches, ..self.clone() };
+        if audio {
+            l.props = picture_props(&self.props);
+        }
+        Some(l)
     }
 }
 
@@ -283,10 +580,29 @@ pub enum AutoOrient {
     TowardsPointOfInterest,
 }
 
+/// A stretch written as `null` (a NaN or infinite stretch: JSON holds neither, and auto-saves
+/// write it so) reads as NaN, so the project still opens and loading brings it to 100 % with a
+/// note ([`crate::limits::stretch`], #3247) instead of the whole file being refused. An infinite
+/// stretch therefore also reopens at 100 %, not at ±9900 %.
+fn stretch_or_nan<'de, D: serde::Deserializer<'de>>(d: D) -> Result<f64, D::Error> {
+    Ok(Option::<f64>::deserialize(d)?.unwrap_or(f64::NAN))
+}
+
+/// `t × mul / div` in ticks, within [`Tick::MIN`]..=[`Tick::MAX`] (the cast saturates, NaN is 0),
+/// so a layer time of an extreme stretch can't overflow later tick arithmetic.
+fn scaled(t: Tick, mul: f64, div: f64) -> Tick {
+    Tick(((t.0 as f64 * mul / div) as i64).clamp(Tick::MIN.0, Tick::MAX.0))
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Layer {
     pub id: LayerId,
     pub name: String,
+    /// A text layer's name follows the first line of its Source Text until the user renames it
+    /// (After Effects). `Some(true)`: it follows, `Some(false)`: the user named it. `None` (older
+    /// projects, layers made before this was recorded): see [`Layer::name_follows_text()`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name_follows_text: Option<bool>,
     pub source: LayerSource,
     pub label: Label,
     #[serde(default)]
@@ -297,6 +613,7 @@ pub struct Layer {
     pub in_point: Tick,
     pub out_point: Tick,
     /// Time stretch in percent (100 = normal, negative = reversed).
+    #[serde(deserialize_with = "stretch_or_nan")]
     pub stretch: f64,
     pub switches: Switches,
     pub blend_mode: BlendMode,
@@ -325,20 +642,86 @@ pub struct Layer {
     pub props: PropGroup,
 }
 
+/// The name a text layer takes from its text: the first 40 characters of the first line. A line
+/// ends at a line feed or at a bare carriage return (After Effects' paragraph break).
+pub fn text_layer_name(text: &str) -> String {
+    text.split(['\r', '\n']).next().unwrap_or("").chars().take(40).collect()
+}
+
+/// A text layer's default name when its text gives none: "Text", numbered "Text 2", "Text 3"…
+fn is_default_text_name(name: &str) -> bool {
+    name == "Text" || name.strip_prefix("Text ").is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+}
+
 impl Layer {
+    /// Whether this text layer's name follows its Source Text, whose first line gives the name
+    /// `current` (see [`text_layer_name`]). Without a recorded state (an older project), a name
+    /// that is empty, the text's own, or the default "Text"/"Text 2"… follows; any other name was
+    /// given by the user.
+    pub fn name_follows_text(&self, current: &str) -> bool {
+        self.name_follows_text.unwrap_or_else(|| self.name.is_empty() || self.name == current || is_default_text_name(&self.name))
+    }
+
+    /// The layers this layer reads: its parent, track matte, layer parameters (Displacement Map,
+    /// Audio Spectrum's Audio Layer…) and tracker targets.
+    pub fn referenced_layers(&self) -> Vec<LayerId> {
+        fn walk(g: &PropGroup, depth: usize, out: &mut Vec<LayerId>) {
+            if depth > 64 {
+                return;
+            }
+            if let GroupKind::Tracker { settings } = &g.kind
+                && let Some(t) = settings.target
+            {
+                out.push(t);
+            }
+            for c in &g.children {
+                match c {
+                    Node::Prop(p) => {
+                        for v in std::iter::once(&p.value).chain(p.keys.iter().map(|k| &k.value)) {
+                            if let Value::Layer(Some(id)) = v {
+                                out.push(LayerId(*id));
+                            }
+                        }
+                    }
+                    Node::Group(sub) => walk(sub, depth + 1, out),
+                }
+            }
+        }
+        let mut out: Vec<LayerId> = self.parent.iter().copied().chain(self.track_matte.iter().map(|m| m.layer)).collect();
+        walk(&self.props, 0, &mut out);
+        out
+    }
+
+    /// Layers this one picks in an effect or tracker (an Audio Spectrum's Audio Layer, a
+    /// Displacement Map's map layer…), itself included: [`Self::referenced_layers`] without the
+    /// parent and the track matte.
+    pub fn picked_layers(&self) -> Vec<LayerId> {
+        let skip = usize::from(self.parent.is_some()) + usize::from(self.track_matte.is_some());
+        self.referenced_layers().into_iter().skip(skip).collect()
+    }
+
     pub fn is_active_at(&self, t: Tick) -> bool {
         t >= self.in_point && t < self.out_point
+    }
+
+    /// The time stretch the layer plays at: [`Layer::stretch`] within
+    /// [`limits::stretch`](crate::limits::stretch) (a damaged value that got past loading, 0 or
+    /// NaN, never divides the layer's time by zero).
+    pub fn effective_stretch(&self) -> f64 {
+        crate::limits::stretch(self.stretch)
     }
 
     /// Layer time for a comp time (stretch-aware).
     pub fn layer_time(&self, comp_t: Tick) -> Tick {
         let d = comp_t - self.start_time;
-        if (self.stretch - 100.0).abs() < 1e-9 { d } else { Tick((d.0 as f64 * 100.0 / self.stretch) as i64) }
+        let s = self.effective_stretch();
+        if (s - 100.0).abs() < 1e-9 { d } else { scaled(d, 100.0, s) }
     }
 
     /// Comp time for a layer time.
     pub fn comp_time(&self, layer_t: Tick) -> Tick {
-        if (self.stretch - 100.0).abs() < 1e-9 { self.start_time + layer_t } else { self.start_time + Tick((layer_t.0 as f64 * self.stretch / 100.0) as i64) }
+        let s = self.effective_stretch();
+        if (s - 100.0).abs() < 1e-9 { self.start_time + layer_t } else { self.start_time + scaled(layer_t, s, 100.0) }
     }
 
     pub fn transform(&self) -> Option<&PropGroup> {

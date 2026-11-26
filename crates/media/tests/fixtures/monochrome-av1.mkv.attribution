@@ -1,0 +1,7 @@
+asset:        monochrome-av1.mkv
+title:        Synthetic monochrome AV1 seek fixture
+author:       Terra854
+source:       crates/media/tests/fixtures/generate-monochrome-av1.sh
+license:      MIT OR Apache-2.0
+added:        2026-11-22
+notes:        Original 16x12 grayscale ramps generated with FFmpeg 7.1 and libaom-av1. SHA-256 0837f2039cad2324e7c7e3d4d11bbcf09b02bc9ee6acf84814c5a06e514c52d5.

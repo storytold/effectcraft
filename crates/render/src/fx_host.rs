@@ -1,4 +1,5 @@
-use super::{Arc, Buf, EffectHost, EvalCtx, ItemKind, Layer, LayerPixels, LayerSource, Params, Renderer, Tick, three_d};
+use super::frames::frame_blend_mode;
+use super::{Arc, Buf, EffectHost, EvalCtx, FrameBlend, ItemKind, Layer, LayerPixels, LayerSource, Params, Renderer, Tick, three_d};
 
 /// Layer parameters and audio for effects (see [`effectcraft_effects::EffectHost`]). What it
 /// hands out is in effect space (see [`effect_bounds`]): the other layer's for its pixels, the
@@ -95,6 +96,7 @@ impl EffectHost for FxHost<'_, '_, '_> {
         Some(self.pixels(other, buf, false))
     }
 
+    /// The audio of footage layer `id` from `start`, or `None` when the layer is not footage.
     fn audio(&self, id: u64, start: f64, frames: usize, rate: u32) -> Option<Vec<f32>> {
         let other = self.ctx.layer(effectcraft_project::LayerId(id))?;
         let LayerSource::Footage { item } = &other.source else { return None };
@@ -104,7 +106,7 @@ impl EffectHost for FxHost<'_, '_, '_> {
             return None;
         }
         let st = other.layer_time(Tick::from_seconds_f64(start));
-        self.r.footage.audio(item, f, st, frames, rate)
+        self.r.read(|| self.r.footage.audio(item, f, st, frames, rate))
     }
 
     fn self_at(&self, layer_time: f64, effects: usize) -> Option<Buf> {
@@ -137,7 +139,13 @@ impl EffectHost for FxHost<'_, '_, '_> {
     }
 
     fn param_is_static(&self, effect_index: usize, id: &str) -> bool {
-        effect_param(self.layer, effect_index, id).is_some_and(|p| p.keys.is_empty() && !p.has_expression())
+        let Some(p) = effect_param(self.layer, effect_index, id) else { return false };
+        let Some(o) = self.ctx.property_overrides.iter().rev().find(|o| o.layer == self.layer.id && o.prop == p.uid) else {
+            return p.keys.is_empty() && !p.has_expression();
+        };
+        // A whole-value override replaces the target property's keys. A Font override leaves them
+        // in place, so those keys still make the value vary over time.
+        o.keys.is_empty() && !p.has_expression() && (!o.font || p.keys.is_empty())
     }
 
     fn comp_scene(&self) -> Option<effectcraft_effects::CompScene> {
@@ -182,17 +190,52 @@ fn effect_param<'a>(layer: &'a Layer, effect_index: usize, id: &str) -> Option<&
     None
 }
 
+/// Whether an instance's keys are in the nested comp's time, so they can go into the comp as they
+/// are: not with Time Remap, Responsive Design - Time (a stretched precomp with protected
+/// regions), a nested comp that preserves its frame rate (its time is floored to its own frames)
+/// or a layer with Frame Blending (it renders the nested comp at two other times and mixes them,
+/// so keys would pull the next frame's value in early).
+fn keys_in_nested_time(ctx: &EvalCtx, layer: &Layer) -> bool {
+    if layer.props.get("timeRemap").is_some() || frame_blend_mode(ctx, layer) != FrameBlend::Off {
+        return false;
+    }
+    let LayerSource::Comp { item } = layer.source else { return true };
+    let Some(nc) = ctx.project.comp(item) else { return true };
+    let responsive = (layer.stretch - 100.0).abs() > 1e-9 && !super::eval::protected_regions(nc).is_empty();
+    !responsive && !nc.preserve_frame_rate
+}
+
 /// The Essential Properties overrides of a precomp layer, evaluated at the context time.
 pub fn essential_overrides(ctx: &EvalCtx, layer: &Layer) -> Vec<effectcraft_project::essential::Override> {
     use effectcraft_project::essential;
     let over = essential::overridden(layer);
     let Some(g) = essential::group(layer).filter(|_| !over.is_empty()) else { return vec![] };
+    let same_time = keys_in_nested_time(ctx, layer);
     let mut out = vec![];
     g.walk("", &mut |_, p| {
         if over.contains(&p.uid)
             && let Some(control) = essential::control_of(&p.match_id)
         {
-            out.push(essential::Override { control, value: ctx.value(layer, p) });
+            // An expression on the instance property replaces its keys. A whole-value override
+            // from a collapsed parent replaces the instance's own keys with the parent's; a Font
+            // override leaves them in place, so the font merges into their history.
+            let parent = ctx.property_overrides.iter().rev().find(|o| o.layer == layer.id && o.prop == p.uid);
+            let keys = if !same_time || p.has_expression() {
+                vec![]
+            } else if let Some(parent) = parent {
+                if parent.font {
+                    let mut keys = p.keys.clone();
+                    for key in &mut keys {
+                        effectcraft_project::essential::merge_font(&mut key.value, &parent.value);
+                    }
+                    keys
+                } else {
+                    parent.keys.clone()
+                }
+            } else {
+                p.keys.clone()
+            };
+            out.push(essential::Override { control, value: ctx.value(layer, p), keys });
         }
     });
     out

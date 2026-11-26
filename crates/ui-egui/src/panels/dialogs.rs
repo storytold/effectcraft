@@ -37,6 +37,12 @@ pub struct DialogState {
     pub palette_sel: usize,
     /// Settings dialog page id (`general`, `appearance`…).
     pub settings_page: String,
+    /// Settings ▸ Plug-in Library: the search field.
+    pub library_query: String,
+    /// Settings ▸ Plug-in Library: the package whose preview is open.
+    pub library_preview: Option<String>,
+    /// The preview's Before/After split (0 = all After, 1 = all Before).
+    pub library_split: f32,
     /// Settings when the dialog opened (Cancel restores them).
     pub prefs_snapshot: Option<effectcraft_engine::prefs::Prefs>,
     /// Keyboard Shortcuts editor.
@@ -64,6 +70,9 @@ pub struct DialogState {
     pub unsaved: super::unsaved::Pending,
     /// Deleting Project items in use: the deletion waiting on the prompt.
     pub delete_items: super::delete_items::Pending,
+    pub aep_losses: super::aep_losses::Pending,
+    /// Un-precompose with reasons: the unpack waiting on the prompt.
+    pub unprecompose: super::unprecompose::Pending,
     /// The Gradient Editor's draft and the property it edits.
     pub gradient: super::gradient_editor::Draft,
     /// Preview of the settings dialog being edited (Solid, Camera, Light, Composition Settings).
@@ -315,6 +324,8 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context) {
         Dialog::RenderTemplates => super::rq_templates::show(app, ctx, &t),
         Dialog::UnsavedChanges => super::unsaved::show(app, ctx, &t),
         Dialog::DeleteItems => super::delete_items::show(app, ctx, &t),
+        Dialog::AepLosses => super::aep_losses::show(app, ctx, &t),
+        Dialog::Unprecompose => super::unprecompose::show(app, ctx, &t),
         Dialog::GradientEditor => super::gradient_editor::show(app, ctx, &t),
         Dialog::DeleteTemplate => super::templates::show_delete(app, ctx, &t),
     }
@@ -333,7 +344,8 @@ fn about(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
     let mut close = false;
     let mut cmd: Option<&str> = None;
     let tab_id = egui::Id::unique("about_tab");
-    modal(ctx, "About EffectCraft", vec2(680.0, 520.0), t, |ui| {
+    // Wide enough for every Contributors column at its natural width (modals shrink to the window).
+    modal(ctx, "About EffectCraft", vec2(820.0, 520.0), t, |ui| {
         let mut tab = ui.data_mut(|d| d.get_temp::<usize>(tab_id)).unwrap_or(0);
         ui.horizontal(|ui| {
             for (i, (label, id)) in ABOUT_TABS.iter().enumerate() {
@@ -386,14 +398,17 @@ fn about_main(app: &mut EffectcraftApp, ui: &mut egui::Ui, t: &Tokens, cmd: &mut
     let p = ui.painter();
     p.rect_filled(r, 10.0, Color32::from_rgb(0x1b, 0x22, 0x3c));
     crate::header::paint_logo(p, Rect::from_min_size(r.min + vec2(18.0, 20.0), vec2(56.0, 56.0)));
-    p.text(r.min + vec2(90.0, 34.0), Align2::LEFT_CENTER, "EffectCraft", Tokens::semibold(24.0), Color32::WHITE);
-    p.text(
-        r.min + vec2(90.0, 62.0),
-        Align2::LEFT_CENTER,
-        format!("Version {}  •  Motion graphics & VFX in pure Rust", env!("CARGO_PKG_VERSION")),
-        Tokens::ui(12.0),
-        t.text_dim,
-    );
+    let channel = crate::channel::identity();
+    p.text(r.min + vec2(90.0, 34.0), Align2::LEFT_CENTER, crate::channel::name_for(channel), Tokens::semibold(24.0), Color32::WHITE);
+    // A Nightly build reports its prepared feed version and channel; stable keeps its Cargo version.
+    let version = match crate::channel::channel_label() {
+        Some(label) => format!("Version {} ({label})  •  Motion graphics & VFX in pure Rust", crate::channel::version()),
+        None => format!("Version {}  •  Motion graphics & VFX in pure Rust", crate::channel::version()),
+    };
+    p.text(r.min + vec2(90.0, 62.0), Align2::LEFT_CENTER, version, Tokens::ui(12.0), t.text_dim);
+    if let Some(line) = crate::channel::nightly_about_line() {
+        p.text(r.min + vec2(90.0, 80.0), Align2::LEFT_CENTER, line, Tokens::ui(11.0), t.text_faint);
+    }
     ui.add_space(12.0);
     ui.label(tr("A clean-room, open-source compositor for motion graphics and visual effects: native on macOS, Windows and Linux, and in the browser. Part of the ArtCraft family of creative apps."));
     ui.add_space(14.0);
@@ -494,6 +509,8 @@ fn comp_settings(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens, exis
             };
             if !existing && r.is_ok() {
                 app.dialog_state.last_new_comp = Some(app.dialog_state.comp.clone());
+                // The new composition opens: it leaves the Home screen, as `run_engine` does.
+                app.ui.start_screen = false;
             }
             if let Err(e) = r {
                 app.ui.status = e.to_string();
@@ -609,7 +626,7 @@ fn solid(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
                 .find(|(_, v)| (v - par).abs() < 1e-3)
                 .map(|p| p.0.to_string())
                 .unwrap_or_else(|| format!("{par:.2}"));
-            let r = craft_ui::ComboBox::from_id_salt("solid-par").width(240.0).selected_text(cur).show_ui(ui, |ui| {
+            let r = egui::ComboBox::from_id_salt("solid-par").width(240.0).selected_text(cur).show_ui(ui, |ui| {
                 for (label, v) in super::comp_settings::PIXEL_ASPECTS {
                     if ui.selectable_label((v - par).abs() < 1e-3, *label).clicked() {
                         par = *v;

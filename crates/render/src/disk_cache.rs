@@ -2,13 +2,25 @@
 //! and layer cache entries kept on disk between sessions, like After Effects' disk cache.
 //!
 //! * Entries are files keyed by a 128-bit content hash (`<folder>/v1/<kind>/<2 hex>/<32 hex>.ecc`):
-//!   frames by the hash of the composition's content (the comp and everything it uses, footage
-//!   files' size and modification time included) plus frame, scale and view; layer buffers by
-//!   the layer cache's content key salted with the project's footage fingerprint. A changed
-//!   project therefore never reads stale pixels: its keys simply change.
-//! * Payloads are LZ4-compressed (`lz4_flex`, MIT): frames as 8-bit premultiplied RGBA, layer
-//!   buffers as `f32` RGBA with the bytes shuffled into planes (exact, so cached and fresh
-//!   renders are bit-identical), Roto Brush / Object Matte segmentations as
+//!   frames by the hash of the composition's content as it is in memory (the comp and what it can
+//!   draw, footage items with their settings and paths, and what its expressions can read; no
+//!   file is looked at, [`comp_content_key`]) plus frame, scale and view; layer buffers by the
+//!   layer cache's content key (which names the footage items a buffer uses with their settings
+//!   and paths) and the renderer version ([`layer_disk_key`]). A changed project therefore never
+//!   reads stale pixels: its keys simply change, and an edit elsewhere keeps them.
+//! * Frame and layer entries keep the source files they were made of (footage, and the font
+//!   files text is drawn with), each with the size and modification time it was read with
+//!   ([`EntryFiles`], #3184). An entry is used only while those files are unchanged: a handful
+//!   of `metadata` calls when it is read, never a scan of the project's files. A frame or
+//!   buffer whose files can't all be named is not stored (text in a family that isn't installed
+//!   or with fallback glyphs, footage refused by automation read roots, …). File ▸ Reload
+//!   Footage deletes the entries made of the reloaded files ([`DiskCache::drop_files`]): a file
+//!   replaced by one of the same size and time is read again.
+//! * Payloads are LZ4-compressed (`lz4_flex`, MIT): frames as 8-bit premultiplied RGBA (or, for
+//!   32 bpc viewer frames, half-float RGBA with the bytes shuffled into planes; the entry
+//!   header's format byte tells them apart: 2 and 3, both with their source files first), layer
+//!   buffers (format 4, their source files first) as `f32` RGBA with the bytes shuffled into
+//!   planes (exact, so cached and fresh renders are bit-identical), Roto Brush / Object Matte segmentations as
 //!   `FrameSeg::to_bytes` (keyed by their content-keyed chain key and scale, so they are
 //!   reused whenever the same frames, settings and prompt come back, also after a restart). Every file ends in a checksum; damaged files read as misses and
 //!   are deleted.
@@ -30,12 +42,31 @@ use std::sync::{Arc, Condvar, Mutex};
 use effectcraft_effects::Buf;
 use effectcraft_raster::Image;
 
+use crate::reads::ReadFiles;
+
+mod entry_files;
+pub use entry_files::{EntryFile, EntryFiles, EntryStamp};
+
 /// File format version (part of the folder layout).
 const VERSION: &str = "v1";
 const MAGIC: &[u8; 4] = b"ECDC";
-/// Pending writes before new ones are dropped.
+/// Pending layer and matte writes before new ones are dropped.
 #[cfg(not(target_arch = "wasm32"))]
 const QUEUE_LIMIT: usize = 64;
+/// What reading a megabyte of a disk cache entry back is assumed to take until reads are
+/// measured, in microseconds: 10 ms (100 MB/s, a slow disk or a network share), so a quick frame
+/// is not written on a guess ([`DiskCache::pays_off`]).
+pub const DEFAULT_READ_US_PER_MB: u64 = 10_000;
+
+/// Pending frame bytes before new frames are dropped. Frames have their own lane, written
+/// before layer buffers: a burst of large layer writes used to fill the shared queue and drop
+/// frames, so a fully cached comp came back with gaps in its blue bar.
+#[cfg(not(target_arch = "wasm32"))]
+const FRAME_QUEUE_BYTES: usize = 1 << 30;
+/// Pending layer and plane bytes (uncompressed: they are encoded on the writer thread, #3271)
+/// before new ones are dropped.
+#[cfg(not(target_arch = "wasm32"))]
+const JOB_QUEUE_BYTES: usize = 1 << 30;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Kind {
@@ -43,6 +74,9 @@ pub enum Kind {
     Layer,
     /// A Roto Brush / Object Matte segmentation.
     Matte,
+    /// Decoded footage channels (an OpenEXR frame's planes, #3271): read instead of decoding
+    /// the file again, after RAM let them go or in the next session.
+    Plane,
 }
 
 impl Kind {
@@ -52,6 +86,7 @@ impl Kind {
             Kind::Frame => "frames",
             Kind::Layer => "layers",
             Kind::Matte => "mattes",
+            Kind::Plane => "planes",
         }
     }
     fn tag(self) -> u8 {
@@ -59,6 +94,7 @@ impl Kind {
             Kind::Frame => 1,
             Kind::Layer => 2,
             Kind::Matte => 3,
+            Kind::Plane => 4,
         }
     }
 }
@@ -69,6 +105,51 @@ pub struct Frame8 {
     pub width: u32,
     pub height: u32,
     pub rgba: Vec<u8>,
+}
+
+/// A cached 32 bpc viewer frame: premultiplied RGBA half floats (IEEE binary16 bits), four
+/// per pixel.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FrameF16 {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u16>,
+}
+
+/// The entry header's format byte: segmentations (and 8-bit frames and layer buffers before
+/// #3184).
+const FORMAT_RGBA8: u8 = 0;
+/// Frame entries: their source files ([`EntryFiles`]), then 8-bit or half-float pixels. The
+/// formats before them (0: 8-bit, 1: half float, without files) read as misses and are deleted.
+const FORMAT_RGBA8_FILES: u8 = 2;
+const FORMAT_F16_FILES: u8 = 3;
+/// Layer entries: their source files ([`EntryFiles`]), then the buffer. The format before it
+/// (0, without files) reads as a miss and is deleted.
+const FORMAT_LAYER_FILES: u8 = 4;
+/// Plane entries: their source file ([`EntryFiles`]), then one named plane ([`encode_plane_after`]).
+/// (5, several `f32` planes per entry, reads as a miss and is deleted.)
+const FORMAT_PLANES_FILES: u8 = 6;
+
+/// The most plane bytes one queued write of decoded footage channels holds
+/// ([`DiskCache::put_planes`]).
+#[cfg(not(test))]
+const PLANE_JOB_BYTES: usize = 256 << 20;
+#[cfg(test)]
+const PLANE_JOB_BYTES: usize = 64 << 10;
+
+/// The most pixels a plane entry holds (a damaged entry can't ask for more).
+const MAX_ENTRY_PIXELS: usize = 1 << 28;
+
+/// The disk key of a decoded footage channel: the source file's path and identity as read, and
+/// the channel's name.
+pub fn plane_key(path: &str, stamp: &crate::reads::FileStamp, channel: &str) -> u128 {
+    let mut h = Hash128::default();
+    h.write(b"plane-v2");
+    h.write(path.as_bytes());
+    h.write(format!("{stamp:?}").as_bytes());
+    h.write_u64(channel.len() as u64);
+    h.write(channel.as_bytes());
+    h.finish()
 }
 
 /// Counters for tests, the Info panel and `cache.diskStats`.
@@ -200,7 +281,7 @@ pub struct LayerPrefetch {
 const PREFETCH_RECENT: usize = 512;
 
 impl LayerPrefetch {
-    /// A frame's layer-cache misses (salted keys).
+    /// A frame's layer-cache misses (disk keys, [`layer_disk_key`]).
     pub fn note_misses(&mut self, keys: impl IntoIterator<Item = u128>) {
         for k in keys {
             self.recent.retain(|x| *x != k);
@@ -221,12 +302,228 @@ impl LayerPrefetch {
 
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 enum Job {
-    Write(Kind, u128, Vec<u8>),
+    /// Kind, key, header format byte, payload (encoded on the writer thread).
+    Write(Kind, u128, u8, Payload),
+    /// Delete the frame and layer entries made of these files ([`DiskCache::drop_files`]).
+    Drop(Vec<Arc<str>>),
+}
+
+/// What a queued write stores, encoded on the writer thread (#3271): rendering threads hand over
+/// the pixels they made (a layer buffer shared with the RAM cache, a frame moved in) and go on;
+/// converting and compressing them is the writer's work.
+enum Payload {
+    /// A layer buffer and its source files.
+    Layer(Arc<Buf>, EntryFiles),
+    /// An 8-bit or half-float frame (width, height, pixels) and its source files.
+    Frame8(u32, u32, Vec<u8>, EntryFiles),
+    FrameF16(u32, u32, Vec<u16>, EntryFiles),
+    /// Decoded footage channels of width x height, each written as an entry of its own (key,
+    /// name, plane), and their source file. The job owns its planes: what it holds is what it
+    /// counts, and dropping it frees them.
+    Planes(u32, u32, Vec<(u128, String, Vec<f32>)>, EntryFiles),
+    /// Bytes to compress with LZ4 (a segmentation).
+    Lz4(Vec<u8>),
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Payloads encoded on this thread (tests: none on a rendering thread).
+    static ENCODED_HERE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Payloads encoded on this thread so far (tests).
+#[cfg(test)]
+pub(crate) fn encoded_here() -> u64 {
+    ENCODED_HERE.with(std::cell::Cell::get)
+}
+
+impl Payload {
+    /// Encode it (its source files, then its pixels, compressed) and write it to `cache` as
+    /// `key` (planes: each under its own key); an entry written meanwhile by another render
+    /// isn't encoded again.
+    fn write(self, cache: &DiskCache, kind: Kind, key: u128, format: u8) {
+        #[cfg(test)]
+        if !matches!(self, Payload::Lz4(_)) {
+            ENCODED_HERE.with(|n| n.set(n.get() + 1));
+        }
+        let one = |key: u128, bytes: &dyn Fn() -> Vec<u8>| {
+            if !cache.contains(kind, key) {
+                cache.write_format(kind, key, format, &bytes());
+            }
+        };
+        match self {
+            Payload::Layer(buf, files) => one(key, &|| with_files(&files, encode_layer(&buf))),
+            Payload::Frame8(w, h, rgba, files) => one(key, &|| with_files(&files, encode_frame(w, h, &rgba))),
+            Payload::FrameF16(w, h, rgba, files) => one(key, &|| with_files(&files, encode_frame_f16(w, h, &rgba))),
+            Payload::Planes(w, h, planes, files) => {
+                for (key, name, plane) in planes {
+                    if cache.contains(kind, key) {
+                        continue;
+                    }
+                    let mut entry = Vec::new();
+                    files.encode(&mut entry);
+                    // (no memory for the encoder just now: the entry isn't written, and the
+                    // plane is decoded from its file next time)
+                    if let Some(entry) = encode_plane_after(entry, w, h, &name, &plane) {
+                        cache.write_format(kind, key, format, &entry);
+                    }
+                }
+            }
+            Payload::Lz4(raw) => one(key, &|| lz4_flex::compress_prepend_size(&raw)),
+        }
+    }
+
+    /// The bytes it holds while queued.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    fn held(&self) -> usize {
+        match self {
+            Payload::Layer(buf, _) => buf.img.data.len().saturating_mul(16),
+            Payload::Frame8(_, _, p, _) => p.len(),
+            Payload::FrameF16(_, _, p, _) => p.len().saturating_mul(2),
+            Payload::Planes(_, _, planes, _) => planes.iter().map(|(_, _, p)| p.len().saturating_mul(4)).fold(0, usize::saturating_add),
+            Payload::Lz4(raw) => raw.len(),
+        }
+    }
+
+    /// The bytes only this payload holds: a layer buffer the RAM cache shares counts there.
+    fn unique(&self) -> usize {
+        match self {
+            Payload::Layer(buf, _) if Arc::strong_count(buf) > 1 => 0,
+            _ => self.held(),
+        }
+    }
+
+    /// At least the bytes its largest entry takes uncompressed (the pixels; files and header
+    /// are small): planes are entries of their own.
+    fn raw(&self) -> u64 {
+        match self {
+            Payload::Planes(_, _, planes, _) => planes.iter().map(|(_, _, p)| p.len().saturating_mul(4)).max().unwrap_or(0) as u64,
+            _ => self.held() as u64,
+        }
+    }
+
+    /// The entries it writes.
+    fn entries(&self) -> u64 {
+        match self {
+            Payload::Planes(_, _, planes, _) => planes.len() as u64,
+            _ => 1,
+        }
+    }
 }
 
 struct Queue {
+    /// Frame writes (taken first) and their payload bytes.
+    frames: std::collections::VecDeque<Job>,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    frame_bytes: usize,
+    /// Layer and matte writes, and the bytes they hold.
     jobs: std::collections::VecDeque<Job>,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    job_bytes: usize,
     busy: bool,
+    /// Keys of frames queued or being written.
+    pending_frames: std::collections::HashSet<u128>,
+    /// The drops so far (under the queue's lock: a write is queued either before a drop, which
+    /// then sweeps it, or after it, when this refuses it if it was made from before).
+    drops: Drops,
+}
+
+impl Queue {
+    /// No room for a `kind` write of `len` bytes. A layer bigger than the whole budget is still
+    /// taken when nothing else is queued.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn full(&self, kind: Kind, len: usize) -> bool {
+        match kind {
+            Kind::Frame => self.frame_bytes.saturating_add(len) > FRAME_QUEUE_BYTES,
+            _ => self.jobs.len() >= QUEUE_LIMIT || (self.job_bytes > 0 && self.job_bytes.saturating_add(len) > JOB_QUEUE_BYTES),
+        }
+    }
+}
+
+/// Files dropped from the cache files beyond this are not remembered one by one: everything made
+/// before the drop that forgot them is refused instead.
+const MAX_DROPPED_PATHS: usize = 1 << 16;
+
+/// The [`DiskCache::drop_files`] calls so far: their number (the drop generation) and the last one
+/// of each file. An entry made of a file read before that file's last drop (its render started at
+/// an earlier generation) holds the pixels from before and is refused.
+#[derive(Default)]
+struct Drops {
+    generation: u64,
+    last: HashMap<Arc<str>, u64>,
+    /// Everything made before this generation is refused (the per-file record was forgotten).
+    floor: u64,
+}
+
+impl Drops {
+    /// Notes that the given paths were dropped, bumping the generation and tracking them for later checks.
+    fn record(&mut self, paths: &[Arc<str>]) {
+        self.generation = self.generation.saturating_add(1);
+        if self.last.len().saturating_add(paths.len()) > MAX_DROPPED_PATHS {
+            self.last.clear();
+            self.floor = self.generation;
+            return;
+        }
+        for p in paths {
+            self.last.insert(p.clone(), self.generation);
+        }
+    }
+
+    /// Whether something made of `paths`, whose reads started at generation `since`, read one of
+    /// them before it was dropped.
+    fn stale<'a>(&self, mut paths: impl Iterator<Item = &'a Arc<str>>, since: u64) -> bool {
+        since < self.floor || paths.any(|p| self.last.get(p).is_some_and(|g| *g > since))
+    }
+}
+
+impl Queue {
+    /// Takes the next queued job, frames first, and releases the bytes it held.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn pop(&mut self) -> Option<Job> {
+        if let Some(j) = self.frames.pop_front() {
+            if let Job::Write(_, _, _, p) = &j {
+                self.frame_bytes = self.frame_bytes.saturating_sub(p.held());
+            }
+            return Some(j);
+        }
+        let j = self.jobs.pop_front()?;
+        if let Job::Write(_, _, _, p) = &j {
+            self.job_bytes = self.job_bytes.saturating_sub(p.held());
+        }
+        Some(j)
+    }
+    fn is_empty(&self) -> bool {
+        self.frames.is_empty() && self.jobs.is_empty()
+    }
+
+    /// The newest queued layer or plane write holding bytes only the queue holds: its index and
+    /// those bytes. (Frame writes are never dropped: a fully cached comp would come back with
+    /// gaps.)
+    fn newest_unique(&self) -> Option<(usize, usize)> {
+        self.jobs.iter().enumerate().rev().find_map(|(i, j)| match j {
+            Job::Write(_, _, _, p) if p.unique() > 0 => Some((i, p.unique())),
+            _ => None,
+        })
+    }
+
+    /// Drop [`Queue::newest_unique`]; the bytes only it held.
+    fn drop_newest_unique(&mut self) -> Option<usize> {
+        let (i, unique) = self.newest_unique()?;
+        if let Some(Job::Write(_, _, _, p)) = self.jobs.remove(i) {
+            self.job_bytes = self.job_bytes.saturating_sub(p.held());
+        }
+        Some(unique)
+    }
+
+    /// The bytes only the queued layer and plane writes hold (no frames: see the memory holder).
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    fn unique_job_bytes(&self) -> usize {
+        let job = |j: &Job| match j {
+            Job::Write(_, _, _, p) => p.unique(),
+            Job::Drop(_) => 0,
+        };
+        self.jobs.iter().map(job).fold(0, usize::saturating_add)
+    }
 }
 
 pub struct DiskCache {
@@ -237,16 +534,31 @@ pub struct DiskCache {
     disk_cap: AtomicU64,
     /// Free space is limiting the cache (warned once per episode).
     space_limited: AtomicBool,
+    /// The free space the cache leaves on its disk ([`disk_reserve`]); 0 = unknown.
+    reserve: AtomicU64,
     hits: AtomicU64,
     misses: AtomicU64,
     writes: AtomicU64,
     evictions: AtomicU64,
     dropped: AtomicU64,
     failed: AtomicU64,
+    /// Source files looked at to check frame and layer entries ([`DiskCache::file_checks`]).
+    file_checks: AtomicU64,
+    /// Frame and layer entries compressed for a queued write ([`DiskCache::encodes`]).
+    encodes: AtomicU64,
     tmp_counter: AtomicU64,
     queue: Arc<(Mutex<Queue>, Condvar)>,
     /// Layer buffers that took less than this to render are not written (ms).
     min_layer_ms: AtomicU64,
+    /// What reading a megabyte of an entry takes, in microseconds ([`DiskCache::pays_off`]):
+    /// [`DEFAULT_READ_US_PER_MB`] until reads are measured, then their running average.
+    read_us_per_mb: AtomicU64,
+    /// Files whose entries are being deleted ([`DiskCache::drop_files`]), each with the number
+    /// of drops of it pending: until then an entry made of one is a miss.
+    dropping: Mutex<HashMap<Arc<str>, u32>>,
+    /// Bytes [`DiskCache::entry_files`] read (tests).
+    #[cfg(test)]
+    head_bytes: AtomicU64,
 }
 
 /// FNV-1a 128-bit (content keys).
@@ -283,8 +595,44 @@ fn checksum(data: &[u8]) -> u64 {
     h
 }
 
-/// The platform's default disk cache folder.
+/// The least free space the disk cache leaves on its disk.
+pub const MIN_DISK_RESERVE: u64 = 2 << 30;
+/// The most free space the disk cache leaves on its disk: 5% of a large disk is far more than
+/// the system needs to keep working (on a 4 TB disk it held a 20 GB cache at 0 with 190 GB free).
+pub const MAX_DISK_RESERVE: u64 = 10 << 30;
+/// Below this much room left by free disk space, frame and layer writes are refused before they
+/// are encoded ([`DiskCache::accepts_writes`]): a few frames would fill it, and the rest would be
+/// compressed only to be refused.
+const MIN_WRITE_ROOM: u64 = 64 << 20;
+
+/// The free space the disk cache leaves on a disk of `total` bytes: 5% of it, at least 2 GB and
+/// at most 10 GB. It keeps the cache from filling the disk; the cache's size is the user's
+/// Maximum Disk Cache Size (After Effects has that maximum and no reserve).
+pub fn disk_reserve(total: u64) -> u64 {
+    (total / 20).clamp(MIN_DISK_RESERVE, MAX_DISK_RESERVE)
+}
+
+/// A validated Nightly profile root, set once at startup by the desktop app: every cache folder
+/// then derives from it instead of the platform cache/state folders.
+static PROFILE_ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Select the private Nightly profile root for the cache folders (disk cache, media cache,
+/// conformed audio, local footage copies). A stable launch never sets it.
+pub fn set_profile_root(root: PathBuf) -> Result<(), &'static str> {
+    PROFILE_ROOT.set(root).map_err(|_| "the Nightly profile root was already selected")
+}
+
+/// The platform's default disk cache folder, or the Nightly profile's caches folder.
 pub fn default_folder() -> PathBuf {
+    default_folder_at(PROFILE_ROOT.get().map(PathBuf::as_path))
+}
+
+/// [`default_folder`] for an explicit Nightly profile root (`None`: the platform convention), so
+/// the choice is testable without process-global state.
+pub fn default_folder_at(profile: Option<&Path>) -> PathBuf {
+    if let Some(root) = profile {
+        return root.join("Caches").join("Disk Cache");
+    }
     let home = std::env::var_os("HOME").map(PathBuf::from);
     if cfg!(target_os = "macos")
         && let Some(h) = &home
@@ -299,12 +647,54 @@ pub fn default_folder() -> PathBuf {
     if let Some(x) = std::env::var_os("XDG_CACHE_HOME") {
         return PathBuf::from(x).join("effectcraft/disk-cache");
     }
-    home.map(|h| h.join(".cache/effectcraft/disk-cache")).unwrap_or_else(|| std::env::temp_dir().join("effectcraft-disk-cache"))
+    // Without a home folder: a per-user folder in the shared temp folder, made private by `open`.
+    let user = std::env::var("USER").or_else(|_| std::env::var("USERNAME")).unwrap_or_default();
+    home.map(|h| h.join(".cache/effectcraft/disk-cache")).unwrap_or_else(|| std::env::temp_dir().join(format!("effectcraft-disk-cache-{user}")))
+}
+
+/// A cache folder in the shared temp folder must be ours alone: not a link someone placed there,
+/// and private (setting the mode fails unless we own it), so another user cannot redirect the
+/// cache's writes and clean-up or read its files.
+#[cfg(unix)]
+fn make_private(folder: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    // Judge the folder as written and as it resolves (a relative path, a link or an alias such as
+    // /tmp -> /private/tmp can all land in the shared temp folder).
+    // The shared roots: the process's temp folder (`TMPDIR`) and the system's own, which a cache
+    // configured by path lands in whatever `TMPDIR` says.
+    let roots: Vec<PathBuf> = [std::env::temp_dir(), PathBuf::from("/tmp"), PathBuf::from("/var/tmp")]
+        .into_iter()
+        .flat_map(|t| {
+            let real = t.canonicalize().unwrap_or_else(|_| t.clone());
+            [t, real]
+        })
+        .collect();
+    let given = std::path::absolute(folder).unwrap_or_else(|_| folder.to_path_buf());
+    let real = folder.canonicalize().unwrap_or_else(|_| given.clone());
+    // The shared folder itself is not ours to change or to keep a cache in: refused.
+    if [&given, &real].iter().any(|p| roots.contains(p)) {
+        return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "the disk cache folder is the shared temp folder"));
+    }
+    // Only folders inside it are made private.
+    if ![&given, &real].iter().any(|p| roots.iter().any(|t| p.starts_with(t) && **p != *t)) {
+        return Ok(());
+    }
+    if std::fs::symlink_metadata(folder)?.file_type().is_symlink() {
+        return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "the disk cache folder is a link"));
+    }
+    std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o700))
+}
+
+#[cfg(not(unix))]
+fn make_private(_: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 impl DiskCache {
     /// Open (or create) the cache in `folder`, holding at most `max_bytes`.
     pub fn open(folder: impl AsRef<Path>, max_bytes: u64) -> std::io::Result<Arc<DiskCache>> {
+        std::fs::create_dir_all(folder.as_ref())?;
+        make_private(folder.as_ref())?;
         let dir = folder.as_ref().join(VERSION);
         std::fs::create_dir_all(&dir)?;
         let dc = Arc::new(DiskCache {
@@ -313,15 +703,33 @@ impl DiskCache {
             max_bytes: AtomicU64::new(max_bytes),
             disk_cap: AtomicU64::new(u64::MAX),
             space_limited: AtomicBool::new(false),
+            reserve: AtomicU64::new(0),
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
             writes: AtomicU64::new(0),
             evictions: AtomicU64::new(0),
             dropped: AtomicU64::new(0),
             failed: AtomicU64::new(0),
+            file_checks: AtomicU64::new(0),
+            encodes: AtomicU64::new(0),
             tmp_counter: AtomicU64::new(0),
-            queue: Arc::new((Mutex::new(Queue { jobs: Default::default(), busy: cfg!(not(target_arch = "wasm32")) }), Condvar::new())),
+            queue: Arc::new((
+                Mutex::new(Queue {
+                    frames: Default::default(),
+                    frame_bytes: 0,
+                    jobs: Default::default(),
+                    job_bytes: 0,
+                    busy: cfg!(not(target_arch = "wasm32")),
+                    pending_frames: Default::default(),
+                    drops: Drops::default(),
+                }),
+                Condvar::new(),
+            )),
             min_layer_ms: AtomicU64::new(30),
+            read_us_per_mb: AtomicU64::new(DEFAULT_READ_US_PER_MB),
+            dropping: Mutex::new(HashMap::new()),
+            #[cfg(test)]
+            head_bytes: AtomicU64::new(0),
         });
         dc.rescan();
         // Shrinking a large cache deletes many files: the writer thread does it.
@@ -343,7 +751,7 @@ impl DiskCache {
     /// Rebuild the index from the folder (oldest files first).
     pub fn rescan(&self) {
         let mut found: Vec<(std::time::SystemTime, Kind, u128, u64)> = vec![];
-        for kind in [Kind::Frame, Kind::Layer, Kind::Matte] {
+        for kind in [Kind::Frame, Kind::Layer, Kind::Matte, Kind::Plane] {
             let Ok(shards) = std::fs::read_dir(self.dir.join(kind.dir())) else { continue };
             for shard in shards.flatten() {
                 let Ok(files) = std::fs::read_dir(shard.path()) else { continue };
@@ -394,25 +802,55 @@ impl DiskCache {
         self.max_bytes().min(self.disk_cap.load(Ordering::Relaxed))
     }
 
-    /// The cache's disk: `(total, available)` bytes, `None` = unknown. The cache leaves at least
-    /// 2 GB or 5% of the disk free, whichever is more (evicting when it must).
+    /// The cache's disk: `(total, available)` bytes, `None` = unknown. The cache leaves
+    /// [`disk_reserve`] free (5% of the disk, at least 2 GB and at most 10 GB), evicting when it
+    /// must.
     pub fn set_disk_space(&self, space: Option<(u64, u64)>) {
+        let mut reserve = 0;
         let cap = match space {
             // (a disk reported as 0 bytes, such as an automount map, is unknown)
             Some((total, available)) if total > 0 => {
-                let reserve = (2u64 << 30).max(total / 20);
+                reserve = disk_reserve(total);
                 let used = self.index.lock().map(|g| g.total()).unwrap_or_default();
                 // The cache's own files count as free: below the reserve it gives space back.
                 used.saturating_add(available).saturating_sub(reserve)
             }
             _ => u64::MAX,
         };
+        self.reserve.store(reserve, Ordering::Relaxed);
         self.disk_cap.store(cap, Ordering::Relaxed);
         let limited = cap < self.max_bytes();
         if self.space_limited.swap(limited, Ordering::Relaxed) != limited && limited {
             log::warn!("disk cache at {}: little free disk space, limiting the cache to {} MB", self.folder().display(), cap >> 20);
         }
         self.evict();
+    }
+
+    /// Whether frame and layer writes are worth encoding now: `false` while free disk space
+    /// holds the limit at 0 or under 64 MB (a limit the setting asks for is always used). Two
+    /// atomic reads, so writes check it before they spend time converting and compressing
+    /// pixels that [`DiskCache::write_format`] would refuse anyway. (Whether a given entry fits
+    /// is known only once it is compressed: `write_format` decides.)
+    pub fn accepts_writes(&self) -> bool {
+        let (max, limit) = (self.max_bytes(), self.limit_bytes());
+        limit > 0 && (limit >= MIN_WRITE_ROOM || limit == max)
+    }
+
+    /// The free space the cache leaves on its disk ([`disk_reserve`]), once the disk's size is
+    /// known ([`DiskCache::set_disk_space`]).
+    pub fn reserve_bytes(&self) -> Option<u64> {
+        Some(self.reserve.load(Ordering::Relaxed)).filter(|r| *r > 0)
+    }
+
+    /// Frame and layer entries compressed for writing so far (tests: a write refused up front
+    /// costs no encode).
+    pub fn encodes(&self) -> u64 {
+        self.encodes.load(Ordering::Relaxed)
+    }
+
+    /// Count one entry compressed for a queued write.
+    fn count_encodes(&self, n: u64) {
+        self.encodes.fetch_add(n, Ordering::Relaxed);
     }
 
     /// Layer buffers faster to render than this are not worth a disk write.
@@ -424,8 +862,45 @@ impl DiskCache {
         self.min_layer_ms.load(Ordering::Relaxed)
     }
 
+    /// What reading `bytes` of an entry back is expected to take, in microseconds (the measured
+    /// read rate, [`DiskCache::note_read`]).
+    pub fn read_us(&self, bytes: usize) -> u64 {
+        let rate = u128::from(self.read_us_per_mb.load(Ordering::Relaxed));
+        u64::try_from(u128::try_from(bytes).unwrap_or(u128::MAX).saturating_mul(rate) >> 20).unwrap_or(u64::MAX)
+    }
+
+    /// Set the read rate assumed until reads are measured (microseconds per MB; tests that need
+    /// every write give 0: everything pays off).
+    pub fn set_read_us_per_mb(&self, us: u64) {
+        self.read_us_per_mb.store(us, Ordering::Relaxed);
+    }
+
+    /// Whether a frame or plane set of `bytes` that took `make_us` microseconds to make is worth
+    /// a disk write: only when making it again costs more than reading it back (#3301). A RAM
+    /// eviction keeps the disk copy either way.
+    pub fn pays_off(&self, bytes: usize, make_us: u64) -> bool {
+        let read = self.read_us(bytes);
+        read == 0 || make_us > read
+    }
+
+    /// Note a read of `bytes` that took `took_us` (reads of under 64 KB are too short to time):
+    /// the read rate becomes a running average (7/8 the old rate, 1/8 this read's).
+    fn note_read(&self, bytes: usize, took_us: u64) {
+        if bytes < 64 << 10 {
+            return;
+        }
+        let rate = u64::try_from(u128::from(took_us).saturating_mul(1 << 20) / u128::try_from(bytes).unwrap_or(1).max(1)).unwrap_or(u64::MAX);
+        let old = self.read_us_per_mb.load(Ordering::Relaxed);
+        self.read_us_per_mb.store(old.saturating_mul(7).saturating_add(rate) / 8, Ordering::Relaxed);
+    }
+
     pub fn contains(&self, kind: Kind, key: u128) -> bool {
         self.index.lock().is_ok_and(|g| g.contains(kind, key))
+    }
+
+    /// A frame write is queued or in progress.
+    pub fn frame_pending(&self, key: u128) -> bool {
+        self.queue.0.lock().is_ok_and(|q| q.pending_frames.contains(&key))
     }
 
     /// Keys of one kind (unordered).
@@ -455,7 +930,7 @@ impl DiskCache {
         if let Ok(mut g) = self.index.lock() {
             g.clear();
         }
-        for kind in [Kind::Frame, Kind::Layer, Kind::Matte] {
+        for kind in [Kind::Frame, Kind::Layer, Kind::Matte, Kind::Plane] {
             let _ = std::fs::remove_dir_all(self.dir.join(kind.dir()));
         }
     }
@@ -467,8 +942,11 @@ impl DiskCache {
         #[cfg(target_arch = "wasm32")]
         {
             q.jobs.clear();
+            q.job_bytes = 0;
+            q.frames.clear();
+            q.pending_frames.clear();
         }
-        while !q.jobs.is_empty() || q.busy {
+        while !q.is_empty() || q.busy {
             q = match cv.wait(q) {
                 Ok(q) => q,
                 Err(_) => return,
@@ -477,36 +955,109 @@ impl DiskCache {
     }
 
     fn read(&self, kind: Kind, key: u128) -> Option<Vec<u8>> {
+        self.read_entry(kind, key).map(|(_, p)| p)
+    }
+
+    /// An entry's payload and its header's format byte.
+    fn read_entry(&self, kind: Kind, key: u128) -> Option<(u8, Vec<u8>)> {
+        let entry = self.load(kind, key);
+        match &entry {
+            Some(_) => self.hit(kind, key),
+            None => _ = self.misses.fetch_add(1, Ordering::Relaxed),
+        }
+        entry
+    }
+
+    /// An entry's payload and format byte, without counting it as a hit or miss. A damaged file
+    /// is deleted; a missing one forgotten.
+    fn load(&self, kind: Kind, key: u128) -> Option<(u8, Vec<u8>)> {
         if !self.contains(kind, key) {
-            self.misses.fetch_add(1, Ordering::Relaxed);
             return None;
         }
         let path = self.path(kind, key);
+        let t0 = web_time::Instant::now();
         let data = std::fs::read(&path).ok();
-        let ok = data.as_deref().and_then(|d| verify(d, kind));
-        match ok {
-            Some(payload) => {
-                let payload = payload.to_vec();
-                self.hits.fetch_add(1, Ordering::Relaxed);
-                if let Ok(mut g) = self.index.lock() {
-                    g.touch(kind, key);
-                }
-                // Persist the recency for the next session (best effort).
-                if let Ok(f) = std::fs::File::options().append(true).open(&path) {
-                    let _ = f.set_modified(std::time::SystemTime::now());
-                }
-                Some(payload)
-            }
-            None => {
-                self.misses.fetch_add(1, Ordering::Relaxed);
-                // Gone (another process evicted it) or damaged: forget it.
-                if data.is_some() {
-                    let _ = std::fs::remove_file(&path);
-                }
-                self.forget(kind, key);
-                None
-            }
+        let ok = data.as_deref().and_then(|d| Some((*d.get(5)?, verify(d, kind)?.to_vec())));
+        if let Some((_, payload)) = &ok {
+            self.note_read(payload.len(), u64::try_from(t0.elapsed().as_micros()).unwrap_or(u64::MAX));
         }
+        if ok.is_none() {
+            // Gone (another process evicted it) or damaged: forget it.
+            if data.is_some() {
+                let _ = std::fs::remove_file(&path);
+            }
+            self.forget(kind, key);
+        }
+        ok
+    }
+
+    /// Count a hit: the entry becomes the most recently used, also for the next session.
+    fn hit(&self, kind: Kind, key: u128) {
+        self.hits.fetch_add(1, Ordering::Relaxed);
+        if let Ok(mut g) = self.index.lock() {
+            g.touch(kind, key);
+        }
+        // Persist the recency for the next session (best effort).
+        if let Ok(f) = std::fs::File::options().append(true).open(self.path(kind, key)) {
+            let _ = f.set_modified(std::time::SystemTime::now());
+        }
+    }
+
+    /// An entry of `kind` and `format` whose source files are unchanged, decoded by `decode`,
+    /// with those files. An entry whose files changed, of the format before #3184, or damaged,
+    /// is a miss and is deleted (it renders again and is stored anew). A frame entry of the
+    /// other current frame format (8-bit and half-float frames have keys of their own) is a miss
+    /// and stays.
+    fn get_checked<T>(
+        &self,
+        kind: Kind,
+        key: u128,
+        format: u8,
+        virtual_id: Option<VirtualFileId<'_>>,
+        decode: impl FnOnce(&[u8]) -> Option<T>,
+    ) -> Option<(T, ReadFiles)> {
+        let miss = || {
+            self.misses.fetch_add(1, Ordering::Relaxed);
+            None
+        };
+        // (before the file is read: the writer may finish a drop's sweep between the read and the
+        // check below, and a drop may start meanwhile)
+        let drops = self.drops_now();
+        let Some((found, payload)) = self.load(kind, key) else { return miss() };
+        if found != format {
+            let other_frame_format = kind == Kind::Frame && (found == FORMAT_RGBA8_FILES || found == FORMAT_F16_FILES);
+            if !other_frame_format {
+                self.discard(kind, key);
+            }
+            return miss();
+        }
+        let Some((files, body)) = EntryFiles::decode(&payload) else {
+            self.discard(kind, key);
+            return miss();
+        };
+        self.file_checks.fetch_add(files.len() as u64, Ordering::Relaxed);
+        if self.made_of_dropped(&files, &drops) || !files.unchanged(virtual_id) {
+            self.discard(kind, key);
+            return miss();
+        }
+        let Some(value) = decode(body) else {
+            self.discard(kind, key);
+            return miss();
+        };
+        self.hit(kind, key);
+        Some((value, files.to_read_files()))
+    }
+
+    /// Source files looked at so far to check frame and layer entries before using them (one per
+    /// file a read entry lists; tests).
+    pub fn file_checks(&self) -> u64 {
+        self.file_checks.load(Ordering::Relaxed)
+    }
+
+    /// A valid file whose payload does not decode: delete it, as a damaged one.
+    fn discard(&self, kind: Kind, key: u128) {
+        let _ = std::fs::remove_file(self.path(kind, key));
+        self.forget(kind, key);
     }
 
     fn forget(&self, kind: Kind, key: u128) {
@@ -515,26 +1066,56 @@ impl DiskCache {
         }
     }
 
-    fn enqueue(&self, kind: Kind, key: u128, payload: Vec<u8>) {
+    /// [`DiskCache::enqueue`] with the entry's header format byte. `made`: the source files of a
+    /// frame or layer entry and the drop generation its reads started at
+    /// ([`DiskCache::drop_generation`]); refused (`false`) when one of them was dropped since.
+    fn enqueue_format(&self, kind: Kind, key: u128, format: u8, payload: Payload, made: Option<(&EntryFiles, u64)>) -> bool {
+        let stale = |q: &Queue| made.is_some_and(|(files, since)| q.drops.stale(files.files().iter().map(|f| &f.path), since));
+        // An entry larger uncompressed than the cache may hold isn't worth encoding (#3271).
+        if payload.raw() > self.limit_bytes() {
+            return false;
+        }
         #[cfg(target_arch = "wasm32")]
         {
-            self.write_now(kind, key, &payload);
+            if self.queue.0.lock().is_ok_and(|q| stale(&q)) {
+                return false;
+            }
+            if !matches!(payload, Payload::Lz4(_)) {
+                self.count_encodes(payload.entries());
+            }
+            payload.write(self, kind, key, format);
+            true
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
             let (m, cv) = &*self.queue;
-            let Ok(mut q) = m.lock() else { return };
-            if q.jobs.len() >= QUEUE_LIMIT {
-                self.dropped.fetch_add(1, Ordering::Relaxed);
-                return;
+            let Ok(mut q) = m.lock() else { return false };
+            if stale(&q) {
+                return false;
             }
-            q.jobs.push_back(Job::Write(kind, key, payload));
+            if q.full(kind, payload.held()) {
+                self.dropped.fetch_add(1, Ordering::Relaxed);
+                return false;
+            }
+            // (counted as it is accepted: the writer compresses it)
+            if !matches!(payload, Payload::Lz4(_)) {
+                self.count_encodes(payload.entries());
+            }
+            if kind == Kind::Frame {
+                q.pending_frames.insert(key);
+                q.frame_bytes = q.frame_bytes.saturating_add(payload.held());
+                q.frames.push_back(Job::Write(kind, key, format, payload));
+            } else {
+                q.job_bytes = q.job_bytes.saturating_add(payload.held());
+                q.jobs.push_back(Job::Write(kind, key, format, payload));
+            }
             cv.notify_all();
+            true
         }
     }
 
     /// Write an entry now (atomic rename), then evict down to the limit.
-    fn write_now(&self, kind: Kind, key: u128, payload: &[u8]) {
+    fn write_format(&self, kind: Kind, key: u128, format: u8, payload: &[u8]) {
         if self.contains(kind, key) {
             return;
         }
@@ -544,11 +1125,13 @@ impl DiskCache {
             self.write_failed(&e);
             return;
         }
-        let data = seal(kind, payload);
-        // An entry that cannot fit would be evicted straight away.
-        if data.len() as u64 > self.limit_bytes() {
+        // An entry that cannot fit would be evicted straight away (asked before it is sealed).
+        if payload.len().saturating_add(16) as u64 > self.limit_bytes() {
             return;
         }
+        // (no memory for the sealed entry just now: it isn't written; a plane is decoded from its
+        // file next time)
+        let Some(data) = try_seal_format(kind, format, payload) else { return };
         // Make room first, so the cache never exceeds its limit (or the free-space reserve).
         self.evict_to(self.limit_bytes().saturating_sub(data.len() as u64));
         let n = self.tmp_counter.fetch_add(1, Ordering::Relaxed);
@@ -588,44 +1171,316 @@ impl DiskCache {
         }
     }
 
+    /// Delete the frame and layer entries made of any of `paths` (File ▸ Reload Footage: a file
+    /// replaced by one with the same size and modification time must be read again, which the
+    /// check on hit can't tell). The index knows keys, not files, so the writer thread reads the
+    /// files section at the start of each frame and layer entry (no pixels) and deletes the
+    /// entries that list one of `paths`, after the writes queued before (those are swept too);
+    /// until it is done, an entry made of one of them is a miss. Entries are deleted for good,
+    /// so they don't come back after a restart. Nothing else in the cache is touched.
+    ///
+    /// A render that was under way meanwhile may still offer an entry made of one of `paths` as
+    /// it was before: it is refused, see [`DiskCache::drop_generation`].
+    pub fn drop_files(&self, paths: impl IntoIterator<Item = impl Into<Arc<str>>>) {
+        let paths: Vec<Arc<str>> = paths.into_iter().map(Into::into).collect();
+        if paths.is_empty() {
+            return;
+        }
+        {
+            let mut d = self.dropping.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            for p in &paths {
+                let n = d.entry(p.clone()).or_default();
+                *n = n.saturating_add(1);
+            }
+        }
+        #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
+        let (m, cv) = &*self.queue;
+        match m.lock() {
+            Ok(mut q) => {
+                q.drops.record(&paths);
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    // (never refused for a full queue)
+                    q.jobs.push_back(Job::Drop(paths));
+                    cv.notify_all();
+                    return;
+                }
+            }
+            // (no writer thread to take the job any more)
+            Err(poisoned) => poisoned.into_inner().drops.record(&paths),
+        }
+        self.sweep(&paths);
+    }
+
+    /// The number of [`DiskCache::drop_files`] calls so far. A render takes it before it starts
+    /// reading and hands it to `put_frame` / `put_layer` with what it made: an entry listing a
+    /// file dropped after that is refused (the render may have read the file as it was before).
+    pub fn drop_generation(&self) -> u64 {
+        self.queue.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).drops.generation
+    }
+
+    /// Whether one of `files` was dropped after generation `since` ([`DiskCache::drop_generation`]),
+    /// or after the earlier generation the list's own reads started at ([`ReadFiles::since`]: a
+    /// buffer made by an earlier render, from memory): what was made of them then is from before
+    /// the drop (shown, never stored).
+    pub fn dropped_since(&self, files: &ReadFiles, since: u64) -> bool {
+        let since = files.since().map_or(since, |s| s.min(since));
+        self.queue.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).drops.stale(files.files().iter().map(|f| &f.path), since)
+    }
+
+    /// Whether a [`DiskCache::drop_files`] is pending.
+    pub fn is_dropping(&self) -> bool {
+        !self.dropping.lock().unwrap_or_else(std::sync::PoisonError::into_inner).is_empty()
+    }
+
+    /// The drop generation and the files being dropped now, taken before an entry is read
+    /// (see [`DiskCache::made_of_dropped`]).
+    fn drops_now(&self) -> (u64, Vec<Arc<str>>) {
+        let generation = self.drop_generation();
+        let d = self.dropping.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        (generation, d.keys().cloned().collect())
+    }
+
+    /// An entry read after [`DiskCache::drops_now`] gave `drops` that is made of a file whose
+    /// drop was pending then (its sweep may have ended since, after the entry was read) or that
+    /// was dropped since.
+    fn made_of_dropped(&self, files: &EntryFiles, drops: &(u64, Vec<Arc<str>>)) -> bool {
+        let (since, pending) = drops;
+        let paths = || files.files().iter().map(|f| &f.path);
+        paths().any(|p| pending.contains(p)) || self.queue.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).drops.stale(paths(), *since)
+    }
+
+    /// The writer's part of [`DiskCache::drop_files`]: delete the entries made of `paths`, then
+    /// end their drop.
+    fn sweep(&self, paths: &[Arc<str>]) {
+        let set: std::collections::HashSet<&str> = paths.iter().map(|p| &**p).collect();
+        for kind in [Kind::Frame, Kind::Layer, Kind::Plane] {
+            for key in self.keys(kind) {
+                if self.entry_files(kind, key).is_some_and(|f| f.files().iter().any(|f| set.contains(&*f.path))) {
+                    self.discard(kind, key);
+                }
+            }
+        }
+        let mut d = self.dropping.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        for p in paths {
+            if let Some(n) = d.get_mut(p) {
+                *n = n.saturating_sub(1);
+                if *n == 0 {
+                    d.remove(p);
+                }
+            }
+        }
+    }
+
+    /// The source files a frame or layer entry lists, read from the start of its file (the
+    /// whole file only when the list is longer than that). `None` when it has none to read (an
+    /// earlier format, gone, damaged): such an entry is never used anyway.
+    fn entry_files(&self, kind: Kind, key: u128) -> Option<EntryFiles> {
+        use std::io::Read;
+        // (a plane entry lists its one source file: a short read holds it; there are many of
+        // them, one per channel and frame, and Reload Footage reads each one's head)
+        let head_len: u64 = if kind == Kind::Plane { 4 << 10 } else { 64 << 10 };
+        let parse = |d: &[u8]| {
+            let format = *d.get(5)?;
+            let ours = d.get(..4)? == MAGIC && *d.get(4)? == kind.tag();
+            if !ours || !matches!(format, FORMAT_RGBA8_FILES | FORMAT_F16_FILES | FORMAT_LAYER_FILES | FORMAT_PLANES_FILES) {
+                return None;
+            }
+            EntryFiles::decode(d.get(8..)?).map(|(files, _)| files)
+        };
+        let path = self.path(kind, key);
+        let mut head = Vec::new();
+        std::fs::File::open(&path).ok()?.take(head_len).read_to_end(&mut head).ok()?;
+        #[cfg(test)]
+        self.head_bytes.fetch_add(head.len() as u64, Ordering::Relaxed);
+        parse(&head).or_else(|| if head.len() as u64 == head_len { parse(&std::fs::read(&path).ok()?) } else { None })
+    }
+
     // ------------------------------------------------------------ typed entries
 
-    pub fn get_frame(&self, key: u128) -> Option<Frame8> {
-        let p = self.read(Kind::Frame, key)?;
-        decode_frame(&p)
+    /// An 8-bit frame whose source files are unchanged (see [`DiskCache::get_checked`]), with
+    /// those files; `None` for a half-float entry of that key, which
+    /// [`DiskCache::get_frame_f16`] reads. `virtual_id` names files served from memory.
+    pub fn get_frame(&self, key: u128, virtual_id: Option<VirtualFileId<'_>>) -> Option<(Frame8, ReadFiles)> {
+        self.get_checked(Kind::Frame, key, FORMAT_RGBA8_FILES, virtual_id, decode_frame)
     }
 
-    /// Queue a frame for writing (8-bit premultiplied RGBA, `width * height * 4` bytes).
-    pub fn put_frame(&self, key: u128, width: u32, height: u32, rgba: &[u8]) {
-        if self.contains(Kind::Frame, key) || rgba.len() != width as usize * height as usize * 4 {
+    /// A half-float frame (32 bpc viewer frames), as [`DiskCache::get_frame`].
+    pub fn get_frame_f16(&self, key: u128, virtual_id: Option<VirtualFileId<'_>>) -> Option<(FrameF16, ReadFiles)> {
+        self.get_checked(Kind::Frame, key, FORMAT_F16_FILES, virtual_id, decode_frame_f16)
+    }
+
+    /// Queue a half-float frame for writing (`width * height * 4` binary16 values) with the
+    /// source files it was made of. `true` when it is on disk or queued; `false` when refused
+    /// (wrong size, a full queue, no room on the disk, files that can't be checked later: see
+    /// [`EntryFiles::of`]; a file dropped after `since`, the [`DiskCache::drop_generation`] the
+    /// render started at).
+    #[allow(clippy::too_many_arguments)]
+    pub fn put_frame_f16(
+        &self,
+        key: u128,
+        width: u32,
+        height: u32,
+        rgba: &[u16],
+        files: &ReadFiles,
+        virtual_id: Option<VirtualFileId<'_>>,
+        since: u64,
+    ) -> bool {
+        if rgba.len() as u64 != width as u64 * height as u64 * 4 {
+            return false;
+        }
+        let Some(files) = EntryFiles::of(files, virtual_id) else { return false };
+        if self.contains(Kind::Frame, key) {
+            return true;
+        }
+        // (no room on the disk: refused before the pixels are copied)
+        if !self.accepts_writes() {
+            return false;
+        }
+        let payload = Payload::FrameF16(width, height, rgba.to_vec(), files.clone());
+        self.enqueue_format(Kind::Frame, key, FORMAT_F16_FILES, payload, Some((&files, since)))
+    }
+
+    /// Write a half-float frame synchronously (tests); a list that can't be stored is not.
+    pub fn put_frame_f16_now(&self, key: u128, width: u32, height: u32, rgba: &[u16], files: &ReadFiles) {
+        if let Some(files) = EntryFiles::of(files, None) {
+            self.write_format(Kind::Frame, key, FORMAT_F16_FILES, &with_files(&files, encode_frame_f16(width, height, rgba)));
+        }
+    }
+
+    /// Queue a frame for writing (8-bit premultiplied RGBA, `width * height * 4` bytes) with the
+    /// source files it was made of. `true` when it is on disk or queued; `false` when refused
+    /// (wrong size, a full queue, no room on the disk, files that can't be checked later: see
+    /// [`EntryFiles::of`]; a file dropped after `since`, the [`DiskCache::drop_generation`] the
+    /// render started at).
+    #[allow(clippy::too_many_arguments)]
+    pub fn put_frame(&self, key: u128, width: u32, height: u32, rgba: &[u8], files: &ReadFiles, virtual_id: Option<VirtualFileId<'_>>, since: u64) -> bool {
+        // (refused before the pixels are copied)
+        if rgba.len() as u64 != width as u64 * height as u64 * 4 || self.contains(Kind::Frame, key) || !self.accepts_writes() {
+            return self.contains(Kind::Frame, key);
+        }
+        self.put_frame_owned(key, width, height, rgba.to_vec(), files, virtual_id, since)
+    }
+
+    /// [`DiskCache::put_frame`] taking the pixels: they move to the writer thread, which converts
+    /// and compresses them (#3271); the caller goes on at once.
+    #[allow(clippy::too_many_arguments)]
+    pub fn put_frame_owned(
+        &self,
+        key: u128,
+        width: u32,
+        height: u32,
+        rgba: Vec<u8>,
+        files: &ReadFiles,
+        virtual_id: Option<VirtualFileId<'_>>,
+        since: u64,
+    ) -> bool {
+        if rgba.len() as u64 != width as u64 * height as u64 * 4 {
+            return false;
+        }
+        let Some(files) = EntryFiles::of(files, virtual_id) else { return false };
+        if self.contains(Kind::Frame, key) {
+            return true;
+        }
+        // (no room on the disk: refused before the pixels are queued and compressed)
+        if !self.accepts_writes() {
+            return false;
+        }
+        let payload = Payload::Frame8(width, height, rgba, files.clone());
+        self.enqueue_format(Kind::Frame, key, FORMAT_RGBA8_FILES, payload, Some((&files, since)))
+    }
+
+    /// A layer buffer (key: [`layer_disk_key`]) whose source files are unchanged, with those
+    /// files, as [`DiskCache::get_checked`]: an entry whose files changed, damaged, or of the
+    /// format before #3184 is a miss and is deleted, so the buffer renders again and replaces it.
+    /// `virtual_id` names files served from memory.
+    pub fn get_layer(&self, key: u128, virtual_id: Option<VirtualFileId<'_>>) -> Option<(Buf, ReadFiles)> {
+        self.get_checked(Kind::Layer, key, FORMAT_LAYER_FILES, virtual_id, decode_layer)
+    }
+
+    /// Queue a layer buffer for writing with the source files it was made of (see
+    /// [`EntryFiles::of`]: a buffer whose files can't all be named must not be stored). Refused
+    /// when one of them was dropped after `since`, the [`DiskCache::drop_generation`] its render
+    /// started at.
+    /// The buffer is shared, and encoded on the writer thread.
+    pub fn put_layer(&self, key: u128, buf: &Arc<Buf>, files: &EntryFiles, since: u64) {
+        // (no room on the disk, or a buffer no entry could hold: refused before it is queued and
+        // compressed)
+        if !layer_fits(buf.img.data.len()) || self.contains(Kind::Layer, key) || !self.accepts_writes() {
             return;
         }
-        self.enqueue(Kind::Frame, key, encode_frame(width, height, rgba));
+        let _ = self.enqueue_format(Kind::Layer, key, FORMAT_LAYER_FILES, Payload::Layer(buf.clone(), files.clone()), Some((files, since)));
     }
 
-    pub fn get_layer(&self, key: u128) -> Option<Buf> {
-        let p = self.read(Kind::Layer, key)?;
-        decode_layer(&p)
-    }
-
-    /// Queue a layer buffer for writing.
-    pub fn put_layer(&self, key: u128, buf: &Buf) {
-        if self.contains(Kind::Layer, key) {
+    /// Write a layer buffer synchronously (tests); a list that can't be stored is not.
+    pub fn put_layer_now(&self, key: u128, buf: &Buf, files: &ReadFiles) {
+        if !layer_fits(buf.img.data.len()) {
             return;
         }
-        self.enqueue(Kind::Layer, key, encode_layer(buf));
+        if let Some(files) = EntryFiles::of(files, None) {
+            self.write_format(Kind::Layer, key, FORMAT_LAYER_FILES, &with_files(&files, encode_layer(buf)));
+        }
     }
 
-    /// Write a layer buffer synchronously (tests).
-    pub fn put_layer_now(&self, key: u128, buf: &Buf) {
-        self.write_now(Kind::Layer, key, &encode_layer(buf));
+    /// A decoded footage channel ([`plane_key`]) whose source file is unchanged, as
+    /// [`DiskCache::get_checked`] (#3271): its name and its `width` x `height` plane. An entry
+    /// of another size is a miss (nothing larger is decompressed).
+    pub fn get_plane(&self, key: u128, width: u32, height: u32) -> Option<(String, Vec<f32>)> {
+        self.get_checked(Kind::Plane, key, FORMAT_PLANES_FILES, None, |p| decode_plane(p, (width, height))).map(|(plane, _)| plane)
+    }
+
+    /// The most plane bytes one queued write of decoded footage channels holds: a caller copying
+    /// planes for [`DiskCache::put_planes`] copies this much at a time.
+    pub fn plane_job_bytes(&self) -> usize {
+        PLANE_JOB_BYTES
+    }
+
+    /// Queue decoded footage channels of `width` x `height` (each [`plane_key`], name and plane)
+    /// for writing, with the source file they were read from; encoded on the writer thread.
+    /// Planes stored already, of another size or larger than the cache may hold are left out;
+    /// the rest go in jobs of at most [`PLANE_JOB_BYTES`] each, so a set the queue can't take
+    /// whole still gets as many as fit. `false` when some were refused (no room, a full queue,
+    /// or the source file dropped after `since`).
+    pub fn put_planes(&self, width: u32, height: u32, planes: Vec<(u128, String, Vec<f32>)>, files: &EntryFiles, since: u64) -> bool {
+        let n = (width as usize).checked_mul(height as usize);
+        let most = self.limit_bytes();
+        let planes: Vec<(u128, String, Vec<f32>)> = planes
+            .into_iter()
+            .filter(|(key, _, p)| Some(p.len()) == n && (p.len() as u64).saturating_mul(4) <= most && !self.contains(Kind::Plane, *key))
+            .collect();
+        if planes.is_empty() {
+            return true;
+        }
+        if !self.accepts_writes() {
+            return false;
+        }
+        let mut all = true;
+        let mut job: Vec<(u128, String, Vec<f32>)> = vec![];
+        let mut bytes = 0usize;
+        let mut rest = planes.into_iter().peekable();
+        while let Some(plane) = rest.next() {
+            bytes = bytes.saturating_add(plane.2.len().saturating_mul(4));
+            job.push(plane);
+            let next = rest.peek().map_or(0, |p| p.2.len().saturating_mul(4));
+            if rest.peek().is_none() || bytes.saturating_add(next) > PLANE_JOB_BYTES {
+                let first = job.first().map_or(0, |p| p.0);
+                let payload = Payload::Planes(width, height, std::mem::take(&mut job), files.clone());
+                all &= self.enqueue_format(Kind::Plane, first, FORMAT_PLANES_FILES, payload, Some((files, since)));
+                bytes = 0;
+            }
+        }
+        all
     }
 
     /// A segmentation (chain key, scale) written by [`DiskCache::put_seg`].
     pub fn get_seg(&self, key: u64, scale: f64) -> Option<effectcraft_effects::roto::FrameSeg> {
         let p = self.read(Kind::Matte, seg_key(key, scale))?;
-        let raw = lz4_flex::decompress_size_prepended(&p).ok()?;
-        effectcraft_effects::roto::FrameSeg::from_bytes(&raw)
+        let seg = decompress_checked(&p, None).and_then(|raw| effectcraft_effects::roto::FrameSeg::from_bytes(&raw));
+        if seg.is_none() {
+            // A rejected entry would otherwise stay indexed and keep `put_seg` from replacing it.
+            self.discard(Kind::Matte, seg_key(key, scale));
+        }
+        seg
     }
 
     /// Queue a segmentation for writing.
@@ -634,15 +1489,60 @@ impl DiskCache {
         if self.contains(Kind::Matte, k) {
             return;
         }
-        self.enqueue(Kind::Matte, k, lz4_flex::compress_prepend_size(&seg.to_bytes()));
+        // (compressed on the writer thread)
+        let _ = self.enqueue_format(Kind::Matte, k, FORMAT_RGBA8, Payload::Lz4(seg.to_bytes()), None);
     }
 
-    /// Write a frame synchronously (tests).
-    pub fn put_frame_now(&self, key: u128, width: u32, height: u32, rgba: &[u8]) {
-        self.write_now(Kind::Frame, key, &encode_frame(width, height, rgba));
+    /// Make the frame at key `from` the frame at key `to` too (an edit that can't change it gave
+    /// its comp a new content key): a hard link to the same file, or a copy where the file system
+    /// has no links. `false` when `from` isn't cached, `to` already is, or the file system
+    /// refused. (Entries don't contain their key, so the same file serves both.)
+    pub fn link_frame(&self, from: u128, to: u128) -> bool {
+        // (while files are being dropped, `from` may be made of one: it renders again instead)
+        if !self.contains(Kind::Frame, from) || self.contains(Kind::Frame, to) || self.is_dropping() {
+            return false;
+        }
+        let (src, dst) = (self.path(Kind::Frame, from), self.path(Kind::Frame, to));
+        let Some(parent) = dst.parent() else { return false };
+        let n = self.tmp_counter.fetch_add(1, Ordering::Relaxed);
+        let tmp = parent.join(format!("{to:032x}.tmp.{}.{n}", std::process::id()));
+        let linked = std::fs::create_dir_all(parent)
+            .and_then(|()| std::fs::hard_link(&src, &tmp).or_else(|_| std::fs::copy(&src, &tmp).map(|_| ())))
+            .and_then(|()| std::fs::metadata(&tmp))
+            .and_then(|m| std::fs::rename(&tmp, &dst).map(|()| m.len()));
+        let bytes = match linked {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                // (gone meanwhile: another process evicted it)
+                let _ = std::fs::remove_file(&tmp);
+                return false;
+            }
+        };
+        // (a link shares its file, but counts in full: the cache only ever errs small)
+        self.evict_to(self.limit_bytes().saturating_sub(bytes));
+        if let Ok(mut g) = self.index.lock() {
+            g.insert(Kind::Frame, to, bytes);
+        }
+        true
+    }
+
+    /// Write a frame synchronously (tests); a list that can't be stored is not.
+    pub fn put_frame_now(&self, key: u128, width: u32, height: u32, rgba: &[u8], files: &ReadFiles) {
+        if let Some(files) = EntryFiles::of(files, None) {
+            self.write_format(Kind::Frame, key, FORMAT_RGBA8_FILES, &with_files(&files, encode_frame(width, height, rgba)));
+        }
     }
 }
 
+/// A frame or layer entry's payload: its source files, then its pixels.
+fn with_files(files: &EntryFiles, pixels: Vec<u8>) -> Vec<u8> {
+    let mut out = Vec::with_capacity(pixels.len() + 64);
+    files.encode(&mut out);
+    out.extend_from_slice(&pixels);
+    out
+}
+
+/// The writer thread: evicts to the limit at open, then drains the job queue until the cache is dropped.
 #[cfg(not(target_arch = "wasm32"))]
 fn writer(dc: std::sync::Weak<DiskCache>, q: Arc<(Mutex<Queue>, Condvar)>) {
     let (m, cv) = &*q;
@@ -659,7 +1559,7 @@ fn writer(dc: std::sync::Weak<DiskCache>, q: Arc<(Mutex<Queue>, Condvar)>) {
         let job = {
             let Ok(mut g) = m.lock() else { return };
             loop {
-                if let Some(j) = g.jobs.pop_front() {
+                if let Some(j) = g.pop() {
                     g.busy = true;
                     break j;
                 }
@@ -673,49 +1573,101 @@ fn writer(dc: std::sync::Weak<DiskCache>, q: Arc<(Mutex<Queue>, Condvar)>) {
             }
         };
         let Some(cache) = dc.upgrade() else { return };
-        match job {
-            Job::Write(kind, key, payload) => cache.write_now(kind, key, &payload),
-        }
+        let written = match job {
+            Job::Write(kind, key, format, payload) => {
+                payload.write(&cache, kind, key, format);
+                (kind == Kind::Frame).then_some(key)
+            }
+            Job::Drop(paths) => {
+                cache.sweep(&paths);
+                None
+            }
+        };
         drop(cache);
         if let Ok(mut g) = m.lock() {
             g.busy = false;
+            if let Some(key) = written {
+                g.pending_frames.remove(&key);
+            }
         }
         cv.notify_all();
     }
 }
 
-/// An entry file's bytes: header (magic, kind), payload, checksum.
-pub fn seal(kind: Kind, payload: &[u8]) -> Vec<u8> {
+/// An entry file's bytes: header (magic, kind, the format byte: [`FORMAT_RGBA8`] for
+/// segmentations, [`FORMAT_RGBA8_FILES`] / [`FORMAT_F16_FILES`] for frames,
+/// [`FORMAT_LAYER_FILES`] for layer buffers), payload, checksum.
+fn seal_format(kind: Kind, format: u8, payload: &[u8]) -> Vec<u8> {
     let mut data = Vec::with_capacity(payload.len() + 16);
-    data.extend_from_slice(MAGIC);
-    data.push(kind.tag());
-    data.extend_from_slice(&[0, 0, 0]);
-    data.extend_from_slice(payload);
-    let sum = checksum(&data);
-    data.extend_from_slice(&sum.to_le_bytes());
+    seal_into(&mut data, kind, format, payload);
     data
 }
 
-/// A sealed frame entry ([`seal`] of the encoded frame): what the browser's frame workers
-/// write to the Origin Private File System.
-pub fn frame_entry(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
-    seal(Kind::Frame, &encode_frame(width, height, rgba))
+/// [`seal_format`] with its memory taken fallibly: `None` when the system can't give it (a
+/// poorly compressible 16K plane's entry is about 1 GiB), and the entry is then not written.
+fn try_seal_format(kind: Kind, format: u8, payload: &[u8]) -> Option<Vec<u8>> {
+    let len = payload.len().checked_add(16)?;
+    #[cfg(test)]
+    if len > NO_SEAL_OVER.with(std::cell::Cell::get) {
+        return None;
+    }
+    let mut data = Vec::new();
+    data.try_reserve_exact(len).ok()?;
+    seal_into(&mut data, kind, format, payload);
+    Some(data)
 }
 
-/// A frame from a sealed entry's bytes (`None` when damaged).
-pub fn read_frame_entry(data: &[u8]) -> Option<Frame8> {
-    decode_frame(verify(data, Kind::Frame)?)
+/// The header, `payload` and checksum of an entry appended to `data` (room for them reserved).
+fn seal_into(data: &mut Vec<u8>, kind: Kind, format: u8, payload: &[u8]) {
+    data.extend_from_slice(MAGIC);
+    data.push(kind.tag());
+    data.extend_from_slice(&[format, 0, 0]);
+    data.extend_from_slice(payload);
+    let sum = checksum(data.as_slice());
+    data.extend_from_slice(&sum.to_le_bytes());
 }
 
-/// A sealed layer-buffer entry: what the browser's frame workers write to the Origin Private
-/// File System (`layers/<32 hex>.ecc`).
-pub fn layer_entry(buf: &Buf) -> Vec<u8> {
-    seal(Kind::Layer, &encode_layer(buf))
+/// A sealed 8-bit frame entry with the source files it was made of: what the browser's frame
+/// workers write to the Origin Private File System. `None` when the frame must not be stored
+/// (its files can't be checked later, see [`EntryFiles::of`]; or a wrong size).
+pub fn frame_entry(width: u32, height: u32, rgba: &[u8], files: &ReadFiles, virtual_id: Option<VirtualFileId<'_>>) -> Option<Vec<u8>> {
+    if rgba.len() as u64 != width as u64 * height as u64 * 4 {
+        return None;
+    }
+    let files = EntryFiles::of(files, virtual_id)?;
+    Some(seal_format(Kind::Frame, FORMAT_RGBA8_FILES, &with_files(&files, encode_frame(width, height, rgba))))
 }
 
-/// A layer buffer from a sealed entry's bytes (`None` when damaged).
-pub fn read_layer_entry(data: &[u8]) -> Option<Buf> {
-    decode_layer(verify(data, Kind::Layer)?)
+/// The frame of a sealed entry's bytes, if its source files are unchanged. `None` when damaged,
+/// of another format, or made of files that changed since: a miss, to be rendered again.
+pub fn read_frame_entry(data: &[u8], virtual_id: Option<VirtualFileId<'_>>) -> Option<Frame8> {
+    let payload = verify(data, Kind::Frame)?;
+    if data.get(5) != Some(&FORMAT_RGBA8_FILES) {
+        return None;
+    }
+    let (files, pixels) = EntryFiles::decode(payload)?;
+    if !files.unchanged(virtual_id) {
+        return None;
+    }
+    decode_frame(pixels)
+}
+
+/// A sealed layer-buffer entry with the source files it was made of: what the browser's frame
+/// workers write to the Origin Private File System (`layers/<32 hex>.ecc`).
+pub fn layer_entry(buf: &Buf, files: &EntryFiles) -> Vec<u8> {
+    seal_format(Kind::Layer, FORMAT_LAYER_FILES, &with_files(files, encode_layer(buf)))
+}
+
+/// A layer buffer and its source files from a sealed entry's bytes (`None` when damaged or of
+/// another format). The files are not looked at here: the store checks them when the buffer is
+/// used ([`EntryFiles::unchanged`]).
+pub fn read_layer_entry(data: &[u8]) -> Option<(Buf, EntryFiles)> {
+    let payload = verify(data, Kind::Layer)?;
+    if data.get(5) != Some(&FORMAT_LAYER_FILES) {
+        return None;
+    }
+    let (files, body) = EntryFiles::decode(payload)?;
+    Some((decode_layer(body)?, files))
 }
 
 /// The disk key of a segmentation: its chain key and scale.
@@ -736,12 +1688,51 @@ impl effectcraft_effects::roto::SegStore for DiskCache {
     }
 }
 
-impl crate::cache::LayerStore for DiskCache {
-    fn get_layer(&self, key: u128) -> Option<Arc<Buf>> {
-        DiskCache::get_layer(self, key).map(Arc::new)
+/// The disk cache's write queue in the common memory budget (#3271, #3298): queued entries hold
+/// their pixels until the writer has written them. They are copies (a dropped write only costs
+/// a later render a disk miss), worth nothing to the accountant: the first freed.
+impl crate::memory::MemoryHolder for DiskCache {
+    fn name(&self) -> &'static str {
+        "disk write queue"
     }
-    fn put_layer(&self, key: u128, buf: &Buf) {
-        DiskCache::put_layer(self, key, buf);
+    /// The bytes only the queue holds (a layer buffer the RAM cache still holds counts there).
+    fn bytes(&self) -> usize {
+        self.queue.0.lock().map(|q| q.unique_job_bytes()).unwrap_or(0)
+    }
+    /// The newest queued write holding bytes only the queue holds (newest first: the oldest is
+    /// the next to be written); a copy, so it costs nothing.
+    fn oldest(&self) -> Option<crate::memory::Candidate> {
+        let q = self.queue.0.lock().ok()?;
+        let (_, bytes) = q.newest_unique()?;
+        Some(crate::memory::Candidate { used: 0, bytes, cost_us: 0, protected: false })
+    }
+    fn drop_oldest(&self) -> usize {
+        let Ok(mut q) = self.queue.0.lock() else { return 0 };
+        match q.drop_newest_unique() {
+            Some(bytes) => {
+                self.dropped.fetch_add(1, Ordering::Relaxed);
+                bytes
+            }
+            None => 0,
+        }
+    }
+}
+
+impl crate::cache::LayerStore for DiskCache {
+    /// The layer for `key` from the disk cache, or `None` when it is missing or stale.
+    fn get_layer(&self, key: u128, virtual_id: Option<VirtualFileId<'_>>) -> Option<(Arc<Buf>, ReadFiles)> {
+        DiskCache::get_layer(self, key, virtual_id).map(|(b, f)| (Arc::new(b), f))
+    }
+    /// Queues a layer write on the disk cache (encoded on its writer thread).
+    fn put_layer(&self, key: u128, buf: &Arc<Buf>, files: &EntryFiles, since: u64) {
+        DiskCache::put_layer(self, key, buf, files, since);
+    }
+    /// The current drop generation of the disk cache.
+    fn drop_generation(&self) -> u64 {
+        DiskCache::drop_generation(self)
+    }
+    fn dropped_since(&self, files: &ReadFiles, since: u64) -> bool {
+        DiskCache::dropped_since(self, files, since)
     }
     fn min_layer_ms(&self) -> u64 {
         DiskCache::min_layer_ms(self)
@@ -778,14 +1769,200 @@ fn encode_frame(w: u32, h: u32, rgba: &[u8]) -> Vec<u8> {
     out
 }
 
+/// The most bytes one cache entry decompresses to (a 16384² frame of 8-bit RGBA): the size an
+/// entry states is checked against it, and against what the entry's dimensions need, before
+/// anything is allocated.
+const MAX_ENTRY_BYTES: usize = 1 << 30;
+
+/// An LZ4 payload with its stated size prepended, decompressed only when that size is
+/// `expected` (any size up to [`MAX_ENTRY_BYTES`] when `None`).
+fn decompress_checked(p: &[u8], expected: Option<usize>) -> Option<Vec<u8>> {
+    let size = u32::from_le_bytes(p.get(..4)?.try_into().ok()?) as usize;
+    if size > MAX_ENTRY_BYTES || expected.is_some_and(|e| e != size) {
+        return None;
+    }
+    // A block that ends short of the size it states is damaged: callers index by that size.
+    // (memory the system can't give is a miss, not an abort)
+    let mut raw = zeroed(size, 0u8)?;
+    let got = lz4_flex::block::decompress_into(p.get(4..)?, &mut raw).ok()?;
+    (got == size).then_some(raw)
+}
+
+/// `n` copies of `v`, or `None` when the system can't give the memory: a cache entry read back
+/// then counts as a miss.
+fn zeroed<T: Copy>(n: usize, v: T) -> Option<Vec<T>> {
+    #[cfg(test)]
+    if n.saturating_mul(std::mem::size_of::<T>()) > NO_MEMORY_OVER.with(std::cell::Cell::get) {
+        return None;
+    }
+    let mut out = Vec::new();
+    out.try_reserve_exact(n).ok()?;
+    out.resize(n, v);
+    Some(out)
+}
+
 fn decode_frame(p: &[u8]) -> Option<Frame8> {
     if p.len() < 8 {
         return None;
     }
     let w = u32::from_le_bytes(p[0..4].try_into().ok()?);
     let h = u32::from_le_bytes(p[4..8].try_into().ok()?);
-    let rgba = lz4_flex::decompress_size_prepended(&p[8..]).ok()?;
+    let rgba = decompress_checked(&p[8..], Some((w as usize).checked_mul(h as usize)?.checked_mul(4)?))?;
     (rgba.len() == w as usize * h as usize * 4).then_some(Frame8 { width: w, height: h, rgba })
+}
+
+/// Whether a layer of `pixels` pixels (16 bytes each, decompressed) is within what a cache entry
+/// may hold: a larger one could never be read back, so it is not compressed or written.
+fn layer_fits(pixels: usize) -> bool {
+    pixels.checked_mul(16).is_some_and(|b| b <= MAX_ENTRY_BYTES)
+}
+
+/// Half floats with their low and high bytes in planes (per channel), then LZ4: the high bytes
+/// (sign, exponent) repeat a lot, mixed with the low ones LZ4 finds little.
+fn encode_frame_f16(w: u32, h: u32, rgba: &[u16]) -> Vec<u8> {
+    use rayon::prelude::*;
+    let n = rgba.len() / 4;
+    let mut planes = vec![0u8; n * 8];
+    // Plane (byte k, channel c) at (k · 4 + c) · n.
+    planes.par_chunks_mut(n.max(1)).enumerate().for_each(|(plane, out)| {
+        let (k, c) = (plane / 4, plane % 4);
+        for (o, px) in out.iter_mut().zip(rgba.as_chunks::<4>().0) {
+            *o = px[c].to_le_bytes()[k];
+        }
+    });
+    let mut out = Vec::with_capacity(planes.len() / 3 + 16);
+    out.extend_from_slice(&w.to_le_bytes());
+    out.extend_from_slice(&h.to_le_bytes());
+    out.extend_from_slice(&lz4_flex::compress_prepend_size(&planes));
+    out
+}
+
+fn decode_frame_f16(p: &[u8]) -> Option<FrameF16> {
+    if p.len() < 8 {
+        return None;
+    }
+    let w = u32::from_le_bytes(p[0..4].try_into().ok()?);
+    let h = u32::from_le_bytes(p[4..8].try_into().ok()?);
+    let n = (w as usize).checked_mul(h as usize)?;
+    let planes = decompress_checked(&p[8..], Some(n.checked_mul(8)?))?;
+    let mut rgba = zeroed(n.checked_mul(4)?, 0u16)?;
+    for (i, px) in rgba.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+        for (c, v) in px.iter_mut().enumerate() {
+            *v = u16::from_le_bytes([planes[c * n + i], planes[(4 + c) * n + i]]);
+        }
+    }
+    Some(FrameF16 { width: w, height: h, rgba })
+}
+
+/// [`encode_plane_after`] alone (tests).
+#[cfg(test)]
+fn encode_plane(w: u32, h: u32, name: &str, plane: &[f32]) -> Vec<u8> {
+    encode_plane_after(Vec::new(), w, h, name, plane).unwrap_or_default()
+}
+
+/// A plane entry's pixels (`plane`, named `name`, of `w` x `h`) appended to `out` (the entry's
+/// source files): width, height, the name (length and UTF-8 bytes) and the sample type, then the
+/// samples' bytes shuffled into byte planes (the first bytes of all samples, then the
+/// second...), LZ4-compressed. Type 1: half floats, when every value is one exactly (a half
+/// channel: half the bytes); type 2: `f32` (bit-exact: Cryptomatte IDs are float bit patterns).
+/// The scratch memory and the result are taken fallibly: `None` when the system can't give them.
+fn encode_plane_after(mut out: Vec<u8>, w: u32, h: u32, name: &str, plane: &[f32]) -> Option<Vec<u8>> {
+    let name = name.as_bytes();
+    let len = name.len().min(u16::MAX as usize);
+    // (the size, the name and the sample type)
+    out.try_reserve(len.checked_add(64)?).ok()?;
+    out.extend_from_slice(&w.to_le_bytes());
+    out.extend_from_slice(&h.to_le_bytes());
+    out.extend_from_slice(&(len as u16).to_le_bytes());
+    out.extend_from_slice(name.get(..len).unwrap_or_default());
+    let n = plane.len();
+    let mut halves = zeroed(n, half::f16::ZERO)?;
+    half::slice::HalfFloatSliceExt::convert_from_f32_slice(halves.as_mut_slice(), plane);
+    // (NaNs stay `f32`: their payloads must come back as they were)
+    let exact = halves.iter().zip(plane).all(|(h, v)| !v.is_nan() && h.to_f32().to_bits() == v.to_bits());
+    // Shuffled straight from the samples' bits into byte planes.
+    let shuffled = if exact {
+        out.push(1);
+        let mut s = zeroed(n.checked_mul(2)?, 0u8)?;
+        let (lo, hi) = s.split_at_mut(n);
+        for ((l, hb), x) in lo.iter_mut().zip(hi.iter_mut()).zip(&halves) {
+            [*l, *hb] = x.to_bits().to_le_bytes();
+        }
+        s
+    } else {
+        drop(halves);
+        out.push(2);
+        let mut s = zeroed(n.checked_mul(4)?, 0u8)?;
+        let (b0, rest) = s.split_at_mut(n);
+        let (b1, rest) = rest.split_at_mut(n);
+        let (b2, b3) = rest.split_at_mut(n);
+        for ((((a, b), c), d), v) in b0.iter_mut().zip(b1.iter_mut()).zip(b2.iter_mut()).zip(b3.iter_mut()).zip(plane) {
+            [*a, *b, *c, *d] = v.to_bits().to_le_bytes();
+        }
+        s
+    };
+    // (as `lz4_flex::compress_prepend_size`: the size, then the block)
+    let most = lz4_flex::block::get_maximum_output_size(shuffled.len());
+    out.try_reserve_exact(most.checked_add(4)?).ok()?;
+    out.extend_from_slice(&u32::try_from(shuffled.len()).ok()?.to_le_bytes());
+    let at = out.len();
+    out.resize(at.checked_add(most)?, 0);
+    let len = lz4_flex::block::compress_into(&shuffled, out.get_mut(at..)?).ok()?;
+    out.truncate(at.saturating_add(len));
+    Some(out)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Allocations [`zeroed`] refuses on this thread: those over this many bytes (tests: memory
+    /// the system can't give).
+    static NO_MEMORY_OVER: std::cell::Cell<usize> = const { std::cell::Cell::new(usize::MAX) };
+    /// Sealed entries [`try_seal_format`] can't get memory for on this thread: those over this
+    /// many bytes (tests).
+    static NO_SEAL_OVER: std::cell::Cell<usize> = const { std::cell::Cell::new(usize::MAX) };
+}
+
+/// The name and plane of a plane entry's pixels ([`encode_plane_after`]) of `expect` (width, height);
+/// `None` when damaged or of another size.
+fn decode_plane(p: &[u8], expect: (u32, u32)) -> Option<(String, Vec<f32>)> {
+    let u32_at = |at: usize| Some(u32::from_le_bytes(p.get(at..at + 4)?.try_into().ok()?));
+    let (w, h) = (u32_at(0)?, u32_at(4)?);
+    if (w, h) != expect {
+        return None;
+    }
+    let n = (w as usize).checked_mul(h as usize).filter(|n| *n <= MAX_ENTRY_PIXELS)?;
+    let len = u16::from_le_bytes(p.get(8..10)?.try_into().ok()?) as usize;
+    let name = std::str::from_utf8(p.get(10..10 + len)?).ok()?.to_string();
+    let width = match *p.get(10 + len)? {
+        1 => 2,
+        2 => 4,
+        _ => return None,
+    };
+    let body = p.get(11 + len..)?;
+    // (the size the compressed block says must be the plane's: nothing larger is allocated)
+    let want = n.checked_mul(width)?;
+    if u32::from_le_bytes(body.get(..4)?.try_into().ok()?) as usize != want {
+        return None;
+    }
+    // (every buffer taken fallibly: a plane the system can't give memory for is a miss)
+    let s = decompress_checked(body, Some(want))?;
+    let mut plane = zeroed(n, 0.0f32)?;
+    if width == 2 {
+        let (lo, hi) = s.split_at_checked(n)?;
+        let mut halves = zeroed(n, half::f16::ZERO)?;
+        for ((x, l), h) in halves.iter_mut().zip(lo).zip(hi) {
+            *x = half::f16::from_bits(u16::from_le_bytes([*l, *h]));
+        }
+        half::slice::HalfFloatSliceExt::convert_to_f32_slice(halves.as_slice(), &mut plane);
+    } else {
+        let (b0, rest) = s.split_at_checked(n)?;
+        let (b1, rest) = rest.split_at_checked(n)?;
+        let (b2, b3) = rest.split_at_checked(n)?;
+        for (o, (((a, b), c), d)) in plane.iter_mut().zip(b0.iter().zip(b1).zip(b2).zip(b3)) {
+            *o = f32::from_bits(u32::from_le_bytes([*a, *b, *c, *d]));
+        }
+    }
+    Some((name, plane))
 }
 
 fn encode_layer(b: &Buf) -> Vec<u8> {
@@ -811,6 +1988,7 @@ fn encode_layer(b: &Buf) -> Vec<u8> {
     out
 }
 
+/// Decodes a stored layer payload into a buffer, or `None` when it is too short or damaged.
 fn decode_layer(p: &[u8]) -> Option<Buf> {
     if p.len() < 32 {
         return None;
@@ -820,8 +1998,8 @@ fn decode_layer(p: &[u8]) -> Option<Buf> {
     let f = |i: usize| -> Option<f64> { Some(f64::from_le_bytes(p[i..i + 8].try_into().ok()?)) };
     let offset = [f(8)?, f(16)?];
     let scale = f(24)?;
-    let planes = lz4_flex::decompress_size_prepended(&p[32..]).ok()?;
-    let n = w as usize * h as usize;
+    let n = (w as usize).checked_mul(h as usize)?;
+    let planes = decompress_checked(&p[32..], Some(n.checked_mul(16)?))?;
     if planes.len() != n * 16 {
         return None;
     }
@@ -841,8 +2019,9 @@ fn decode_layer(p: &[u8]) -> Option<Buf> {
 // ---------------------------------------------------------------- content keys
 
 /// Bump when rendering changes in a way that makes old disk entries wrong.
-const RENDER_VERSION: &str = "effectcraft-render-5";
+const RENDER_VERSION: &str = "effectcraft-render-7";
 
+/// Feeds the `Debug` form of `v` into the hash, followed by a separator byte.
 fn hash_debug(h: &mut Hash128, v: &impl std::fmt::Debug) {
     h.write(format!("{v:?}").as_bytes());
     h.write(&[0xff]);
@@ -851,124 +2030,96 @@ fn hash_debug(h: &mut Hash128, v: &impl std::fmt::Debug) {
 /// Size and content hash of a path that has no native metadata (the browser file table).
 pub type VirtualFileId<'a> = &'a (dyn Fn(&str) -> Option<(u64, u64)> + Send + Sync);
 
-/// A file's size and modification time (so edited footage gets new keys). When the path has no
-/// native metadata, `virtual_id` supplies a durable size and content hash instead.
-fn file_stamp(h: &mut Hash128, path: &str, virtual_id: Option<VirtualFileId<'_>>) {
-    if path.is_empty() {
-        return;
-    }
-    if let Ok(md) = std::fs::metadata(path) {
-        h.write_u64(md.len());
-        if let Ok(t) = md.modified()
-            && let Ok(d) = t.duration_since(std::time::UNIX_EPOCH)
-        {
-            h.write_u64(d.as_nanos() as u64);
-        }
-        return;
-    }
-    if let Some((len, hash)) = virtual_id.and_then(|id| id(path)) {
-        h.write_u64(len);
-        h.write_u64(hash);
-    }
-}
+/// A [`VirtualFileId`] a cache can keep (the browser file table's identities).
+pub type SharedVirtualFileId = Arc<dyn Fn(&str) -> Option<(u64, u64)> + Send + Sync>;
 
-fn footage_stamp(h: &mut Hash128, f: &effectcraft_project::Footage, virtual_id: Option<VirtualFileId<'_>>) {
-    file_stamp(h, &f.path, virtual_id);
-    for p in &f.sequence {
-        file_stamp(h, p, virtual_id);
-    }
-}
+/// Layer entries with their source files (#3184), part of every layer disk key: entries of the
+/// earlier format (keyed by a project-wide footage salt instead) are never looked up again;
+/// least recently used, they are evicted.
+const LAYER_ENTRY_VERSION: &[u8] = b"layer-entry-files-2";
 
-/// Salt for layer cache keys on disk: the renderer version and every footage file's identity
-/// (layer keys name footage items, not file contents).
-pub fn footage_salt(project: &effectcraft_project::Project) -> u64 {
-    footage_salt_with(project, None)
-}
-
-/// [`footage_salt`] with [`VirtualFileId`] for paths `std::fs::metadata` cannot describe.
-pub fn footage_salt_with(project: &effectcraft_project::Project, virtual_id: Option<VirtualFileId<'_>>) -> u64 {
+/// Disk key of a layer buffer: the layer cache's content key ([`crate::cache::layer_key`] and
+/// the keys derived from it), the layer entry format and the renderer version. The content key
+/// comes from memory alone: it names the footage items the buffer uses with their settings and
+/// paths, so two projects only share an entry for the same pixels of the same files; whether
+/// those files still hold what the buffer was made of is checked when the entry is read
+/// ([`EntryFiles`]). No file is looked at here.
+pub fn layer_disk_key(key: u64) -> u128 {
     let mut h = Hash128::default();
+    h.write(LAYER_ENTRY_VERSION);
     h.write(RENDER_VERSION.as_bytes());
-    for (id, it) in &project.items {
-        if let effectcraft_project::ItemKind::Footage(f) = &it.kind {
-            h.write_u64(id.0);
-            hash_debug(&mut h, f);
-            footage_stamp(&mut h, f, virtual_id);
-        }
-    }
-    let v = h.finish();
-    (v as u64) ^ ((v >> 64) as u64)
+    h.write_u64(key);
+    h.finish()
 }
 
-/// Content key of a composition's pixels: project render settings, the comp and everything it
-/// uses (nested comps, footage, solids, their proxies and Use Proxy switches, footage and proxy
-/// files' size and time). With expressions in play (which can read any comp) the whole project
-/// counts. Switches that don't change pixels (Audio, Lock, Shy, Hide Shy Layers) don't count, and
-/// neither do markers unless an expression mentions them.
+/// Content key of a composition's pixels, from the project in memory alone (no file is looked
+/// at: the frame entries check their own source files when read, see [`EntryFiles`]): project
+/// render settings, the comp and the items it can draw (nested comps, footage items with their
+/// settings and paths, solids, Media Replacement footage, their proxies and Use Proxy switches;
+/// [`effectcraft_project::Project::pixel_reach`]). With expressions among them, everything those
+/// expressions can read counts too: every layer of their comps, markers, the comps and footage
+/// they name with literal names (and which items have those names), or the whole project when
+/// they compute a name or reach items another way. An edit to an item the comp can't reach keeps
+/// its key and its frames on disk (#3184, #1492). Switches that don't change pixels (Audio, Lock,
+/// Shy, Hide Shy Layers) don't count, and neither do markers unless an expression can read them.
 pub fn comp_content_key(project: &effectcraft_project::Project, comp: effectcraft_project::ItemId) -> u128 {
-    comp_content_key_with(project, comp, None)
+    comp_content_key_for_renderer(project, comp, RENDER_VERSION)
 }
 
-/// [`comp_content_key`] with [`VirtualFileId`] for paths `std::fs::metadata` cannot describe.
-pub fn comp_content_key_with(project: &effectcraft_project::Project, comp: effectcraft_project::ItemId, virtual_id: Option<VirtualFileId<'_>>) -> u128 {
-    comp_content_key_for_renderer(project, comp, virtual_id, RENDER_VERSION)
-}
-
-fn comp_content_key_for_renderer(
-    project: &effectcraft_project::Project,
-    comp: effectcraft_project::ItemId,
-    virtual_id: Option<VirtualFileId<'_>>,
-    renderer: &str,
-) -> u128 {
-    use effectcraft_project::{ItemKind, LayerSource};
+/// The content key of `comp` for one renderer: its settings, the comps and footage it uses, and the renderer name.
+fn comp_content_key_for_renderer(project: &effectcraft_project::Project, comp: effectcraft_project::ItemId, renderer: &str) -> u128 {
+    use effectcraft_project::ItemKind;
     let mut h = Hash128::default();
     h.write(renderer.as_bytes());
     hash_debug(&mut h, &project.settings);
-    let mut seen = std::collections::BTreeSet::new();
-    let mut stack = vec![comp];
-    let mut expressions = false;
-    while let Some(id) = stack.pop() {
-        if !seen.insert(id) {
-            continue;
-        }
-        let Some(it) = project.item(id) else { continue };
-        if let ItemKind::Comp(c) = &it.kind {
-            for l in &c.layers {
-                if let LayerSource::Comp { item } | LayerSource::Footage { item } | LayerSource::Solid { item } = l.source {
-                    stack.push(item);
-                }
-                if !expressions {
-                    l.props.walk("", &mut |_, p| expressions |= p.expr.is_some());
-                }
-            }
-        }
+    let heard = project.heard_layers();
+    let reach = project.pixel_reach(comp, &heard);
+    // Expressions can read any layer of the comps they reach, hidden or not, and their markers
+    // (#1083); without them, layers that can't change the picture (music, hidden layers nothing
+    // reads) don't count.
+    let expressions = reach.expressions;
+    let silent = |id, c: &effectcraft_project::Comp| if expressions { Default::default() } else { project.silent_layers(id, c, &heard) };
+    // (the names expressions look items up by: which items have them now)
+    if !reach.names.is_empty() {
+        hash_debug(&mut h, &reach.names);
     }
-    // Markers are pixels only to the expressions that read them (#1083).
-    let markers = project.reads_markers();
-    let ids: Vec<effectcraft_project::ItemId> = if expressions { project.items.keys().copied().collect() } else { seen.into_iter().collect() };
+    let ids: Vec<effectcraft_project::ItemId> = match reach.items {
+        Some(items) => items.into_iter().collect(),
+        None => project.items.keys().copied().collect(),
+    };
     for id in ids {
         let Some(it) = project.item(id) else { continue };
         h.write_u64(id.0);
         h.write(it.name.as_bytes());
         match &it.kind {
-            ItemKind::Comp(c) => hash_debug(&mut h, &c.pixel_form_with(markers)),
+            ItemKind::Comp(c) => {
+                let quiet = silent(id, c);
+                let heard = |l| heard.contains(id, l);
+                if quiet.is_empty() {
+                    hash_debug(&mut h, &c.pixel_form_with(expressions, &heard));
+                } else {
+                    let mut pic = (**c).clone();
+                    pic.layers.retain(|l| !quiet.contains(&l.id));
+                    hash_debug(&mut h, &pic.pixel_form_with(expressions, &heard));
+                }
+            }
             k => hash_debug(&mut h, k),
         }
-        if let ItemKind::Footage(f) = &it.kind {
-            footage_stamp(&mut h, f, virtual_id);
-        }
         hash_debug(&mut h, &it.proxy);
-        if let Some(px) = &it.proxy {
-            footage_stamp(&mut h, &px.footage, virtual_id);
-        }
     }
     h.write_u64(comp.0);
     h.finish()
 }
 
+/// Frame entries with their source files (#3184), part of every frame key: entries of the
+/// earlier format (keyed by footage stamps instead) are never looked up again; least recently
+/// used, they are evicted.
+const FRAME_ENTRY_VERSION: &[u8] = b"frame-entry-files-2";
+
 /// Disk key of one viewer frame.
 pub fn frame_key(content: u128, frame: i64, scale_milli: u32, view: u64) -> u128 {
     let mut h = Hash128::default();
+    h.write(FRAME_ENTRY_VERSION);
     h.write(&content.to_le_bytes());
     h.write_u64(frame as u64);
     h.write_u64(scale_milli as u64);
@@ -980,10 +2131,124 @@ pub fn frame_key(content: u128, frame: i64, scale_milli: u32, view: u64) -> u128
 mod tests {
     use super::*;
 
+    /// A Nightly launch keeps its disk cache (and every folder derived from it: media cache,
+    /// conformed audio) inside the private profile instead of the platform cache folder.
+    #[test]
+    fn a_nightly_profile_root_holds_the_cache_folders() {
+        let root = std::path::Path::new("/nightly profiles/effectcraft");
+        assert_eq!(default_folder_at(Some(root)), root.join("Caches").join("Disk Cache"));
+        assert!(default_folder_at(Some(root)).starts_with(root));
+    }
+
+    /// #3301 review: buffers for entries read back are taken fallibly; memory the system can't
+    /// give is a miss, not an abort.
+    #[test]
+    fn memory_that_cannot_be_had_is_a_miss() {
+        assert!(zeroed(usize::MAX, 0u8).is_none());
+        assert!(zeroed(usize::MAX / 2, 0.0f32).is_none());
+        assert_eq!(zeroed(3, 7u16), Some(vec![7; 3]));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_cache_folder_in_the_temp_folder_is_made_private_and_never_a_link() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tmpdir("private");
+        let dc = DiskCache::open(&d, 1 << 20).unwrap();
+        assert_eq!(std::fs::metadata(&d).unwrap().permissions().mode() & 0o777, 0o700);
+        drop(dc);
+        let link = tmpdir("link-private-temp");
+        std::os::unix::fs::symlink(&d, &link).unwrap();
+        assert!(DiskCache::open(&link, 1 << 20).is_err());
+        let _ = std::fs::remove_file(&link);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_shared_temp_folder_itself_is_refused_as_a_cache_folder() {
+        let tmp = std::env::temp_dir();
+        assert!(DiskCache::open(&tmp, 1 << 20).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_that_resolves_into_the_temp_folder_is_made_private() {
+        use std::os::unix::fs::PermissionsExt;
+        // `<cwd>/link` names a folder in the temp folder only through the link.
+        let real = tmpdir("alias-real");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = std::env::current_dir().unwrap().join(format!("effectcraft-alias-link-{}", std::process::id()));
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let dc = DiskCache::open(link.join("cache"), 1 << 20).unwrap();
+        let mode = std::fs::metadata(real.join("cache")).map(|m| m.permissions().mode() & 0o777);
+        drop(dc);
+        let _ = std::fs::remove_file(&link);
+        let _ = std::fs::remove_dir_all(&real);
+        assert_eq!(mode.unwrap(), 0o700);
+    }
+
+    #[test]
+    fn layers_too_big_to_read_back_are_not_written() {
+        assert!(layer_fits(MAX_ENTRY_BYTES / 16));
+        assert!(!layer_fits(MAX_ENTRY_BYTES / 16 + 1));
+        assert!(!layer_fits(10_000 * 10_000));
+        assert!(!layer_fits(usize::MAX));
+    }
+
+    #[test]
+    fn an_entry_stating_a_size_its_dimensions_do_not_need_is_not_decompressed() {
+        // A 2×2 frame whose payload states 3 GiB: refused before any allocation.
+        let mut p = 2u32.to_le_bytes().to_vec();
+        p.extend_from_slice(&2u32.to_le_bytes());
+        p.extend_from_slice(&(3u32 << 30).to_le_bytes());
+        p.extend_from_slice(&[0; 16]);
+        assert!(decode_frame(&p).is_none());
+        assert!(decompress_checked(&p[8..], None).is_none());
+        // A well-formed entry still decodes.
+        let ok = encode_frame(2, 2, &[7; 16]);
+        assert_eq!(decode_frame(&ok).map(|f| f.rgba), Some(vec![7; 16]));
+    }
+
+    #[test]
+    fn a_block_shorter_than_the_size_it_states_is_rejected() {
+        // The payload states 100 bytes but holds a valid block of 10: `lz4_flex` returns the 10.
+        let mut p = 100u32.to_le_bytes().to_vec();
+        p.extend_from_slice(&lz4_flex::block::compress(&[5u8; 10]));
+        assert!(decompress_checked(&p, None).is_none());
+        // A half-float frame whose planes come up short is refused, not indexed past.
+        let mut f16 = 2u32.to_le_bytes().to_vec();
+        f16.extend_from_slice(&2u32.to_le_bytes());
+        f16.extend_from_slice(&32u32.to_le_bytes());
+        f16.extend_from_slice(&lz4_flex::block::compress(&[1u8; 8]));
+        assert!(decode_frame_f16(&f16).is_none());
+    }
+
     fn tmpdir(name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("effectcraft-disk-cache-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         d
+    }
+
+    /// A linked frame reads back as the original under its new key, survives the original's
+    /// eviction, and is never linked over an existing entry or from a missing one.
+    #[test]
+    fn link_frame_serves_a_frame_under_a_new_key() {
+        let dc = DiskCache::open(tmpdir("link"), 1 << 30).unwrap();
+        let rgba: Vec<u8> = (0..16).collect();
+        dc.put_frame_now(1, 2, 2, &rgba, &ReadFiles::default());
+        assert!(dc.link_frame(1, 2));
+        assert_eq!(dc.get_frame(2, None).map(|f| f.0).map(|f| f.rgba), Some(rgba.clone()));
+        assert!(!dc.link_frame(1, 2), "already there");
+        assert!(!dc.link_frame(3, 4), "nothing to link");
+        assert!(!dc.contains(Kind::Frame, 4));
+        dc.put_frame_now(5, 2, 2, &[7; 16], &ReadFiles::default());
+        assert!(!dc.link_frame(5, 2), "an existing entry stays");
+        assert_eq!(dc.get_frame(2, None).map(|f| f.0).map(|f| f.rgba), Some(rgba.clone()));
+        let _ = std::fs::remove_file(dc.path(Kind::Frame, 1));
+        dc.forget(Kind::Frame, 1);
+        assert_eq!(dc.get_frame(2, None).map(|f| f.0).map(|f| f.rgba), Some(rgba), "the link outlives the original");
     }
 
     fn buf(seed: u32, w: u32, h: u32) -> Buf {
@@ -1018,15 +2283,61 @@ mod tests {
     #[test]
     fn frame_entries_round_trip_and_names_parse() {
         let rgba: Vec<u8> = (0..4 * 6 * 3).map(|i| (i * 7 % 256) as u8).collect();
-        let e = frame_entry(6, 3, &rgba);
-        assert_eq!(read_frame_entry(&e), Some(Frame8 { width: 6, height: 3, rgba: rgba.clone() }));
+        let files: ReadFiles = [crate::reads::ReadFile::new("/v.png", crate::reads::FileStamp::Virtual)].into_iter().collect();
+        let (one, two) = (|_: &str| Some((4, 1)), |_: &str| Some((4, 2)));
+        assert!(frame_entry(6, 3, &rgba, &files, None).is_none(), "a file from memory needs its identity");
+        assert!(frame_entry(6, 3, &rgba[1..], &files, Some(&one)).is_none(), "a wrong size");
+        let e = frame_entry(6, 3, &rgba, &files, Some(&one)).unwrap();
+        assert_eq!(read_frame_entry(&e, Some(&one)), Some(Frame8 { width: 6, height: 3, rgba: rgba.clone() }));
+        assert!(read_frame_entry(&e, Some(&two)).is_none(), "the file changed");
+        let mut incomplete = files.clone();
+        incomplete.mark_incomplete();
+        assert!(frame_entry(6, 3, &rgba, &incomplete, Some(&one)).is_none(), "an incomplete list is not stored");
         let mut bad = e.clone();
         bad[20] ^= 1;
-        assert!(read_frame_entry(&bad).is_none());
+        assert!(read_frame_entry(&bad, Some(&one)).is_none());
+        // An entry of the format before #3184 (pixels without files) is never read.
+        assert!(read_frame_entry(&seal_format(Kind::Frame, FORMAT_RGBA8, &encode_frame(6, 3, &rgba)), Some(&one)).is_none());
         let key = 0x0123_4567_89ab_cdef_0011_2233_4455_6677u128;
         assert_eq!(parse_entry_name(&entry_name(key)), Some(key));
         assert_eq!(parse_entry_name("abc.ecc"), None);
         assert_eq!(parse_entry_name(&format!("{key:032x}.tmp.1")), None);
+    }
+
+    /// Half-float frames (32 bpc viewer frames) round-trip bit for bit, over-range values,
+    /// negatives and odd sizes included; they and 8-bit frames never read as each other; a
+    /// damaged half-float entry is a miss and is deleted; they count toward the size limit.
+    #[test]
+    fn half_float_frames_round_trip() {
+        let dir = tmpdir("f16");
+        let dc = DiskCache::open(&dir, 1 << 30).unwrap();
+        let (w, h) = (7u32, 5u32);
+        // 4.0, 16.0, -0.25, 65504 and a spread of bit patterns.
+        let rgba: Vec<u16> = (0..w * h * 4).map(|i| [0x4400, 0x4c00, 0xb400, 0x7bff][i as usize % 4] ^ ((i * 37) as u16 & 0x03ff)).collect();
+        dc.put_frame_f16_now(1, w, h, &rgba, &ReadFiles::default());
+        assert_eq!(dc.get_frame_f16(1, None).map(|f| f.0), Some(FrameF16 { width: w, height: h, rgba: rgba.clone() }));
+        assert!(dc.get_frame(1, None).map(|f| f.0).is_none(), "not an 8-bit frame");
+        dc.put_frame_now(2, 2, 2, &[9; 16], &ReadFiles::default());
+        assert!(dc.get_frame_f16(2, None).map(|f| f.0).is_none() && dc.contains(Kind::Frame, 2), "an 8-bit entry stays valid");
+        assert_eq!(dc.get_frame(2, None).map(|f| f.0).unwrap().rgba, vec![9; 16]);
+        assert!(dc.stats().bytes > 0);
+        // Reopened, still there (format byte persisted).
+        drop(dc);
+        let dc = DiskCache::open(&dir, 1 << 30).unwrap();
+        assert_eq!(dc.get_frame_f16(1, None).map(|f| f.0).unwrap().rgba, rgba);
+        // A sealed entry with a payload of the wrong size: deleted on read.
+        let p = dc.path(Kind::Frame, 3);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, seal_format(Kind::Frame, FORMAT_F16_FILES, &with_files(&EntryFiles::default(), encode_frame_f16(w, h + 1, &rgba[..])))).unwrap();
+        dc.rescan();
+        assert!(dc.contains(Kind::Frame, 3));
+        assert!(dc.get_frame_f16(3, None).map(|f| f.0).is_none());
+        assert!(!dc.contains(Kind::Frame, 3) && !p.exists());
+        // Wrong lengths are not written.
+        dc.put_frame_f16(4, w, h, &rgba[1..], &ReadFiles::default(), None, 0);
+        dc.flush();
+        assert!(!dc.contains(Kind::Frame, 4));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Segmentations round-trip by (chain key, scale), survive a reopen (rescan), are bounded by
@@ -1061,25 +2372,349 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// #3271: frame and layer entries are handed to the writer thread and converted and
+    /// compressed there, not on the thread that rendered them; one larger uncompressed than the
+    /// cache may hold is refused before anything is queued.
+    #[test]
+    fn entries_are_encoded_on_the_writer_thread() {
+        let dir = tmpdir("writer-encodes");
+        let dc = DiskCache::open(&dir, 1 << 30).unwrap();
+        let before = encoded_here();
+        dc.put_layer(1, &Arc::new(buf(1, 32, 32)), &EntryFiles::default(), 0);
+        assert!(dc.put_frame_owned(2, 8, 8, vec![3; 8 * 8 * 4], &ReadFiles::default(), None, 0));
+        assert!(dc.put_frame_f16(3, 8, 8, &[0x3c00; 8 * 8 * 4], &ReadFiles::default(), None, 0));
+        assert_eq!(encoded_here(), before, "nothing encoded on the rendering thread");
+        dc.flush();
+        assert_eq!(dc.get_layer(1, None).map(|(b, _)| b.img), Some(buf(1, 32, 32).img));
+        assert_eq!(dc.get_frame(2, None).map(|(f, _)| f.rgba), Some(vec![3; 8 * 8 * 4]));
+        assert!(dc.get_frame_f16(3, None).is_some());
+        let encodes = dc.encodes();
+        dc.set_max_bytes(1000);
+        dc.put_layer(4, &Arc::new(buf(1, 64, 64)), &EntryFiles::default(), 0);
+        dc.flush();
+        assert_eq!(dc.encodes(), encodes, "too large uncompressed: not queued");
+        assert!(!dc.contains(Kind::Layer, 4));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A source file for plane entries (it must exist: hits check it is unchanged).
+    fn plane_source(dir: &Path) -> (EntryFiles, crate::reads::FileStamp) {
+        std::fs::create_dir_all(dir).unwrap();
+        let src = dir.join("plate.exr");
+        std::fs::write(&src, b"exr").unwrap();
+        let stamp = crate::reads::FileStamp::of_metadata(&std::fs::metadata(&src).unwrap());
+        let mut files = ReadFiles::default();
+        files.add(crate::reads::ReadFile::new(src.to_string_lossy().to_string(), stamp));
+        (EntryFiles::of(&files, None).unwrap(), stamp)
+    }
+
+    /// #3271: a plane entry gives back every value bit for bit. A plane of half values is stored
+    /// as half floats (half the bytes), any other (Cryptomatte IDs, NaN payloads, values a half
+    /// can't hold) as `f32`; -0.0 and denormals come back as they were. An entry of another size,
+    /// a damaged one and one of the earlier format read as misses.
+    #[test]
+    fn plane_entries_round_trip_bit_for_bit() {
+        let dir = tmpdir("planes");
+        let dc = DiskCache::open(&dir, 1 << 30).unwrap();
+        let (files, _) = plane_source(&dir.join("src"));
+        let (w, h) = (16u32, 8u32);
+        let n = (w * h) as usize;
+        let halves: Vec<f32> = (0..n).map(|i| half::f16::from_bits((i * 517) as u16 & 0x7bff).to_f32()).collect();
+        let mut mixed: Vec<f32> = (0..n).map(|i| f32::from_bits(0x3f80_0001 + i as u32 * 7919)).collect();
+        mixed[0] = f32::from_bits(0x7fc0_1234);
+        mixed[1] = -0.0;
+        mixed[2] = f32::from_bits(1);
+        let mut nan_half = halves.clone();
+        nan_half[3] = f32::from_bits(0x7fc0_0000 | 0x2000);
+        let set = vec![(1, "A.R".to_string(), halves.clone()), (2, "A.id".to_string(), mixed.clone()), (3, "A.nan".to_string(), nan_half.clone())];
+        for ((_, name, plane), want) in set.iter().zip([1u8, 2, 2]) {
+            let p = encode_plane(w, h, name, plane);
+            let len = p[8] as usize;
+            assert_eq!(p[10 + len], want, "{name}: sample type");
+        }
+        assert!(dc.put_planes(w, h, set, &files, 0));
+        dc.flush();
+        for (key, name, want) in [(1, "A.R", &halves), (2, "A.id", &mixed), (3, "A.nan", &nan_half)] {
+            let (got_name, got) = dc.get_plane(key, w, h).unwrap();
+            assert_eq!(got_name, name);
+            assert_eq!(got.iter().map(|v| v.to_bits()).collect::<Vec<_>>(), want.iter().map(|v| v.to_bits()).collect::<Vec<_>>(), "{name}");
+        }
+        assert!(dc.get_plane(1, w, h + 1).is_none(), "another size: a miss");
+        let entry = encode_plane(w, h, "A.id", &mixed);
+        assert!(decode_plane(entry.get(..entry.len() - 9).unwrap(), (w, h)).is_none(), "short");
+        let mut damaged = entry.clone();
+        let len = damaged[8] as usize;
+        damaged[10 + len] = 3;
+        assert!(decode_plane(&damaged, (w, h)).is_none(), "unknown sample type");
+        // An entry of the earlier format (5) is a miss, and deleted.
+        dc.write_format(Kind::Plane, 9, 5, &with_files(&files, encode_plane(w, h, "A.R", &halves)));
+        assert!(dc.contains(Kind::Plane, 9));
+        assert!(dc.get_plane(9, w, h).is_none());
+        assert!(!dc.contains(Kind::Plane, 9), "deleted");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #3750 review: a plane write whose encoder can't get its scratch memory (the half or
+    /// shuffled buffer of a 16K plane) writes no entry and goes on, instead of aborting; with the
+    /// memory it is written.
+    #[test]
+    fn a_plane_write_without_memory_for_its_encoder_is_skipped() {
+        let dir = tmpdir("planes-no-memory");
+        let dc = DiskCache::open(&dir, 1 << 30).unwrap();
+        let (files, _) = plane_source(&dir.join("src"));
+        let job = |key: u128| Payload::Planes(16, 8, vec![(key, "A.R".to_string(), vec![0.5f32; 128])], files.clone());
+        // (this thread's allocations through the encoder's scratch over 64 bytes are refused)
+        NO_MEMORY_OVER.with(|c| c.set(64));
+        job(1).write(&dc, Kind::Plane, 1, FORMAT_PLANES_FILES);
+        NO_MEMORY_OVER.with(|c| c.set(usize::MAX));
+        assert!(!dc.contains(Kind::Plane, 1), "no entry without the encoder's memory");
+        job(2).write(&dc, Kind::Plane, 2, FORMAT_PLANES_FILES);
+        assert!(dc.get_plane(2, 16, 8).is_some(), "written with it");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #3750 review: a plane entry that can't get the memory to be sealed (a poorly compressible
+    /// 16K plane's is about 1 GiB) is not written, and the planes after it are; a sealed entry
+    /// is the same bytes either way.
+    #[test]
+    fn a_plane_entry_without_memory_to_seal_is_skipped_and_the_rest_written() {
+        let dir = tmpdir("planes-no-seal");
+        let dc = DiskCache::open(&dir, 1 << 30).unwrap();
+        let (files, _) = plane_source(&dir.join("src"));
+        // (noise compresses poorly: its entry is over 2 KiB; the flat plane's is far under)
+        let noise: Vec<f32> = (0..1024u32).map(|i| f32::from_bits(0x3f00_0000 | i.wrapping_mul(2_654_435_761) >> 9)).collect();
+        let flat = vec![0.5f32; 1024];
+        let job = Payload::Planes(32, 32, vec![(1, "A.id".to_string(), noise.clone()), (2, "A.R".to_string(), flat)], files.clone());
+        NO_SEAL_OVER.with(|c| c.set(2048));
+        job.write(&dc, Kind::Plane, 0, FORMAT_PLANES_FILES);
+        NO_SEAL_OVER.with(|c| c.set(usize::MAX));
+        assert!(!dc.contains(Kind::Plane, 1), "no memory to seal it: not written");
+        assert!(dc.get_plane(2, 32, 32).is_some(), "the next plane is written");
+        let mut entry = Vec::new();
+        files.encode(&mut entry);
+        let entry = encode_plane_after(entry, 32, 32, "A.id", &noise).unwrap();
+        assert!(entry.len() > 2048);
+        assert_eq!(try_seal_format(Kind::Plane, FORMAT_PLANES_FILES, &entry), Some(seal_format(Kind::Plane, FORMAT_PLANES_FILES, &entry)), "the same bytes");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #3271: a queued plane write owns its planes, counts them for the memory accountant (all
+    /// of them, not a share of the store's set) and frees them when the accountant drops it;
+    /// frames stay. 69 channels are queued without loss, each written as an entry of its own
+    /// and counted as one encode.
+    #[test]
+    fn queued_planes_count_what_they_hold_and_are_written_each() {
+        let dir = tmpdir("planes-job");
+        let dc = DiskCache::open(&dir, 1 << 30).unwrap();
+        let (files, _) = plane_source(&dir.join("src"));
+        let planes = || -> Vec<(u128, String, Vec<f32>)> { (0..69).map(|i| (100 + i as u128, format!("c{i:02}"), vec![i as f32; 8])).collect() };
+        {
+            let mut q = dc.queue.0.lock().unwrap();
+            let job = Payload::Planes(4, 2, planes(), files.clone());
+            assert_eq!((job.held(), job.unique(), job.raw(), job.entries()), (69 * 8 * 4, 69 * 8 * 4, 32, 69));
+            q.jobs.push_back(Job::Write(Kind::Plane, 1, FORMAT_PLANES_FILES, job));
+            q.frames.push_back(Job::Write(Kind::Frame, 2, FORMAT_RGBA8_FILES, Payload::Frame8(1, 1, vec![0; 4], files.clone())));
+            assert_eq!(q.unique_job_bytes(), 69 * 8 * 4, "what the memory holder reports");
+            assert_eq!(q.drop_newest_unique(), Some(69 * 8 * 4), "dropped as reported");
+            assert_eq!(q.drop_newest_unique(), None, "frame writes are never dropped");
+            assert!(q.jobs.is_empty() && q.frames.len() == 1);
+            q.frames.clear();
+        }
+        let encodes = dc.encodes();
+        assert!(dc.put_planes(4, 2, planes(), &files, 0));
+        dc.flush();
+        assert_eq!(dc.keys(Kind::Plane).len(), 69);
+        assert_eq!(dc.encodes() - encodes, 69, "one encode per entry");
+        assert_eq!(dc.stats().dropped, 0);
+        assert_eq!(crate::memory::MemoryHolder::bytes(&*dc), 0, "written: the queue holds nothing");
+        assert_eq!(dc.get_plane(168, 4, 2).map(|(n, p)| (n, p[0])), Some(("c68".to_string(), 68.0)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #3271 review: Reload Footage looks at each plane entry's head for its source file; a plane
+    /// entry lists one, so only a short head is read (a sequence of many channels has a great
+    /// many plane entries), and the entry is still found and deleted.
+    #[test]
+    fn reload_reads_only_a_short_head_of_plane_entries() {
+        let dir = tmpdir("planes-sweep");
+        let dc = DiskCache::open(&dir, 1 << 30).unwrap();
+        let (files, _) = plane_source(&dir.join("src"));
+        // A plane that doesn't compress: its entry is far larger than any head read.
+        let (w, h) = (256u32, 256u32);
+        let mut x = 0x1234_5678u32;
+        let plane: Vec<f32> = (0..w * h)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 17;
+                x ^= x << 5;
+                f32::from_bits(0x3f00_0000 | (x >> 9))
+            })
+            .collect();
+        assert!(dc.put_planes(w, h, vec![(400, "noise".into(), plane)], &files, 0));
+        dc.flush();
+        assert_eq!(dc.keys(Kind::Plane), [400]);
+        assert!(std::fs::metadata(dc.path(Kind::Plane, 400)).unwrap().len() > 64 << 10);
+        let before = dc.head_bytes.load(Ordering::Relaxed);
+        dc.drop_files([dir.join("src").join("plate.exr").to_string_lossy().to_string()]);
+        dc.flush();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while dc.is_dropping() && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(dc.keys(Kind::Plane).is_empty(), "the plane entry of the reloaded file is deleted");
+        let read = dc.head_bytes.load(Ordering::Relaxed) - before;
+        assert!(read > 0 && read <= 4 << 10, "{read} bytes read");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #3271 review: a set of planes larger together than the cache may hold, or than one queued
+    /// write takes ([`PLANE_JOB_BYTES`]), still reaches the disk plane by plane (a 4K file of 31
+    /// channels or more was refused whole); only a single plane larger than the cache is left out.
+    #[test]
+    fn a_large_plane_set_is_written_plane_by_plane() {
+        let dir = tmpdir("planes-large");
+        let dc = DiskCache::open(&dir, 1 << 30).unwrap();
+        let (files, _) = plane_source(&dir.join("src"));
+        // 8 planes of 32 KiB: 256 KiB together, over the cache's 80 KiB and over a queued write.
+        let (w, h) = (128u32, 64u32);
+        let plane = (w * h) as usize;
+        dc.set_max_bytes(80 << 10);
+        let set: Vec<(u128, String, Vec<f32>)> = (0..8).map(|i| (200 + i as u128, format!("p{i}"), vec![0.5; plane])).collect();
+        assert!(set.len() * plane * 4 > PLANE_JOB_BYTES);
+        assert!(dc.put_planes(w, h, set, &files, 0));
+        dc.flush();
+        assert!(!dc.keys(Kind::Plane).is_empty(), "planes reached the disk");
+        assert!(dc.get_plane(207, w, h).is_some(), "the last one too");
+        // One plane larger than the whole cache: left out.
+        dc.set_max_bytes(16 << 10);
+        assert!(dc.put_planes(w, h, vec![(300, "big".into(), vec![0.5; plane])], &files, 0));
+        dc.flush();
+        assert!(!dc.contains(Kind::Plane, 300));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn hit_miss_and_exact_round_trip() {
         let dir = tmpdir("hit");
         let dc = DiskCache::open(&dir, 1 << 30).unwrap();
-        assert!(dc.get_layer(42).is_none());
+        assert!(dc.get_layer(42, None).is_none());
         let b = buf(1, 33, 17);
-        dc.put_layer(42, &b);
+        dc.put_layer(42, &Arc::new(b.clone()), &EntryFiles::default(), 0);
         dc.flush();
-        let back = dc.get_layer(42).unwrap();
+        let (back, files) = dc.get_layer(42, None).unwrap();
+        assert!(files.is_empty() && files.is_complete());
         assert_eq!(back.img, b.img);
         assert_eq!((back.offset, back.scale), (b.offset, b.scale));
         let rgba: Vec<u8> = (0..20 * 10 * 4).map(|i| (i % 251) as u8).collect();
-        dc.put_frame(7, 20, 10, &rgba);
+        assert!(dc.put_frame(7, 20, 10, &rgba, &ReadFiles::default(), None, 0));
+        assert!(!dc.put_frame(8, 2, 2, &[0; 3], &ReadFiles::default(), None, 0), "a wrong-size frame is refused");
+        // Handed over and compressed on the writer thread: the same pixels come back.
+        assert!(dc.put_frame_owned(9, 20, 10, rgba.clone(), &ReadFiles::default(), None, 0));
+        assert!(!dc.put_frame_owned(10, 2, 2, vec![0; 3], &ReadFiles::default(), None, 0), "a wrong-size frame is refused");
         dc.flush();
-        assert_eq!(dc.get_frame(7).unwrap().rgba, rgba);
+        assert_eq!(dc.get_frame(7, None).map(|f| f.0).unwrap().rgba, rgba);
+        assert_eq!(dc.get_frame(9, None).map(|f| f.0).unwrap().rgba, rgba);
         let st = dc.stats();
-        assert_eq!((st.entries, st.hits, st.misses, st.writes), (2, 2, 1, 2));
+        assert_eq!((st.entries, st.hits, st.misses, st.writes), (3, 3, 1, 3));
         // Wrong kind is a miss.
-        assert!(dc.get_frame(42).is_none());
+        assert!(dc.get_frame(42, None).map(|f| f.0).is_none());
+    }
+
+    /// Music doesn't change a comp's disk keys (adding it to the timeline kept no blue frame);
+    /// hiding a clip does. Importing music keeps them too.
+    #[test]
+    fn music_keeps_the_disk_keys() {
+        use effectcraft_project::{Comp, Footage, FootageKind, ItemKind, LayerSource, Project, Solid, build};
+        use effectcraft_time::{FrameRate, Tick};
+        let mut p = Project::default();
+        let comp = Comp::new(64, 64, FrameRate::FPS_30, Tick::from_seconds_f64(2.0));
+        let cid = p.add_item("Main", Default::default(), None, ItemKind::Comp(comp.clone().into()));
+        let sid = p.add_item("Solid", Default::default(), None, ItemKind::Solid(Solid { color: [1.0, 0.0, 0.0], width: 64, height: 64, pixel_aspect: 1.0 }));
+        let clip = build::layer(&mut p, &comp, "Clip", LayerSource::Solid { item: sid }, (64, 64), None);
+        let clip_id = clip.id;
+        p.comp_mut(cid).unwrap().layers.push(clip);
+        let key = comp_content_key(&p, cid);
+        let song = p.add_item(
+            "song.wav",
+            Default::default(),
+            None,
+            ItemKind::Footage(Footage { kind: FootageKind::Audio, has_video: false, has_audio: true, ..Default::default() }),
+        );
+        assert_eq!(comp_content_key(&p, cid), key, "importing music");
+        let music = build::layer(&mut p, &comp, "Music", LayerSource::Footage { item: song }, (64, 64), None);
+        p.comp_mut(cid).unwrap().layers.insert(0, music);
+        assert_eq!(comp_content_key(&p, cid), key, "music on the timeline");
+        p.comp_mut(cid).unwrap().layer_mut(clip_id).unwrap().switches.video = false;
+        assert_ne!(comp_content_key(&p, cid), key, "a hidden clip");
+    }
+
+    /// An expression that reads a 3D model layer's source (`thisComp.layer("Model").source.name`)
+    /// gives a new key when the model item is renamed: the frames on disk hold the old name.
+    #[test]
+    fn renaming_a_model_an_expression_reads_changes_the_disk_key() {
+        use effectcraft_project::{Comp, Expression, Footage, FootageKind, ItemKind, LayerSource, Project, Solid, build};
+        use effectcraft_time::{FrameRate, Tick};
+        let mut p = Project::default();
+        let comp = Comp::new(64, 64, FrameRate::FPS_30, Tick::from_seconds_f64(2.0));
+        let cid = p.add_item("Main", Default::default(), None, ItemKind::Comp(comp.clone().into()));
+        let model = p.add_item("chair.glb", Default::default(), None, ItemKind::Footage(Footage { kind: FootageKind::Model, ..Default::default() }));
+        let sid = p.add_item("Solid", Default::default(), None, ItemKind::Solid(Solid { color: [1.0, 0.0, 0.0], width: 64, height: 64, pixel_aspect: 1.0 }));
+        let mut m = build::layer(&mut p, &comp, "Model", LayerSource::Model { item: model }, (64, 64), None);
+        m.switches.video = false;
+        let mut s = build::layer(&mut p, &comp, "Reader", LayerSource::Solid { item: sid }, (64, 64), None);
+        s.props.prop_mut("transform/opacity").unwrap().expr =
+            Some(Expression { text: "thisComp.layer(\"Model\").source.name.length * 10".into(), enabled: true });
+        p.comp_mut(cid).unwrap().layers.extend([s, m]);
+        let key = comp_content_key(&p, cid);
+        p.item_mut(model).unwrap().name = "table.glb".into();
+        assert_ne!(comp_content_key(&p, cid), key, "the expression reads the model's name");
+    }
+
+    /// Layer jobs hold float buffers until they are compressed: the queue holds at most
+    /// [`JOB_QUEUE_BYTES`] of them (64 at 4K held ~8.5 GB), and a single bigger one only alone.
+    #[test]
+    fn layer_writes_queue_within_a_byte_budget() {
+        let mut q = Queue {
+            frames: Default::default(),
+            frame_bytes: 0,
+            jobs: Default::default(),
+            job_bytes: 0,
+            busy: true,
+            pending_frames: Default::default(),
+            drops: Drops::default(),
+        };
+        let layer = JOB_QUEUE_BYTES / 4 + 1;
+        for _ in 0..3 {
+            assert!(!q.full(Kind::Layer, layer));
+            q.jobs.push_back(Job::Write(Kind::Layer, 0, 0, Payload::Lz4(vec![])));
+            q.job_bytes += layer;
+        }
+        assert!(q.full(Kind::Layer, layer), "a fourth would pass the budget");
+        assert!(!q.full(Kind::Frame, 1024), "frames have their own budget");
+        let mut empty = Queue { jobs: Default::default(), job_bytes: 0, ..q };
+        assert!(!empty.full(Kind::Layer, 2 * JOB_QUEUE_BYTES), "a single big layer, alone");
+        // Taking a job gives its bytes back.
+        empty.job_bytes = 3;
+        empty.jobs.push_back(Job::Write(Kind::Layer, 0, 0, Payload::Lz4(vec![0; 3])));
+        assert!(empty.pop().is_some());
+        assert_eq!(empty.job_bytes, 0);
+    }
+
+    /// A burst of layer writes never crowds out frames: every frame of a fully cached comp is
+    /// on disk afterwards (the blue bar came back with gaps).
+    #[test]
+    fn frames_are_kept_when_layer_writes_fill_the_queue() {
+        let dir = tmpdir("burst");
+        let dc = DiskCache::open(&dir, 1 << 30).unwrap();
+        for k in 0..300 {
+            dc.put_layer(10_000 + k, &Arc::new(buf(1, 64, 64)), &EntryFiles::default(), 0);
+        }
+        let rgba = vec![7u8; 32 * 32 * 4];
+        for k in 0..300 {
+            dc.put_frame(k, 32, 32, &rgba, &ReadFiles::default(), None, 0);
+        }
+        dc.flush();
+        assert!((0..300).all(|k| dc.contains(Kind::Frame, k)), "every frame written");
     }
 
     #[test]
@@ -1091,17 +2726,17 @@ mod tests {
         let comp = Comp::new(2, 2, FrameRate::FPS_30, Tick::from_seconds_f64(1.0));
         let id = project.add_item("Cached composition", effectcraft_color::Label::None, None, ItemKind::Comp(comp.into()));
         let key = frame_key(comp_content_key(&project, id), 0, 1000, 0);
-        let previous_key = frame_key(comp_content_key_for_renderer(&project, id, None, "effectcraft-render-4"), 0, 1000, 0);
+        let previous_key = frame_key(comp_content_key_for_renderer(&project, id, "effectcraft-render-5"), 0, 1000, 0);
         let dir = tmpdir("previous-renderer");
         {
             let cache = DiskCache::open(&dir, 1 << 30).unwrap();
-            cache.put_frame_now(previous_key, 2, 2, &[9; 16]);
+            cache.put_frame_now(previous_key, 2, 2, &[9; 16], &ReadFiles::default());
         }
         let cache = DiskCache::open(&dir, 1 << 30).unwrap();
-        assert_eq!(cache.get_frame(previous_key).unwrap().rgba, vec![9; 16]);
-        assert!(cache.get_frame(key).is_none());
-        cache.put_frame_now(key, 2, 2, &[17; 16]);
-        assert_eq!(cache.get_frame(key).unwrap().rgba, vec![17; 16]);
+        assert_eq!(cache.get_frame(previous_key, None).map(|f| f.0).unwrap().rgba, vec![9; 16]);
+        assert!(cache.get_frame(key, None).map(|f| f.0).is_none());
+        cache.put_frame_now(key, 2, 2, &[17; 16], &ReadFiles::default());
+        assert_eq!(cache.get_frame(key, None).map(|f| f.0).unwrap().rgba, vec![17; 16]);
     }
 
     #[test]
@@ -1109,16 +2744,16 @@ mod tests {
         let dir = tmpdir("persist");
         {
             let dc = DiskCache::open(&dir, 1 << 30).unwrap();
-            dc.put_layer_now(1, &buf(1, 8, 8));
-            dc.put_frame_now(2, 2, 2, &[9; 16]);
+            dc.put_layer_now(1, &buf(1, 8, 8), &ReadFiles::default());
+            dc.put_frame_now(2, 2, 2, &[9; 16], &ReadFiles::default());
         }
         let dc = DiskCache::open(&dir, 1 << 30).unwrap();
         assert_eq!(dc.stats().entries, 2);
         assert!(dc.contains(Kind::Layer, 1) && dc.contains(Kind::Frame, 2));
-        assert_eq!(dc.get_frame(2).unwrap().rgba, vec![9; 16]);
+        assert_eq!(dc.get_frame(2, None).map(|f| f.0).unwrap().rgba, vec![9; 16]);
         dc.clear();
         assert_eq!(dc.stats().entries, 0);
-        assert!(dc.get_frame(2).is_none());
+        assert!(dc.get_frame(2, None).map(|f| f.0).is_none());
         let again = DiskCache::open(&dir, 1 << 30).unwrap();
         assert_eq!(again.stats().entries, 0);
     }
@@ -1128,11 +2763,11 @@ mod tests {
         let dir = tmpdir("lru");
         let dc = DiskCache::open(&dir, u64::MAX).unwrap();
         for k in 0..6u128 {
-            dc.put_layer_now(k, &buf(k as u32, 64, 64));
+            dc.put_layer_now(k, &buf(k as u32, 64, 64), &ReadFiles::default());
         }
         let per = dc.stats().bytes / 6;
         // Touch 0 so it is the most recently used.
-        assert!(dc.get_layer(0).is_some());
+        assert!(dc.get_layer(0, None).is_some());
         dc.set_max_bytes(per * 3 + per * 3 / 4);
         let st = dc.stats();
         assert!(st.bytes <= per * 3 + per * 3 / 4, "{st:?}");
@@ -1144,7 +2779,7 @@ mod tests {
         let files = walk(&dir);
         assert_eq!(files, 3);
         // New writes keep evicting.
-        dc.put_layer_now(99, &buf(9, 64, 64));
+        dc.put_layer_now(99, &buf(9, 64, 64), &ReadFiles::default());
         assert!(dc.stats().bytes <= per * 3 + per * 3 / 4);
     }
 
@@ -1169,7 +2804,7 @@ mod tests {
         let dir = tmpdir("space");
         let dc = DiskCache::open(&dir, 1 << 30).unwrap();
         for k in 0..4u128 {
-            dc.put_layer_now(k, &buf(k as u32, 64, 64));
+            dc.put_layer_now(k, &buf(k as u32, 64, 64), &ReadFiles::default());
         }
         let used = dc.stats().bytes;
         // Unknown space: the setting alone.
@@ -1178,22 +2813,95 @@ mod tests {
         // A disk reported as 0 bytes is unknown.
         dc.set_disk_space(Some((0, 0)));
         assert_eq!(dc.stats().limit_bytes, 1 << 30);
-        // 100 GB disk, 5 GB reserved, exactly 5 GB free: the cache may not grow.
+        // 100 GB disk, 5 GB reserved (5%, between the 2 GB floor and the 10 GB cap), exactly
+        // 5 GB free: the cache may not grow.
         dc.set_disk_space(Some((100 << 30, 5 << 30)));
         let st = dc.stats();
         assert_eq!((st.max_bytes, st.limit_bytes), (1 << 30, used));
-        dc.put_layer_now(9, &buf(9, 64, 64));
+        dc.put_layer_now(9, &buf(9, 64, 64), &ReadFiles::default());
         let st = dc.stats();
         assert!(st.bytes <= st.limit_bytes && st.bytes <= used - used / 10 && st.evictions > 0, "{st:?}");
         assert!(dc.contains(Kind::Layer, 9), "the new entry is the most recently used");
         // Below the reserve the cache gives its space back, and skips writes that can't fit.
         dc.set_disk_space(Some((100 << 30, 4 << 30)));
-        dc.put_layer_now(10, &buf(10, 64, 64));
+        dc.put_layer_now(10, &buf(10, 64, 64), &ReadFiles::default());
         let st = dc.stats();
         assert_eq!((st.limit_bytes, st.entries, st.bytes), (0, 0, 0), "{st:?}");
         // Plenty of space again: back to the setting.
         dc.set_disk_space(Some((100 << 30, 50 << 30)));
         assert_eq!(dc.stats().limit_bytes, 1 << 30);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The reserve is 5% of the disk, at least 2 GB and at most 10 GB: a large disk with plenty
+    /// free keeps the user's size. (A 4 TB disk with 190 GB free reserved 200 GB, held a 20 GB
+    /// cache at 0, and every write was refused.)
+    #[test]
+    fn a_large_disk_reserves_at_most_ten_gb() {
+        const GB: u64 = 1 << 30;
+        assert_eq!(disk_reserve(4096 * GB), 10 * GB);
+        assert_eq!(disk_reserve(100 * GB), 5 * GB);
+        assert_eq!(disk_reserve(32 * GB), 2 * GB);
+        assert_eq!(disk_reserve(1), 2 * GB);
+        let dir = tmpdir("space-large");
+        let dc = DiskCache::open(&dir, 20 * GB).unwrap();
+        dc.set_disk_space(Some((4096 * GB, 190 * GB)));
+        let st = dc.stats();
+        assert_eq!((st.max_bytes, st.limit_bytes), (20 * GB, 20 * GB), "{st:?}");
+        assert!(dc.accepts_writes());
+        assert_eq!(dc.reserve_bytes(), Some(10 * GB));
+        // Just above the 10 GB reserve: the cache may use what is left above it.
+        dc.set_disk_space(Some((4096 * GB, 15 * GB)));
+        assert_eq!(dc.stats().limit_bytes, 5 * GB);
+        // A small disk still keeps 2 GB free: 3 GB free leaves 1 GB for the cache.
+        dc.set_disk_space(Some((32 * GB, 3 * GB)));
+        assert_eq!(dc.stats().limit_bytes, GB);
+        // Below the floor: nothing.
+        dc.set_disk_space(Some((32 * GB, GB)));
+        assert_eq!(dc.stats().limit_bytes, 0);
+        assert!(!dc.accepts_writes());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A write the free disk space refuses is refused before its pixels are compressed: the
+    /// frame workers spent about 8 ms per frame and 14 ms per layer encoding entries that were
+    /// then refused (`limit_bytes=0`).
+    #[test]
+    fn no_encode_while_the_disk_has_no_room() {
+        const GB: u64 = 1 << 30;
+        let dir = tmpdir("space-no-encode");
+        let dc = DiskCache::open(&dir, 20 * GB).unwrap();
+        // 4 TB disk, 1 GB free: under the 10 GB reserve, the limit is 0.
+        dc.set_disk_space(Some((4096 * GB, GB)));
+        assert_eq!(dc.stats().limit_bytes, 0);
+        let rgba = vec![7u8; 16 * 16 * 4];
+        assert!(!dc.put_frame(1, 16, 16, &rgba, &ReadFiles::default(), None, 0), "refused");
+        assert!(!dc.put_frame_f16(2, 16, 16, &[0x3c00u16; 16 * 16 * 4], &ReadFiles::default(), None, 0), "refused");
+        dc.put_layer(3, &Arc::new(buf(3, 16, 16)), &EntryFiles::default(), 0);
+        dc.flush();
+        assert_eq!(dc.encodes(), 0, "nothing compressed");
+        assert_eq!(dc.stats().entries, 0);
+        // 32 MB of room above the reserve: a few frames would fill it, the rest would be
+        // compressed only to be refused. Not worth encoding either.
+        dc.set_disk_space(Some((4096 * GB, 10 * GB + (32 << 20))));
+        assert_eq!(dc.stats().limit_bytes, 32 << 20);
+        assert!(!dc.accepts_writes());
+        assert!(!dc.put_frame(1, 16, 16, &rgba, &ReadFiles::default(), None, 0), "refused");
+        dc.put_layer(3, &Arc::new(buf(3, 16, 16)), &EntryFiles::default(), 0);
+        assert_eq!(dc.encodes(), 0, "nothing compressed");
+        // A small limit the setting asks for (not free space) is used.
+        dc.set_disk_space(None);
+        dc.set_max_bytes(32 << 20);
+        assert!(dc.accepts_writes());
+        dc.set_max_bytes(20 * GB);
+        // Room again: the same writes are compressed and stored.
+        dc.set_disk_space(Some((4096 * GB, 500 * GB)));
+        assert!(dc.put_frame(1, 16, 16, &rgba, &ReadFiles::default(), None, 0));
+        assert!(dc.put_frame_f16(2, 16, 16, &[0x3c00u16; 16 * 16 * 4], &ReadFiles::default(), None, 0));
+        dc.put_layer(3, &Arc::new(buf(3, 16, 16)), &EntryFiles::default(), 0);
+        dc.flush();
+        assert_eq!(dc.encodes(), 3);
+        assert_eq!(dc.stats().entries, 3);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1203,8 +2911,8 @@ mod tests {
         let dc = DiskCache::open(&dir, 1 << 30).unwrap();
         // A file where the layers folder should be: every layer write fails.
         std::fs::write(dir.join(VERSION).join(Kind::Layer.dir()), b"x").unwrap();
-        dc.put_layer_now(1, &buf(1, 8, 8));
-        dc.put_layer_now(2, &buf(2, 8, 8));
+        dc.put_layer_now(1, &buf(1, 8, 8), &ReadFiles::default());
+        dc.put_layer_now(2, &buf(2, 8, 8), &ReadFiles::default());
         let st = dc.stats();
         assert_eq!((st.failed, st.writes, st.entries), (2, 0, 0));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1229,13 +2937,13 @@ mod tests {
     fn damaged_files_are_misses() {
         let dir = tmpdir("damaged");
         let dc = DiskCache::open(&dir, 1 << 30).unwrap();
-        dc.put_frame_now(5, 4, 4, &[1; 64]);
+        dc.put_frame_now(5, 4, 4, &[1; 64], &ReadFiles::default());
         let p = dc.path(Kind::Frame, 5);
         let mut d = std::fs::read(&p).unwrap();
         let n = d.len();
         d[n / 2] ^= 0xff;
         std::fs::write(&p, d).unwrap();
-        assert!(dc.get_frame(5).is_none());
+        assert!(dc.get_frame(5, None).map(|f| f.0).is_none());
         assert!(!dc.contains(Kind::Frame, 5));
         assert!(!p.exists());
     }
@@ -1253,8 +2961,8 @@ mod tests {
                     for i in 0..20u128 {
                         let k = i % 5;
                         let w = if t % 2 == 0 { &a } else { &b };
-                        w.put_layer_now(k, &buf(k as u32, 16, 16));
-                        if let Some(x) = w.get_layer(k) {
+                        w.put_layer_now(k, &buf(k as u32, 16, 16), &ReadFiles::default());
+                        if let Some((x, _)) = w.get_layer(k, None) {
                             assert_eq!(x.img, buf(k as u32, 16, 16).img);
                         }
                     }
@@ -1263,13 +2971,16 @@ mod tests {
         });
         b.rescan();
         for k in 0..5u128 {
-            assert_eq!(b.get_layer(k).unwrap().img, buf(k as u32, 16, 16).img);
+            assert_eq!(b.get_layer(k, None).unwrap().0.img, buf(k as u32, 16, 16).img);
         }
     }
 
-    /// A path with no native metadata takes its key from the caller's size and content hash (#1253).
+    /// Replaced bytes of a path with no native metadata (the browser file table) change neither
+    /// the comp key nor a layer's disk key (both from memory): the frame and layer entries made
+    /// of them check the hook's size and content hash when read and are misses, deleted (#1253,
+    /// #3184).
     #[test]
-    fn virtual_file_bytes_change_content_keys() {
+    fn virtual_file_bytes_are_checked_by_the_entries_not_the_keys() {
         use effectcraft_project::build;
         use effectcraft_project::{Comp, Footage, ItemKind, LayerSource, Project};
         use effectcraft_time::{FrameRate, Tick};
@@ -1283,12 +2994,360 @@ mod tests {
 
         let id = |mark: u64| move |path: &str| (path == "/virtual.mov").then_some((8, mark));
         let (one, two) = (id(1), id(2));
-        let a = footage_salt_with(&p, Some(&one));
-        let b = footage_salt_with(&p, Some(&two));
-        let ka = comp_content_key_with(&p, cid, Some(&one));
-        let kb = comp_content_key_with(&p, cid, Some(&two));
-        assert_ne!(a, b, "replaced virtual media must not reuse the salt");
-        assert_ne!(ka, kb, "replaced virtual media must not reuse the frame key");
-        assert_eq!(comp_content_key(&p, cid), comp_content_key_with(&p, cid, None));
+        let dc = DiskCache::open(tmpdir("virtual"), 1 << 30).unwrap();
+        let k = frame_key(comp_content_key(&p, cid), 0, 1000, 0);
+        let files: ReadFiles = [crate::reads::ReadFile::new("/virtual.mov", crate::reads::FileStamp::Virtual)].into_iter().collect();
+        assert!(dc.put_frame(k, 1, 1, &[1, 2, 3, 4], &files, Some(&one), 0));
+        dc.flush();
+        assert!(dc.get_frame(k, Some(&one)).is_some_and(|(_, f)| f == files));
+        assert!(dc.get_frame(k, Some(&two)).is_none() && !dc.contains(Kind::Frame, k), "replaced: a miss, deleted");
+        // A layer buffer made of it.
+        let lk = layer_disk_key(7);
+        dc.put_layer(lk, &Arc::new(buf(1, 4, 4)), &EntryFiles::of(&files, Some(&one)).unwrap(), 0);
+        dc.flush();
+        assert!(dc.get_layer(lk, Some(&one)).is_some_and(|(b, f)| b.img == buf(1, 4, 4).img && f == files && f.is_complete()));
+        assert!(dc.get_layer(lk, None).is_none() && !dc.contains(Kind::Layer, lk), "no identity: a miss, deleted");
+        dc.put_layer(lk, &Arc::new(buf(1, 4, 4)), &EntryFiles::of(&files, Some(&one)).unwrap(), 0);
+        dc.flush();
+        assert!(dc.get_layer(lk, Some(&two)).is_none() && !dc.contains(Kind::Layer, lk), "replaced: a miss, deleted");
+        // The browser's sealed layer entries carry the same list.
+        let e = layer_entry(&buf(2, 3, 2), &EntryFiles::of(&files, Some(&one)).unwrap());
+        let (b, list) = read_layer_entry(&e).unwrap();
+        assert!(b.img == buf(2, 3, 2).img && list.unchanged(Some(&one)) && !list.unchanged(Some(&two)));
+        assert!(read_layer_entry(&seal_format(Kind::Layer, FORMAT_RGBA8, &encode_layer(&buf(2, 3, 2)))).is_none(), "the format before #3184");
+        let mut bad = e.clone();
+        bad[12] ^= 1;
+        assert!(read_layer_entry(&bad).is_none(), "damaged");
+    }
+
+    /// Layer disk keys come from the layer cache's key alone (no file, no project-wide salt) and
+    /// differ per key.
+    #[test]
+    fn layer_disk_keys_need_no_files() {
+        assert_eq!(layer_disk_key(1), layer_disk_key(1));
+        assert_ne!(layer_disk_key(1), layer_disk_key(2));
+        // Not the layout of the salted keys before #3184 (`salt << 64 | key`).
+        assert_ne!(layer_disk_key(1) as u64, 1);
+    }
+
+    /// A layer entry is used only while the files it lists are what the buffer was made of: a
+    /// new size, a new time, a missing file that is back, a file replaced by a folder, a damaged
+    /// files section and the format before #3184 are misses, and the entry is deleted so the
+    /// buffer is rendered and stored again. A buffer whose files can't all be named is not
+    /// stored. Only the listed files are looked at.
+    #[test]
+    fn layer_entries_check_their_files() {
+        use crate::reads::{FileStamp, ReadFile};
+        let dir = tmpdir("layer-check");
+        let src = dir.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let file = |name: &str, bytes: &[u8]| {
+            let p = src.join(name);
+            std::fs::write(&p, bytes).unwrap();
+            p.to_string_lossy().to_string()
+        };
+        let (a, b) = (file("a.png", b"aa"), file("b.png", b"bb"));
+        let gone = src.join("gone.png").to_string_lossy().to_string();
+        let read = |paths: &[&str]| -> ReadFiles { paths.iter().map(|p| ReadFile::new(*p, FileStamp::native(p).unwrap_or(FileStamp::Missing))).collect() };
+        let dc = DiskCache::open(&dir, 1 << 30).unwrap();
+        dc.put_layer_now(1, &buf(1, 4, 4), &read(&[&a]));
+        dc.put_layer_now(2, &buf(2, 4, 4), &read(&[&b, &gone]));
+        dc.put_layer_now(3, &buf(3, 4, 4), &read(&[&b]));
+        let (one, files) = dc.get_layer(1, None).unwrap();
+        assert!(one.img == buf(1, 4, 4).img && files == read(&[&a]) && files.is_complete());
+        assert_eq!(dc.file_checks(), 1, "only the file of that buffer");
+        // a.png gets a new size: entry 1 is a miss and deleted, the others stay.
+        std::fs::write(&a, b"aaa").unwrap();
+        assert!(dc.get_layer(1, None).is_none() && !dc.contains(Kind::Layer, 1));
+        assert!(dc.get_layer(2, None).is_some() && dc.get_layer(3, None).is_some());
+        // b.png gets a new time only.
+        let t = std::fs::metadata(&b).unwrap().modified().unwrap() + std::time::Duration::from_secs(7);
+        std::fs::File::options().append(true).open(&b).unwrap().set_modified(t).unwrap();
+        assert!(dc.get_layer(3, None).is_none() && !dc.contains(Kind::Layer, 3));
+        assert!(dc.get_layer(2, None).is_none(), "b.png is listed there too");
+        // A missing file that is back.
+        dc.put_layer_now(4, &buf(4, 4, 4), &read(&[&gone]));
+        assert!(dc.get_layer(4, None).is_some(), "missing, still missing");
+        file("gone.png", b"g");
+        assert!(dc.get_layer(4, None).is_none() && !dc.contains(Kind::Layer, 4), "back");
+        // A file replaced by a folder (unreadable).
+        let c = file("c.png", b"cc");
+        dc.put_layer_now(5, &buf(5, 4, 4), &read(&[&c]));
+        std::fs::remove_file(&c).unwrap();
+        std::fs::create_dir(&c).unwrap();
+        assert!(dc.get_layer(5, None).is_none() && !dc.contains(Kind::Layer, 5));
+        // Written again after the miss: a hit with the new identity.
+        dc.put_layer_now(1, &buf(9, 4, 4), &read(&[&a]));
+        assert_eq!(dc.get_layer(1, None).map(|l| l.0.img), Some(buf(9, 4, 4).img));
+        // The format before #3184 (no files): a miss, deleted.
+        dc.write_format(Kind::Layer, 6, FORMAT_RGBA8, &encode_layer(&buf(6, 4, 4)));
+        assert!(dc.contains(Kind::Layer, 6));
+        assert!(dc.get_layer(6, None).is_none() && !dc.contains(Kind::Layer, 6));
+        // A valid checksum over a damaged files section, or over a cut buffer: misses, deleted.
+        let mut payload = vec![];
+        payload.extend_from_slice(&3u32.to_le_bytes());
+        payload.extend_from_slice(&encode_layer(&buf(7, 4, 4)));
+        dc.write_format(Kind::Layer, 7, FORMAT_LAYER_FILES, &payload);
+        assert!(dc.get_layer(7, None).is_none() && !dc.contains(Kind::Layer, 7));
+        let mut cut = vec![];
+        EntryFiles::default().encode(&mut cut);
+        cut.extend_from_slice(&encode_layer(&buf(8, 4, 4))[..40]);
+        dc.write_format(Kind::Layer, 8, FORMAT_LAYER_FILES, &cut);
+        assert!(dc.get_layer(8, None).is_none() && !dc.contains(Kind::Layer, 8));
+        // A damaged file on disk.
+        dc.put_layer_now(9, &buf(9, 4, 4), &ReadFiles::default());
+        let p = dc.path(Kind::Layer, 9);
+        let mut d = std::fs::read(&p).unwrap();
+        let n = d.len();
+        d[n / 2] ^= 0xff;
+        std::fs::write(&p, d).unwrap();
+        assert!(dc.get_layer(9, None).is_none() && !dc.contains(Kind::Layer, 9) && !p.exists());
+        // Buffers whose files can't all be named are not stored.
+        let mut incomplete = read(&[&a]);
+        incomplete.mark_incomplete();
+        dc.put_layer_now(10, &buf(10, 4, 4), &incomplete);
+        assert!(!dc.contains(Kind::Layer, 10));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A frame entry is used only while the files it lists are what it was made of: a new size,
+    /// a new time, a missing file that is back, a file replaced by a folder are misses, and the
+    /// entry is deleted so the frame is rendered and stored again. Only the listed files are
+    /// looked at. Entries of the format before #3184 are misses and deleted.
+    #[test]
+    fn frame_entries_check_their_files() {
+        use crate::reads::{FileStamp, ReadFile};
+        let dir = tmpdir("check");
+        let src = dir.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let file = |name: &str, bytes: &[u8]| {
+            let p = src.join(name);
+            std::fs::write(&p, bytes).unwrap();
+            p.to_string_lossy().to_string()
+        };
+        let (a, b) = (file("a.png", b"aa"), file("b.png", b"bb"));
+        let gone = src.join("gone.png").to_string_lossy().to_string();
+        let read = |paths: &[&str]| -> ReadFiles { paths.iter().map(|p| ReadFile::new(*p, FileStamp::native(p).unwrap_or(FileStamp::Missing))).collect() };
+        let dc = DiskCache::open(&dir, 1 << 30).unwrap();
+        dc.put_frame_now(1, 1, 1, &[1; 4], &read(&[&a]));
+        dc.put_frame_now(2, 1, 1, &[2; 4], &read(&[&b, &gone]));
+        dc.put_frame_now(3, 1, 1, &[3; 4], &read(&[&b]));
+        assert_eq!(dc.get_frame(1, None).map(|f| f.1), Some(read(&[&a])));
+        assert_eq!(dc.file_checks(), 1, "only the file of that frame");
+        // a.png gets a new size: frame 1 is a miss and deleted, the others stay.
+        std::fs::write(&a, b"aaa").unwrap();
+        assert!(dc.get_frame(1, None).is_none() && !dc.contains(Kind::Frame, 1));
+        assert!(dc.get_frame(2, None).is_some() && dc.get_frame(3, None).is_some());
+        // b.png gets a new time only.
+        let t = std::fs::metadata(&b).unwrap().modified().unwrap() + std::time::Duration::from_secs(7);
+        std::fs::File::options().append(true).open(&b).unwrap().set_modified(t).unwrap();
+        assert!(dc.get_frame(3, None).is_none() && !dc.contains(Kind::Frame, 3));
+        assert!(dc.get_frame(2, None).is_none(), "b.png is listed there too");
+        // A missing file that is back.
+        dc.put_frame_now(4, 1, 1, &[4; 4], &read(&[&gone]));
+        assert!(dc.get_frame(4, None).is_some(), "missing, still missing");
+        file("gone.png", b"g");
+        assert!(dc.get_frame(4, None).is_none() && !dc.contains(Kind::Frame, 4), "back");
+        // A file replaced by a folder (unreadable).
+        let c = file("c.png", b"cc");
+        dc.put_frame_now(5, 1, 1, &[5; 4], &read(&[&c]));
+        std::fs::remove_file(&c).unwrap();
+        std::fs::create_dir(&c).unwrap();
+        assert!(dc.get_frame(5, None).is_none() && !dc.contains(Kind::Frame, 5));
+        // Written again after the miss: a hit with the new identity.
+        let fresh = file("d.png", b"dd");
+        dc.put_frame_now(1, 1, 1, &[9; 4], &read(&[&fresh]));
+        assert_eq!(dc.get_frame(1, None).map(|f| f.0.rgba), Some(vec![9; 4]));
+        // The format before #3184 (no files): a miss, deleted.
+        dc.write_format(Kind::Frame, 6, FORMAT_RGBA8, &encode_frame(1, 1, &[6; 4]));
+        assert!(dc.contains(Kind::Frame, 6));
+        assert!(dc.get_frame(6, None).is_none() && !dc.contains(Kind::Frame, 6));
+        // A valid checksum over a damaged files section: a miss, deleted.
+        let mut payload = vec![];
+        payload.extend_from_slice(&3u32.to_le_bytes());
+        payload.extend_from_slice(&encode_frame(1, 1, &[7; 4]));
+        dc.write_format(Kind::Frame, 7, FORMAT_RGBA8_FILES, &payload);
+        assert!(dc.get_frame(7, None).is_none() && !dc.contains(Kind::Frame, 7));
+        // Frames whose files can't all be named are not stored.
+        let mut incomplete = read(&[&fresh]);
+        incomplete.mark_incomplete();
+        assert!(!dc.put_frame(8, 1, 1, &[8; 4], &incomplete, None, 0));
+        dc.flush();
+        assert!(!dc.contains(Kind::Frame, 8));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Reload Footage drops the entries made of the reloaded files (#3184): a file replaced by
+    /// one with the same size and modification time passes the check on hit, so only the drop
+    /// makes the next use a miss. Entries of other files stay; an entry written after the drop
+    /// is used; a layer entry and one written while the drop waits in the queue are dropped too;
+    /// the drop survives a restart (the files are gone).
+    #[test]
+    fn dropped_files_take_their_entries_with_them() {
+        use crate::reads::{FileStamp, ReadFile};
+        let dir = tmpdir("drop");
+        let src = dir.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        let file = |name: &str, bytes: &[u8]| {
+            let p = src.join(name);
+            std::fs::write(&p, bytes).unwrap();
+            p.to_string_lossy().to_string()
+        };
+        let (a, b) = (file("a.png", b"aa"), file("b.png", b"bb"));
+        let read = |paths: &[&str]| -> ReadFiles { paths.iter().map(|p| ReadFile::new(*p, FileStamp::native(p).unwrap())).collect() };
+        let dc = DiskCache::open(&dir, 1 << 30).unwrap();
+        dc.put_frame_now(1, 1, 1, &[1; 4], &read(&[&a]));
+        dc.put_frame_now(2, 1, 1, &[2; 4], &read(&[&b]));
+        dc.put_frame_now(3, 1, 1, &[3; 4], &read(&[&a, &b]));
+        dc.put_layer_now(4, &buf(4, 2, 2), &read(&[&a]));
+        // a.png gets other bytes of the same size and its old time back: the check can't tell.
+        let t = std::fs::metadata(&a).unwrap().modified().unwrap();
+        std::fs::write(&a, b"AA").unwrap();
+        std::fs::File::options().append(true).open(&a).unwrap().set_modified(t).unwrap();
+        assert!(dc.get_frame(1, None).is_some(), "same size and time: still a hit");
+        // A frame queued (not written yet) when the drop comes is dropped too.
+        assert!(dc.put_frame(5, 1, 1, &[5; 4], &read(&[&a]), None, 0));
+        dc.drop_files([a.clone()]);
+        dc.flush();
+        assert!(!dc.is_dropping());
+        for (kind, key) in [(Kind::Frame, 1), (Kind::Frame, 3), (Kind::Layer, 4), (Kind::Frame, 5)] {
+            assert!(!dc.contains(kind, key), "{kind:?} {key} made of a.png is gone");
+        }
+        assert!(dc.get_frame(1, None).is_none() && dc.get_layer(4, None).is_none());
+        assert_eq!(dc.get_frame(2, None).map(|f| f.0.rgba), Some(vec![2; 4]), "b.png's frame stays");
+        // Written again from the reloaded file: used.
+        dc.put_frame_now(1, 1, 1, &[9; 4], &read(&[&a]));
+        assert_eq!(dc.get_frame(1, None).map(|f| f.0.rgba), Some(vec![9; 4]));
+        // The drop is for good: a new session on the folder finds what is left.
+        drop(dc);
+        let dc = DiskCache::open(&dir, 1 << 30).unwrap();
+        assert_eq!(dc.keys(Kind::Frame).into_iter().collect::<std::collections::BTreeSet<_>>(), [1, 2].into());
+        assert!(dc.keys(Kind::Layer).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A render under way when Reload Footage drops its files offers its entries after the drop
+    /// (#3184), when the writer has already deleted the old ones: made of the files as they were,
+    /// they are refused, frames and layer buffers alike. What the same render made of other files
+    /// is stored, and so is what a render that started after the drop makes.
+    #[test]
+    fn entries_made_before_a_drop_are_refused_after_it() {
+        use crate::reads::{FileStamp, ReadFile};
+        let dir = tmpdir("drop-in-flight");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = |name: &str| {
+            let p = dir.join(name);
+            std::fs::write(&p, name.as_bytes()).unwrap();
+            p.to_string_lossy().to_string()
+        };
+        let (a, b) = (file("a.png"), file("b.png"));
+        let read = |paths: &[&str]| -> ReadFiles { paths.iter().map(|p| ReadFile::new(*p, FileStamp::native(p).unwrap())).collect() };
+        let dc = DiskCache::open(dir.join("cache"), 1 << 30).unwrap();
+        // The render starts (and reads a.png and b.png), then a.png is reloaded.
+        let before = dc.drop_generation();
+        dc.drop_files([a.clone()]);
+        dc.flush();
+        assert!(!dc.is_dropping());
+        assert!(dc.dropped_since(&read(&[&a]), before) && !dc.dropped_since(&read(&[&b]), before));
+        assert!(!dc.put_frame(1, 1, 1, &[1; 4], &read(&[&a, &b]), None, before), "a frame from before the drop");
+        assert!(!dc.put_frame_f16(2, 1, 1, &[1; 4], &read(&[&a]), None, before));
+        dc.put_layer(3, &Arc::new(buf(3, 2, 2)), &EntryFiles::of(&read(&[&a]), None).unwrap(), before);
+        assert!(dc.put_frame(4, 1, 1, &[4; 4], &read(&[&b]), None, before), "b.png wasn't dropped");
+        dc.flush();
+        assert!(!dc.contains(Kind::Frame, 1) && !dc.contains(Kind::Frame, 2) && !dc.contains(Kind::Layer, 3));
+        assert!(dc.get_frame(1, None).is_none() && dc.get_layer(3, None).is_none());
+        assert_eq!(dc.get_frame(4, None).map(|f| f.0.rgba), Some(vec![4; 4]));
+        // A render that starts after the drop reads the reloaded file: stored and served.
+        let after = dc.drop_generation();
+        assert!(after > before && !dc.dropped_since(&read(&[&a]), after));
+        assert!(dc.put_frame(5, 1, 1, &[5; 4], &read(&[&a]), None, after));
+        dc.put_layer(6, &Arc::new(buf(6, 2, 2)), &EntryFiles::of(&read(&[&a]), None).unwrap(), after);
+        dc.flush();
+        assert_eq!(dc.get_frame(5, None).map(|f| f.0.rgba), Some(vec![5; 4]));
+        assert!(dc.get_layer(6, None).is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The record of dropped files is bounded: past it, everything made before the drop that
+    /// forgot the record is refused, and what is made after it is stored.
+    #[test]
+    fn the_record_of_dropped_files_is_bounded() {
+        let mut d = Drops::default();
+        let a: Arc<str> = "/a.png".into();
+        d.record(std::slice::from_ref(&a));
+        assert!(d.stale([&a].into_iter(), 0) && !d.stale([&a].into_iter(), 1));
+        let many: Vec<Arc<str>> = (0..=MAX_DROPPED_PATHS).map(|i| format!("/f{i}").into()).collect();
+        d.record(&many);
+        assert!(d.last.is_empty(), "forgotten, not grown");
+        let other: Arc<str> = "/other.png".into();
+        assert!(d.stale([&other].into_iter(), 1), "made before the drop that forgot the record");
+        assert!(!d.stale([&a].into_iter(), 2), "made after it");
+    }
+
+    /// While a drop waits, an entry made of a dropped file is a miss (and deleted), and frames
+    /// aren't linked to new keys.
+    #[test]
+    fn entries_of_a_pending_drop_are_misses() {
+        use crate::reads::{FileStamp, ReadFile};
+        let dir = tmpdir("drop-pending");
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("a.png");
+        std::fs::write(&a, b"aa").unwrap();
+        let a = a.to_string_lossy().to_string();
+        let files: ReadFiles = [ReadFile::new(a.as_str(), FileStamp::native(&a).unwrap())].into_iter().collect();
+        let dc = DiskCache::open(dir.join("cache"), 1 << 30).unwrap();
+        dc.put_frame_now(1, 1, 1, &[1; 4], &files);
+        dc.dropping.lock().unwrap().insert(a.as_str().into(), 1);
+        assert!(!dc.link_frame(1, 2));
+        assert!(dc.get_frame(1, None).is_none() && !dc.contains(Kind::Frame, 1));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An entry read while its file's drop was pending is a miss even when the writer ends the
+    /// sweep between the read and the check (it deleted the file, but its bytes were read), and
+    /// so is one read before a drop that starts meanwhile. Found under load: a stale hit.
+    #[test]
+    fn a_sweep_ending_during_a_read_never_makes_a_hit() {
+        use crate::reads::{FileStamp, ReadFile};
+        let dir = tmpdir("drop-race");
+        let dc = DiskCache::open(dir.join("cache"), 1 << 30).unwrap();
+        let files = EntryFiles::of(&[ReadFile::new("/a.png", FileStamp::Missing)].into_iter().collect(), None).unwrap();
+        // Read while the drop is pending; the sweep ends before the check.
+        dc.dropping.lock().unwrap().insert("/a.png".into(), 1);
+        let drops = dc.drops_now();
+        dc.dropping.lock().unwrap().clear();
+        assert!(dc.made_of_dropped(&files, &drops));
+        // Read before a drop that starts (and ends) before the check.
+        let drops = dc.drops_now();
+        dc.drop_files(["/a.png"]);
+        dc.flush();
+        assert!(dc.made_of_dropped(&files, &drops));
+        assert!(!dc.made_of_dropped(&files, &dc.drops_now()), "read after the drop: used");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #3301: a frame or plane set is written only when making it again costs more than
+    /// reading it back: a cheap one is not written, an expensive one is; the read rate follows
+    /// the reads measured.
+    #[test]
+    fn only_items_dearer_to_make_than_to_read_are_written() {
+        let dir = tmpdir("pays-off");
+        let dc = DiskCache::open(&dir, 1 << 30).unwrap();
+        let eight_mb = 8 << 20;
+        // Until a read is measured: 10 ms per MB, 80 ms for 8 MB.
+        assert_eq!(dc.read_us(eight_mb), 8 * DEFAULT_READ_US_PER_MB);
+        assert!(!dc.pays_off(eight_mb, 1_000), "rendered in 1 ms: not written");
+        assert!(dc.pays_off(eight_mb, 200_000), "rendered in 200 ms: written");
+        // Reads measured at 1 ms per MB: a 20 ms frame of 8 MB is now worth writing.
+        assert!(!dc.pays_off(eight_mb, 20_000));
+        for _ in 0..40 {
+            dc.note_read(1 << 20, 1_000);
+        }
+        assert!(dc.pays_off(eight_mb, 20_000), "{}", dc.read_us(eight_mb));
+        // Tiny reads are not timed.
+        dc.note_read(100, 1_000_000);
+        assert!(dc.pays_off(eight_mb, 20_000));
+        drop(dc);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

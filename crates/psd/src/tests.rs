@@ -1,8 +1,20 @@
 use super::write::*;
 use super::*;
+use crate::pixels::srgb_encode;
 
+mod descriptor_framing;
+mod fixed_adjustments;
+mod fixed_writers;
 mod integration;
 mod opt;
+mod parity;
+mod scalar_blocks;
+mod section_divider;
+mod shared_corpus;
+mod tagged_descriptors;
+mod tysh_prefix;
+mod unicode_name;
+mod vector_records;
 
 fn gradient(w: u32, h: u32) -> Vec<[f32; 4]> {
     (0..w * h).map(|i| [(i % w) as f32 / (w - 1).max(1) as f32, (i / w) as f32 / (h - 1).max(1) as f32, 0.25, 1.0]).collect()
@@ -171,7 +183,7 @@ fn text_effects_fill_and_adjustments() {
 #[test]
 fn packbits_round_trip() {
     for src in [vec![], vec![1u8], vec![5; 300], (0..=255).collect::<Vec<u8>>(), vec![1, 1, 2, 3, 3, 3, 4, 5, 5]] {
-        let enc = pack_bits(&src);
+        let enc = craft_psd::compression::packbits::encode_vec(&src);
         let mut out = vec![];
         unpack_bits(&enc, src.len(), &mut out).unwrap();
         assert_eq!(out, src);
@@ -492,4 +504,125 @@ fn rle_composite_matches_the_raw_one() {
         assert_eq!(rle.composite().unwrap().data, raw.composite().unwrap().data, "{depth} bit");
         assert_eq!(rle.layer_pixels(2, true).unwrap().data, raw.layer_pixels(2, true).unwrap().data, "{depth} bit");
     }
+}
+
+#[test]
+fn packbits_packets_stop_at_the_row_end() {
+    // A 128-byte repeat and a 128-byte literal into 3-byte rows: the reserved row is never
+    // outgrown (capacity stays what was reserved).
+    for src in [vec![0x81u8, 7], {
+        let mut v = vec![0x7fu8];
+        v.extend([1u8; 128]);
+        v
+    }] {
+        let mut out = Vec::with_capacity(3);
+        unpack_bits(&src, 3, &mut out).unwrap();
+        assert_eq!(out.len(), 3);
+        assert_eq!(out.capacity(), 3);
+    }
+}
+
+#[test]
+fn a_failed_inflate_reports_its_status_not_its_output() {
+    // A stream that inflates a megabyte of zeros, then breaks its checksum.
+    let mut z = miniz_oxide::deflate::compress_to_vec_zlib(&vec![0u8; 1 << 20], 6);
+    let n = z.len();
+    z[n - 1] ^= 0xff;
+    let Err(craft_psd::PsdError::Decompress(msg)) = craft_psd::compression::zip_decompress_up_to(&z, 1 << 21) else { panic!("the checksum fails") };
+    assert!(msg.len() < 100, "{} bytes", msg.len());
+}
+
+#[test]
+fn written_32_bit_documents_decode() {
+    // 32-bit samples are written as floats, raw or RLE, so both read back whole.
+    for rle in [true, false] {
+        let p = Psd::parse(write(&doc_with_layers(32, ColorMode::Rgb, rle))).expect("parse");
+        assert_eq!(p.depth, 32);
+        assert!(p.composite().is_ok(), "rle={rle}");
+        for i in 0..p.layers.len() {
+            assert!(p.layer_pixels(i, false).is_ok(), "rle={rle} layer {i}");
+        }
+    }
+}
+
+#[test]
+fn deep_layers_go_in_their_global_block() {
+    for (depth, key) in [(16, b"Lr16"), (32, b"Lr32")] {
+        let bytes = write(&doc_with_layers(depth, ColorMode::Rgb, true));
+        let file = craft_psd::PsdFile::from_bytes(&bytes).expect("parse");
+        assert!(
+            matches!(file.layer_info_placement, craft_psd::LayerInfoPlacement::GlobalBlock { key: k, .. } if &k == key),
+            "{depth}-bit: {:?}",
+            file.layer_info_placement
+        );
+        assert_eq!(Psd::parse(bytes).expect("parse").layers.len(), doc_with_layers(depth, ColorMode::Rgb, true).layers.len());
+    }
+}
+
+#[test]
+fn rows_too_wide_for_rle_are_written_raw() {
+    // 20000 32-bit samples are 80000 bytes per row, past the 65535 an RLE row count holds.
+    let doc = |w: u32| {
+        let mut d = WDoc::new(w, 1);
+        d.depth = 32;
+        d.composite = Some(vec![[0.5, 0.25, 0.75, 1.0]; w as usize]);
+        d.layers.push(WLayer::solid("Wide", Rect::new(0, 0, w as i32, 1), [0.5, 0.25, 0.75, 1.0]));
+        d
+    };
+    let want = Psd::parse(write(&doc(100))).expect("narrow").composite().expect("composite").data[0];
+    let p = Psd::parse(write(&doc(20_000))).expect("parse");
+    let c = p.composite().expect("composite");
+    assert_eq!(c.data.len(), 20_000);
+    assert!(c.data.iter().all(|px| *px == want), "{:?} vs {want:?}", c.data[0]);
+    assert!(p.layer_pixels(0, false).is_ok());
+}
+
+#[test]
+fn written_32_bit_color_samples_keep_their_range() {
+    // The reader keeps finite 32-bit samples outside 0..1; the writer must be able to
+    // produce those fixtures. Integer depths stay clamped. A layer is present so the
+    // merged transparency flag is set and alpha is read back.
+    let want = [2.0, -0.5, 0.25, 1.5];
+    let mut d = WDoc::new(1, 1);
+    d.depth = 32;
+    d.rle = false;
+    d.composite = Some(vec![want]);
+    d.layers.push(WLayer::solid("HDR", Rect::new(0, 0, 1, 1), want));
+    let bytes = write(&d);
+    for v in want {
+        assert!(bytes.windows(4).any(|w| w == v.to_be_bytes()), "missing the {v} sample");
+    }
+    let p = Psd::parse(bytes).expect("parse");
+    assert!(p.merged_alpha);
+    let c = p.composite().expect("composite");
+    assert_eq!(c.data[0], [srgb_encode(2.0), srgb_encode(-0.5), srgb_encode(0.25), 1.5]);
+    assert_eq!(p.layer_pixels(0, false).expect("layer").data[0], c.data[0]);
+
+    let mut d8 = WDoc::new(1, 1);
+    d8.composite = Some(vec![want]);
+    d8.layers.push(WLayer::solid("HDR", Rect::new(0, 0, 1, 1), want));
+    let p8 = Psd::parse(write(&d8)).expect("parse 8-bit");
+    let q = |x: f32| (x.clamp(0.0, 1.0) * 255.0).round() / 255.0;
+    assert_eq!(p8.composite().expect("composite").data[0], [q(2.0), q(-0.5), q(0.25), q(1.5)]);
+}
+
+#[test]
+fn shared_packbits_keeps_padded_rows_and_truncated_packet_errors() {
+    let mut out = vec![42];
+    unpack_bits(&[0, 7], 3, &mut out).unwrap();
+    assert_eq!(out, [42, 7, 0, 0]);
+    unpack_bits(&[128], 2, &mut out).unwrap();
+    assert_eq!(out, [42, 7, 0, 0, 0, 0]);
+    assert_eq!(unpack_bits(&[3, 1], 1, &mut vec![]), Err(Error::Truncated));
+    assert_eq!(unpack_bits(&[255], 1, &mut vec![]), Err(Error::Truncated));
+    let mut row = vec![];
+    unpack_bits(&[0, 9, 255], 1, &mut row).unwrap();
+    assert_eq!(row, [9]);
+}
+
+#[test]
+fn shared_packbits_reports_row_limits_as_invalid_not_truncated() {
+    // The shared recovery decoder refuses a row beyond its decoded-size limit. That refusal
+    // is a limit, not truncated PackBits data, so the wrapper must not report it as one.
+    assert!(matches!(unpack_bits(&[], usize::MAX, &mut Vec::new()), Err(Error::Invalid(_))));
 }

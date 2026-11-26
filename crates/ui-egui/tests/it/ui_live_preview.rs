@@ -45,7 +45,11 @@ fn opacity_edits_show_completed_intermediate_frames_before_the_drag_stops() {
     let renderer = Arc::new(HeldRenderer::default());
     let mut app = EffectcraftApp::new(session);
     app.frames.set_remote(Some(renderer.clone()));
-    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_step_dt(0.016).build_eframe(|_| app);
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1400.0, 900.0))
+        .with_step_dt(0.016)
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| app);
     h.run_steps(3);
     assert_eq!(h.state().frames.dispatch_remote(), 1);
     renderer.finish();
@@ -77,12 +81,12 @@ fn position_anchor_and_effect_edits_present_intermediate_pixels() {
         (None, "transform/position", json!([22, 18, 0]), json!([18, 18, 0])),
         (None, "transform/anchor", json!([9, 8, 0]), json!([6, 8, 0])),
         (Some("Gaussian Blur"), "blurriness", json!(3), json!(6)),
-        (Some("CC Radial Fast Blur"), "center", json!([4, 4]), json!([18, 12])),
+        (Some("Fast Radial Blur"), "center", json!([4, 4]), json!([18, 12])),
     ] {
         let mut session = Session::default();
         session.execute("comp.new", json!({"width":64,"height":36,"duration":1})).unwrap();
         let layer = session.execute("layer.newSolid", json!({"color":"#ffffff","width":24,"height":16})).unwrap()["layer"].as_u64().unwrap();
-        if effect == Some("CC Radial Fast Blur") {
+        if effect == Some("Fast Radial Blur") {
             // A uniform solid is invariant under a radial blur; give the point edit visible detail.
             session.execute("effect.apply", json!({"layers":[layer],"effect":"Gradient Ramp"})).unwrap();
         }
@@ -95,7 +99,11 @@ fn position_anchor_and_effect_edits_present_intermediate_pixels() {
         let renderer = Arc::new(HeldRenderer::default());
         let mut app = EffectcraftApp::new(session);
         app.frames.set_remote(Some(renderer.clone()));
-        let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_step_dt(0.016).build_eframe(|_| app);
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(1400.0, 900.0))
+            .with_step_dt(0.016)
+            .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+            .build_eframe(|_| app);
         h.run_steps(3);
         h.state().frames.dispatch_remote();
         let initial = renderer.finish();
@@ -124,7 +132,11 @@ fn continuous_opacity_preview_probe() {
     let mut session = Session::default();
     session.execute("comp.new", json!({"width":1920,"height":1080,"duration":1})).unwrap();
     let layer = session.execute("layer.newSolid", json!({"color":"#ffffff"})).unwrap()["layer"].as_u64().unwrap();
-    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_step_dt(1.0 / 60.0).build_eframe(|_| EffectcraftApp::new(session));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1400.0, 900.0))
+        .with_step_dt(1.0 / 60.0)
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(session));
     let ready = Instant::now();
     while h.state_mut().viewer_pixels().is_none() && ready.elapsed() < Duration::from_secs(5) {
         h.step();

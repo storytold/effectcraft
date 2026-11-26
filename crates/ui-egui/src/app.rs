@@ -31,7 +31,9 @@ impl EffectcraftApp {
     /// Loads and applies the workspaces saved in the session's config directory (a failed load is reported in
     /// `ui.status`), initializes the default UI, playback and render state, and registers the frontend's commands as
     /// shortcutable `UiCommand`s on the session.
-    pub fn new(session: Session) -> Self {
+    pub fn new(mut session: Session) -> Self {
+        // Scripts' file dialogs (File.openDialog…) show here ([`panels::scriptui_view::serve_file_dialogs`]).
+        session.script_ui.answers_file_dialogs = true;
         let mut ui = UiState::default();
         let workspace_store = workspace_state::WorkspaceStore::load(session.config.as_deref(), &mut ui);
         EffectcraftApp {
@@ -68,17 +70,26 @@ impl EffectcraftApp {
             forwarded: ForwardedInput::default(),
             input_waiters: vec![],
             job_waiters: vec![],
+            script_waiters: vec![],
             pending_screenshots: vec![],
             shot_bytes: 0,
             last_activity: (0.0, 0),
             last_edit: (0.0, 0),
             toast: None,
+            error_toasts: Default::default(),
             viewer_tex: None,
             passive_tex: std::collections::HashMap::new(),
             viewer_native: None,
             viewer_shown: None,
             crypto_probe_busy: Default::default(),
             viewer_image: None,
+            viewer_f16: None,
+            window_wgpu: None,
+            display_gpu: None,
+            display_gpu_failed: false,
+            viewer_bake: Default::default(),
+            snapshot_bake: Default::default(),
+            snapshot_f16: None,
             viewer_readback: Default::default(),
             wgpu: None,
             gpu: None,
@@ -89,6 +100,9 @@ impl EffectcraftApp {
             gpu_failure_applied: None,
             footage_watcher: None,
             footage_watch_key: None,
+            lut_watcher: None,
+            lut_generation: effectcraft_engine::lut_reload::generation(),
+            purges: 0,
             device_lost_close: None,
             dialog_answers: std::sync::mpsc::channel(),
             file_dialogs: FileDialogsUp::default(),
@@ -108,12 +122,15 @@ impl EffectcraftApp {
             native_viewports: vec![],
             unpublished_viewports: vec![],
             pending_panel_raise: None,
+            live_dock: Default::default(),
             home_thumbs: Default::default(),
             home_thumb_saved: None,
             window_title: String::new(),
             template_thumbs: Default::default(),
             template_list: None,
             updates_rt: updates_ui::Runtime::default(),
+            framework_dialogs: craft_ui::dialog::DialogHost::new(),
+            framework_host: crate::framework::host(),
         }
         .with_ui_commands()
     }
@@ -144,10 +161,12 @@ impl eframe::App for EffectcraftApp {
         }
     }
 
-    /// Feed pending synthetic input into `raw_input` only once fonts are ready (so a non-drawing pass never consumes
+    /// Hand the runtime this frame's root values (`before_input`), then feed pending synthetic input into `raw_input`
+    /// only once fonts are ready (so a non-drawing pass never consumes
     /// a batch), then prepare pointer wrapping; ending a numeric scrub clears the history merge key so the next edit
     /// starts a new undo step.
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        self.before_input(ctx);
         raw_input.events.append(&mut self.forwarded.events);
         raw_input.dropped_files.append(&mut self.forwarded.files);
         let injected = self.synthetic_in_flight || !self.synthetic.is_empty();
@@ -163,19 +182,19 @@ impl eframe::App for EffectcraftApp {
         }
     }
 
-    /// The logic-only tick: run `tick`, close the IME pass with `finish_ime_logic` and, last, hand a close to the
-    /// platform quit (`panels::unsaved::quit_on_close`). It does not read pass-time
-    /// input state (events, pointer and time are stale here), only the viewport information eframe refreshed.
+    /// The logic-only tick: run `tick`, close the IME pass with `finish_ime_logic` and, last, the root window's close
+    /// path (`close_path`, which asks about unsaved changes, and on macOS quits through the platform). It does not
+    /// read pass-time input state (events, pointer and time are stale here), only the viewport information eframe
+    /// refreshed. A close request must be answered while hidden too; an answered file dialog can change the project,
+    /// so the tick's dialog answers run first.
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        // Never `ctx.input(|i| i.time)` here: `Context::run_logic` leaves events, pointer state and
-        // time at the previous full pass's values (only the viewport information is refreshed).
-        self.tick(ctx, frame);
-        self.finish_ime_logic(ctx);
-        crate::panels::unsaved::quit_on_close(ctx);
+        self.logic_pass(ctx, frame);
     }
 
     /// Draw one UI pass through `draw`.
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        #[cfg(not(target_arch = "wasm32"))]
+        crate::framework::before_ui(ui.ctx(), &*frame);
         self.draw(ui, frame);
     }
 }

@@ -18,7 +18,7 @@ fn harness() -> (Harness<'static, EffectcraftApp>, u64) {
     }
     s.execute("layer.select", json!({"layers": []})).unwrap();
     let app = EffectcraftApp::new(s);
-    let mut h = Harness::builder().with_size(vec2(1200.0, 800.0)).build_eframe(|_| app);
+    let mut h = Harness::builder().with_size(vec2(1200.0, 800.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app);
     h.run_steps(4);
     (h, top)
 }

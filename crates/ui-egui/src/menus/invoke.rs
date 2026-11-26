@@ -115,7 +115,7 @@ fn reveal_targets(app: &EffectcraftApp) -> Vec<u64> {
 
 /// The arrow keys nudge the selected layers 1 pixel at the viewer's magnification (`up`,
 /// `down`, `left`, `right`), 10 with Shift (`up10`…), as After Effects does, so zoomed in
-/// they move by fractions of a comp pixel. From any panel except Project, Effects & Presets and Render Queue (which own the
+/// they move by fractions of a comp pixel. From any panel except Project, Effects & Presets, Render Queue and the Flowchart (which own the
 /// arrow keys for its own keyboard navigation, #961); not while typing, with a dialog or
 /// menu open. With mask points selected the arrows move the points instead (#1288).
 fn nudge(app: &mut EffectcraftApp, ctx: &egui::Context, dir: &str) -> Result<Value, String> {
@@ -131,7 +131,7 @@ fn nudge(app: &mut EffectcraftApp, ctx: &egui::Context, dir: &str) -> Result<Val
         _ => return Err(format!("unknown nudge `{dir}`")),
     };
     let st = &app.session.state;
-    if matches!(app.ui.focused, PanelKind::Project | PanelKind::EffectsPresets | PanelKind::RenderQueue)
+    if matches!(app.ui.focused, PanelKind::Project | PanelKind::EffectsPresets | PanelKind::RenderQueue | PanelKind::Flowchart)
         || (st.selected_layers.is_empty() && st.selected_vertices.is_empty())
         || st.text_edit.is_some()
     {
@@ -163,6 +163,7 @@ fn vertex_delta(app: &EffectcraftApp, layer: effectcraft_engine::project::LayerI
         footage: None,
         property_overrides: &[],
         media_overrides: &[],
+        reads: None,
     };
     let (l2c, _) = crate::panels::viewer::l2c(&ectx, l);
     l2c.inverse().map_or(d, |inv| {
@@ -182,8 +183,15 @@ fn only_comp(p: &Value) -> Option<effectcraft_engine::project::ItemId> {
     m.get("comp")?.as_u64().map(effectcraft_engine::project::ItemId)
 }
 
+/// Whether [`invoke`]'s result says the command waits on a dialog (a guard or a form deferred it
+/// until the user answers, `{"dialog": …}`).
+pub fn waits_on_dialog(result: &Value) -> bool {
+    result.get("dialog").is_some()
+}
+
 /// Execute a UI or engine command by id.
 pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: Value) -> Result<Value, String> {
+    crate::control::check_script_render(app, id)?;
     if matches!(id, "effects.copyPresetsFolderPath" | "mediaBrowser.copySourcePath") {
         return frontend(app, ctx, id, params);
     }
@@ -195,10 +203,16 @@ pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: V
     }
     // A new folder (File ▸ New, its shortcut, the Project panel's button and context menu) opens
     // with its name ready to type, as in After Effects (#1658). The command selects it.
-    // `engine.execute` keeps the headless default.
-    if id == "project.newFolder" && no_params(&params) {
+    // `engine.execute` keeps the headless default. Items dropped on the New Folder button (only
+    // `items`, #3196) open the name too.
+    if id == "project.newFolder" && (no_params(&params) || params.as_object().is_some_and(|m| m.len() == 1 && m.contains_key("items"))) {
+        let dropped = params.get("items").is_some();
         let r = run_engine(app, ctx, id, params);
-        if r.is_ok() {
+        if let Ok(v) = &r {
+            // Open a folder that items were dropped into, so they stay in view.
+            if dropped && let Some(f) = v.get("item").and_then(Value::as_u64) {
+                app.ui.project_open_folders.insert(f);
+            }
             app.show_panel(PanelKind::Project);
             crate::panels::project::begin_rename(app, ctx);
         }
@@ -229,7 +243,7 @@ pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: V
     // Close follows panel focus too: with the Render Queue active, Cmd+W closes that panel and
     // leaves the active composition open (it used to close the composition next to it).
     if id == "file.close" && no_params(&params) && app.ui.focused == PanelKind::RenderQueue {
-        app.apply_dock(craft_ui::docking::Action::Close { panel: PanelKind::RenderQueue })?;
+        app.apply_dock(craft_behavior::dock::Action::close(PanelKind::RenderQueue))?;
         // The focus goes to a panel that is still there, so the next Close acts on the composition
         // instead of on the queue that is gone.
         let next = [PanelKind::Timeline, PanelKind::Composition, PanelKind::Project].into_iter().find(|p| panel_shown(app, *p)).unwrap_or(PanelKind::Project);
@@ -284,6 +298,15 @@ pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: V
     if crate::panels::delete_items::guard(app, id, &params) {
         return Ok(json!({"dialog": "deleteItems"}));
     }
+    // Un-precompose that would change the picture lists why and asks before unpacking anyway.
+    if crate::panels::unprecompose::guard(app, id, &params)? {
+        return Ok(json!({"dialog": "unprecompose"}));
+    }
+    // An After Effects import with a path that loses something asks first (the menu's file
+    // dialog asks in `run_with_picked`).
+    if params.get("path").is_some() && crate::panels::aep_losses::guard(app, id, &params)? {
+        return Ok(json!({"dialog": "aepLosses"}));
+    }
     // J / K and Select All Keyframes act on what the Timeline shows (its revealed properties).
     if matches!(id, "time.nextKey" | "time.previousKey" | "keys.selectAll")
         && ["visible", "layers", "layer", "prop"].iter().all(|k| params.get(*k).is_none())
@@ -325,13 +348,23 @@ pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: V
         return frontend(app, ctx, "window.workspace", json!({"name": ws}));
     }
     if let Some(t) = id.strip_prefix("tool.") {
-        // C cycles through the camera tools.
-        if t == "camera" {
-            let tools = [Tool::Orbit, Tool::PanCamera, Tool::Dolly];
-            let next = match tools.iter().position(|x| *x == app.ui.tool) {
-                Some(i) => tools[(i + 1) % tools.len()],
-                None => Tool::Orbit,
-            };
+        // The camera tools: the Orbit, Pan and Dolly slots, each showing the variant last picked
+        // from its flyout. C cycles the three; 1, 2 and 3 pick one.
+        let camera_tool = |g: usize| {
+            let lead = [Tool::Orbit, Tool::PanCamera, Tool::Dolly].get(g).copied().unwrap_or(Tool::Orbit);
+            let Some(si) = Tool::SLOTS.iter().position(|s| s.contains(&lead)) else { return lead };
+            let slot = Tool::SLOTS.get(si).copied().unwrap_or(&[]);
+            app.ui.slot_tools.get(si).copied().filter(|x| slot.contains(x)).unwrap_or(lead)
+        };
+        let group = match t {
+            "camera" => Some(app.ui.tool.camera_group().map_or(0, |g| (g + 1) % 3)),
+            "orbit" => Some(0),
+            "panCamera" => Some(1),
+            "dolly" => Some(2),
+            _ => None,
+        };
+        if let Some(g) = group {
+            let next = camera_tool(g);
             app.ui.tool = next;
             return Ok(json!({"tool": next}));
         }
@@ -420,17 +453,23 @@ pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: V
             "closePanel" => {
                 let p = panel_of("panel").ok_or("closePanel: need `panel`")??;
                 if app.ui.dock.is_open(p) {
-                    app.apply_dock(craft_ui::docking::Action::Close { panel: p })?;
+                    app.apply_dock(craft_behavior::dock::Action::close(p))?;
                 }
                 return Ok(Value::Null);
             }
             "floatPanel" => {
                 let p = panel_of("panel").ok_or("floatPanel: need `panel`")??;
                 let r = match params.get("rect") {
-                    Some(value) => serde_json::from_value::<[f32; 4]>(value.clone()).map_err(|_| "rect must contain four finite numbers")?,
+                    Some(value) => {
+                        let rect = serde_json::from_value::<[f32; 4]>(value.clone()).map_err(|_| "rect must contain four finite numbers")?;
+                        if !rect.iter().all(|v| v.is_finite()) {
+                            return Err("rect must contain four finite numbers".into());
+                        }
+                        crate::dock_command::rect_of(rect)
+                    }
                     None => crate::dock_ui::default_float_rect(ctx.content_rect()),
                 };
-                app.apply_dock(craft_ui::docking::Action::Float { panel: p, rect: r }).map_err(|e| format!("can't undock {}: {e}", p.title()))?;
+                app.apply_dock(craft_behavior::dock::Action::float(p, r)).map_err(|e| format!("can't undock {}: {e}", p.title()))?;
                 return Ok(Value::Null);
             }
             _ => {
@@ -452,8 +491,8 @@ pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: V
                 if let Some(before) = panel_of("before") {
                     command["before"] = json!(before?);
                 }
-                let command: craft_ui::docking::DockCommand<PanelKind> =
-                    serde_json::from_value(command).map_err(|e| format!("dockPanel: zone: center|tab|left|right|top|bottom|above|below ({e})"))?;
+                let command = crate::dock_command::DockCommand::parse("window.panel.dock", &command)
+                    .map_err(|e| format!("dockPanel: zone: center|tab|left|right|top|bottom|above|below ({e})"))?;
                 app.run_dock_command(ctx, command).map_err(|e| format!("can't dock {}: {e}", p.title()))?;
                 app.show_panel(p);
                 return Ok(Value::Null);

@@ -47,6 +47,7 @@ impl Env {
     fn of(s: &Session, cid: ItemId) -> Env {
         Env { time: s.time_of(cid), expr: s.expr.clone(), footage: s.footage.clone() }
     }
+    /// The evaluation context of `comp` in `proj` at the session's current time.
     fn ctx<'a>(&'a self, proj: &'a Project, cid: ItemId, comp: &'a Comp) -> EvalCtx<'a> {
         EvalCtx {
             project: proj,
@@ -57,6 +58,7 @@ impl Env {
             footage: Some(self.footage.as_ref()),
             property_overrides: &[],
             media_overrides: &[],
+            reads: None,
         }
     }
 }

@@ -223,29 +223,198 @@ fn crypto_aux_image_is_bit_exact_on_edge_values() {
     }
 }
 
-/// Without the ID colours the matte (A) is bit-identical and the RGB is 0, on the edge values.
+/// #3334: at render scale 1 the matte plane is the per-pixel reduction's matte bit for bit, and
+/// the Colors plane is the Colors display's pixel made from it, on the edge values.
 #[test]
-fn crypto_aux_image_without_colors_keeps_the_matte() {
+fn the_source_resolution_planes_are_the_per_pixel_reduction() {
     let a = edge_aux(true);
     let sel = edge_selection();
     let full = crypto_aux_image(&a, "CryptoObject", &sel);
-    let matte = crypto_aux_image_with(&a, "CryptoObject", &sel, CryptoAux::MatteOnly);
-    for (f, m) in full.data.iter().zip(&matte.data) {
-        assert_eq!(f[3].to_bits(), m[3].to_bits());
-        assert_eq!(m[..3], [0.0; 3]);
+    let matte = crypto_plane(&a, "CryptoObject", &sel, CryptoOutput::Matte, 1.0);
+    let colors = crypto_plane(&a, "CryptoObject", &sel, CryptoOutput::Colors, 1.0);
+    assert_eq!((matte.width, matte.height, matte.scale), (a.width, a.height, a.scale));
+    assert_eq!(matte.data.len(), 12, "one value per aux pixel");
+    for (i, f) in full.data.iter().enumerate() {
+        assert_eq!(f[3].to_bits(), matte.data[i].to_bits(), "matte {i}");
+        let want = crypto_colors_px([f[0], f[1], f[2]], f[3]);
+        assert_eq!(want.map(f32::to_bits), [0, 1, 2, 3].map(|c| colors.data[i * 4 + c].to_bits()), "colors {i}");
     }
 }
 
 /// Only the Colors display without Matte Only reads the ID colours.
 #[test]
-fn crypto_aux_for_display_reads_colors_only_for_the_colors_display() {
-    assert_eq!(CryptoAux::for_display(0, false), CryptoAux::ColorsAndMatte);
-    assert_eq!(CryptoAux::for_display(0, true), CryptoAux::MatteOnly);
+fn crypto_output_reads_colors_only_for_the_colors_display() {
+    assert_eq!(CryptoOutput::for_display(0, false), CryptoOutput::Colors);
+    assert_eq!(CryptoOutput::for_display(0, true), CryptoOutput::Matte);
     for display in [1, 2, 3, u32::MAX] {
         for matte_only in [false, true] {
-            assert_eq!(CryptoAux::for_display(display, matte_only), CryptoAux::MatteOnly, "display {display}");
+            assert_eq!(CryptoOutput::for_display(display, matte_only), CryptoOutput::Matte, "display {display}");
         }
     }
+}
+
+/// A 9×7 two-rank Cryptomatte layer (`aux_scale` aux pixels per layer pixel) whose objects
+/// share their edge pixels: on rank 00 "cube" (60 %) or "sphere", on rank 01 the other one
+/// (the remaining coverage) along the edges, so a pixel there belongs to two IDs.
+fn shared_edges(aux_scale: f64) -> AuxChannels {
+    let (lw, lh) = (9usize, 7usize);
+    let (w, h) = ((lw as f64 * aux_scale) as usize, (lh as f64 * aux_scale) as usize);
+    let (cube, sphere) = (crypto_float(crypto_hash("cube")), crypto_float(crypto_hash("sphere")));
+    let mut a = AuxChannels::new(w as u32, h as u32, aux_scale);
+    let mut ch: Vec<Vec<f32>> = vec![vec![0.0; w * h]; 4];
+    for y in 0..h {
+        for x in 0..w {
+            let i = y * w + x;
+            let (lx, ly) = (x as f64 / aux_scale, y as f64 / aux_scale);
+            let d = lx + 0.6 * ly - 6.0;
+            let edge = d.abs() < 1.5;
+            let (first, second) = if d < 0.0 { (cube, sphere) } else { (sphere, cube) };
+            let c = if edge { 0.6 + 0.1 * ((x + y) % 3) as f32 } else { 1.0 };
+            ch[0][i] = first;
+            ch[1][i] = c;
+            ch[2][i] = if edge { second } else { 0.0 };
+            ch[3][i] = if edge { 1.0 - c } else { 0.0 };
+        }
+    }
+    a.channels = ["00.R", "00.G", "00.B", "00.A"].iter().zip(ch).map(|(n, v)| (format!("CryptoObject{n}"), v)).collect();
+    a.manifests = vec![("CryptoObject".into(), vec![("cube".into(), crypto_hash("cube")), ("sphere".into(), crypto_hash("sphere"))])];
+    a
+}
+
+/// Run the Cryptomatte effect on a buffer of the 9×7 layer at render scale 1 / `k` over `a`.
+fn crypto_run(a: &AuxChannels, vals: &[(&str, Value)], k: u32) -> Image {
+    let host = AuxHost(Arc::new(a.clone()));
+    let (w, h, scale) = (9u32.div_ceil(k), 7u32.div_ceil(k), 1.0 / k as f64);
+    let spec = crate::find("ec.3d.cryptomatte").unwrap();
+    let mut params = crate::Params { values: spec.params.iter().map(|ps| (ps.id.to_string(), crate::default_value(ps, [9.0, 7.0]))).collect() };
+    for (k, v) in vals {
+        params.values.insert(k.to_string(), v.clone());
+    }
+    let ctx = EffectCtx {
+        params: &params,
+        time: 0.0,
+        layer_size: [9.0, 7.0],
+        seed: 0,
+        adjustment: false,
+        env: EffectEnv { host: Some(&host), ..Default::default() },
+    };
+    (spec.render)(&ctx, Buf { img: Image::filled(w, h, [0.8, 0.6, 0.4, 1.0]), offset: [0.0; 2], scale }).img
+}
+
+/// The full-resolution output box-filtered by `k`, summed in the plane's order (rows, then
+/// columns), the pixels past the layer's edge 0. Alpha is 1: the outputs compared (Colors, and
+/// Matte Only with the matte in RGB) are opaque.
+fn boxed(full: &Image, k: u32) -> Image {
+    let (w, h) = (full.width.div_ceil(k), full.height.div_ceil(k));
+    let mut out = Image::new(w, h);
+    for y in 0..h {
+        for x in 0..w {
+            let mut px = [0.0f32; 4];
+            for (c, o) in px.iter_mut().enumerate() {
+                let mut sum = 0.0f64;
+                for sy in y * k..y * k + k {
+                    for sx in x * k..x * k + k {
+                        let v = if sx < full.width && sy < full.height { full.get(sx as i64, sy as i64)[c] } else { 0.0 };
+                        sum += v as f64;
+                    }
+                }
+                *o = (sum / (k * k) as f64) as f32;
+            }
+            px[3] = 1.0;
+            out.set(x, y, px);
+        }
+    }
+    out
+}
+
+/// #3334: below render scale 1 the output is the full-resolution output box-filtered down, bit
+/// for bit, at half and third resolution, for the matte (Matte Only) and the Colors display, on
+/// edges where two IDs share a pixel and with the aux at 1× and 2× the layer's resolution.
+#[test]
+fn reduced_resolution_is_the_full_resolution_output_box_filtered() {
+    for aux_scale in [1.0, 2.0] {
+        let a = shared_edges(aux_scale);
+        for vals in [
+            vec![("selection", Value::Str("cube".into())), ("matteOnly", Value::Bool(true))],
+            vec![("selection", Value::Str("cube, sphere".into())), ("matteOnly", Value::Bool(true))],
+            vec![("selection", Value::Str("sphere".into())), ("display", Value::Enum(0)), ("matteOnly", Value::Bool(false))],
+        ] {
+            let full = crypto_run(&a, &vals, 1);
+            for k in [2u32, 3] {
+                let got = crypto_run(&a, &vals, k);
+                let want = boxed(&full, k);
+                assert_eq!((got.width, got.height), (want.width, want.height));
+                for (i, (g, w)) in got.data.iter().zip(&want.data).enumerate() {
+                    assert_eq!(g.map(f32::to_bits), w.map(f32::to_bits), "aux {aux_scale} {vals:?} 1/{k}: pixel {i}: {g:?} vs {w:?}");
+                }
+            }
+        }
+        // The edges hold partial coverage: a filtered pixel there is neither 0 nor 1.
+        let half = crypto_run(&a, &[("selection", Value::Str("cube".into())), ("matteOnly", Value::Bool(true))], 2);
+        assert!(half.data.iter().any(|p| p[0] > 0.05 && p[0] < 0.95), "{:?}", half.data);
+    }
+}
+
+/// #3334: the ID channels never go through a resampler. The selection is the ID an
+/// interpolation of the two IDs would make where they meet (their values' mean: a 2 × 2 box or
+/// a bilinear sample half way between them; and their bits' midpoint): no pixel of the layer
+/// has it, so its matte is 0 at every render scale, in the effect and in the plane the GPU
+/// uploads. (That the planes are the per-pixel reduction is
+/// `the_source_resolution_planes_are_the_per_pixel_reduction`.)
+#[test]
+fn ids_are_never_resampled() {
+    let (cube, sphere) = (crypto_float(crypto_hash("cube")), crypto_float(crypto_hash("sphere")));
+    let mid_bits = ((cube.to_bits() as u64 + sphere.to_bits() as u64) / 2) as u32;
+    let mean = (cube + sphere) * 0.5;
+    for made in [mid_bits, mean.to_bits()] {
+        assert!(made != cube.to_bits() && made != sphere.to_bits());
+        for aux_scale in [1.0, 2.0] {
+            let a = shared_edges(aux_scale);
+            for k in [1u32, 2, 3, 4] {
+                let sel = Value::Str(format!("<{made:08x}>"));
+                let out = crypto_run(&a, &[("selection", sel), ("matteOnly", Value::Bool(true))], k);
+                assert!(out.data.iter().all(|p| p[0] == 0.0), "aux {aux_scale} 1/{k}: an ID no pixel has was selected");
+                // (and the plane the GPU uploads: the matte alone)
+                let plane = crypto_plane(&a, "CryptoObject", &[made], CryptoOutput::Matte, 1.0 / k as f64);
+                assert!(plane.data.iter().all(|m| *m == 0.0));
+            }
+        }
+    }
+}
+
+/// #3334: a hostile render scale or aux scale never allocates a huge plane or panics.
+#[test]
+fn box_filter_survives_hostile_scales() {
+    let a = shared_edges(1.0);
+    for s in [0.0, -1.0, f64::NAN, f64::INFINITY, 1e-12, 1.0, 4.0] {
+        let p = crypto_plane(&a, "CryptoObject", &[crypto_hash("cube")], CryptoOutput::Matte, s);
+        assert!(p.data.len() <= 9 * 7, "scale {s}: {}", p.data.len());
+    }
+    let mut tiny = shared_edges(1.0);
+    tiny.scale = 1e-9;
+    let p = crypto_plane(&tiny, "CryptoObject", &[crypto_hash("cube")], CryptoOutput::Matte, 0.5);
+    assert_eq!(p.data.len(), 9 * 7, "too large a layer: left unscaled");
+    // A layer claiming 1000 × its file's size at a tiny render scale: few output pixels, but the
+    // filter would visit 6.3e7 layer pixels; left unscaled, at once.
+    tiny.scale = 1e-3;
+    let p = crypto_plane(&tiny, "CryptoObject", &[crypto_hash("cube")], CryptoOutput::Matte, 1e-3);
+    assert_eq!(p.data.len(), 9 * 7);
+    assert!(box_size(9, 7, 1e-3, 1e-3, MAX_BOX_PIXELS).is_none(), "the filter's work is refused, not done");
+    assert!(box_size(9, 7, 1.0, 0.5, MAX_BOX_PIXELS).is_some(), "an ordinary half resolution is filtered");
+}
+
+/// #3301 review: a source whose layer has more pixels than a filtered plane may have (a 16K
+/// file at half resolution) is still filtered when the result fits: alternating selected and
+/// unselected rows give 0.5, not the 0 of a nearest-neighbour lookup of every second row.
+#[test]
+fn a_large_source_is_filtered_when_its_result_fits() {
+    let (w, h) = (8usize, 8usize);
+    let data = (0..w * h).map(|i| if (i / w) % 2 == 0 { 1.0 } else { 0.0 }).collect();
+    let src = CryptoPlane { width: w as u32, height: h as u32, scale: 1.0, output: CryptoOutput::Matte, data };
+    // (at most 16 output pixels: the 4 × 4 result fits, the 64 layer pixels don't)
+    let p = crypto_box_within(src, 0.5, 16);
+    assert_eq!((p.width, p.height), (4, 4), "filtered to half resolution");
+    assert!(p.data.iter().all(|m| (m - 0.5).abs() < 1e-6), "{:?}", p.data);
 }
 
 /// The CPU effect on a 20×10 layer over the 6×2 edge aux: pixels inside the aux area match
@@ -258,15 +427,20 @@ fn cryptomatte_cpu_path_is_bit_exact_inside_and_outside_the_aux_area() {
     let names = "sphere, <7fc00000>, <7fc01234>, <80000000>";
     assert_eq!(selection_hashes(names, None), edge_selection());
     let src = img().data[0];
-    for (display, matte_only) in [(0, false), (1, false), (2, false), (0, true)] {
+    for (display, matte_only, in_alpha) in [(0, false, false), (1, false, false), (2, false, false), (0, true, false), (0, true, true)] {
         let out = run(
             "ec.3d.cryptomatte",
-            &[("selection", Value::Str(names.into())), ("display", Value::Enum(display)), ("matteOnly", Value::Bool(matte_only))],
+            &[
+                ("selection", Value::Str(names.into())),
+                ("display", Value::Enum(display)),
+                ("matteOnly", Value::Bool(matte_only)),
+                (MATTE_ONLY_IN_ALPHA, Value::Bool(in_alpha)),
+            ],
             &host,
         );
         let expect = |c: [f32; 3], m: f32| -> [f32; 4] {
             if matte_only {
-                return [m; 4];
+                return if in_alpha { [m; 4] } else { [m, m, m, 1.0] };
             }
             match display {
                 0 => {
@@ -279,30 +453,122 @@ fn cryptomatte_cpu_path_is_bit_exact_inside_and_outside_the_aux_area() {
         };
         for (x, y) in [(0u32, 0u32), (1, 0), (5, 0), (0, 1), (3, 1), (5, 1)] {
             let (c, m) = reduce_by_name(&a, "CryptoObject", &edge_selection(), (y * 6 + x) as usize);
-            assert_eq!(out.get(x as i64, y as i64).map(f32::to_bits), expect(c, m).map(f32::to_bits), "display {display} matteOnly {matte_only} at ({x}, {y})");
+            assert_eq!(
+                out.get(x as i64, y as i64).map(f32::to_bits),
+                expect(c, m).map(f32::to_bits),
+                "display {display} matteOnly {matte_only} inAlpha {in_alpha} at ({x}, {y})"
+            );
         }
         for (x, y) in [(6u32, 0u32), (19, 0), (0, 2), (12, 9)] {
             assert_eq!(
                 out.get(x as i64, y as i64).map(f32::to_bits),
                 expect([0.0; 3], 0.0).map(f32::to_bits),
-                "display {display} matteOnly {matte_only} outside the aux at ({x}, {y})"
+                "display {display} matteOnly {matte_only} inAlpha {in_alpha} outside the aux at ({x}, {y})"
             );
         }
     }
+}
+
+/// #3127: Matte Only shows the matte as After Effects' Cryptomatte plug-in does, in RGB over
+/// alpha 1 (its Matte Only render of 2026-11-05 is opaque black where nothing is selected), not
+/// in alpha. A partly covered pixel is grey, not translucent; the hidden Matte Only In Alpha
+/// switch (on for projects saved before) keeps the old matte in every channel.
+#[test]
+fn cryptomatte_matte_only_is_the_matte_in_rgb_over_alpha_one() {
+    let a = edge_aux(true);
+    let host = AuxHost(Arc::new(a.clone()));
+    let names = "sphere, <7fc00000>, <7fc01234>, <80000000>";
+    let only = |in_alpha: bool| {
+        run(
+            "ec.3d.cryptomatte",
+            &[("selection", Value::Str(names.into())), ("matteOnly", Value::Bool(true)), (MATTE_ONLY_IN_ALPHA, Value::Bool(in_alpha))],
+            &host,
+        )
+    };
+    let (new, old) = (only(false), only(true));
+    let partial = (0..6u32 * 2).map(|i| (i % 6, i / 6)).find(|&(x, y)| {
+        let m = reduce_by_name(&a, "CryptoObject", &edge_selection(), (y * 6 + x) as usize).1;
+        m > 0.0 && m < 1.0
+    });
+    let (x, y) = partial.expect("the edge aux has a partly covered pixel");
+    let m = reduce_by_name(&a, "CryptoObject", &edge_selection(), (y * 6 + x) as usize).1;
+    assert_eq!(new.get(x as i64, y as i64), [m, m, m, 1.0]);
+    assert_eq!(old.get(x as i64, y as i64), [m; 4]);
+    // Outside the aux area (and unselected): opaque black, as After Effects renders it.
+    assert_eq!(new.get(12, 9), [0.0, 0.0, 0.0, 1.0]);
+    assert_eq!(old.get(12, 9), [0.0; 4]);
+    // A fresh instance has the switch off.
+    let spec = crate::find("ec.3d.cryptomatte").unwrap();
+    let ps = spec.params.iter().find(|p| p.id == MATTE_ONLY_IN_ALPHA).expect("the hidden switch");
+    assert_eq!((&ps.default, &ps.ui), (&Value::Bool(false), &ParamUi::Hidden));
 }
 
 #[test]
 fn cryptomatte_selects_by_name_and_wildcard() {
     let h = scene();
     let m = run("ec.3d.cryptomatte", &[("selection", Value::Str("right".into())), ("matteOnly", Value::Bool(true))], &h);
-    assert_eq!(m.get(2, 5)[3], 0.0);
-    assert_eq!(m.get(12, 5)[3], 1.0);
+    assert_eq!(m.get(2, 5), [0.0, 0.0, 0.0, 1.0]);
+    assert_eq!(m.get(12, 5), [1.0; 4]);
     let w = run("ec.3d.cryptomatte", &[("selection", Value::Str("l*".into())), ("display", Value::Enum(1))], &h);
     assert_eq!(w.get(2, 5)[3], 1.0);
     assert_eq!(w.get(12, 5)[3], 0.0);
     assert!(wild("*ight", "right") && wild("r*t", "right") && !wild("x*", "right"));
     let hex = format!("<{:08x}>", crypto_hash("left"));
     assert_eq!(selection_hashes(&hex, None), vec![crypto_hash("left")]);
+}
+
+/// Layer Name picks a Cryptomatte layer named in full (`Crypto_Material`, which the Layer popup's
+/// CryptoMaterial does not match); empty or missing it falls back to the Layer popup.
+#[test]
+fn cryptomatte_layer_name_picks_the_named_layer() {
+    let base = scene();
+    let mut a = (*base.0).clone();
+    // A second layer with the IDs swapped: left is on the right half there.
+    let swap = |name: &str| a.channels.iter().find(|(n, _)| n == name).map(|(_, v)| v.clone()).unwrap();
+    let (r, g) = (swap("CryptoObject00.R"), swap("CryptoObject00.G"));
+    let w = 20;
+    let r2: Vec<f32> = (0..r.len()).map(|i| r[(i / w) * w + (w - 1 - i % w)]).collect();
+    a.channels.push(("Crypto_Material00.R".into(), r2));
+    a.channels.push(("Crypto_Material00.G".into(), g));
+    let h = AuxHost(Arc::new(a));
+    let sel = format!("<{:08x}>", crypto_hash("left"));
+    let matte = |vals: &[(&str, Value)]| {
+        let mut v = vec![("selection", Value::Str(sel.clone())), ("matteOnly", Value::Bool(true))];
+        v.extend(vals.iter().cloned());
+        let m = run("ec.3d.cryptomatte", &v, &h);
+        (m.get(2, 5)[0], m.get(17, 5)[0])
+    };
+    assert_eq!(matte(&[("layerName", Value::Str("Crypto_Material".into()))]), (0.0, 1.0), "the named layer");
+    assert_eq!(matte(&[]), (1.0, 0.0), "the Layer popup's CryptoObject");
+    assert_eq!(matte(&[("layerName", Value::Str("Crypto_Name".into()))]), (1.0, 0.0), "a missing name falls back to the popup");
+}
+
+/// Layers whose names differ only in case are different layers: `layerName` "crypto_a" mattes
+/// from crypto_a's own IDs, not from the earlier `Crypto_A`.
+#[test]
+fn cryptomatte_layer_name_is_case_sensitive() {
+    let base = scene();
+    let mut a = (*base.0).clone();
+    let (r, g) = (
+        a.channels.iter().find(|(n, _)| n == "CryptoObject00.R").unwrap().1.clone(),
+        a.channels.iter().find(|(n, _)| n == "CryptoObject00.G").unwrap().1.clone(),
+    );
+    let w = 20;
+    let flipped: Vec<f32> = (0..r.len()).map(|i| r[(i / w) * w + (w - 1 - i % w)]).collect();
+    // `Crypto_A` first, with left/right as in the base scene; `crypto_a` has them swapped.
+    a.channels.push(("Crypto_A00.R".into(), r));
+    a.channels.push(("Crypto_A00.G".into(), g.clone()));
+    a.channels.push(("crypto_a00.r".into(), flipped));
+    a.channels.push(("crypto_a00.g".into(), g));
+    let h = AuxHost(Arc::new(a));
+    let sel = format!("<{:08x}>", crypto_hash("left"));
+    let matte = |name: &str| {
+        let v = [("selection", Value::Str(sel.clone())), ("matteOnly", Value::Bool(true)), ("layerName", Value::Str(name.into()))];
+        let m = run("ec.3d.cryptomatte", &v, &h);
+        (m.get(2, 5)[0], m.get(17, 5)[0])
+    };
+    assert_eq!(matte("Crypto_A"), (1.0, 0.0));
+    assert_eq!(matte("crypto_a"), (0.0, 1.0));
 }
 
 /// #473: a name with a comma in it (Blender allows `Green, Glossy`) is selected when it is
@@ -360,6 +626,38 @@ fn extractor_maps_named_channels() {
     assert_eq!(s.img.get(0, 0), [1.0, 0.3, 0.4, 1.0]);
 }
 
+/// `(copy)` (After Effects' EXtractoR choice, imported from .aep) is the effect input's own
+/// channel as earlier effects left it, never the OpenEXR's plane of the same name: here the input
+/// buffer differs from the footage's R, G, B and A planes, as after an earlier effect.
+#[test]
+fn extractor_copy_reads_the_current_input_not_the_footage_plane() {
+    let (w, h) = (4usize, 3usize);
+    let mut a = AuxChannels::new(w as u32, h as u32, 1.0);
+    // The file's own planes (what the footage held before any effect) and a depth channel.
+    a.channels = ["R", "G", "B", "A"].iter().map(|n| (n.to_string(), vec![0.9; w * h])).collect();
+    a.channels.push(("Z".into(), vec![0.7; w * h]));
+    let host = AuxHost(Arc::new(a));
+    let env = || EffectEnv { host: Some(&host), ..Default::default() };
+    // The input after an earlier effect: straight (0.2, 0.3, 0.4) at alpha 0.5, premultiplied.
+    let input = Image::filled(w as u32, h as u32, [0.1, 0.15, 0.2, 0.5]);
+    let copy = || Value::Str(EXTRACTOR_COPY.into());
+    // All four `(copy)`: the input unchanged.
+    let all = [("red", copy()), ("green", copy()), ("blue", copy()), ("alpha", copy())];
+    let o = run_fx("ec.3d.extractor", &all, input.clone(), 0.0, env()).img;
+    assert_eq!(o.data, input.data);
+    // Mixed with a named channel (no pass-through): red from Z, green and alpha copied, blue the
+    // footage's B plane.
+    let vals = [("red", Value::Str("Z".into())), ("green", copy()), ("blue", Value::Str("B".into())), ("alpha", copy())];
+    let px = run_fx("ec.3d.extractor", &vals, input.clone(), 0.0, env()).img.get(1, 1);
+    let want = [0.7 * 0.5, 0.3 * 0.5, 0.9 * 0.5, 0.5];
+    for (c, (got, want)) in px.iter().zip(want).enumerate() {
+        assert!((got - want).abs() < 1e-6, "channel {c}: {got} != {want} ({px:?})");
+    }
+    // `A` by name is the footage's alpha plane (0.9), not the input's alpha (0.5).
+    let named = [("alpha", Value::Str("A".into())), ("red", Value::Str("Z".into()))];
+    assert!((run_fx("ec.3d.extractor", &named, input, 0.0, env()).img.get(1, 1)[3] - 0.9).abs() < 1e-6);
+}
+
 #[test]
 fn channel_extract_antialias_averages_sub_pixels() {
     // Depth at twice the layer resolution, alternating 0 / 1000 per aux column.
@@ -398,4 +696,205 @@ fn instance3d_replaces_the_pixels_with_the_referenced_layer() {
     // No layer chosen: the layer's own pixels.
     let out = run_fx("ec.3d.instance3d", &[], solid(), 0.0, EffectEnv::default());
     assert_eq!(out.img.data, solid().data);
+}
+
+/// A 20×10 layer of one Cryptomatte layer `name` that holds "left" on its left half and
+/// "right" on its right half, as [`scene`] does for `CryptoObject`.
+fn crypto_only(names: &[&str]) -> AuxHost {
+    let (w, h) = (20usize, 10usize);
+    let mut a = AuxChannels::new(w as u32, h as u32, 1.0);
+    let (hl, hr) = (crypto_hash("left"), crypto_hash("right"));
+    for name in names {
+        let ids: Vec<f32> = (0..w * h).map(|i| crypto_float(if i % w < 10 { hl } else { hr })).collect();
+        a.channels.push((format!("{name}00.R"), ids));
+        a.channels.push((format!("{name}00.G"), vec![1.0; w * h]));
+        a.manifests.push((name.to_string(), vec![("left".into(), hl), ("right".into(), hr)]));
+    }
+    AuxHost(Arc::new(a))
+}
+
+fn choices(names: &[&str]) -> Vec<(usize, String)> {
+    crypto_layer_choices(Some(&crypto_only(names).0))
+}
+
+/// #473: the Layer popup lists the Cryptomatte layers the footage has, and the three standard
+/// ones when there is no footage, no OpenEXR or no Cryptomatte in it.
+#[test]
+fn crypto_layer_popup_lists_the_layers_of_the_footage() {
+    let standard: Vec<(usize, String)> = CRYPTO_LAYERS.iter().enumerate().map(|(i, n)| (i, n.to_string())).collect();
+    assert_eq!(crypto_layer_choices(None), standard);
+    assert_eq!(crypto_layer_choices(Some(&AuxChannels::new(1, 1, 1.0))), standard, "an EXR without Cryptomatte");
+    assert_eq!(crypto_layer_choices(Some(&scene().0)), vec![(0, "CryptoObject".to_string())]);
+    // Only CryptoMaterial: it, not CryptoObject, with its own stored value.
+    assert_eq!(choices(&["CryptoMaterial"]), vec![(1, "CryptoMaterial".to_string())]);
+    // Standard layers come in slot order whatever the names sort like; prefixed ones fill their slot.
+    assert_eq!(choices(&["CryptoAsset", "ViewLayer.CryptoObject"]), vec![(0, "ViewLayer.CryptoObject".to_string()), (2, "CryptoAsset".to_string())]);
+    // A layer under another name gets a value after the standard ones, in name order.
+    assert_eq!(choices(&["Zed", "CryptoMaterial", "Alpha"]), vec![(1, "CryptoMaterial".to_string()), (3, "Alpha".to_string()), (4, "Zed".to_string())]);
+    // A name that only ends in a standard one fills its slot, as the effect always matched it.
+    assert_eq!(
+        choices(&["MyCryptoObject", "ViewLayer.CryptoMaterial", "Other"]),
+        vec![(0, "MyCryptoObject".to_string()), (1, "ViewLayer.CryptoMaterial".to_string()), (3, "Other".to_string())]
+    );
+    // The entry shown: the value's own, else the first layer; with no layers, the standard one.
+    let shown = |names: &[&str], i| crypto_layer_menu(Some(&crypto_only(names).0), i).1;
+    assert_eq!(
+        [0, 1, 7].map(|i| shown(&["CryptoMaterial"], i)),
+        [Some("CryptoMaterial".to_string()), Some("CryptoMaterial".to_string()), Some("CryptoMaterial".to_string())]
+    );
+    assert_eq!(crypto_layer_menu(None, 2).1.as_deref(), Some("CryptoAsset"));
+    assert_eq!(crypto_layer_menu(None, 9).1.as_deref(), Some("CryptoObject"), "a custom value with no footage");
+    // Two layers for one slot: the first keeps it, the next gets a custom value.
+    assert_eq!(choices(&["A.CryptoObject", "B.CryptoObject"]), vec![(0, "A.CryptoObject".to_string()), (3, "B.CryptoObject".to_string())]);
+    assert_eq!(choices(&["A.CryptoObject", "B.CryptoObject", "C.CryptoObject", "Mine"]).iter().map(|c| c.0).collect::<Vec<_>>(), [0, 3, 4, 5]);
+}
+
+/// A project saved with Layer = CryptoObject / CryptoMaterial / CryptoAsset renders the same layer
+/// as before: the stored value's own layer, else the file's first; and the custom layers are read
+/// by their value.
+#[test]
+fn crypto_layer_values_keep_their_meaning() {
+    let all = crypto_only(&["CryptoAsset", "CryptoMaterial", "CryptoObject", "Mine"]).0;
+    let name = |i| crypto_layer_name(&all, i);
+    assert_eq!([0, 1, 2, 3].map(name), ["CryptoObject", "CryptoMaterial", "CryptoAsset", "Mine"].map(|n| Some(n.to_string())));
+    // A value the file has no layer for reads its first layer, as the effect always did.
+    assert_eq!(name(4).as_deref(), Some("CryptoAsset"));
+    let only = crypto_only(&["CryptoMaterial"]).0;
+    assert_eq!(
+        [0, 1, 2].map(|i| crypto_layer_name(&only, i)),
+        [Some("CryptoMaterial".to_string()), Some("CryptoMaterial".to_string()), Some("CryptoMaterial".to_string())]
+    );
+    assert_eq!(crypto_layer_name(&AuxChannels::new(1, 1, 1.0), 0), None);
+}
+
+/// The effect keys the layer the Layer value names: a Material-only file renders its matte
+/// whether Layer says Object (a saved project) or Material (what the popup now stores), and a
+/// custom layer by its own value.
+#[test]
+fn cryptomatte_renders_the_layer_the_value_names() {
+    let sel = ("selection", Value::Str("left".into()));
+    let matte = |layer: u32, host: &AuxHost| run("ec.3d.cryptomatte", &[("layer", Value::Enum(layer)), sel.clone(), ("display", Value::Enum(1))], host);
+    let only = crypto_only(&["CryptoMaterial"]);
+    let (old, new) = (matte(0, &only), matte(1, &only));
+    assert_eq!(old.data, new.data);
+    assert_eq!((new.get(2, 5)[3], new.get(12, 5)[3]), (1.0, 0.0));
+    // Two layers: "left" is in both, under hashes the manifests share, so tell them apart by
+    // which has it on the right half.
+    let (hl, hr) = (crypto_hash("left"), crypto_hash("right"));
+    let mut a = AuxChannels::new(20, 10, 1.0);
+    for (name, flip) in [("CryptoObject", false), ("Mine", true)] {
+        let ids: Vec<f32> = (0..200).map(|i| crypto_float(if (i % 20 < 10) != flip { hl } else { hr })).collect();
+        a.channels.push((format!("{name}00.R"), ids));
+        a.channels.push((format!("{name}00.G"), vec![1.0; 200]));
+    }
+    let two = AuxHost(Arc::new(a));
+    let (object, mine) = (matte(0, &two), matte(3, &two));
+    assert_eq!((object.get(2, 5)[3], object.get(12, 5)[3]), (1.0, 0.0));
+    assert_eq!((mine.get(2, 5)[3], mine.get(12, 5)[3]), (0.0, 1.0), "Layer 3 is the custom layer");
+    // A second view's layer of a standard kind is selectable too: B.CryptoObject is Layer 3.
+    let mut a = AuxChannels::new(20, 10, 1.0);
+    for (name, flip) in [("A.CryptoObject", false), ("B.CryptoObject", true)] {
+        let ids: Vec<f32> = (0..200).map(|i| crypto_float(if (i % 20 < 10) != flip { hl } else { hr })).collect();
+        a.channels.push((format!("{name}00.R"), ids));
+        a.channels.push((format!("{name}00.G"), vec![1.0; 200]));
+    }
+    let views = AuxHost(Arc::new(a));
+    assert_eq!(crypto_layer_name(&views.0, 0).as_deref(), Some("A.CryptoObject"));
+    assert_eq!(crypto_layer_name(&views.0, 3).as_deref(), Some("B.CryptoObject"));
+    let (first, second) = (matte(0, &views), matte(3, &views));
+    assert_eq!((first.get(2, 5)[3], first.get(12, 5)[3]), (1.0, 0.0));
+    assert_eq!((second.get(2, 5)[3], second.get(12, 5)[3]), (0.0, 1.0), "Layer 3 renders B");
+}
+
+/// #474: [`reads_aux`] names exactly the 3D Channel effects that ask the host for channels.
+#[test]
+fn reads_aux_names_the_effects_that_read_channels() {
+    struct Counting(AuxHost, std::sync::atomic::AtomicUsize);
+    impl EffectHost for Counting {
+        fn layer(&self, _: u64, _: bool) -> Option<LayerPixels> {
+            None
+        }
+        fn audio(&self, _: u64, _: f64, _: usize, _: u32) -> Option<Vec<f32>> {
+            None
+        }
+        fn aux(&self) -> Option<Arc<AuxChannels>> {
+            self.1.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.0.aux()
+        }
+    }
+    for s in specs() {
+        let host = Counting(scene(), Default::default());
+        run_fx(s.id, &[], img(), 0.0, EffectEnv { host: Some(&host), ..Default::default() });
+        assert_eq!(host.1.into_inner() > 0, reads_aux(s.id), "{}", s.id);
+    }
+    assert!(READS_AUX.iter().all(|id| specs().iter().any(|s| s.id == *id)), "every listed effect exists");
+}
+
+/// [`scene`] with more channels: IDs, coverage, normals, UVs, a background, a colour layer and
+/// two more Cryptomatte layers, each with its own values.
+fn rich_scene() -> AuxHost {
+    let mut a = (*scene().0).clone();
+    let n = (a.width * a.height) as usize;
+    let plane = |k: usize| (0..n).map(|i| ((i * 7 + k * 13) % 23) as f32 / 11.0 - 0.5).collect::<Vec<f32>>();
+    let (ha, hc) = (crypto_hash("asset"), crypto_hash("custom"));
+    let ids = |h: u32| (0..n).map(|i| if i % 3 == 0 { crypto_float(h) } else { 0.0 }).collect::<Vec<f32>>();
+    let names = ["MaterialID", "Coverage", "N.X", "N.Y", "N.Z", "UV.U", "UV.V", "BG.R", "BG.G", "BG.B", "diffuse.R", "diffuse.G", "diffuse.B"];
+    for (k, name) in names.iter().enumerate() {
+        a.channels.push((name.to_string(), plane(k)));
+    }
+    a.channels.push(("A.CryptoAsset00.R".into(), ids(ha)));
+    a.channels.push(("A.CryptoAsset00.G".into(), plane(40)));
+    a.channels.push(("zz.Custom00.R".into(), ids(hc)));
+    a.channels.push(("zz.Custom00.G".into(), plane(41)));
+    a.manifests.push(("A.CryptoAsset".into(), vec![("asset".into(), ha)]));
+    AuxHost(Arc::new(a))
+}
+
+/// The parameters [`run_fx`] gives effect `id` with `vals` (on [`img`]).
+fn params_of(id: &str, vals: &[(&str, Value)]) -> crate::Params {
+    let s = crate::find(id).expect("an effect");
+    let mut p = crate::Params { values: s.params.iter().map(|p| (p.id.to_string(), crate::default_value(p, [20.0, 10.0]))).collect() };
+    for (k, v) in vals {
+        p.values.insert(k.to_string(), v.clone());
+    }
+    p
+}
+
+/// #3271: each 3D Channel effect, given only the channels it declares ([`aux_needs`], with every
+/// channel name listed), renders bit for bit what it renders with all channels, and reads fewer.
+#[test]
+fn declared_aux_needs_render_as_all_channels() {
+    use effectcraft_raster::channels3d::AuxNeed;
+    let full = rich_scene();
+    let mut names = (*full.0).clone();
+    for (_, p) in &mut names.channels {
+        p.clear();
+    }
+    let s = |v: &str| Value::Str(v.into());
+    let mut cases: Vec<(&str, Vec<(&str, Value)>)> = (0..8).map(|k| ("ec.3d.channelextract", vec![("channel", Value::Enum(k))])).collect();
+    cases.extend([
+        ("ec.3d.depthmatte", vec![("depth", num(300.0))]),
+        ("ec.3d.depthoffield", vec![("focalPlane", num(300.0)), ("maximumRadius", num(4.0))]),
+        ("ec.3d.fog3d", vec![]),
+        ("ec.3d.idmatte", vec![("idSelection", num(1.0))]),
+        ("ec.3d.idmatte", vec![("auxChannel", Value::Enum(1)), ("useCoverage", Value::Bool(true))]),
+        ("ec.3d.identifier", vec![("id", num(2.0))]),
+        ("ec.3d.identifier", vec![("channelType", Value::Enum(1)), ("display", Value::Enum(3))]),
+        ("ec.3d.cryptomatte", vec![("selection", s("left")), ("display", Value::Enum(0))]),
+        ("ec.3d.cryptomatte", vec![("layer", Value::Enum(3)), ("display", Value::Enum(1)), ("selection", s("<*>"))]),
+        ("ec.3d.cryptomatte", vec![("layerName", s("A.CryptoAsset")), ("selection", s("asset"))]),
+        ("ec.3d.extractor", vec![("red", s("diffuse.R")), ("green", s(" N.X ")), ("blue", s("")), ("alpha", s("Coverage"))]),
+    ]);
+    let bits = |i: &Image| i.data.iter().flat_map(|p| p.map(f32::to_bits)).collect::<Vec<_>>();
+    for (id, vals) in cases {
+        let need = aux_needs(id, &params_of(id, &vals)).map_or(AuxNeed::All, AuxNeed::Lookups);
+        let keep = need.resolve(&names).expect("declared");
+        assert!(!keep.is_empty() && keep.len() < full.0.channels.len(), "{id} {vals:?}: {keep:?}");
+        let mut some = (*full.0).clone();
+        some.channels.retain(|(n, _)| keep.contains(n));
+        some.listed = full.0.names().iter().map(|n| n.to_string()).collect();
+        let (want, got) = (run(id, &vals, &full), run(id, &vals, &AuxHost(Arc::new(some))));
+        assert_eq!(bits(&got), bits(&want), "{id} {vals:?}: {keep:?}");
+    }
+    assert_eq!(aux_needs("ec.blur.gaussian", &crate::Params::default()), None, "not declared: all");
 }

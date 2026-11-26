@@ -38,7 +38,7 @@ fn harness(panel: Panel, angle: f64) -> (Harness<'static, EffectcraftApp>, u64, 
     s.execute("comp.new", json!({"name": "Angles", "width": 320, "height": 180, "duration": 4})).unwrap();
     let layer = s.execute("layer.newSolid", json!({"name": "Plate", "color": "#40b080"})).unwrap()["layer"].as_u64().unwrap();
     let uid = if matches!(panel, Panel::EffectControls) {
-        let fx = s.execute("effect.apply", json!({"layer": layer, "effect": "CC Bend It"})).unwrap()["effects"][0].as_u64().unwrap();
+        let fx = s.execute("effect.apply", json!({"layer": layer, "effect": "Two-Point Bend"})).unwrap()["effects"][0].as_u64().unwrap();
         s.active_comp().unwrap().layer(LayerId(layer)).unwrap().props.find_group(fx).unwrap().get("bend").unwrap().uid
     } else {
         s.active_comp().unwrap().layer(LayerId(layer)).unwrap().props.prop("transform/rotation").unwrap().uid
@@ -49,7 +49,7 @@ fn harness(panel: Panel, angle: f64) -> (Harness<'static, EffectcraftApp>, u64, 
     app.toggle_maximize(panel.kind());
     app.ui.timeline.layer_reveal.insert(layer, vec!["rotation".into()]);
     app.ui.timeline.open_layers.insert(layer);
-    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_eframe(|_| app);
+    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app);
     h.run_steps(4);
     (h, layer, uid)
 }
@@ -172,6 +172,21 @@ fn typing_replaces_the_clicked_value() {
     }
 }
 
+/// #3195: a typed `+10` turns the angle by 10°, from its signed remainder: `0x-30°` becomes
+/// `0x-20°` (the degrees field shows the remainder's size, 30, which would have given -40°).
+#[test]
+fn a_typed_step_applies_to_the_signed_angle() {
+    for panel in [Panel::EffectControls, Panel::Timeline, Panel::Properties] {
+        for (text, expected) in [("+10", -20.0), ("*2", -60.0), ("/3", -10.0)] {
+            let (mut h, layer, uid) = harness(panel, -30.0);
+            let p = component(&h, panel, uid, false);
+            begin_edit(&mut h, p, text);
+            key(&mut h, Key::Enter, Modifiers::NONE);
+            assert_eq!(angle(&h, layer, uid), expected, "{panel:?}: {text}");
+        }
+    }
+}
+
 fn commit_edits(click_away: bool) {
     for panel in [Panel::EffectControls, Panel::Timeline, Panel::Properties] {
         for (revolutions, text, expected) in [(true, "3", 1110.5), (false, "45.5", 405.5)] {
@@ -188,6 +203,28 @@ fn commit_edits(click_away: bool) {
             assert_eq!(h.state().session.history.undo.len(), undo + 1);
             h.state_mut().session.execute("edit.undo", json!({})).unwrap();
             assert_eq!(angle(&h, layer, uid), 390.5);
+        }
+    }
+}
+
+/// #3367: on a negative angle the minus sign is part of the degrees typing replaces, so typing
+/// 50 into `0x-20.0°` sets +50°. It used to keep the sign (-50°). Committing the text as it
+/// opened keeps the angle.
+#[test]
+fn typing_into_a_negative_angle_replaces_its_sign() {
+    for panel in [Panel::EffectControls, Panel::Timeline, Panel::Properties] {
+        for (start, text, expected) in
+            [(-20.0, Some("50"), 50.0), (-20.0, Some("-50"), -50.0), (-20.0, None, -20.0), (-400.0, None, -400.0), (45.0, Some("-30"), -30.0)]
+        {
+            let (mut h, layer, uid) = harness(panel, start);
+            let p = component(&h, panel, uid, false);
+            click(&mut h, p);
+            if let Some(text) = text {
+                h.input_mut().events.push(Event::Text(text.into()));
+                h.step();
+            }
+            key(&mut h, Key::Enter, Modifiers::NONE);
+            assert_eq!(angle(&h, layer, uid), expected, "{panel:?}: {start} then {text:?}");
         }
     }
 }

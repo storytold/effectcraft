@@ -9,6 +9,13 @@ effectcraft --control 9877        # or EFFECTCRAFT_CONTROL_PORT=9877
 The port must be a number from 1 to 65535, and `--control` overrides the variable. A bad port or an
 unknown option prints an error and the app exits with status 1 before it opens a window.
 
+An app started with a control port is meant to be driven by an agent, so a normal launch does not
+wait for a person: the window opens without taking keyboard focus, and the app skips crash recovery,
+the Home screen (unless `--home` is given) and the startup update check. Help ▸ Check for Updates
+still works. One exception: when the window cannot start at all, the app writes the error to
+standard error and the session log and then shows it in a message box, and it exits only after
+someone closes that box.
+
 - **Transport:** TCP on `127.0.0.1` only, one JSON object per line in each direction. Connections are
   persistent; requests on one connection are answered in order.
 - **Request:** `{"id": 1, "method": "engine.execute", "params": {...}}` (`id` is echoed back, `params`
@@ -53,13 +60,33 @@ export formats, parity summary), `jobs.list` (Progress panel jobs, e.g. the back
 Every engine command is reachable through `engine.execute`, and every interactive widget of every
 panel registers an element id; both are enforced by `crates/ui-egui/tests/it/ui_agent_audit.rs`.
 
+### Waiting for a render
+
+On native desktop builds, `engine.execute` with `renderQueue.render` and `wait: true`
+(the default) keeps the window responsive while its reply waits for the render worker.
+`script.run` invoked through the control channel also yields the window while
+`app.project.renderQueue.render()` waits. JavaScript resumes after completion or cancellation;
+the original request receives its result and accumulated output only after the continuation
+finishes or shows a modal dialog. Several renders in one script keep the same request pending.
+Headless scripts retain their synchronous behavior.
+
+While a script waits for rendering, the window shows progress and a **Stop Render** button
+(`scriptRender.stop`). Other editing and script callbacks pause so they cannot enter the
+suspended script's undo group. `ui.inspect`, `ui.elements`, command/menu listings, resize,
+focus, and the engine commands `renderQueue.list`, `renderQueue.stop`, `editor.state`,
+`app.capabilities`, `command.list`, `scriptui.list` and `scriptui.get` remain available.
+Other control requests return an error. Use another connection for inspection or Stop,
+since requests on one connection are answered in order. A window-close request is canceled
+during this wait; stop the render and then close normally to use the unsaved-changes prompt.
+The control transport's 60-second request timeout still applies to long renders.
+
 ## UI state
 
 | Method | Params | Result |
 |---|---|---|
 | `ui.inspect` | `{}` | Window size, pixels per point, fps, serialized `UiState`, playback, time, active comp, selection, open dialog, last render ms, `keyboardFocus`, `windowFocused`, `workspaceStorageError`. |
 | `ui.elements` | `{prefix?}` | `[{id, label, rect: [x, y, w, h]}]`: the widgets drawn in the last frame, in points. |
-| `ui.set` | `{tool?, workspace?, theme?, focused?, viewer?, timeline?, menuBar?, home?}` | `viewer: {zoom (null = fit), res: Full\|Half\|Third\|Quarter\|Auto, pan: [x,y], grid, rulers, safeMargins, transparencyGrid}`; `timeline: {pps (null = fit), start, graphEditor, showModes, openLayers: [ids], openGroups: [uids]}`. |
+| `ui.set` | `{tool?, workspace?, theme?, focused?, viewer?, effectControlsLocked?, timeline?, menuBar?, home?}` | `viewer: {zoom (null = fit), res: Full\|Half\|Third\|Quarter\|Auto, pan: [x,y], grid, rulers, safeMargins, transparencyGrid}`; `effectControlsLocked: true` locks Effect Controls on the layer it shows (an error when it shows none, or while it is locked to a layer of another composition), `false` unlocks it (the tab's lock icon, `panel.tab.EffectControls.lock`; `ui.inspect` reports it as `effect_controls_lock: {comp, layer}`); `timeline: {pps (null = fit), start, graphEditor, showModes, openLayers: [ids], openGroups: [uids]}`. |
 | `ui.panel.show` / `ui.panel.close` | `{panel}` | Panels: `Project`, `Composition`, `Timeline`, `EffectControls`, `EffectsPresets`, `Info`, `Preview`, `Character`, `Paragraph`, `Align` and others. |
 | `ui.playback` | `{action: play\|stop\|toggle\|status}` | `{playing, time, audio, levelsDb, peaksDb}` (audio: an audio preview is running; L/R meter levels and held peaks in dBFS) |
 | `ui.resize` | `{width, height}` | Resizes the window (points). |
@@ -129,8 +156,7 @@ frames and can be assigned through `shortcuts.set`.
 | `ui.screenshot` | `{path?, panel?, id?}` | `{path, width, height}`: a PNG of the window, or cropped to one panel or element. The panel or element rectangle is resolved when the capture is issued (after the UI settles), so it follows a panel that moved; a panel or id that is not on screen is retried and then reported, never replaced by a whole-window shot. |
 
 Element ids are stable, for example `tools.Selection`, `panel.Timeline`, `panel.tab.EffectControls`,
-`panel.tab.Timeline.<comp>` (one Timeline tab per open comp; `panel.tab.Timeline` is the shown
-one), `panel.tab.Viewer(<n>)` and `viewers.<n>` (View ▸ New Viewer's other Composition viewers;
+`panel.tab.Viewer(<n>)` and `viewers.<n>` (View ▸ New Viewer's other Composition viewers;
 `viewers.0` is the Composition panel while another viewer is active), `header.workspace.Animation`, `project.item.<id>` (a double-click opens the item, Enter
 renames it), `viewer.comp`, `viewer.handle.<layer>.<i>`,
 `timeline.layer.<id>.bar`, `timeline.layer.<id>.nestedMarker.<i>` (a precomp's comp markers), `timeline.layer.<id>.twirl`, `timeline.layer.<id>.row` (click selects,
@@ -145,7 +171,9 @@ revolutions are `timeline.prop.<uid>.revolutions`, `effectControls.prop.<uid>.re
 `viewer.motionPath.<layer>.<key>[.in|.out]`, `viewer.puppetPin.<uid>[.rotate|.scale]`,
 `viewer.freeTransform.handle.<i>`, `viewer.cryptoPick` (the Cryptomatte eyedropper's hover chip; its
 label is the chip's text), `viewer.cryptoPick.error` (the chip when it shows an error; label `whole`, or
-`cut` when the message is cut off), `viewer.cryptoPick.highlight` (the hovered ID's highlighted area) and
+`cut` when the message is cut off), `viewer.cryptoPick.highlight` (the hovered ID's highlighted area),
+`viewer.cryptoSelect` (the Selection tool picking Cryptomatte IDs over the layer while its Cryptomatte
+effect is selected in Effect Controls, no eyedropper armed; label: the Selection's name) and
 `viewer.regionOfInterest`; the Graph Editor adds `timeline.graph.transformBox[.<i>]`,
 `timeline.graph.snap` and `timeline.graph.reference`. Use `ui.elements` to see what is on screen.
 
@@ -167,6 +195,16 @@ step; `ui.set {viewer: {res}}` sets the active comp's, and `ui.inspect` reports 
 `mask.insertVertex`, `mask.convertVertex`, `mask.deleteVertices`, `path.freeTransform` (masks and
 shape paths by uid), `keys.setSpatialTangents` (motion-path handles) and `keys.transform` (Graph
 Editor transform box, timeline Alt-drag scaling).
+
+Camera tools: the Tools bar's Orbit, Pan and Dolly slots hold After Effects' variants
+(`tools.Orbit|OrbitScene|OrbitTarget`, `tools.PanCamera|PanTarget`,
+`tools.Dolly|DollyToCursor|DollyTarget`; flyout rows `tools.select.<tool>`). `tool.orbit`,
+`tool.panCamera` and `tool.dolly` (1, 2, 3) select the variant the slot last showed, `tool.camera`
+(C) cycles the three slots, and `tool.<tool>` (e.g. `tool.OrbitScene`) selects one directly. A drag
+runs `camera.orbit` / `camera.pan` / `camera.dolly` with the tool's `mode` and the press point as
+`cursor`; the result's `pivot` is the world point used, sent back as `point` for the rest of the drag
+(null when the tool works about the camera's point of interest: the POI variants, and `camera.dolly`
+without `mode`).
 
 The MCP server's bridge mode (`effectcraft-cli mcp --bridge 9877`) is a thin client of this protocol;
 see [agents.md](agents.md).
@@ -202,12 +240,14 @@ takes a name, or as `{"Viewer":42}` and `{"ScriptPanel":77}` for viewers and Scr
   floating window holding Info. `Open` and `OpenAt` are refused: panels open through the panel
   commands (`window.panel`, `ui.panel.show`), which run the viewer and ScriptUI lifecycles.
   Closing runs them too. Pointer gestures dispatch through this command.
-- craft-ui's commands: `window.panel.move`, `.float`, `.dock`, `.activate`, `.close`,
-  `.closeGroup`, `.closeOthers`, `.minimize`, `.iconic`, `.window` and `.layout`, with the params
-  of craft-ui's `DockCommand` (`docs/ui-docking.md` in craft-libs). `window.panel.<Panel>`
+- The panel commands `window.panel.move {panel, anchor, zone?, before?, group?}`,
+  `.float {panel, x?, y?, width?, height?, group?, column?}`,
+  `.dock {panel, anchor?, zone?, before?, group?, column?, side?}`, `.activate`, `.close`,
+  `.closeGroup`, `.closeOthers`, `.minimize {minimized?}`, `.iconic {iconic?}`,
+  `.window {native?}` (as `window.panelWindow`) and `.layout {action}`. `window.panel.<Panel>`
   (`window.panel.Align`) opens and shows that panel. `window.panel.activate` on a closed panel
   reopens it where it was.
-- `ui.dock {operation, panel, …}` or `ui.dock {action}`: craft-ui's `ui.dock` operations
+- `ui.dock {operation, panel, …}` or `ui.dock {action}`: the operations
   (`open`, `close`, `activate`, `float {rect}`, `moveFloating {rect}`,
   `move {target, zone?, before?}`, `setStackOpen {open}`, `resizeStack {height}`,
   `resizeSplit {path, size}`; `rect` is `[x, y, width, height]`). It returns
@@ -231,13 +271,13 @@ windows stay in the main window. Keys pressed in a floating window that none of 
 run the main window's shortcuts, and files dropped on one import as on the main window. While a
 modal dialog is open, floating windows take no input.
 
-The automation ids of the docking chrome are `panel.tab.<Panel>`, `panel.drag.<Panel>` (a
-group's drag bar), `panel.tabs.more.<Panel>`, `panel.menu.<Panel>` (≡), `panel.header.<Panel>`
-(a stacked panel's open and close button), `panel.tab.<Panel>.lock` (viewer lock),
-`panel.tab.Timeline.<comp>` and `panel.tab.Timeline.close` (the Timeline's comp tabs),
-`panel.float.<n>.move`, `.close`, `.resize` and `.resize.<Edge>` for floating window `n`,
-`dock.gutter.<path>` for dividers (`a`/`b` per split level; a stack's gap below entry `i` adds
-`s<i>`) and `dock.corner.<outer>.<inner>` where two dividers meet.
+The automation ids of the docking chrome are `panel.tab.<Panel>`, `panel.tab.Timeline.<comp>`
+(the Timeline's comp tabs), `panel.drag.<Panel>` (a group's drag bar), `panel.menu.<Panel>` (≡),
+`panel.tab.<Panel>.lock` (viewer lock), `panel.float.<n>.move`, `.resize` and `.resize.<Edge>`
+for floating window `n`, `dock.gutter.<path>` for split dividers (`a`/`b` per split level),
+`dock.gutter.group.<Panel>` below a dock column's group and `dock.column.<Panel>` at a dock
+column's inner edge. The other parts (a tab's close button, "Close <tab>", and the tab
+overflow button, "More tabs") are found by their accessible names.
 
 Saved workspaces (`workspaces.json`, version 2) hold craft-ui `Workspace`s: the layout, the
 closed panels with where each goes back, the lock, and each floating window's desktop place. A

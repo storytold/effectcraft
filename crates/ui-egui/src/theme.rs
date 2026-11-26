@@ -111,6 +111,21 @@ pub struct Tokens {
     pub gradients: bool,
 }
 
+/// WCAG 2 relative luminance of an opaque sRGB colour (alpha is ignored).
+pub fn relative_luminance(c: Color32) -> f32 {
+    let f = |v: u8| {
+        let v = f32::from(v) / 255.0;
+        if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+    };
+    0.2126 * f(c.r()) + 0.7152 * f(c.g()) + 0.0722 * f(c.b())
+}
+
+/// WCAG 2 contrast ratio of two opaque sRGB colours (1 to 21).
+pub fn contrast_ratio(a: Color32, b: Color32) -> f32 {
+    let (x, y) = (relative_luminance(a), relative_luminance(b));
+    (x.max(y) + 0.05) / (x.min(y) + 0.05)
+}
+
 /// A vertical gradient fill (`top` → `bottom`) over `rect`.
 pub fn gradient_rect(painter: &egui::Painter, rect: egui::Rect, top: Color32, bottom: Color32) {
     let mut m = egui::Mesh::default();
@@ -378,7 +393,7 @@ pub fn install(ctx: &egui::Context, t: &Tokens, language: &str) {
         stack.push("noto-symbols2".into());
     }
     install_script_fallbacks(&mut fonts, language);
-    ctx.set_fonts(fonts);
+    craft_ui::fonts::load(ctx, fonts);
     apply_visuals(ctx, t);
 }
 
@@ -667,6 +682,7 @@ mod script_font_tests {
     /// interface's fonts installed.
     fn assert_drawn(language: &str, text: &str) {
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         super::install(&ctx, &super::Tokens::for_kind(super::ThemeKind::Dark), language);
         let mut out = ctx.run_ui(egui::RawInput::default(), |_| {});
         // No renderer here: drop the frame's texture uploads (egui asserts on unhandled ones in debug).
@@ -752,6 +768,7 @@ mod script_font_tests {
     #[test]
     fn simplified_chinese_interface_draws_simplified_hanzi_after_another_language() {
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         let tokens = super::Tokens::for_kind(super::ThemeKind::Dark);
         super::install(&ctx, &tokens, "en");
         super::install(&ctx, &tokens, "zh-hans");
@@ -783,6 +800,7 @@ mod script_font_tests {
             return;
         }
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         super::install(&ctx, &super::Tokens::for_kind(super::ThemeKind::Dark), "en");
         let mut out = ctx.run_ui(egui::RawInput::default(), |_| {});
         out.textures_delta.clear();
@@ -824,6 +842,7 @@ mod script_font_tests {
             return;
         }
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         ctx.set_pixels_per_point(2.0);
         super::install(&ctx, &super::Tokens::for_kind(super::ThemeKind::Dark), "ja");
         let mut out = ctx.run_ui(egui::RawInput::default(), |_| {});
@@ -908,6 +927,7 @@ mod tests {
     #[test]
     fn every_family_reaches_the_symbol_fallback() {
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         install(&ctx, &Tokens::for_kind(Default::default()), "en");
         ctx.run_ui(Default::default(), |_| {}).textures_delta.clear();
         for family in [FontFamily::Proportional, FontFamily::Monospace, FontFamily::Name("medium".into()), FontFamily::Name("semibold".into())] {

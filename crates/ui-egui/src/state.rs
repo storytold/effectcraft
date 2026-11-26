@@ -13,9 +13,22 @@ pub enum Tool {
     Selection,
     Hand,
     Zoom,
+    /// Orbit Around Cursor.
     Orbit,
+    /// Pan Under Cursor.
     PanCamera,
+    /// Dolly Towards Cursor.
     Dolly,
+    /// Orbit Around Scene (the centre of the comp's 3D layers).
+    OrbitScene,
+    /// Orbit Around Camera POI (the camera's point of interest).
+    OrbitTarget,
+    /// Pan Camera POI (moves as far as the point of interest's depth asks).
+    PanTarget,
+    /// Dolly to Cursor (stops short of the point under the cursor).
+    DollyToCursor,
+    /// Dolly to Camera POI (approaches the point of interest, which stays).
+    DollyTarget,
     Rotate,
     PanBehind,
     Rectangle,
@@ -50,9 +63,9 @@ impl Tool {
         &[Tool::Selection],
         &[Tool::Hand],
         &[Tool::Zoom],
-        &[Tool::Orbit],
-        &[Tool::PanCamera],
-        &[Tool::Dolly],
+        &[Tool::Orbit, Tool::OrbitScene, Tool::OrbitTarget],
+        &[Tool::PanCamera, Tool::PanTarget],
+        &[Tool::Dolly, Tool::DollyToCursor, Tool::DollyTarget],
         &[Tool::Rotate],
         &[Tool::PanBehind],
         &[Tool::Rectangle, Tool::RoundedRect, Tool::Ellipse, Tool::Polygon, Tool::Star],
@@ -64,13 +77,20 @@ impl Tool {
         &[Tool::RotoBrush, Tool::RefineEdge, Tool::ObjectMatte],
         &[Tool::Puppet, Tool::PuppetStarch, Tool::PuppetBend, Tool::PuppetAdvanced, Tool::PuppetOverlap],
     ];
-    pub const ALL: [Tool; 31] = [
+    /// Each slot's first tool comes before its variants: [`Tool::from_name`] matches labels by
+    /// prefix, so `orbit` stays Orbit Around Cursor.
+    pub const ALL: [Tool; 36] = [
         Tool::Selection,
         Tool::Hand,
         Tool::Zoom,
         Tool::Orbit,
         Tool::PanCamera,
         Tool::Dolly,
+        Tool::OrbitScene,
+        Tool::OrbitTarget,
+        Tool::PanTarget,
+        Tool::DollyToCursor,
+        Tool::DollyTarget,
         Tool::Rotate,
         Tool::PanBehind,
         Tool::Rectangle,
@@ -97,6 +117,7 @@ impl Tool {
         Tool::PuppetAdvanced,
         Tool::PuppetOverlap,
     ];
+    /// Returns the tool's name as After Effects shows it, e.g. `Orbit Around Cursor Tool`.
     pub fn label(self) -> &'static str {
         match self {
             Tool::Selection => "Selection Tool",
@@ -105,6 +126,11 @@ impl Tool {
             Tool::Orbit => "Orbit Around Cursor Tool",
             Tool::PanCamera => "Pan Under Cursor Tool",
             Tool::Dolly => "Dolly Towards Cursor Tool",
+            Tool::OrbitScene => "Orbit Around Scene Tool",
+            Tool::OrbitTarget => "Orbit Around Camera POI Tool",
+            Tool::PanTarget => "Pan Camera POI Tool",
+            Tool::DollyToCursor => "Dolly to Cursor Tool",
+            Tool::DollyTarget => "Dolly to Camera POI Tool",
             Tool::Rotate => "Rotation Tool",
             Tool::PanBehind => "Pan Behind (Anchor Point) Tool",
             Tool::Rectangle => "Rectangle Tool",
@@ -132,14 +158,15 @@ impl Tool {
             Tool::PuppetOverlap => "Puppet Overlap Pin Tool",
         }
     }
+    /// Returns the tool's key, shared by the variants in one toolbar slot, or `None` when it has none.
     pub fn shortcut(self) -> Option<&'static str> {
         match self {
             Tool::Selection => Some("V"),
             Tool::Hand => Some("H"),
             Tool::Zoom => Some("Z"),
-            Tool::Orbit => Some("1"),
-            Tool::PanCamera => Some("2"),
-            Tool::Dolly => Some("3"),
+            Tool::Orbit | Tool::OrbitScene | Tool::OrbitTarget => Some("1"),
+            Tool::PanCamera | Tool::PanTarget => Some("2"),
+            Tool::Dolly | Tool::DollyToCursor | Tool::DollyTarget => Some("3"),
             Tool::Rotate => Some("W"),
             Tool::PanBehind => Some("Y"),
             Tool::Rectangle | Tool::RoundedRect | Tool::Ellipse | Tool::Polygon | Tool::Star => Some("Q"),
@@ -150,14 +177,15 @@ impl Tool {
             Tool::Puppet | Tool::PuppetStarch | Tool::PuppetBend | Tool::PuppetAdvanced | Tool::PuppetOverlap => Some("Cmd+P"),
         }
     }
+    /// Returns the toolbar icon of the tool; the variants of one slot share an icon.
     pub fn icon(self) -> Icon {
         match self {
             Tool::Selection => Icon::Selection,
             Tool::Hand => Icon::Hand,
             Tool::Zoom => Icon::Zoom,
-            Tool::Orbit => Icon::Orbit,
-            Tool::PanCamera => Icon::PanCamera,
-            Tool::Dolly => Icon::Dolly,
+            Tool::Orbit | Tool::OrbitScene | Tool::OrbitTarget => Icon::Orbit,
+            Tool::PanCamera | Tool::PanTarget => Icon::PanCamera,
+            Tool::Dolly | Tool::DollyToCursor | Tool::DollyTarget => Icon::Dolly,
             Tool::Rotate => Icon::Rotate,
             Tool::PanBehind => Icon::PanBehind,
             Tool::Rectangle => Icon::Rectangle,
@@ -188,6 +216,33 @@ impl Tool {
     pub fn from_name(s: &str) -> Option<Tool> {
         let n = s.to_ascii_lowercase().replace([' ', '_', '-'], "");
         Tool::ALL.into_iter().find(|t| format!("{t:?}").to_ascii_lowercase() == n || t.label().to_ascii_lowercase().replace(' ', "").starts_with(&n))
+    }
+    /// The camera tools' toolbar slot (0 = the Orbit tools, 1 = Pan, 2 = Dolly); None for other tools.
+    pub fn camera_group(self) -> Option<usize> {
+        match self {
+            Tool::Orbit | Tool::OrbitScene | Tool::OrbitTarget => Some(0),
+            Tool::PanCamera | Tool::PanTarget => Some(1),
+            Tool::Dolly | Tool::DollyToCursor | Tool::DollyTarget => Some(2),
+            _ => None,
+        }
+    }
+    /// Returns whether the tool is one of the orbit, pan or dolly camera tools.
+    pub fn is_camera(self) -> bool {
+        self.camera_group().is_some()
+    }
+    /// A camera tool's engine command and its `mode` (After Effects' variant of the tool).
+    pub fn camera_command(self) -> Option<(&'static str, &'static str)> {
+        Some(match self {
+            Tool::Orbit => ("camera.orbit", "aroundCursor"),
+            Tool::OrbitScene => ("camera.orbit", "aroundScene"),
+            Tool::OrbitTarget => ("camera.orbit", "aroundCameraPoi"),
+            Tool::PanCamera => ("camera.pan", "underCursor"),
+            Tool::PanTarget => ("camera.pan", "cameraPoi"),
+            Tool::Dolly => ("camera.dolly", "towardsCursor"),
+            Tool::DollyToCursor => ("camera.dolly", "toCursor"),
+            Tool::DollyTarget => ("camera.dolly", "toCameraPoi"),
+            _ => return None,
+        })
     }
     /// Puppet pin tools, with the pin kind they place (`puppet.addPin` kind).
     pub fn puppet_kind(self) -> Option<&'static str> {
@@ -265,6 +320,9 @@ pub struct ViewerState {
     /// The pointer is dragging in the viewer this frame (Adaptive Resolution).
     #[serde(skip)]
     pub interacting: bool,
+    /// A drag outside the viewer changed the frame on screen: a property scrub in Effect Controls,
+    /// or any Timeline or Properties drag ([`crate::panels::drag_preview`]). Adaptive Resolution
+    /// draws a draft until the primary button is up, which clears it.
     #[serde(skip)]
     pub property_interacting: bool,
     /// Extended Viewer: the comp-space region the viewer renders this frame (comp frame plus
@@ -594,6 +652,44 @@ impl Default for AnimToolsState {
     }
 }
 
+/// The layer a locked Effect Controls panel keeps showing (the tab's lock icon, as After Effects'
+/// panel lock): comp item id and layer id.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EffectControlsLock {
+    pub comp: u64,
+    pub layer: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ProjectStatus {
+    #[default]
+    All,
+    Available,
+    Missing,
+}
+
+impl ProjectStatus {
+    pub const ALL: [Self; 3] = [Self::All, Self::Available, Self::Missing];
+    /// English catalog key; localization belongs at the widget rendering boundary.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::Available => "Available",
+            Self::Missing => "Missing",
+        }
+    }
+    /// Filter the dependency inventory, including unused missing proxies. Generated items
+    /// count as available even though they have no external source file.
+    pub fn matches(self, item: &effectcraft_engine::project::Item) -> bool {
+        match self {
+            Self::All => true,
+            Self::Available => !item.has_missing_footage(),
+            Self::Missing => item.has_missing_footage(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct UiState {
     pub tool: Tool,
@@ -612,15 +708,24 @@ pub struct UiState {
     /// The panel maximized to fill the dock area (`~`), if any.
     #[serde(default)]
     pub maximized: Option<PanelKind>,
-    /// Floating windows of [`Self::dock`] whose native rect holds the OS window's outer
-    /// position, from a workspace file of an earlier version (see
-    /// `crate::dock_ui::native_outer_to_content`). Workspaces are not saved while any remain.
-    #[serde(skip)]
-    pub native_outer: Vec<u64>,
+    /// Lock Workspace: no panel of [`Self::dock`] moves, floats or closes.
+    #[serde(default)]
+    pub dock_locked: bool,
     /// Locked Composition / Timeline tabs (panel ids): opening another composition does not
     /// bring a locked panel forward (the tab's lock icon, as After Effects' viewer lock).
     #[serde(default)]
     pub locked_tabs: BTreeSet<String>,
+    /// Effect Controls locked to a layer (its tab's lock icon): the panel keeps showing that
+    /// layer whatever is selected while its comp is the active comp. Cleared when the layer or
+    /// its comp is deleted, and when the project is replaced (see
+    /// `panels::effect_controls::set_lock`).
+    #[serde(default)]
+    pub effect_controls_lock: Option<EffectControlsLock>,
+    /// The project the lock was made in (`ScriptUi::project_epoch`): a new or opened project
+    /// reuses comp and layer ids, so its lock is dropped (see
+    /// `panels::effect_controls::scope_lock`).
+    #[serde(skip)]
+    pub effect_controls_lock_epoch: u64,
     /// The comp each Composition viewer shows, by viewer id (0 = the Composition panel; see
     /// `panels::viewers`).
     #[serde(default)]
@@ -638,6 +743,8 @@ pub struct UiState {
     pub effects_search: String,
     pub effects_open: BTreeSet<String>,
     pub project_search: String,
+    #[serde(default)]
+    pub project_status: ProjectStatus,
     pub project_open_folders: BTreeSet<u64>,
     /// Project panel sort column (`name`, `type`, `size`, `fps`) and direction, as in AE's
     /// clickable column headers. Folders sort with everything else.
@@ -652,6 +759,10 @@ pub struct UiState {
     /// Horizontal scroll of the Project panel's optional columns (Name and Label stay put).
     #[serde(default)]
     pub project_hscroll: f32,
+    /// Width of the Project panel's Name column set by dragging its edge in the header (points);
+    /// `None` fits the longest name shown (double-clicking the edge goes back to that).
+    #[serde(default)]
+    pub project_name_w: Option<f32>,
     /// Vertical scroll of the Project panel's item list (points); only visible rows are drawn.
     #[serde(default)]
     pub project_scroll: f32,
@@ -720,7 +831,7 @@ pub struct UiState {
     /// Flowchart panel options (layers, effects, solids, direction, root comp).
     #[serde(default)]
     pub flowchart: crate::panels::flowchart::FlowOptions,
-    /// Lumetri Scopes panel options.
+    /// Video Scopes panel options.
     #[serde(default)]
     pub scopes: crate::panels::scopes_panel::ScopesState,
 }
@@ -734,9 +845,11 @@ impl Default for UiState {
             workspace: "Default".into(),
             dock: crate::dock::Workspace::new(crate::dock::workspace("Default")),
             saved_workspaces: Default::default(),
-            native_outer: Vec::new(),
+            dock_locked: false,
             maximized: None,
             locked_tabs: BTreeSet::new(),
+            effect_controls_lock: None,
+            effect_controls_lock_epoch: 0,
             viewers: Default::default(),
             active_viewer: 0,
             focused: PanelKind::Composition,
@@ -748,10 +861,12 @@ impl Default for UiState {
             effects_search: String::new(),
             effects_open: BTreeSet::new(),
             project_search: String::new(),
+            project_status: ProjectStatus::All,
             project_open_folders: BTreeSet::new(),
             project_sort: default_project_sort(),
             project_sort_desc: false,
             project_hscroll: 0.0,
+            project_name_w: None,
             project_scroll: 0.0,
             project_columns: default_project_columns(),
             fx_closed: BTreeSet::new(),
@@ -768,7 +883,7 @@ impl Default for UiState {
             home_learn: false,
             home_templates: false,
             align_to_selection: false,
-            cache_when_idle: false,
+            cache_when_idle: true,
             tracker_source: None,
             layer_panel: None,
             layer_view: None,

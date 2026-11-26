@@ -323,4 +323,19 @@ mod tests {
         t.delete(TemplateKind::OutputModule, "High Quality").unwrap();
         assert_eq!(t.output_module("High Quality").unwrap().format, OutputFormat::ProRes);
     }
+
+    /// An Output Module template keeps its OpenEXR compression and bit depth through a save and
+    /// load (#2911); the built-in EXR template stays ZIP, 32-bit float.
+    #[test]
+    fn exr_options_survive_a_template_round_trip() {
+        use crate::render_queue::{ExrBitDepth, ExrCompression};
+        let mut t = RenderTemplates::default();
+        let builtin = t.output_module("OpenEXR Sequence with Alpha").unwrap();
+        assert_eq!((builtin.exr_compression, builtin.exr_bit_depth), (ExrCompression::Zip, ExrBitDepth::Float));
+        let m = OutputModule { exr_compression: ExrCompression::Piz, exr_bit_depth: ExrBitDepth::Half, ..OutputModule::for_format(OutputFormat::ExrSequence) };
+        t.save_output_module("EXR Half PIZ", m);
+        let back: RenderTemplates = serde_json::from_str(&serde_json::to_string(&t).unwrap()).unwrap();
+        let m = back.output_module("exr half piz").unwrap();
+        assert_eq!((m.format, m.exr_compression, m.exr_bit_depth), (OutputFormat::ExrSequence, ExrCompression::Piz, ExrBitDepth::Half));
+    }
 }

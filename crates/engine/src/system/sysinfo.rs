@@ -24,7 +24,20 @@ pub struct SysMemory {
 impl SysMemory {
     /// The system is low on memory: less than 10% (or less than 1 GB) is available.
     pub fn is_low(&self) -> bool {
-        self.total > 0 && (self.available < self.total / 10 || self.available < 1 << 30)
+        self.total > 0 && self.available < self.low_threshold()
+    }
+
+    /// Below this much available memory the system is low: 10% of the total, at least 1 GB.
+    fn low_threshold(&self) -> u64 {
+        (self.total / 10).max(1 << 30)
+    }
+
+    /// Still low on memory, given whether it was (`was_low`): a low episode ends only once twice
+    /// the low threshold is available again. Without that margin, halving the caches frees just
+    /// enough memory to end it, the budgets double again and fill it, and the system is low
+    /// again a reading later.
+    pub fn still_low(&self, was_low: bool) -> bool {
+        if was_low { self.total > 0 && self.available < self.low_threshold().saturating_mul(2) } else { self.is_low() }
     }
 }
 
@@ -139,6 +152,20 @@ pub fn parse_freebsd_sysctl(text: &str) -> Option<SysMemory> {
     Some(SysMemory { total, available: free.saturating_mul(page).min(total) })
 }
 
+/// The physical memory this process uses now (its resident set, the working set on Windows), in
+/// bytes; `None` where it can't be read (the browser). Cheap: the memory accountant reads it
+/// with each balance (at most every 250 ms).
+pub fn process_memory() -> Option<u64> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        memory_stats::memory_stats().and_then(|m| u64::try_from(m.physical_mem).ok())
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        None
+    }
+}
+
 /// Total and available physical memory, when the system reports them.
 pub fn memory() -> Option<SysMemory> {
     #[cfg(target_os = "linux")]
@@ -205,6 +232,75 @@ pub fn disk_space(path: &std::path::Path) -> Option<(u64, u64)> {
         let _ = path;
         None
     }
+}
+
+/// Whether `path` is on a RAM-backed filesystem (`tmpfs`/`ramfs`), where bytes written count
+/// against memory as well as space. Linux reads `/proc/self/mountinfo`; other systems report
+/// `false` (their temporary folders are disk-backed by default). `path` may not exist yet: its
+/// nearest existing ancestor decides, as when the fill creates its scratch folder.
+pub fn is_memory_backed(path: &std::path::Path) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        let Some(canonical) = canonical_ancestor(path) else { return false };
+        return std::fs::read_to_string("/proc/self/mountinfo").is_ok_and(|mountinfo| mountinfo_is_memory_backed(&mountinfo, &canonical));
+    }
+    #[allow(unreachable_code)]
+    {
+        let _ = path;
+        false
+    }
+}
+
+/// The canonical path of `path`'s nearest existing ancestor (or itself). Relative paths are
+/// resolved against the current directory first, so a new relative output folder still names
+/// the volume it will be created on.
+#[cfg(target_os = "linux")]
+fn canonical_ancestor(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    let absolute = if path.is_absolute() { path.to_path_buf() } else { std::env::current_dir().ok()?.join(path) };
+    let mut p = absolute.as_path();
+    loop {
+        if let Ok(canonical) = std::fs::canonicalize(p) {
+            return Some(canonical);
+        }
+        p = p.parent()?;
+    }
+}
+
+/// Whether a `/proc/self/mountinfo` listing mounts `path` on `tmpfs` or `ramfs`; the deepest
+/// matching mount point wins, and a later entry at the same mount point is the visible one.
+#[cfg(target_os = "linux")]
+pub(crate) fn mountinfo_is_memory_backed(mountinfo: &str, path: &std::path::Path) -> bool {
+    let mut best: Option<(usize, &str)> = None;
+    for line in mountinfo.lines() {
+        let Some(mount) = line.split_whitespace().nth(4) else { continue };
+        let Some(fstype) = line.split(" - ").nth(1).and_then(|rest| rest.split_whitespace().next()) else { continue };
+        let mount = unescape_mount(mount);
+        if path.starts_with(&mount) && best.is_none_or(|(longest, _)| mount.len() >= longest) {
+            best = Some((mount.len(), fstype));
+        }
+    }
+    matches!(best, Some((_, "tmpfs" | "ramfs")))
+}
+
+/// Undo mountinfo's octal escapes (`\040` space, `\011` tab, `\012` newline, `\134` backslash).
+#[cfg(target_os = "linux")]
+fn unescape_mount(field: &str) -> String {
+    let mut out = String::with_capacity(field.len());
+    let mut chars = field.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\'
+            && chars.clone().take(3).count() == 3
+            && let Ok(code) = u8::from_str_radix(&chars.clone().take(3).collect::<String>(), 8)
+        {
+            for _ in 0..3 {
+                chars.next();
+            }
+            out.push(code as char);
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// CPU model name.
@@ -338,5 +434,43 @@ mod tests {
         let m = parse_vm_stat(vm, 8 << 30).unwrap();
         assert_eq!(m.available, 4100 * 16384);
         assert!(m.is_low());
+    }
+
+    /// The default temp folder may be a `tmpfs`; a nested disk mount under `/tmp` or a nested
+    /// `tmpfs` must be resolved to the deepest mount point.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn mountinfo_finds_memory_backed_storage() {
+        let mountinfo = "\
+25 1 0:22 / / rw,relatime - ext4 /dev/nvme0n1p2 rw
+26 25 0:23 / /tmp rw,nosuid - tmpfs tmpfs rw
+27 25 0:24 / /tmp/disk rw - ext4 /dev/sda1 rw
+28 25 0:25 / /mnt/ram rw - ramfs none rw
+29 25 0:26 / /media/My\\040Disk rw - ext4 /dev/sdb1 rw
+";
+        assert!(mountinfo_is_memory_backed(mountinfo, std::path::Path::new("/tmp/effectcraft-fill")));
+        assert!(!mountinfo_is_memory_backed(mountinfo, std::path::Path::new("/tmp/disk/fill")));
+        assert!(mountinfo_is_memory_backed(mountinfo, std::path::Path::new("/mnt/ram/a")));
+        assert!(!mountinfo_is_memory_backed(mountinfo, std::path::Path::new("/home/fill")));
+        assert!(!mountinfo_is_memory_backed(mountinfo, std::path::Path::new("/")));
+        // A path that merely shares a prefix is not on that mount.
+        assert!(!mountinfo_is_memory_backed(mountinfo, std::path::Path::new("/tmpdisk/fill")));
+        // Escaped spaces in a mount point decode before matching.
+        assert!(!mountinfo_is_memory_backed(mountinfo, std::path::Path::new("/media/My Disk/fill")));
+        assert_eq!(unescape_mount("/media/My\\040Disk"), "/media/My Disk");
+        // The later entry at the same mount point is the visible mount: a disk mount stacked on
+        // a tmpfs is disk-backed, and the reverse order is memory-backed (#2570 review).
+        let stacked_disk = "\
+30 25 0:30 / /tmp/stack rw - tmpfs tmpfs rw
+31 25 0:31 / /tmp/stack rw - ext4 /dev/sdb2 rw
+";
+        let stacked_ram = "\
+30 25 0:30 / /tmp/stack rw - ext4 /dev/sdb2 rw
+31 25 0:31 / /tmp/stack rw - tmpfs tmpfs rw
+";
+        assert!(!mountinfo_is_memory_backed(stacked_disk, std::path::Path::new("/tmp/stack/fill")));
+        assert!(mountinfo_is_memory_backed(stacked_ram, std::path::Path::new("/tmp/stack/fill")));
+        // A new relative folder resolves against the current directory before walking up.
+        assert!(canonical_ancestor(std::path::Path::new("no-such-relative-folder/fill")).is_some());
     }
 }

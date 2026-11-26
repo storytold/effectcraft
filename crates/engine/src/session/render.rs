@@ -1,3 +1,7 @@
+use std::sync::atomic::Ordering;
+
+use effectcraft_render::{CancellableFootage, FootageSource};
+
 use super::{EngineError, Image, ItemId, RenderOpts, Renderer, Result, Session, ThumbnailJob, Tick, Value, commands};
 
 impl Session {
@@ -77,9 +81,12 @@ impl Session {
     /// A Project panel thumbnail of an item (a comp at `t`, footage at its first frame), longest
     /// side at most `max_side`, as a job that owns everything it reads: frontends run it off the
     /// UI thread (a big comp takes far longer than a frame). `None` for items without pixels.
+    /// Once the project closes ([`Session::replace_project`]) the job reads no more and answers
+    /// `None`, after letting go of what it read meanwhile: a thread that started late or decoded
+    /// through Close can't fill the shared caches with the closed project's frames.
     pub fn thumbnail_job(&self, item: ItemId, t: Tick, max_side: u32) -> Option<ThumbnailJob> {
         let it = self.project.item(item)?;
-        let footage = self.footage.clone();
+        let (footage, closed) = (self.footage.clone(), self.project_closed.clone());
         match &it.kind {
             effectcraft_project::ItemKind::Comp(c) => {
                 let (project, expr, cache) = (self.project.clone(), self.expr.clone(), self.layer_cache.clone());
@@ -93,26 +100,50 @@ impl Session {
                 };
                 let bg = c.background;
                 Some(Box::new(move || {
-                    let mut r = Renderer::new(&project, footage.as_ref(), opts);
+                    if closed.load(Ordering::SeqCst) {
+                        return None;
+                    }
+                    let src = CancellableFootage { inner: footage.as_ref(), cancel: closed.clone() };
+                    let mut r = Renderer::new(&project, &src, opts);
                     r.expr = expr.as_deref();
                     r.cache = Some(&cache);
                     let img = r.comp_frame(item, t);
+                    if closed.load(Ordering::SeqCst) {
+                        project_footage(&project).for_each(|f| forget_files(footage.as_ref(), f));
+                        cache.clear();
+                        return None;
+                    }
                     Some((img.width, img.height, img.to_rgba8_over(bg)))
                 }))
             }
             effectcraft_project::ItemKind::Footage(f) if f.has_video => {
                 let f = f.clone();
                 Some(Box::new(move || {
-                    let img = effectcraft_render::cineon_frame(footage.frame(item, &f, Tick(0))?, &f);
-                    // Point-sample down to at most `max_side` on the long side.
-                    let step = (img.width.max(img.height) as f32 / max_side.max(1) as f32).ceil().max(1.0) as u32;
-                    let (w, h) = (img.width.div_ceil(step), img.height.div_ceil(step));
+                    if closed.load(Ordering::SeqCst) {
+                        return None;
+                    }
+                    // Vector footage is drawn at the thumbnail's size: its declared size can be a
+                    // 16384² canvas, gigabytes of pixels to point-sample down to a few dozen.
+                    let scale = (max_side.max(1) as f64 / f.width.max(f.height).max(1) as f64).min(1.0);
+                    let read = CancellableFootage { inner: footage.as_ref(), cancel: closed.clone() };
+                    let src = read.vector_frame(item, &f, scale).or_else(|| read.frame(item, &f, Tick(0)));
+                    if closed.load(Ordering::SeqCst) {
+                        forget_files(footage.as_ref(), &f);
+                        return None;
+                    }
+                    let img = effectcraft_render::cineon_frame(src?, &f);
+                    // Point-sample down to at most `max_side` on the long side (a drawn size one
+                    // pixel over it, from rounding, is shrunk by that pixel, not halved).
+                    let (long, max) = (u64::from(img.width.max(img.height)), u64::from(max_side.max(1)));
+                    let fit = |side: u32| if long <= max { side } else { ((u64::from(side) * max + long / 2) / long).max(1) as u32 };
+                    let (w, h) = (fit(img.width), fit(img.height));
                     let full = img.to_rgba8();
                     let mut px = Vec::with_capacity((w * h * 4) as usize);
                     for y in 0..h {
                         for x in 0..w {
-                            let i = (((y * step) * img.width + x * step) * 4) as usize;
-                            px.extend_from_slice(&full[i..i + 4]);
+                            let (sx, sy) = (u64::from(x) * u64::from(img.width) / u64::from(w), u64::from(y) * u64::from(img.height) / u64::from(h));
+                            let i = ((sy * u64::from(img.width) + sx) * 4) as usize;
+                            px.extend_from_slice(full.get(i..i + 4)?);
                         }
                     }
                     Some((w, h, px))
@@ -120,6 +151,37 @@ impl Session {
             }
             _ => None,
         }
+    }
+
+    /// What a Project panel thumbnail of `item` at `t` (longest side `max_side`) shows depends
+    /// on, as a key (#3271): a comp's content as the disk cache keys frames
+    /// ([`effectcraft_render::disk_cache::comp_content_key`]), footage's item and settings, the
+    /// time, the size, the render switches the thumbnail uses and the footage reloads so far.
+    /// An edit that doesn't change the picture (a selection, another comp, a marker) keeps it, so
+    /// the thumbnail isn't rendered again. `None` for items without pixels.
+    pub fn thumbnail_key(&self, item: ItemId, t: Tick, max_side: u32) -> Option<u128> {
+        use effectcraft_render::disk_cache::Hash128;
+        let it = self.project.item(item)?;
+        let mut h = Hash128::default();
+        h.write(b"thumbnail-v1");
+        match &it.kind {
+            effectcraft_project::ItemKind::Comp(_) => {
+                h.write_u64(1);
+                h.write(&effectcraft_render::disk_cache::comp_content_key(&self.project, item).to_le_bytes());
+                h.write_u64(t.0 as u64);
+                h.write_u64(u64::from(self.prefs.general.switches_affect_nested_comps));
+                h.write_u64(u64::from(self.prefs.three_d.realtime_shadows));
+            }
+            effectcraft_project::ItemKind::Footage(f) if f.has_video => {
+                h.write_u64(2);
+                h.write_u64(item.0);
+                h.write(format!("{f:?}").as_bytes());
+            }
+            _ => return None,
+        }
+        h.write_u64(u64::from(max_side));
+        h.write_u64(self.footage_reloads.load(std::sync::atomic::Ordering::Relaxed));
+        Some(h.finish())
     }
 
     /// [`Session::render_rgba8`], or with `transparent` the frame's own straight alpha (what a
@@ -138,10 +200,109 @@ impl Session {
     /// Make the media layer and the layer cache let go of what they decoded from `footage`'s
     /// files (it keys frames by path, so an overwritten file would keep showing its old pixels).
     pub(crate) fn forget_decoded(&self, footage: &effectcraft_project::Footage) {
-        for p in std::iter::once(&footage.path).chain(&footage.sequence) {
-            self.footage.forget(p);
-        }
+        self.footage_reloads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        forget_files(self.footage.as_ref(), footage);
         self.layer_cache.clear();
         self.drop_crypto_probe();
     }
+
+    /// Tell the footage source which files effects read the channels of ([`aux_footage`]), so
+    /// it can decode their pictures and channels at once from the first frame (#474). Called with
+    /// every project change ([`Session::bump`]); the set is only sent when it changed, or after
+    /// [`Session::replace_project`] cleared what was sent.
+    pub(crate) fn refresh_aux_footage(&mut self) {
+        let paths = aux_footage(&self.project);
+        if self.aux_footage.as_ref() != Some(&paths) {
+            self.footage.set_aux_footage(&paths);
+            self.aux_footage = Some(paths);
+        }
+        let needs = aux_needs(&self.project);
+        if self.aux_needs.as_ref() != Some(&needs) {
+            self.footage.set_aux_needs(&needs);
+            self.aux_needs = Some(needs);
+        }
+    }
+}
+
+/// What the effects of [`aux_footage`]'s layers read of each file's channels (#3271), by
+/// [`effectcraft_project::Footage::path`], sorted: the union of what each enabled effect reading
+/// them declares ([`effectcraft_effects::aux_needs`]) with its parameters' values (channel
+/// selection is static, as in After Effects). Several layers of one file add up.
+pub(crate) fn aux_needs(project: &effectcraft_project::Project) -> Vec<(String, effectcraft_raster::channels3d::AuxNeed)> {
+    use effectcraft_project::{GroupKind, ItemKind, LayerSource};
+    use effectcraft_raster::channels3d::AuxNeed;
+    let mut out: std::collections::BTreeMap<String, AuxNeed> = std::collections::BTreeMap::new();
+    for l in project.comps().flat_map(|(_, c)| c.layers.iter()).filter(|l| l.switches.effects) {
+        let LayerSource::Footage { item } = &l.source else { continue };
+        let Some(ItemKind::Footage(f)) = project.item(*item).map(|i| &i.kind) else { continue };
+        if f.path.is_empty() {
+            continue;
+        }
+        for g in l.effects().into_iter().flat_map(|fx| fx.groups()).filter(|g| g.enabled) {
+            let GroupKind::Effect { effect } = &g.kind else { continue };
+            if !effectcraft_effects::reads_aux(effect) {
+                continue;
+            }
+            // Channel selection is static (as in After Effects): the values say what is read. A
+            // parameter that moves anyway (it can't, see `static_channel_params`) is read at its
+            // static value.
+            if commands::moves(g, None) {
+                static SAID: std::sync::Once = std::sync::Once::new();
+                SAID.call_once(|| log::warn!("an effect reading footage channels has animated parameters; its channels are read at their static values"));
+            }
+            let params = effectcraft_effects::flatten_params(g, &mut |p| p.value.clone());
+            let need = effectcraft_effects::aux_need(effect, &params);
+            let merged = match out.remove(&f.path) {
+                Some(e) => e.union(need),
+                None => need,
+            };
+            out.insert(f.path.clone(), merged);
+        }
+    }
+    out.into_iter().collect()
+}
+
+/// The files (each footage item's [`effectcraft_project::Footage::path`], sorted, once each) of
+/// the footage layers that have an enabled effect reading their channels
+/// ([`effectcraft_effects::reads_aux`]), with the layer's Effects switch on. Several items can
+/// use one file: it stays in while any of them is read.
+pub(crate) fn aux_footage(project: &effectcraft_project::Project) -> Vec<String> {
+    use effectcraft_project::{GroupKind, ItemKind, LayerSource};
+    let mut paths: Vec<String> = project
+        .comps()
+        .flat_map(|(_, c)| c.layers.iter())
+        .filter(|l| l.switches.effects)
+        .filter(|l| {
+            l.effects()
+                .is_some_and(|fx| fx.groups().any(|g| g.enabled && matches!(&g.kind, GroupKind::Effect { effect } if effectcraft_effects::reads_aux(effect))))
+        })
+        .filter_map(|l| match &l.source {
+            LayerSource::Footage { item } => match &project.item(*item)?.kind {
+                ItemKind::Footage(f) if !f.path.is_empty() => Some(f.path.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    paths.sort_unstable();
+    paths.dedup();
+    paths
+}
+
+/// Make `src` let go of what it decoded from `footage`'s files (its file, or a sequence's).
+pub(crate) fn forget_files(src: &dyn FootageSource, footage: &effectcraft_project::Footage) {
+    for p in std::iter::once(&footage.path).chain(&footage.sequence) {
+        src.forget(p);
+    }
+}
+
+/// Every footage `project` shows: its footage items and the proxies of its items.
+pub(crate) fn project_footage(project: &effectcraft_project::Project) -> impl Iterator<Item = &effectcraft_project::Footage> {
+    project.items.values().flat_map(|it| {
+        let own = match &it.kind {
+            effectcraft_project::ItemKind::Footage(f) => Some(f),
+            _ => None,
+        };
+        own.into_iter().chain(it.proxy.as_deref().map(|px| &px.footage))
+    })
 }

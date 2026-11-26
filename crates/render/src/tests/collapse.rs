@@ -1,9 +1,9 @@
 //! Collapse Transformations, Continuously Rasterize and the Quality switch.
 
 use effectcraft_color::{BlendMode, Label};
-use effectcraft_keyframe::{TextDoc, Value};
+use effectcraft_keyframe::{Keyframe, TextDoc, Value};
 use effectcraft_project::build::{self, Ids};
-use effectcraft_project::{BitDepth, Comp, FrameBlend, ItemId, ItemKind, Layer, LayerSource, Project, Quality, Solid};
+use effectcraft_project::{BitDepth, Comp, FrameBlend, GroupKind, ItemId, ItemKind, Layer, LayerSource, Project, Quality, Solid};
 use effectcraft_time::{FrameRate, Tick};
 
 use crate::{EvalCtx, Image, NoFootage, RenderOpts, Renderer, render_frame};
@@ -90,6 +90,145 @@ fn collapsed_precomp_equals_manual_flattening() {
     assert!((half.get(x, y)[0] - (bg + (full - bg) * 0.5)).abs() < 0.03, "{:?} vs {full}", half.get(x, y));
 }
 
+/// A Particle Emitter 2D producer in a nested comp, overridden by a keyframed Essential
+/// Property on the collapsed precomp instance. The particles born earlier follow the instance
+/// override's history, just as they do on the flattened path.
+#[test]
+fn a_collapsed_particle_producer_follows_the_instance_override_history() {
+    use effectcraft_project::essential::{self, EgControl, EgKind, EssentialGraphics};
+
+    fn scene(collapse: bool) -> (Project, ItemId) {
+        let mut p = project();
+        let mut outer = Comp::new(200, 100, FrameRate::FPS_30, Tick::from_seconds_f64(2.0));
+        let mut inner = Comp::new(200, 100, FrameRate::FPS_30, Tick::from_seconds_f64(2.0));
+        let mut layer = solid(&mut p, &inner, [0.0, 0.0, 0.0], (200, 100), [100.0, 50.0, 0.0]);
+        let spec = effectcraft_effects::find("ec.sim.ccparticlesystems2").unwrap();
+        let mut next = p.next_id;
+        let mut effect = effectcraft_effects::instantiate(spec, &mut Ids(&mut next), spec.name, [200.0, 100.0]);
+        p.next_id = next;
+        effect.prop_mut("birthRate").unwrap().value = Value::Scalar(60.0);
+        effect.prop_mut("longevity").unwrap().value = Value::Scalar(5.0);
+        let producer = effect.sub_mut("producer").unwrap().prop_mut("position").unwrap();
+        producer.value = Value::Vec2([140.0, 50.0]);
+        producer.keys = vec![Keyframe::new(Tick::ZERO, Value::Vec2([140.0, 50.0])), Keyframe::new(Tick::from_seconds_f64(1.0), Value::Vec2([160.0, 50.0]))];
+        let producer_uid = producer.uid;
+        for (group, name) in [("producer", "radiusX"), ("producer", "radiusY"), ("physics", "velocity"), ("physics", "gravity")] {
+            effect.sub_mut(group).unwrap().prop_mut(name).unwrap().value = Value::Scalar(0.0);
+        }
+        layer.props.sub_mut("effects").unwrap().children.push(effect.into());
+        let layer_id = layer.id;
+        inner.layers = vec![layer].into();
+        let inner_id = p.add_item("Inner", Label::Sandstone, None, ItemKind::Comp(inner.into()));
+        p.comp_mut(inner_id).unwrap().essential = Some(EssentialGraphics {
+            controls: vec![EgControl {
+                id: 1,
+                name: "Producer".into(),
+                kind: EgKind::Property { layer: layer_id, prop: producer_uid, links: vec![] },
+                as_type: None,
+            }],
+            ..Default::default()
+        });
+
+        let mut pre = build::layer(&mut p, &outer, "Inner", LayerSource::Comp { item: inner_id }, (200, 100), None);
+        let mut next = p.next_id;
+        let mut ids = Ids(&mut next);
+        let mut control = ids.prop(&essential::match_id(1), "Producer", Value::Vec2([20.0, 50.0]));
+        control.keys = vec![Keyframe::new(Tick::ZERO, Value::Vec2([20.0, 50.0])), Keyframe::new(Tick::from_seconds_f64(1.0), Value::Vec2([120.0, 50.0]))];
+        let mut group = ids.group(essential::GROUP, "Essential Properties");
+        group.kind = GroupKind::Essential { overridden: vec![control.uid] };
+        group.children.push(control.into());
+        pre.props.children.push(group.into());
+        p.next_id = next;
+        pre.switches.collapse = collapse;
+        outer.layers = vec![pre].into();
+        let outer_id = p.add_item("Outer", Label::Sandstone, None, ItemKind::Comp(outer.into()));
+        (p, outer_id)
+    }
+
+    fn particle_span(img: &Image) -> (f32, f32) {
+        let (mut first, mut last, mut mass) = (f32::INFINITY, f32::NEG_INFINITY, 0.0);
+        for y in 0..img.height {
+            for x in 0..img.width {
+                let red = img.get(x as i64, y as i64)[0];
+                if red > 0.001 {
+                    first = first.min(x as f32);
+                    last = last.max(x as f32);
+                    mass += red;
+                }
+            }
+        }
+        assert!(mass > 1.0, "particles drawn");
+        (first, last)
+    }
+
+    let (p, cid) = scene(false);
+    let flattened = particle_span(&render_frame(&p, cid, Tick::from_seconds_f64(1.0), 1.0));
+    let (p, cid) = scene(true);
+    let comp = p.comp(cid).unwrap();
+    let ctx = EvalCtx::new(&p, cid, comp, Tick::from_seconds_f64(1.0));
+    assert!(Renderer::new(&p, &NoFootage, RenderOpts::default()).collapsed(&ctx, &comp.layers[0]).is_some(), "the precomp stays collapsed");
+    let collapsed = particle_span(&render_frame(&p, cid, Tick::from_seconds_f64(1.0), 1.0));
+    // The override moves the producer from x=20 to x=120. The trail must reach both ends,
+    // independently of whether the flattened and collapsed paths agree.
+    assert!(collapsed.0 < 30.0 && collapsed.1 > 110.0, "collapsed producer trail {collapsed:?}");
+    assert!(
+        (flattened.0 - collapsed.0).abs() < 2.0 && (flattened.1 - collapsed.1).abs() < 2.0,
+        "collapsed producer history: {collapsed:?} vs flattened {flattened:?}"
+    );
+}
+
+/// A keyframed Source Text override on a collapsed precomp changes the nested text layer at
+/// its exact layer times. Its processed-layer key must change too, or the previous nested frame
+/// is reused and the old text stays on screen.
+#[test]
+fn an_animated_collapsed_text_override_changes_the_nested_layer_cache_key() {
+    use effectcraft_project::essential::{self, EgControl, EgKind, EssentialGraphics};
+
+    fn text(value: &str) -> Value {
+        Value::Text(Box::new(TextDoc { text: value.into(), size: 60.0, ..Default::default() }))
+    }
+
+    let mut p = project();
+    let mut outer = Comp::new(200, 100, FrameRate::FPS_30, Tick::from_seconds_f64(2.0));
+    let mut inner = Comp::new(200, 100, FrameRate::FPS_30, Tick::from_seconds_f64(2.0));
+    let mut layer = build::layer(&mut p, &inner, "Text", LayerSource::Text, (200, 100), None);
+    layer.props.prop_mut("text/sourceText").unwrap().value = text("BASE");
+    let layer_id = layer.id;
+    let source_uid = layer.props.prop("text/sourceText").unwrap().uid;
+    inner.layers = vec![layer].into();
+    inner.essential = Some(EssentialGraphics {
+        controls: vec![EgControl { id: 1, name: "Text".into(), kind: EgKind::Property { layer: layer_id, prop: source_uid, links: vec![] }, as_type: None }],
+        ..Default::default()
+    });
+    let inner_id = p.add_item("Inner", Label::Sandstone, None, ItemKind::Comp(inner.into()));
+
+    let mut pre = build::layer(&mut p, &outer, "Inner", LayerSource::Comp { item: inner_id }, (200, 100), None);
+    let mut next = p.next_id;
+    let mut ids = Ids(&mut next);
+    let mut control = ids.prop(&essential::match_id(1), "Text", text("A"));
+    control.keys = vec![Keyframe::new(Tick::ZERO, text("A")), Keyframe::new(Tick::from_seconds_f64(1.0), text("B"))];
+    let mut group = ids.group(essential::GROUP, "Essential Properties");
+    group.kind = GroupKind::Essential { overridden: vec![control.uid] };
+    group.children.push(control.into());
+    pre.props.children.push(group.into());
+    p.next_id = next;
+    pre.switches.collapse = true;
+    outer.layers = vec![pre].into();
+    let outer_id = p.add_item("Outer", Label::Sandstone, None, ItemKind::Comp(outer.into()));
+
+    let outer = p.comp(outer_id).unwrap();
+    let pre = &outer.layers[0];
+    let renderer = Renderer::new(&p, &NoFootage, RenderOpts::default());
+    let ctx = EvalCtx::new(&p, outer_id, outer, Tick::from_seconds_f64(1.0));
+    let collapsed = renderer.collapsed(&ctx, pre).unwrap();
+    let (_, nested) = renderer.collapse_into(&ctx, pre, &collapsed, 1.0).unwrap();
+    let layer = &nested.comp.layers[0];
+    let before = nested.time - nested.comp.frame_rate.frame_duration();
+    let now_key = crate::cache::layer_key(&nested, layer, 1.0, false, false).unwrap();
+    let before_key = crate::cache::layer_key(&nested.at(before), layer, 1.0, false, false).unwrap();
+    assert_ne!(now_key, before_key, "the animated Source Text override changes the nested layer's pixels");
+}
+
 #[test]
 fn masks_on_a_collapsed_layer_force_a_flattened_render() {
     let (mut p, cid) = scene(true, false);
@@ -159,15 +298,27 @@ fn referenced_layer_overrides_change_the_owner_cache_key() {
     let comp = p.comp(cid).unwrap();
     let b = comp.layer(bid).unwrap();
     let opacity = comp.layer(aid).unwrap().props.prop("transform/opacity").unwrap().uid;
-    let key = |value: f64| {
-        let overrides = [crate::PropertyOverride { layer: aid, prop: opacity, value: Value::Scalar(value), font: false }];
-        let ctx =
-            EvalCtx { project: &p, comp_id: cid, comp, time: Tick::ZERO, expr: None, footage: None, property_overrides: &overrides, media_overrides: &[] };
+    let key = |overrides: &[crate::PropertyOverride]| {
+        let ctx = EvalCtx {
+            project: &p,
+            comp_id: cid,
+            comp,
+            time: Tick::ZERO,
+            expr: None,
+            footage: None,
+            property_overrides: overrides,
+            media_overrides: &[],
+            reads: None,
+        };
         crate::cache::layer_key(&ctx, b, 1.0, false, false)
     };
-    let (opaque, half) = (key(100.0), key(50.0));
+    let override_at = |value: f64, keys: Vec<Keyframe>| [crate::PropertyOverride { layer: aid, prop: opacity, value: Value::Scalar(value), keys, font: false }];
+    let (opaque, half) = (key(&override_at(100.0, vec![])), key(&override_at(50.0, vec![])));
     assert!(opaque.is_some(), "the owner is cacheable");
     assert_ne!(opaque, half, "A's static override changes B's key");
+    let early = override_at(100.0, vec![Keyframe::new(Tick::ZERO, Value::Scalar(25.0))]);
+    let late = override_at(100.0, vec![Keyframe::new(Tick::ZERO, Value::Scalar(75.0))]);
+    assert_ne!(key(&early), key(&late), "A's override history changes B's key");
 }
 
 #[test]

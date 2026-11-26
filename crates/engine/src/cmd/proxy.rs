@@ -29,13 +29,14 @@ fn has_targets(s: &Session) -> std::result::Result<(), String> {
     if targets(s, &Value::Null).is_empty() { Err("select footage or a composition in the Project panel".into()) } else { Ok(()) }
 }
 
+/// The targets that have a proxy: what Use Proxy and Interpret Footage ▸ Proxy change.
+pub(crate) fn proxied(s: &Session, p: &Value) -> Vec<ItemId> {
+    targets(s, p).into_iter().filter(|i| s.project.item(*i).is_some_and(|x| x.proxy.is_some())).collect()
+}
+
 fn has_proxy(s: &Session) -> std::result::Result<(), String> {
     has_targets(s)?;
-    if targets(s, &Value::Null).iter().any(|i| s.project.item(*i).is_some_and(|x| x.proxy.is_some())) {
-        Ok(())
-    } else {
-        Err("the selected items have no proxy".into())
-    }
+    if proxied(s, &Value::Null).is_empty() { Err("the selected items have no proxy".into()) } else { Ok(()) }
 }
 
 /// Probe a proxy file through the importer.
@@ -53,6 +54,7 @@ fn probe(s: &Session, path: &str, cmd: &str) -> Result<Footage> {
 
 /// Attach `footage` as the proxy of `items` (Use Proxy on). One undo step.
 pub(crate) fn set_proxy_footage(s: &mut Session, items: &[ItemId], footage: Footage) -> Result<()> {
+    s.stored_paths.allow(&footage);
     s.edit("Set Proxy", None, |proj, _| {
         for i in items {
             if let Some(it) = proj.item_mut(*i) {
@@ -92,7 +94,7 @@ fn set_proxy_none(s: &mut Session, p: &Value) -> Result<Value> {
 /// The Project panel's proxy switch: use the proxy (filled box) or the full-resolution source.
 fn use_proxy(s: &mut Session, p: &Value) -> Result<Value> {
     const C: &str = "file.useProxy";
-    let items: Vec<ItemId> = targets(s, p).into_iter().filter(|i| s.project.item(*i).is_some_and(|x| x.proxy.is_some())).collect();
+    let items = proxied(s, p);
     if items.is_empty() {
         return Err(bad(C, "the selected items have no proxy"));
     }
@@ -112,7 +114,7 @@ fn use_proxy(s: &mut Session, p: &Value) -> Result<Value> {
 /// File ▸ Interpret Footage ▸ Proxy: Interpret Footage settings for the proxy file.
 fn interpret_proxy(s: &mut Session, p: &Value) -> Result<Value> {
     const C: &str = "file.interpretProxy";
-    let items: Vec<ItemId> = targets(s, p).into_iter().filter(|i| s.project.item(*i).is_some_and(|x| x.proxy.is_some())).collect();
+    let items = super::file_more::interpretation_targets(s, p, true);
     if items.is_empty() {
         return Err(bad(C, "the selected items have no proxy"));
     }

@@ -301,7 +301,8 @@ pub fn frozen_alpha(params: &Params, layer_size: [f64; 2], fps: f64, f: i64, w: 
     let fr = fc.frames.get(&f)?;
     let [fw, fh] = fc.size;
     let expected = fw.checked_mul(fh)?;
-    if fw == 0 || fh == 0 || expected > rle::MAX_PLANE_BYTES {
+    // Only the layer's own full-resolution grid (see Roto Brush's frozen mattes).
+    if fc.size != roto::frozen_grid(layer_size) || fw == 0 || fh == 0 || expected > rle::MAX_PLANE_BYTES {
         return None;
     }
     let a = rle::decode_bounded(&fr.a, expected)?;
@@ -718,6 +719,12 @@ mod tests {
         fc2.size = [usize::MAX, 2];
         p.values.insert("objectPoint".into(), Value::Vec2([40.0, 40.0]));
         p.values.insert(FROZEN.into(), Value::Str(fc2.to_json()));
+        assert_eq!(frozen_alpha(&p, [100.0, 80.0], 25.0, 2, 100, 80, None), None);
+        // A compact plane claiming a size other than the layer's grid is not decoded.
+        let mut fc3 = fc.clone();
+        fc3.size = [4000, 4000];
+        fc3.frames.insert(2, roto::freeze_frame(&vec![1.0; 4000 * 4000], &[]));
+        p.values.insert(FROZEN.into(), Value::Str(fc3.to_json()));
         assert_eq!(frozen_alpha(&p, [100.0, 80.0], 25.0, 2, 100, 80, None), None);
     }
 

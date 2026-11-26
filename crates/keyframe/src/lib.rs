@@ -57,6 +57,12 @@ impl Ease {
     pub const EASY: Ease = Ease { speed: 0.0, influence: 1.0 / 3.0 };
 }
 
+/// Influence of a linear key side in a segment whose other side is eased: the side keeps the
+/// segment's average speed with a 16.67 % influence, as After Effects shows it in the Keyframe
+/// Velocity dialog and evaluates it (time-remap read-backs: a bezier-out (speed 0, 50 %) into a
+/// linear-in from 3.5 to 0.5 over 2 s gives 3.290 at a quarter and 2.657 at half of the segment).
+pub const LINEAR_SIDE_INFLUENCE: f64 = 1.0 / 6.0;
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Keyframe {
     pub time: Tick,
@@ -408,7 +414,7 @@ fn effective_ease<K: Borrow<Keyframe>>(keys: &[K], i: usize, d: usize, spatial: 
 
 /// The ease a key side presents in the Graph Editor and the Keyframe Velocity dialog: stored
 /// Bezier eases, auto-Bezier slopes, or the equivalent of a linear side (speed of the straight
-/// segment, 33.3 % influence). `None` for hold sides and sides without a neighbour.
+/// segment, [`LINEAR_SIDE_INFLUENCE`]). `None` for hold sides and sides without a neighbour.
 pub fn side_ease(keys: &[Keyframe], i: usize, d: usize, spatial: bool, out: bool) -> Option<Ease> {
     let k = keys.get(i)?;
     let j = if out { i + 1 } else { i.checked_sub(1)? };
@@ -429,7 +435,7 @@ pub fn side_ease(keys: &[Keyframe], i: usize, d: usize, spatial: bool, out: bool
             let dv = b.get(d).unwrap_or(&0.0) - a.get(d).unwrap_or(&0.0);
             if out { dv } else { -dv }
         };
-        return Some(Ease { speed: dv / dur, influence: 1.0 / 3.0 });
+        return Some(Ease { speed: dv / dur, influence: LINEAR_SIDE_INFLUENCE });
     }
     Some(effective_ease(keys, i, if is_spatial { 0 } else { d }, is_spatial, out))
 }
@@ -546,6 +552,63 @@ fn evaluate_active<K: Borrow<Keyframe>>(keys: &[K], t: Tick, spatial: bool) -> O
     Some(segment_value_of(keys, i, t, spatial))
 }
 
+/// Evaluate keyed 3D Orientation at `t` as After Effects does: the temporal ease gives the
+/// progress through each segment, and the rotation moves along the shortest arc between the two
+/// keys ([`effectcraft_geom::orientation_slerp`]) instead of blending each angle. Speeds are
+/// degrees per second along that arc. Values other than 3D vectors evaluate as [`evaluate`].
+pub fn evaluate_orientation(keys: &[Keyframe], t: Tick) -> Option<Value> {
+    let first = keys.first()?;
+    if keys.len() == 1 || t <= first.time {
+        return Some(first.value.clone());
+    }
+    let last = keys.last()?;
+    if t >= last.time {
+        return Some(last.value.clone());
+    }
+    let i = keys.partition_point(|k| k.time <= t).checked_sub(1)?;
+    let (a, b) = (keys.get(i)?, keys.get(i + 1)?);
+    let (Value::Vec3(va), Value::Vec3(vb)) = (&a.value, &b.value) else { return Some(segment_value(keys, i, t, false)) };
+    if a.out_interp == Interp::Hold {
+        return Some(a.value.clone());
+    }
+    let (t0, t1) = (secs(a.time), secs(b.time));
+    let dur = (t1 - t0).max(1e-12);
+    let x = ((secs(t) - t0) / dur).clamp(0.0, 1.0);
+    // On a key: its own value, as stored.
+    if x <= 0.0 {
+        return Some(a.value.clone());
+    }
+    let arc = effectcraft_geom::orientation_arc_deg((*va).into(), (*vb).into());
+    let lin_out = a.out_interp == Interp::Linear;
+    let lin_in = b.in_interp != Interp::Bezier;
+    let f = if lin_out && lin_in || arc <= 1e-9 {
+        x
+    } else {
+        // Auto-Bezier keys take the arc speed between their neighbours.
+        let side = |j: usize, out: bool| -> Ease {
+            // A linear side keeps the segment's average speed at the same influence as in
+            // `segment_value` (and a missing key, unreachable here, is treated as one).
+            let Some(k) = keys.get(j) else { return Ease { speed: arc / dur, influence: LINEAR_SIDE_INFLUENCE } };
+            let linear = if out { lin_out } else { lin_in };
+            if linear {
+                return Ease { speed: arc / dur, influence: LINEAR_SIDE_INFLUENCE };
+            }
+            if k.auto_bezier && j > 0 && j + 1 < keys.len() {
+                let span = (secs(keys[j + 1].time) - secs(keys[j - 1].time)).max(1e-12);
+                let (Value::Vec3(p), Value::Vec3(n)) = (&keys[j - 1].value, &keys[j + 1].value) else { return Ease { speed: arc / dur, influence: 1.0 / 6.0 } };
+                return Ease { speed: effectcraft_geom::orientation_arc_deg((*p).into(), (*n).into()) / span, influence: 1.0 / 6.0 };
+            }
+            let list = if out { &k.out_ease } else { &k.in_ease };
+            list.first().copied().unwrap_or_default()
+        };
+        let (eo, ei) = (side(i, true), side(i + 1, false));
+        ease_progress(eo.speed * dur / arc, eo.influence, ei.speed * dur / arc, ei.influence, x)
+    };
+    let f = if f.is_finite() { f } else { x };
+    let o = effectcraft_geom::orientation_slerp((*va).into(), (*vb).into(), f);
+    Some(Value::Vec3([o.x, o.y, o.z]))
+}
+
 /// Value inside segment `i` → `i+1` at time `t`.
 pub fn segment_value(keys: &[Keyframe], i: usize, t: Tick, spatial: bool) -> Value {
     segment_value_of(keys, i, t, spatial)
@@ -576,8 +639,8 @@ fn segment_value_of<K: Borrow<Keyframe>>(keys: &[K], i: usize, t: Tick, spatial:
         let f = if lin_out && lin_in || len <= 1e-12 {
             x
         } else {
-            let eo = if lin_out { Ease { speed: len / dur, influence: 1.0 / 3.0 } } else { effective_ease(keys, i, 0, true, true) };
-            let ei = if lin_in { Ease { speed: len / dur, influence: 1.0 / 3.0 } } else { effective_ease(keys, i + 1, 0, true, false) };
+            let eo = if lin_out { Ease { speed: len / dur, influence: LINEAR_SIDE_INFLUENCE } } else { effective_ease(keys, i, 0, true, true) };
+            let ei = if lin_in { Ease { speed: len / dur, influence: LINEAR_SIDE_INFLUENCE } } else { effective_ease(keys, i + 1, 0, true, false) };
             ease_progress(eo.speed * dur / len, eo.influence, ei.speed * dur / len, ei.influence, x)
         };
         // A straight path (both handles on the chord, as auto-Bezier keys on a line have) is the
@@ -596,16 +659,16 @@ fn segment_value_of<K: Borrow<Keyframe>>(keys: &[K], i: usize, t: Tick, spatial:
     let cb = b.value.components();
     if ca.is_empty() || ca.len() != cb.len() {
         // Paths, gradients: ease on dimension 0 as overall progress.
-        let eo = if lin_out { Ease { speed: 1.0 / dur, influence: 1.0 / 3.0 } } else { effective_ease(keys, i, 0, false, true) };
-        let ei = if lin_in { Ease { speed: 1.0 / dur, influence: 1.0 / 3.0 } } else { effective_ease(keys, i + 1, 0, false, false) };
+        let eo = if lin_out { Ease { speed: 1.0 / dur, influence: LINEAR_SIDE_INFLUENCE } } else { effective_ease(keys, i, 0, false, true) };
+        let ei = if lin_in { Ease { speed: 1.0 / dur, influence: LINEAR_SIDE_INFLUENCE } } else { effective_ease(keys, i + 1, 0, false, false) };
         let f = ease_progress(eo.speed * dur, eo.influence, ei.speed * dur, ei.influence, x);
         return a.value.lerp(&b.value, f);
     }
     let mut out = Vec::with_capacity(ca.len());
     for d in 0..ca.len() {
         let dv = cb[d] - ca[d];
-        let eo = if lin_out { Ease { speed: dv / dur, influence: 1.0 / 3.0 } } else { effective_ease(keys, i, d, false, true) };
-        let ei = if lin_in { Ease { speed: dv / dur, influence: 1.0 / 3.0 } } else { effective_ease(keys, i + 1, d, false, false) };
+        let eo = if lin_out { Ease { speed: dv / dur, influence: LINEAR_SIDE_INFLUENCE } } else { effective_ease(keys, i, d, false, true) };
+        let ei = if lin_in { Ease { speed: dv / dur, influence: LINEAR_SIDE_INFLUENCE } } else { effective_ease(keys, i + 1, d, false, false) };
         // Bezier in (time, value) space directly: P1 = (i0, v0 + s0*i0*dur), P2 = (1-i1, v1 - s1*i1*dur).
         let (i0, i1) = (eo.influence.clamp(0.0, 1.0), ei.influence.clamp(0.0, 1.0));
         let u = solve_u(0.0, i0, 1.0 - i1, 1.0, x);

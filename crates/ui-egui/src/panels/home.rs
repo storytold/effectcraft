@@ -475,13 +475,15 @@ fn home_page(
     }
 }
 
+/// Run the commands the Home screen's buttons and recent files asked for, and leave Home once one
+/// opened something (not while a dialog it opened waits, nor when only the list changed).
 fn run_actions(app: &mut EffectcraftApp, ctx: &egui::Context, actions: Vec<(&str, serde_json::Value)>) {
     for (id, params) in actions {
         let before = (app.session.path.clone(), app.session.revision);
         match crate::menus::invoke(app, ctx, id, params) {
             Err(e) => app.ui.status = e,
             // Asking to save the open project first: Home stays until it is answered.
-            Ok(r) if r.get("dialog").is_some() => {}
+            Ok(r) if crate::menus::waits_on_dialog(&r) => {}
             // Leave Home unless only the list changed or a file dialog was cancelled.
             Ok(_) => {
                 let cancelled = matches!(id, "file.open" | "file.import") && (app.session.path.clone(), app.session.revision) == before;
@@ -581,6 +583,7 @@ mod tests {
         s.prefs.push_recent("/projects/Alpha.ecproj");
         let mut app = EffectcraftApp::new(s);
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         crate::theme::install(&ctx, &app.tokens, crate::i18n::language(&app));
         ctx.run_ui(Default::default(), |_| {}).textures_delta.clear();
         ctx.run_ui(Default::default(), |ui| {
@@ -614,6 +617,7 @@ mod tests {
         app.ui.start_screen = true;
         app.ui.home_learn = true;
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         crate::theme::install(&ctx, &app.tokens, crate::i18n::language(&app));
         let frame = |app: &mut EffectcraftApp| {
             ctx.run_ui(Default::default(), |ui| {

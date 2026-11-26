@@ -199,7 +199,7 @@ pub fn velocity(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
 fn combo(ui: &mut egui::Ui, app: &mut EffectcraftApp, id: &str, sel: &mut usize, opts: &[&str], enabled: bool) {
     ui.add_enabled_ui(enabled, |ui| {
         // The options are the English source strings; the automation id and label stay English.
-        let r = craft_ui::ComboBox::from_id_salt(id).width(200.0).selected_text(tr(opts[*sel])).show_ui(ui, |ui| {
+        let r = egui::ComboBox::from_id_salt(id).width(200.0).selected_text(tr(opts[*sel])).show_ui(ui, |ui| {
             for (i, o) in opts.iter().enumerate() {
                 ui.selectable_value(sel, i, tr(o));
             }
@@ -262,7 +262,14 @@ pub fn time_stretch(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
             ui.end_row();
             ui.label(tr("Stretch Factor:"));
             let before = d.percent;
-            drag(ui, app, "dialog.timeStretch.percent", &mut d.percent, DragSpec { speed: 0.5, range: -10000.0..=10000.0, suffix: " %" }, true);
+            drag(
+                ui,
+                app,
+                "dialog.timeStretch.percent",
+                &mut d.percent,
+                DragSpec { speed: 0.5, range: -effectcraft_project::limits::MAX_STRETCH..=effectcraft_project::limits::MAX_STRETCH, suffix: " %" },
+                true,
+            );
             if (before - d.percent).abs() > 1e-9 && d.orig_percent.abs() > 1e-9 {
                 d.duration = d.orig_duration * d.percent.abs() / d.orig_percent.abs();
             }
@@ -271,7 +278,12 @@ pub fn time_stretch(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
             let before = d.duration;
             drag(ui, app, "dialog.timeStretch.duration", &mut d.duration, DragSpec { speed: 0.05, range: 0.01..=100000.0, suffix: " s" }, true);
             if (before - d.duration).abs() > 1e-9 && d.orig_duration > 1e-9 {
-                d.percent = d.orig_percent.signum() * d.orig_percent.abs() * d.duration / d.orig_duration;
+                let wanted = d.orig_percent.signum() * d.orig_percent.abs() * d.duration / d.orig_duration;
+                // Within what Time Stretch accepts (±1 % to ±9900 %, #3247); the duration follows.
+                d.percent = effectcraft_project::limits::stretch(wanted);
+                if d.percent.to_bits() != wanted.to_bits() && d.orig_percent.abs() > 1e-9 {
+                    d.duration = d.orig_duration * d.percent.abs() / d.orig_percent.abs();
+                }
             }
             ui.end_row();
         });

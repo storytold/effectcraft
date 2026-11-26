@@ -252,6 +252,15 @@ fn invalidation_resolve_cancel_and_undo() {
     assert_eq!(status(&mut s)["analyzed"], false);
     assert!(s.redo());
     assert_eq!(status(&mut s)["solved"], true);
+    // A mask is part of the tracked input (#3535): drawing one clears the tracks, undo keeps them.
+    s.execute_checked("mask.new", json!({"layer": clip.0, "vertices": [[10, 10], [200, 10], [200, 150]]})).unwrap();
+    assert_eq!(status(&mut s)["analyzed"], false);
+    s.execute_checked("edit.undo", json!({})).unwrap();
+    assert_eq!(status(&mut s)["solved"], true);
+    // An effect below the tracker isn't.
+    s.execute_checked("effect.apply", json!({"layers": [clip.0], "effect": "ec.blur.gaussian"})).unwrap();
+    assert_eq!(status(&mut s)["solved"], true);
+    s.execute_checked("edit.undo", json!({})).unwrap();
 
     // Changing the Solve Method keeps the tracks and only re-solves.
     s.execute_checked("prop.set", json!({"layer": clip.0, "path": "effects/#1/advanced/solveMethod", "value": 1})).unwrap();

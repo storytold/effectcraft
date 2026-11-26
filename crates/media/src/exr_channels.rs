@@ -1,265 +1,228 @@
 //! Auxiliary channels from multi-layer OpenEXR files (depth, object / material IDs, normals,
-//! Cryptomatte, …) for the 3D Channel effects, read with the pure-Rust `exr` crate.
+//! Cryptomatte, …) for the 3D Channel effects, read with `craft-exr`.
 //!
 //! Every channel of every layer becomes a plane named `layer.channel` (or just `channel` for
 //! the unnamed layer), placed in the display window (pixels outside a layer's data window are
 //! 0, or the background depth for depth channels). Cryptomatte manifests come from the
 //! `cryptomatte/<key>/name` and `cryptomatte/<key>/manifest` header attributes (the published
 //! Cryptomatte metadata convention: the manifest is a JSON object of name → hex hash).
+//!
+//! The files are indexed from their headers ([`crate::exr_index`]), read chunk by chunk
+//! ([`crate::exr_read`]) and their planes kept in the plane store ([`crate::exr_planes`]),
+//! which the picture of an EXR footage item shares with EXtractoR / Cryptomatte (#474, #3271).
+//! This module holds the naming and picture rules they share, and whole-file reads of bytes.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use craft_exr::decode::PartInfo;
+use effectcraft_raster::{AuxChannels, Image};
+use effectcraft_render::reads::FileStamp;
 
-use effectcraft_raster::AuxChannels;
-use effectcraft_raster::channels3d::{BACKGROUND_DEPTH, split_channel};
+use crate::convert::{AlphaOp, float_to_image};
+use crate::exr_index::ExrIndex;
+use crate::exr_read::{ReadRequest, read_planes};
 
 /// The largest display window decoded (16384²; vector footage and Continuously Rasterize
 /// stop at the same size).
-const MAX_DISPLAY_PIXELS: usize = 1 << 28;
+pub(crate) const MAX_DISPLAY_PIXELS: usize = 1 << 28;
 
-fn is_depth(name: &str) -> bool {
-    let last = name.rsplit('.').next().unwrap_or(name);
-    last.eq_ignore_ascii_case("z") || name.to_ascii_lowercase().contains("depth")
-}
+// Channel naming and the Cryptomatte manifest are `craft-exr`'s.
+pub(crate) use craft_exr::channels::{is_depth, part_channel_name as channel_name};
+pub use craft_exr::cryptomatte::parse_manifest;
 
-/// Full plane name of a channel in a part: `part.channel`, except that Blender 5 writes one part
-/// per pass whose channels already carry the full name (part `ViewLayer.Depth` holds
-/// `ViewLayer.Depth.Z`), which is kept as is instead of doubling the prefix.
-fn channel_name(part: Option<&str>, channel: &str) -> String {
-    match part {
-        Some(p) if channel.strip_prefix(p).is_some_and(|rest| rest.starts_with('.')) => channel.to_string(),
-        Some(p) => format!("{p}.{channel}"),
-        None => channel.to_string(),
-    }
-}
-
-/// Parse a Cryptomatte manifest (`{"name": "hexhash", …}`).
-pub fn parse_manifest(json: &str) -> Vec<(String, u32)> {
-    let Ok(serde_json::Value::Object(m)) = serde_json::from_str::<serde_json::Value>(json) else { return vec![] };
-    let mut v: Vec<(String, u32)> = m.iter().filter_map(|(k, h)| Some((k.clone(), u32::from_str_radix(h.as_str()?.trim(), 16).ok()?))).collect();
-    v.sort();
-    v
+/// The part name channels are prefixed with (`None`: unnamed).
+pub(crate) fn part_name(part: &PartInfo) -> Option<String> {
+    part.name.clone().filter(|s| !s.is_empty())
 }
 
 /// Why an OpenEXR file's pixels can't be decoded when its headers name a compression this build
 /// can't decompress (HTJ2K, OpenEXR 3.4's High-Throughput JPEG 2000): the decoders only said
 /// "no non-deep rgb channels" or showed a transparent frame (#482). `None` for other files.
 pub fn unsupported_compression(bytes: &[u8]) -> Option<&'static str> {
-    use exr::compression::Compression;
-    let meta = exr::meta::MetaData::read_from_buffered(std::io::Cursor::new(bytes), false).ok()?;
-    meta.headers
-        .iter()
-        .any(|h| matches!(h.compression, Compression::HTJ2K32 | Compression::HTJ2K256))
-        .then_some("OpenEXR HTJ2K compression isn't supported yet: re-save the file with ZIP, PIZ or DWAA compression")
+    let parts = craft_exr::decode::parts(bytes, &craft_exr::decode::Limits::none()).ok()?;
+    parts.iter().any(|p| p.compression.starts_with("HTJ2K")).then_some(crate::exr_index::HTJ2K)
+}
+
+/// How many bytes of decoded planes the plane store keeps by itself until the caches' budget is
+/// set (then it follows the footage frames' cap, see [`crate::exr_planes::set_budget`]: the whole
+/// common budget on the desktop, #3298), like the frame cache's default
+/// ([`crate::DEFAULT_BUDGET`]): two 2560×1440 files of 32 channels (470 MB each, as every plane
+/// is f32). A soft bound: the newest file is kept whatever its size (so a frame's picture and its
+/// effects share its decode), and files still in use are never dropped (planes an effect holds,
+/// pictures waiting for their effects, decodes in progress), so memory can go above it while
+/// they are.
+pub const CACHE_BUDGET: usize = if cfg!(target_arch = "wasm32") { WEB_CACHE_CAP } else { crate::DEFAULT_BUDGET };
+
+/// The most decoded planes the plane store keeps in the browser: the browser's largest footage
+/// budget (Footage Frame Cache, frames and planes together, `WEB_MEDIA_CACHE` in the engine).
+pub const WEB_CACHE_CAP: usize = 256 << 20;
+
+/// The index of an EXR file's bytes and the planes of `ids` (all when `None`). `None` when it is
+/// not a readable EXR or the planes need too much memory.
+fn read_bytes(bytes: &[u8], ids: Option<Vec<usize>>) -> Option<(ExrIndex, Vec<usize>, Vec<Vec<f32>>)> {
+    let mut src = std::io::Cursor::new(bytes);
+    let index = crate::exr_index::build(&mut src, FileStamp::Virtual).ok()?;
+    let ids = ids.unwrap_or_else(|| (0..index.channels.len()).collect());
+    let (planes, _) = read_planes(&mut src, &index, &ReadRequest::full(ids.clone()));
+    Some((index, ids, planes.ok()?))
+}
+
+/// The channels `ids` of `index` with their `planes` (as [`read_bytes`] reads them).
+fn aux_of(index: &ExrIndex, ids: &[usize], planes: Vec<Vec<f32>>) -> AuxChannels {
+    let (w, h) = index.size();
+    let mut aux = AuxChannels::new(w as u32, h as u32, 1.0);
+    aux.channels = ids.iter().zip(planes).filter_map(|(id, p)| Some((index.channels.get(*id)?.name.clone(), p))).collect();
+    aux.manifests = index.names.manifests.clone();
+    aux.aliases = index.names.aliases.clone();
+    aux
 }
 
 /// Read all channels of an EXR file's bytes. `None` when it is not a readable EXR.
 pub fn read_exr_channels(bytes: &[u8]) -> Option<AuxChannels> {
-    use exr::prelude::*;
-    let img = read().no_deep_data().largest_resolution_level().all_channels().all_layers().all_attributes().from_buffered(std::io::Cursor::new(bytes)).ok()?;
-    let dw = img.attributes.display_window;
-    let (w, h) = (dw.size.0, dw.size.1);
-    if w == 0 || h == 0 {
+    let (index, ids, planes) = read_bytes(bytes, None)?;
+    Some(aux_of(&index, &ids, planes))
+}
+
+/// The main picture of an OpenEXR file's bytes ([`crate::exr_index::MainPicture`]), linear,
+/// straight RGB(A) as the file stores it (a `Y` picture as grey); a file without one (named
+/// layers only, as Blender's `ViewLayer.Combined.R`) is black at its display window's size, as
+/// After Effects shows it (its layers are reached by name, EXtractoR). Only the picture's
+/// channels are decoded (in a multi-part file the other parts aren't read). `None` when it is
+/// not a readable EXR.
+pub fn picture_image(bytes: &[u8]) -> Option<image::DynamicImage> {
+    let mut src = std::io::Cursor::new(bytes);
+    let index = crate::exr_index::build(&mut src, FileStamp::Virtual).ok()?;
+    let (w, h) = index.size();
+    let (w, h) = (u32::try_from(w).ok()?, u32::try_from(h).ok()?);
+    let n = (w as usize).checked_mul(h as usize)?;
+    // (the caller converts it to a float RGBA picture: a still's bound)
+    if n as u64 > crate::probe::MAX_STILL_PIXELS {
         return None;
     }
-    let mut aux = AuxChannels::new(w as u32, h as u32, 1.0);
-    let mut crypto: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
-    let mut collect_meta = |other: &HashMap<Text, AttributeValue>| {
-        for (k, v) in other {
-            let key = k.to_string();
-            let Some(rest) = key.strip_prefix("cryptomatte/") else { continue };
-            let Some((id, field)) = rest.split_once('/') else { continue };
-            let AttributeValue::Text(t) = v else { continue };
-            let e = crypto.entry(id.to_string()).or_default();
-            match field {
-                "name" => e.0 = Some(t.to_string()),
-                "manifest" => e.1 = Some(t.to_string()),
-                _ => {}
-            }
-        }
+    let Some(picture) = &index.picture else {
+        let len = n.checked_mul(3)?;
+        let mut data: Vec<f32> = Vec::new();
+        data.try_reserve_exact(len).ok()?;
+        data.resize(len, 0.0);
+        return image::Rgb32FImage::from_raw(w, h, data).map(image::DynamicImage::ImageRgb32F);
     };
-    collect_meta(&img.attributes.other);
-    // Each channel is a display-window plane: a 60000² window over a 1×1 data window was a
-    // multi-gigabyte allocation per channel (#2141).
-    let n = w.checked_mul(h).filter(|n| *n <= MAX_DISPLAY_PIXELS)?;
-    // The decoded image is consumed channel by channel, so each channel's samples are freed (or
-    // moved) as its plane is made instead of the whole file being held twice (#474).
-    for layer in img.layer_data {
-        collect_meta(&layer.attributes.other);
-        let prefix = layer.attributes.layer_name.as_ref().map(|t| t.to_string()).filter(|s| !s.is_empty());
-        let size = (layer.size.0, layer.size.1);
-        let pos = layer.attributes.layer_position;
-        let offset = (i64::from(pos.0) - i64::from(dw.position.0), i64::from(pos.1) - i64::from(dw.position.1));
-        for ch in layer.channel_data.list {
-            let name = channel_name(prefix.as_deref(), &ch.name.to_string());
-            let fill = if is_depth(&name) { BACKGROUND_DEPTH } else { 0.0 };
-            if let Some(plane) = place(ch.sample_data, size, offset, (w, h), n, fill) {
-                aux.channels.push((name, plane));
-            }
-        }
-    }
-    for (_, (name, manifest)) in crypto {
-        if let (Some(n), Some(m)) = (name, manifest) {
-            aux.manifests.push((n, parse_manifest(&m)));
-        }
-    }
-    aux.manifests.sort();
-    Some(aux)
-}
-
-/// One channel's samples (`size`, at `offset` in the `display` window of `n` pixels) as a
-/// display-window plane, `fill` outside its data window. A channel covering exactly the display
-/// window is converted in one pass, and an f32 one is moved without a copy. `None` when the
-/// channel has fewer samples than its size.
-fn place(samples: exr::image::FlatSamples, size: (usize, usize), offset: (i64, i64), display: (usize, usize), n: usize, fill: f32) -> Option<Vec<f32>> {
-    use exr::image::FlatSamples;
-    let (lw, lh) = size;
-    if samples.len() < lw.checked_mul(lh)? {
-        return None;
-    }
-    if size == display && offset == (0, 0) {
-        return Some(match samples {
-            FlatSamples::F32(mut v) => {
-                v.truncate(n);
-                v
-            }
-            FlatSamples::F16(v) => v.iter().take(n).map(|s| s.to_f32()).collect(),
-            FlatSamples::U32(v) => v.iter().take(n).map(|s| *s as f32).collect(),
-        });
-    }
-    let value = |i: usize| match &samples {
-        FlatSamples::F32(v) => v.get(i).copied(),
-        FlatSamples::F16(v) => v.get(i).map(|s| s.to_f32()),
-        FlatSamples::U32(v) => v.get(i).map(|s| *s as f32),
+    let ([r, g, b], a) = picture.rgba()?;
+    let ids = index.picture_ids();
+    let (planes, _) = read_planes(&mut src, &index, &ReadRequest::full(ids.clone()));
+    let planes = planes.ok()?;
+    let plane = |id: usize| ids.iter().position(|i| *i == id).and_then(|at| planes.get(at));
+    let (r, g, b) = (plane(r)?, plane(g)?, plane(b)?);
+    let a = match a {
+        Some(a) => Some(plane(a)?),
+        None => None,
     };
-    let (w, h) = display;
-    let mut plane = vec![fill; n];
-    for y in 0..lh {
-        let Some(ty) = usize::try_from(y as i64 + offset.1).ok().filter(|ty| *ty < h) else { continue };
-        for x in 0..lw {
-            let Some(tx) = usize::try_from(x as i64 + offset.0).ok().filter(|tx| *tx < w) else { continue };
-            if let (Some(v), Some(p)) = (value(y * lw + x), plane.get_mut(ty * w + tx)) {
-                *p = v;
-            }
-        }
-    }
-    Some(plane)
-}
-
-/// Names of the beauty pass, most preferred first, matched against the last part of a layer's
-/// name (Blender's `ViewLayer.Combined` is `Combined`): Blender's Combined pass and its
-/// compositor's File Output default `Image`, the beauty / rgba / rgb / color of Nuke, Arnold and
-/// V-Ray.
-const BEAUTY: [&str; 7] = ["combined", "beauty", "image", "rgba", "rgb", "color", "colour"];
-
-/// A data pass, never the picture: Cryptomatte (`CryptoMaterial00`), depth, mist, normals,
-/// motion vectors, positions, UVs and object / material indices.
-fn is_data_layer(layer: &str) -> bool {
-    let last = layer.rsplit('.').next().unwrap_or(layer).to_ascii_lowercase();
-    last.starts_with("crypto")
-        || ["z", "uv", "id", "mist", "indexob", "indexma"].contains(&last.as_str())
-        || ["depth", "normal", "vector", "position", "velocity", "motion", "objectid", "materialid"].iter().any(|k| last.contains(k))
-}
-
-/// The layer whose colour a multi-layer file shows (see [`layered_image`]).
-fn picture_layer<'a>(aux: &AuxChannels, layers: &[&'a str]) -> Option<&'a str> {
-    // Colour layers: three different channels (not one channel, such as depth, shown in all).
-    let rgb: Vec<&str> = layers
-        .iter()
-        .copied()
-        .filter(|l| {
-            let [r, g, b, _] = aux.layer_rgba(l);
-            !r.is_empty() && !g.is_empty() && !b.is_empty() && r != g
-        })
-        .collect();
-    let last = |l: &str| l.rsplit('.').next().unwrap_or(l).to_ascii_lowercase();
-    let pictures = || rgb.iter().filter(|l| !is_data_layer(l));
-    // The unnamed layer (plain R, G, B), then the beauty pass by name.
-    rgb.iter()
-        .find(|l| l.is_empty())
-        .or_else(|| BEAUTY.iter().find_map(|k| rgb.iter().find(|l| last(l) == *k)))
-        .or_else(|| pictures().find(|l| ["combined", "beauty"].iter().any(|k| last(l).contains(k))))
-        .or_else(|| pictures().next())
-        .or_else(|| layers.iter().find(|l| !is_data_layer(l)))
-        .or_else(|| rgb.first())
-        .or_else(|| layers.first())
-        .copied()
-}
-
-/// The picture of a multi-layer OpenEXR file without an unnamed RGB layer (Blender's
-/// `ViewLayer.Combined.R`, the compositor's `Image.R`, Nuke's `beauty.R`, …), which the image
-/// decoder rejects. After Effects shows a file's main RGBA channels and leaves the other layers
-/// to EXtractoR; here that is the beauty pass by name (`BEAUTY`), else the first colour layer
-/// that is not a data pass (never Cryptomatte, depth or normals, #412), else the first channel
-/// as grey. Linear, straight RGBA as the file stores it. `None` when it is not a readable EXR.
-pub fn layered_image(bytes: &[u8]) -> Option<image::DynamicImage> {
-    picture_of(&read_exr_channels(bytes)?)
-}
-
-/// [`layered_image`] of the EXR at `path` from the channel cache, so the picture and EXtractoR /
-/// Cryptomatte share one decode of the file (#474).
-pub(crate) fn cached_layered_image(path: &str, bytes: Arc<[u8]>) -> Option<image::DynamicImage> {
-    let aux = cached(path, || Some(bytes))?;
-    picture_of(&aux)
-}
-
-/// The picture of decoded channels (see [`layered_image`]).
-fn picture_of(aux: &AuxChannels) -> Option<image::DynamicImage> {
-    let layers = aux.layers();
-    let colour = picture_layer(aux, &layers)?;
-    let names = aux.layer_rgba(colour);
-    // A layer without R, G and B channels shows its first channel as grey.
-    let first = aux.names().into_iter().find(|n| split_channel(n).0 == colour).unwrap_or_default();
-    let plane = |k: usize| -> Option<&[f32]> { aux.get(names.get(k).map(String::as_str).filter(|n| !n.is_empty()).unwrap_or(first)) };
-    let (r, g, b) = (plane(0)?, plane(1)?, plane(2)?);
-    let a = names.get(3).filter(|n| !n.is_empty()).and_then(|n| aux.get(n));
-    let n = (aux.width as usize).checked_mul(aux.height as usize)?;
-    let mut data = Vec::with_capacity(n.checked_mul(4)?);
+    let mut data = Vec::new();
+    data.try_reserve_exact(n.checked_mul(if a.is_some() { 4 } else { 3 })?).ok()?;
+    // (0 outside the picture part's data window where its planes hold another fill)
+    let width = w as usize;
+    let shown = |i: usize| picture.inside.is_none_or(|[x0, y0, x1, y1]| (x0..x1).contains(&(i % width.max(1))) && (y0..y1).contains(&(i / width.max(1))));
     for i in 0..n {
-        data.extend([r.get(i)?, g.get(i)?, b.get(i)?].map(|v| *v));
+        let on = shown(i);
+        let pick = |v: &f32| if on { *v } else { 0.0 };
+        data.extend([r.get(i)?, g.get(i)?, b.get(i)?].map(pick));
         if let Some(a) = a {
-            data.push(*a.get(i)?);
+            data.push(pick(a.get(i)?));
         }
     }
     match a {
-        Some(_) => image::Rgba32FImage::from_raw(aux.width, aux.height, data).map(image::DynamicImage::ImageRgba32F),
-        None => image::Rgb32FImage::from_raw(aux.width, aux.height, data).map(image::DynamicImage::ImageRgb32F),
+        Some(_) => image::Rgba32FImage::from_raw(w, h, data).map(image::DynamicImage::ImageRgba32F),
+        None => image::Rgb32FImage::from_raw(w, h, data).map(image::DynamicImage::ImageRgb32F),
     }
 }
 
-type Cache = Mutex<Vec<(String, Option<Arc<AuxChannels>>)>>;
-
-fn cache() -> &'static Cache {
-    static CACHE: OnceLock<Cache> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(Vec::new()))
+/// The size and alpha of an OpenEXR file's main picture ([`picture_image`]) from its headers
+/// alone (import; a file without one is its display window, opaque). `None` when it is not a
+/// readable EXR.
+pub(crate) fn picture_size(bytes: &[u8]) -> Option<(u32, u32, bool)> {
+    let mut src = std::io::Cursor::new(bytes);
+    let index = crate::exr_index::build(&mut src, FileStamp::Virtual).ok()?;
+    let (w, h) = index.size();
+    Some((u32::try_from(w).ok()?, u32::try_from(h).ok()?, index.picture.as_ref().is_some_and(|p| p.has_alpha())))
 }
 
-/// Drop the cached channels of `path` (the file changed on disk).
-pub(crate) fn forget(path: &str) {
-    if let Ok(mut c) = cache().lock() {
-        c.retain(|(p, _)| p != path);
-    }
+/// The black picture of a file without a main picture, `w` × `h`, opaque (no alpha channel).
+pub(crate) fn black_picture(w: u32, h: u32, op: AlphaOp) -> Image {
+    float_to_image(w, h, op, |_| [0.0, 0.0, 0.0, 1.0])
 }
 
-/// Read (and cache, a few files) the channels of the EXR at `path` via `read`.
-pub(crate) fn cached(path: &str, read: impl FnOnce() -> Option<Arc<[u8]>>) -> Option<Arc<AuxChannels>> {
-    let cache = cache();
-    if let Some(v) = cache.lock().ok().and_then(|c| c.iter().find(|(p, _)| p == path).map(|(_, v)| v.clone())) {
-        return v;
+/// The picture made of planes `rgb` and `a` (opaque without one) of `aux`, as
+/// [`crate::convert::dynamic_to_image`] makes it of the same values. `None` when a plane is
+/// missing or short.
+pub(crate) fn planes_picture(aux: &AuxChannels, rgb: [&[f32]; 3], a: Option<&[f32]>, inside: Option<[usize; 4]>, op: AlphaOp) -> Option<Image> {
+    let w = aux.width as usize;
+    let n = w.checked_mul(aux.height as usize)?;
+    if rgb.iter().chain(&a).any(|p| p.len() < n) {
+        return None;
     }
-    let v = read().and_then(|b| read_exr_channels(&b)).map(Arc::new);
-    if let Ok(mut c) = cache.lock() {
-        if c.len() >= 4 {
-            c.remove(0);
-        }
-        c.push((path.to_string(), v.clone()));
-    }
-    v
+    let [r, g, b] = rgb;
+    // (0 outside `inside`, the picture part's data window, where the planes hold another fill)
+    let shown = |i: usize| inside.is_none_or(|[x0, y0, x1, y1]| (x0..x1).contains(&(i % w.max(1))) && (y0..y1).contains(&(i / w.max(1))));
+    let at = |p: &[f32], i: usize| if shown(i) { p.get(i).copied().unwrap_or(0.0) } else { 0.0 };
+    Some(float_to_image(aux.width, aux.height, op, |i| [at(r, i), at(g, i), at(b, i), a.map_or(1.0, |a| at(a, i))]))
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Decodes of a still's pixels on this thread ([`count_decode`]): the `image` crate's, then
+    /// the plane store's.
+    static DECODES: std::cell::Cell<[u64; 2]> = const { std::cell::Cell::new([0; 2]) };
+}
+
+/// Count a decode of a file's pixels on this thread (tests): by the plane store (`channels`)
+/// or by the `image` crate.
+#[cfg(test)]
+pub(crate) fn count_decode(channels: bool) {
+    DECODES.with(|d| {
+        let mut n = d.get();
+        n[usize::from(channels)] += 1;
+        d.set(n);
+    });
+}
+
+/// The decodes [`count_decode`] counted on this thread since the last call: by the `image` crate
+/// and by the plane store.
+#[cfg(test)]
+pub(crate) fn take_decodes() -> [u64; 2] {
+    DECODES.with(|d| d.replace([0; 2]))
+}
+
+/// Run `f` and return the decodes [`count_decode`] counted on this thread meanwhile, leaving
+/// this thread's count as it was (a decode thread may run another request's decode inside
+/// this one's).
+#[cfg(test)]
+pub(crate) fn counting<R>(f: impl FnOnce() -> R) -> (R, [u64; 2]) {
+    let before = DECODES.with(std::cell::Cell::get);
+    let r = f();
+    let after = DECODES.with(|d| d.replace(before));
+    (r, [after[0].saturating_sub(before[0]), after[1].saturating_sub(before[1])])
+}
+
+/// Count `n` decodes ([`counting`]) on this thread: made for it on another.
+#[cfg(test)]
+pub(crate) fn add_decodes(n: [u64; 2]) {
+    DECODES.with(|d| {
+        let c = d.get();
+        d.set([c[0] + n[0], c[1] + n[1]]);
+    });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use effectcraft_raster::channels3d::BACKGROUND_DEPTH;
+    use std::sync::Arc;
+
+    /// An EXR file of `layers` (with their display window `display`).
+    fn file(layers: Vec<exr::prelude::Layer<exr::prelude::AnyChannels<exr::prelude::FlatSamples>>>, display: exr::prelude::IntegerBounds) -> Vec<u8> {
+        use exr::prelude::*;
+        let image = Image::from_layers(ImageAttributes::new(display), layers);
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image.write().to_buffered(&mut bytes).unwrap();
+        bytes.into_inner()
+    }
 
     #[test]
     fn reads_layered_channels_and_cryptomatte_metadata() {
@@ -294,53 +257,72 @@ mod tests {
         assert!(read_exr_channels(b"not an exr").is_none());
     }
 
-    /// #474: a full-window f32 channel (Cryptomatte ranks, …) becomes its plane without a copy,
-    /// so a decode no longer holds the file's samples twice; other channels are placed in the
-    /// display window as before.
+    /// #474: each line of samples goes straight into its display-window plane: a data window
+    /// inside the display window is placed with the fill around it (the background depth for
+    /// depth), one partly outside is clipped, never out of bounds; half and uint samples are
+    /// converted as the file stores them.
     #[test]
-    fn channels_become_planes_without_an_extra_copy() {
-        use exr::image::FlatSamples;
-        let v = vec![0.25f32; 6];
-        let ptr = v.as_ptr();
-        let plane = place(FlatSamples::F32(v), (3, 2), (0, 0), (3, 2), 6, 0.0).unwrap();
-        assert_eq!(plane.as_ptr(), ptr, "moved, not copied");
-        assert_eq!(plane, [0.25; 6]);
-        let half = |x: f32| exr::prelude::f16::from_f32(x);
-        let full = place(FlatSamples::F16(vec![half(0.5); 6]), (3, 2), (0, 0), (3, 2), 6, 0.0).unwrap();
-        assert_eq!(full, [0.5; 6]);
-        // A 2×1 data window at (1, 1) of a 3×2 display window; the rest is the fill.
-        let part = place(FlatSamples::F16(vec![half(1.0), half(2.0)]), (2, 1), (1, 1), (3, 2), 6, 9.0).unwrap();
-        assert_eq!(part, [9.0, 9.0, 9.0, 9.0, 1.0, 2.0]);
-        // Partly outside the display window: clipped, never out of bounds.
-        let off = place(FlatSamples::U32(vec![7, 8]), (2, 1), (2, -1), (3, 2), 6, 0.0).unwrap();
-        assert_eq!(off, [0.0; 6]);
-        let edge = place(FlatSamples::U32(vec![7, 8]), (2, 1), (2, 0), (3, 2), 6, 0.0).unwrap();
-        assert_eq!(edge, [0.0, 0.0, 7.0, 0.0, 0.0, 0.0]);
-        assert!(place(FlatSamples::F32(vec![1.0; 5]), (3, 2), (0, 0), (3, 2), 6, 0.0).is_none(), "too few samples");
+    fn channels_are_placed_in_the_display_window() {
+        use exr::prelude::*;
+        let half = |x: f32| f16::from_f32(x);
+        let part = |pos: (i32, i32), size: (usize, usize), list: Vec<AnyChannel<FlatSamples>>| {
+            let attrs = LayerAttributes { layer_position: Vec2(pos.0, pos.1), ..Default::default() };
+            Layer::new(size, attrs, Encoding::FAST_LOSSLESS, AnyChannels::sort(list.into()))
+        };
+        let display = IntegerBounds::from_dimensions((3, 2));
+        // A 2×1 data window at (1, 1).
+        let inside = file(
+            vec![part(
+                (1, 1),
+                (2, 1),
+                vec![AnyChannel::new("G", FlatSamples::F16(vec![half(1.0), half(2.0)])), AnyChannel::new("Z", FlatSamples::U32(vec![7, 8]))],
+            )],
+            display,
+        );
+        let aux = read_exr_channels(&inside).unwrap();
+        assert_eq!(aux.get("G").unwrap(), [0.0, 0.0, 0.0, 0.0, 1.0, 2.0]);
+        let bg = BACKGROUND_DEPTH;
+        assert_eq!(aux.get("Z").unwrap(), [bg, bg, bg, bg, 7.0, 8.0]);
+        // A 2×2 data window at (2, -1): only its bottom-left sample lands at (2, 0).
+        let off = file(vec![part((2, -1), (2, 2), vec![AnyChannel::new("G", FlatSamples::F32(vec![1.0, 2.0, 3.0, 4.0]))])], display);
+        assert_eq!(read_exr_channels(&off).unwrap().get("G").unwrap(), [0.0, 0.0, 3.0, 0.0, 0.0, 0.0]);
+        // Entirely outside: all fill.
+        let away = file(vec![part((-5, 0), (2, 2), vec![AnyChannel::new("G", FlatSamples::F32(vec![1.0; 4]))])], display);
+        assert_eq!(read_exr_channels(&away).unwrap().get("G").unwrap(), [0.0; 6]);
     }
 
-    /// #295: a multi-layer EXR whose colour is only in named layers (`diffuse.R`, as Blender and
-    /// Nuke write them) failed to import ("does not contain non-deep rgb channels"); it now
-    /// shows its colour layer and keeps every channel for EXtractoR.
-    /// #474: the picture and EXtractoR / Cryptomatte share one decode of a multi-layer file:
-    /// after the frame is decoded, the aux channels come from the cache without reading the file.
+    /// #474: a header asking for more plane memory than one decode may allocate (16384² display
+    /// window, 40 channels: 43 GB) is refused with a reason before anything is allocated.
     #[test]
-    fn picture_and_aux_channels_share_one_decode() {
+    fn a_header_asking_for_too_much_memory_is_refused() {
         use exr::prelude::*;
-        let (w, h) = (2usize, 2usize);
-        let ch = |n: &str, v: f32| AnyChannel::new(n, FlatSamples::F32(vec![v; w * h]));
-        let channels = AnyChannels::sort(vec![ch("Image.R", 0.5), ch("Image.G", 0.5), ch("Image.B", 0.5), ch("GlossDir.R", 0.25)].into());
-        let image = Image::from_layer(Layer::new((w, h), LayerAttributes::default(), Encoding::FAST_LOSSLESS, channels));
-        let mut bytes = std::io::Cursor::new(Vec::new());
-        image.write().to_buffered(&mut bytes).unwrap();
-        let b: Arc<[u8]> = bytes.into_inner().into();
-        let path = "/474-shared-decode.exr";
+        // (another test raises the process-wide decode limit far above the request: not now)
+        let _only = crate::exr_read::LIMIT_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let list: Vec<AnyChannel<FlatSamples>> = (0..40).map(|i| AnyChannel::new(format!("pass{i:02}.Y").as_str(), FlatSamples::F32(vec![0.5]))).collect();
+        let layer = Layer::new((1, 1), LayerAttributes::default(), Encoding::FAST_LOSSLESS, AnyChannels::sort(list.into()));
+        let bytes = file(vec![layer], IntegerBounds::new((0, 0), (16384, 16384)));
+        let mut src = std::io::Cursor::new(bytes.as_slice());
+        let index = crate::exr_index::build(&mut src, FileStamp::Virtual).unwrap();
+        // (the fixed limit, whatever the process-wide one)
+        let all = ReadRequest { max_bytes: crate::exr_read::MAX_DECODE_BYTES, ..ReadRequest::full((0..index.channels.len()).collect()) };
+        match read_planes(&mut src, &index, &all).0 {
+            Err(crate::exr_read::ReadError::TooLarge(why)) => assert!(why.contains("16384×16384") && why.contains("GB"), "{why}"),
+            Err(e) => panic!("readable: {e:?}"),
+            Ok(_) => panic!("refused"),
+        }
+        assert!(read_exr_channels(&bytes).is_none());
         let pool = crate::MediaPool::new();
-        pool.add_bytes(path, b.clone());
-        let f = crate::probe_bytes(path, b).unwrap();
-        pool.frame_at(&f, effectcraft_time::Tick::ZERO).unwrap();
-        let aux = cached(path, || panic!("the frame's decode is reused, the file is not read again")).unwrap();
-        assert_eq!(aux.get("GlossDir.R").and_then(|p| p.first()).copied(), Some(0.25));
+        pool.add_bytes("/474-too-large.exr", bytes.as_slice().into());
+        let f = effectcraft_project::Footage {
+            path: "/474-too-large.exr".into(),
+            kind: effectcraft_project::FootageKind::Still,
+            has_video: true,
+            width: 16384,
+            height: 16384,
+            ..Default::default()
+        };
+        use effectcraft_render::FootageSource;
+        assert!(pool.aux(effectcraft_project::ItemId(1), &f, effectcraft_time::Tick::ZERO).is_none());
     }
 
     /// #2141: one pixel of data in a 60000² display window is refused, not allocated per channel.
@@ -355,8 +337,11 @@ mod tests {
         assert!(read_exr_channels(&bytes.into_inner()).is_none());
     }
 
+    /// A file of named layers only (Blender's single-part multilayer) imports at its display
+    /// window's size and shows black, opaque, as After Effects does; its layers stay readable by
+    /// effects (EXtractoR, Cryptomatte) and nothing is an error.
     #[test]
-    fn layered_exr_without_an_unnamed_rgb_layer_imports() {
+    fn layered_exr_without_an_unnamed_rgb_layer_imports_black() {
         use exr::prelude::*;
         let (w, h) = (4usize, 2usize);
         let ch = |n: &str, v: f32| AnyChannel::new(n, FlatSamples::F32(vec![v; w * h]));
@@ -369,8 +354,13 @@ mod tests {
         assert_eq!((f.width, f.height, f.alpha), (4, 2, effectcraft_project::AlphaMode::Ignore));
         let pool = crate::MediaPool::new();
         pool.add_bytes("/layers.exr", b.clone());
-        let px = pool.frame_at(&f, effectcraft_time::Tick::ZERO).unwrap().get(1, 1);
-        assert!((px[0] - 1.0).abs() < 1e-4 && px[1] > 0.3 && px[1] < 0.6 && px[2] < 1e-4 && px[3] == 1.0, "diffuse, sRGB-encoded: {px:?}");
+        let img = pool.frame_at(&f, effectcraft_time::Tick::ZERO).unwrap();
+        assert_eq!((img.width, img.height), (4, 2));
+        assert_eq!(img.get(1, 1), [0.0, 0.0, 0.0, 1.0], "black, opaque");
+        use effectcraft_render::FootageSource;
+        let effects = pool.aux(effectcraft_project::ItemId(1), &f, effectcraft_time::Tick::ZERO).expect("the layers, for effects");
+        assert_eq!(effects.get("diffuse.R").unwrap(), [1.0; 8].as_slice());
+        assert_eq!(effects.get("depth.Z").unwrap(), [7.0; 8].as_slice());
         let aux = read_exr_channels(&b).unwrap();
         assert_eq!(aux.layers(), ["depth", "diffuse"]);
         assert_eq!(aux.layer_rgba("diffuse"), ["diffuse.R", "diffuse.G", "diffuse.B", ""].map(String::from));
@@ -407,7 +397,7 @@ mod tests {
         assert!(aux.get("ViewLayer.Combined.R").is_some());
     }
 
-    /// Straight RGBA of [`layered_image`] at pixel 0 for a file of single-value channels.
+    /// Straight RGBA of [`picture_image`] at pixel 0 for a file of single-value channels.
     fn picture<S: AsRef<str>>(channels: &[(S, f32)]) -> Vec<f32> {
         use exr::prelude::*;
         let (w, h) = (2usize, 2usize);
@@ -415,15 +405,17 @@ mod tests {
         let image = Image::from_layer(Layer::new((w, h), LayerAttributes::default(), Encoding::FAST_LOSSLESS, AnyChannels::sort(list.into())));
         let mut bytes = std::io::Cursor::new(Vec::new());
         image.write().to_buffered(&mut bytes).unwrap();
-        let img = layered_image(bytes.get_ref()).unwrap().to_rgba32f();
+        let img = picture_image(bytes.get_ref()).unwrap().to_rgba32f();
+        assert_eq!(img.dimensions(), (2, 2), "the display window's size");
         img.get_pixel(0, 0).0.to_vec()
     }
 
-    /// #412: a Blender compositor File Output (multilayer) names its beauty pass `Image`, and its
-    /// Cryptomatte layers (lowercase `r, g, b, a`) sort first. The picture was CryptoMaterial00;
-    /// it is the Image layer, and data passes are never the picture.
+    /// The main picture is After Effects': the unprefixed `R`, `G`, `B` (`A`), else `Y` (`A`) as
+    /// grey. A file of named layers only (Blender's multilayer `ViewLayer.Combined.R`, a
+    /// compositor's `Image.R`, Cryptomatte, depth) has none and shows black, opaque (#412 chose a
+    /// beauty pass by name before; its layers are reached by name, EXtractoR).
     #[test]
-    fn layered_exr_shows_the_beauty_pass_not_cryptomatte() {
+    fn the_picture_is_the_unprefixed_channels_else_black() {
         let mut blender = vec![];
         for layer in ["CryptoMaterial00", "CryptoMaterial01", "CryptoMaterial02"] {
             blender.extend(["r", "g", "b", "a"].map(|c| (format!("{layer}.{c}"), 0.9)));
@@ -432,8 +424,8 @@ mod tests {
             blender.extend(["R", "G", "B", "A"].map(|c| (format!("{layer}.{c}"), v)));
         }
         blender.push(("Mist.Z".into(), 0.7));
-        assert_eq!(picture(&blender), [0.5; 4], "the Image layer");
-        // Blender's render-layer names and Nuke's beauty.
+        let black = [0.0, 0.0, 0.0, 1.0];
+        assert_eq!(picture(&blender), black, "named layers only: no Image or beauty pass by name");
         assert_eq!(
             picture(&[
                 ("ViewLayer.CryptoObject00.r", 0.9),
@@ -443,12 +435,15 @@ mod tests {
                 ("ViewLayer.Combined.G", 0.2),
                 ("ViewLayer.Combined.B", 0.2)
             ]),
-            [0.2, 0.2, 0.2, 1.0]
+            black,
+            "Blender's Combined pass"
         );
-        // No beauty name: the first colour layer that isn't a data pass.
-        let no_beauty: Vec<(String, f32)> = blender.iter().filter(|(n, _)| !n.starts_with("Image")).cloned().collect();
-        assert_eq!(picture(&no_beauty), [0.3; 4], "GlossCol, not Cryptomatte");
-        // Only data and a grey pass: the grey pass, not depth.
-        assert_eq!(picture(&[("Depth.Z", 9.0), ("AO.Y", 0.25)]), [0.25, 0.25, 0.25, 1.0]);
+        assert_eq!(picture(&[("Depth.Z", 9.0), ("AO.Y", 0.25)]), black, "a layer's Y is not the picture");
+        // Unprefixed channels are, whatever the named layers beside them.
+        assert_eq!(picture(&[("R", 0.1), ("G", 0.2), ("B", 0.3), ("Image.R", 0.9)]), [0.1, 0.2, 0.3, 1.0]);
+        assert_eq!(picture(&[("R", 0.1), ("G", 0.2), ("B", 0.3), ("A", 0.5)]), [0.1, 0.2, 0.3, 0.5]);
+        // Luminance: grey, with its alpha.
+        assert_eq!(picture(&[("Y", 0.25)]), [0.25, 0.25, 0.25, 1.0]);
+        assert_eq!(picture(&[("A", 0.5), ("Y", 0.25), ("diffuse.R", 0.9)]), [0.25, 0.25, 0.25, 0.5]);
     }
 }

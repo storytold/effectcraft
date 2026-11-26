@@ -9,6 +9,7 @@ struct State {
     numeric: Option<(Id, u64)>,
     offset: Vec2,
     pending: Option<(Pos2, Pos2)>,
+    #[cfg(any(not(target_arch = "wasm32"), test))]
     disabled: bool,
 }
 
@@ -55,7 +56,11 @@ pub(crate) fn prepare_input(ctx: &Context, raw: &mut RawInput, injected: bool) -
             || raw.events.iter().any(|e| matches!(e, Event::WindowFocused(false) | Event::PointerButton { button: PointerButton::Primary, .. }))
         {
             let ended = state.numeric.is_some();
-            *state = State { disabled: touch, ..Default::default() };
+            *state = State {
+                #[cfg(any(not(target_arch = "wasm32"), test))]
+                disabled: touch,
+                ..Default::default()
+            };
             return ended;
         }
         if state.numeric.is_none() {

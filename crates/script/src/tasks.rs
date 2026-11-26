@@ -208,7 +208,9 @@ pub(crate) fn run_tasks_at(session: &mut Session, now: Instant) -> J {
     if !running {
         #[cfg(not(target_arch = "wasm32"))]
         crate::ui::tick_threaded(session, now, &mut report);
-        crate::ui::tick_inline(session, now, &mut report);
+        if session.script_ui.render_host.is_none() {
+            crate::ui::tick_inline(session, now, &mut report);
+        }
         crate::ui::prune_task_hosts(session);
     }
     let errors: Vec<J> = report.errors.iter().map(|e| json!({"message": e.message, "line": e.line, "column": e.column, "file": e.file})).collect();

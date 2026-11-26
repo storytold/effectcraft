@@ -1,0 +1,343 @@
+# After Effects 26.2 app.effects: match name<TAB>category, first-party names only (ADBE, APC, VISINF).
+# Names only, read back from the running application (#3113). Categories "Obsolete"/"_Obsolete" are hidden legacy versions. "-" = no category.
+ADBE 3D Glasses	_Obsolete
+ADBE 3D Glasses2	Perspective
+ADBE 3D Tracker	Perspective
+ADBE 4ColorGradient	Generate
+ADBE AIF Perlin Noise 3D	Noise & Grain
+ADBE ATG Extract	Keying
+ADBE AUX CHANNEL EXTRACT	3D Channel
+ADBE Alpha Levels2	_Obsolete
+ADBE Alpha Levels3	_Obsolete
+ADBE Angle Control	Expression Controls
+ADBE Apply Color LUT	_Obsolete
+ADBE Apply Color LUT2	Utility
+ADBE Arithmetic	Channel
+ADBE Aud BT	Audio
+ADBE Aud Compressor	Audio
+ADBE Aud Delay	Audio
+ADBE Aud Distortion	Audio
+ADBE Aud Gate	Audio
+ADBE Aud HiLo	Audio
+ADBE Aud Modulator	Audio
+ADBE Aud Reverb	Audio
+ADBE Aud Reverse	Audio
+ADBE Aud Stereo Mixer	Audio
+ADBE Aud Tone	Audio
+ADBE AudSpect	Generate
+ADBE AudWave	Generate
+ADBE Aud_Flange	Audio
+ADBE AutoColor	Color Correction
+ADBE AutoContrast	Color Correction
+ADBE AutoLevels	Color Correction
+ADBE BEZMESH	Distort
+ADBE Basic 3D	Obsolete
+ADBE Basic Text2	Obsolete
+ADBE Bevel Alpha	Perspective
+ADBE Bevel Edges	Perspective
+ADBE Bilateral	Blur & Sharpen
+ADBE Black&White	Color Correction
+ADBE Blend	Channel
+ADBE Block Dissolve	Transition
+ADBE Box Blur	_Obsolete
+ADBE Box Blur2	Blur & Sharpen
+ADBE Brightness & Contrast	_Obsolete
+ADBE Brightness & Contrast 2	Color Correction
+ADBE Broadcast Colors	Color Correction
+ADBE Brush Strokes	Stylize
+ADBE Bulge	Distort
+ADBE CHANNEL MIXER	Color Correction
+ADBE CM Animated Shape 2	-
+ADBE CM Animated Shape 3	-
+ADBE CM Animated Shape Control	-
+ADBE CM AutoscrollHorizontal	-
+ADBE CM AutoscrollVertical	-
+ADBE CM CornerReveal	-
+ADBE CM CrackedTiles	-
+ADBE CM CropEdges	-
+ADBE CM DissolveUnmelt	-
+ADBE CM FadeInOutFrames	-
+ADBE CM FadeInOutmsec	-
+ADBE CM FlyToInset	-
+ADBE CM GridWipe	-
+ADBE CM InsetVideoFramed	-
+ADBE CM InsetVideoTorn	-
+ADBE CM LightLeaksMarkers	-
+ADBE CM LightLeaksRandom	-
+ADBE CM MoodLightAmorph	-
+ADBE CM MoodLightDigital	-
+ADBE CM MoodLightStreaks	-
+ADBE CM OpacityFlashMarkers	-
+ADBE CM OpacityFlashRandom	-
+ADBE CM ScaleBounceMarkers	-
+ADBE CM ScaleBounceRandom	-
+ADBE CM SlideVariable	-
+ADBE CM Spin	-
+ADBE CM Throw	-
+ADBE CM TransCard	-
+ADBE CM TransComplete	-
+ADBE CM TransCorner	-
+ADBE CM TransDirection	-
+ADBE CM TransDissolve	-
+ADBE CM TransFade	-
+ADBE CM TransFadeMask	-
+ADBE CM TransIris	-
+ADBE CM TransRadial	-
+ADBE CM TransSlide	-
+ADBE CM TransStretch	-
+ADBE CM TransWipe	-
+ADBE CM TransWipeFeath	-
+ADBE CM WiggleGelatin	-
+ADBE CM WigglePosition	-
+ADBE CM WiggleRotation	-
+ADBE CM WiggleScale	-
+ADBE CM WiggleShear	-
+ADBE CM Wigglerama	-
+ADBE CM Zoom2DSpin	-
+ADBE CM Zoom3DTumble	-
+ADBE CM ZoomBubble	-
+ADBE CM ZoomSpiral	-
+ADBE CM ZoomWobble	-
+ADBE Calculations	Channel
+ADBE Camera Lens Blur	Blur & Sharpen
+ADBE CameraShakeDeblur	Blur & Sharpen
+ADBE Cartoonify	Stylize
+ADBE Cell Pattern	Generate
+ADBE Change Color	Color Correction
+ADBE Change To Color	Color Correction
+ADBE Channel Blur	Blur & Sharpen
+ADBE Channel Combiner	Channel
+ADBE Checkbox Control	Expression Controls
+ADBE Checkerboard	Generate
+ADBE Cineon Converter	_Obsolete
+ADBE Cineon Converter2	Utility
+ADBE Circle	Generate
+ADBE Color Balance	_Obsolete
+ADBE Color Balance (HLS)	Color Correction
+ADBE Color Balance 2	Color Correction
+ADBE Color Control	Expression Controls
+ADBE Color Difference Key	Keying
+ADBE Color Emboss	Stylize
+ADBE Color Key	Obsolete
+ADBE Color Link	Color Correction
+ADBE Color Range	Keying
+ADBE Color Swirl	-
+ADBE Compander	Utility
+ADBE Compound Arithmetic	Channel
+ADBE Compound Blur	Blur & Sharpen
+ADBE Corner Pin	Distort
+ADBE CurvesCustom	Color Correction
+ADBE DE Bounce	-
+ADBE DE Bounce At Marker	-
+ADBE DE Bounce On Beat	-
+ADBE DE Bounce Random	-
+ADBE DE Follow	-
+ADBE DE Jiggle	-
+ADBE DE Jiggle At Marker	-
+ADBE DE Jiggle On Beat	-
+ADBE DE Jiggle Random	-
+ADBE DE Opacity Pulse	-
+ADBE DE Opacity Pulse At Marker	-
+ADBE DE Opacity Pulse On Beat	-
+ADBE DE Opacity Pulse Random	-
+ADBE DE Orbit	-
+ADBE DE Orbit 3D	-
+ADBE DE Oscillate	-
+ADBE DE Oscillate At Marker	-
+ADBE DE Oscillate On Beat	-
+ADBE DE Oscillate Random	-
+ADBE DE Pendulum	-
+ADBE DE Pendulum At Marker	-
+ADBE DE Pendulum On Beat	-
+ADBE DE Pendulum Random	-
+ADBE DE Pulse	-
+ADBE DE Pulse At Marker	-
+ADBE DE Pulse On Beat	-
+ADBE DE Pulse Random	-
+ADBE DE Random Fill Color	-
+ADBE DE Random Motion	-
+ADBE DE Random Motion 1D	-
+ADBE DE Random Opacity	-
+ADBE DE Random Rotation	-
+ADBE DE Random Rotation 3D	-
+ADBE DE Random Scale	-
+ADBE DE Swarm	-
+ADBE DE Wobble Bounce	-
+ADBE DE Wobble Bounce At Marker	-
+ADBE DE Wobble Bounce On Beat	-
+ADBE DE Wobble Bounce Random	-
+ADBE DE Z Spring	-
+ADBE DE Z Spring At Marker	-
+ADBE DEPTH FIELD	3D Channel
+ADBE DEPTH MATTE	3D Channel
+ADBE Deflicker	Color Correction
+ADBE Difference	Time
+ADBE Difference Matte2	Keying
+ADBE DigitalVideoLimiter	Color Correction
+ADBE Displacement Map	Distort
+ADBE Drop Shadow	Perspective
+ADBE Dropdown Control	Expression Controls
+ADBE Dust & Scratches	Noise & Grain
+ADBE ELLIPSE	Generate
+ADBE Easy Levels	_Obsolete
+ADBE Easy Levels2	Color Correction
+ADBE Echo	Time
+ADBE Emboss	Stylize
+ADBE Equalize	Color Correction
+ADBE Exposure	_Obsolete
+ADBE Exposure2	Color Correction
+ADBE Extract	Keying
+ADBE Eyedropper Fill	Generate
+ADBE FOG_3D	3D Channel
+ADBE Fast Blur	_Obsolete
+ADBE Fill	Generate
+ADBE Find Edges	Stylize
+ADBE Fractal	Generate
+ADBE Fractal Noise	Noise & Grain
+ADBE FreePin3	_Obsolete
+ADBE GROW BOUNDS	Utility
+ADBE Gamma/Pedestal/Gain2	Color Correction
+ADBE Gaussian Blur	Obsolete
+ADBE Gaussian Blur 2	Blur & Sharpen
+ADBE Geometry	_Obsolete
+ADBE Geometry2	Distort
+ADBE Getting Jiggy	-
+ADBE Glo2	Stylize
+ADBE Gradient Wipe	Transition
+ADBE Grid	Generate
+ADBE HDR ToneMap	Utility
+ADBE HUE SATURATION	Color Correction
+ADBE ID MATTE	3D Channel
+ADBE IRIS_WIPE	Transition
+ADBE Invert	Channel
+ADBE KeyCleaner	Keying
+ADBE LIQUIFY	Distort
+ADBE Laser	Generate
+ADBE Layer Control	Expression Controls
+ADBE Leave Color	Color Correction
+ADBE Lens Flare	Generate
+ADBE Lightning	Obsolete
+ADBE Lightning 2	Generate
+ADBE Linear Color Key2	Keying
+ADBE Linear Wipe	Transition
+ADBE Luma Key	Obsolete
+ADBE Lumetri	Color Correction
+ADBE MESH WARP	Distort
+ADBE Magnify	Distort
+ADBE Matte Choker	Matte
+ADBE Median	Noise & Grain
+ADBE Minimax	Channel
+ADBE Mirror	Distort
+ADBE Mosaic	Stylize
+ADBE Motion Blur	Blur & Sharpen
+ADBE Noise	_Obsolete
+ADBE Noise Alpha	_Obsolete
+ADBE Noise Alpha2	Noise & Grain
+ADBE Noise HLS	_Obsolete
+ADBE Noise HLS Auto	_Obsolete
+ADBE Noise HLS Auto2	Noise & Grain
+ADBE Noise HLS2	Noise & Grain
+ADBE Noise2	Noise & Grain
+ADBE Numbers2	Text
+ADBE OCIO CDL Transform	Color Correction
+ADBE OCIO Color Space Transform	Color Correction
+ADBE OCIO Display Transform	Color Correction
+ADBE OCIO FILE Transform	Color Correction
+ADBE OCIO Look Transform	Color Correction
+ADBE OFMotionBlur	Time
+ADBE Offset	Distort
+ADBE Optics Compensation	Distort
+ADBE PS Arbitrary Map	Color Correction
+ADBE PS Median	Noise & Grain
+ADBE PSL Bevel Emboss	_Obsolete
+ADBE PSL Drop Shadow	_Obsolete
+ADBE PSL Inner Glow	_Obsolete
+ADBE PSL Inner Shadow	_Obsolete
+ADBE PSL Outer Glow	_Obsolete
+ADBE PSL Solid Fill	_Obsolete
+ADBE Paint	_Obsolete
+ADBE Paint Bucket	Generate
+ADBE Param EQ	Audio
+ADBE Path Text	Obsolete
+ADBE Photo Filter	_Obsolete
+ADBE PhotoFilterPS	Color Correction
+ADBE Playgnd	Simulation
+ADBE Point Control	Expression Controls
+ADBE Point3D Control	Expression Controls
+ADBE Polar Coordinates	Distort
+ADBE Posterize	Stylize
+ADBE Posterize Time	Time
+ADBE Pro Levels	_Obsolete
+ADBE Pro Levels2	Color Correction
+ADBE ProfileToProfile	Utility
+ADBE RESHAPE	Distort
+ADBE Radial Blur	Blur & Sharpen
+ADBE Radial Shadow	Perspective
+ADBE Radial Wipe	Transition
+ADBE Ramp	Generate
+ADBE Reduce Interlace Flicker	Obsolete
+ADBE RefineMatte	_Obsolete
+ADBE RefineMatte2	Matte
+ADBE RefineRBMatte	Matte
+ADBE Remove Color Matting	Channel
+ADBE Ripple	Distort
+ADBE Rolling Shutter	Distort
+ADBE Roughen Edges	Stylize
+ADBE SCHMEAR	Distort
+ADBE Sample Image	-
+ADBE Samurai	_Obsolete
+ADBE Scatter	Stylize
+ADBE Scribble Fill	Generate
+ADBE SelectiveColor	Color Correction
+ADBE Separate XYZ Position	-
+ADBE Separate XYZ Scale	-
+ADBE Set Channels	Channel
+ADBE Set Matte2	_Obsolete
+ADBE Set Matte3	Channel
+ADBE ShadowHighlight	Color Correction
+ADBE Sharpen	Blur & Sharpen
+ADBE Shift Channels	Channel
+ADBE Simple Choker	Matte
+ADBE Slider Control	Expression Controls
+ADBE Smart Blur	Blur & Sharpen
+ADBE Solid Composite	Channel
+ADBE Spherize	Distort
+ADBE Spill Suppressor	Obsolete
+ADBE Spill2	Keying
+ADBE Stereo 3D Controls	-
+ADBE Strobe	Stylize
+ADBE Stroke	Generate
+ADBE SubspaceStabilizer	Distort
+ADBE Texturize	Stylize
+ADBE Three-Way Color Corrector	_Obsolete
+ADBE Threshold	_Obsolete
+ADBE Threshold2	Stylize
+ADBE Tile	Stylize
+ADBE Time Displacement	Time
+ADBE Timecode	Text
+ADBE Timewarp	Time
+ADBE Tint	Color Correction
+ADBE Tritone	Color Correction
+ADBE Turbulent Displace	Distort
+ADBE Twirl	Distort
+ADBE Unmult	Keying
+ADBE Unsharp Mask	_Obsolete
+ADBE Unsharp Mask2	Blur & Sharpen
+ADBE Upscale	Distort
+ADBE Venetian Blinds	Transition
+ADBE Vibrance	Color Correction
+ADBE WRPMESH	Distort
+ADBE Wave Warp	Distort
+ADBE Write-on	Generate
+APC CardDanceCam	Simulation
+APC CardWipeCam	Transition
+APC Caustics	Simulation
+APC Colorama	Color Correction
+APC Foam	Simulation
+APC Radio Waves	Generate
+APC Shatter	Simulation
+APC Vegas	Generate
+APC Wave World	Simulation
+VISINF Grain Duplication	Noise & Grain
+VISINF Grain Implant	Noise & Grain
+VISINF Grain Removal	Noise & Grain

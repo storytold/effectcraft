@@ -60,16 +60,19 @@ fn the_interface_draws_and_composites_on_the_cpu_while_the_gpu_compositor_is_bui
     }
     let (release, gate) = std::sync::mpsc::channel::<()>();
     let s = small_session();
-    let mut h = Harness::builder().with_size(egui::vec2(1200.0, 800.0)).wgpu().build_eframe(move |_| {
-        let mut app = EffectcraftApp::new(s);
-        // The status line's 5 s expiry reads the app clock: a manual one makes the steps below
-        // stand for a known span of time.
-        app.use_manual_clock();
-        app.hooks.before_gpu_build = Some(Box::new(move || {
-            let _ = gate.recv();
-        }));
-        app
-    });
+    let mut h =
+        Harness::builder().with_size(egui::vec2(1200.0, 800.0)).wgpu().with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(
+            move |_| {
+                let mut app = EffectcraftApp::new(s);
+                // The status line's 5 s expiry reads the app clock: a manual one makes the steps below
+                // stand for a known span of time.
+                app.use_manual_clock();
+                app.hooks.before_gpu_build = Some(Box::new(move || {
+                    let _ = gate.recv();
+                }));
+                app
+            },
+        );
     // The first frames paint, and a CPU frame reaches the viewer, while the worker still waits.
     for _ in 0..600 {
         h.step();
@@ -118,11 +121,14 @@ fn a_compositor_build_that_panics_leaves_the_viewer_on_the_cpu() {
         return;
     }
     let s = small_session();
-    let mut h = Harness::builder().with_size(egui::vec2(1200.0, 800.0)).wgpu().build_eframe(move |_| {
-        let mut app = EffectcraftApp::new(s);
-        app.hooks.before_gpu_build = Some(Box::new(|| panic!("synthetic shader compiler panic")));
-        app
-    });
+    let mut h =
+        Harness::builder().with_size(egui::vec2(1200.0, 800.0)).wgpu().with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(
+            move |_| {
+                let mut app = EffectcraftApp::new(s);
+                app.hooks.before_gpu_build = Some(Box::new(|| panic!("synthetic shader compiler panic")));
+                app
+            },
+        );
     settle(&mut h);
     assert!(!h.state().gpu_initializing());
     assert!(h.state().gpu_adapter().is_none());
@@ -169,6 +175,7 @@ fn viewer_draws_gpu_frames_that_match_the_cpu() {
         .with_size(egui::vec2(1400.0, 900.0))
         .with_pixels_per_point(1.0)
         .wgpu_setup(same_adapter(adapter))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
         .build_eframe(|_| EffectcraftApp::new(Session::default()));
     // The project opens once the compositor (built on a worker thread) is attached. A frame the
     // CPU composited while it was being built has the GPU frame's key, so the viewer would keep
@@ -215,7 +222,10 @@ fn a_lost_device_draws_nothing_autosaves_and_closes() {
     let mut s = Session { autosave_folder_override: Some(dir.clone()), ..Default::default() };
     s.execute("comp.new", json!({"name": "Unsaved", "width": 64, "height": 64, "duration": 1})).unwrap();
     assert!(s.is_dirty());
-    let mut h = Harness::builder().with_size(egui::vec2(1200.0, 800.0)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1200.0, 800.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(s));
     let told = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     let log = told.clone();
     h.state_mut().hooks.device_lost = Some(Box::new(move |saved| log.borrow_mut().push(saved)));
@@ -241,4 +251,47 @@ fn a_lost_device_draws_nothing_autosaves_and_closes() {
     assert_eq!(kept, cfg!(target_os = "macos"), "the platform quit closes the window on macOS");
     assert_eq!(told.borrow().len(), 1);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// #2797 in the real viewer on a device: a 32 bpc frame of white +2 stops (about 4.0 linear)
+/// goes through the display pass on egui-wgpu's device, so -2 EV still shows it white and -4 EV
+/// a quarter of white (the 8-bit viewer showed a sixteenth of white there).
+#[test]
+fn the_viewer_exposes_32_bpc_frames_on_the_gpu() {
+    let _device = crate::gpu_test::lock();
+    if !any_adapter() {
+        eprintln!("no wgpu adapter: skipping");
+        return;
+    }
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Hdr", "width": 64, "height": 64, "duration": 1})).unwrap();
+    s.execute("file.projectSettings", json!({"bitDepth": 32, "workingSpace": "srgb"})).unwrap();
+    let lid = s.execute("layer.newSolid", json!({"color": "#ffffff"})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("effect.apply", json!({"layers": [lid], "effect": "Exposure"})).unwrap();
+    s.execute("prop.set", json!({"layer": lid, "path": "effects/#1/master/exposure", "value": 2.0})).unwrap();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1200.0, 800.0))
+        .wgpu()
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(move |_| EffectcraftApp::new(s));
+    settle(&mut h);
+    let p = h.state().viewer_f16().expect("a half-float viewer frame").pixel(0).unwrap();
+    let l = effectcraft_engine::color::srgb_to_linear(p[0] / p[3]);
+    assert!(l > 3.9, "{l}");
+    // Screen pixels of the frame's grey (the comp is 64 × 64 points in the viewer at most).
+    let count = |h: &mut Harness<'_, EffectcraftApp>, stops: f32| {
+        h.state_mut().session.state.viewer.exposure = stops;
+        for _ in 0..4 {
+            h.step();
+        }
+        assert!(h.state().viewer_display_texture().is_some(), "drawn by the display pass on the device");
+        let want = (effectcraft_engine::color::linear_to_srgb(l * 2f32.powf(stops)).clamp(0.0, 1.0) * 255.0).round() as i32;
+        let img = h.render().expect("render");
+        let n = img.pixels().filter(|px| px.0[..3].iter().all(|c| (*c as i32 - want).abs() <= 1)).count();
+        (want, n)
+    };
+    let (white, n) = count(&mut h, -2.0);
+    assert!(white == 255 && n >= 1000, "-2 EV: {n} white pixels");
+    let (grey, n) = count(&mut h, -4.0);
+    assert!((130..=145).contains(&grey) && n >= 1000, "-4 EV: {n} pixels of {grey}");
 }

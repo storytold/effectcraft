@@ -248,3 +248,124 @@ fn locked_resize_uses_height_for_height_only_output_module_updates() {
     let comp = s.project.comp(item.comp).unwrap();
     assert_eq!(item.output.output_size(comp, &item.settings), (32, 32), "explicit width retains precedence");
 }
+
+#[test]
+fn a_queue_run_keeps_its_jobs_warm() {
+    // #3335: every job started with a fresh layer cache and trimmed the GPU's texture pool when
+    // it ended, so each item's first frames were cold. A run's jobs share its caches; the pool is
+    // trimmed once, when the run ends; an item's output modules share one compositor choice.
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct Recorder(Mutex<Vec<(Option<usize>, Option<usize>)>>);
+    impl Exporter for Recorder {
+        fn formats(&self) -> Vec<OutputFormat> {
+            OutputFormat::ALL.to_vec()
+        }
+        fn export(&self, job: &ExportJob, _: &mut dyn FnMut(u64, u64) -> bool) -> Result<ExportResult, String> {
+            let caches = job.caches.map(|c| c as *const _ as usize);
+            let slot = job.renderer.map(|r| {
+                // The first module chooses; the second sees its choice.
+                r.lock().unwrap().get_or_insert(effectcraft_render::Backend::Cpu);
+                r as *const _ as usize
+            });
+            self.0.lock().unwrap().push((caches, slot));
+            Ok(ExportResult { path: job.path.to_string(), ..Default::default() })
+        }
+    }
+    #[derive(Default)]
+    struct Ends(AtomicUsize);
+    impl effectcraft_render::Accelerator for Ends {
+        fn name(&self) -> String {
+            "ends".into()
+        }
+        fn comp_frame(&self, _: &effectcraft_render::Renderer, _: effectcraft_project::ItemId, _: effectcraft_time::Tick) -> Option<effectcraft_raster::Image> {
+            None
+        }
+        fn supports_effect(&self, _: &str) -> bool {
+            false
+        }
+        fn effects(&self, _: &[effectcraft_render::FxStep], _: &effectcraft_effects::Buf, _: Option<f32>) -> Option<effectcraft_effects::Buf> {
+            None
+        }
+        fn render_end(&self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    let mut s = demo();
+    let ex = Arc::new(Recorder(Mutex::new(vec![])));
+    s.exporter = Some(ex.clone());
+    let ends = Arc::new(Ends::default());
+    s.accel = Some(ends.clone());
+    s.execute("renderQueue.add", json!({"output": crate::tests::stubs::tmp_out("rq/warm_a.mp4")})).unwrap();
+    s.execute("render.addOutputModule", json!({"format": "png"})).unwrap();
+    s.execute("renderQueue.add", json!({"output": crate::tests::stubs::tmp_out("rq/warm_b.mp4")})).unwrap();
+    s.execute("renderQueue.render", json!({})).unwrap();
+    let jobs = ex.0.lock().unwrap().clone();
+    assert_eq!(jobs.len(), 3, "{jobs:?}");
+    assert!(jobs.iter().all(|(c, r)| c.is_some() && r.is_some()), "{jobs:?}");
+    assert!(jobs.iter().all(|(c, _)| *c == jobs[0].0), "every job of the run shares its caches");
+    assert_eq!(jobs[0].1, jobs[1].1, "an item's output modules share one choice");
+    assert_eq!(ends.0.load(Ordering::SeqCst), 1, "the pool is trimmed once, after the run");
+}
+
+#[test]
+fn render_queue_runs_and_one_off_exports_follow_the_memory_budget() {
+    // #3941: a Render Queue run's two layer caches and a one-off export's held 512 MiB each
+    // (1 GiB together), whatever the memory budget. Both follow the session's budget now.
+    type Seen = (Option<(usize, usize)>, Option<usize>);
+    struct Budgets(Mutex<Vec<Seen>>);
+    impl Exporter for Budgets {
+        fn formats(&self) -> Vec<OutputFormat> {
+            OutputFormat::ALL.to_vec()
+        }
+        fn export(&self, job: &ExportJob, _: &mut dyn FnMut(u64, u64) -> bool) -> Result<ExportResult, String> {
+            self.0.lock().unwrap().push((job.caches.map(|c| (c.gpu.budget(), c.cpu.budget())), job.cache_budget));
+            Ok(ExportResult { path: job.path.to_string(), ..Default::default() })
+        }
+    }
+    let mut s = demo();
+    let ex = Arc::new(Budgets(Mutex::new(vec![])));
+    s.exporter = Some(ex.clone());
+    // A 64 GB machine: 46.4 GB with the default reserve.
+    s.take_memory_reading(Some(crate::sysinfo::SysMemory { total: 64 << 30, available: 48 << 30 }));
+    let budget = s.memory_budget().bytes;
+    assert_eq!(budget as u64, (64 - 6) * (1 << 30) * 80 / 100);
+    assert_eq!(s.export_cache_budget(), budget, "on the desktop the layer cache's budget is the whole budget");
+
+    s.execute("renderQueue.add", json!({"output": crate::tests::stubs::tmp_out("rq/budget.mp4")})).unwrap();
+    s.execute("renderQueue.render", json!({})).unwrap();
+    assert_eq!(ex.0.lock().unwrap().last().copied(), Some((Some((budget, budget)), Some(budget))), "a Render Queue run's caches");
+
+    s.execute("render.saveCurrentPreview", json!({"path": crate::tests::stubs::tmp_out("rq/budget_preview.mp4")})).unwrap();
+    assert_eq!(ex.0.lock().unwrap().last().copied(), Some((None, Some(budget))), "a one-off export's own caches");
+}
+
+#[test]
+fn the_gpu_frames_setting_reaches_every_render_queue_job() {
+    // #3335: Settings ▸ Memory & CPU ▸ GPU Frames Rendered at Once is Auto (`None`) or 1–3.
+    struct Seen(Mutex<Vec<Option<usize>>>);
+    impl Exporter for Seen {
+        fn formats(&self) -> Vec<OutputFormat> {
+            OutputFormat::ALL.to_vec()
+        }
+        fn export(&self, job: &ExportJob, _: &mut dyn FnMut(u64, u64) -> bool) -> Result<ExportResult, String> {
+            self.0.lock().unwrap().push(job.gpu_frames);
+            Ok(ExportResult { path: job.path.to_string(), ..Default::default() })
+        }
+    }
+    let mut s = demo();
+    let ex = Arc::new(Seen(Mutex::new(vec![])));
+    s.exporter = Some(ex.clone());
+    assert_eq!(s.prefs.memory.gpu_frames_in_flight, "auto");
+    let pages = crate::settings::prefs::pages_json();
+    assert!(pages.to_string().contains("memory.gpuFramesInFlight"), "the Memory & CPU page lists it");
+    for (value, want) in [("auto", None), ("1", Some(1)), ("2", Some(2)), ("3", Some(3))] {
+        s.execute("prefs.set", json!({"key": "memory.gpuFramesInFlight", "value": value})).unwrap();
+        assert_eq!(s.prefs.memory.gpu_frames(), want, "{value}");
+        s.execute("renderQueue.add", json!({"output": crate::tests::stubs::tmp_out(&format!("rq/frames_{value}.mp4"))})).unwrap();
+        s.execute("renderQueue.render", json!({})).unwrap();
+        assert_eq!(ex.0.lock().unwrap().last().copied(), Some(want), "{value}");
+    }
+    // A hand-edited settings file's nonsense is Auto.
+    s.prefs.memory.gpu_frames_in_flight = "9".into();
+    assert_eq!(s.prefs.memory.gpu_frames(), None);
+}
