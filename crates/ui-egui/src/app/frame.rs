@@ -678,12 +678,11 @@ impl EffectcraftApp {
         // Monotonic app time: a wall-clock jump must not skip or repeat an auto-save.
         let now = self.now;
         // Auto-saves are recovery copies at their own path, so they keep running while an
-        // external edit is pending: a crash then still has the local work. Only a target that
-        // would be the project file itself waits, so recovery never overwrites that edit.
-        let hold = self.project_reload_pending.is_some() && self.session.autosave_target_aliases_project();
-        if !hold
-            && let Some(Err(e)) = self.session.autosave_tick(now)
-        {
+        // external edit is pending: a crash then still has the local work. The guard skips only
+        // a due write whose planned target would be the project file itself; the engine checks
+        // that on the final write plan, so idle ticks do no file-system work.
+        let guard = self.project_reload_pending.is_some();
+        if let Some(Err(e)) = self.session.autosave_tick_guarded(now, guard) {
             self.ui.status = e.to_string();
         }
         if self.session.prefs.auto_save.enabled {
@@ -1097,6 +1096,60 @@ mod tests {
         assert!(app.ui.status.contains("discards unsaved changes"), "{}", app.ui.status);
     }
 
+    /// A clean session with a pending external change at a stamp the session does not hold.
+    fn clean_app_with_a_pending_change() -> (EffectcraftApp, u64) {
+        let path = "C:/test/project.ecproj".to_string();
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        app.session.path = Some(path.clone());
+        app.session.project_stamp = Some((100, 1));
+        app.project_reload_pending = Some((path, (120, 2), None));
+        assert!(!app.session.is_dirty(), "the guard under test must be the only reason to hold");
+        let revision = app.session.revision;
+        (app, revision)
+    }
+
+    fn assert_change_held(app: &EffectcraftApp, revision: u64) {
+        assert_eq!(app.session.revision, revision, "the project was not replaced");
+        assert!(app.project_reload_pending.is_some(), "the change must be held, not discarded");
+        assert!(app.ui.status.contains("Save a Copy"), "{}", app.ui.status);
+    }
+
+    #[test]
+    fn an_external_change_is_held_while_a_script_renders() {
+        let (mut app, revision) = clean_app_with_a_pending_change();
+        app.session.script_ui.render_host = Some(1);
+        app.tick_project_reload(&egui::Context::default());
+        assert_change_held(&app, revision);
+    }
+
+    #[test]
+    fn an_external_change_is_held_while_a_script_file_dialog_is_open() {
+        use effectcraft_engine::scriptui::{FileDialogKind, ScriptFileDialog};
+        let (mut app, revision) = clean_app_with_a_pending_change();
+        app.session.script_ui.file_dialogs.push(ScriptFileDialog {
+            id: 1,
+            host: 1,
+            kind: FileDialogKind::Open,
+            prompt: String::new(),
+            exts: vec![],
+            label: String::new(),
+            any: true,
+            many: false,
+            start: String::new(),
+            shown: false,
+        });
+        app.tick_project_reload(&egui::Context::default());
+        assert_change_held(&app, revision);
+    }
+
+    #[test]
+    fn an_external_change_is_held_while_a_render_job_is_active() {
+        let (mut app, revision) = clean_app_with_a_pending_change();
+        app.session.render_job = Some(effectcraft_engine::render_queue::RenderJob::detached(std::sync::Arc::default()));
+        app.tick_project_reload(&egui::Context::default());
+        assert_change_held(&app, revision);
+    }
+
     #[test]
     fn recovery_autosave_keeps_running_while_a_project_change_is_pending() {
         let dir = tempfile::tempdir().unwrap();
@@ -1119,7 +1172,6 @@ mod tests {
         app.session
             .execute("prefs.set", serde_json::json!({"values": {"autoSave.enabled": true, "autoSave.intervalMinutes": 1}}))
             .unwrap();
-        assert!(!app.session.autosave_target_aliases_project(), "recovery copies never target the project file");
 
         let ctx = egui::Context::default();
         app.now = 1000.0;
