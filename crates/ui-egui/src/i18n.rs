@@ -9347,6 +9347,7 @@ mod tests {
     fn general_settings_exposes_the_language_automation_id() {
         let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         let tokens = crate::theme::Tokens::for_kind(crate::theme::ThemeKind::Dark);
         crate::theme::install(&ctx, &tokens, language(&app));
         crate::panels::settings::open(&mut app, "general");

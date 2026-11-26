@@ -2,11 +2,19 @@ use super::write::*;
 use super::*;
 use crate::pixels::srgb_encode;
 
+mod descriptor_framing;
 mod fixed_adjustments;
+mod fixed_writers;
 mod integration;
 mod opt;
+mod parity;
+mod scalar_blocks;
+mod section_divider;
 mod shared_corpus;
+mod tagged_descriptors;
+mod tysh_prefix;
 mod unicode_name;
+mod vector_records;
 
 fn gradient(w: u32, h: u32) -> Vec<[f32; 4]> {
     (0..w * h).map(|i| [(i % w) as f32 / (w - 1).max(1) as f32, (i / w) as f32 / (h - 1).max(1) as f32, 0.25, 1.0]).collect()
@@ -520,7 +528,7 @@ fn a_failed_inflate_reports_its_status_not_its_output() {
     let mut z = miniz_oxide::deflate::compress_to_vec_zlib(&vec![0u8; 1 << 20], 6);
     let n = z.len();
     z[n - 1] ^= 0xff;
-    let Err(Error::Invalid(msg)) = crate::limits::inflate(&z, 1 << 21) else { panic!("the checksum fails") };
+    let Err(craft_psd::PsdError::Decompress(msg)) = craft_psd::compression::zip_decompress_up_to(&z, 1 << 21) else { panic!("the checksum fails") };
     assert!(msg.len() < 100, "{} bytes", msg.len());
 }
 

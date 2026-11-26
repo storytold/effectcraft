@@ -423,7 +423,7 @@ fn paste_properties(s: &mut Session, p: &Value) -> Result<Value> {
             for (path, v) in &values {
                 let path = super::resolve_effect_path(l, path);
                 if let Some(pr) = l.props.prop_mut(&path)
-                    && let Some(v) = pr.value.coerce_json(&v.to_json())
+                    && let Some(v) = super::anim::pasted_value(&pr.value, v)
                 {
                     pr.set_value_at(lt, v);
                     n += 1;
@@ -553,7 +553,8 @@ fn paste_links(s: &mut Session, clip: LinkClip) -> Result<Value> {
             let l = super::layer_mut(proj, cid, *lid)?;
             for (path, e) in &pairs {
                 let path = super::resolve_effect_path(l, path);
-                if let Some(pr) = l.props.prop_mut(&path) {
+                // (a property that can't be animated takes no expression)
+                if let Some(pr) = l.props.prop_mut(&path).filter(|pr| !pr.static_only) {
                     pr.expr = Some(e.clone());
                     n += 1;
                 }

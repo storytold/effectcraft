@@ -20,7 +20,7 @@ mod create;
 mod edit;
 mod effect;
 pub use effect::{CryptoCoverage, CryptoProbeJob, PLUGINS_DIR};
-pub(crate) use effect::{CryptoProbeSlot, crypto_coverage, crypto_probe_job, crypto_probe_ready, keep_crypto_probe, kept_crypto_probe};
+pub(crate) use effect::{CryptoProbeSlot, crypto_coverage, crypto_probe_job, crypto_probe_ready, keep_crypto_probe, kept_crypto_probe, moves};
 pub mod essential;
 pub mod expr_tools;
 mod file;
@@ -165,6 +165,7 @@ use super::commands;
 pub use aep::is_aep_path;
 pub use enabled::always;
 pub(crate) use enabled::{has_comp, has_keys, has_layers, has_project_selection, not_yet, not_yet_run};
+pub use file_more::interpretation_targets;
 pub use params::match_path_of;
 pub(crate) use params::{
     b_p, bad, comp_id, f_p, frontend, layer_mut, layer_p, layers_or, layers_p, merge_p, popup_options, resolve_effect_path, resolve_layer, selectable,

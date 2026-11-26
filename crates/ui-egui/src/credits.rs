@@ -253,7 +253,7 @@ pub fn contributors_ui(ui: &mut egui::Ui, auto: &mut Registry) {
         }
         ui.separator();
         ui.label(tr("Sort"));
-        let combo = craft_ui::ComboBox::from_id_salt("credits_sort").selected_text(tr(v.key.label().0)).show_ui(ui, |ui| {
+        let combo = egui::ComboBox::from_id_salt("credits_sort").selected_text(tr(v.key.label().0)).show_ui(ui, |ui| {
             for k in SortKey::ALL {
                 let r = ui.selectable_label(v.key == k, tr(k.label().0));
                 auto.add(&format!("about.credits.sort.{}", k.id()), r.rect, k.label().0);

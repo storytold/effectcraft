@@ -113,8 +113,8 @@ impl eframe::App for WebApp {
     }
 
     /// The browser host's logic tick: run queued UI actions, tick the shared app, poll API replies, flush Render
-    /// Queue downloads, persist the session snapshot when enabled, publish GPU/frame-worker/disk-cache info and close
-    /// the IME pass.
+    /// Queue downloads, persist the session snapshot when enabled, publish GPU/frame-worker/disk-cache info, close
+    /// the IME pass and run the root window's close path.
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         let actions = ACTIONS.with(|a| std::mem::take(&mut *a.borrow_mut()));
         for f in actions {
@@ -146,6 +146,7 @@ impl eframe::App for WebApp {
         diskcache::configure(d.disk_cache_enabled, d.disk_cache_max_gb, storage::quota());
         api::set_info("diskCache", diskcache::stats());
         self.app.finish_ime_logic(ctx);
+        self.app.close_path(ctx);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
@@ -277,6 +278,7 @@ pub async fn start(canvas_id: String) -> Result<(), JsValue> {
             canvas,
             eframe::WebOptions::default(),
             Box::new(move |cc| {
+                effectcraft_ui_egui::framework::install_headless(&cc.egui_ctx);
                 EffectcraftApp::install_ime_reset_hooks(&cc.egui_ctx);
                 CTX.with(|c| *c.borrow_mut() = Some(cc.egui_ctx.clone()));
                 // The page owns this shared presentation device; worker devices retain their

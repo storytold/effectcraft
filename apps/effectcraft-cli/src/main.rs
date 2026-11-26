@@ -317,6 +317,16 @@ fn main() {
         Ok(raw) => raw,
         Err(e) => fail_usage(&e),
     };
+    // The Launcher's Nightly profile flags belong to the desktop app only. Refuse them before any
+    // argument is parsed, so no script can drive a profile outside the Launcher's control (exit 2).
+    // Written without a leading `--` in the literal so the option table stays the one place that
+    // declares options (`every_option_read_is_declared`).
+    const DESKTOP_PROFILE_FLAGS: [&str; 2] = ["launch-profile", "profile-root"];
+    if let Some(flag) =
+        raw.iter().find(|a| a.starts_with('-') && DESKTOP_PROFILE_FLAGS.iter().any(|name| a.trim_start_matches('-').split('=').next() == Some(*name)))
+    {
+        fail_usage(&format!("`{flag}` selects the desktop Nightly profile; effectcraft-cli has no launch profile"));
+    }
     if matches!(raw.first().map(String::as_str), Some("--version" | "-V" | "version")) {
         say!("effectcraft-cli {}", env!("CARGO_PKG_VERSION"));
         return;
@@ -470,10 +480,11 @@ fn backend(args: &Args, default_demo: bool) -> Result<Backend, Failure> {
     Ok(b)
 }
 
-/// A wired session; `--gpu` attaches the GPU compositor (renders then follow the project's
-/// renderer setting, GPU Acceleration by default).
+/// A wired session whose caches share the budget of the installed RAM (#3941); `--gpu` attaches
+/// the GPU compositor (renders then follow the project's renderer setting, GPU Acceleration by
+/// default).
 fn session(args: &Args) -> Result<effectcraft_engine::Session, Failure> {
-    let mut s = effectcraft_host::session();
+    let mut s = effectcraft_host::headless_session();
     if args.flag("--autosave") {
         let dir = effectcraft_host::config_dir().ok_or_else(|| Failure::Error("--autosave: no config directory; set EFFECTCRAFT_CONFIG_DIR".into()))?;
         // Read only auto-save settings. Opting in must not change headless rendering or load

@@ -87,7 +87,7 @@ impl Dependencies<'_> {
         hash_debug(self.h, layer);
         // An overridden clip plays on the layer clock and a keyed one from its key: the same
         // selection at the same time can pose differently.
-        super::hash_overrides(self.h, ctx, layer.id);
+        super::hash_overrides(self.h, ctx, layer);
         hash_values(self.h, ctx, layer, &layer.props);
         hash_debug(self.h, &ctx.world_matrix(layer));
         if let Some(item) = layer.source.item() {
@@ -148,7 +148,7 @@ impl Dependencies<'_> {
         hash_debug(self.h, layer);
         // A referenced layer's static values can be overridden by the collapsed instance without
         // editing it (`hash_values` only sees animated ones), so the owner's key needs them too.
-        super::hash_overrides(self.h, ctx, layer.id);
+        super::hash_overrides(self.h, ctx, layer);
         hash_values(self.h, ctx, layer, &layer.props);
         hash_debug(self.h, &ctx.world_matrix(layer));
         // A cached owner never runs this layer's effects, so the comp camera and lights its
