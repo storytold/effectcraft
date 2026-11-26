@@ -40,7 +40,9 @@ mod reach;
 mod settings;
 
 pub use comp::{Comp, Guide, Renderer, Resolution};
-pub use footage::{AlphaMode, CineonSettings, CineonUnits, FieldOrder, Footage, FootageKind, Proxy, Solid, SourceLayer, VIDEO_EXTENSIONS, cineon_log_to_lin};
+pub use footage::{
+    AlphaMode, CineonSettings, CineonUnits, FieldOrder, Footage, FootageKind, PCRAFT_MAX_INPUT, Proxy, Solid, SourceLayer, VIDEO_EXTENSIONS, cineon_log_to_lin,
+};
 pub use item::NO_LAYER;
 pub use item::{Heard, Item, ItemId, ItemKind, LayerId};
 pub use layer::{
