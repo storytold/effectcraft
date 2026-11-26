@@ -4,7 +4,7 @@
 use effectcraft_engine::Session;
 use effectcraft_ui_egui::EffectcraftApp;
 use effectcraft_ui_egui::dock::PanelKind;
-use egui::{Key, Modifiers};
+use egui::{Id, Key, Modifiers};
 use serde_json::json;
 
 /// A comp with one solid selected at 1 s, and one render item.
@@ -21,9 +21,18 @@ fn app() -> EffectcraftApp {
 fn press(app: &mut EffectcraftApp, key: Key, modifiers: Modifiers) {
     let ctx = egui::Context::default();
     effectcraft_ui_egui::framework::install_headless(&ctx);
-    let raw = egui::RawInput { events: vec![egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers }], ..Default::default() };
-    let mut output = ctx.run_ui(raw, |ui| effectcraft_ui_egui::menus::handle_shortcuts(app, ui.ctx()));
-    output.textures_delta.clear();
+    press_in(&ctx, app, key, modifiers);
+}
+
+/// Press `key` with `modifiers` on `ctx`, which keeps the panel state (such as the Render Queue's
+/// selected item) across presses.
+fn press_in(ctx: &egui::Context, app: &mut EffectcraftApp, key: Key, modifiers: Modifiers) {
+    // A press and its release, a frame each: a key already down would read as a repeat.
+    for pressed in [true, false] {
+        let raw = egui::RawInput { events: vec![egui::Event::Key { key, physical_key: None, pressed, repeat: false, modifiers }], ..Default::default() };
+        let mut output = ctx.run_ui(raw, |ui| effectcraft_ui_egui::menus::handle_shortcuts(app, ui.ctx()));
+        output.textures_delta.clear();
+    }
 }
 
 fn layers(app: &EffectcraftApp) -> usize {
@@ -84,4 +93,55 @@ fn the_default_preset_has_no_two_commands_on_one_chord_in_one_scope() {
     let app = app();
     let c = app.session.shortcuts().all_conflicts();
     assert!(c.is_empty(), "{c:?}");
+}
+
+/// The Render Queue keeps its selected item in egui temp data, as the panel does.
+fn select(ctx: &egui::Context, item: Option<u64>) {
+    ctx.data_mut(|d| d.insert_temp(Id::unique("rq-ui"), (Vec::<u64>::new(), item)));
+}
+
+fn selected(ctx: &egui::Context) -> Option<u64> {
+    ctx.data(|d| d.get_temp::<(Vec<u64>, Option<u64>)>(Id::unique("rq-ui"))).and_then(|(_, id)| id)
+}
+
+/// #3668: Ctrl/⌘+D in the Render Queue duplicates the selected item (the context menu's
+/// Duplicate does), rather than reporting that no layer is selected. Each copy takes the
+/// selection, so a second press copies the copy.
+#[test]
+fn cmd_d_duplicates_the_selected_render_queue_item() {
+    let mut app = app();
+    app.session.execute("renderQueue.add", json!({"output": "/out/second.mov"})).unwrap();
+    let ids: Vec<u64> = app.session.project.render_queue.iter().map(|i| i.id).collect();
+    assert_eq!(ids.len(), 2);
+    app.ui.focused = PanelKind::RenderQueue;
+    let ctx = egui::Context::default();
+    effectcraft_ui_egui::framework::install_headless(&ctx);
+    select(&ctx, Some(ids[0]));
+
+    press_in(&ctx, &mut app, Key::D, Modifiers::COMMAND);
+    let queue = &app.session.project.render_queue;
+    assert!(app.ui.status.is_empty(), "{}", app.ui.status);
+    assert_eq!(queue.len(), 3, "the queue gained one item");
+    assert_eq!(queue[1].output.output, "/out/main.mov", "the copy sits after the item it copies");
+    assert_eq!(selected(&ctx), Some(queue[1].id), "the copy takes the selection");
+    assert_eq!(app.session.active_comp().map(|c| c.layers.len()), Some(1), "no layer was duplicated");
+
+    press_in(&ctx, &mut app, Key::D, Modifiers::COMMAND);
+    let queue = &app.session.project.render_queue;
+    assert_eq!(queue.len(), 4, "a second press copies the copy");
+    assert_eq!(queue[2].output.output, "/out/main.mov");
+    assert_eq!(selected(&ctx), Some(queue[2].id));
+}
+
+/// With no item selected, Ctrl/⌘+D in the Render Queue changes nothing and says what to do.
+#[test]
+fn cmd_d_in_the_render_queue_needs_a_selected_item() {
+    let mut app = app();
+    app.ui.focused = PanelKind::RenderQueue;
+    let ctx = egui::Context::default();
+    effectcraft_ui_egui::framework::install_headless(&ctx);
+    select(&ctx, None);
+    press_in(&ctx, &mut app, Key::D, Modifiers::COMMAND);
+    assert_eq!(render_items(&app), 1);
+    assert!(app.ui.status.contains("select a Render Queue item first"), "{}", app.ui.status);
 }
