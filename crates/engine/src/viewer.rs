@@ -367,6 +367,14 @@ impl ExprHost for SnapExpressions<'_> {
         result
     }
 
+    fn busy(&self) -> bool {
+        self.inner.busy()
+    }
+
+    fn faults(&self) -> Option<u64> {
+        self.inner.faults()
+    }
+
     fn eval_text_selector(&self, ctx: &EvalCtx, layer: &Layer, prop: &Property, index: usize, total: usize, selector: [f64; 3]) -> Result<[f64; 3], String> {
         self.inner.eval_text_selector(ctx, layer, prop, index, total, selector)
     }

@@ -14,6 +14,21 @@ use effectcraft_time::Tick;
 pub trait ExprHost: Send + Sync {
     /// Evaluate the expression of `prop` (on `layer`, comp time `t`), given the keyframed value.
     fn eval(&self, ctx: &EvalCtx, layer: &Layer, prop: &Property, value: &Value) -> Result<Value, String>;
+    /// Whether an expression is being evaluated on this thread: a result worked out then may
+    /// rest on a stand-in (see [`Self::faults`]). A host that wraps another passes this and
+    /// [`Self::faults`] on: left at their defaults, values worked out inside an expression would
+    /// be taken for values worked out at the top.
+    fn busy(&self) -> bool {
+        false
+    }
+    /// How many expressions have failed on this thread so far, when the host counts them: a
+    /// circular reference, expressions nested too deeply, a spent work budget, a script error.
+    /// The reader of a failed expression gets the keyframed value in its place, so a value is the
+    /// property's own, whoever asks and from wherever, exactly when this did not move while it
+    /// was worked out. `None` (the default): not counted, and no value is known to be that.
+    fn faults(&self) -> Option<u64> {
+        None
+    }
     /// Evaluate a text Expression Selector's Amount expression (on `prop`) for one unit:
     /// `textIndex` (1-based), `textTotal` and `selectorValue` (percent, per dimension) are
     /// defined. Returns the amount in percent per dimension.
@@ -107,7 +122,34 @@ impl<'a> EvalCtx<'a> {
         if prop.has_expression()
             && let Some(h) = self.expr
         {
-            return h.eval(self, layer, prop, &v).unwrap_or(v);
+            // Inside a frame memo scope an expression runs once per property and time: the
+            // viewer asks for a layer's transform for every view, outline and handle.
+            use crate::three_d::camera::memo;
+            // A failed expression's stand-in is this read's only: the next read asks the host
+            // again, as it does without the memo (the failure may be a spent work budget), and
+            // a camera or frame being built from it is not kept either.
+            let stand_in = |v: Value| {
+                if !h.busy() {
+                    memo::failed_read();
+                }
+                v
+            };
+            let Some(key) = memo::prop(self, layer, prop, lt) else {
+                return match h.eval(self, layer, prop, &v) {
+                    Ok(out) => out,
+                    Err(_) => stand_in(v),
+                };
+            };
+            let mark = memo::mark(self);
+            if let Some(memo::Value::Prop(m)) = memo::get(key, &mark) {
+                return m;
+            }
+            let (out, keep) = memo::tracked(self, |ctx| h.eval(ctx, layer, prop, &v));
+            let Ok(out) = out else { return stand_in(v) };
+            if keep {
+                memo::put(key, memo::Value::Prop(out.clone()), self, &mark);
+            }
+            return out;
         }
         v
     }

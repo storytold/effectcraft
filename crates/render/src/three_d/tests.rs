@@ -719,3 +719,516 @@ fn rig_orbit_keeps_distance_and_pan_moves_both() {
     let off = r.eye - r.poi;
     assert!(off.y.abs() / off.length() < 0.9999);
 }
+
+/// Counts the expressions run on camera layers; moves the camera 10 px a second.
+struct CameraCounting(std::sync::atomic::AtomicUsize);
+impl crate::ExprHost for CameraCounting {
+    fn eval(&self, ctx: &EvalCtx, layer: &Layer, prop: &effectcraft_project::Property, value: &Value) -> Result<Value, String> {
+        if layer.is_camera() {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if prop.match_id == "position" {
+                let mut v = value.as_vec3();
+                v[0] += 10.0 * ctx.time.seconds();
+                return Ok(Value::Vec3(v));
+            }
+        }
+        Ok(value.clone())
+    }
+}
+
+/// A comp with an expression-driven camera and `n` 3D solids.
+fn moving_camera_comp(n: usize) -> (Project, ItemId, Vec<Layer>) {
+    let (mut p, cid, comp) = setup();
+    let mut cam = camera(&mut p, &comp);
+    cam.props.prop_mut("transform/position").unwrap().expr = Some(effectcraft_project::Expression { text: "moves".into(), enabled: true });
+    let layers: Vec<Layer> = (0..n).map(|i| solid3(&mut p, &comp, [1.0, 0.0, 0.0], 40, 20, [20.0 * i as f64, 30.0, 0.0])).collect();
+    let c = p.comp_mut(cid).unwrap();
+    c.layers.push(cam);
+    c.layers.extend(layers.iter().cloned());
+    (p, cid, layers)
+}
+
+/// Viewer lag on a project whose camera is driven by expressions: every 3D layer's
+/// `layer_to_comp` asked for the active camera again and re-ran the camera's expressions, so
+/// a frame of N 3D layers ran them N times. Inside an `EvalMemo` scope they run once per time.
+#[test]
+fn a_memo_runs_the_cameras_expressions_once_per_frame() {
+    let (p, cid, layers) = moving_camera_comp(5);
+    let host = CameraCounting(std::sync::atomic::AtomicUsize::new(0));
+    let count = || host.0.swap(0, std::sync::atomic::Ordering::Relaxed);
+    let c = p.comp(cid).unwrap();
+    let at = |s: f64| EvalCtx { expr: Some(&host), ..EvalCtx::new(&p, cid, c, Tick::from_seconds_f64(s)) };
+    let frame = |ctx: &EvalCtx| layers.iter().map(|l| ctx.layer_to_comp(l)).collect::<Vec<_>>();
+
+    // Control: without a scope every layer re-runs the camera's expressions.
+    let plain = frame(&at(0.5));
+    let per_layer = count();
+    assert!(per_layer >= layers.len(), "the fixture must run the camera's expression for each layer ({per_layer})");
+
+    let memo = EvalMemo::scope(&p);
+    let first = frame(&at(0.5));
+    let once = count();
+    assert!(once > 0 && once * layers.len() <= per_layer, "{once} runs inside the scope, {per_layer} without");
+    assert_eq!(first, plain, "a remembered camera places the layers exactly where a fresh one does");
+    frame(&at(0.5));
+    assert_eq!(count(), 0, "the same frame again runs no expression");
+    // Another time is another camera: the expression moved it.
+    let later = frame(&at(1.5));
+    assert!(count() > 0, "a new time works the camera out again");
+    assert_ne!(later, first, "the camera at 1.5 s is not the one at 0.5 s");
+    drop(memo);
+
+    frame(&at(0.5));
+    assert!(count() >= layers.len(), "after the scope ends nothing is remembered");
+}
+
+/// A memo scope for one project never answers for another project at the same time, such as the
+/// live project beside the snapshot the viewer draws.
+#[test]
+fn a_memo_ignores_other_projects() {
+    let (mut p, cid, comp) = setup();
+    let cam = camera(&mut p, &comp);
+    p.comp_mut(cid).unwrap().layers.push(cam);
+    let mut q = p.clone();
+    q.comp_mut(cid).unwrap().layers[0].props.prop_mut("transform/position").unwrap().value = Value::Vec3([0.0, 0.0, -500.0]);
+    let _memo = EvalMemo::scope(&p);
+    let (pc, qc) = (p.comp(cid).unwrap(), q.comp(cid).unwrap());
+    let a = active_camera(&EvalCtx::new(&p, cid, pc, Tick::ZERO));
+    let b = active_camera(&EvalCtx::new(&q, cid, qc, Tick::ZERO));
+    assert_ne!(a.eye, b.eye, "the other project's camera is its own");
+}
+
+/// The same lag in playback: each 3D layer of a rendered frame asked for the camera again. A
+/// frame of five 3D layers now runs the camera's expressions as often as a frame of one.
+#[test]
+fn a_rendered_frame_runs_the_cameras_expressions_once_however_many_3d_layers() {
+    let runs = |n: usize| {
+        let (p, cid, _) = moving_camera_comp(n);
+        let host = CameraCounting(std::sync::atomic::AtomicUsize::new(0));
+        let mut r = Renderer::new(&p, &NoFootage, RenderOpts::default());
+        r.expr = Some(&host);
+        r.comp_frame(cid, Tick::from_seconds_f64(0.5));
+        host.0.load(std::sync::atomic::Ordering::Relaxed)
+    };
+    let (one, five) = (runs(1), runs(5));
+    assert!(one > 0, "the fixture must run the camera's expression");
+    assert_eq!(five, one, "five 3D layers ran the camera's expressions {five} times, one layer {one}");
+}
+
+/// With motion blur each blurred 3D layer needs the camera at every sub-sample: the layers are
+/// prepared on several threads at once, and each worked those cameras out again. The frame now
+/// runs the camera's expressions as often with three blurred layers as with one.
+#[test]
+fn a_motion_blurred_frame_runs_the_cameras_expressions_once_per_sample() {
+    let runs = |n: usize| {
+        let (mut p, cid, _) = moving_camera_comp(n);
+        let c = p.comp_mut(cid).unwrap();
+        c.enable_motion_blur = true;
+        for l in c.layers.iter_mut().filter(|l| l.switches.three_d) {
+            l.switches.motion_blur = true;
+        }
+        let host = CameraCounting(std::sync::atomic::AtomicUsize::new(0));
+        let mut r = Renderer::new(&p, &NoFootage, RenderOpts { motion_blur: true, ..RenderOpts::default() });
+        r.expr = Some(&host);
+        r.comp_frame(cid, Tick::from_seconds_f64(0.5));
+        host.0.load(std::sync::atomic::Ordering::Relaxed)
+    };
+    let (one, three) = (runs(1), runs(3));
+    assert!(one > 2, "the fixture must blur with several samples ({one} runs)");
+    assert_eq!(three, one, "three blurred layers ran the camera's expressions {three} times, one layer {one}");
+}
+
+/// The viewer draws every camera's outline in each of its panes; each drawing ran the camera's
+/// expressions again. Inside a scope its frame is worked out once, and an edited copy of the
+/// layer (a drag's preview shares the id) is never answered from the memo.
+#[test]
+fn a_memo_remembers_a_cameras_frame_but_not_an_edited_copys() {
+    let (p, cid, _) = moving_camera_comp(1);
+    let host = CameraCounting(std::sync::atomic::AtomicUsize::new(0));
+    let count = || host.0.swap(0, std::sync::atomic::Ordering::Relaxed);
+    let c = p.comp(cid).unwrap();
+    let cam = c.layers.iter().find(|l| l.is_camera()).unwrap();
+    let ctx = EvalCtx { expr: Some(&host), ..EvalCtx::new(&p, cid, c, Tick::from_seconds_f64(0.5)) };
+
+    let fresh = super::camera::layer_frame(&ctx, cam);
+    let per_call = count();
+    assert!(per_call > 0, "the fixture must run the camera's expression");
+    let _memo = EvalMemo::scope(&p);
+    for _ in 0..4 {
+        assert_eq!(super::camera::layer_frame(&ctx, cam), fresh);
+    }
+    let runs = count();
+    assert!(runs > 0 && runs <= per_call, "four outlines ran the camera's expressions at most once each ({runs}, {per_call} without the memo)");
+
+    let mut moved = cam.clone();
+    moved.props.prop_mut("transform/position").unwrap().value = Value::Vec3([0.0, 0.0, -300.0]);
+    let (eye, _, _) = super::camera::layer_frame(&ctx, &moved);
+    assert_ne!(eye, fresh.0, "the edited copy is evaluated, not answered with the stored frame");
+}
+
+/// A layer's expression-driven transform, read for every view, outline and handle of a frame,
+/// runs its expression once inside a scope.
+#[test]
+fn a_frame_memo_runs_a_layers_expression_once() {
+    struct Counting(std::sync::atomic::AtomicUsize);
+    impl crate::ExprHost for Counting {
+        fn eval(&self, ctx: &EvalCtx, _: &Layer, prop: &effectcraft_project::Property, value: &Value) -> Result<Value, String> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if prop.match_id == "position" {
+                let mut v = value.as_vec3();
+                v[0] += 30.0 * ctx.time.seconds();
+                return Ok(Value::Vec3(v));
+            }
+            Ok(value.clone())
+        }
+    }
+    let (mut p, cid, comp) = setup();
+    let mut l = solid3(&mut p, &comp, [1.0, 0.0, 0.0], 40, 20, [50.0, 30.0, 0.0]);
+    l.props.prop_mut("transform/position").unwrap().expr = Some(effectcraft_project::Expression { text: "wiggle".into(), enabled: true });
+    p.comp_mut(cid).unwrap().layers.push(l);
+    let host = Counting(std::sync::atomic::AtomicUsize::new(0));
+    let count = || host.0.swap(0, std::sync::atomic::Ordering::Relaxed);
+    let c = p.comp(cid).unwrap();
+    let l = &c.layers[0];
+    let ctx = EvalCtx { expr: Some(&host), ..EvalCtx::new(&p, cid, c, Tick::from_seconds_f64(0.5)) };
+    let fresh = ctx.world_matrix(l);
+    assert_eq!(count(), 1);
+    {
+        let _memo = EvalMemo::scope(&p);
+        for _ in 0..6 {
+            assert_eq!(ctx.world_matrix(l).0, fresh.0);
+        }
+        assert_eq!(count(), 1, "six reads, one run");
+        let later = EvalCtx { time: Tick::from_seconds_f64(1.5), ..ctx };
+        assert_ne!(later.world_matrix(l).0, fresh.0, "another time is another value");
+        assert_eq!(count(), 1);
+        let mut copy = l.clone();
+        copy.props.prop_mut("transform/position").unwrap().value = Value::Vec3([0.0, 0.0, 0.0]);
+        ctx.world_matrix(&copy);
+        assert_eq!(count(), 1, "an edited copy of the layer is evaluated, never answered from the memo");
+    }
+    ctx.world_matrix(l);
+    assert_eq!(count(), 1, "outside the scope it runs every time");
+}
+
+/// A value worked out while another expression runs can be a stand-in (a circular reference
+/// gets the keyframed value): it is used but never remembered, so a later read at the top
+/// works the real value out.
+#[test]
+fn a_frame_memo_never_keeps_a_value_worked_out_inside_an_expression() {
+    /// The opacity's expression reads the position (as `transform.position` would); while it
+    /// runs the host is busy.
+    struct Reading {
+        runs: std::sync::atomic::AtomicUsize,
+        depth: std::sync::atomic::AtomicUsize,
+    }
+    impl crate::ExprHost for Reading {
+        fn eval(&self, ctx: &EvalCtx, layer: &Layer, prop: &effectcraft_project::Property, value: &Value) -> Result<Value, String> {
+            use std::sync::atomic::Ordering::Relaxed;
+            self.runs.fetch_add(1, Relaxed);
+            if prop.match_id == "opacity" {
+                self.depth.fetch_add(1, Relaxed);
+                let pos = layer.props.prop("transform/position").map(|p| ctx.value(layer, p));
+                self.depth.fetch_sub(1, Relaxed);
+                return Ok(Value::Scalar(pos.map_or(0.0, |v| v.as_vec3()[0]) / 10.0));
+            }
+            Ok(value.clone())
+        }
+        fn busy(&self) -> bool {
+            self.depth.load(std::sync::atomic::Ordering::Relaxed) > 0
+        }
+    }
+    let (mut p, cid, comp) = setup();
+    let mut l = solid3(&mut p, &comp, [1.0, 0.0, 0.0], 40, 20, [50.0, 30.0, 0.0]);
+    for path in ["transform/position", "transform/opacity"] {
+        l.props.prop_mut(path).unwrap().expr = Some(effectcraft_project::Expression { text: "e".into(), enabled: true });
+    }
+    p.comp_mut(cid).unwrap().layers.push(l);
+    let host = Reading { runs: Default::default(), depth: Default::default() };
+    let runs = || host.runs.swap(0, std::sync::atomic::Ordering::Relaxed);
+    let c = p.comp(cid).unwrap();
+    let l = &c.layers[0];
+    let ctx = EvalCtx { expr: Some(&host), ..EvalCtx::new(&p, cid, c, Tick::ZERO) };
+    let _memo = EvalMemo::scope(&p);
+    let opacity = l.props.prop("transform/opacity").unwrap();
+    let position = l.props.prop("transform/position").unwrap();
+    assert_eq!(ctx.value(l, opacity).as_f64(), 5.0);
+    assert_eq!(runs(), 2, "the opacity, and the position it read");
+    ctx.value(l, opacity);
+    assert_eq!(runs(), 0, "the opacity, worked out at the top, is remembered");
+    ctx.value(l, position);
+    assert_eq!(runs(), 1, "the position, worked out inside the opacity's expression, was not");
+    ctx.value(l, position);
+    assert_eq!(runs(), 0, "now worked out at the top, it is");
+}
+
+/// Camera expression runs for one rendered frame (at 0.5 s, motion blur on) of `p`.
+fn camera_runs_of_a_blurred_frame(p: &Project, cid: ItemId) -> usize {
+    let host = CameraCounting(std::sync::atomic::AtomicUsize::new(0));
+    let mut r = Renderer::new(p, &NoFootage, RenderOpts { motion_blur: true, ..RenderOpts::default() });
+    r.expr = Some(&host);
+    r.comp_frame(cid, Tick::from_seconds_f64(0.5));
+    host.0.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Before a frame's layers are prepared, the cameras they will ask for are worked out: the
+/// frame's own and one per motion-blur sub-sample. A blurred 3D layer anywhere in the comp made
+/// every frame work out the sub-sample cameras, also the frames it is not on: half the render
+/// time of a stretch with nothing blurred on screen, under an expression-driven camera.
+#[test]
+fn a_frame_with_no_blurred_layer_on_screen_works_out_one_camera() {
+    let runs = |blurred_later: bool| {
+        let (mut p, cid, _) = moving_camera_comp(1);
+        let comp = p.comp(cid).unwrap().clone();
+        if blurred_later {
+            // On screen from 1 s on: not at the frame rendered.
+            let mut late = solid3(&mut p, &comp, [0.0, 1.0, 0.0], 40, 20, [60.0, 60.0, 0.0]);
+            late.switches.motion_blur = true;
+            late.in_point = Tick::from_seconds_f64(1.0);
+            push(&mut p, cid, late);
+        }
+        p.comp_mut(cid).unwrap().enable_motion_blur = true;
+        camera_runs_of_a_blurred_frame(&p, cid)
+    };
+    let (alone, with_later) = (runs(false), runs(true));
+    assert!(alone > 0, "the fixture must run the camera's expression");
+    assert_eq!(with_later, alone, "a blurred layer that is not on screen ran the camera's expressions {with_later} times, not {alone}");
+}
+
+/// A blurred 3D layer used as a track matte is drawn at every sub-sample too: its cameras are
+/// the frame's, worked out once, as for a blurred layer that is on screen itself.
+#[test]
+fn a_blurred_3d_track_matte_uses_the_frames_sample_cameras() {
+    let runs = |as_matte: bool| {
+        let (mut p, cid, _) = moving_camera_comp(1);
+        let comp = p.comp(cid).unwrap().clone();
+        let mut blurred = solid3(&mut p, &comp, [1.0; 3], 80, 40, [100.0, 50.0, 0.0]);
+        blurred.switches.motion_blur = true;
+        let c = p.comp_mut(cid).unwrap();
+        c.enable_motion_blur = true;
+        if as_matte {
+            blurred.switches.video = false;
+            let fill = c.layers.iter_mut().find(|l| l.switches.three_d).unwrap();
+            fill.track_matte = Some(effectcraft_project::TrackMatte { layer: blurred.id, kind: effectcraft_project::MatteKind::Alpha });
+        }
+        c.layers.push(blurred);
+        camera_runs_of_a_blurred_frame(&p, cid)
+    };
+    let (on_screen, as_matte) = (runs(false), runs(true));
+    assert!(on_screen > 2, "the fixture must blur with several samples ({on_screen} runs)");
+    assert_eq!(as_matte, on_screen, "a blurred matte ran the camera's expressions {as_matte} times, a blurred layer on screen {on_screen}");
+}
+
+/// A host whose opacity expression reads the position (busy meanwhile), whose position
+/// expression can be made to fail, and which counts its failures.
+#[derive(Default)]
+struct ReadingCounted {
+    runs: std::sync::atomic::AtomicUsize,
+    depth: std::sync::atomic::AtomicUsize,
+    faults: std::sync::atomic::AtomicU64,
+    position_fails: std::sync::atomic::AtomicBool,
+}
+impl crate::ExprHost for ReadingCounted {
+    fn eval(&self, ctx: &EvalCtx, layer: &Layer, prop: &effectcraft_project::Property, value: &Value) -> Result<Value, String> {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.runs.fetch_add(1, Relaxed);
+        if prop.match_id == "opacity" {
+            self.depth.fetch_add(1, Relaxed);
+            let pos = layer.props.prop("transform/position").map(|p| ctx.value(layer, p));
+            self.depth.fetch_sub(1, Relaxed);
+            return Ok(Value::Scalar(pos.map_or(0.0, |v| v.as_vec3()[0]) / 10.0));
+        }
+        if self.position_fails.load(Relaxed) {
+            self.faults.fetch_add(1, Relaxed);
+            return Err("circular".into());
+        }
+        let mut v = value.as_vec3();
+        v[0] += 20.0;
+        Ok(Value::Vec3(v))
+    }
+    fn busy(&self) -> bool {
+        self.depth.load(std::sync::atomic::Ordering::Relaxed) > 0
+    }
+    fn faults(&self) -> Option<u64> {
+        Some(self.faults.load(std::sync::atomic::Ordering::Relaxed))
+    }
+}
+
+/// A camera whose position and point of interest both read one shake expression worked that
+/// expression out twice per camera, 17 cameras a blurred frame: a value worked out inside another
+/// expression was never remembered, because a circular reference can hand back a stand-in there.
+/// A host that counts its failed expressions shows when that happened: with none, the value is
+/// the property's own and is remembered; with one, it is used once and worked out again.
+#[test]
+fn a_frame_memo_keeps_a_value_worked_out_inside_an_expression_unless_one_failed() {
+    use std::sync::atomic::Ordering::Relaxed;
+    let (mut p, cid, comp) = setup();
+    let mut l = solid3(&mut p, &comp, [1.0, 0.0, 0.0], 40, 20, [50.0, 30.0, 0.0]);
+    for path in ["transform/position", "transform/opacity"] {
+        l.props.prop_mut(path).unwrap().expr = Some(effectcraft_project::Expression { text: "e".into(), enabled: true });
+    }
+    p.comp_mut(cid).unwrap().layers.push(l);
+    let host = ReadingCounted::default();
+    let runs = || host.runs.swap(0, Relaxed);
+    let c = p.comp(cid).unwrap();
+    let l = &c.layers[0];
+    let at = |s: f64| EvalCtx { expr: Some(&host), ..EvalCtx::new(&p, cid, c, Tick::from_seconds_f64(s)) };
+    let opacity = l.props.prop("transform/opacity").unwrap();
+    let position = l.props.prop("transform/position").unwrap();
+    let _memo = EvalMemo::scope(&p);
+
+    let ctx = at(0.0);
+    assert_eq!(ctx.value(l, opacity).as_f64(), 7.0);
+    assert_eq!(runs(), 2, "the opacity, and the position it read");
+    assert_eq!(ctx.value(l, position).as_vec3()[0], 70.0);
+    assert_eq!(runs(), 0, "the position, worked out inside the opacity's expression with nothing failing, is remembered");
+
+    // At another time the position's expression fails while the opacity reads it.
+    let ctx = at(1.0);
+    host.position_fails.store(true, Relaxed);
+    assert_eq!(ctx.value(l, opacity).as_f64(), 5.0, "the reader gets the keyframed position");
+    assert_eq!(runs(), 2);
+    host.position_fails.store(false, Relaxed);
+    assert_eq!(ctx.value(l, position).as_vec3()[0], 70.0, "the stand-in was not remembered");
+    assert_eq!(runs(), 1);
+
+    // The opacity worked out at 1 s, at the top, with the position's stand-in under it, is the
+    // frame's opacity there: later reads at the top get it as it was.
+    assert_eq!(ctx.value(l, opacity).as_f64(), 5.0);
+    assert_eq!(runs(), 0, "at the top it is remembered");
+
+    // The failed expression itself is not remembered, at the top either: its next read asks
+    // the host again.
+    let ctx = at(1.5);
+    host.position_fails.store(true, Relaxed);
+    assert_eq!(ctx.value(l, position).as_vec3()[0], 50.0);
+    assert_eq!(runs(), 1);
+    host.position_fails.store(false, Relaxed);
+    assert_eq!(ctx.value(l, position).as_vec3()[0], 70.0, "the failed read's stand-in was not remembered");
+    assert_eq!(runs(), 1);
+}
+
+/// A value whose evaluation read a file (an expression that samples footage) is worked out for
+/// every reader: each reader's read log has to learn of the file. The memo told read logs apart
+/// by their address, and a log that took the place of an earlier one got that one's answer
+/// without the file.
+#[test]
+fn a_memo_never_keeps_a_value_that_read_a_file() {
+    use crate::reads::{FileStamp, ReadFile, ReadLog};
+    struct Sampling;
+    impl crate::ExprHost for Sampling {
+        fn eval(&self, ctx: &EvalCtx, _: &Layer, _: &effectcraft_project::Property, value: &Value) -> Result<Value, String> {
+            if let Some(log) = ctx.reads {
+                log.note(ReadFile::new("/footage/plate.mov", FileStamp::Native { len: 1, modified: Some(7) }));
+            }
+            Ok(value.clone())
+        }
+    }
+    let (mut p, cid, comp) = setup();
+    let mut l = solid3(&mut p, &comp, [1.0, 0.0, 0.0], 40, 20, [50.0, 30.0, 0.0]);
+    l.props.prop_mut("transform/position").unwrap().expr = Some(effectcraft_project::Expression { text: "samples".into(), enabled: true });
+    p.comp_mut(cid).unwrap().layers.push(l);
+    let c = p.comp(cid).unwrap();
+    let l = &c.layers[0];
+    let position = l.props.prop("transform/position").unwrap();
+    let _memo = EvalMemo::scope(&p);
+    let mut log = ReadLog::new();
+    for round in 0..3 {
+        let ctx = EvalCtx { expr: Some(&Sampling), reads: Some(&log), ..EvalCtx::new(&p, cid, c, Tick::ZERO) };
+        ctx.value(l, position);
+        assert_eq!(log.files().len(), 1, "read {round}: the reader's log names the file");
+        // The next reader's log, where this one was.
+        log = ReadLog::new();
+    }
+}
+
+/// A failed expression gives its reader the keyframed value for that read only. The next read
+/// asks the host again, as it does without the memo: the failure may have been a spent work
+/// budget.
+#[test]
+fn a_memo_never_keeps_the_stand_in_of_a_failed_expression() {
+    struct FailsOnce(std::sync::atomic::AtomicUsize);
+    impl crate::ExprHost for FailsOnce {
+        fn eval(&self, _: &EvalCtx, _: &Layer, _: &effectcraft_project::Property, _: &Value) -> Result<Value, String> {
+            if self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 0 { Err("out of time".into()) } else { Ok(Value::Vec3([7.0, 8.0, 9.0])) }
+        }
+    }
+    let (mut p, cid, comp) = setup();
+    let mut l = solid3(&mut p, &comp, [1.0, 0.0, 0.0], 40, 20, [50.0, 30.0, 0.0]);
+    l.props.prop_mut("transform/position").unwrap().expr = Some(effectcraft_project::Expression { text: "slow".into(), enabled: true });
+    p.comp_mut(cid).unwrap().layers.push(l);
+    let c = p.comp(cid).unwrap();
+    let l = &c.layers[0];
+    let position = l.props.prop("transform/position").unwrap();
+    let host = FailsOnce(std::sync::atomic::AtomicUsize::new(0));
+    let ctx = EvalCtx { expr: Some(&host), ..EvalCtx::new(&p, cid, c, Tick::ZERO) };
+    let _memo = EvalMemo::scope(&p);
+    assert_eq!(ctx.value(l, position), Value::Vec3([50.0, 30.0, 0.0]), "the failed read gets the keyframed value");
+    assert_eq!(ctx.value(l, position), Value::Vec3([7.0, 8.0, 9.0]), "the next read gets the expression's value");
+    assert_eq!(ctx.value(l, position), Value::Vec3([7.0, 8.0, 9.0]));
+    assert_eq!(host.0.load(std::sync::atomic::Ordering::Relaxed), 2, "and that one is kept");
+}
+
+/// A frame with no 3D layer on screen asks for no camera: a 3D layer that starts later does not
+/// make the frames before it run the camera's expressions.
+#[test]
+fn a_frame_with_no_3d_layer_on_screen_works_out_no_camera() {
+    let (mut p, cid, _) = moving_camera_comp(1);
+    let comp = p.comp(cid).unwrap().clone();
+    let mut flat = solid3(&mut p, &comp, [0.0, 1.0, 0.0], 40, 20, [60.0, 60.0, 0.0]);
+    flat.switches.three_d = false;
+    push(&mut p, cid, flat);
+    for l in &mut p.comp_mut(cid).unwrap().layers {
+        if l.is_3d() && !l.is_camera() {
+            l.in_point = Tick::from_seconds_f64(1.0);
+        }
+    }
+    let host = CameraCounting(std::sync::atomic::AtomicUsize::new(0));
+    let mut r = Renderer::new(&p, &NoFootage, RenderOpts::default());
+    r.expr = Some(&host);
+    r.comp_frame(cid, Tick::from_seconds_f64(0.5));
+    assert_eq!(host.0.load(std::sync::atomic::Ordering::Relaxed), 0, "the frame at 0.5 s draws the 2D solid only");
+    r.comp_frame(cid, Tick::from_seconds_f64(1.5));
+    assert!(host.0.load(std::sync::atomic::Ordering::Relaxed) > 0, "control: once the 3D solid is on screen the camera is asked for");
+}
+
+/// A camera, or a camera's frame, built on the stand-in of a failed expression is not kept
+/// either: the next reader works it out again, as it does without the memo.
+#[test]
+fn a_memo_never_keeps_a_camera_built_on_a_failed_expressions_stand_in() {
+    /// The camera's position expression fails the first time it runs, then moves the camera.
+    struct FailsOnce(std::sync::atomic::AtomicUsize);
+    impl crate::ExprHost for FailsOnce {
+        fn eval(&self, _: &EvalCtx, layer: &Layer, prop: &effectcraft_project::Property, value: &Value) -> Result<Value, String> {
+            if !layer.is_camera() || prop.match_id != "position" {
+                return Ok(value.clone());
+            }
+            if self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 0 {
+                return Err("out of time".into());
+            }
+            let mut v = value.as_vec3();
+            v[0] += 100.0;
+            Ok(Value::Vec3(v))
+        }
+    }
+    let (p, cid, _) = moving_camera_comp(1);
+    let c = p.comp(cid).unwrap();
+    let cam = c.layers.iter().find(|l| l.is_camera()).unwrap();
+    let _memo = EvalMemo::scope(&p);
+
+    let host = FailsOnce(std::sync::atomic::AtomicUsize::new(0));
+    let ctx = EvalCtx { expr: Some(&host), ..EvalCtx::new(&p, cid, c, Tick::ZERO) };
+    let stand_in = super::camera::layer_frame(&ctx, cam);
+    let moved = super::camera::layer_frame(&ctx, cam);
+    assert!((moved.0.x - stand_in.0.x - 100.0).abs() < 1e-9, "the frame after a failed one is worked out again: {stand_in:?}, then {moved:?}");
+    assert_eq!(super::camera::layer_frame(&ctx, cam), moved);
+    assert_eq!(host.0.load(std::sync::atomic::Ordering::Relaxed), 2, "and that one is kept");
+
+    let host = FailsOnce(std::sync::atomic::AtomicUsize::new(0));
+    let ctx = EvalCtx { expr: Some(&host), ..EvalCtx::new(&p, cid, c, Tick::from_seconds_f64(1.0)) };
+    let stand_in = active_camera(&ctx);
+    let moved = active_camera(&ctx);
+    assert!((moved.eye.x - stand_in.eye.x - 100.0).abs() < 1e-9, "the camera after a failed one is worked out again");
+    assert_eq!(active_camera(&ctx).eye, moved.eye);
+    assert_eq!(host.0.load(std::sync::atomic::Ordering::Relaxed), 2, "and that one is kept");
+}

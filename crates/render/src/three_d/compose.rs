@@ -231,6 +231,40 @@ pub(crate) fn visible_clip(r: &Renderer, ctx: &EvalCtx, layer: &Layer) -> Option
     rect
 }
 
+/// Comp time of motion-blur sub-sample `i` of `n` (`n` at least 2) of the frame at `ctx.time`.
+fn mb_time(ctx: &EvalCtx, i: usize, n: usize) -> Tick {
+    let fd = ctx.comp.frame_duration().seconds();
+    let angle = ctx.comp.shutter_angle / 360.0;
+    let phase = ctx.comp.shutter_phase / 360.0;
+    let f = phase + angle * i as f64 / n.saturating_sub(1).max(1) as f64;
+    ctx.time + Tick::from_seconds_f64(f * fd)
+}
+
+/// Work out the cameras a frame's 3D layers will ask for (the frame's own, and one per
+/// motion-blur sub-sample) before the layers are prepared on several threads at once: inside a
+/// [`super::EvalMemo`] scope they then find them remembered, rather than all missing at once
+/// and each working them out again.
+pub(crate) fn warm_cameras(r: &Renderer, ctx: &EvalCtx) {
+    // Only the 3D layers this frame draws ask for a camera: one that starts later asks for none
+    // now, and an expression-driven camera is slow to work out.
+    let on_screen = r.visible_layers(ctx);
+    let on_screen = || on_screen.iter().copied().filter(|l| l.switches.three_d);
+    if on_screen().next().is_none() {
+        return;
+    }
+    camera_for(r, ctx);
+    // The sub-sample cameras, for the blurred ones among them and the 3D layers they take as
+    // track mattes ([`matte_for`]).
+    let mattes = on_screen().filter_map(|l| ctx.comp.layer(l.track_matte?.layer)).filter(|m| m.switches.three_d && m.is_active_at(ctx.time));
+    let n = on_screen().chain(mattes).map(|l| mb_samples(r, ctx, l)).max().unwrap_or(1);
+    if n > 1 {
+        // (side by side: each is the camera's expressions at another time)
+        (0..n).into_par_iter().for_each(|i| {
+            camera_for(r, &ctx.at(mb_time(ctx, i, n)));
+        });
+    }
+}
+
 /// Number of motion-blur sub-samples for a layer.
 fn mb_samples(r: &Renderer, ctx: &EvalCtx, layer: &Layer) -> usize {
     if r.opts.motion_blur && ctx.comp.enable_motion_blur && r.layer_motion_blur(layer) {
@@ -296,13 +330,9 @@ fn prepare_with<'a>(r: &Renderer, ctx: &EvalCtx<'_>, layer: &'a Layer, order: us
     let geos: Vec<Geo> = if n <= 1 {
         geo(&cam, world, bounds, comp, s, out, r.out_offset()).into_iter().collect()
     } else {
-        let fd = ctx.comp.frame_duration().seconds();
-        let angle = ctx.comp.shutter_angle / 360.0;
-        let phase = ctx.comp.shutter_phase / 360.0;
         (0..n)
             .filter_map(|i| {
-                let f = phase + angle * i as f64 / (n - 1) as f64;
-                let sub = ctx.at(ctx.time + Tick::from_seconds_f64(f * fd));
+                let sub = ctx.at(mb_time(ctx, i, n));
                 let c = camera_for(r, &sub);
                 geo(&c, outer * sub.world_matrix(layer) * local, bounds, comp, s, out, r.out_offset())
             })

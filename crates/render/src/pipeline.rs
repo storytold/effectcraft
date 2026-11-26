@@ -630,6 +630,17 @@ impl<'a> Renderer<'a> {
     }
 
     fn comp_frame_with<E>(&self, comp_id: ItemId, t: Tick, scoped: bool, scope: impl FnOnce(&dyn Accelerator) -> Result<Option<Image>, E>) -> Result<Image, E> {
+        // Every 3D layer (its plane, its mattes, its raster scale) asks for the active camera,
+        // and an expression-driven camera re-ran its expressions each time: the project cannot
+        // change during this frame, so its cameras are worked out once (on whichever thread).
+        let _memo = (self.depth == 0).then(|| crate::three_d::EvalMemo::scope(self.project));
+        // Worked out here, before the frame's layers fan out over threads that would all miss
+        // the memo at once and each work them out again.
+        if self.depth == 0
+            && let Some(comp) = self.project.comp(comp_id)
+        {
+            crate::three_d::compose::warm_cameras(self, &self.ctx(comp_id, comp, t));
+        }
         let cpu = if scoped { self.with_accel(None) } else { self.with_accel(self.accel) };
         // Classic 3D runs composite on the GPU too (M12.7), so Auto sends 3D comps there as well;
         // Auto renders each comp on whichever compositor measured faster ([`AutoPick`]).

@@ -372,7 +372,23 @@ pub fn auto_orient_3d(ctx: &EvalCtx, layer: &Layer, pos: Vec3) -> Option<Mat4> {
 }
 
 /// (eye, forward, down) in world space of a camera or light layer.
+///
+/// Remembered inside an [`EvalMemo`] scope, like [`active_camera`]: the viewer draws every
+/// camera's and light's outline in each pane, each frame.
 pub fn layer_frame(ctx: &EvalCtx, layer: &Layer) -> (Vec3, Vec3, Vec3) {
+    let Some(key) = memo::frame(ctx, layer) else { return eval_layer_frame(ctx, layer) };
+    let mark = memo::mark(ctx);
+    if let Some(memo::Value::Frame(f)) = memo::get(key, &mark) {
+        return f;
+    }
+    let (frame, keep) = memo::tracked(ctx, |ctx| eval_layer_frame(ctx, layer));
+    if keep {
+        memo::put(key, memo::Value::Frame(frame), ctx, &mark);
+    }
+    frame
+}
+
+fn eval_layer_frame(ctx: &EvalCtx, layer: &Layer) -> (Vec3, Vec3, Vec3) {
     let (w, h) = (ctx.comp.width as f64, ctx.comp.height as f64);
     let Some(tr) = layer.transform() else { return (vec3(w / 2.0, h / 2.0, -1000.0), vec3(0.0, 0.0, 1.0), vec3(0.0, 1.0, 0.0)) };
     let parent = parent_world(ctx, layer);
@@ -416,10 +432,283 @@ pub fn layer_camera(ctx: &EvalCtx, cam: &Layer) -> CameraState {
 }
 
 /// The comp's active camera at the context time (topmost active camera layer, else the default).
+///
+/// Inside an [`EvalMemo`] scope for `ctx.project`, the camera is worked out once per context
+/// and remembered: every 3D layer's [`EvalCtx::layer_to_comp`] asks for it, and a camera driven
+/// by expressions otherwise re-runs them all for each layer, each frame.
 pub fn active_camera(ctx: &EvalCtx) -> CameraState {
-    match ctx.comp.active_camera(ctx.time) {
+    let work = |ctx: &EvalCtx| match ctx.comp.active_camera(ctx.time) {
         Some(cam) => layer_camera(ctx, cam),
         None => default_camera(ctx.comp.width as f64, ctx.comp.height as f64),
+    };
+    let Some(key) = memo::camera(ctx) else { return work(ctx) };
+    let mark = memo::mark(ctx);
+    if let Some(memo::Value::Camera(cam)) = memo::get(key, &mark) {
+        return cam;
+    }
+    let (cam, keep) = memo::tracked(ctx, work);
+    if keep {
+        memo::put(key, memo::Value::Camera(cam), ctx, &mark);
+    }
+    cam
+}
+
+/// Remembers what was worked out while one project snapshot is drawn or rendered: the active
+/// camera, camera and light frames, and the values of expression-driven properties (see
+/// [`EvalMemo::scope`]).
+///
+/// The scope borrows the project for as long as it lives, so that project can neither change nor
+/// be freed (and its address reused) while values of it are remembered. Every thread working on
+/// that project shares what is remembered, such as the threads one frame's layers are prepared
+/// on. Contexts of any other project are not remembered.
+pub struct EvalMemo<'a> {
+    project: usize,
+    _project: std::marker::PhantomData<&'a effectcraft_project::Project>,
+}
+
+impl<'a> EvalMemo<'a> {
+    /// Remember what is worked out for `project` until the returned guard (and every other scope
+    /// open for the same project) drops.
+    pub fn scope(project: &'a effectcraft_project::Project) -> EvalMemo<'a> {
+        let project = memo::addr(project);
+        memo::open(project);
+        EvalMemo { project, _project: std::marker::PhantomData }
+    }
+}
+
+impl Drop for EvalMemo<'_> {
+    fn drop(&mut self) {
+        memo::close(self.project);
+    }
+}
+
+/// What an [`EvalMemo`] scope remembers. Shared by every thread working on the scope's
+/// project. A value is kept only when it is the same for every reader: see [`put`] for one
+/// worked out inside an expression and [`tracked`] for one that read a file.
+pub(crate) mod memo {
+    use super::{CameraState, EvalCtx, Layer, Vec3};
+    use effectcraft_project::Property;
+    use effectcraft_time::Tick;
+    use std::collections::HashMap;
+    use std::sync::{Mutex, MutexGuard, PoisonError};
+
+    /// Values kept per project: every expression-driven property of the frames being drawn and
+    /// rendered at once, at their motion blur samples. Past this the project's memo starts over.
+    const ENTRIES: usize = 16_384;
+
+    /// What is remembered.
+    #[derive(Clone, Copy, PartialEq, Eq, Hash)]
+    pub(crate) enum What {
+        /// The comp's active camera.
+        Camera,
+        /// A camera or light layer's frame (its address).
+        Frame(usize),
+        /// A property's value: the layer's and property's addresses, at layer time `lt`.
+        Prop(usize, usize, Tick),
+    }
+
+    /// What `What` evaluates to.
+    #[derive(Clone)]
+    pub(crate) enum Value {
+        Camera(CameraState),
+        Frame((Vec3, Vec3, Vec3)),
+        Prop(effectcraft_keyframe::Value),
+    }
+
+    /// What the value depends on, beyond the project the scope pins down.
+    #[derive(Clone, Copy, PartialEq, Eq, Hash)]
+    pub(crate) struct Key {
+        what: What,
+        comp: usize,
+        time: Tick,
+        expr: usize,
+        footage: usize,
+        /// Whether the reader keeps a read log. One that does gets only values known to have read
+        /// no file ([`tracked`]); one that does not is never told of files anyway.
+        logged: bool,
+    }
+
+    /// The values of one project, and how many scopes keep it open.
+    struct Memo {
+        project: usize,
+        scopes: usize,
+        /// Each value, and whether it is the property's own whoever asks ([`Mark::clean`]).
+        entries: HashMap<Key, (Value, bool)>,
+    }
+
+    static MEMO: Mutex<Vec<Memo>> = Mutex::new(Vec::new());
+
+    fn memos() -> MutexGuard<'static, Vec<Memo>> {
+        MEMO.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    pub(super) fn addr<T: ?Sized>(r: &T) -> usize {
+        (r as *const T).cast::<()>() as usize
+    }
+
+    pub(super) fn open(project: usize) {
+        let mut m = memos();
+        match m.iter_mut().find(|m| m.project == project) {
+            Some(m) => m.scopes = m.scopes.saturating_add(1),
+            None => m.push(Memo { project, scopes: 1, entries: HashMap::new() }),
+        }
+    }
+
+    pub(super) fn close(project: usize) {
+        let mut m = memos();
+        if let Some(i) = m.iter().position(|m| m.project == project) {
+            match m.get_mut(i) {
+                Some(e) if e.scopes > 1 => e.scopes -= 1,
+                _ => {
+                    m.swap_remove(i);
+                }
+            }
+        }
+    }
+
+    /// `layer` is the one the context's comp holds (an edited copy, such as a drag's preview,
+    /// shares its id but not its values).
+    fn held(ctx: &EvalCtx, layer: &Layer) -> bool {
+        ctx.comp.layer(layer.id).is_some_and(|c| std::ptr::eq(c, layer))
+    }
+
+    /// The memo key of the active camera of `ctx`.
+    pub(crate) fn camera(ctx: &EvalCtx) -> Option<(usize, Key)> {
+        key(ctx, What::Camera)
+    }
+
+    /// The memo key of `layer`'s frame (a camera or light).
+    pub(crate) fn frame(ctx: &EvalCtx, layer: &Layer) -> Option<(usize, Key)> {
+        if !held(ctx, layer) {
+            return None;
+        }
+        key(ctx, What::Frame(addr(layer)))
+    }
+
+    /// The memo key of `prop`'s value on `layer` at layer time `lt`: only a property of the
+    /// comp's own layer (an expression being edited is evaluated on a copy of its property).
+    pub(crate) fn prop(ctx: &EvalCtx, layer: &Layer, prop: &Property, lt: Tick) -> Option<(usize, Key)> {
+        if !held(ctx, layer) || !layer.props.find(prop.uid).is_some_and(|p| std::ptr::eq(p, prop)) {
+            return None;
+        }
+        key(ctx, What::Prop(addr(layer), addr(prop), lt))
+    }
+
+    /// The key of `what` in `ctx`, or `None` when no scope is open for its project, or when
+    /// Essential Property overrides apply: those live in short-lived lists, whose address a
+    /// later list with other values can take. Only a comp the pinned project holds keeps its
+    /// address for the whole scope; a comp made for the moment could be freed and its address
+    /// taken by another.
+    fn key(ctx: &EvalCtx, what: What) -> Option<(usize, Key)> {
+        if !ctx.property_overrides.is_empty() || !ctx.media_overrides.is_empty() {
+            return None;
+        }
+        if !ctx.project.comp(ctx.comp_id).is_some_and(|c| std::ptr::eq(c, ctx.comp)) {
+            return None;
+        }
+        let project = addr(ctx.project);
+        memos().iter().any(|m| m.project == project).then(|| {
+            let key = Key {
+                what,
+                comp: addr(ctx.comp),
+                time: ctx.time,
+                expr: ctx.expr.map_or(0, addr),
+                footage: ctx.footage.map_or(0, addr),
+                logged: ctx.reads.is_some(),
+            };
+            (project, key)
+        })
+    }
+
+    /// Work a value out with `work` and say whether it may be kept for `ctx`'s readers.
+    ///
+    /// A reader with a read log must be told of every file its value was made of (an expression
+    /// that samples footage). A value answered from the memo would tell it nothing, so the work
+    /// reports to a log of its own, which is handed on to the reader's: only a value that read no
+    /// file is kept. (The memo once told logs apart by their address; a log that took the place
+    /// of an earlier one got that one's value without its files.)
+    ///
+    /// A camera or frame built from a read that fell back to the keyframed value ([`failed_read`])
+    /// is not kept either.
+    pub(crate) fn tracked<T>(ctx: &EvalCtx, work: impl FnOnce(&EvalCtx) -> T) -> (T, bool) {
+        let failed = FAILED_READS.with(|n| n.get());
+        let whole = || FAILED_READS.with(|n| n.get()) == failed;
+        let Some(own) = ctx.reads else {
+            let out = work(ctx);
+            return (out, whole());
+        };
+        let log = crate::reads::ReadLog::new();
+        let out = work(&EvalCtx { reads: Some(&log), ..*ctx });
+        let files = log.into_files();
+        let none = files.is_empty() && files.is_complete() && files.since().is_none() && !files.is_unkeyed();
+        own.note_all(&files);
+        (out, none && whole())
+    }
+
+    thread_local! {
+        /// Reads outside any expression, on this thread, whose own expression failed.
+        static FAILED_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    }
+
+    /// A read outside any expression got the keyframed value because its own expression failed.
+    /// Whatever is being built from it on this thread (a camera, a frame) is not kept: its next
+    /// reader works it out again and so asks the host for that property again. A failure inside
+    /// an expression is not counted here: the value built round it is the property's own for
+    /// readers at the top (see [`Mark`]).
+    pub(crate) fn failed_read() {
+        FAILED_READS.with(|n| n.set(n.get().wrapping_add(1)));
+    }
+
+    /// What is known before a value is looked up or worked out: whether another expression is
+    /// running on this thread, and how many expressions had failed until then.
+    ///
+    /// An expression that needs its own result (directly or round a circle of others) fails, and
+    /// its reader gets the keyframed value instead. So a value can depend on who asks: read at
+    /// the top it is one thing, read from inside an expression that it reads in turn it is
+    /// another. Only a value worked out with no expression failing is the same for everyone.
+    pub(crate) struct Mark {
+        nested: bool,
+        faults: Option<u64>,
+    }
+
+    /// The [`Mark`] of `ctx` now.
+    pub(crate) fn mark(ctx: &EvalCtx) -> Mark {
+        match ctx.expr {
+            Some(h) => Mark { nested: h.busy(), faults: h.faults() },
+            None => Mark { nested: false, faults: None },
+        }
+    }
+
+    impl Mark {
+        /// No expression has failed since the mark was taken, as far as the host can tell (one
+        /// that does not count failures never can).
+        fn clean(&self, ctx: &EvalCtx) -> bool {
+            matches!((self.faults, ctx.expr.and_then(|h| h.faults())), (Some(then), Some(now)) if then == now)
+        }
+    }
+
+    /// The value remembered under `key`: at the top any, inside an expression only one that is
+    /// the same for everyone.
+    pub(crate) fn get((project, key): (usize, Key), mark: &Mark) -> Option<Value> {
+        let m = memos();
+        let (value, clean) = m.iter().find(|m| m.project == project)?.entries.get(&key)?;
+        (*clean || !mark.nested).then(|| value.clone())
+    }
+
+    /// Remember `value`, worked out since `mark` was taken, under `key`: at the top always (a
+    /// later read at the top asks the same way), inside an expression only when it is the same
+    /// for everyone. Without that it is used once and worked out again by whoever asks next.
+    pub(crate) fn put((project, key): (usize, Key), value: Value, ctx: &EvalCtx, mark: &Mark) {
+        let clean = mark.clean(ctx);
+        if mark.nested && !clean {
+            return;
+        }
+        if let Some(m) = memos().iter_mut().find(|m| m.project == project) {
+            if m.entries.len() >= ENTRIES {
+                m.entries.clear();
+            }
+            m.entries.entry(key).or_insert((value, clean));
+        }
     }
 }
 

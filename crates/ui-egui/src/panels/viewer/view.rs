@@ -55,6 +55,10 @@ pub(super) fn aux_views(
         media_overrides: &[],
         reads: None,
     };
+    // Each pane asks for the active camera per 3D layer (outlines, gizmo arrows) and for every
+    // camera's and light's frame (their outlines), and an expression-driven camera re-ran its
+    // expressions each time; the snapshot stays as it is for this frame.
+    let _memo = three_d::EvalMemo::scope(&snap_project);
     let selected = app.session.state.selected_layers.clone();
     let mut picked: Option<(usize, View3D)> = None;
     for (i, (r, v)) in aux.into_iter().enumerate() {
