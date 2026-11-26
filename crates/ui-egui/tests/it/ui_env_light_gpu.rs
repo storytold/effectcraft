@@ -57,6 +57,7 @@ fn environment_light_lights_the_scene_on_the_gpu() {
         .with_size(egui::vec2(1400.0, 900.0))
         .with_pixels_per_point(1.0)
         .wgpu_setup(same_adapter(adapter))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
         .build_eframe(|_| EffectcraftApp::new(Session::default()));
     // The project opens once the compositor (built on a worker thread) is attached, so the
     // frames compared below are GPU frames, not ones the CPU composited meanwhile (see ui_gpu.rs).

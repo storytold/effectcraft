@@ -107,7 +107,7 @@ fn timeline_source_drop_down_picks_the_layer_and_undo_restores_none() {
     let mut app = EffectcraftApp::new(s);
     app.ui.timeline.open_layers.insert(light);
     app.ui.timeline.open_groups.insert(group);
-    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_eframe(|_| app);
+    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app);
     h.run_steps(4);
 
     let value_id = format!("timeline.prop.{source}.value");
@@ -176,7 +176,7 @@ fn effect_controls_layer_param_picks_through_the_shared_widget() {
     s.state.selected_layers = vec![LayerId(base)];
     let mut app = EffectcraftApp::new(s);
     app.show_panel(PanelKind::EffectControls);
-    let mut h = Harness::builder().with_size(vec2(1600.0, 1100.0)).build_eframe(|_| app);
+    let mut h = Harness::builder().with_size(vec2(1600.0, 1100.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app);
     h.run_steps(4);
 
     let value_id = format!("effectControls.prop.{prop}.value");
@@ -221,7 +221,12 @@ fn snapshot_source_dropdown_open_and_chosen() {
     let mut app = EffectcraftApp::new(s);
     app.ui.timeline.open_layers.insert(light);
     app.ui.timeline.open_groups.insert(group);
-    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).with_pixels_per_point(2.0).wgpu().build_eframe(|_| app);
+    let mut h = Harness::builder()
+        .with_size(vec2(1600.0, 1000.0))
+        .with_pixels_per_point(2.0)
+        .wgpu()
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| app);
     h.run_steps(4);
     let save = |h: &mut Harness<'_, EffectcraftApp>, name: &str| {
         if let Ok(dir) = std::env::var("EC_SNAPSHOT_DIR") {

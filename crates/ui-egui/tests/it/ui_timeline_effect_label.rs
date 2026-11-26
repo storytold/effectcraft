@@ -20,7 +20,7 @@ fn harness() -> (Harness<'static, EffectcraftApp>, u64, u64) {
     app.ui.timeline.open_layers.insert(layer);
     let effects = app.session.active_comp().and_then(|c| c.layer(LayerId(layer))).and_then(|l| l.props.sub("effects")).map(|g| g.uid);
     app.ui.timeline.open_groups.extend(effects);
-    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_eframe(|_| app);
+    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app);
     h.run_steps(4);
     (h, layer, fx)
 }

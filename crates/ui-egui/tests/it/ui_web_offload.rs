@@ -193,7 +193,10 @@ fn waiting_commands_reply_when_their_offloaded_job_ends() {
     s.execute("layer.newSolid", json!({"color": "#406080"})).unwrap();
     s.execute("renderQueue.add", json!({"format": "gif", "output": "/w.gif"})).unwrap();
     let (tx, rx) = std::sync::mpsc::channel();
-    let mut h = Harness::builder().with_size(egui::vec2(1280.0, 800.0)).build_eframe(|_| EffectcraftApp::new(s).with_control(rx));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1280.0, 800.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(s).with_control(rx));
     h.run_steps(2);
     // `renderQueue.render` waits by default: the job goes to the worker, the reply waits.
     let (req, reply) = ControlRequest::new("engine.execute", json!({"command": "renderQueue.render", "params": {}}));

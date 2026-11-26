@@ -20,7 +20,10 @@ fn harness() -> (Harness<'static, EffectcraftApp>, [u64; 6]) {
     s.execute("prop.set", json!({"layer": ids[3], "path": "transform/position", "value": [60, 40]})).unwrap();
     s.execute("prop.set", json!({"layer": ids[3], "path": "transform/scale", "value": [50, 50]})).unwrap();
     s.history.undo.clear();
-    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(vec2(1600.0, 1000.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(s));
     h.state_mut().ui.timeline.show_modes = true;
     h.state_mut().ui.timeline.columns_w = 900.0;
     h.run_steps(3);

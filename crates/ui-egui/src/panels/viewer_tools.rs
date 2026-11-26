@@ -346,7 +346,7 @@ pub(crate) fn shown_region(ctx: &egui::Context, comp: [f32; 2]) -> [f64; 4] {
 
 /// Show Snapshot: the stored snapshot is on screen (button or F5 held).
 pub(crate) fn showing_snapshot(app: &EffectcraftApp, ctx: &egui::Context) -> bool {
-    let f5 = ctx.input(|i| i.key_down(egui::Key::F5)) && !ctx.egui_wants_keyboard_input();
+    let f5 = ctx.input(|i| i.key_down(egui::Key::F5)) && !crate::framework::widget_has_keyboard(ctx);
     app.session.snapshot.is_some() && (app.session.state.viewer.show_snapshot || f5)
 }
 
@@ -943,7 +943,8 @@ fn bottom_bar_contents(app: &mut EffectcraftApp, ui: &mut egui::Ui, bar: Rect, z
         let renderers = [(Renderer::Classic3D, "Classic 3D", "classic3D"), (Renderer::Advanced3D, "Advanced 3D", "advanced3D")];
         let current = renderers.iter().find(|(r, ..)| *r == comp.renderer).map_or("Classic 3D", |(_, label, _)| *label);
         let r = Rect::from_min_size(pos2(x, cy - 10.0), vec2(96.0, 20.0));
-        if widgets::dropdown(ui, r, crate::i18n::tr(current), &t, egui::Id::unique("vw-3d")).clicked() {
+        let renderer_resp = widgets::dropdown(ui, r, crate::i18n::tr(current), &t, egui::Id::unique("vw-3d"));
+        if renderer_resp.clicked() {
             toggle_popup(ui, "vw-3d-pop");
         }
         app.auto.add("viewer.renderer3d", r, current);
