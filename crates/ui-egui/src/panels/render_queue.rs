@@ -413,6 +413,39 @@ fn exr_channels_popup(ui: &mut egui::Ui, id: egui::Id, anchor: &egui::Response, 
     chosen.flatten()
 }
 
+/// Route a chosen drop-down entry: a form to open, a command to run, or (returns true) the EXR Channels popup.
+fn queue_menu_choice(mut params: Value, it: &RenderQueueItem, sub: usize, forms: &mut Vec<(RenderQueueItem, String)>, actions: &mut Vec<Action>) -> bool {
+    match params.get("form").and_then(Value::as_str) {
+        Some("exrChannels") => return true,
+        Some(form) => forms.push((it.clone(), form.to_string())),
+        None => {
+            params["item"] = json!(it.id);
+            actions.push((if sub == 0 { "renderQueue.setRenderSettings" } else { "renderQueue.setOutputModule" }, params));
+        }
+    }
+    false
+}
+
+/// The command that stores the EXR Channels popup's choice for an item, once the popup is applied.
+fn exr_channels_action(
+    app: &EffectcraftApp,
+    ui: &mut egui::Ui,
+    did: egui::Id,
+    anchor: &egui::Response,
+    it: &RenderQueueItem,
+    open: bool,
+    rendering: bool,
+) -> Option<Action> {
+    if rendering || it.output.format != OutputFormat::ExrSequence {
+        return None;
+    }
+    let comp = app.session.project.comp(it.comp)?;
+    let selection = exr_channels_popup(ui, did.with("exrChannels"), anchor, comp, &it.output, open)?;
+    let selection = (selection != ExrSelection::default()).then_some(selection);
+
+    Some(("renderQueue.setOutputModule", json!({"item": it.id, "exrSelection": selection})))
+}
+
 /// HEVC / AV1 options: profile, level, rate control (bitrate or constant quality), key frames.
 fn codec_menu(o: &effectcraft_engine::project::render_queue::OutputModule, v: &mut Vec<(String, Value)>) {
     use effectcraft_engine::project::render_queue::{CodecProfile, RateControlMode, VideoCodecOptions};
@@ -1127,26 +1160,10 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 if widgets::by_keyboard(ui) {
                     dd_resp.request_focus();
                 }
-                let mut params = menu[i].1.clone();
-                if let Some(f) = params.get("form").and_then(Value::as_str) {
-                    if f == "exrChannels" {
-                        open_exr_channels = true;
-                    } else {
-                        forms.push((it.clone(), f.to_string()));
-                    }
-                } else {
-                    params["item"] = json!(it.id);
-                    actions.push((if sub == 0 { "renderQueue.setRenderSettings" } else { "renderQueue.setOutputModule" }, params));
-                }
+                open_exr_channels = queue_menu_choice(menu[i].1.clone(), it, sub, &mut forms, &mut actions);
             }
-            if sub == 1
-                && !rendering
-                && it.output.format == OutputFormat::ExrSequence
-                && let Some(comp) = app.session.project.comp(it.comp)
-                && let Some(selection) = exr_channels_popup(ui, did.with("exrChannels"), &dd_resp, comp, &it.output, open_exr_channels)
-            {
-                let selection = (selection != ExrSelection::default()).then_some(selection);
-                actions.push(("renderQueue.setOutputModule", json!({"item": it.id, "exrSelection": selection})));
+            if sub == 1 {
+                actions.extend(exr_channels_action(app, ui, did, &dd_resp, it, open_exr_channels, rendering));
             }
             app.auto.add(&aid(key), dd, &summary);
             if sub == 0 {

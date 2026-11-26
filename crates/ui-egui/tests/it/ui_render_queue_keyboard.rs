@@ -171,7 +171,10 @@ fn a_drop_down_opens_from_the_keyboard_and_gives_the_focus_back() {
 
 fn exr_harness(mut s: Session) -> Harness<'static, EffectcraftApp> {
     s.execute("renderQueue.add", json!({"format": "exr"})).unwrap();
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(s));
     h.state_mut().show_panel(PanelKind::RenderQueue);
     h.run_steps(4);
     click(&mut h, "renderQueue.item.1.twirl");

@@ -429,7 +429,7 @@ fn exr_sequence_layer_pass_retains_alpha_without_the_lower_stack() {
     run_frames(&project, cid, &NoFootage, &om, &dir.path().join("f_[#####].exr"), 1);
 
     let media = MediaPool::new();
-    let footage = effectcraft_media::probe(&dir.path().join("f_00000.exr")).unwrap();
+    let footage = effectcraft_media::probe(dir.path().join("f_00000.exr")).unwrap();
     let picture = media.frame_at(&footage, Tick::ZERO).unwrap();
     assert_eq!(px(&picture, W / 2, H / 2)[3], 0.0);
     let need = AuxNeed::Lookups(vec![AuxLookup::Name("Red.A".into())]);
@@ -491,7 +491,7 @@ fn check_selected_exr_sequence(multipart: bool) {
             .headers
             .iter()
             .flat_map(|h| {
-                let prefix = h.own_attributes.layer_name.as_ref().filter(|n| n.to_string() != "Beauty");
+                let prefix = h.own_attributes.layer_name.as_ref().filter(|n| n.bytes() != b"Beauty");
                 h.channels.list.iter().map(move |c| {
                     let name = prefix.map_or_else(|| c.name.to_string(), |p| format!("{p}.{}", c.name));
                     (name, c.sample_type)

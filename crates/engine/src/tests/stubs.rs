@@ -383,9 +383,7 @@ fn saved_exr_pass_selection_exports_and_skips_incompatible_post_render_actions()
     s.execute_checked("renderQueue.add", json!({"comp": inner.0, "output": dir.path().join("default.exr")})).unwrap();
     let path = dir.path().join("passes.ecproj");
     s.execute_checked("file.saveAs", json!({"path": path})).unwrap();
-    let mut reopened = Session::default();
-    reopened.exporter = Some(exporter.clone());
-    reopened.importer = Some(Arc::new(MockImporter));
+    let mut reopened = Session { exporter: Some(exporter.clone()), importer: Some(Arc::new(MockImporter)), ..Default::default() };
     reopened.execute_checked("file.open", json!({"path": path})).unwrap();
     let restored: Vec<_> = reopened.project.render_queue.iter().map(|item| json!(item.output.exr_selection)).collect();
     assert_eq!(restored, [passes.clone(), passes.clone(), passes, all, serde_json::Value::Null]);
