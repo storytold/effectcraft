@@ -58,7 +58,10 @@ mod standalone_flac;
 const MAX_WORKERS: usize = 8;
 
 /// Maximum decoded frames retained in the per-source GOP window cache.
-const MAX_CACHED_FRAMES: usize = 32;
+const MAX_CACHED_FRAMES: usize = 256;
+/// Maximum decoded bytes retained in the per-source GOP window cache. A typical 1080p GOP fits;
+/// the cap bounds 4K or alpha-heavy sources.
+const MAX_CACHED_BYTES: usize = 384 << 20;
 
 /// Maximum audio lookahead packets inspected when initializing `craft_audio::TrackDecoder`.
 const AUDIO_LOOKAHEAD: usize = 8;
@@ -1648,7 +1651,15 @@ enum VideoState {
 
 impl VideoState {
     fn packet(decoder: TrackDecoder) -> Mutex<Self> {
-        Mutex::new(Self::Packet(PacketVideoState { decoder, next_decode_idx: 0, gop_start_idx: 0, emitted_max_pts: None, flushed: false, decoded: Vec::new() }))
+        Mutex::new(Self::Packet(PacketVideoState {
+            decoder,
+            next_decode_idx: 0,
+            gop_start_idx: 0,
+            emitted_max_pts: None,
+            flushed: false,
+            decoded: Vec::new(),
+            cached_bytes: 0,
+        }))
     }
 }
 
@@ -1661,6 +1672,8 @@ struct PacketVideoState {
     emitted_max_pts: Option<i64>,
     flushed: bool,
     decoded: Vec<CachedFrame>,
+    /// Decoded bytes held in `decoded`, kept beside the vector so eviction is O(1) per frame.
+    cached_bytes: usize,
 }
 
 fn decode_track_packet(
@@ -1867,6 +1880,7 @@ impl MediaSource for CraftMediaSource {
         if draft_changed || target_passed || before_gop || jump_ahead {
             state.decoder.reset().map_err(video_decode_error)?;
             state.decoded.clear();
+            state.cached_bytes = 0;
             state.next_decode_idx = sync_idx;
             state.gop_start_idx = sync_idx;
             state.emitted_max_pts = None;
@@ -2354,11 +2368,12 @@ fn push_decoded(
         state.emitted_max_pts = Some(state.emitted_max_pts.map_or(pts, |max| max.max(pts)));
         let pts_tick = file.pts_to_tick(track_idx, pts);
         let frame = Arc::new(to_craft_frame(vf, presentation, pts_tick)?);
+        state.cached_bytes = state.cached_bytes.saturating_add(frame.byte_size());
         state.decoded.push(CachedFrame { pts, draft, frame });
     }
-    if state.decoded.len() > MAX_CACHED_FRAMES {
-        let excess = state.decoded.len() - MAX_CACHED_FRAMES;
-        state.decoded.drain(..excess);
+    while state.decoded.len() > MAX_CACHED_FRAMES || (state.cached_bytes > MAX_CACHED_BYTES && state.decoded.len() > 1) {
+        let removed = state.decoded.remove(0);
+        state.cached_bytes = state.cached_bytes.saturating_sub(removed.frame.byte_size());
     }
     Ok(())
 }
@@ -4814,6 +4829,35 @@ mod tests {
             assert_eq!(frame.pts, time, "frame {k}");
         }
         assert_eq!(source.reads[0].load(Ordering::Relaxed), 1, "sequential playback re-read the keyframe");
+        // The cache now covers the whole short GOP: the backward seek is a cache hit.
+        let back = media.video_frame(FrameRequest::full(Tick::ZERO)).expect("backward seek");
+        assert_eq!(back.pts, Tick::ZERO);
+        assert_eq!(source.reads[0].load(Ordering::Relaxed), 1, "a cached backward seek re-read the keyframe");
+    }
+
+    #[test]
+    fn h264_gop_jumps_still_reset_to_the_target_keyframe() {
+        use std::sync::atomic::Ordering;
+
+        let movie = generated_h264_movie(40, 20);
+        assert_eq!(movie.keyframes.len(), 2, "the fixture has two GOPs");
+        let source = Arc::new(CountingKeyReads {
+            bytes: movie.bytes,
+            keyframes: movie.keyframes,
+            reads: vec![std::sync::atomic::AtomicUsize::new(0), std::sync::atomic::AtomicUsize::new(0)],
+        });
+        let media = open_isobmff_with_workers("gop.mp4", source.clone(), 8).expect("shared route").expect("opens");
+        for read in &source.reads {
+            read.store(0, Ordering::Relaxed);
+        }
+        // Jump straight into the second GOP: only its keyframe is read.
+        let second = media.video_frame(FrameRequest::full(Tick::from_units(30, 25))).expect("second GOP");
+        assert_eq!(second.pts, Tick::from_units(30, 25));
+        assert_eq!((source.reads[0].load(Ordering::Relaxed), source.reads[1].load(Ordering::Relaxed)), (0, 1), "the jump starts at the second GOP");
+        // Seek back across the GOP boundary: reset to the first keyframe.
+        let first = media.video_frame(FrameRequest::full(Tick::ZERO)).expect("back to the first GOP");
+        assert_eq!(first.pts, Tick::ZERO);
+        assert_eq!((source.reads[0].load(Ordering::Relaxed), source.reads[1].load(Ordering::Relaxed)), (1, 1), "the backward seek re-read the first keyframe");
     }
 
     fn generated_two_frame_ts() -> Vec<u8> {
