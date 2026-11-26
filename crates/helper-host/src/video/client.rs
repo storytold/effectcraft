@@ -155,7 +155,8 @@ pub struct VideoHelper {
     opts: Options,
 }
 
-/// Job ids are never reused, even across helper processes.
+/// Job ids are never reused within one helper process. A new helper starts from the highest id
+/// opened so far, which keeps them apart in the log but is not a promise across processes.
 static NEXT_JOB: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 impl VideoHelper {

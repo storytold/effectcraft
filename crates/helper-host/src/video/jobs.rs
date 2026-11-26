@@ -107,7 +107,8 @@ pub struct Jobs {
 }
 
 impl Jobs {
-    /// Job ids are never reused, not even after a restart: start from [`Jobs::next_id`] of the earlier book.
+    /// Job ids only go up and are never reused by one book. To keep them apart from an earlier
+    /// book, start from its [`Jobs::next_id`].
     pub fn new(first: u64) -> Jobs {
         let first = first.max(1);
         Jobs { first, next: first, open: BTreeMap::new(), cancelling: BTreeSet::new() }
