@@ -32,15 +32,11 @@ craft-doc = { version = "0.1.0", git = "https://github.com/storytold/craft-libs"
 craft-vectorcraft-format = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "5a7a63a21dd03dd1a2bc6c308a3a6ce818caae87" }
 # craft-update: app-specific pretend versions apply to startup and manual checks.
 craft-update = { git = "https://github.com/storytold/craft-libs", version = "=0.1.0", rev = "5a7a63a21dd03dd1a2bc6c308a3a6ce818caae87", features = ["egui"] }
-# Craft Link and the plug-in host. These crates are in craft-libs pull requests that are still open
-# (craft-command, craft-ipc, craft-plugin-abi, craft-plugin-host, craft-plugin-ui). They share one rev.
-# Move it to the merged commit.
-craft-command = { git = "https://github.com/storytold/craft-libs", rev = "8bb1adcfb631e32ba7fa32f0417fc0e03287979f", version = "=0.1.0" }
-craft-ipc = { git = "https://github.com/storytold/craft-libs", rev = "8bb1adcfb631e32ba7fa32f0417fc0e03287979f", version = "=0.1.0" }
-# The plug-in host lifecycle is native only.
-craft-plugin-host = { git = "https://github.com/storytold/craft-libs", rev = "8bb1adcfb631e32ba7fa32f0417fc0e03287979f", version = "=0.1.0", default-features = false }
-craft-plugin-abi = { git = "https://github.com/storytold/craft-libs", rev = "8bb1adcfb631e32ba7fa32f0417fc0e03287979f", version = "=0.1.0" }
-craft-plugin-ui = { git = "https://github.com/storytold/craft-libs", rev = "8bb1adcfb631e32ba7fa32f0417fc0e03287979f", version = "=0.1.0" }
+# Craft Link. These two crates are in craft-libs pull requests that are still open: craft-command
+# (#431) and craft-ipc (#433). They are independent crates, so each pins its own PR head. Move both
+# to the merged commit.
+craft-command = { git = "https://github.com/storytold/craft-libs", rev = "81669a0c5c656207abf6df59ea2f93dcca328e24", version = "=0.1.0" }
+craft-ipc = { git = "https://github.com/storytold/craft-libs", rev = "a346c50303129490218ffc2e8f7e646435bd8efe", version = "=0.1.0" }
 # internal
 effectcraft-time = { path = "crates/time" }
 effectcraft-geom = { path = "crates/geom" }
@@ -59,7 +55,6 @@ effectcraft-render = { path = "crates/render" }
 effectcraft-gpu = { path = "crates/gpu" }
 effectcraft-media = { path = "crates/media" }
 effectcraft-link = { path = "crates/link" }
-effectcraft-plugins = { path = "crates/plugins" }
 effectcraft-export = { path = "crates/export" }
 effectcraft-expr = { path = "crates/expr" }
 effectcraft-lottie = { path = "crates/lottie" }

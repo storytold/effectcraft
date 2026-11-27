@@ -50,7 +50,6 @@ mod ui_graph_fit;
 mod ui_graph_theme;
 mod ui_group_rename;
 mod ui_guide_layers;
-mod ui_host_hooks;
 mod ui_info_tracker_a11y;
 mod ui_inline_edit;
 mod ui_keyframes;
