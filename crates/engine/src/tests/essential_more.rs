@@ -380,7 +380,7 @@ fn a_collapsed_parent_keeps_its_override_history_for_the_nested_instance() {
     // The Inner target starts late and is stretched: the parent's source-time keys must be moved
     // into this target's own layer time.
     {
-        let layer = std::sync::Arc::make_mut(&mut s.project).comp_mut(inner).unwrap().layer_mut(LayerId(target)).unwrap();
+        let layer = s.project_mut().comp_mut(inner).unwrap().layer_mut(LayerId(target)).unwrap();
         layer.start_time = Tick::from_seconds_f64(0.5);
         layer.stretch = 125.0;
     }

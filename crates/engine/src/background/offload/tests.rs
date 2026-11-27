@@ -288,7 +288,7 @@ fn cancelling_offloaded_jobs() {
     // Render: the queued items become User Stopped.
     s.execute("renderQueue.add", serde_json::json!({"output": "/a.gif"})).unwrap();
     // An earlier run's timing does not stay beside the stopped status (#3724)
-    Arc::make_mut(&mut s.project).render_queue.last_mut().unwrap().last_timing = Some(Default::default());
+    s.project_mut().render_queue.last_mut().unwrap().last_timing = Some(Default::default());
     let ids = s.start_render(false).unwrap();
     assert!(s.is_rendering());
     assert!(s.stop_render());

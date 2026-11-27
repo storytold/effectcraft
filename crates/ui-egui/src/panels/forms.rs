@@ -1350,7 +1350,7 @@ mod tests {
             (50.0, 2, AlphaMode::Ignore, Some(ColorSpace::DisplayP3), false),
         ];
         let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
-        let project = std::sync::Arc::make_mut(&mut app.session.project);
+        let project = app.session.project_mut();
         let ids = looks.map(|(fps, loops, alpha, profile, invert)| {
             if !proxy {
                 return project.add_item("clip.mov", Default::default(), None, ItemKind::Footage(clip(fps, loops, alpha, profile, invert)));
@@ -1423,7 +1423,7 @@ mod tests {
             let solid = app.session.project.items.values().find(|i| matches!(i.kind, effectcraft_engine::project::ItemKind::Solid(_))).unwrap().id;
             // Footage without a proxy.
             let kind = app.session.project.item(a).unwrap().kind.clone();
-            let plain = std::sync::Arc::make_mut(&mut app.session.project).add_item("plain.mov", Default::default(), None, kind);
+            let plain = app.session.project_mut().add_item("plain.mov", Default::default(), None, kind);
             app.session.state.project_selection = vec![a];
             let mut invalid = vec![json!({"item": 999}), json!({"items": [999]}), json!({"item": comp.0}), json!({"item": solid.0})];
             if proxy {
@@ -1441,7 +1441,7 @@ mod tests {
                     assert_eq!(r, Ok(json!({"items": []})), "{command}: {params}");
                 }
             }
-            assert_eq!(*app.session.project, *before);
+            assert_eq!(*app.session.project, before);
         }
     }
 

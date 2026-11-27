@@ -1667,7 +1667,7 @@ fn convert_expression_to_keyframes_refuses_a_zero_frame_duration() {
 /// Source Text of text layer `t`, its static value set to `doc` (no keyframes touched).
 fn set_static_text(s: &mut Session, t: u64, doc: &effectcraft_keyframe::TextDoc) {
     let cid = s.active_comp_id().unwrap();
-    let comp = std::sync::Arc::make_mut(&mut s.project).comp_mut(cid).unwrap();
+    let comp = s.project_mut().comp_mut(cid).unwrap();
     comp.layer_mut(effectcraft_project::LayerId(t)).unwrap().props.prop_mut("text/sourceText").unwrap().value = KV::Text(Box::new(doc.clone()));
 }
 

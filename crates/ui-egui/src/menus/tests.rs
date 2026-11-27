@@ -1109,7 +1109,7 @@ fn the_unlabeled_alpha_question_opens_on_the_imported_footage() {
             ..Default::default()
         })
     };
-    let project = std::sync::Arc::make_mut(&mut app.session.project);
+    let project = app.session.project_mut();
     let before = project.add_item("before.png", Default::default(), None, still("/m/before.png", 1, AlphaMode::Straight));
     let matte = project.add_item("matte.tga", Default::default(), None, still("/m/matte.tga", 4, AlphaMode::Premultiplied));
     app.session.state.project_selection = vec![before];
