@@ -55,7 +55,7 @@ impl Hit {
     /// Text shown in the result row.
     fn name(&self) -> &str {
         match self {
-            Hit::Effect(spec) => &spec.name,
+            Hit::Effect(spec) => spec.name,
             Hit::Preset { name, .. } => name,
         }
     }
