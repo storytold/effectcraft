@@ -1,0 +1,8 @@
+asset:        quick-effects-search-results.png
+title:        Quick Effects Search, blur results
+author:       ashrafalix29
+source:       original work (screenshot of EffectCraft 0.25.1 via the control channel's ui.screenshot)
+license:      MIT OR Apache-2.0
+license-file:
+added:        2026-11-27 by ashrafalix29
+notes:        Screenshot of EffectCraft's demo composition with Quick Effects Search showing five ranked real effect results for the query "blur", with the 32-bpc and GPU badges.

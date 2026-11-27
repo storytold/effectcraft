@@ -1,0 +1,8 @@
+asset:        quick-effects-search-empty.png
+title:        Quick Effects Search, empty query
+author:       ashrafalix29
+source:       original work (screenshot of EffectCraft 0.25.1 via the control channel's ui.screenshot)
+license:      MIT OR Apache-2.0
+license-file:
+added:        2026-11-27 by ashrafalix29
+notes:        Screenshot of EffectCraft's demo composition with the Quick Effects Search palette open and an empty search field. The palette shows only the search field until the user types.

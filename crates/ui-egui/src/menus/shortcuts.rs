@@ -381,6 +381,20 @@ fn handle_shortcuts_impl(app: &mut EffectcraftApp, ctx: &egui::Context, tab_only
         return;
     }
     let binds = bindings(&app.session);
+    // Quick Effects Search keeps priority at its configured chord. The default Shift+Space is
+    // also bound to the preview preset; resolving it through the same table keeps rebinds and
+    // clears effective.
+    if !tab_only && app.dialog.is_none() && !app.ui.quick_effects.open {
+        if let Some((want_mods, want_key, _, _)) = binds.iter().find(|(_, _, id, _)| id == "effects.quickSearch") {
+            for (key, mods, pressed, _) in &events {
+                if *pressed && *key == *want_key && mods_match(*want_mods, *mods) {
+                    ctx.input_mut(|i| i.consume_key(*want_mods, *key));
+                    crate::panels::quick_effects::open(app, ctx);
+                    return;
+                }
+            }
+        }
+    }
     for (key, mods, pressed, physical_key) in events {
         // (Per event: a shortcut can change the tool, the selection or the focused panel.)
         let (focused, contexts) = (app.ui.focused.shortcut_scope(), active_contexts(app));

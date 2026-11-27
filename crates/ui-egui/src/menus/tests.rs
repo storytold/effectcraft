@@ -69,7 +69,11 @@ fn ui_and_menu_shortcuts_do_not_collide() {
         let key = (format!("{m:?}"), format!("{k:?}"));
         let target = (id.clone(), params.to_string());
         if let Some(prev) = seen.get(&key) {
-            assert_eq!(prev, &target, "{key:?} bound to {prev:?} and {target:?}");
+            // Quick Effects Search deliberately shares Shift+Space with the Shift+Space preview
+            // preset; the dispatcher gives it priority and the shortcut editor warns about it.
+            let intentional = (prev.0 == "effects.quickSearch" && id == "playback.preview.shiftSpacebar")
+                || (prev.0 == "playback.preview.shiftSpacebar" && id == "effects.quickSearch");
+            assert!(intentional || prev == &target, "{key:?} bound to {prev:?} and {target:?}");
         } else {
             seen.insert(key, target);
         }

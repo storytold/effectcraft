@@ -549,6 +549,10 @@ pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: V
             app.stop();
             return Ok(Value::Null);
         }
+        "effects.quickSearch" => {
+            crate::panels::quick_effects::open(app, ctx);
+            return Ok(Value::Null);
+        }
         // The focused Layer panel has its own magnification; otherwise the Composition viewer.
         "view.fit" if app.ui.focused == PanelKind::Layer => {
             app.ui.layer_zoom = None;

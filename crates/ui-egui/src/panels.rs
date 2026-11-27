@@ -44,6 +44,7 @@ pub mod primitive_dialog;
 pub mod project;
 pub mod properties;
 pub mod puppet_tool;
+pub mod quick_effects;
 pub mod render_queue;
 pub mod roto_tool;
 pub mod rq_templates;

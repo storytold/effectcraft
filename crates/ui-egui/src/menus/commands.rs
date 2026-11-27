@@ -14,6 +14,7 @@ pub const UI_COMMANDS: &[UiCommand] = &[
     uic!("playback.preview.shiftNumpad0", "Preview (Shift+Numpad 0)", [], Some("Shift+Num0")),
     uic!("playback.preview.altNumpad0", "Preview (Alt+Numpad 0)", [], Some("Alt+Num0")),
     uic!("playback.stop", "Stop", [], None),
+    uic!("effects.quickSearch", "Quick Effects Search", [], Some("Shift+Space")),
     uic!("view.fit", "Fit", [], Some("Shift+/")),
     uic!("view.actualSize", "100%", [], Some("/")),
     uic!("view.fitUpTo100", "Fit up to 100%", [], Some("Alt+/")),
