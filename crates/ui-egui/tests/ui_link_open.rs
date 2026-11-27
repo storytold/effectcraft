@@ -81,7 +81,7 @@ fn link_result_path(tag: &str) -> String {
 
 #[test]
 fn link_open_dismisses_the_home_screen() {
-    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(|_| EffectcraftApp::new(Session::default()));
+    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| EffectcraftApp::new(Session::default()));
     h.run_steps(3);
     h.state_mut().ui.start_screen = true;
     let params = json!({
@@ -99,7 +99,7 @@ fn link_open_dismisses_the_home_screen() {
 
 #[test]
 fn link_attach_dismisses_the_home_screen() {
-    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(|_| EffectcraftApp::new(Session::default()));
+    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| EffectcraftApp::new(Session::default()));
     h.run_steps(3);
     let result_path = link_result_path("attach");
     let params = json!({
@@ -122,7 +122,7 @@ fn link_attach_dismisses_the_home_screen() {
 /// Home must not stay over it. A link the session does not bind opens nothing and leaves Home.
 #[test]
 fn app_activate_with_a_link_dismisses_the_home_screen() {
-    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(|_| EffectcraftApp::new(Session::default()));
+    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| EffectcraftApp::new(Session::default()));
     h.run_steps(3);
     let params = json!({
         "link_id": LINK_ID,
@@ -146,7 +146,7 @@ fn app_activate_with_a_link_dismisses_the_home_screen() {
 
 #[test]
 fn a_failed_link_open_leaves_the_home_screen_alone() {
-    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(|_| EffectcraftApp::new(Session::default()));
+    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| EffectcraftApp::new(Session::default()));
     h.run_steps(3);
     h.state_mut().ui.start_screen = true;
     let reply = send(&mut h, "link.open", json!({"link_id": "not-a-uuid"}));
@@ -158,7 +158,7 @@ fn a_failed_link_open_leaves_the_home_screen_alone() {
 /// viewer showed a flat comp and the user could not tell why.
 #[test]
 fn the_viewer_says_when_the_footage_is_missing() {
-    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(|_| EffectcraftApp::new(Session::default()));
+    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| EffectcraftApp::new(Session::default()));
     h.run_steps(3);
     let params = json!({
         "link_id": LINK_ID,

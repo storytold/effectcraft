@@ -182,3 +182,12 @@ pub fn result_parts(dir: &std::path::Path) -> Vec<String> {
     parts.sort();
     parts
 }
+
+/// Asserts that `path` is a ProRes 4444 movie. The probe names the codec family; the profile is
+/// the `ap4h` sample entry in the movie, which does not depend on how the probe words the codec.
+pub fn assert_prores_4444(path: &std::path::Path) {
+    let probed = effectcraft_media::probe(path).unwrap();
+    assert!(probed.codec.contains("ProRes"), "{}", probed.codec);
+    let bytes = std::fs::read(path).unwrap();
+    assert!(bytes.windows(4).any(|w| w == b"ap4h"), "no ProRes 4444 sample entry in {}", path.display());
+}

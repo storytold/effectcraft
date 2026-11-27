@@ -209,8 +209,7 @@ mod tests {
         let reply = back_to_filmcraft(&mut session, Some(&runtime.dir), &backend).unwrap();
 
         assert!(result.exists(), "result file was not written");
-        let probed = effectcraft_media::probe(&result).unwrap();
-        assert!(probed.codec.contains("ProRes 4444"), "{}", probed.codec);
+        crate::test_support::assert_prores_4444(&result);
         let calls = peer.calls();
         assert_eq!(peer.methods(), ["link.focus", "app.activate"], "{calls:?}");
         assert_eq!(calls[0].1, json!({"link_id": LINK, "place": {"seconds": seconds}}));

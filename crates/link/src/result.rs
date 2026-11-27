@@ -564,7 +564,7 @@ mod tests {
         println!("RESULT_CODEC:{} {}x{}", probed.codec, probed.width, probed.height);
         // A flat 128×72 frame encodes to a short ProRes 4444 file. The in-repo probe is the check.
         assert!(bytes.len() > 4096 || probed.codec.contains("ProRes"), "RESULT_BYTES:{} codec:{}", bytes.len(), probed.codec);
-        assert!(probed.codec.contains("ProRes 4444"), "{}", probed.codec);
+        crate::test_support::assert_prores_4444(&result);
         assert_eq!((probed.width, probed.height), (128, 72));
         let frame = effectcraft_media::MediaPool::new().frame_at(&probed, probed.frame_rate.tick_of(0)).unwrap();
         assert_eq!((frame.width, frame.height), (128, 72));
