@@ -24,7 +24,10 @@ fn harness() -> (Harness<'static, EffectcraftApp>, Vec<ItemId>, LayerId) {
     );
     let folder = ItemId(s.execute("project.newFolder", json!({"name": "Folder"})).unwrap()["item"].as_u64().unwrap());
     let keep = LayerId(s.execute("layer.newNull", json!({"name": "Keep this layer"})).unwrap()["layer"].as_u64().unwrap());
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(s));
     let folders: Vec<u64> = h.state().session.project.items.values().filter(|i| i.is_folder()).map(|i| i.id.0).collect();
     h.state_mut().ui.project_open_folders.extend(folders);
     h.run_steps(3);

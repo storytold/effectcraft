@@ -10,6 +10,7 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+craft-doc = { workspace = true }
 craft-docpath = { workspace = true }
 effectcraft-time = { workspace = true }
 effectcraft-geom = { workspace = true }
@@ -42,12 +43,13 @@ web-time = { workspace = true }
 exr = { workspace = true }
 craft-command = { workspace = true }
 
+[dev-dependencies]
+effectcraft-media = { workspace = true }
+craft-command = { workspace = true, features = ["testing"] }
+
 # Native file identity and SAM 2 inference; browsers keep the built-in engines.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 memory-stats = { workspace = true }
 same-file = { workspace = true }
 tempfile = { workspace = true }
 effectcraft-sam2 = { workspace = true }
-
-[dev-dependencies]
-craft-command = { workspace = true, features = ["testing"] }

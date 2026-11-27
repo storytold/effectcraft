@@ -28,6 +28,8 @@ pollster = { workspace = true }
 cpal = { workspace = true }
 log = { workspace = true }
 chrono = { workspace = true }
+# The launch-profile refusal and the nightly Windows identity (src/process_identity.rs).
+thiserror = { workspace = true }
 # MIT; safe process handles and target-only memory observation for the crash helper.
 sysinfo = { version = "=0.37.2", default-features = false, features = ["system"] }
 
@@ -62,3 +64,5 @@ fmv-macos-events = "=0.1.0"
 
 [target.'cfg(windows)'.dependencies]
 craft-update = { workspace = true }
+# SetCurrentProcessExplicitAppUserModelID: the Nightly window's own taskbar identity.
+winsafe = { version = "=0.0.29", default-features = false, features = ["user", "shell"] }

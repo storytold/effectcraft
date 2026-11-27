@@ -92,7 +92,12 @@ fn harness(s: Session, size: egui::Vec2, ppp: f32, ec: f32) -> Harness<'static, 
 /// [`harness`] whose steps advance the clock by `dt` seconds.
 fn harness_dt(s: Session, size: egui::Vec2, ppp: f32, ec: f32, dt: f32) -> Harness<'static, EffectcraftApp> {
     let app = app(s, ec);
-    let mut h = Harness::builder().with_size(size).with_pixels_per_point(ppp).with_step_dt(dt).build_eframe(|_| app);
+    let mut h = Harness::builder()
+        .with_size(size)
+        .with_pixels_per_point(ppp)
+        .with_step_dt(dt)
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| app);
     settle(&mut h);
     h
 }
@@ -651,7 +656,12 @@ fn picks_on_the_gpu_viewer() {
     }
     let (s, ids) = crypto_session("gpu", 1919, 1079, false);
     let app = app(s, 420.0);
-    let mut h = Harness::builder().with_size(vec2(1400.0, 900.0)).with_pixels_per_point(1.0).wgpu_setup(setup).build_eframe(|_| app);
+    let mut h = Harness::builder()
+        .with_size(vec2(1400.0, 900.0))
+        .with_pixels_per_point(1.0)
+        .wgpu_setup(setup)
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| app);
     settle(&mut h);
     if h.state().gpu_adapter().is_none() {
         eprintln!("the viewer stayed on the CPU ({adapter}): skipping");
@@ -1923,10 +1933,11 @@ fn the_same_status_set_again_while_shown_gets_its_own_5_s() {
     let _ = std::fs::remove_dir_all(&ids.dir);
 }
 
-/// A press, a PageDown and the release in one slow pass: the click is the frame on screen at the
-/// press, so it is dropped and says so, not made on the next frame (Windows round 6, R-i pd8).
+/// A press, then a PageDown and the release in one slow pass (the runtime takes the press in its
+/// own pass): the click is the frame on screen at the press, so it is dropped and says so, not
+/// made on the next frame (Windows round 6, R-i pd8).
 #[test]
-fn a_frame_step_between_press_and_release_in_one_pass_drops_the_click() {
+fn a_frame_step_between_press_and_release_drops_the_click() {
     let (mut h, ids, a, _) = ready_at_two_ids("key-one-pass");
     let key = |pressed| Event::Key { key: egui::Key::PageDown, physical_key: None, pressed, repeat: false, modifiers: Modifiers::NONE };
     let ev = &mut h.input_mut().events;
@@ -1934,6 +1945,7 @@ fn a_frame_step_between_press_and_release_in_one_pass_drops_the_click() {
     ev.push(key(true));
     ev.push(key(false));
     ev.push(Event::PointerButton { pos: a, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+    h.step();
     h.step();
     assert!(h.state().session.time().seconds() > 0.0, "the PageDown stepped");
     assert!(h.state().ui.status.starts_with("Pick not made"), "{:?}", h.state().ui.status);

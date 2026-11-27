@@ -349,7 +349,7 @@ fn flow_keys(
     rects: &[Rect],
     cmds: &mut Vec<(String, Value)>,
 ) {
-    let focused = ctx.memory(|m| m.focused());
+    let focused = crate::framework::focused_widget(ctx);
     let on_node = focused.is_some_and(|f| g.nodes.iter().any(|n| node_id(&n.id) == f));
     let by_mouse = focused.is_none() && app.ui.focused == crate::dock::PanelKind::Flowchart;
     if (on_node || by_mouse) && app.dialog.is_none() && !widgets::any_menu_open(ctx) {

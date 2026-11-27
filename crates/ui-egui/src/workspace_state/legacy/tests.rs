@@ -8,7 +8,7 @@ fn stack(count: usize) -> OldNode {
 
 #[test]
 fn stacked_frames_respect_the_remaining_tree_depth() {
-    let limit = craft_ui::docking::MAX_DEPTH;
+    let limit = craft_behavior::dock::MAX_DEPTH;
     assert!(node(stack(limit + 1), 0).is_ok());
     assert!(node(stack(limit + 2), 0).is_err());
     assert!(node(stack(1), limit).is_ok());

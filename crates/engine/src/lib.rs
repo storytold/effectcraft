@@ -100,7 +100,7 @@ pub use doc_state::{CompSelection, EditorState, KeyClip, KeyMove, KeyRef, LinkCl
 pub use error::{EngineError, Result};
 pub use event::Event;
 pub use fonts::{FontRow, font_features, font_menu, font_preview, font_styles, text_families};
-pub use services::{FsServices, Importer, Services};
+pub use services::{FsServices, Importer, PCRAFT_MAX_INPUT, Services, pcraft_too_large};
 pub use session::upgrade_effects;
 
 pub struct Session {
@@ -292,7 +292,7 @@ pub struct Session {
     pub call_seq: u64,
     /// Set by a merged edit, consumed by [`Session::bump`].
     pub pending_merged: bool,
-    /// `Arc` so the plug-in host (`effectcraft-plugins`) registers into the same table.
+    /// `Arc` so another host can register into the same table.
     pub registry: Arc<craft_command::Registry<Session, EngineError>>,
     pub hooks: craft_command::Hooks<Session>,
 }

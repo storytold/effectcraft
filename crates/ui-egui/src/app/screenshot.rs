@@ -206,7 +206,7 @@ impl EffectcraftApp {
     fn drain_completed_screenshots(&mut self, geom: DrawGeometry) {
         let mut i = 0;
         while i < self.pending_screenshots.len() {
-            let taken = self.pending_screenshots.get(i).and_then(|s| s.slot.as_ref()).and_then(craft_ui::capture::CaptureSlot::take);
+            let taken = self.pending_screenshots.get(i).and_then(|s| s.slot.as_ref()).and_then(crate::capture::CaptureSlot::take);
             let Some(result) = taken else {
                 i += 1;
                 continue;
@@ -324,7 +324,7 @@ impl EffectcraftApp {
                     continue;
                 }
             };
-            let (slot, callback) = craft_ui::capture::CaptureSlot::new(ctx, egui::ViewportId::ROOT, MAX_SHOT_BYTES);
+            let (slot, callback) = crate::capture::CaptureSlot::new(ctx, egui::ViewportId::ROOT, MAX_SHOT_BYTES);
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(callback));
             let s = &mut self.pending_screenshots[i];
             s.slot = Some(slot);
@@ -356,7 +356,7 @@ mod tests {
             assert!(app.session.refuse_export(&text).is_ok());
             let (tx, rx) = std::sync::mpsc::channel();
             app.admit_screenshot(&ctx, Some(text.clone()), ShotTarget::Window, tx);
-            let (slot, callback) = craft_ui::capture::CaptureSlot::new(&ctx, egui::ViewportId::ROOT, MAX_SHOT_BYTES);
+            let (slot, callback) = crate::capture::CaptureSlot::new(&ctx, egui::ViewportId::ROOT, MAX_SHOT_BYTES);
             let shot = app.pending_screenshots.last_mut().unwrap();
             shot.issued = Some(geom);
             shot.slot = Some(slot);

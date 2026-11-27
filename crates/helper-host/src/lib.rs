@@ -18,6 +18,8 @@
 //!
 //! [`serve`] is the helper side, for helper programs written in Rust.
 //!
+//! [`video`] is EffectCraft's side of hardware video helpers (`docs/video-helper-protocol.md`).
+//!
 //! Native only: on wasm32 the crate is empty (there are no processes to start).
 
 #![cfg(not(target_arch = "wasm32"))]
@@ -28,6 +30,7 @@ pub mod client;
 pub mod frames;
 pub mod protocol;
 pub mod serve;
+pub mod video;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -108,6 +111,9 @@ pub fn find_helpers(paths: &[PathBuf]) -> Vec<PathBuf> {
             }
         }
     }
+    // The video helper is started by hardware video only (`video::find_video_helper`), never as an
+    // effect helper, even when a folder or an explicit path names it.
+    out.retain(|p| !video::is_video_program(p));
     out.sort();
     out.dedup();
     out

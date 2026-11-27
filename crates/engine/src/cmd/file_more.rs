@@ -30,10 +30,13 @@ fn has_comp_selection(s: &Session) -> std::result::Result<(), String> {
     if s.state.project_selection.iter().any(|i| s.project.comp(*i).is_some()) { Ok(()) } else { Err("select compositions in the Project panel".into()) }
 }
 
+fn is_footage(s: &Session, i: ItemId) -> bool {
+    matches!(s.project.item(i).map(|x| &x.kind), Some(ItemKind::Footage(_)))
+}
+
 /// Selected project items that are footage (or the source of the selected layer).
 fn selected_footage(s: &Session) -> Vec<ItemId> {
-    let mut v: Vec<ItemId> =
-        s.state.project_selection.iter().copied().filter(|i| matches!(s.project.item(*i).map(|x| &x.kind), Some(ItemKind::Footage(_)))).collect();
+    let mut v: Vec<ItemId> = s.state.project_selection.iter().copied().filter(|i| is_footage(s, *i)).collect();
     if v.is_empty()
         && let Some(c) = s.active_comp()
     {
@@ -54,6 +57,17 @@ fn items_p(s: &Session, p: &Value) -> Vec<ItemId> {
         Some(Value::Number(n)) => n.as_u64().map(ItemId).into_iter().collect(),
         _ => selected_footage(s),
     }
+}
+
+/// The items `file.interpretFootage` changes for parameters `p` (with `proxy`, the items whose
+/// proxy `file.interpretProxy` changes): `items`/`item`, else the selection, keeping only
+/// footage (items with a proxy), as the commands skip the rest. The Interpret Footage dialog
+/// shows the first one, so OK writes its settings back to the footage they came from.
+pub fn interpretation_targets(s: &Session, p: &Value, proxy: bool) -> Vec<ItemId> {
+    if proxy {
+        return super::proxy::proxied(s, p);
+    }
+    items_p(s, p).into_iter().filter(|i| is_footage(s, *i)).collect()
 }
 
 /// `project.newFolder {name?, parent?, items?}`. With `items` (ids or names), they move into the

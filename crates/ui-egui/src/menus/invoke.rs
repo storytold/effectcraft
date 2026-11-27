@@ -266,7 +266,7 @@ fn invoke_body(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: 
     // Close follows panel focus too: with the Render Queue active, Cmd+W closes that panel and
     // leaves the active composition open (it used to close the composition next to it).
     if id == "file.close" && no_params(&params) && app.ui.focused == PanelKind::RenderQueue {
-        app.apply_dock(craft_ui::docking::Action::Close { panel: PanelKind::RenderQueue })?;
+        app.apply_dock(craft_behavior::dock::Action::close(PanelKind::RenderQueue))?;
         // The focus goes to a panel that is still there, so the next Close acts on the composition
         // instead of on the queue that is gone.
         let next = [PanelKind::Timeline, PanelKind::Composition, PanelKind::Project].into_iter().find(|p| panel_shown(app, *p)).unwrap_or(PanelKind::Project);
@@ -303,6 +303,24 @@ fn invoke_body(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: 
             Some(item) => run_engine(app, ctx, "renderQueue.remove", json!({"item": item})),
             None => Err("select a Render Queue item first".into()),
         };
+    }
+    // Duplicate follows panel focus too: in the Render Queue it copies the selected item (#3668),
+    // as its context menu's Duplicate does, instead of reporting that no layer is selected. The
+    // copy takes the selection, so Duplicate again copies the copy.
+    if id == "edit.duplicate" && no_params(&params) && app.ui.focused == PanelKind::RenderQueue {
+        if app.session.is_rendering() {
+            return Err("the Render Queue is rendering".into());
+        }
+        let key = egui::Id::unique("rq-ui");
+        let selected = ctx.data(|d| d.get_temp::<(Vec<u64>, Option<u64>)>(key)).and_then(|(_, id)| id);
+        let Some(item) = selected else { return Err("select a Render Queue item first".into()) };
+        let out = run_engine(app, ctx, "renderQueue.duplicate", json!({"item": item}))?;
+        if let Some(copy) = out.get("item").and_then(Value::as_u64) {
+            let mut state: (Vec<u64>, Option<u64>) = ctx.data(|d| d.get_temp(key)).unwrap_or_default();
+            state.1 = Some(copy);
+            ctx.data_mut(|d| d.insert_temp(key, state));
+        }
+        return Ok(out);
     }
     // Shift+Delete deletes the Project panel's selection without asking; it does nothing in the
     // other panels.
@@ -371,13 +389,23 @@ fn invoke_body(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: 
         return frontend(app, ctx, "window.workspace", json!({"name": ws}));
     }
     if let Some(t) = id.strip_prefix("tool.") {
-        // C cycles through the camera tools.
-        if t == "camera" {
-            let tools = [Tool::Orbit, Tool::PanCamera, Tool::Dolly];
-            let next = match tools.iter().position(|x| *x == app.ui.tool) {
-                Some(i) => tools[(i + 1) % tools.len()],
-                None => Tool::Orbit,
-            };
+        // The camera tools: the Orbit, Pan and Dolly slots, each showing the variant last picked
+        // from its flyout. C cycles the three; 1, 2 and 3 pick one.
+        let camera_tool = |g: usize| {
+            let lead = [Tool::Orbit, Tool::PanCamera, Tool::Dolly].get(g).copied().unwrap_or(Tool::Orbit);
+            let Some(si) = Tool::SLOTS.iter().position(|s| s.contains(&lead)) else { return lead };
+            let slot = Tool::SLOTS.get(si).copied().unwrap_or(&[]);
+            app.ui.slot_tools.get(si).copied().filter(|x| slot.contains(x)).unwrap_or(lead)
+        };
+        let group = match t {
+            "camera" => Some(app.ui.tool.camera_group().map_or(0, |g| (g + 1) % 3)),
+            "orbit" => Some(0),
+            "panCamera" => Some(1),
+            "dolly" => Some(2),
+            _ => None,
+        };
+        if let Some(g) = group {
+            let next = camera_tool(g);
             app.ui.tool = next;
             return Ok(json!({"tool": next}));
         }
@@ -466,17 +494,23 @@ fn invoke_body(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: 
             "closePanel" => {
                 let p = panel_of("panel").ok_or("closePanel: need `panel`")??;
                 if app.ui.dock.is_open(p) {
-                    app.apply_dock(craft_ui::docking::Action::Close { panel: p })?;
+                    app.apply_dock(craft_behavior::dock::Action::close(p))?;
                 }
                 return Ok(Value::Null);
             }
             "floatPanel" => {
                 let p = panel_of("panel").ok_or("floatPanel: need `panel`")??;
                 let r = match params.get("rect") {
-                    Some(value) => serde_json::from_value::<[f32; 4]>(value.clone()).map_err(|_| "rect must contain four finite numbers")?,
+                    Some(value) => {
+                        let rect = serde_json::from_value::<[f32; 4]>(value.clone()).map_err(|_| "rect must contain four finite numbers")?;
+                        if !rect.iter().all(|v| v.is_finite()) {
+                            return Err("rect must contain four finite numbers".into());
+                        }
+                        crate::dock_command::rect_of(rect)
+                    }
                     None => crate::dock_ui::default_float_rect(ctx.content_rect()),
                 };
-                app.apply_dock(craft_ui::docking::Action::Float { panel: p, rect: r }).map_err(|e| format!("can't undock {}: {e}", p.title()))?;
+                app.apply_dock(craft_behavior::dock::Action::float(p, r)).map_err(|e| format!("can't undock {}: {e}", p.title()))?;
                 return Ok(Value::Null);
             }
             _ => {
@@ -498,8 +532,8 @@ fn invoke_body(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: 
                 if let Some(before) = panel_of("before") {
                     command["before"] = json!(before?);
                 }
-                let command: craft_ui::docking::DockCommand<PanelKind> =
-                    serde_json::from_value(command).map_err(|e| format!("dockPanel: zone: center|tab|left|right|top|bottom|above|below ({e})"))?;
+                let command = crate::dock_command::DockCommand::parse("window.panel.dock", &command)
+                    .map_err(|e| format!("dockPanel: zone: center|tab|left|right|top|bottom|above|below ({e})"))?;
                 app.run_dock_command(ctx, command).map_err(|e| format!("can't dock {}: {e}", p.title()))?;
                 app.show_panel(p);
                 return Ok(Value::Null);

@@ -15,7 +15,10 @@ fn spec() -> LargeSpec {
 }
 
 fn harness(s: Session) -> Harness<'static, EffectcraftApp> {
-    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1400.0, 900.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(s));
     h.run_steps(3);
     h
 }

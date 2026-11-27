@@ -96,7 +96,7 @@ fn control(ui: &mut egui::Ui, p: &Property, v: &KV) -> Option<Value> {
         }
         (KV::Enum(i), ParamUi::Popup { options }) => {
             let mut sel = *i as usize;
-            craft_ui::ComboBox::from_id_salt(("ls-popup", p.uid)).selected_text(options.get(sel).cloned().unwrap_or_default()).show_ui(ui, |ui| {
+            egui::ComboBox::from_id_salt(("ls-popup", p.uid)).selected_text(options.get(sel).cloned().unwrap_or_default()).show_ui(ui, |ui| {
                 for (k, o) in options.iter().enumerate() {
                     ui.selectable_value(&mut sel, k, o);
                 }

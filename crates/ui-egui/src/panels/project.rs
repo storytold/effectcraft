@@ -293,10 +293,10 @@ fn selection_seen_id() -> egui::Id {
     egui::Id::unique("proj-sel-seen")
 }
 
-/// The focused widget is one of the panel's rows, or nothing has keyboard focus: the panel's keys
+/// The focused widget is one of the panel's rows, or no widget has the keyboard: the panel's keys
 /// apply. Any other focused widget (a text field, a button reached with Tab) keeps them.
 fn keys_reach_rows(app: &EffectcraftApp, ctx: &egui::Context) -> bool {
-    match ctx.memory(|m| m.focused()) {
+    match crate::framework::focused_widget(ctx) {
         None => app.ui.focused == crate::dock::PanelKind::Project,
         Some(f) => ctx.data(|d| d.get_temp::<ItemId>(focused_row_id())).is_some_and(|row| row_id(row) == f),
     }
@@ -330,7 +330,7 @@ fn keyboard_nav(app: &mut EffectcraftApp, ctx: &egui::Context) -> Option<ItemId>
     {
         return None;
     }
-    let row_focused = ctx.memory(|m| m.focused()).is_some();
+    let row_focused = crate::framework::widget_has_keyboard(ctx);
     let mut moved = None;
     for (key, m) in keys {
         let (plain, shift) = (!m.any(), m.shift_only());
@@ -1657,6 +1657,7 @@ mod tests {
         let long = p.add_item("A rather long composition name for the list", Label::Aqua, Some(folder), ItemKind::Folder);
         let app = EffectcraftApp::new(s);
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         let mut fit = (0.0, 0.0);
         ctx.run_ui(Default::default(), |ui| {
             let painter = ui.painter();

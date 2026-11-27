@@ -227,7 +227,6 @@ fn engine_resume_equals_from_scratch() {
         let phys = Phys {
             rate: 90.0,
             life: 1.5,
-            producer: [0.0; 3],
             radius: [0.05; 3],
             anim,
             speed: 0.5,
@@ -242,10 +241,10 @@ fn engine_resume_equals_from_scratch() {
         };
         let a: SimCache<PState> = SimCache::new(2);
         let b: SimCache<PState> = SimCache::new(2);
-        let direct = simulate(&a, 1, 2.0, &phys);
-        let _ = simulate(&b, 1, 1.0, &phys);
-        let _ = simulate(&b, 1, 0.37, &phys);
-        let resumed = simulate(&b, 1, 2.0, &phys);
+        let direct = simulate(&a, 1, 2.0, &phys, [0.0; 3]);
+        let _ = simulate(&b, 1, 1.0, &phys, [0.0; 3]);
+        let _ = simulate(&b, 1, 0.37, &phys, [0.0; 3]);
+        let resumed = simulate(&b, 1, 2.0, &phys, [0.0; 3]);
         assert_eq!(direct.parts.len(), resumed.parts.len(), "anim {anim}");
         assert!(direct.parts.iter().zip(&resumed.parts).all(|(p, q)| p.p == q.p && p.v == q.v && p.id == q.id), "anim {anim}");
         assert!(!direct.parts.is_empty());
@@ -566,6 +565,34 @@ fn half_resolution_scales_sprites() {
 
 // ---------------------------------------------------------- Birth Rate over time (#1373)
 
+/// A host whose producer moves from `start_x` at layer time 0 to `start_x + 60 · t`.
+struct MovingProducer {
+    index: usize,
+    start_x: f64,
+}
+
+impl crate::EffectHost for MovingProducer {
+    fn layer(&self, _: u64, _: bool) -> Option<crate::LayerPixels> {
+        None
+    }
+    fn audio(&self, _: u64, _: f64, _: usize, _: u32) -> Option<Vec<f32>> {
+        None
+    }
+    fn param_at(&self, effect_index: usize, id: &str, t: f64) -> Option<Value> {
+        if effect_index != self.index {
+            return None;
+        }
+        let x = self.start_x + 60.0 * t;
+        match id {
+            "producer/position" | "producer" => Some(Value::Vec2([x, 50.0])),
+            "producer/producerX" => Some(num(x)),
+            "producer/producerY" => Some(num(50.0)),
+            "producer/producerZ" => Some(num(0.0)),
+            _ => None,
+        }
+    }
+}
+
 /// A host that evaluates effect `index`'s Birth Rate at other layer times as `rate(t)`.
 struct Rate {
     index: usize,
@@ -624,8 +651,13 @@ fn pw_at(seed: f64, now: f64, t: f64, host: Option<&Rate>) -> Vec<crate::psim::S
 fn pw_fresh(seed: f64, now: f64, t: f64, host: &Rate) -> Vec<crate::psim::SimParticle> {
     let p = pw_params(seed, now);
     let ctx = pw_ctx(&p, t, Some(host), host.index);
-    let key = params_key_except(&ctx, &Buf { img: Image::new(0, 0), offset: [0.0; 2], scale: 1.0 }, 1, &[PW_EFFECT_CAMERA, "birthRate"]);
-    let st = simulate_rates(&SimCache::new(1), key, &pw_phys(&ctx), &rate_history(&ctx, "birthRate", PW_RATE));
+    let rates = rate_history(&ctx, "birthRate", PW_RATE);
+    let producers = PW.producer.history(&ctx);
+    let mut skip = PW.skip.to_vec();
+    skip.push("birthRate");
+    skip.extend(PW.producer.cache_skips());
+    let key = params_key_except(&ctx, &Buf { img: Image::new(0, 0), offset: [0.0; 2], scale: 1.0 }, 1, &skip);
+    let st = simulate_rates(&SimCache::new(1), key, &pw_phys(&ctx), &rates, &producers);
     st.parts.iter().map(|q| crate::psim::SimParticle { p: q.p, v: q.v, age: q.age, life: q.life, rnd: q.rnd, id: q.id }).collect()
 }
 
@@ -699,7 +731,7 @@ fn a_constant_birth_rate_is_unchanged() {
     let p = pw_params(105.0, 2.0);
     let ctx = pw_ctx(&p, 1.3, None, 0);
     let phys = pw_phys(&ctx);
-    let before = simulate(&SimCache::new(1), sim_key(&ctx, 1), 1.3, &phys);
+    let before = simulate(&SimCache::new(1), sim_key(&ctx, 1), 1.3, &phys, [0.0; 3]);
     let now = pw_at(105.0, 2.0, 1.3, Some(&host));
     assert_eq!(now.len(), before.parts.len());
     assert!(now.iter().zip(&before.parts).all(|(a, b)| a.id == b.id && a.p == b.p && a.v == b.v && a.age == b.age));
@@ -714,7 +746,8 @@ fn the_birth_schedule_follows_the_rate_history() {
     let p = pw_params(106.0, 0.0);
     let ctx = pw_ctx(&p, 0.7, Some(&host), 0);
     let rates = rate_history(&ctx, "birthRate", PW_RATE);
-    let st = simulate_rates(&SimCache::new(1), 9, &pw_phys(&ctx), &rates);
+    let producers = PW.producer.history(&ctx);
+    let st = simulate_rates(&SimCache::new(1), 9, &pw_phys(&ctx), &rates, &producers);
     let births = crate::psim::births_at(rates.len() as u64, 40_000, |i| rates[i as usize]).unwrap();
     assert_eq!(st.next_id as usize, births.len());
     assert!(births.iter().all(|&b| f64::from(b) / SPS < 0.5), "nothing born once the ramp reaches 0");
@@ -762,8 +795,11 @@ fn sys_fresh(sys: &System, seed: u32, now: f64, t: f64, host: &Rate) -> Vec<(u32
     let ctx = sys_ctx(&p, t, Some(host), seed);
     let mut skip = sys.stepped.skip.to_vec();
     skip.push("birthRate");
+    skip.extend(sys.stepped.producer.cache_skips());
     let key = params_key_except(&ctx, &Buf { img: Image::new(0, 0), offset: [0.0; 2], scale: 1.0 }, sys.stepped.salt, &skip);
-    let st = simulate_rates(&SimCache::new(1), key, &(sys.phys)(&ctx), &rate_history(&ctx, "birthRate", sys.stepped.k));
+    let rates = rate_history(&ctx, "birthRate", sys.stepped.k);
+    let producers = sys.stepped.producer.history(&ctx);
+    let st = simulate_rates(&SimCache::new(1), key, &(sys.phys)(&ctx), &rates, &producers);
     st.parts.iter().map(|q| (q.id, q.p, q.age)).collect()
 }
 
@@ -819,10 +855,134 @@ fn particle_systems_ii_and_mr_mercury_are_unchanged_at_a_constant_rate() {
     for sys in &SYSTEMS {
         let p = sys_params(sys.id, 2.0);
         let ctx = sys_ctx(&p, 1.3, None, 203);
-        let before = simulate(&SimCache::new(1), 1, 1.3, &(sys.phys)(&ctx));
+        let producers = sys.stepped.producer.history(&ctx);
+        let producer = producers.last().copied().unwrap_or([0.0; 3]);
+        let before = simulate(&SimCache::new(1), 1, 1.3, &(sys.phys)(&ctx), producer);
         let before: Vec<_> = before.parts.iter().map(|q| (q.id, q.p, q.age)).collect();
         assert!(!before.is_empty());
         assert_eq!(sys_at(sys, 203, 2.0, 1.3, Some(&host)), before, "{}: keyed to a constant", sys.id);
         assert_eq!(sys_at(sys, 203, 2.0, 1.3, None), before, "{}: no host", sys.id);
     }
+}
+
+/// #1955: a particle is born where its producer was during that step, not where the producer
+/// is when the frame is rendered.
+#[test]
+fn stepped_particles_are_born_at_their_producer_positions() {
+    let cases: [(&str, &Stepped<'static>, fn(&EffectCtx) -> Phys); 3] =
+        [("ec.sim.ccparticleworld", &PW, pw_phys), ("ec.sim.ccparticlesystems2", &PS2, ps2_phys), ("ec.sim.ccmrmercury", &MERCURY, mercury_phys)];
+    for (id, stepped, phys_fn) in cases {
+        let mut p = sys_params(id, 1.0);
+        p.values.insert("longevity".into(), num(5.0));
+        for (key, value) in [
+            ("producer/radiusX", num(0.0)),
+            ("producer/radiusY", num(0.0)),
+            ("producer/radiusZ", num(0.0)),
+            ("radiusX", num(0.0)),
+            ("radiusY", num(0.0)),
+            ("physics/velocity", num(0.0)),
+            ("physics/gravity", num(0.0)),
+            ("gravity", num(0.0)),
+            ("velocity", num(0.0)),
+        ] {
+            if p.values.contains_key(key) {
+                p.values.insert(key.into(), value);
+            }
+        }
+        match id {
+            "ec.sim.ccparticleworld" => {
+                p.values.insert("producer/producerX".into(), num(80.0));
+                p.values.insert("producer/producerY".into(), num(50.0));
+                p.values.insert("producer/producerZ".into(), num(0.0));
+            }
+            "ec.sim.ccparticlesystems2" => {
+                p.values.insert("producer/position".into(), pt(80.0, 50.0));
+            }
+            "ec.sim.ccmrmercury" => {
+                p.values.insert("producer".into(), pt(80.0, 50.0));
+            }
+            _ => {}
+        }
+        let host = MovingProducer { index: 0, start_x: 20.0 };
+        let env = EffectEnv { host: Some(&host), effect_index: 0, ..Default::default() };
+        let ctx = EffectCtx { params: &p, time: 1.0, layer_size: [100.0, 100.0], seed: 301, adjustment: false, env };
+        let phys = phys_fn(&ctx);
+        let state = stepped.state(&ctx, &phys);
+        let births = crate::psim::births_at(steps_at(ctx.time), 40_000, |_| phys.rate).unwrap();
+        assert!(!state.parts.is_empty(), "{id}: particles born");
+        for q in &state.parts {
+            let birth = births[q.id as usize] as f32;
+            // The producer moves 60 units per second. Particle Emitter 3D uses world units;
+            // the 2D systems use layer-height-relative units in this 100-pixel-high layer.
+            let want = if id == "ec.sim.ccparticleworld" { [20.0 + birth, 50.0, 0.0] } else { [(20.0 + birth) / 100.0, 0.5, 0.0] };
+            let distance = (0..3).map(|k| (q.p[k] - want[k]).abs()).fold(0.0f32, f32::max);
+            assert!(distance < 1e-5, "{id}: particle {} born at {want:?}, not {:?}", q.id, q.p);
+        }
+    }
+}
+
+/// A producer's current position stays out of the simulation key even in production-shaped
+/// parameters, where it has both a canonical id and a positional alias.
+#[test]
+fn current_producer_positions_do_not_change_stepped_simulation_keys() {
+    use effectcraft_project::build::Ids;
+    let cases: [(&str, &Stepped<'static>, &[(&str, &str, Value)], (&str, Value)); 3] = [
+        (
+            "ec.sim.ccparticleworld",
+            &PW,
+            &[
+                ("producer/producerX", "#1/producerX", num(80.0)),
+                ("producer/producerY", "#1/producerY", num(50.0)),
+                ("producer/producerZ", "#1/producerZ", num(0.0)),
+            ],
+            ("longevity", num(2.0)),
+        ),
+        ("ec.sim.ccparticlesystems2", &PS2, &[("producer/position", "#1/position", pt(80.0, 50.0))], ("longevity", num(2.0))),
+        ("ec.sim.ccmrmercury", &MERCURY, &[("producer", "producer", pt(80.0, 50.0))], ("radiusX", num(2.0))),
+    ];
+    for (id, stepped, producers, (other, other_value)) in cases {
+        let spec = crate::find(id).unwrap();
+        let mut next = 1;
+        let group = crate::instantiate(spec, &mut Ids(&mut next), spec.name, [100.0, 100.0]);
+        let mut p = crate::flatten_params(&group, &mut |pr| pr.value.clone());
+        let key = |p: &crate::Params| {
+            let ctx = EffectCtx { params: p, time: 1.0, layer_size: [100.0, 100.0], seed: 303, adjustment: false, env: EffectEnv::default() };
+            let mut skip = stepped.skip.to_vec();
+            skip.push("birthRate");
+            skip.extend(stepped.producer.cache_skips());
+            params_key_except(&ctx, &Buf { img: Image::new(0, 0), offset: [0.0; 2], scale: 1.0 }, stepped.salt, &skip)
+        };
+        let before = key(&p);
+        for (canonical, alias, value) in producers {
+            assert!(p.values.contains_key(*canonical), "{id}: {canonical}");
+            assert!(p.values.contains_key(*alias), "{id}: {alias}");
+            p.values.insert((*canonical).into(), (*value).clone());
+            p.values.insert((*alias).into(), (*value).clone());
+        }
+        assert_eq!(key(&p), before, "{id}: the current producer position changed the key");
+        p.values.insert(other.into(), other_value);
+        assert_ne!(key(&p), before, "{id}: another parameter still changes the key");
+    }
+}
+
+/// The producer's current value is not part of the simulation key, but an earlier producer
+/// value is: a checkpoint reached with another producer history is not reused.
+#[test]
+fn a_changed_producer_history_drops_stale_checkpoints() {
+    let state = |start_x| {
+        let mut p = sys_params("ec.sim.ccparticlesystems2", 1.0);
+        p.values.insert("longevity".into(), num(5.0));
+        p.values.insert("producer/position".into(), pt(80.0, 50.0));
+        p.values.insert("producer/radiusX".into(), num(0.0));
+        p.values.insert("producer/radiusY".into(), num(0.0));
+        p.values.insert("physics/velocity".into(), num(0.0));
+        p.values.insert("physics/gravity".into(), num(0.0));
+        let host = MovingProducer { index: 0, start_x };
+        let env = EffectEnv { host: Some(&host), effect_index: 0, ..Default::default() };
+        let ctx = EffectCtx { params: &p, time: 1.0, layer_size: [100.0, 100.0], seed: 302, adjustment: false, env };
+        let phys = ps2_phys(&ctx);
+        PS2.state(&ctx, &phys).parts.first().map(|q| q.p).unwrap()
+    };
+    assert!((state(20.0)[0] - 0.2).abs() < 1e-5, "{:?}", state(20.0));
+    assert!((state(60.0)[0] - 0.6).abs() < 1e-5, "{:?}", state(60.0));
 }

@@ -483,12 +483,14 @@ Playground cannons without interacting forces evolve every particle independentl
 backend (reached through `EffectHost::particles` when the GPU compositor is active) simulates one
 particle per invocation from the CPU's birth schedule and keeps per-key state checkpoints on the
 GPU, like `SimCache`; the CPU simulation stays the oracle (tests compare ids and positions).
-Particle Emitter 3D, Particle Emitter 2D and Liquid Particles sample their Birth Rate at every
-step (`EffectHost::param_at`, #1373), so a keyed rate only decides the births of its own time;
-the rate is left out of the simulation key, and a checkpoint is resumed only with the same rate history (the CPU state's `hist`, the GPU
-checkpoint's births). The rate's keyframes are read at the step's exact layer time
+Particle Emitter 3D, Particle Emitter 2D and Liquid Particles sample their Birth Rate and producer
+position at every step (`EffectHost::param_at`, #1373), so a keyed rate only decides the births of
+its own time and a particle is born where its producer was during that step. The rate and producer
+are left out of the simulation key; a checkpoint is resumed only with the same rate and producer
+histories (the CPU state's `hist` and `producer_hist`, the GPU checkpoint's births and producer
+fingerprint). The values are read at the step's exact layer time
 (`EvalCtx::value_at_layer_time`; mapping it to comp time and back rounds under a fractional
-stretch), a rate without keyframes or an expression isn't sampled, and a layer of one of them with
+stretch), a value without keyframes or an expression isn't sampled, and a layer of one of them with
 expressions isn't layer cached (its key can't see what an expression returned at earlier times).
 `effectcraft-cli bench --gpu` reports CPU vs GPU ms/frame, speed-up, Auto's ms/frame, pixel
 agreement and the steady-state upload / readback MB per frame for every comp plus an

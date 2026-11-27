@@ -472,6 +472,7 @@ fn drawn_text(mut draw: impl FnMut(&mut egui::Ui)) -> Vec<String> {
         }
     }
     let ctx = egui::Context::default();
+    crate::framework::install_headless(&ctx);
     ctx.run_ui(Default::default(), |ui| draw(ui)).textures_delta.clear();
     let mut frame = ctx.run_ui(Default::default(), |ui| draw(ui));
     frame.textures_delta.clear();

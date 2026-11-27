@@ -18,7 +18,8 @@ fn all_ui_review_captures() {
         s.execute("layer.newSolid", json!({"name":"Plate","color":"#406080","width":160,"height":120})).unwrap();
         s.execute("renderQueue.add", json!({"format":"png","output":"review-[#####].png"})).unwrap();
         s.project_mut().settings.gpu_acceleration = false;
-        let mut h = Harness::builder().with_size(size).build_eframe(|_| EffectcraftApp::new(s));
+        let mut h =
+            Harness::builder().with_size(size).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| EffectcraftApp::new(s));
         h.run_steps(4);
         h.render_serialized().unwrap().save(out.join(format!("{label}-workspace.png"))).unwrap();
         let ctx = h.ctx.clone();

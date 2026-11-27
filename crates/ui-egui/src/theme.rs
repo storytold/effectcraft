@@ -393,7 +393,7 @@ pub fn install(ctx: &egui::Context, t: &Tokens, language: &str) {
         stack.push("noto-symbols2".into());
     }
     install_script_fallbacks(&mut fonts, language);
-    ctx.set_fonts(fonts);
+    craft_ui::fonts::load(ctx, fonts);
     apply_visuals(ctx, t);
 }
 
@@ -682,6 +682,7 @@ mod script_font_tests {
     /// interface's fonts installed.
     fn assert_drawn(language: &str, text: &str) {
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         super::install(&ctx, &super::Tokens::for_kind(super::ThemeKind::Dark), language);
         let mut out = ctx.run_ui(egui::RawInput::default(), |_| {});
         // No renderer here: drop the frame's texture uploads (egui asserts on unhandled ones in debug).
@@ -767,6 +768,7 @@ mod script_font_tests {
     #[test]
     fn simplified_chinese_interface_draws_simplified_hanzi_after_another_language() {
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         let tokens = super::Tokens::for_kind(super::ThemeKind::Dark);
         super::install(&ctx, &tokens, "en");
         super::install(&ctx, &tokens, "zh-hans");
@@ -798,6 +800,7 @@ mod script_font_tests {
             return;
         }
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         super::install(&ctx, &super::Tokens::for_kind(super::ThemeKind::Dark), "en");
         let mut out = ctx.run_ui(egui::RawInput::default(), |_| {});
         out.textures_delta.clear();
@@ -839,6 +842,7 @@ mod script_font_tests {
             return;
         }
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         ctx.set_pixels_per_point(2.0);
         super::install(&ctx, &super::Tokens::for_kind(super::ThemeKind::Dark), "ja");
         let mut out = ctx.run_ui(egui::RawInput::default(), |_| {});
@@ -923,6 +927,7 @@ mod tests {
     #[test]
     fn every_family_reaches_the_symbol_fallback() {
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         install(&ctx, &Tokens::for_kind(Default::default()), "en");
         ctx.run_ui(Default::default(), |_| {}).textures_delta.clear();
         for family in [FontFamily::Proportional, FontFamily::Monospace, FontFamily::Name("medium".into()), FontFamily::Name("semibold".into())] {
