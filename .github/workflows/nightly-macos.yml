@@ -36,7 +36,7 @@ jobs:
       RUST_BACKTRACE: 1
     steps:
       - name: Harden runner
-        uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
+        uses: step-security/harden-runner@aebdcf6156ab6691adf63218240e476564a1ed4c # v2.23.0
         with:
           egress-policy: audit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -45,12 +45,12 @@ jobs:
       # The producer's own craft-fonts pin (nightly.yml craft-fonts-ref), so this check builds the
       # fonts a shipped Nightly carries.
       - name: Check out craft-fonts
-        uses: storytold/craft-common-actions/actions/checkout-craft-fonts@f5141455aac7b2eb4708aa259d8ffcdf10fde939
+        uses: storytold/craft-common-actions/actions/checkout-craft-fonts@f94a43818dabb2e85f2f4d5cd768bb8e5662600a
         with:
           ref: b076417b5880bd4154bd22f00695b1d28c6bea83
-      - uses: storytold/craft-common-actions/actions/checkout-craft-i18n@f5141455aac7b2eb4708aa259d8ffcdf10fde939
+      - uses: storytold/craft-common-actions/actions/checkout-craft-i18n@f94a43818dabb2e85f2f4d5cd768bb8e5662600a
       - id: rust
-        uses: storytold/craft-common-actions/actions/rust-channel@f5141455aac7b2eb4708aa259d8ffcdf10fde939
+        uses: storytold/craft-common-actions/actions/rust-channel@f94a43818dabb2e85f2f4d5cd768bb8e5662600a
         with:
           targets: aarch64-apple-darwin
       - uses: step-security/dtolnay-rust-toolchain@8dd607977d06adf4ed49b190381e74c17a9dd25f # v1.0.0
