@@ -180,6 +180,9 @@ impl eframe::App for EffectcraftApp {
         if pointer_wrap::prepare_input(ctx, raw_input, injected) {
             self.session.history.merge_key = None;
         }
+        // A color picker owns the click and the cursor before any panel sees them. Must run
+        // after the input hooks above, on the final event stream for this pass.
+        crate::screen_pick::capture_input(self, ctx, raw_input);
     }
 
     /// The logic-only tick: run `tick`, close the IME pass with `finish_ime_logic` and, last, the root window's close

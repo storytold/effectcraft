@@ -545,6 +545,13 @@ fn run_desktop(reporter: &crash_report::Shutdown, arguments: &[std::ffi::OsStrin
             let mut app = EffectcraftApp::new(session);
             app.set_startup_update_check(stable_services() && startup_update_check(control_port));
             app.set_gpu_failure_bridge(gpu_failures);
+            // The color picker reads the pixel on screen, not a frame held by the compositor.
+            // winit has made the process DPI aware, so desktop coordinates and the window's
+            // `inner_position` are in the same physical-pixel space.
+            #[cfg(windows)]
+            {
+                app.hooks.screen_pixel = Some(Box::new(|x, y| effectcraft_screen_pick::sample(x, y).map(|p| p.srgb())));
+            }
             app.ui.start_screen = show_home;
             let interruption = if previous_nightly_unclean {
                 Some("The previous EffectCraft Nightly session did not finish normally. You can report a problem from About. No diagnostics have been sent.")
@@ -758,6 +765,12 @@ impl eframe::App for Desktop {
         // driver may still crash as the window is shown and its surface re-created.
         if let Some(left) = self.launch.frame_drawn() {
             ui.ctx().request_repaint_after(left);
+        }
+        // Last cursor writer in the frame: while a color picker is armed, every panel and
+        // widget — including hovered buttons and text fields — keeps the crosshair. eframe
+        // applies the egui cursor to the native window after `ui` returns.
+        if effectcraft_ui_egui::screen_pick::armed(ui.ctx()) {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
         }
     }
 

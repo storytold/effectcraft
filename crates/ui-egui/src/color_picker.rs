@@ -173,6 +173,12 @@ fn disarm(ctx: &egui::Context, popup: egui::Id) {
     }
 }
 
+/// Cancels whichever picker's eyedropper is armed, without changing its colour. Used when the
+/// application-wide picker handles Escape after taking the key event before egui could.
+pub fn disarm_any(ctx: &egui::Context) {
+    ctx.data_mut(|d| d.remove::<Armed>(armed_key()));
+}
+
 /// Keeps `popup`'s eyedropper armed while its picker is drawn.
 fn refresh_armed(ctx: &egui::Context, popup: egui::Id) {
     if let Some(armed) = armed_record(ctx).filter(|a| a.popup == popup) {
@@ -272,7 +278,11 @@ pub fn take_automation(ctx: &egui::Context) -> Option<Rect> {
 fn eyedropper(ui: &mut Ui, popup: egui::Id) {
     let armed = armed_for(ui.ctx(), popup);
     let (rect, resp) = ui.allocate_exact_size(vec2(18.0, 18.0), Sense::click());
-    let resp = resp.on_hover_text(tr("Eyedropper: click, then click in the Composition panel"));
+    let resp = resp.on_hover_text(if crate::screen_pick::native_available(ui.ctx()) {
+        tr("Eyedropper: click, then click anywhere in EffectCraft to sample a color")
+    } else {
+        tr("Eyedropper: click, then click in the Composition panel")
+    });
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, resp.enabled(), "Eyedropper"));
     let fill = if armed {
         ui.visuals().selection.bg_fill

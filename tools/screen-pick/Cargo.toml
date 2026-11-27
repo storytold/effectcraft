@@ -1,0 +1,15 @@
+[package]
+name = "effectcraft-screen-pick"
+description = "Safe screen-pixel sampling for EffectCraft's desktop color picker"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# This shim is deliberately its own workspace: the EffectCraft workspace forbids `unsafe`,
+# while the Win32 screen-DC calls below are inherently unsafe. The crate has no dependencies
+# and exposes only safe functions, so the rest of the app stays inside the no-unsafe rule.
+[workspace]
+
+[lib]
+path = "src/lib.rs"

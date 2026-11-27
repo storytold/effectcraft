@@ -2467,6 +2467,7 @@ dependencies = [
  "craft-update",
  "effectcraft-engine",
  "effectcraft-host",
+ "effectcraft-screen-pick",
  "effectcraft-ui-egui",
  "eframe",
  "egui",
@@ -2950,6 +2951,10 @@ dependencies = [
  "rayon",
  "wgpu",
 ]
+
+[[package]]
+name = "effectcraft-screen-pick"
+version = "0.1.0"
 
 [[package]]
 name = "effectcraft-script"

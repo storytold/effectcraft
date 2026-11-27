@@ -6043,7 +6043,11 @@ fn color_editor(app: &mut EffectcraftApp, ui: &mut egui::Ui, ve: &ValueEdit<'_>,
     let er = Rect::from_center_size(pos2(r.max.x + 12.0, at.y), vec2(16.0, 16.0));
     let active = app.ui.fx_pick.as_ref().is_some_and(|k| k.prop == uid && k.kind == "color");
     if super::fx_widgets::eyedropper_button(ui, er, active, egui::Id::unique(("tl-eye", uid)), &t)
-        .on_hover_text(crate::i18n::tr("Eyedropper: click, then click in the Composition panel"))
+        .on_hover_text(if app.hooks.screen_pixel.is_some() {
+            crate::i18n::tr("Eyedropper: click, then click anywhere in EffectCraft to sample a color")
+        } else {
+            crate::i18n::tr("Eyedropper: click, then click in the Composition panel")
+        })
         .clicked()
     {
         super::effect_controls::toggle_pick(app, "color", layer, prop);

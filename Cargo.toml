@@ -1,6 +1,9 @@
 [workspace]
 resolver = "3"
 members = ["crates/*", "apps/*", "xtask"]
+# The Win32 screen-DC shim used by the desktop eyedropper owns its own workspace: it is the
+# only place in the tree with `unsafe`, kept outside this workspace's `unsafe_code = "forbid"`.
+exclude = ["tools/screen-pick"]
 default-members = ["crates/*", "apps/*"]
 
 [workspace.package]

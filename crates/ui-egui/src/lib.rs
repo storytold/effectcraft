@@ -44,6 +44,7 @@ pub mod num_math;
 pub mod panels;
 mod pointer_wrap;
 pub mod prefs_live;
+pub mod screen_pick;
 pub mod state;
 pub mod theme;
 pub mod updates_ui;

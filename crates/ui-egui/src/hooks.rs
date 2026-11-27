@@ -86,6 +86,10 @@ pub struct Hooks {
     /// it to look at the interface while the compositor is still being prepared, or make it
     /// panic to check that a failing build never reaches the UI thread.
     pub before_gpu_build: Option<Box<dyn FnOnce() + Send>>,
+    /// The visible screen pixel at physical desktop coordinates `(x, y)`, as sRGB components in
+    /// `0.0..=1.0`. The desktop app supplies this so the color picker can sample any part of the
+    /// window; without it (the web app, tests) the picker falls back to the rendered frame.
+    pub screen_pixel: Option<Box<dyn Fn(i32, i32) -> Option<[f32; 3]>>>,
 }
 
 impl Hooks {
