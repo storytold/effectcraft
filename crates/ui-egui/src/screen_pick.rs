@@ -74,6 +74,12 @@ pub fn uses_screen(app: &EffectcraftApp, pick: &FxPick) -> bool {
     app.hooks.screen_pixel.is_some() && pick.kind == "color" && !is_keyer(app, pick)
 }
 
+/// The same eligibility check for a caller that has a layer id and property uid rather than an
+/// [`FxPick`] (the Effect Controls and Timeline tooltips).
+pub fn uses_screen_pick(app: &EffectcraftApp, kind: &str, layer: u64, prop: u64) -> bool {
+    uses_screen(app, &FxPick { kind: kind.into(), layer, prop, name: String::new() })
+}
+
 /// A color pick that the screen sampler should serve: an Effect Controls / Timeline color
 /// property (but not a keyer's input sample), a Character panel color, or a color picker popup's
 /// eyedropper. Point crosshairs and Cryptomatte picks are deliberately untouched.
@@ -101,7 +107,7 @@ pub fn to_screen_pixel(pos: Pos2, inner_rect: Rect, pixels_per_point: f32) -> Op
     // monitor points. Testing `inner_rect.contains(pos)` here would reject every click once
     // the window is moved away from (0, 0), which is exactly the offset bug this replaces.
     let size = inner_rect.size();
-    if pos.x < 0.0 || pos.y < 0.0 || pos.x > size.x || pos.y > size.y || !pixels_per_point.is_finite() || pixels_per_point <= 0.0 {
+    if pos.x < 0.0 || pos.y < 0.0 || pos.x >= size.x || pos.y >= size.y || !pixels_per_point.is_finite() || pixels_per_point <= 0.0 {
         return None;
     }
     let screen = inner_rect.min + pos.to_vec2();
@@ -156,18 +162,24 @@ fn finish(app: &mut EffectcraftApp, ctx: &Context, rgb: Option<[f32; 3]>) {
             Some(rgb) => crate::color_picker::deliver_sample(ctx, rgb),
             None => crate::color_picker::disarm_any(ctx),
         }
+        // One completed (or cancelled) sample ends the whole pick session. A popup can be
+        // armed by keyboard while another owner is still set; leaving that owner armed would
+        // make the next ordinary click write to its property.
+        app.ui.fx_pick = None;
+        app.ui.text_color_pick = None;
+        app.ui.status.clear();
     } else if let Some(pick) = app.ui.fx_pick.clone()
         && pick.kind == "color"
         && !is_keyer(app, &pick)
     {
         if let Some(rgb) = rgb {
             let params = json!({"layer": pick.layer, "prop": pick.prop, "value": [rgb[0], rgb[1], rgb[2], 1.0]});
-            if let Err(e) = crate::menus::invoke(app, ctx, "prop.set", params) {
-                app.ui.status = e;
+            match crate::menus::invoke(app, ctx, "prop.set", params) {
+                Ok(_) => app.ui.status.clear(),
+                Err(e) => app.ui.status = e,
             }
         }
         app.ui.fx_pick = None;
-        app.ui.status.clear();
     } else if let Some(pick) = app.ui.text_color_pick.clone() {
         if let Some(rgb) = rgb {
             let mut params = json!({"layer": pick.layer});
@@ -175,12 +187,12 @@ fn finish(app: &mut EffectcraftApp, ctx: &Context, rgb: Option<[f32; 3]>) {
             if let Some(range) = pick.range {
                 params["range"] = json!(range);
             }
-            if let Err(e) = crate::menus::invoke(app, ctx, "layer.setText", params) {
-                app.ui.status = e;
+            match crate::menus::invoke(app, ctx, "layer.setText", params) {
+                Ok(_) => app.ui.status.clear(),
+                Err(e) => app.ui.status = e,
             }
         }
         app.ui.text_color_pick = None;
-        app.ui.status.clear();
     }
     set_state(ctx, State { armed: false, native: state(ctx).native });
     ctx.request_repaint();
@@ -207,6 +219,7 @@ mod tests {
     fn rejects_points_outside_the_client_area() {
         assert_eq!(to_screen_pixel(Pos2::new(-1.0, 5.0), rect(), 1.0), None);
         assert_eq!(to_screen_pixel(Pos2::new(5.0, 601.0), rect(), 1.0), None);
+        assert_eq!(to_screen_pixel(Pos2::new(800.0, 5.0), rect(), 1.0), None);
         assert_eq!(to_screen_pixel(Pos2::new(5.0, 5.0), rect(), 0.0), None);
     }
 

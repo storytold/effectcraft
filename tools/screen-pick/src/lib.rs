@@ -117,7 +117,12 @@ mod tests {
 
     #[test]
     fn off_screen_points_are_rejected() {
-        assert!(sample(-1, -1).is_none());
+        // A monitor to the left of the primary one has valid negative coordinates, so the
+        // bounds come from Windows rather than being assumed to start at (0, 0).
+        if let Some((left, top, width, height)) = screen_bounds() {
+            assert!(sample(left.saturating_sub(1), top).is_none());
+            assert!(sample(left.saturating_add(width), top.saturating_add(height)).is_none());
+        }
         assert!(sample(i32::MAX, i32::MAX).is_none());
     }
 }
