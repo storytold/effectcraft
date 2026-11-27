@@ -1744,6 +1744,7 @@ impl VideoState {
             next_decode_idx: 0,
             gop_start_idx: 0,
             emitted_max_pts: None,
+            draft_change: None,
             flushed: false,
             decoded: Vec::new(),
             cached_bytes: 0,
@@ -1758,6 +1759,10 @@ struct PacketVideoState {
     /// Highest presentation timestamp the decoder has emitted, in track units. Pictures with
     /// later timestamps may still be in flight inside a frame-threaded decoder.
     emitted_max_pts: Option<i64>,
+    /// The sample index at which the decoder last changed draft mode, and the new mode.
+    /// Pictures fed before it may still be in flight in the old mode, even if the request that
+    /// changed the mode returned early (cancelled or failed).
+    draft_change: Option<(usize, bool)>,
     flushed: bool,
     decoded: Vec<CachedFrame>,
     /// Decoded bytes held in `decoded`, kept beside the vector so the eviction loop updates
@@ -1990,6 +1995,7 @@ impl MediaSource for CraftMediaSource {
         let draft_changed = state.decoder.draft() != want_draft;
         if draft_changed {
             state.decoder.set_draft(want_draft);
+            state.draft_change = Some((state.next_decode_idx, want_draft));
         }
         // A target at or before the highest emitted PTS was already decoded: its frame is no
         // longer cached, so this is a backward seek. A target whose GOP starts before the
@@ -2000,9 +2006,12 @@ impl MediaSource for CraftMediaSource {
         let target_passed = state.emitted_max_pts.is_some_and(|max| target_pts <= max);
         let before_gop = sync_idx < state.gop_start_idx;
         let jump_ahead = sync_idx > state.gop_start_idx && sync_idx >= state.next_decode_idx;
-        // A full-quality request for a picture already fed may be in flight as draft: restart so
-        // it is decoded at full quality. A draft request accepts the full pictures already fed.
-        let mode_changed_in_flight = draft_changed && !want_draft && target_idx < state.next_decode_idx;
+        // A full-quality request for a picture fed before the last switch to full may still be in
+        // flight as draft: restart so it is decoded at full quality. Use the recorded switch, not
+        // `draft_changed`: the request that changed the mode may have returned early (cancelled or
+        // failed) and left those draft pictures in flight. A draft request accepts them.
+        let mode_changed_in_flight =
+            !want_draft && target_idx < state.next_decode_idx && state.draft_change.is_some_and(|(from, draft)| !draft && target_idx < from);
         if mode_changed_in_flight || target_passed || before_gop || jump_ahead {
             stats::seek();
             stats::evicted(state.decoded.len() as u64);
@@ -2012,6 +2021,7 @@ impl MediaSource for CraftMediaSource {
             state.next_decode_idx = sync_idx;
             state.gop_start_idx = sync_idx;
             state.emitted_max_pts = None;
+            state.draft_change = None;
             state.flushed = false;
         }
 
@@ -5082,6 +5092,32 @@ mod tests {
         let full = media.video_frame(FrameRequest::full(Tick::from_units(in_flight as i64, 25))).expect("full B picture");
         assert_eq!(full.pts, Tick::from_units(in_flight as i64, 25));
         assert_eq!(source.reads[0].load(Ordering::Relaxed), 2, "a full request accepted a cached draft picture");
+    }
+
+    #[test]
+    fn cancelled_mode_switch_does_not_hide_in_flight_draft_pictures() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let movie = generated_h264_movie(96, 96, 2);
+        let in_flight = *movie.b_frames.iter().find(|&&i| (31..40).contains(&i)).expect("an in-flight B picture");
+        let source = Arc::new(CountingKeyReads { bytes: movie.bytes, keyframes: movie.keyframes, reads: vec![std::sync::atomic::AtomicUsize::new(0)] });
+        let media = open_isobmff_with_workers("cancelled-switch.mp4", source.clone(), 8).expect("shared route").expect("opens");
+        source.reads[0].store(0, Ordering::Relaxed);
+        // Leave draft pictures in flight.
+        let draft = media.video_frame(FrameRequest { time: Tick::from_units(30, 25), scale: 0.25 }).expect("draft frame 30");
+        assert_eq!(draft.pts, Tick::from_units(30, 25));
+        assert_eq!(source.reads[0].load(Ordering::Relaxed), 1, "the draft switch re-read the keyframe");
+        // A full-quality request changes the decoder mode, then is cancelled before feeding any
+        // packet. The draft pictures submitted before the switch are still in flight.
+        let cancel = Arc::new(AtomicBool::new(true));
+        let cancelled = craft_media_source::cancel::with_cancel(&cancel, || media.video_frame(FrameRequest::full(Tick::from_units(80, 25))));
+        assert!(matches!(cancelled, Err(craft_media_source::MediaError::Cancelled)), "{cancelled:?}");
+        assert_eq!(source.reads[0].load(Ordering::Relaxed), 1, "the cancelled request read nothing");
+        // The full request must restart for the in-flight draft picture instead of falling back to
+        // an earlier full-quality frame.
+        let full = media.video_frame(FrameRequest::full(Tick::from_units(in_flight as i64, 25))).expect("full B picture");
+        assert_eq!(full.pts, Tick::from_units(in_flight as i64, 25));
+        assert_eq!(source.reads[0].load(Ordering::Relaxed), 2, "the full request reused an in-flight draft picture");
     }
 
     #[test]
