@@ -26,9 +26,11 @@ the selected timeline layers without leaving the current panel. It is a separate
 - The palette is draggable. Its last position is saved in global preferences
   (`Prefs::quick_effects_pos`), so it reopens in the same place in a new project and after a
   restart. `UiState` keeps only the open/query/selection state, which is per project.
-- Keyboard navigation moves real egui focus; every drawn control registers an automation id
-  (`quickEffects.search`, `quickEffects.item.<id>`, `quickEffects.list`) and an accessibility
-  role, so the palette is usable by automation and assistive technology.
+- Arrow keys change the highlighted result without moving keyboard focus out of the search field;
+  that selection is exposed to assistive technology through each row's list-item state. Enter applies
+  the highlighted result. The field and rows register automation ids (`quickEffects.search`,
+  `quickEffects.item.<id>`) and accessibility roles; `quickEffects.list` is an automation rectangle
+  for the visible results box, not an accessibility role.
 
 ## Changing the shortcut
 

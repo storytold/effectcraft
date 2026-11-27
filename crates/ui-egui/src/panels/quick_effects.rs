@@ -109,6 +109,11 @@ pub struct State {
     /// Last query and its ranked results, so idle frames do not rescan the registry or presets.
     #[serde(skip)]
     cache: Option<(String, Vec<Hit>)>,
+    /// Position waiting for a successful preferences write, retried after a short delay.
+    #[serde(skip)]
+    pending_pos: Option<[f32; 2]>,
+    #[serde(skip)]
+    retry_pos_at: f64,
 }
 
 /// `EffectSpec` has no `Debug`, so spell out the fields and report only the cache's size.
@@ -123,14 +128,19 @@ impl std::fmt::Debug for State {
             .field("sel", &self.sel)
             .field("pos", &self.pos)
             .field("cache", &self.cache.as_ref().map(|(q, v)| (q, v.len())))
+            .field("pending_pos", &self.pending_pos)
             .finish()
     }
 }
 
 /// Open the popup, resetting the search. Only one popup exists: this is a bool in [`UiState`].
 pub fn open(app: &mut EffectcraftApp, ctx: &egui::Context) {
-    let previous = ctx.memory(|m| m.focused());
-    ctx.data_mut(|d| d.insert_temp(previous_focus_id(), PreviousFocus(previous)));
+    // Only a closed-to-open transition has a focus to restore. A repeated command invocation
+    // while the palette is open would otherwise replace the saved focus with the search field.
+    if !app.ui.quick_effects.open {
+        let previous = ctx.memory(|m| m.focused());
+        ctx.data_mut(|d| d.insert_temp(previous_focus_id(), PreviousFocus(previous)));
+    }
     // Focus the field now, not only when it is first drawn: the very first keystroke after the
     // shortcut must land in the search box. (`data_mut` and `memory_mut` share egui's lock, so
     // these calls must stay separate.)
@@ -219,6 +229,23 @@ fn score(spec: &effectcraft_engine::effects::EffectSpec, terms: &[String]) -> Op
     Some(total)
 }
 
+/// Compare names without case or whitespace differences, for exact full-name ranking.
+fn normalized_name(name: &str) -> String {
+    name.trim().to_lowercase().split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// `true` when the result's whole name is what the user typed, not merely a token match.
+fn exact_name(name: &str, query: &str) -> bool {
+    !query.trim().is_empty() && normalized_name(name) == normalized_name(query)
+}
+
+/// Exact full names come first, then relevance, then the Effects & Presets catalog order.
+fn rank(scored: Vec<(i32, Hit)>, query: &str) -> Vec<Hit> {
+    let mut scored = scored;
+    scored.sort_by_key(|(s, h)| (std::cmp::Reverse(exact_name(h.name(), query)), std::cmp::Reverse(*s)));
+    scored.into_iter().map(|(_, hit)| hit).collect()
+}
+
 /// Relevance of a preset for the whitespace-separated, lowercase `terms`. Presets have no parameter
 /// list, so their name, id and Effects & Presets category are searched.
 fn score_preset(name: &str, id: &str, category: &str, terms: &[String]) -> Option<i32> {
@@ -269,8 +296,7 @@ fn search(query: &str) -> Vec<Hit> {
     }
     // Best score first. `sort_by_key` is stable, so equal scores keep the Effects & Presets order:
     // effects, then text presets, built-in presets by category, then user presets.
-    scored.sort_by_key(|(s, _)| std::cmp::Reverse(*s));
-    scored.into_iter().map(|(_, hit)| hit).collect()
+    rank(scored, query)
 }
 
 /// Return the ranked results for `query`, reusing the last frame's work while the query and the
@@ -287,6 +313,47 @@ fn search_cached(st: &mut State, query: &str) -> Vec<Hit> {
 /// Apply a result to the current selection through the same engine commands Effects & Presets
 /// uses, then mirror its follow-up and close. Never records an effect that failed to apply.
 fn apply(app: &mut EffectcraftApp, hit: Hit) {
+    if app.session.state.selected_layers.is_empty() {
+        app.ui.status = tr("Select a layer to apply to").to_string();
+        return;
+    }
+    // A text preset must land on a text layer. The engine defaults to the first selected layer,
+    // so resolve the eligible ones here; several text layers are applied as one undo step.
+    if let Hit::Preset { preset: PresetRef::Text(id), .. } = &hit {
+        let Some(comp) = app.session.active_comp() else {
+            app.ui.status = tr("no composition is open").to_string();
+            return;
+        };
+        let targets: Vec<u64> = app
+            .session
+            .state
+            .selected_layers
+            .iter()
+            .map(|l| l.0)
+            .filter(|lid| {
+                comp.layer(effectcraft_engine::project::LayerId(*lid)).is_some_and(|l| matches!(l.source, effectcraft_engine::project::LayerSource::Text))
+            })
+            .collect();
+        if targets.is_empty() {
+            app.ui.status = tr("select a text layer first").to_string();
+            return;
+        }
+        let (cmd, params) = if targets.len() == 1 {
+            ("layer.applyTextPreset", json!({"preset": id, "layer": targets[0]}))
+        } else {
+            let steps: Vec<serde_json::Value> =
+                targets.iter().map(|l| json!({"command": "layer.applyTextPreset", "params": {"preset": id, "layer": l}})).collect();
+            ("engine.batch", json!({"steps": steps, "label": "Apply Text Preset"}))
+        };
+        match app.session.execute(cmd, params) {
+            Err(e) => app.ui.status = e.to_string(),
+            Ok(_) => {
+                let close_at = app.now();
+                begin_close(&mut app.ui.quick_effects, close_at);
+            }
+        }
+        return;
+    }
     let (cmd, mut params, effect_id) = match &hit {
         Hit::Effect(spec) => ("effect.apply", json!({"effect": spec.id}), Some(spec.id)),
         Hit::Preset { preset, .. } => {
@@ -294,10 +361,6 @@ fn apply(app: &mut EffectcraftApp, hit: Hit) {
             (cmd, params, None)
         }
     };
-    if app.session.state.selected_layers.is_empty() {
-        app.ui.status = tr("Select a layer to apply to").to_string();
-        return;
-    }
     if effect_id.is_some() {
         let layers = valid_targets(app);
         if layers.is_empty() {
@@ -395,10 +458,9 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context) {
             begin_close(&mut st, app.now());
         }
     }
-    let mut apply_hit = None;
-    if enter && st.closing_since.is_none() {
-        apply_hit = rows.get(st.sel).cloned();
-    }
+    // Enter is resolved after the search field has processed this frame's text events: an edit
+    // that arrives in the same input batch as Enter must change what Enter applies.
+    let enter_pressed = enter && st.closing_since.is_none();
     let scroll_to = (up || down).then_some(st.sel);
 
     let t = app.tokens;
@@ -484,85 +546,109 @@ pub fn show(app: &mut EffectcraftApp, ctx: &egui::Context) {
                     // however many effects match. `show_rows` counts `item_spacing` in the row
                     // pitch, so zero it: five rows then fill the box exactly.
                     ui.spacing_mut().item_spacing.y = 0.0;
-                    egui::ScrollArea::vertical().id_salt("quick-effects-list").max_height(list_h).auto_shrink(false).show_rows(
-                        ui,
-                        ROW_H,
-                        rows.len(),
-                        |ui, range| {
-                            ui.set_width(list_w);
-                            // A selected row outside the rendered range (arrow-key navigation past
-                            // the five visible) scrolls into view by its computed position.
-                            if let Some(i) = scroll_to
-                                && !range.contains(&i)
-                            {
-                                let top = ui.max_rect().top() + i as f32 * ROW_H;
-                                let row = Rect::from_min_size(pos2(ui.max_rect().left(), top), vec2(ui.max_rect().width(), ROW_H));
-                                ui.scroll_to_rect(row, Some(Align::Center));
+                    // A new query gets a fresh scroll area, so the highlighted best match is
+                    // visible; scrolling within one query keeps its usual offset.
+                    let scroll_id = format!("quick-effects-list|{}", st.shown_query);
+                    egui::ScrollArea::vertical().id_salt(scroll_id).max_height(list_h).auto_shrink(false).show_rows(ui, ROW_H, rows.len(), |ui, range| {
+                        ui.set_width(list_w);
+                        // A selected row outside the rendered range (arrow-key navigation past
+                        // the five visible) scrolls into view by its computed position.
+                        if let Some(i) = scroll_to
+                            && !range.contains(&i)
+                        {
+                            // `show_rows` gives us a child UI already shifted to range.start.
+                            let top = ui.max_rect().top() + (i as f32 - range.start as f32) * ROW_H;
+                            let row = Rect::from_min_size(pos2(ui.max_rect().left(), top), vec2(ui.max_rect().width(), ROW_H));
+                            ui.scroll_to_rect(row, Some(Align::Center));
+                        }
+                        for i in range {
+                            let hit = &rows[i];
+                            let (row_rect, r) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), Sense::click());
+                            let selected = i == st.sel;
+                            // A one-pixel inset keeps adjacent highlights from touching.
+                            let highlight = row_rect.shrink2(vec2(0.0, 1.0));
+                            if selected {
+                                ui.painter().rect_filled(highlight, t.radius_sm, t.row_selected);
+                            } else if r.hovered() {
+                                ui.painter().rect_filled(highlight, t.radius_sm, t.hover);
                             }
-                            for i in range {
-                                let hit = &rows[i];
-                                let (row_rect, r) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), Sense::click());
-                                let selected = i == st.sel;
-                                // A one-pixel inset keeps adjacent highlights from touching.
-                                let highlight = row_rect.shrink2(vec2(0.0, 1.0));
-                                if selected {
-                                    ui.painter().rect_filled(highlight, t.radius_sm, t.row_selected);
-                                } else if r.hovered() {
-                                    ui.painter().rect_filled(highlight, t.radius_sm, t.hover);
-                                }
-                                icons::paint(
-                                    ui.painter(),
-                                    Rect::from_center_size(pos2(row_rect.min.x + 12.0, row_rect.center().y), vec2(13.0, 13.0)),
-                                    hit.icon(),
-                                    if selected { t.accent } else { t.text_dim },
-                                );
-                                let shown = match hit {
-                                    Hit::Effect(spec) => crate::i18n::effects::name(spec.id, spec.name),
-                                    Hit::Preset { name, .. } => name.clone(),
-                                };
+                            icons::paint(
+                                ui.painter(),
+                                Rect::from_center_size(pos2(row_rect.min.x + 12.0, row_rect.center().y), vec2(13.0, 13.0)),
+                                hit.icon(),
+                                if selected { t.accent } else { t.text_dim },
+                            );
+                            let shown = match hit {
+                                Hit::Effect(spec) => crate::i18n::effects::name(spec.id, spec.name),
+                                Hit::Preset { name, .. } => name.clone(),
+                            };
+                            ui.painter().text(pos2(row_rect.min.x + 26.0, row_rect.center().y), Align2::LEFT_CENTER, shown.clone(), Tokens::ui(12.5), t.text);
+                            // Real effect flags, or the preset's Effects & Presets category.
+                            let badges = hit.badge();
+                            if !badges.is_empty() {
                                 ui.painter().text(
-                                    pos2(row_rect.min.x + 26.0, row_rect.center().y),
-                                    Align2::LEFT_CENTER,
-                                    shown.clone(),
-                                    Tokens::ui(12.5),
-                                    t.text,
+                                    pos2(row_rect.max.x - 6.0, row_rect.center().y),
+                                    Align2::RIGHT_CENTER,
+                                    badges,
+                                    Tokens::ui(10.0),
+                                    t.text_faint,
                                 );
-                                // Real effect flags, or the preset's Effects & Presets category.
-                                let badges = hit.badge();
-                                if !badges.is_empty() {
-                                    ui.painter().text(
-                                        pos2(row_rect.max.x - 6.0, row_rect.center().y),
-                                        Align2::RIGHT_CENTER,
-                                        badges,
-                                        Tokens::ui(10.0),
-                                        t.text_faint,
-                                    );
-                                }
-                                app.auto.add(&format!("quickEffects.item.{}", hit.auto_suffix()), row_rect, hit.name());
-                                a11y::list_item(&r, &shown, selected, i, rows.len());
-                                if scroll_to == Some(i) {
-                                    r.scroll_to_me(Some(Align::Center));
-                                }
-                                if r.clicked() {
-                                    st.sel = i;
-                                    clicked = Some(hit.clone());
-                                }
                             }
-                        },
-                    );
+                            app.auto.add(&format!("quickEffects.item.{}", hit.auto_suffix()), row_rect, hit.name());
+                            a11y::list_item(&r, &shown, selected, i, rows.len());
+                            if scroll_to == Some(i) {
+                                r.scroll_to_me(Some(Align::Center));
+                            }
+                            if r.clicked() && st.closing_since.is_none() {
+                                st.sel = i;
+                                clicked = Some(hit.clone());
+                            }
+                        }
+                    });
                 });
                 // The visible results box, so tests and agents can check its fixed height.
                 app.auto.add("quickEffects.list", Rect::from_min_size(pos2(ui.min_rect().left(), box_top), vec2(list_w, list_h)), "Results");
             });
     });
+    let mut apply_hit = None;
+    if enter_pressed && st.closing_since.is_none() {
+        if !st.query.is_empty() && st.query.trim().is_empty() {
+            st.query.clear();
+        }
+        if st.query != query {
+            // TextEdit changed the query in this frame: re-rank and use the new best match.
+            st.shown_query = st.query.clone();
+            st.sel = 0;
+            let final_query = st.query.clone();
+            apply_hit = search_cached(&mut st, &final_query).first().cloned();
+        } else {
+            apply_hit = rows.get(st.sel).cloned();
+        }
+    }
     // Remember wherever the user dragged it, including egui's own constrain adjustment. The
     // preferences copy is global, so the next project opens the palette in the same place.
     let r = area.response.rect;
     let at = [r.min.x.round(), r.min.y.round()];
     st.pos = Some(at);
-    if app.session.prefs.quick_effects_pos != st.pos {
+    let pos_changed = app.session.prefs.quick_effects_pos != st.pos;
+    if pos_changed {
         app.session.prefs.quick_effects_pos = st.pos;
-        app.session.save_prefs();
+        st.pending_pos = st.pos;
+    }
+    // Keep the position pending until the write succeeds. A failed write is retried later; without
+    // this, the in-memory copy would hide the failure and the next restart would use the old spot.
+    if st.pending_pos.is_some() && (pos_changed || now >= st.retry_pos_at) {
+        match app.session.try_save_prefs() {
+            Ok(()) => {
+                st.pending_pos = None;
+                st.retry_pos_at = 0.0;
+            }
+            Err(e) => {
+                log::warn!("saving Quick Effects Search position: {e}");
+                st.retry_pos_at = app.now() + 1.0;
+                ctx.request_repaint();
+            }
+        }
     }
     let outside = ctx.input(|i| i.pointer.any_pressed() && i.pointer.press_origin().is_some_and(|p| !r.contains(p)) && now - st.opened_at > 0.05);
     if outside && st.closing_since.is_none() {
@@ -652,6 +738,16 @@ mod tests {
             "substring matches are included"
         );
         assert!(search("").is_empty() && search("  ").is_empty(), "clearing the query returns no rows");
+    }
+
+    /// A preset whose whole name was typed wins over a longer preset that merely scores the same.
+    #[test]
+    fn exact_full_name_ranks_ahead_of_partial_presets() {
+        let preset =
+            |name: &str| Hit::Preset { preset: PresetRef::File(format!("{name}.ecpreset")), name: name.to_string(), category: "User Presets".to_string() };
+        let ranked = rank(vec![(225, preset("My A Fade")), (225, preset("My Fade"))], "My Fade");
+        assert_eq!(ranked[0].name(), "My Fade", "typing a full preset name must apply that preset");
+        assert_eq!(ranked[1].name(), "My A Fade");
     }
 
     /// Exact names outrank prefix hits, which outrank loose substring hits.

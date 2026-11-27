@@ -269,11 +269,18 @@ impl Session {
         self.disk_cache = Some(dc);
     }
 
+    /// Write settings to the config store, reporting a failure to the caller.
+    pub fn try_save_prefs(&self) -> std::result::Result<(), String> {
+        match &self.config {
+            Some(c) => c.write(PREFS_FILE, &self.prefs.to_json()).map_err(|e| e.to_string()),
+            // No store: there is nothing to persist, so there is no pending write.
+            None => Ok(()),
+        }
+    }
+
     /// Write settings to the config store.
     pub fn save_prefs(&self) {
-        if let Some(c) = &self.config
-            && let Err(e) = c.write(PREFS_FILE, &self.prefs.to_json())
-        {
+        if let Err(e) = self.try_save_prefs() {
             log::warn!("saving settings: {e}");
         }
     }

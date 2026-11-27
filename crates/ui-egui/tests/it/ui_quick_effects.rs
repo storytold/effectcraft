@@ -28,6 +28,48 @@ fn key(h: &mut Harness<'_, EffectcraftApp>, key: Key, modifiers: Modifiers) {
     h.run_steps(3);
 }
 
+/// Enter resolves against the query after TextEdit processed this frame's text events.
+#[test]
+fn enter_after_a_text_edit_uses_the_edited_query() {
+    let mut h = harness(true);
+    open(&mut h);
+    h.state_mut().ui.quick_effects.query = "Gaussian Blur".into();
+    h.run_steps(2);
+    assert_eq!(effect_count(&h), 0);
+    for ch in "zzzz".chars() {
+        h.input_mut().events.push(Event::Text(ch.to_string()));
+    }
+    key(&mut h, Key::Enter, Modifiers::NONE);
+    assert!(h.state().ui.quick_effects.query.contains("zzzz"), "the edit reached the field");
+    assert_eq!(effect_count(&h), 0, "Enter must not apply a result from the query before the edit");
+}
+
+/// A text preset is applied to the selected text layer, not the first selected solid.
+#[test]
+fn text_preset_targets_a_text_layer_in_the_selection() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Main", "width": 160, "height": 90, "duration": 4})).unwrap();
+    let solid = s.execute("layer.newSolid", json!({"name": "Solid", "color": "#406080"})).unwrap();
+    let solid_id = solid["layer"].as_u64().unwrap();
+    let text = s.execute("layer.newText", json!({"text": "Hello", "name": "Text"})).unwrap();
+    let text_id = text["layer"].as_u64().unwrap();
+    s.execute("layer.select", json!({"layers": [solid_id, text_id]})).unwrap();
+    let mut h =
+        Harness::builder().with_size(egui::vec2(1400.0, 900.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| {
+            let mut app = EffectcraftApp::new(s);
+            app.use_manual_clock();
+            app
+        });
+    open(&mut h);
+    h.state_mut().ui.quick_effects.query = "fade up".into();
+    h.run_steps(2);
+    key(&mut h, Key::Enter, Modifiers::NONE);
+    let comp = h.state().session.active_comp().unwrap();
+    let text_layers = comp.layer(effectcraft_engine::project::LayerId(text_id)).unwrap().props.group("text/animators").map(|a| a.groups().count()).unwrap_or(0);
+    assert!(text_layers > 0, "Fade Up Characters was applied to the text layer");
+    assert!(comp.layer(effectcraft_engine::project::LayerId(solid_id)).unwrap().props.group("text/animators").is_none(), "the solid was not targeted");
+}
+
 /// Animation presets shown in Effects & Presets are searchable too, not just registered effects.
 #[test]
 fn animation_presets_are_searchable() {
