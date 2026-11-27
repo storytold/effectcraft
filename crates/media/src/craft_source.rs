@@ -2040,13 +2040,13 @@ impl MediaSource for CraftMediaSource {
                 stats::add_decode_time(started);
                 stats::decoded(1);
                 state.next_decode_idx = idx + 1;
-                push_decoded(state, frames, self.presentation, &self.file, video_idx)?;
+                push_decoded(state, frames, target_pts, want_draft, self.presentation, &self.file, video_idx)?;
             } else if !state.flushed {
                 let started = stats::timer();
                 let frames = state.decoder.flush().map_err(video_decode_error)?;
                 stats::add_decode_time(started);
                 state.flushed = true;
-                push_decoded(state, frames, self.presentation, &self.file, video_idx)?;
+                push_decoded(state, frames, target_pts, want_draft, self.presentation, &self.file, video_idx)?;
                 break;
             } else {
                 break;
@@ -2501,6 +2501,8 @@ fn decode_audio_range(
 fn push_decoded(
     state: &mut PacketVideoState,
     frames: Vec<DecodedVideoFrame>,
+    target_pts: i64,
+    want_draft: bool,
     presentation: FramePresentation,
     file: &ContainerFile,
     track_idx: usize,
@@ -2518,14 +2520,23 @@ fn push_decoded(
         state.cached_bytes = state.cached_bytes.saturating_add(frame.byte_size());
         state.decoded.push(CachedFrame { pts, draft: picture_draft, frame });
     }
-    let mut evicted = 0;
-    while state.decoded.len() > MAX_CACHED_FRAMES || (state.cached_bytes > MAX_CACHED_BYTES && state.decoded.len() > 1) {
-        let removed = state.decoded.remove(0);
-        state.cached_bytes = state.cached_bytes.saturating_sub(removed.frame.byte_size());
-        evicted += 1;
-    }
+    let evicted = trim_decoded(&mut state.decoded, &mut state.cached_bytes, MAX_CACHED_FRAMES, MAX_CACHED_BYTES, target_pts, want_draft);
     stats::evicted(evicted);
     Ok(())
+}
+
+/// Evict decoded pictures over `max_frames` or `max_bytes`, never the picture that answers the
+/// request. A frame-threaded decoder or a flush can return a batch larger than the byte limit;
+/// evicting from the front would otherwise drop the requested picture before it is selected.
+fn trim_decoded(decoded: &mut Vec<CachedFrame>, cached_bytes: &mut usize, max_frames: usize, max_bytes: usize, target_pts: i64, want_draft: bool) -> u64 {
+    let mut evicted = 0;
+    while decoded.len() > max_frames || (*cached_bytes > max_bytes && decoded.len() > 1) {
+        let Some(index) = decoded.iter().position(|c| !(c.pts == target_pts && c.serves(want_draft))) else { break };
+        let removed = decoded.remove(index);
+        *cached_bytes = cached_bytes.saturating_sub(removed.frame.byte_size());
+        evicted += 1;
+    }
+    evicted
 }
 
 #[cfg(test)]
@@ -3158,6 +3169,20 @@ mod tests {
         let offsets = track.samples.iter().map(|s| s.offset).collect::<Vec<_>>();
         let params = track.codec_params();
         OpusFixture { bytes, file: ContainerFile::Matroska(Box::new(file)), offsets, params, delay: OPUS_CODEC_DELAY_NS as u64 }
+    }
+
+    #[test]
+    fn trim_decoded_keeps_the_requested_picture_over_the_byte_limit() {
+        let frame = |pts| CachedFrame { pts, draft: false, frame: Arc::new(VideoFrame::rgba8(2, 2, vec![0; 16]).expect("frame")) };
+        let mut decoded = vec![frame(0), frame(1), frame(2), frame(3)];
+        let mut bytes: usize = decoded.iter().map(|c| c.frame.byte_size()).sum();
+        assert_eq!(bytes, 64);
+        // One decoder batch larger than the cap, with the requested picture first.
+        let evicted = trim_decoded(&mut decoded, &mut bytes, 256, 32, 0, false);
+        assert_eq!(evicted, 2);
+        assert_eq!(decoded.iter().map(|c| c.pts).collect::<Vec<_>>(), vec![0, 3]);
+        assert_eq!(bytes, 32);
+        assert!(decoded.iter().any(|c| c.pts == 0), "the requested picture stays cached");
     }
 
     #[test]
