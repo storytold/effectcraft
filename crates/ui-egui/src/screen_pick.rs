@@ -178,6 +178,9 @@ fn finish(app: &mut EffectcraftApp, ctx: &Context, rgb: Option<[f32; 3]>) {
                 Ok(_) => app.ui.status.clear(),
                 Err(e) => app.ui.status = e,
             }
+        } else {
+            // Cancelled: drop the "Click anywhere…" prompt, keep any unrelated status.
+            app.ui.status.clear();
         }
         app.ui.fx_pick = None;
     } else if let Some(pick) = app.ui.text_color_pick.clone() {
@@ -191,6 +194,8 @@ fn finish(app: &mut EffectcraftApp, ctx: &Context, rgb: Option<[f32; 3]>) {
                 Ok(_) => app.ui.status.clear(),
                 Err(e) => app.ui.status = e,
             }
+        } else {
+            app.ui.status.clear();
         }
         app.ui.text_color_pick = None;
     }
