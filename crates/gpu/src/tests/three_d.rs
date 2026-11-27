@@ -4,10 +4,13 @@
 //! intersection line of two planes may sort differently (f32 vs f64 depths), so intersecting
 //! scenes allow 0.5 % of pixels over.
 
+use std::sync::Arc;
+
 use effectcraft_color::{BlendMode, Label};
 use effectcraft_keyframe::{Keyframe, Value};
 use effectcraft_project::build;
 use effectcraft_project::{BitDepth, Comp, ItemKind, Layer, LayerSource, LightKind, MatteKind, TrackMatte};
+use effectcraft_render::three_d::PlaneDof;
 use effectcraft_render::{Backend, RenderOpts, Renderer};
 use effectcraft_time::{FrameRate, Tick};
 
@@ -279,6 +282,31 @@ fn bokeh_depth_of_field_runs_on_the_gpu() {
             }
         }
     }
+}
+
+/// Bokeh pads a plane in `u32` sizes and refuses a padded plane the device can't hold. Each
+/// radius map here is sized as wrapping arithmetic would pad its plane: its length matches a
+/// padded size that wraps, or one that outgrows the device, so only the refusal stops them. A
+/// padding of 2³¹ doubles to 2³², which would wrap the padded size around to the plane's own: only
+/// the saturating size stops it. A plane padded to the device's largest texture width is refused
+/// too, as its row sums need a column more, and so is one padded a row taller than that texture. A
+/// padding the device holds is blurred.
+#[test]
+fn bokeh_refuses_a_padding_the_device_cannot_hold() {
+    let Some(g) = gpu() else { return };
+    let mut e = crate::context::Enc::new(g.context());
+    let mut blurred = |(w, h): (u32, u32), pad: u32| {
+        let grow = |n: u32| n.wrapping_add(pad.wrapping_mul(2)) as usize;
+        let radius = Arc::new(vec![1.0; grow(w) * grow(h)]);
+        let d = PlaneDof { pad, iris: Default::default(), highlight: Default::default(), radius, levels: vec![1.0] };
+        let src = e.image(w, h);
+        crate::bokeh::apply(&mut e, &src, &d).is_some()
+    };
+    let max = g.context().max_dim;
+    assert!(blurred((4, 4), 1), "a padding the device holds is blurred");
+    assert!(!blurred((4, 4), 1 << 31), "a padding of 2³¹ is refused");
+    assert!(!blurred((max - 2, 1), 1), "a padded width of {max} is refused: its row sums need {} columns", max + 1);
+    assert!(!blurred((1, max - 1), 1), "a padded height of {} is refused", max + 1);
 }
 
 /// A 2D layer whose track matte is a 3D layer: the matte is drawn through the camera on the

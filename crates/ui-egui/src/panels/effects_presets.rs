@@ -422,7 +422,7 @@ fn list_keys(app: &mut EffectcraftApp, ctx: &egui::Context, nav: &Nav, list: Rec
         ctx.data_mut(|d| d.remove::<egui::Id>(cursor_id()));
         ctx.request_repaint();
     }
-    let focused = ctx.memory(|m| m.focused());
+    let focused = crate::framework::focused_widget(ctx);
     let on_row = focused.is_some_and(|f| nav.rows.iter().any(|r| r.id == f || r.star == Some(f)));
     // Enter / Space on the star are the star button's (it toggles the favourite), not the row's.
     let on_star = focused.is_some_and(|f| nav.rows.iter().any(|r| r.star == Some(f)));
@@ -882,6 +882,7 @@ mod tests {
         assert_eq!(v.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), vec!["bounce", "Zoom In"]);
         assert!(scan_presets(&d.join("missing")).is_empty());
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         let set_time = |time| {
             let mut output = ctx.run_ui(egui::RawInput { time: Some(time), ..Default::default() }, |_| {});
             output.textures_delta.clear();

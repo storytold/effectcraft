@@ -1674,6 +1674,13 @@ fn decode_track_packet(
     Ok(vec![frame])
 }
 
+fn video_decode_error(error: VideoError) -> MediaError {
+    match error {
+        VideoError::Unsupported(detail) => MediaError::Unsupported(detail),
+        other => MediaError::Decode(other.to_string()),
+    }
+}
+
 struct AudioTrackState {
     decoder: AudioTrackDecoder,
     audio_starts: AudioStarts,
@@ -1842,7 +1849,7 @@ impl MediaSource for CraftMediaSource {
         // Backward seek, jump to a later GOP, or draft/full-quality mode switch: reset decoder to
         // the target sync sample so full-quality frames never reuse draft-decoded references.
         if draft_changed || target_idx < state.next_decode_idx || sync_idx > state.gop_start_idx {
-            state.decoder.reset().map_err(|e| MediaError::Decode(e.to_string()))?;
+            state.decoder.reset().map_err(video_decode_error)?;
             state.decoded.clear();
             state.next_decode_idx = sync_idx;
             state.gop_start_idx = sync_idx;
@@ -1859,12 +1866,11 @@ impl MediaSource for CraftMediaSource {
                 let idx = state.next_decode_idx;
                 let pts = self.file.sample_pts(video_idx, idx);
                 let pkt = self.file.read_sample(&*self.source, video_idx, idx)?;
-                let frames =
-                    decode_track_packet(&mut state.decoder, is_isobmff, &pkt, pts, prores::decode_frame_with).map_err(|e| MediaError::Decode(e.to_string()))?;
+                let frames = decode_track_packet(&mut state.decoder, is_isobmff, &pkt, pts, prores::decode_frame_with).map_err(video_decode_error)?;
                 state.next_decode_idx = idx + 1;
                 push_decoded(&mut state.decoded, frames, want_draft, self.presentation, &self.file, video_idx)?;
             } else if !state.flushed {
-                let frames = state.decoder.flush().map_err(|e| MediaError::Decode(e.to_string()))?;
+                let frames = state.decoder.flush().map_err(video_decode_error)?;
                 state.flushed = true;
                 push_decoded(&mut state.decoded, frames, want_draft, self.presentation, &self.file, video_idx)?;
                 break;
@@ -2863,6 +2869,15 @@ mod raw_avi_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A decoder's "unsupported" stays unsupported; anything else is a decode failure.
+    #[test]
+    fn video_decode_errors_keep_unsupported_apart() {
+        assert!(matches!(video_decode_error(VideoError::Unsupported("H.264: 4:2:2".into())), MediaError::Unsupported(s) if s == "H.264: 4:2:2"));
+        assert!(
+            matches!(video_decode_error(VideoError::Malformed("VP9: bad header".into())), MediaError::Decode(s) if s == "malformed video: VP9: bad header")
+        );
+    }
 
     // One 20 ms mono packet from craft-audio's generated tone.opus test fixture.
     // Re-mux it into ordinary small audio-only files without an external encoder.

@@ -17,10 +17,9 @@ impl EffectcraftApp {
         ctx.set_theme(theme::theme_preference(&p.appearance.appearance_mode, self.ui.theme.is_light()));
         let tips = p.general.show_tool_tips;
         ctx.all_styles_mut(|s| s.interaction.tooltip_delay = if tips { 0.5 } else { f32::INFINITY });
-        // Settings ▸ Appearance ▸ UI Scale (#284). egui's own Ctrl+= / Ctrl+- / Ctrl+0 zoom stays
-        // off: Ctrl+0 is Window ▸ Project, and the scale is a setting.
-        ctx.options_mut(|o| o.zoom_with_keyboard = false);
-        ctx.set_zoom_factor(p.appearance.ui_scale as f32 / 100.0);
+        // Settings ▸ Appearance ▸ UI Scale (#284) is the runtime's root scale (`frame_input`), which
+        // writes the zoom factor; egui's own Ctrl+= / Ctrl+- / Ctrl+0 zoom is off under the runtime
+        // (Ctrl+0 is Window ▸ Project).
         self.ui.cache_when_idle = p.previews.cache_frames_when_idle;
         self.ui.viewer.fast_preview = p.previews.fast_previews;
         // No limit of its own below the common budget on the desktop, the browser's cap there:
@@ -129,6 +128,7 @@ mod appearance_tests {
     #[test]
     fn auto_mode_leaves_the_native_window_following_the_system() {
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         let mut app = app();
         app.hooks.system_theme = Some(Box::new(|_| Some(egui::Theme::Light)));
         app.set_pref("appearance.appearanceMode", json!("auto")).unwrap();

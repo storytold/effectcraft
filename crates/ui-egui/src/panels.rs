@@ -184,7 +184,7 @@ pub(crate) fn toggle_time_display(app: &mut EffectcraftApp, resp: &egui::Respons
 /// Spacebar held outside a text field: the Hand tool (drags pan the viewer and scroll the
 /// Timeline).
 pub(crate) fn space_hand(ctx: &egui::Context) -> bool {
-    ctx.input(|i| i.key_down(egui::Key::Space)) && !ctx.egui_wants_keyboard_input()
+    ctx.input(|i| i.key_down(egui::Key::Space)) && !crate::framework::widget_has_keyboard(ctx)
 }
 
 /// What a scroll gesture over a viewer (Composition, Layer) does this frame.
@@ -344,13 +344,13 @@ pub(crate) fn panel_menu_area(app: &mut EffectcraftApp, ui: &mut egui::Ui) {
             // only ever narrows what the area measured: the separator fills whatever width it is given
             ui.set_max_width(ui.max_rect().width().min(width));
             if ui.button(tr("Close Panel")).clicked() {
-                let _ = app.dock_command(ui.ctx(), craft_ui::docking::Action::Close { panel });
+                let _ = app.dock_command(ui.ctx(), craft_behavior::dock::Action::close(panel));
                 close = true;
             }
             let floating = crate::dock::WorkspaceExt::is_floating(&app.ui.dock, panel);
             if !floating && ui.button(tr("Undock Panel")).clicked() {
                 let r = crate::dock_ui::default_float_rect(ui.ctx().content_rect());
-                let _ = app.dock_command(ui.ctx(), craft_ui::docking::Action::Float { panel, rect: r });
+                let _ = app.dock_command(ui.ctx(), craft_behavior::dock::Action::float(panel, r));
                 close = true;
             }
             // Multiple monitors: an OS window of its own, which can go on another screen. Where

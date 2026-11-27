@@ -256,10 +256,15 @@ impl EffectcraftApp {
 
 #[cfg(test)]
 mod tests {
+    /// The LUT generation is process-wide: a test that changes a LUT file moves it for every
+    /// viewer in the process, so the tests that read frame keys run one at a time.
+    static LUT_GENERATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// #3493: the viewer shows the frame again once the LUT file it was graded with changes,
     /// though its key was otherwise the same (same project revision, frame and options).
     #[test]
     fn the_viewer_shows_a_lut_file_changed_on_disk() {
+        let _serial = LUT_GENERATION.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempfile::tempdir().unwrap();
         let lut = dir.path().join("viewer.cube");
         let write = |text: &str, secs: u64| {
@@ -273,7 +278,10 @@ mod tests {
         session.execute("layer.newSolid", serde_json::json!({"color": "#808080"})).unwrap();
         session.execute("effect.apply", serde_json::json!({"layer": 1, "effect": "Apply Color LUT"})).unwrap();
         session.execute("prop.set", serde_json::json!({"layer": 1, "path": "effects/#1/lut", "value": lut.to_string_lossy()})).unwrap();
-        let mut harness = egui_kittest::Harness::builder().with_size(egui::vec2(1200.0, 800.0)).build_eframe(|_| crate::EffectcraftApp::new(session));
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(1200.0, 800.0))
+            .with_context_setup(crate::framework::install_headless)
+            .build_eframe(|_| crate::EffectcraftApp::new(session));
         let centre = |h: &egui_kittest::Harness<'_, crate::EffectcraftApp>| {
             h.state().viewer_image.as_ref().map(|img| img.pixels[img.pixels.len() / 2 + img.size[0] / 2].r())
         };
@@ -299,6 +307,7 @@ mod tests {
     /// frame having the key of the one on screen. A reload's purge gives the frames new keys, once.
     #[test]
     fn the_viewers_show_a_still_reloaded_at_the_same_size() {
+        let _serial = LUT_GENERATION.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempfile::tempdir().unwrap();
         let png = dir.path().join("still.png");
         let save = |rgb: [u8; 3]| image::RgbaImage::from_pixel(64, 36, image::Rgba([rgb[0], rgb[1], rgb[2], 255])).save(&png).unwrap();
@@ -308,7 +317,10 @@ mod tests {
         let cid = session.active_comp_id().unwrap();
         let item = session.execute("file.import", serde_json::json!({"paths": [png.to_string_lossy()]})).unwrap()["items"][0].clone();
         session.execute("layer.addItem", serde_json::json!({"item": item})).unwrap();
-        let mut harness = egui_kittest::Harness::builder().with_size(egui::vec2(1200.0, 800.0)).build_eframe(|_| crate::EffectcraftApp::new(session));
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(1200.0, 800.0))
+            .with_context_setup(crate::framework::install_headless)
+            .build_eframe(|_| crate::EffectcraftApp::new(session));
         let centre = |h: &egui_kittest::Harness<'_, crate::EffectcraftApp>| {
             h.state().viewer_image.as_ref().map(|img| img.pixels[img.pixels.len() / 2 + img.size[0] / 2].r())
         };

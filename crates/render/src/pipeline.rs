@@ -365,7 +365,7 @@ impl<'a> Renderer<'a> {
     /// Properties overrides travel with it and are applied as the nested layers are evaluated,
     /// so the nested comp is not rasterised at its frame.
     pub fn collapsed(&self, ctx: &EvalCtx, layer: &Layer) -> Option<Collapsed> {
-        if !layer.switches.collapse || layer.switches.adjustment || self.depth > 12 {
+        if !layer.switches.collapse || layer.switches.adjustment || self.depth > super::MAX_COLLAPSE_DEPTH {
             return None;
         }
         let LayerSource::Comp { item } = &layer.source else { return None };

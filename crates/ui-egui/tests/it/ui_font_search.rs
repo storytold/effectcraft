@@ -37,9 +37,9 @@ fn font_search_filters_selects_and_undoes_in_both_panels() {
         let lid = s.execute("layer.newText", json!({"text": "Keep this text", "font": "Inter"})).unwrap()["layer"].as_u64().unwrap();
         let builder = Harness::builder().with_size(egui::vec2(1600.0, 1000.0));
         let mut h = if std::env::var_os("EC_SNAPSHOT_DIR").is_some() {
-            builder.wgpu().build_eframe(move |_| EffectcraftApp::new(s))
+            builder.wgpu().with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(move |_| EffectcraftApp::new(s))
         } else {
-            builder.build_eframe(move |_| EffectcraftApp::new(s))
+            builder.with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(move |_| EffectcraftApp::new(s))
         };
         h.state_mut().show_panel(panel);
         h.run_steps(3);
@@ -94,7 +94,10 @@ fn font_search_preserves_edited_text_and_applies_only_to_selected_characters() {
     let lid = s.execute("layer.newText", json!({"text": "First second", "font": "Inter"})).unwrap()["layer"].as_u64().unwrap();
     s.execute("text.edit", json!({"layer": lid})).unwrap();
     s.execute("text.setSelection", json!({"start": 0, "end": 5})).unwrap();
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(move |_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(move |_| EffectcraftApp::new(s));
     h.state_mut().show_panel(PanelKind::Character);
     h.run_steps(3);
     click(&mut h, "character.font");
@@ -143,7 +146,10 @@ fn font_menu_lists_a_name_the_interface_fonts_lack_in_english() {
     let mut s = Session::default();
     s.execute("comp.new", json!({"width": 320, "height": 180})).unwrap();
     let lid = s.execute("layer.newText", json!({"text": "Native", "font": "Inter"})).unwrap()["layer"].as_u64().unwrap();
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(move |_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(move |_| EffectcraftApp::new(s));
     h.state_mut().show_panel(PanelKind::Character);
     h.run_steps(3);
     click(&mut h, "character.font");
@@ -192,7 +198,10 @@ fn font_menu_filters_variable_fonts() {
     let mut s = Session::default();
     s.execute("comp.new", json!({"width": 320, "height": 180})).unwrap();
     let lid = s.execute("layer.newText", json!({"text": "Var", "font": "Inter"})).unwrap()["layer"].as_u64().unwrap();
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(move |_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(move |_| EffectcraftApp::new(s));
     h.state_mut().show_panel(PanelKind::Character);
     h.run_steps(3);
     let families = |h: &Harness<'_, EffectcraftApp>| -> Vec<String> {
@@ -232,7 +241,10 @@ fn font_menu_grows_back_after_an_empty_search() {
     let mut s = Session::default();
     s.execute("comp.new", json!({"width": 320, "height": 180})).unwrap();
     let lid = s.execute("layer.newText", json!({"text": "Grow", "font": "Inter"})).unwrap()["layer"].as_u64().unwrap();
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(move |_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(move |_| EffectcraftApp::new(s));
     h.state_mut().show_panel(PanelKind::Character);
     h.run_steps(3);
     let rows = |h: &Harness<'_, EffectcraftApp>| h.state().auto.query("character.font.option.").len();
@@ -266,7 +278,10 @@ fn font_menu_rescan_button_adds_fonts_installed_later() {
     let mut s = Session::default();
     s.execute("comp.new", json!({"width": 320, "height": 180})).unwrap();
     s.execute("layer.newText", json!({"text": "Keep this text", "font": "Inter"})).unwrap();
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(move |_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(move |_| EffectcraftApp::new(s));
     h.state_mut().show_panel(PanelKind::Character);
     h.run_steps(3);
     click(&mut h, "character.font");

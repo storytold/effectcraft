@@ -94,7 +94,14 @@ Commands (CLI, MCP, control channel):
   frames the Render Queue renders on the GPU at once. Auto measures the GPU memory after the
   job's first GPU frame and fits up to 3 frames into the GPU memory cap (by default a
   conservative 3 GiB on a discrete card, less when its memory is known, 2 GiB on an integrated
-  one; `EFFECTCRAFT_GPU_MEMCAP_MB` sets it), keeping room for the upload cache to fill. It
+  one; `EFFECTCRAFT_GPU_MEMCAP_MB` sets it), keeping room for the upload cache to fill (the
+  textures of uploaded layers: 1.5 GiB, or three eighths of the card's memory where it is
+  known: on Linux with amdgpu, on Windows, and on NVIDIA cards through `nvidia-smi`; the
+  default cap grows with it, never above
+  three quarters of the card, and a cap above 0 set with `EFFECTCRAFT_GPU_MEMCAP_MB` can only
+  lower the default budget: to at most the larger of half that cap and 1.5 GiB, so a smaller
+  default, like the 768 MiB of a 2 GiB card, stays; `EFFECTCRAFT_GPU_UPLOAD_MB` sets the budget
+  in whole MiB, 0 = default, and a budget set there is kept). It
   renders one frame at a time where the memory can't be measured (Metal, WebGPU, GL, or the
   cap turned off) and once frames have had to wait for memory. The render log names the count.
   `EFFECTCRAFT_GPU_INFLIGHT` overrides it. CPU renders have no such setting. A job on GPU
@@ -111,6 +118,13 @@ Commands (CLI, MCP, control channel):
   names it and why). `EFFECTCRAFT_RQ_RENDERER` set to `gpu` or `cpu` skips it and renders on
   that compositor; `auto` (the default) measures. A queue item's later output modules reuse its
   first one's choice, and Software Rendering projects always render on the CPU.
+  When a job ends, the log target `effectcraft_export` gets one timing line, and the render log
+  gets it as a `Timing:` line when its Log setting writes a log for that outcome (under the
+  default Errors Only, failed jobs only; a failed job's line says how long it ran and what ran
+  before it stopped): the wall time, the busy time of rendering, the encoder and writing the file
+  (the stages overlap, so they are not a sum), the compositor and why, the encoder and its
+  settings, and frames per second ([#3713](https://github.com/storytold/effectcraft/issues/3713)).
+  `effectcraft-cli render --json` returns it as `timing` and `timingSummary`.
 - `threeD.defaultRenderer`: Default 3D Renderer
 - `labels.N.name` / `labels.N.color`: the 16 label names and colours, used by the Label menu,
   the timeline, project panel, render queue and viewer handles

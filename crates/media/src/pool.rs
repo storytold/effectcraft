@@ -2108,10 +2108,30 @@ fn describe_problem(codec: &str, e: &MediaError) -> String {
         MediaError::Cancelled => "the decode was called off",
     };
     let mut unsupported = matches!(e, MediaError::Unsupported(_));
-    while let Some(rest) = ["decode error: ", "unsupported media: ", "unsupported: ", "I/O error: "].iter().find_map(|p| detail.strip_prefix(p)) {
-        unsupported |= detail.starts_with("unsupported");
-        detail = rest;
+    loop {
+        if let Some(rest) = ["decode error: ", "unsupported media: ", "unsupported video: ", "malformed video: ", "unsupported: ", "I/O error: "]
+            .iter()
+            .find_map(|p| detail.strip_prefix(p))
+        {
+            unsupported |= detail.starts_with("unsupported");
+            detail = rest;
+        } else if !codec.is_empty()
+            && let Some(rest) = detail.strip_prefix(codec).and_then(|s| s.strip_prefix(": "))
+        {
+            detail = rest;
+        } else {
+            break;
+        }
     }
+    // Present the stream's chroma sampling, not the shared decoder's H.264 syntax-field number.
+    let detail = if codec == "H.264" {
+        [("chroma_format_idc 0 ", "monochrome "), ("chroma_format_idc 2 ", "4:2:2 chroma "), ("chroma_format_idc 3 ", "4:4:4 chroma ")]
+            .into_iter()
+            .find_map(|(syntax, label)| detail.strip_prefix(syntax).map(|rest| format!("{label}{rest}")))
+            .unwrap_or_else(|| detail.to_owned())
+    } else {
+        detail.to_owned()
+    };
     let what = if codec.is_empty() { "This video" } else { codec };
     if unsupported { format!("{what} isn't supported by the built-in decoder: {detail}") } else { format!("{what} can't be decoded: {detail}") }
 }
@@ -2400,6 +2420,34 @@ mod tests {
         c.insert(k(true), Pixels::Q8(Arc::new(Frame8 { width: 16, height: 16, rgba: vec![0; 16 * 16 * 4] })), Arc::default(), usize::MAX);
         assert!(matches!(c.get(&k(false)), Some((Pixels::F32(_), _))) && matches!(c.get(&k(true)), Some((Pixels::Q8(_), _))));
         assert_eq!(c.bytes, (16 * 16 * 16 + 64) + (16 * 16 * 4 + 64));
+    }
+
+    /// The shared decoder's real messages read without their wrappers or the H.264 syntax-field
+    /// number, and stay "unsupported" or "can't be decoded" as the decoder said.
+    #[test]
+    fn describe_problem_unwraps_shared_decoder_errors() {
+        let unsupported = |s: &str| MediaError::Unsupported(s.into());
+        assert_eq!(
+            describe_problem("H.264", &unsupported("H.264: unsupported: chroma_format_idc 2 (only 4:2:0 is implemented)")),
+            "H.264 isn't supported by the built-in decoder: 4:2:2 chroma (only 4:2:0 is implemented)"
+        );
+        assert_eq!(
+            describe_problem("H.264", &unsupported("H.264: chroma_format_idc 0 stream")),
+            "H.264 isn't supported by the built-in decoder: monochrome stream"
+        );
+        assert_eq!(describe_problem("H.264", &unsupported("chroma_format_idc 3 stream")), "H.264 isn't supported by the built-in decoder: 4:4:4 chroma stream");
+        // The relabel is H.264's own field: another codec keeps the text.
+        assert_eq!(
+            describe_problem("HEVC", &unsupported("chroma_format_idc 2 stream")),
+            "HEVC isn't supported by the built-in decoder: chroma_format_idc 2 stream"
+        );
+        // A wrapped "unsupported" inside a decode error still counts as unsupported.
+        assert_eq!(
+            describe_problem("VP9", &MediaError::Decode("decode error: unsupported video: VP9: profile 3".into())),
+            "VP9 isn't supported by the built-in decoder: profile 3"
+        );
+        assert_eq!(describe_problem("VP9", &MediaError::Decode("malformed video: VP9: bad frame header".into())), "VP9 can't be decoded: bad frame header");
+        assert_eq!(describe_problem("", &MediaError::Decode("malformed video: truncated".into())), "This video can't be decoded: truncated");
     }
 
     /// #482: an OpenEXR file with HTJ2K compression (which the decoder lacks) says so on import

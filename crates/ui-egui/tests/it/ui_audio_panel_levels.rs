@@ -54,7 +54,10 @@ fn sound_layer(s: &mut Session, levels: [f64; 2]) -> u64 {
 /// The harness with layer `l` selected and the Audio panel up.
 fn harness(mut s: Session, l: u64) -> Harness<'static, EffectcraftApp> {
     s.execute("layer.select", json!({"layers": [l]})).unwrap();
-    let mut h = Harness::builder().with_size(vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(vec2(1600.0, 1000.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(s));
     h.state_mut().show_panel(PanelKind::Audio);
     h.run_steps(4);
     h

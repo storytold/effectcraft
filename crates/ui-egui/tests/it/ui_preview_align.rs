@@ -16,7 +16,10 @@ fn harness() -> Harness<'static, EffectcraftApp> {
     s.execute("comp.new", json!({"name": "Preview", "width": 320, "height": 180, "frameRate": 24, "duration": 10})).unwrap();
     s.execute("layer.newSolid", json!({"name": "A", "color": "#406080", "width": 40, "height": 30})).unwrap();
     s.execute("layer.newSolid", json!({"name": "B", "color": "#806040", "width": 60, "height": 20})).unwrap();
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(s));
     h.run_steps(3);
     h
 }

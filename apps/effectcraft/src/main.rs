@@ -87,13 +87,22 @@ fn initialize_nightly_process_identity() -> Result<(), process_identity::Identit
     )
 }
 
-/// Say why a Nightly launch was refused, through a native dialog where a person is looking at one.
+/// Whether a refusal may also open a native message box. Standard error always carries the reason;
+/// this only adds a box where one renders without the app's event loop. Never on macOS: the dialog library's alert
+/// there needs the AppKit run loop this start has not reached, so a refused nightly launch hung in
+/// an invisible modal instead of exiting (GridCraft Mac smoke, 2026-11-26).
+fn refusal_dialog(flavor: build_flavor::BuildFlavor, desktop_session: bool, macos: bool) -> bool {
+    build_flavor::needs_native_error(flavor, desktop_session) && !macos
+}
+
+/// Say why a Nightly launch was refused, through a native dialog where a person is looking at one
+/// and a modal renders without the app's run loop (Windows, X11/Wayland; macOS gets the console line).
 fn report_launch_profile_error(error: &str) {
     eprintln!("EffectCraft launch profile: {error}");
     let desktop_session = cfg!(windows)
         || cfg!(target_os = "macos")
         || (cfg!(target_os = "linux") && ["DISPLAY", "WAYLAND_DISPLAY"].into_iter().any(|key| std::env::var_os(key).is_some_and(|v| !v.is_empty())));
-    if build_flavor::needs_native_error(build_flavor::COMPILED, desktop_session) {
+    if refusal_dialog(build_flavor::COMPILED, desktop_session, cfg!(target_os = "macos")) {
         if let Err(error) = initialize_nightly_process_identity() {
             eprintln!("EffectCraft launch profile: {error}");
             return;
@@ -445,6 +454,7 @@ fn run_desktop(reporter: &crash_report::Shutdown, arguments: &[std::ffi::OsStrin
         effectcraft_ui_egui::channel::name_for(effectcraft_ui_egui::channel::identity()),
         options,
         Box::new(move |cc| {
+            effectcraft_ui_egui::framework::install(&cc.egui_ctx)?;
             EffectcraftApp::install_ime_reset_hooks(&cc.egui_ctx);
             match &cc.wgpu_render_state {
                 Some(rs) => {
@@ -716,7 +726,7 @@ struct Desktop {
 
 impl eframe::App for Desktop {
     /// The desktop host's logic tick: update the macOS menu bar, run the shared app tick, close the IME pass, show the
-    /// file dialogs asked for and, last, hand a close to the platform quit.
+    /// file dialogs asked for and, last, the root window's close path.
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         #[cfg(target_os = "macos")]
         self.menu_sync.before(&mut self.app, |app| self.menu.update(app, ctx));
@@ -728,7 +738,7 @@ impl eframe::App for Desktop {
         if let Some(asked) = &self.file_dialogs {
             file_dialogs::show_asked(asked, frame, ctx);
         }
-        effectcraft_ui_egui::panels::unsaved::quit_on_close(ctx);
+        self.app.close_path(ctx);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
@@ -1022,5 +1032,19 @@ mod tests {
         assert!(app.hooks.file_dialog_async.is_some() && asked.is_some(), "the commands' file dialogs must not block the frame");
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         assert!(app.hooks.file_dialog_async.is_none() && asked.is_none(), "the blocking dialog pumps its own messages here");
+    }
+}
+
+#[cfg(test)]
+mod refusal_dialog_tests {
+    use super::refusal_dialog;
+    use crate::build_flavor::BuildFlavor;
+
+    #[test]
+    fn a_refusal_never_blocks_on_a_modal_before_the_event_loop_on_macos() {
+        assert!(refusal_dialog(BuildFlavor::NightlyV1, true, false), "a desktop refusal still shows the box where one renders");
+        assert!(!refusal_dialog(BuildFlavor::NightlyV1, true, true), "macOS has no run loop yet: the modal would hang");
+        assert!(!refusal_dialog(BuildFlavor::NightlyV1, false, false), "a headless session has no box");
+        assert!(!refusal_dialog(BuildFlavor::Stable, true, false), "only a nightly refusal explains itself in a box");
     }
 }

@@ -112,9 +112,6 @@ type EffectPipelines = HashMap<&'static str, (usize, std::sync::OnceLock<Result<
 /// 8/16 bpc are emulated by clamping and quantising, as on the CPU).
 pub const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba32Float;
 
-/// Uploaded layer buffers kept on the GPU by default (bytes; [`GpuContext::set_upload_budget`]).
-const UPLOAD_BUDGET: usize = 1536 << 20;
-
 /// Working textures kept for reuse once their last image is dropped (bytes).
 const POOL_BUDGET: usize = 256 << 20;
 
@@ -1028,7 +1025,7 @@ impl GpuContext {
             uploads: Mutex::new(Uploads::default()),
             pictures: Default::default(),
             upload_staging: Default::default(),
-            upload_budget: std::sync::atomic::AtomicUsize::new(UPLOAD_BUDGET),
+            upload_budget: std::sync::atomic::AtomicUsize::new(memcap.upload_budget()),
             upload_full_warned: Default::default(),
             pool,
             staging: Default::default(),
@@ -1166,6 +1163,11 @@ impl GpuContext {
         let staging: u64 = self.staging.lock().map(|s| s.iter().map(|(k, v)| k * v.len() as u64).sum()).unwrap_or(0);
         let zeros: u64 = self.zeros.lock().map(|z| z.keys().map(|&(w, h)| w as u64 * h as u64 * 16).sum()).unwrap_or(0);
         pool + staging + self.upload_staging.bytes() + zeros
+    }
+
+    #[cfg(test)]
+    pub(crate) fn upload_budget_from_rule(&self) -> usize {
+        self.memcap.upload_budget()
     }
 
     #[cfg(test)]
@@ -1598,7 +1600,7 @@ impl GpuContext {
             uploads: Mutex::new(Uploads::default()),
             pictures: Default::default(),
             upload_staging: Default::default(),
-            upload_budget: std::sync::atomic::AtomicUsize::new(UPLOAD_BUDGET),
+            upload_budget: std::sync::atomic::AtomicUsize::new(self.upload_budget()),
             upload_full_warned: Default::default(),
             pool: self.pool.clone(),
             staging: Default::default(),
@@ -1676,9 +1678,13 @@ impl GpuContext {
         (GpuImage { texture, width: w, height: h, _lease: Some(lease), levels: None }, was_reused)
     }
 
-    /// Bytes of uploaded layer textures the context keeps (default 1536 MB). An application that
-    /// knows the device's memory can raise it (static layers of a big frame upload once) or lower
-    /// it (a small GPU); the least recently used textures go first.
+    /// Bytes of uploaded layer textures the context keeps (by default 3/8 of the card's memory
+    /// when known, 1536 MiB otherwise; a positive `EFFECTCRAFT_GPU_MEMCAP_MB` can only lower that
+    /// default: to at most the larger of half the cap and 1536 MiB, so a smaller default, like the
+    /// 768 MiB of a 2 GiB card, stays; a positive `EFFECTCRAFT_GPU_UPLOAD_MB` sets it and is not
+    /// lowered by the cap; see `memcap`). An application
+    /// can raise it (static layers of a big frame upload once) or lower it (a small GPU); the
+    /// least recently used textures go first.
     pub fn set_upload_budget(&self, bytes: usize) {
         self.upload_budget.store(bytes.max(1 << 20), std::sync::atomic::Ordering::Relaxed);
     }
