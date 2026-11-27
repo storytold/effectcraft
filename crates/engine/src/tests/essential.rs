@@ -535,3 +535,48 @@ fn protected_regions_keep_speed_under_time_stretch() {
     s.project = std::sync::Arc::new(p);
     assert!(near(st(&s, 1.5), 2.0));
 }
+
+/// #4163: Consolidate All Footage points an instance's media override at the item it keeps, as it
+/// does every layer that used the removed duplicate.
+#[test]
+fn consolidating_footage_keeps_replacement_media() {
+    use std::sync::Arc;
+    struct Colors;
+    impl crate::render::FootageSource for Colors {
+        fn frame(&self, _: ItemId, f: &effectcraft_project::Footage, _: Tick) -> Option<Arc<effectcraft_raster::Image>> {
+            let c = if f.path.contains("red") { [1.0, 0.0, 0.0, 1.0] } else { [0.0, 0.0, 1.0, 1.0] };
+            Some(Arc::new(effectcraft_raster::Image::filled(16, 16, c)))
+        }
+    }
+    let mut s = Session { footage: Arc::new(Colors), ..Default::default() };
+    let foot = |p: &str| effectcraft_project::Footage {
+        path: p.into(),
+        kind: effectcraft_project::FootageKind::Still,
+        width: 16,
+        height: 16,
+        has_video: true,
+        ..Default::default()
+    };
+    let (red, blue, duplicate) = s
+        .edit("x", None, |proj, _| {
+            let mut add = |p: &str| proj.add_item(p, Default::default(), None, effectcraft_project::ItemKind::Footage(foot(p)));
+            Ok((add("red.png"), add("blue.png"), add("blue.png")))
+        })
+        .unwrap();
+    s.execute("comp.new", json!({"name": "Slot", "width": 16, "height": 16, "frameRate": 30, "duration": 1})).unwrap();
+    let slot = s.active_comp_id().unwrap();
+    let fl = s.execute("layer.addItem", json!({"item": red.0})).unwrap()["layer"].as_u64().unwrap();
+    let m = s.execute("essential.addMedia", json!({"layer": fl})).unwrap()["control"].as_u64().unwrap();
+    s.execute("comp.new", json!({"name": "Main", "width": 16, "height": 16, "frameRate": 30, "duration": 1})).unwrap();
+    let main = s.active_comp_id().unwrap();
+    let inst = s.execute("layer.addItem", json!({"item": slot.0})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("essential.set", json!({"layer": inst, "control": m, "item": duplicate.0})).unwrap();
+    assert!(center(&s, main)[2] > 0.99);
+    assert_eq!(s.execute("file.consolidateFootage", json!({})).unwrap()["removed"], 1);
+    assert!(s.project.item(duplicate).is_none());
+    let px = center(&s, main);
+    assert!(px[2] > 0.99 && px[0] < 0.01, "the instance still shows the blue footage: {px:?}");
+    let shown = &s.execute("essential.instance", json!({"layer": inst})).unwrap()["controls"][0];
+    assert_eq!(shown["value"].as_f64(), Some(blue.0 as f64), "{shown}");
+    assert_eq!(shown["overridden"], true, "{shown}");
+}

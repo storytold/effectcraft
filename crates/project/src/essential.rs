@@ -294,6 +294,21 @@ pub fn group(layer: &Layer) -> Option<&PropGroup> {
     layer.props.sub(GROUP)
 }
 
+/// Point the media controls of an instance layer that show an item `remap` replaces at its
+/// replacement.
+pub fn remap_media(layer: &mut Layer, remap: &dyn Fn(ItemId) -> Option<ItemId>) {
+    let Some(g) = layer.props.sub_mut(GROUP) else { return };
+    g.walk_mut(&mut |p| {
+        if matches!(p.ui, ParamUi::Hidden)
+            && control_of(&p.match_id).is_some()
+            && let Value::Scalar(x) = p.value
+            && let Some(to) = remap(ItemId(x as u64))
+        {
+            p.value = Value::Scalar(to.0 as f64);
+        }
+    });
+}
+
 /// Uids of the overridden master properties of a layer.
 pub fn overridden(layer: &Layer) -> Vec<Uid> {
     match group(layer).map(|g| &g.kind) {
