@@ -40,7 +40,10 @@ fn harness(dir: &Path, link: &str) -> Harness<'static, EffectcraftApp> {
             epoch: 0,
         },
     );
-    let mut h = Harness::builder().with_size(egui::vec2(1200.0, 800.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(move |_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1200.0, 800.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(move |_| EffectcraftApp::new(s));
     h.run_steps(3);
     h
 }

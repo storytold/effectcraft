@@ -102,7 +102,10 @@ fn harness(runtime: &RuntimeDir, result: &str) -> Harness<'static, EffectcraftAp
         CraftLinkBinding { link_id: LINK.into(), comp, source: json!({"app": "filmcraft", "doc_id": "0", "item": "1"}), result_path: result.into(), epoch: 0 },
     );
     effectcraft_link::install_back_command(&mut s, Some(runtime.clone()), Arc::new(effectcraft_link::EguiActivation::new(egui::Context::default()))).unwrap();
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(move |_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(move |_| EffectcraftApp::new(s));
     h.run_steps(3);
     h
 }
