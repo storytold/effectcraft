@@ -286,7 +286,7 @@ fn what_cannot_be_written_is_reported() {
     let c = add_comp(&mut p, "C", 640, 360, FrameRate::new(25, 1), 1.0, None);
     add_footage(&mut p, c, "avi", Footage { kind: FootageKind::Video, frame_rate: FrameRate::new(25, 1), ..still(r"C:\m\a.avi", 8, 8) });
     add_footage(&mut p, c, "bmp", still(r"C:\m\a.bmp", 8, 8));
-    add_footage(&mut p, c, "ntsc", Footage { kind: FootageKind::Video, frame_rate: FrameRate::FPS_29_97, ..still(r"C:\m\a.mp4", 8, 8) });
+    add_footage(&mut p, c, "odd", Footage { kind: FootageKind::Video, frame_rate: FrameRate::new(25, 2), duration: secs(1.0), ..still(r"C:\m\a.mp4", 8, 8) });
     let mut gaps = seq(r"C:\m", "g_", 1, 3, 2, ".png", FrameRate::new(25, 1));
     gaps.sequence.remove(1);
     add_footage(&mut p, c, "gaps", gaps);
@@ -335,4 +335,76 @@ fn hostile_footage_never_panics() {
     let file = parse(&r.bytes).expect("parse");
     assert_eq!(effectcraft_aep::write(&file).expect("write"), r.bytes);
     let _ = reimport(&r.bytes);
+}
+
+/// The `sspc` of the footage item whose file name ends with `name`.
+fn sspc_of(bytes: &[u8], name: &str) -> Vec<u8> {
+    let file = parse(bytes).expect("parse");
+    let view = effectcraft_aep::Project::new(&file).expect("project");
+    let item = view.all_items().into_iter().find(|i| i.footage().is_some_and(|f| f.path.as_deref().is_some_and(|p| p.ends_with(name)))).expect("footage");
+    item.chunk().child_list(b"Pin ").and_then(|pin| pin.child(b"sspc")).and_then(|c| c.bytes()).expect("sspc").to_vec()
+}
+
+/// 23.976 and 29.97 fps clips, and a 25 fps clip conformed to 29.97, are written as After Effects
+/// 2026 stores them (`ntsc-footage` lab sample: 3.003 s at 23.976 and 29.97 as 9000 / 2997 s in
+/// 2997ths, the rates 16.16 fixed point at @58 and @152, the conformed rate at @148), and come back
+/// at their rate and duration.
+#[test]
+fn ntsc_clips_are_written_as_after_effects_stores_them() {
+    let mut p = Project::default();
+    let c = add_comp(&mut p, "C", 320, 180, FrameRate::FPS_29_97, 3.0, None);
+    let clip = |path: &str, rate: FrameRate, frames: i64| Footage {
+        kind: FootageKind::Video,
+        frame_rate: rate,
+        duration: rate.tick_of(frames),
+        ..still(path, 320, 180)
+    };
+    add_footage(&mut p, c, "t23976.mp4", clip(r"C:\m\t23976.mp4", FrameRate::FPS_23_976, 72));
+    add_footage(&mut p, c, "t2997.mp4", clip(r"C:\m\t2997.mp4", FrameRate::FPS_29_97, 90));
+    add_footage(&mut p, c, "t25c.mp4", Footage { native_rate: Some(FrameRate::new(25, 1)), ..clip(r"C:\m\t25c.mp4", FrameRate::FPS_29_97, 75) });
+    let r = export_all(&p);
+    assert_eq!(r.report.count(LossCategory::FootageItems), 0, "{:?}", r.report.losses);
+    let u32_at = |b: &[u8], at: usize| u32::from_be_bytes(b[at..at + 4].try_into().expect("4"));
+    // (duration num, den, time scale, rate, conformed rate, effective rate), as the lab sample.
+    let fields = |b: &[u8]| (u32_at(b, 38), u32_at(b, 42), u32_at(b, 50), u32_at(b, 58), u32_at(b, 148), u32_at(b, 152));
+    assert_eq!(fields(&sspc_of(&r.bytes, "t23976.mp4")), (9000, 2997, 2997, 0x0017_f9db, 0, 0x0017_f9db));
+    assert_eq!(fields(&sspc_of(&r.bytes, "t2997.mp4")), (9000, 2997, 2997, 0x001d_f852, 0, 0x001d_f852));
+    assert_eq!(fields(&sspc_of(&r.bytes, "t25c.mp4")), (75, 25, 25, 0x0019_0000, 0x001d_f852, 0x001d_f852));
+    // Imported back: the rate and the duration.
+    let none = |_: &str| true;
+    let mut q = Project::default();
+    import(&mut q, &r.bytes, &ImportOptions { allow_losses: true, ..ImportOptions::new(&none) }).expect("import");
+    let back = |name: &str| {
+        q.items
+            .values()
+            .find_map(|i| match &i.kind {
+                ItemKind::Footage(f) if f.path.ends_with(name) => Some((f.frame_rate.as_f64(), f.duration.seconds())),
+                _ => None,
+            })
+            .expect(name)
+    };
+    for (name, rate, seconds) in [("t23976.mp4", 23.976, 3.003), ("t2997.mp4", 29.97, 3.003), ("t25c.mp4", 29.97, 2.5025)] {
+        let (r, d) = back(name);
+        assert!((r - rate).abs() < 0.001 && (d - seconds).abs() < 0.001, "{name}: {r} fps, {d} s");
+    }
+}
+
+/// A 23.976 fps clip whose duration in 2997ths does not fit the 32-bit field (40 000 000 frames,
+/// 125 units each) is reported and not written, rather than written shorter.
+#[test]
+fn an_ntsc_clip_too_long_to_store_is_reported() {
+    let mut p = Project::default();
+    let c = add_comp(&mut p, "C", 320, 180, FrameRate::FPS_23_976, 3.0, None);
+    let long = Footage {
+        kind: FootageKind::Video,
+        frame_rate: FrameRate::FPS_23_976,
+        duration: FrameRate::FPS_23_976.tick_of(40_000_000),
+        ..still(r"C:\m\long.mp4", 320, 180)
+    };
+    add_footage(&mut p, c, "long.mp4", long);
+    let r = export_all(&p);
+    let found: Vec<String> = r.report.losses.iter().filter(|l| l.category == LossCategory::FootageItems).flat_map(|l| l.details.clone()).collect();
+    assert!(found.iter().any(|d| d.contains("long.mp4") && d.contains("too long")), "{found:?}");
+    assert_eq!(r.report.exported.footage, 0);
+    parse(&r.bytes).expect("still a valid file");
 }
