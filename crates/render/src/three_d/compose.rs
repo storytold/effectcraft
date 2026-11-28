@@ -23,7 +23,7 @@ use effectcraft_raster::{Image, Px, hash_noise};
 use effectcraft_time::Tick;
 use rayon::prelude::*;
 
-use super::camera::{CameraState, NEAR, active_camera};
+use super::camera::{CameraState, NEAR, frame_camera};
 use super::light::{LightState, Material, lights_at, shade};
 use crate::{EvalCtx, Renderer};
 
@@ -168,13 +168,19 @@ fn unproject(g: &Geo, sx: f64, sy: f64) -> Option<(f64, f64, f64)> {
 
 /// The camera a renderer uses at a context time (view override only for the top-level comp).
 pub(crate) fn camera_for(r: &Renderer, ctx: &EvalCtx) -> CameraState {
+    shutter_camera(r, ctx, ctx.time)
+}
+
+/// [`camera_for`] at a motion-blur sub-sample of the frame at time `frame`: the frame's camera,
+/// evaluated at the sub-sample's time (see [`frame_camera`]).
+pub(crate) fn shutter_camera(r: &Renderer, sub: &EvalCtx, frame: Tick) -> CameraState {
     // Collapsed precomps see through the parent's camera.
     if let Some(c) = r.collapse3d {
         return c.cam;
     }
     match r.opts.view {
         Some(v) if r.depth == 0 => v,
-        _ => active_camera(ctx),
+        _ => frame_camera(sub, frame),
     }
 }
 
@@ -303,7 +309,7 @@ fn prepare_with<'a>(r: &Renderer, ctx: &EvalCtx<'_>, layer: &'a Layer, order: us
             .filter_map(|i| {
                 let f = phase + angle * i as f64 / (n - 1) as f64;
                 let sub = ctx.at(ctx.time + Tick::from_seconds_f64(f * fd));
-                let c = camera_for(r, &sub);
+                let c = shutter_camera(r, &sub, ctx.time);
                 geo(&c, outer * sub.world_matrix(layer) * local, bounds, comp, s, out, r.out_offset())
             })
             .collect()
