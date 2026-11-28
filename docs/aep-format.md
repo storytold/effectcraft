@@ -647,9 +647,10 @@ in Windows layout: the first 4, 2 and 2 bytes little-endian; zero for None; the 
 Luma vs Sat and Sat vs Sat, 0 for an RGB curve), `u32` point count, then little-endian `f64` pairs x, y
 sorted by x (bytes after the counted points are stale). RGB: x and y 0..1, (0, 0), (1, 1) by default;
 the first of the four is the master curve (`-60-preset-curves-rgb`: (0.491, 0.787) lifts R, G and B
-alike, and the render follows a natural cubic spline through the points within 0.003); the order of
-the other three is H (the `-0001` XML names `ToneCurvesLuma`, `Red`, `Green`, `Blue`; no sample moves
-one). Hue / saturation: x the hue (0 red, 1/3 green) or the luma / saturation 0..1, y the offset from
+alike, and the render follows a natural cubic spline through the points within 0.003); the other three
+are red, green, blue (the `-0001` XML names `ToneCurvesLuma`, `Red`, `Green`, `Blue`; a project
+that moves the second and the fourth renders closest to After Effects with those as red and blue, of
+the six assignments; no sample moves the third, so green is by elimination). Hue / saturation: x the hue (0 red, 1/3 green) or the luma / saturation 0..1, y the offset from
 neutral 0; a fresh curve has no points, the selector colours `-0113` ... `-0117` add three at y = 0,
 the hue picked +- 0.0556. Hue vs Sat's y scales the saturation by 1 + y in linear light
 (`-61-preset-curves-huesat`: (0.0155, 0.97) takes pure red's linear saturation to 1.96 times, (0.263,
@@ -666,7 +667,7 @@ centre 0.435 = its HSL lightness, range 0.05, tolerance 0.1: `-01-set-all`; whet
 or full width is H); `-0122` the Auto Tone analysis (UTF-16 JSON). The project saved as 25.x and 24.x
 copies (`versions/1200-lumetri-25x`, `-24x`: the 58 scripted compositions, saved by After Effects
 2026) stores every Lumetri definition, valid range and value as the 26 save does. [V for the sliders,
-checkboxes, popups, the `tdsb` 3 values, the master RGB curve, Hue vs Sat, the colour wheels and the
+checkboxes, popups, the `tdsb` 3 values, the RGB curves, Hue vs Sat, the colour wheels and the
 LUT names; H where marked]
 
 **Cryptomatte plug-in** (match name `Cryptomatte`, the free Cryptomatte plug-in, 2.6.6 in our

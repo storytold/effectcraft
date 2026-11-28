@@ -18,9 +18,9 @@
 //!   so its values are not imported (the effect looks the same) and are listed in the report.
 //! - **Arbitrary data** (`ParamKind::ArbitraryData`, every instance stores it). Curves are a
 //!   curve type, a point count and points as `f64` x, y ([`curve_points`]).
-//!   - The RGB curve (`-0039`) holds four curves; the first is the master (white) curve (1200
-//!     `lumetri-60-preset-curves-rgb`), imported. The other three are reported when moved: no
-//!     sample tells which is which channel.
+//!   - The RGB curve (`-0039`) holds four curves, in the order master (white; 1200
+//!     `lumetri-60-preset-curves-rgb`), red, green, blue (a project's render, see
+//!     [`import_rgb_curves`]), all imported.
 //!   - Hue vs Sat (`-0042`): y is an offset from neutral, 1 doubling the saturation (`-61`), so
 //!     EffectCraft's y is `0.5 + y / 2`. The other four hue / saturation curves have no sample
 //!     of their scale and are reported when moved.
@@ -700,10 +700,12 @@ fn points_text(pts: impl IntoIterator<Item = (f64, f64)>) -> Option<String> {
     Some(out.join(" "))
 }
 
-/// The RGB curve (`-0039`, four curves of 520 bytes). The first is the master curve (1200
-/// `lumetri-60-preset-curves-rgb`: its midpoint raised to 0.787 lifts R, G and B alike) and
-/// becomes `curves/rgbCurves/master`. The other three are the channel curves, but no sample moves
-/// one, so which is red, green or blue is not known: a moved one is reported.
+/// The RGB curve (`-0039`, four curves of 520 bytes), in the order of the `-0001` XML's
+/// `ToneCurvesLuma`, `Red`, `Green`, `Blue`. The first is the master curve (1200
+/// `lumetri-60-preset-curves-rgb`: its midpoint raised to 0.787 lifts R, G and B alike). A
+/// project that moves the second and the fourth renders closest to After Effects with those as
+/// red and blue, of the six assignments (mean difference 7.0 of 255, next 9.8, none 21.9); no
+/// sample moves the third, so green is by elimination.
 fn import_rgb_curves(d: Option<&[u8]>, (here, label): (&str, &str), group: &mut effectcraft_project::PropGroup, col: &mut crate::import::report::Collector) {
     let Some(d) = d else { return };
     let curves: Option<Vec<Vec<(f64, f64)>>> = if d.len() == 4 * 520 { d.as_chunks::<520>().0.iter().map(|c| curve_points(c)).collect() } else { None };
@@ -712,18 +714,16 @@ fn import_rgb_curves(d: Option<&[u8]>, (here, label): (&str, &str), group: &mut 
         return;
     };
     let identity = |pts: &[(f64, f64)]| pts.iter().all(|(x, y)| (x - y).abs() < 1e-9);
-    if let Some(master) = curves.first().filter(|c| !identity(c)) {
-        match points_text(master.iter().copied()) {
-            Some(text) => set_prop(group, "curves/rgbCurves/master", Value::Str(text)),
-            None => col.lose(LossCategory::DamagedData, format!("{here}: the master curve of {label} has unreadable points, not imported")),
+    let targets =
+        [("master", "curves/rgbCurves/master"), ("red", "curves/rgbCurves/red"), ("green", "curves/rgbCurves/green"), ("blue", "curves/rgbCurves/blue")];
+    for (curve, (name, target)) in curves.iter().zip(targets) {
+        if identity(curve) {
+            continue;
         }
-    }
-    let moved = curves.iter().skip(1).filter(|c| !identity(c)).count();
-    if moved > 0 {
-        col.lose(
-            LossCategory::Effects,
-            format!("{here}: {moved} channel curve(s) of {label} are not imported (no sample tells which curve is red, green or blue)"),
-        );
+        match points_text(curve.iter().copied()) {
+            Some(text) => set_prop(group, target, Value::Str(text)),
+            None => col.lose(LossCategory::DamagedData, format!("{here}: the {name} curve of {label} has unreadable points, not imported")),
+        }
     }
 }
 
