@@ -352,6 +352,7 @@ fn consolidate(s: &mut Session, _: &Value) -> Result<Value> {
                     {
                         *item = *k;
                     }
+                    effectcraft_project::essential::remap_media(l, &|i| remap.get(&i).copied());
                 }
             }
         }
