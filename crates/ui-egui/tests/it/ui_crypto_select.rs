@@ -163,8 +163,8 @@ fn the_selection_tool_picks_while_the_cryptomatte_effect_is_selected() {
     assert_eq!(selection(&h, &ids), "", "Ctrl removes");
     click(&mut h, b, Modifiers::NONE);
     assert_eq!(selection(&h, &ids), "c3_3");
-    click(&mut h, b, Modifiers::CTRL);
-    assert_eq!(selection(&h, &ids), "", "Ctrl (not Cmd) removes too");
+    click(&mut h, b, if cfg!(target_os = "macos") { Modifiers::ALT } else { Modifiers::CTRL });
+    assert_eq!(selection(&h, &ids), "", "the platform remove modifier removes too");
     click(&mut h, b, Modifiers::NONE);
     assert_eq!(selection(&h, &ids), "c3_3");
     assert_eq!(undo_steps(&h), steps + 7, "one undo step per pick");

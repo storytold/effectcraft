@@ -378,19 +378,19 @@ mod tests {
     #[test]
     fn the_window_stays_open_until_the_quit_prompt_is_answered() {
         let (mut app, ctx) = app();
-        assert!(!frame(&mut app, &ctx, true), "an unmodified project quits at once");
+        assert_eq!(frame(&mut app, &ctx, true), cfg!(target_os = "macos"), "a saved project uses the platform quit path");
         modified(&mut app);
         assert!(frame(&mut app, &ctx, true), "the close is cancelled");
         assert_eq!(app.dialog, Some(Dialog::UnsavedChanges));
         answer_with(&mut app, &ctx, Answer::Discard);
         assert!(app.dialog_state.unsaved.quitting);
-        assert!(!frame(&mut app, &ctx, true), "Don't Save lets the window close");
+        assert_eq!(frame(&mut app, &ctx, true), cfg!(target_os = "macos"), "Don't Save uses the platform quit path");
         // Undoing back to the saved state needs no prompt.
         let (mut app, ctx) = self::app();
         modified(&mut app);
         app.session.execute("edit.undo", json!({})).unwrap();
         assert!(!app.session.is_dirty());
-        assert!(!frame(&mut app, &ctx, true));
+        assert_eq!(frame(&mut app, &ctx, true), cfg!(target_os = "macos"));
     }
 
     /// Closing the window while AppKit's run loop is running crashes on a Mac with a Touch Bar
