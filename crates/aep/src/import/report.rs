@@ -66,6 +66,10 @@ pub enum LossCategory {
     /// sRGB and Rec. 709) or stored as an unknown code (colour depth, time display, frames per
     /// foot, frame count start).
     ProjectSettings,
+    /// Essential Graphics: a composition's Essential Properties (the `LIST CCtl` controls in its
+    /// `LIST CIFO` / `CIF2` / `CIF3`) and the values precomp layers override them with. Not
+    /// imported, so every instance shows the composition's own values.
+    EssentialGraphics,
 }
 
 impl LossCategory {
@@ -90,6 +94,7 @@ impl LossCategory {
             LossCategory::UnsupportedItems => "unsupported items",
             LossCategory::DamagedData => "damaged data",
             LossCategory::ProjectSettings => "project settings",
+            LossCategory::EssentialGraphics => "Essential Graphics",
         }
     }
 }
