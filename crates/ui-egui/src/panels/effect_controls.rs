@@ -39,6 +39,7 @@ mod common;
 mod editors;
 mod panel;
 mod rows;
+mod selection;
 mod viewer;
 
 pub use common::{choose_files_after_apply, reveal_applied, set_lock};

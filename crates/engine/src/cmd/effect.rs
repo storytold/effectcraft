@@ -885,15 +885,26 @@ fn remove_all(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 fn toggle(s: &mut Session, p: &Value) -> Result<Value> {
-    let (cid, lid, uid) = find_fx(s, p, "effect.toggle")?;
-    let v = b_p(p, "value");
-    let r = s.edit("Toggle Effect", None, |proj, _| {
-        let l = layer_mut(proj, cid, lid)?;
-        let g = l.props.find_group_mut(uid).ok_or_else(|| bad("effect.toggle", "gone"))?;
-        g.enabled = v.unwrap_or(!g.enabled);
-        Ok(g.enabled)
+    const CMD: &str = "effect.toggle";
+    let cid = super::comp_id(s, p)?;
+    let targets = effects_p(s, p, CMD)?;
+    // Without `value`, the first (primary) effect decides: every target gets the opposite of its
+    // state, so a mixed selection ends up uniform.
+    let first_enabled = {
+        let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
+        targets.first().and_then(|(lid, uid)| comp.layer(*lid)?.props.find_group(*uid)).map(|g| g.enabled)
+    };
+    let on = b_p(p, "value").or(first_enabled.map(|e| !e)).ok_or_else(|| bad(CMD, "no such effect"))?;
+    let label = if targets.len() == 1 { "Toggle Effect" } else { "Toggle Effects" };
+    s.edit(label, None, |proj, _| {
+        for (lid, uid) in &targets {
+            let l = layer_mut(proj, cid, *lid)?;
+            let g = l.props.find_group_mut(*uid).ok_or_else(|| bad(CMD, "gone"))?;
+            g.enabled = on;
+        }
+        Ok(())
     })?;
-    Ok(json!(r))
+    Ok(json!(on))
 }
 
 /// `effect.setLabel`: the effect's colour label (None clears it).
@@ -930,21 +941,32 @@ fn reorder(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 fn duplicate(s: &mut Session, p: &Value) -> Result<Value> {
-    let (cid, lid, uid) = find_fx(s, p, "effect.duplicate")?;
-    let r = s.edit("Duplicate Effect", None, |proj, st| {
+    const CMD: &str = "effect.duplicate";
+    let cid = super::comp_id(s, p)?;
+    let targets = effects_p(s, p, CMD)?;
+    let label = if targets.len() == 1 { "Duplicate Effect" } else { "Duplicate Effects" };
+    let made = s.edit(label, None, |proj, st| {
         let mut next = proj.next_id;
-        let fx = layer_mut(proj, cid, lid)?.props.sub_mut("effects").ok_or_else(|| bad("effect.duplicate", "no effects"))?;
-        let Some(i) = fx.children.iter().position(|c| c.uid() == uid) else { return Ok(0) };
-        let mut g = fx.children[i].as_group().cloned().ok_or_else(|| bad("effect.duplicate", "not a group"))?;
-        g.reassign_uids(&mut next);
-        g.name = unique_name(fx, &g.name);
-        let u = g.uid;
-        fx.children.insert(i + 1, g.into());
+        let mut made: Vec<(LayerId, Uid)> = vec![];
+        for (lid, uid) in &targets {
+            let fx = layer_mut(proj, cid, *lid)?.props.sub_mut("effects").ok_or_else(|| bad(CMD, "no effects"))?;
+            let Some(i) = fx.children.iter().position(|c| c.uid() == *uid) else { continue };
+            let mut g = fx.children.get(i).and_then(|c| c.as_group()).cloned().ok_or_else(|| bad(CMD, "not a group"))?;
+            g.reassign_uids(&mut next);
+            g.name = unique_name(fx, &g.name);
+            let u = g.uid;
+            fx.children.insert(i + 1, g.into());
+            made.push((*lid, u));
+        }
         proj.next_id = next + 1;
-        st.selected_props = vec![(lid, u)];
-        Ok(u)
+        st.selected_props = made.clone();
+        Ok(made)
     })?;
-    Ok(json!(r))
+    // One effect keeps the old result (its uid); several return the list.
+    Ok(match made.as_slice() {
+        [(_, u)] => json!(u),
+        all => json!(all.iter().map(|(_, u)| *u).collect::<Vec<Uid>>()),
+    })
 }
 
 /// Effect groups selected in Effect Controls / the timeline: (layer, effect uid), in stack order.
@@ -1326,10 +1348,10 @@ pub fn specs() -> Vec<CommandSpec> {
         cmd!("effect.applyLast", "Last Effect", ["Effect"], Some("Cmd+Alt+Shift+E"), "{layers?}", has_layers, last),
         cmd!("effect.removeAll", "Remove All", ["Effect"], Some("Cmd+Shift+E"), "{layers?}", has_layers, remove_all),
         cmd!("effect.remove", "Remove Effect", [], None, "{layer?, effect: index|uid|name}", has_layers, remove),
-        cmd!("effect.toggle", "Toggle Effect", [], None, "{layer?, effect, value?}", has_layers, toggle),
+        cmd!("effect.toggle", "Toggle Effect", [], None, "{layer?, effect? | effects?: [uid|name|index], value?} (default: the selected effects)", has_layers, toggle),
         cmd!("effect.setLabel", "Effect Label", [], None, "{layer?, effect, label: name|index 0-16 (None clears)}", has_layers, set_label),
         cmd!("effect.reorder", "Reorder Effect", [], None, "{layer?, effect, index}", has_layers, reorder),
-        cmd!("effect.duplicate", "Duplicate Effect", [], None, "{layer?, effect}", has_layers, duplicate),
+        cmd!("effect.duplicate", "Duplicate Effect", [], None, "{layer?, effect? | effects?: [uid|name|index]} (default: the selected effects)", has_layers, duplicate),
         cmd!("effect.copy", "Copy Effects", [], None, "{layer?, effect? | effects?: [uid|name|index]} (default: the selected effects)", has_layers, copy),
         cmd!("effect.paste", "Paste Effects", [], None, "{layers?} — adds the copied effects to the layers", has_layers, paste),
         cmd!("effect.reset", "Reset Effect", [], None, "{layer?, effect}", has_layers, reset),
@@ -1435,5 +1457,79 @@ mod list_metadata_tests {
         assert_eq!(slider["sliderMax"], 100.0);
         assert_eq!(slider["decimals"], 2);
         assert!(slider["options"].is_null());
+    }
+}
+
+#[cfg(test)]
+mod batch_tests {
+    use super::*;
+
+    /// A session with one layer carrying `n` effects (A, B, C…), none selected.
+    fn session_with_effects(n: usize) -> (Session, LayerId, Vec<Uid>) {
+        let mut s = Session::default();
+        s.execute("comp.new", json!({})).unwrap(); // ASSUMED command id
+        s.execute("layer.newSolid", json!({})).unwrap(); // ASSUMED command id
+        for _ in 0..n {
+            s.execute("effect.apply", json!({"effect": "Gaussian Blur"})).unwrap();
+        }
+        let lid = s.active_comp().and_then(|c| c.layers.first()).map(|l| l.id).unwrap();
+        let stack = stack(&s);
+        (s, lid, stack)
+    }
+
+    fn stack(s: &Session) -> Vec<Uid> {
+        s.active_comp().and_then(|c| c.layers.first()).and_then(Layer::effects).map(|fx| fx.groups().map(|g| g.uid).collect()).unwrap_or_default()
+    }
+
+    fn enabled(s: &Session) -> Vec<bool> {
+        s.active_comp().and_then(|c| c.layers.first()).and_then(Layer::effects).map(|fx| fx.groups().map(|g| g.enabled).collect()).unwrap_or_default()
+    }
+
+    fn select(s: &mut Session, lid: LayerId, uids: &[Uid]) {
+        s.state.selected_props = uids.iter().map(|u| (lid, *u)).collect();
+    }
+
+    #[test]
+    fn delete_selected_is_one_undo_step() {
+        let (mut s, lid, fx) = session_with_effects(3);
+        select(&mut s, lid, &[fx[0], fx[2]]);
+        s.execute("effect.remove", json!({})).unwrap();
+        assert_eq!(stack(&s), vec![fx[1]]);
+        s.execute("edit.undo", json!({})).unwrap(); // ASSUMED command id
+        assert_eq!(stack(&s), fx);
+        s.execute("edit.redo", json!({})).unwrap(); // ASSUMED command id
+        assert_eq!(stack(&s), vec![fx[1]]);
+    }
+
+    #[test]
+    fn toggle_applies_one_state_to_all_selected_in_one_undo_step() {
+        let (mut s, lid, fx) = session_with_effects(3);
+        select(&mut s, lid, &[fx[0], fx[2]]);
+        s.execute("effect.toggle", json!({})).unwrap();
+        assert_eq!(enabled(&s), vec![false, true, false]);
+        s.execute("edit.undo", json!({})).unwrap();
+        assert_eq!(enabled(&s), vec![true, true, true]);
+        s.execute("edit.redo", json!({})).unwrap();
+        assert_eq!(enabled(&s), vec![false, true, false]);
+    }
+
+    #[test]
+    fn toggle_with_explicit_value_and_effects_list() {
+        let (mut s, _, fx) = session_with_effects(3);
+        s.execute("effect.toggle", json!({"effects": [fx[0], fx[1]], "value": false})).unwrap();
+        assert_eq!(enabled(&s), vec![false, false, true]);
+    }
+
+    #[test]
+    fn duplicate_selected_keeps_stack_order_in_one_undo_step() {
+        let (mut s, lid, fx) = session_with_effects(3);
+        select(&mut s, lid, &[fx[0], fx[2]]);
+        s.execute("effect.duplicate", json!({})).unwrap();
+        let after = stack(&s);
+        assert_eq!(after.len(), 5);
+        assert_eq!((after[0], after[2], after[3]), (fx[0], fx[1], fx[2]));
+        assert_eq!(s.state.selected_props, vec![(lid, after[1]), (lid, after[4])]);
+        s.execute("edit.undo", json!({})).unwrap();
+        assert_eq!(stack(&s), fx);
     }
 }
