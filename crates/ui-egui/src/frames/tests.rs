@@ -26,6 +26,47 @@ fn frames_without_the_hdr_step_have_keys_of_their_own() {
     assert_ne!(opts_hash(&opts), opts_hash(&RenderOpts { skip_hdr_step: true, ..opts }));
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn ordinary_viewer_frames_do_not_start_helper_pools() {
+    use effectcraft_engine::Session;
+    use serde_json::json;
+
+    let frames = Frames::default();
+    assert!(frames.foreground.get().is_none(), "startup must leave helper pools dormant");
+    let mut session = Session::default();
+    session.execute("comp.new", json!({"width": 8, "height": 8, "duration": 1})).unwrap();
+    let comp = session.active_comp_id().unwrap();
+    let opts = RenderOpts::default();
+
+    let check = |session: &Session| {
+        let src = RenderSource {
+            project: session.project.clone(),
+            footage: session.footage.clone(),
+            expr: None,
+            layer_cache: Arc::default(),
+            gpu: None,
+            gpu_display: false,
+            disk: None,
+        };
+        let key = FrameKey {
+            revision: session.revision,
+            content: frames.content_of(&src.project, session.revision, comp),
+            comp: comp.0,
+            ..key(0, 0, opts_hash(&opts))
+        };
+        frames.request_urgent(&src, key, comp, Tick::ZERO, opts);
+        wait_for_renders(&frames);
+        assert!(frames.get(&key).is_some());
+        assert!(frames.foreground.get().is_none(), "ordinary work must stay on the existing pool");
+    };
+
+    check(&session);
+    let layer = session.execute("layer.newSolid", json!({"color": "#ff0000"})).unwrap()["layer"].as_u64().unwrap();
+    session.execute("effect.apply", json!({"layers": [layer], "effect": "Exposure"})).unwrap();
+    check(&session);
+}
+
 struct ProbeDisk {
     keys: Mutex<HashSet<u128>>,
     probes: std::sync::atomic::AtomicUsize,
@@ -707,8 +748,8 @@ fn frames_started_first_are_done_first() {
     }
 }
 
-/// Prefetch frames queued when a preview starts or stops, or that become the viewer's
-/// frame, still render: they change hands between the lanes and the pool.
+/// Prefetch frames queued when a preview starts or stops still render. A queued prefetch
+/// that becomes the viewer's frame moves from a lane to the viewer's pool.
 #[test]
 fn queued_frames_render_when_a_preview_starts_or_stops() {
     use effectcraft_engine::time::FrameRate;
@@ -719,7 +760,7 @@ fn queued_frames_render_when_a_preview_starts_or_stops() {
             f.request(&src, FrameKey { frame, ..series }, cid, FrameRate::FPS_30.tick_of(frame), RenderOpts::default());
         }
     };
-    // Queued for the pool, then a preview starts.
+    // Queued while paused, then a preview starts.
     request(1..40);
     f.set_playhead(Some(playhead));
     // Queued for the lanes, then the preview stops.
@@ -875,8 +916,8 @@ fn a_stalling_window_takes_lanes_from_the_gpu() {
     assert_eq!(q.gpu_limit, 2);
 }
 
-/// A preview that stops while lanes composite: their frames finish, the queued ones move to the
-/// pool and render, the viewer's frame is not held up, and every GPU slot is given back.
+/// A preview that stops while lanes composite: their frames finish, the viewer uses the
+/// separate pool, and every GPU slot is given back.
 #[test]
 fn a_preview_stopping_mid_render_gives_the_gpu_slots_back() {
     use effectcraft_engine::time::FrameRate;
@@ -3344,6 +3385,7 @@ fn gpu_worker_routes_admit_display_readback_and_auto_effects() {
         opts: RenderOpts { backend: Backend::Gpu, ..Default::default() },
         urgent: true,
         background: false,
+        isolate: false,
         seq: 0,
         cancel: Arc::default(),
     };
@@ -3418,6 +3460,7 @@ fn gpu_worker_routes_admit_display_readback_and_auto_effects() {
         opts: RenderOpts { backend: Backend::Gpu, ..job.opts },
         urgent: false,
         background: true,
+        isolate: false,
         seq: 1,
         cancel: Arc::default(),
     });
@@ -3430,7 +3473,7 @@ fn gpu_worker_routes_admit_display_readback_and_auto_effects() {
         scope.spawn(|| {
             pool.install(|| {
                 started.send(()).unwrap();
-                worker.drain(Some(0));
+                worker.drain(RenderLane::Preview(0));
                 tx.send(()).unwrap();
             })
         });
@@ -3511,8 +3554,8 @@ fn gpu_preview_lane_waits_for_admission_and_resets_its_marker() {
     let (early, admitted, helper) = std::thread::scope(|scope| {
         scope.spawn(|| {
             pool.install(|| {
-                let _drain = Draining::enter(Some(0)).unwrap();
-                assert!(Draining::enter(None).is_none(), "a lane cannot start a nested drain");
+                let _drain = Draining::enter(true).unwrap();
+                assert!(Draining::enter(false).is_none(), "a lane cannot start a nested drain");
                 assert!(DRAINING_LANE.get(), "nested rejection must not clear the lane marker");
                 started.send(()).unwrap();
                 tx.send(slots.for_render(2).is_some()).unwrap();
@@ -3536,7 +3579,7 @@ fn gpu_preview_lane_waits_for_admission_and_resets_its_marker() {
         assert!(!DRAINING.get());
         assert!(!DRAINING_LANE.get());
         let panic = std::panic::catch_unwind(|| {
-            let _drain = Draining::enter(Some(0)).unwrap();
+            let _drain = Draining::enter(true).unwrap();
             panic!("synthetic lane failure");
         });
         assert!(panic.is_err());

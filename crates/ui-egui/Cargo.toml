@@ -72,6 +72,13 @@ effectcraft-media = { workspace = true }
 exr = { workspace = true }
 tempfile = { workspace = true }
 
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+effectcraft-helper-host = { workspace = true }
+
+[[test]]
+name = "viewer_helper"
+harness = false
+
 [build-dependencies]
 serde_json = { workspace = true }
 toml = "1"

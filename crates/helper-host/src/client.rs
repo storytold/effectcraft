@@ -652,6 +652,10 @@ impl EffectPlugin for HelperEffect {
         format!("helper: {}", self.helper.program.display())
     }
 
+    fn uses_external_helper(&self) -> bool {
+        true
+    }
+
     fn padding(&self, params: &PluginParams, time: f64, scale: f64, layer_size: [f64; 2], instance_key: u64) -> u32 {
         if !self.padding || blocklist::is_blocked(&self.manifest.id) {
             return 0;
