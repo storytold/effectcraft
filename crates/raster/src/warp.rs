@@ -346,6 +346,10 @@ fn composite_warp_impl(
         area = area.intersect(&c);
     }
     if area.is_empty() {
+        if matches!(opts.mode, BlendMode::StencilAlpha | BlendMode::StencilLuma) {
+            dst.data.fill([0.0; 4]);
+            return None;
+        }
         return NOTHING;
     }
     let (x0, x1) = (area.x0.max(0.0) as usize, area.x1.min(dst.width as f64) as usize);

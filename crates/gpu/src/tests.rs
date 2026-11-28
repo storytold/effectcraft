@@ -2223,3 +2223,134 @@ fn mem_gate_reclaims_over_cap_and_tolerates_timeout() {
         assert!(g.render(&r, s.cid, Tick::ZERO).is_some(), "readback waits for poll_lock and succeeds without retiring the context");
     });
 }
+
+/// Native GPU ROI compositing: 2D multi-layer + heavy effects + adjustment layer + 3D comp
+/// all stay on the GPU (`g.render` returns `Some`), match CPU ROI pixel-for-pixel, and avoid
+/// dropping to CPU.
+#[test]
+fn gpu_native_roi_matches_cpu_and_accelerates_heavy_effects() {
+    let Some(g) = gpu() else { return };
+    let mut p = Project::default();
+    let comp = Comp::new(640, 480, FrameRate::FPS_30, Tick::from_seconds_f64(2.0));
+    let cid = p.add_item("Comp", Label::Sandstone, None, ItemKind::Comp(comp.clone().into()));
+    let s1 = p.add_item("Base", Label::Red, None, ItemKind::Solid(Solid { color: [0.85, 0.3, 0.15], width: 640, height: 480, pixel_aspect: 1.0 }));
+    let s2 = p.add_item("Off", Label::Blue, None, ItemKind::Solid(Solid { color: [0.1, 0.4, 0.9], width: 80, height: 80, pixel_aspect: 1.0 }));
+    let s_adj = p.add_item("Adj", Label::Yellow, None, ItemKind::Solid(Solid { color: [1.0, 1.0, 1.0], width: 640, height: 480, pixel_aspect: 1.0 }));
+
+    let mut base = build::layer(&mut p, &comp, "Base", LayerSource::Solid { item: s1 }, (640, 480), None);
+    let mut ids = build::Ids(&mut p.next_id);
+    let mut blur = effectcraft_effects::instantiate(effectcraft_effects::find("ec.blur.gaussian").unwrap(), &mut ids, "Gaussian Blur", [640.0, 480.0]);
+    blur.prop_mut("blurriness").unwrap().value = Value::Scalar(20.0);
+    let mut glow = effectcraft_effects::instantiate(effectcraft_effects::find("ec.stylize.glow").unwrap(), &mut ids, "Glow", [640.0, 480.0]);
+    glow.prop_mut("radius").unwrap().value = Value::Scalar(16.0);
+    base.props.sub_mut("effects").unwrap().children.push(effectcraft_project::Node::Group(blur));
+    base.props.sub_mut("effects").unwrap().children.push(effectcraft_project::Node::Group(glow));
+
+    let mut off = build::layer(&mut p, &comp, "OffROI", LayerSource::Solid { item: s2 }, (80, 80), None);
+    off.props.prop_mut("transform/position").unwrap().value = Value::Vec3([40.0, 40.0, 0.0]);
+
+    let mut adj = build::layer(&mut p, &comp, "Adj", LayerSource::Solid { item: s_adj }, (640, 480), None);
+    adj.switches.adjustment = true;
+    let mut ids = build::Ids(&mut p.next_id);
+    let mut levels = effectcraft_effects::instantiate(effectcraft_effects::find("ec.color.levels").unwrap(), &mut ids, "Levels", [640.0, 480.0]);
+    levels.prop_mut("gamma").unwrap().value = Value::Scalar(1.4);
+    adj.props.sub_mut("effects").unwrap().children.push(effectcraft_project::Node::Group(levels));
+
+    p.comp_mut(cid).unwrap().layers = vec![adj, off, base].into();
+    let roi = Some([220.0, 160.0, 160.0, 120.0]);
+    let t = Tick::ZERO;
+    let cpu_roi = Renderer::new(&p, &Pattern, RenderOpts { backend: Backend::Cpu, roi, ..Default::default() }).comp_frame_cpu(cid, t);
+    let mut r_gpu = Renderer::new(&p, &Pattern, RenderOpts { backend: Backend::Gpu, roi, ..Default::default() });
+    r_gpu.accel = Some(g);
+    let gpu_roi = g.render(&r_gpu, cid, t).expect("GPU compositor must handle 2D ROI natively");
+    assert_eq!((gpu_roi.width, gpu_roi.height), (160, 120));
+    let d = diff(&cpu_roi, &gpu_roi, tolerance(BitDepth::Bpc8));
+    assert_eq!(d.over, 0, "GPU 2D ROI mismatch vs CPU: {d:?}");
+
+    // 3D comp with ROI inside: GPU renders 3D scene on GPU and crops on GPU.
+    p.comp_mut(cid).unwrap().layers[1].switches.three_d = true;
+    p.comp_mut(cid).unwrap().layers[1].props.prop_mut("transform/position").unwrap().value = Value::Vec3([300.0, 220.0, 0.0]);
+    let cpu_3d = Renderer::new(&p, &Pattern, RenderOpts { backend: Backend::Cpu, roi, ..Default::default() }).comp_frame_cpu(cid, t);
+    let mut r_gpu3d = Renderer::new(&p, &Pattern, RenderOpts { backend: Backend::Gpu, roi, ..Default::default() });
+    r_gpu3d.accel = Some(g);
+    let gpu_3d = g.render(&r_gpu3d, cid, t).expect("GPU compositor must handle 3D ROI natively");
+    assert_eq!((gpu_3d.width, gpu_3d.height), (160, 120));
+    let d3 = diff(&cpu_3d, &gpu_3d, tolerance(BitDepth::Bpc8));
+    assert_eq!(d3.over, 0, "GPU 3D ROI mismatch vs CPU: {d3:?}");
+}
+
+/// Real-hardware benchmark comparing 1080p full-frame vs 256×256 ROI on GPU and CPU with heavy
+/// effects (Camera Lens Blur + Gaussian Blur + Glow + off-ROI layers).
+#[test]
+fn bench_roi_speedup_1080p() {
+    let Some(g) = gpu() else { return };
+    let mut p = Project::default();
+    let comp = Comp::new(1920, 1080, FrameRate::FPS_30, Tick::from_seconds_f64(2.0));
+    let cid = p.add_item("HD", Label::Sandstone, None, ItemKind::Comp(comp.clone().into()));
+    let s_hd = p.add_item("HD_Solid", Label::Red, None, ItemKind::Solid(Solid { color: [0.8, 0.4, 0.2], width: 1920, height: 1080, pixel_aspect: 1.0 }));
+    let s_off = p.add_item("Off_Solid", Label::Blue, None, ItemKind::Solid(Solid { color: [0.2, 0.5, 0.9], width: 400, height: 400, pixel_aspect: 1.0 }));
+
+    let mut layers = Vec::new();
+    // 6 heavy off-ROI layers in top-left corner
+    for i in 0..6 {
+        let mut l = build::layer(&mut p, &comp, &format!("Off{i}"), LayerSource::Solid { item: s_off }, (400, 400), None);
+        l.props.prop_mut("transform/position").unwrap().value = Value::Vec3([200.0, 200.0, 0.0]);
+        let mut ids = build::Ids(&mut p.next_id);
+        let mut bl = effectcraft_effects::instantiate(effectcraft_effects::find("ec.blur.gaussian").unwrap(), &mut ids, "Gaussian Blur", [400.0, 400.0]);
+        bl.prop_mut("blurriness").unwrap().value = Value::Scalar(35.0);
+        l.props.sub_mut("effects").unwrap().children.push(effectcraft_project::Node::Group(bl));
+        layers.push(l);
+    }
+    // 1 full-screen 1080p heavy layer
+    let mut bg = build::layer(&mut p, &comp, "BG_HD", LayerSource::Solid { item: s_hd }, (1920, 1080), None);
+    let mut ids = build::Ids(&mut p.next_id);
+    let mut clb = effectcraft_effects::instantiate(effectcraft_effects::find("ec.blur.cameralens").unwrap(), &mut ids, "Camera Lens Blur", [1920.0, 1080.0]);
+    clb.prop_mut("blurRadius").unwrap().value = Value::Scalar(16.0);
+    let mut glow = effectcraft_effects::instantiate(effectcraft_effects::find("ec.stylize.glow").unwrap(), &mut ids, "Glow", [1920.0, 1080.0]);
+    glow.prop_mut("radius").unwrap().value = Value::Scalar(24.0);
+    bg.props.sub_mut("effects").unwrap().children.push(effectcraft_project::Node::Group(clb));
+    bg.props.sub_mut("effects").unwrap().children.push(effectcraft_project::Node::Group(glow));
+    layers.push(bg);
+    p.comp_mut(cid).unwrap().layers = layers.into();
+
+    let roi = Some([1200.0, 600.0, 256.0, 256.0]);
+    let t = Tick::ZERO;
+    // Warm up GPU pipelines
+    let mut r_full = Renderer::new(&p, &Pattern, RenderOpts { backend: Backend::Gpu, ..Default::default() });
+    r_full.accel = Some(g);
+    let _ = r_full.comp_frame(cid, t);
+    let mut r_roi = Renderer::new(&p, &Pattern, RenderOpts { backend: Backend::Gpu, roi, ..Default::default() });
+    r_roi.accel = Some(g);
+    let _ = r_roi.comp_frame(cid, t);
+
+    let iters = 5;
+    let t0 = std::time::Instant::now();
+    for _ in 0..iters {
+        let _ = r_full.comp_frame(cid, t);
+    }
+    let gpu_full_ms = t0.elapsed().as_secs_f64() * 1e3 / iters as f64;
+
+    let t1 = std::time::Instant::now();
+    for _ in 0..iters {
+        let _ = r_roi.comp_frame(cid, t);
+    }
+    let gpu_roi_ms = t1.elapsed().as_secs_f64() * 1e3 / iters as f64;
+
+    let r_cpu_full = Renderer::new(&p, &Pattern, RenderOpts { backend: Backend::Cpu, ..Default::default() });
+    let r_cpu_roi = Renderer::new(&p, &Pattern, RenderOpts { backend: Backend::Cpu, roi, ..Default::default() });
+    let tc0 = std::time::Instant::now();
+    let _ = r_cpu_full.comp_frame_cpu(cid, t);
+    let cpu_full_ms = tc0.elapsed().as_secs_f64() * 1e3;
+
+    let tc1 = std::time::Instant::now();
+    let _ = r_cpu_roi.comp_frame_cpu(cid, t);
+    let cpu_roi_ms = tc1.elapsed().as_secs_f64() * 1e3;
+
+    eprintln!(
+        "1080p ROI benchmark (256x256 ROI): GPU full={gpu_full_ms:.2}ms vs GPU ROI={gpu_roi_ms:.2}ms ({:.2}x) | CPU full={cpu_full_ms:.2}ms vs CPU ROI={cpu_roi_ms:.2}ms ({:.2}x)",
+        gpu_full_ms / gpu_roi_ms.max(0.01),
+        cpu_full_ms / cpu_roi_ms.max(0.01),
+    );
+    assert!(gpu_roi_ms < gpu_full_ms, "GPU ROI ({gpu_roi_ms:.2}ms) should be faster than GPU full ({gpu_full_ms:.2}ms)");
+    assert!(cpu_roi_ms < cpu_full_ms, "CPU ROI ({cpu_roi_ms:.2}ms) should be faster than CPU full ({cpu_full_ms:.2}ms)");
+}

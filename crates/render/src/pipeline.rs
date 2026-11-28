@@ -18,6 +18,10 @@ pub(crate) struct EffectStack {
     pub adjustment: bool,
     pub limit: usize,
     pub origin: [f64; 2],
+    /// True when the input buffer was intentionally cropped to the visible Region of Interest
+    /// (+ stack margin) for a verified local-margin effect stack: skip re-expanding to the full
+    /// layer rectangle via `cover` / `align`.
+    pub roi_cropped: bool,
 }
 
 /// A footage layer's source as the decoded picture itself (see [`Renderer::footage_picture`]):
@@ -532,8 +536,11 @@ impl<'a> Renderer<'a> {
     /// collapsed 2D transform — or the visible part can't be bounded (see
     /// [`three_d::compose::visible_clip`]).
     pub(crate) fn raster_clip(&self, ctx: &EvalCtx, layer: &Layer) -> Option<kurbo::Rect> {
-        if self.whole_raster || !layer.is_3d() || !matches!(layer.source, LayerSource::Text | LayerSource::Shape) || self.outer.is_some() {
+        if self.whole_raster || !matches!(layer.source, LayerSource::Text | LayerSource::Shape) || self.outer.is_some() {
             return None;
+        }
+        if !layer.is_3d() {
+            return self.raster_clip_2d_roi(ctx, layer);
         }
         if (layer.switches.effects && layer.effects().is_some_and(|fx| !fx.children.is_empty()))
             || layer.masks().is_some_and(|m| !m.children.is_empty())
@@ -563,6 +570,182 @@ impl<'a> Renderer<'a> {
         // (Not cut to the content bounds: a stroke or a glyph's padding reaches past them.)
         let cells = kurbo::Rect::new(snap(v.x0, false), snap(v.y0, false), snap(v.x1, true), snap(v.y1, true));
         (cells.is_finite() && cells.intersect(b).area() <= b.area() * 0.5).then_some(cells)
+    }
+
+    /// The layer-space part of a 2D text or shape layer shown inside a viewer Region of Interest,
+    /// when clipping vector/glyph rasterisation saves work without affecting visible pixels.
+    fn raster_clip_2d_roi(&self, ctx: &EvalCtx, layer: &Layer) -> Option<kurbo::Rect> {
+        let (ox, oy, rw, rh) = self.roi_offset()?;
+        if self.depth > 0
+            || self.collapse3d.is_some()
+            || layer.switches.adjustment
+            || self.blurred(ctx, layer)
+            || styles::active(ctx, layer)
+            || layer.masks().is_some_and(|m| !m.children.is_empty())
+            || (matches!(layer.source, LayerSource::Text) && text::animator_blur(ctx, layer))
+        {
+            return None;
+        }
+        // Only clip when there are no effects, or every enabled video effect skips full-layer
+        // cover AND has a finite local ROI margin.
+        let mut margin = 0.0f64;
+        if layer.switches.effects
+            && let Some(fx) = layer.effects()
+        {
+            for g in fx.groups().filter(|g| g.enabled) {
+                let GroupKind::Effect { effect } = &g.kind else { return None };
+                if effectcraft_effects::audio_fx::is_audio_effect(effect) {
+                    continue;
+                }
+                let spec = effectcraft_effects::find(effect)?;
+                if !spec.skips_cover() {
+                    return None;
+                }
+                let params = self.effect_params(ctx, layer, g);
+                margin += effectcraft_effects::roi_margin(effect, &params)?;
+            }
+        }
+        let s = self.opts.scale;
+        let (l2c, _) = ctx.layer_to_comp(layer);
+        let inv = (effectcraft_geom::Mat3::scale(vec2(s, s)) * l2c).inverse()?;
+        if !inv.is_affine() {
+            return None;
+        }
+        let corners = [
+            inv.apply(vec2(ox - 4.0, oy - 4.0)),
+            inv.apply(vec2(ox + rw as f64 + 4.0, oy - 4.0)),
+            inv.apply(vec2(ox + rw as f64 + 4.0, oy + rh as f64 + 4.0)),
+            inv.apply(vec2(ox - 4.0, oy + rh as f64 + 4.0)),
+        ];
+        if !corners.iter().all(|p| p.x.is_finite() && p.y.is_finite()) {
+            return None;
+        }
+        let v = kurbo::Rect::new(
+            corners.iter().map(|p| p.x).fold(f64::INFINITY, f64::min) - margin,
+            corners.iter().map(|p| p.y).fold(f64::INFINITY, f64::min) - margin,
+            corners.iter().map(|p| p.x).fold(f64::NEG_INFINITY, f64::max) + margin,
+            corners.iter().map(|p| p.y).fold(f64::NEG_INFINITY, f64::max) + margin,
+        );
+        let b = content_bounds(ctx, layer).map(|b| kurbo::Rect::new(b[0], b[1], b[2], b[3]))?;
+        if v.x0 <= b.x0 && v.y0 <= b.y0 && v.x1 >= b.x1 && v.y1 >= b.y1 {
+            return None;
+        }
+        let c = 2f64.powf(((v.width().max(v.height()) / 4.0).max(1.0)).log2().floor());
+        let snap = |val: f64, up: bool| if up { (val / c).ceil() * c } else { (val / c).floor() * c };
+        let cells = kurbo::Rect::new(snap(v.x0, false), snap(v.y0, false), snap(v.x1, true), snap(v.y1, true));
+        (cells.is_finite() && cells.intersect(b).area() <= b.area() * 0.75).then_some(cells)
+    }
+
+    /// Total conservative layer-pixel margin across all enabled video effects on `layer`.
+    /// Returns `Some(0.0)` when no video effects are enabled, or `None` if any enabled video
+    /// effect may sample arbitrarily far or depends on full-layer dimensions.
+    pub(crate) fn roi_stack_margin(&self, ctx: &EvalCtx, layer: &Layer) -> Option<f64> {
+        if !layer.switches.effects {
+            return Some(0.0);
+        }
+        let mut total = 0.0f64;
+        for g in layer.effects().into_iter().flat_map(|fx| fx.groups()).filter(|g| g.enabled) {
+            let GroupKind::Effect { effect } = &g.kind else { return None };
+            if effectcraft_effects::audio_fx::is_audio_effect(effect) {
+                continue;
+            }
+            let params = self.effect_params(ctx, layer, g);
+            total += effectcraft_effects::roi_margin(effect, &params)?;
+        }
+        Some(total)
+    }
+
+    /// Whether `layer` has at least one enabled video effect.
+    fn has_enabled_video_effects(&self, layer: &Layer) -> bool {
+        layer.switches.effects
+            && layer.effects().is_some_and(|fx| {
+                fx.groups()
+                    .filter(|g| g.enabled)
+                    .any(|g| matches!(&g.kind, GroupKind::Effect { effect } if !effectcraft_effects::audio_fx::is_audio_effect(effect)))
+            })
+    }
+
+    /// Layer-space ROI rectangle (expanded by the effect stack's total local margin) for a sized
+    /// 2D layer with enabled local-margin effects. `None` when ROI cropping is not applicable.
+    fn roi_effect_layer_rect(&self, ctx: &EvalCtx, layer: &Layer) -> Option<kurbo::Rect> {
+        let (ox, oy, rw, rh) = self.roi_offset()?;
+        if self.whole_raster
+            || self.depth > 0
+            || self.outer.is_some()
+            || self.collapse3d.is_some()
+            || layer.switches.three_d
+            || layer.switches.adjustment
+            || self.blurred(ctx, layer)
+            || styles::active(ctx, layer)
+            || !matches!(layer.source, LayerSource::Solid { .. } | LayerSource::Footage { .. } | LayerSource::Comp { .. })
+            || !self.has_enabled_video_effects(layer)
+        {
+            return None;
+        }
+        let margin = self.roi_stack_margin(ctx, layer)?;
+        let s = self.opts.scale;
+        let (l2c, _) = ctx.layer_to_comp(layer);
+        let inv = (effectcraft_geom::Mat3::scale(vec2(s, s)) * l2c).inverse()?;
+        if !inv.is_affine() {
+            return None;
+        }
+        let corners = [
+            inv.apply(vec2(ox - 4.0, oy - 4.0)),
+            inv.apply(vec2(ox + rw as f64 + 4.0, oy - 4.0)),
+            inv.apply(vec2(ox + rw as f64 + 4.0, oy + rh as f64 + 4.0)),
+            inv.apply(vec2(ox - 4.0, oy + rh as f64 + 4.0)),
+        ];
+        if !corners.iter().all(|p| p.x.is_finite() && p.y.is_finite()) {
+            return None;
+        }
+        let rect = kurbo::Rect::new(
+            corners.iter().map(|p| p.x).fold(f64::INFINITY, f64::min) - margin,
+            corners.iter().map(|p| p.y).fold(f64::INFINITY, f64::min) - margin,
+            corners.iter().map(|p| p.x).fold(f64::NEG_INFINITY, f64::max) + margin,
+            corners.iter().map(|p| p.y).fold(f64::NEG_INFINITY, f64::max) + margin,
+        );
+        rect.is_finite().then_some(rect)
+    }
+
+    /// Convert a layer-space ROI rectangle into an aligned pixel crop `(x, y, w, h)` inside a
+    /// buffer of size `(buf_w, buf_h)` with `offset` and `scale` (in layer space, or in effect
+    /// space shifted by `origin`). Returns `None` if cropping saves less than 25% of pixels.
+    fn crop_rect_for_buf(rect: kurbo::Rect, origin: [f64; 2], buf_w: u32, buf_h: u32, offset: [f64; 2], scale: f64) -> Option<(u32, u32, u32, u32)> {
+        if buf_w == 0 || buf_h == 0 || scale <= 0.0 || !scale.is_finite() {
+            return None;
+        }
+        let align = effectcraft_effects::GRID_ALIGN;
+        let px0 = (rect.x0 - origin[0]) * scale + offset[0];
+        let py0 = (rect.y0 - origin[1]) * scale + offset[1];
+        let px1 = (rect.x1 - origin[0]) * scale + offset[0];
+        let py1 = (rect.y1 - origin[1]) * scale + offset[1];
+        let cx0 = ((px0.floor() as i64).clamp(0, buf_w as i64) as u32) & !(align - 1);
+        let cy0 = ((py0.floor() as i64).clamp(0, buf_h as i64) as u32) & !(align - 1);
+        let cx1 = (px1.ceil() as i64).clamp(cx0 as i64, buf_w as i64) as u32;
+        let cy1 = (py1.ceil() as i64).clamp(cy0 as i64, buf_h as i64) as u32;
+        let (cw, ch) = (cx1 - cx0, cy1 - cy0);
+        if cw == 0 || ch == 0 {
+            return Some((cx0, cy0, 0, 0));
+        }
+        let cropped_area = u64::from(cw) * u64::from(ch);
+        let full_area = u64::from(buf_w) * u64::from(buf_h);
+        (cropped_area <= full_area * 3 / 4).then_some((cx0, cy0, cw, ch))
+    }
+
+    /// ROI pixel crop `(x, y, w, h)` for a GPU-resident layer input in effect space (used by
+    /// `effectcraft-gpu`'s `draw_resident_fx`). `None` when the full buffer should be processed.
+    pub fn layer_roi_crop_effect_space(
+        &self,
+        ctx: &EvalCtx,
+        layer: &Layer,
+        buf_w: u32,
+        buf_h: u32,
+        eff_offset: [f64; 2],
+        scale: f64,
+    ) -> Option<(u32, u32, u32, u32)> {
+        let rect = self.roi_effect_layer_rect(ctx, layer)?;
+        let origin = ctx.effect_bounds(layer).1;
+        Self::crop_rect_for_buf(rect, origin, buf_w, buf_h, eff_offset, scale)
     }
 
     /// A layer content cache key that also names the part rasterised ([`Self::raster_clip`]).
@@ -778,7 +961,16 @@ impl<'a> Renderer<'a> {
         // The comp below an adjustment layer is not in its layer space: it stays as it is.
         let origin = if adjustment { [0.0; 2] } else { ctx.effect_bounds(layer).1 };
         buf.rebase(origin);
-        let mut out = self.effect_space_stack(ctx, layer, buf, EffectStack { adjustment, limit, origin }, timing);
+        let mut out = self.effect_space_stack(ctx, layer, buf, EffectStack { adjustment, limit, origin, roi_cropped: false }, timing);
+        out.rebase([-origin[0], -origin[1]]);
+        out
+    }
+
+    /// [`Self::apply_effects_timed`] on a layer buffer already cropped to the ROI + stack margin.
+    fn apply_effects_roi_timed(&self, ctx: &EvalCtx, layer: &Layer, mut buf: Buf, timing: Option<&mut Vec<(String, f64)>>) -> Buf {
+        let origin = ctx.effect_bounds(layer).1;
+        buf.rebase(origin);
+        let mut out = self.effect_space_stack(ctx, layer, buf, EffectStack { adjustment: false, limit: usize::MAX, origin, roi_cropped: true }, timing);
         out.rebase([-origin[0], -origin[1]]);
         out
     }
@@ -803,7 +995,7 @@ impl<'a> Renderer<'a> {
         mut timing: Option<&mut Vec<(String, f64)>>,
         target: &mut dyn FxTarget,
     ) {
-        let EffectStack { adjustment, limit, origin } = stack;
+        let EffectStack { adjustment, limit, origin, roi_cropped } = stack;
         if !layer.switches.effects {
             return;
         }
@@ -833,7 +1025,7 @@ impl<'a> Renderer<'a> {
                 _ => None,
             })
         };
-        if !adjustment && video().next().is_some() {
+        if !adjustment && !roi_cropped && video().next().is_some() {
             if video().all(|s| s.skips_cover()) {
                 target.align(layer_size);
             } else {
@@ -1527,25 +1719,59 @@ impl<'a> Renderer<'a> {
         layer: &Layer,
         mut timing: Option<&mut LayerTiming>,
     ) -> Option<(Arc<Buf>, Option<u64>, Arc<ReadFiles>)> {
-        let key = self.cache.and_then(|_| cache::layer_key(ctx, layer, self.raster_scale(ctx, layer), self.opts.draft, self.mb_on(ctx, layer)));
-        let key = self.content_key(ctx, layer, self.clipped_key(ctx, layer, key));
-        if let Some((b, files)) = self.cached(key) {
+        let base_key = self.cache.and_then(|_| cache::layer_key(ctx, layer, self.raster_scale(ctx, layer), self.opts.draft, self.mb_on(ctx, layer)));
+        let full_key = self.content_key(ctx, layer, self.clipped_key(ctx, layer, base_key));
+        if let Some((b, files)) = self.cached(full_key) {
             if let Some(t) = timing.as_deref_mut() {
                 t.cached = true;
             }
-            return Some((b, key, files));
+            return Some((b, full_key, files));
+        }
+        // When a top-level ROI is active and the layer's effect stack has a known finite margin,
+        // crop the source buffer to the visible ROI (+ margin) before running effects.
+        let roi_rect = self.roi_effect_layer_rect(ctx, layer).map(|r| {
+            let snap = |v: f64, up: bool| if up { (v / 32.0).ceil() * 32.0 } else { (v / 32.0).floor() * 32.0 };
+            kurbo::Rect::new(snap(r.x0, false), snap(r.y0, false), snap(r.x1, true), snap(r.y1, true))
+        });
+        let roi_key = roi_rect.and_then(|r| full_key.map(|k| raster_clip_key(k, r)));
+        if let Some((b, files)) = self.cached(roi_key) {
+            if let Some(t) = timing.as_deref_mut() {
+                t.cached = true;
+            }
+            return Some((b, roi_key, files));
         }
         // A footage layer read in part (a region of interest, #3271) isn't kept: its key names
         // the whole layer (a whole buffer kept before is used above).
-        let key = key.filter(|_| !self.reads_footage_rows(ctx, layer));
-        let (buf, files) = self.recorded(key, |r| {
+        let reads_rows = self.reads_footage_rows(ctx, layer);
+        let record_key = if reads_rows { None } else { roi_key.or(full_key) };
+        let mut did_crop = false;
+        let (buf, files) = self.recorded(record_key, |r| {
             // (what expressions read while it is made, at shutter times too, goes to its files)
             let ctx = &r.with_reads(ctx);
-            let buf = r.masked_source(ctx, layer)?;
+            let mut buf = r.masked_source(ctx, layer)?;
+            if let Some(rect) = roi_rect
+                && let Some((cx, cy, cw, ch)) = Self::crop_rect_for_buf(rect, [0.0; 2], buf.img.width, buf.img.height, buf.offset, buf.scale)
+            {
+                did_crop = true;
+                if cw == 0 || ch == 0 {
+                    return Some(Buf { img: Image::new(0, 0), offset: [0.0; 2], scale: buf.scale });
+                }
+                buf.img = buf.img.crop(cx as i64, cy as i64, cw, ch);
+                buf.offset[0] -= cx as f64;
+                buf.offset[1] -= cy as f64;
+                return Some(r.apply_effects_roi_timed(ctx, layer, buf, timing.map(|t| &mut t.effects)));
+            }
             Some(r.apply_effects_timed(ctx, layer, buf, false, usize::MAX, timing.map(|t| &mut t.effects)))
         });
-        let (buf, files) = self.keep(key, Arc::new(buf?), &files);
-        Some((buf, key, files))
+        let store_key = if reads_rows {
+            None
+        } else if did_crop {
+            roi_key
+        } else {
+            full_key
+        };
+        let (buf, files) = self.keep(store_key, Arc::new(buf?), &files);
+        Some((buf, store_key, files))
     }
 
     /// A layer's input at the context time: source → masks → its first `effects` effects
@@ -1571,7 +1797,7 @@ impl<'a> Renderer<'a> {
             let origin = ctx.effect_bounds(layer).1;
             buf.rebase(origin);
             if effects > 0 {
-                buf = r.effect_space_stack(ctx, layer, buf, EffectStack { adjustment: false, limit: effects, origin }, None);
+                buf = r.effect_space_stack(ctx, layer, buf, EffectStack { adjustment: false, limit: effects, origin, roi_cropped: false }, None);
             }
             Some(buf)
         });

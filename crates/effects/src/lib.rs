@@ -672,6 +672,94 @@ impl EffectSpec {
     }
 }
 
+/// Conservative layer-pixel reach around each output pixel for effects that are
+/// coordinate-invariant under buffer cropping (`offset` shift + smaller `(width, height)`).
+///
+/// Used by the renderer to cull off-ROI layers and crop layer buffers to the visible
+/// Region of Interest (plus margin) before evaluating heavy effect stacks. Returns `None`
+/// for effects that may sample arbitrarily far, depend on whole-layer dimensions/statistics,
+/// repeat layer edges (`repeatEdge`), or are plug-ins.
+pub fn roi_margin(id: &str, params: &Params) -> Option<f64> {
+    if id.starts_with("ec.control.") {
+        return Some(0.0);
+    }
+    if let Some(m) = channel3d::pixel_margin(id, params) {
+        return Some(m);
+    }
+    match id {
+        // Pure per-pixel colour, channel and keying effects (zero neighbour reach, no coord dependency).
+        "ec.color.brightnesscontrast"
+        | "ec.color.levels"
+        | "ec.color.curves"
+        | "ec.color.huesaturation"
+        | "ec.color.tint"
+        | "ec.color.exposure"
+        | "ec.color.vibrance"
+        | "ec.color.tritone"
+        | "ec.color.blackwhite"
+        | "ec.color.photofilter"
+        | "ec.color.channelmixer"
+        | "ec.color.colorbalance"
+        | "ec.color.colorbalancehls"
+        | "ec.color.selectivecolor"
+        | "ec.color.posterize"
+        | "ec.color.threshold"
+        | "ec.color.gammapedestalgain"
+        | "ec.color.changecolor"
+        | "ec.color.change2color"
+        | "ec.color.leavecolor"
+        | "ec.channel.invert"
+        | "ec.channel.shiftchannels"
+        | "ec.channel.removecolormatte"
+        | "ec.channel.solidcomposite"
+        | "ec.keying.colorkey"
+        | "ec.keying.lumakey"
+        | "ec.keying.linearcolorkey"
+        | "ec.keying.extract" => Some(0.0),
+
+        // Local-support blurs, glow, shadow, sharpen and stylize effects.
+        "ec.blur.gaussian" if !params.b("repeatEdge") => {
+            let b = params.f("blurriness").max(0.0);
+            Some(if b <= 0.0 { 0.0 } else { (b * 2.0).ceil() + 6.0 })
+        }
+        "ec.blur.fastbox" if !params.b("repeatEdge") => {
+            let r = params.f("radius").max(0.0);
+            let it = params.f("iterations").round().clamp(1.0, 50.0);
+            Some(if r <= 0.0 { 0.0 } else { ((r.floor() + 1.0) * it).ceil() + 4.0 })
+        }
+        "ec.blur.directional" => {
+            let len = params.f("length").abs();
+            Some(if len < 0.5 { 0.0 } else { len.ceil() + 4.0 })
+        }
+        "ec.blur.sharpen" => Some(4.0),
+        "ec.blur.unsharpmask" => {
+            let r = params.f("radius").max(0.0);
+            Some(if r <= 0.0 { 0.0 } else { (r * 4.0).ceil() + 6.0 })
+        }
+        "ec.blur.cameralens" if !params.b("repeatEdge") && params.get("blurMap/layer").and_then(Value::as_layer).is_none() => {
+            let r = params.f("blurRadius").max(0.0).min(CAMERA_LENS_MAX_RADIUS);
+            let aspect = params.f("irisProperties/irisAspectRatio").max(1.0);
+            Some(if r <= 0.0 { 0.0 } else { (r * aspect).ceil() + 4.0 })
+        }
+        "ec.stylize.glow" => {
+            let r = params.f("radius").max(0.0);
+            Some((r * 1.6).max(4.0).ceil() + 6.0)
+        }
+        "ec.perspective.dropshadow" => {
+            let dist = params.f("distance").abs();
+            let soft = params.f("softness").max(0.0);
+            Some((dist + soft * 2.0).ceil() + 6.0)
+        }
+        "ec.stylize.findedges" => Some(4.0),
+        "ec.stylize.emboss" => Some(params.f("relief").abs().ceil() + 4.0),
+        "ec.noise.median" => {
+            let r = params.f("radius").max(0.0).min(MEDIAN_MAX_RADIUS as f64);
+            Some(if r <= 0.0 { 0.0 } else { r.ceil() + 4.0 })
+        }
+        _ => None,
+    }
+}
+
 pub(crate) fn p(id: &'static str, name: &'static str, default: Value, ui: ParamUi) -> ParamSpec {
     ParamSpec { id, name, default, ui }
 }

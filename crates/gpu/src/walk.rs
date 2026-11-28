@@ -20,6 +20,9 @@ use crate::ops;
 /// The size [`render`] renders `comp_id` at, without rendering it.
 pub(crate) fn frame_size(r: &Renderer, comp_id: ItemId, t: Tick) -> Option<(u32, u32)> {
     let ctx = r.eval_ctx(comp_id, t)?;
+    if let Some((_, _, rw, rh)) = r.roi_offset() {
+        return Some((rw, rh));
+    }
     Some(effectcraft_render::frame_size(ctx.comp.width, ctx.comp.height, r.opts.scale))
 }
 
@@ -27,12 +30,28 @@ pub(crate) fn frame_size(r: &Renderer, comp_id: ItemId, t: Tick) -> Option<(u32,
 /// `Renderer::comp_frame_cpu` returns it). `None` when something cannot run here (the caller
 /// renders on the CPU instead).
 pub(crate) fn render<'g>(e: &mut Enc<'g>, r: &Renderer, comp_id: ItemId, t: Tick) -> Option<GpuImage> {
-    // Region-of-interest frames are cropped on the CPU path.
-    if r.opts.roi.is_some() {
-        return None;
-    }
     let ctx = r.eval_ctx(comp_id, t)?;
-    let (w, h) = effectcraft_render::frame_size(ctx.comp.width, ctx.comp.height, r.opts.scale);
+    // Region of interest on a comp with 3D layers: render the full frame on the GPU and crop
+    // on the GPU (matches `Renderer::comp_frame_cpu` without dropping to CPU).
+    if r.depth() == 0
+        && let Some(roi) = r.opts.roi
+        && ctx.comp.has_3d()
+        && (effectcraft_render::roi_inside(roi, ctx.comp.width, ctx.comp.height) || ctx.comp.renderer == effectcraft_project::Renderer::Advanced3D)
+    {
+        let full_r = r.without_roi();
+        let full = render(e, &full_r, comp_id, t)?;
+        let s = r.opts.scale;
+        let (x0, y0) = ((roi[0] * s).round() as i64, (roi[1] * s).round() as i64);
+        let (rw, rh) = (((roi[2] * s).round() as u32).max(1), ((roi[3] * s).round() as u32).max(1));
+        if !e.g.fits(rw, rh) {
+            return None;
+        }
+        return Some(e.crop(&full, x0, y0, rw, rh));
+    }
+    let (w, h) = match r.roi_offset() {
+        Some((_, _, rw, rh)) => (rw, rh),
+        None => effectcraft_render::frame_size(ctx.comp.width, ctx.comp.height, r.opts.scale),
+    };
     if r.depth() > 16 || !e.g.fits(w, h) {
         return None;
     }
@@ -220,16 +239,19 @@ fn draw_layer(e: &mut Enc, r: &Renderer, ctx: &EvalCtx, layer: &Layer, canvas: &
 }
 
 fn draw_layer_on(e: &mut Enc, r: &Renderer, ctx: &EvalCtx, layer: &Layer, canvas: &mut GpuImage) -> Option<()> {
+    if !layer.switches.adjustment && r.quality(layer) == Quality::Wireframe {
+        // The layer's bounds as a one-pixel outline (the CPU's pixels).
+        *canvas = crate::adv3d::wireframe(e, canvas, &r.wireframe_pixels(ctx, layer, (canvas.width, canvas.height)));
+        return Some(());
+    }
+    if r.layer_outside_roi(ctx, layer) {
+        return Some(());
+    }
     if layer.switches.adjustment {
         if draw_adjustment(e, r, ctx, layer, canvas).is_some() {
             return Some(());
         }
         return on_cpu(e, canvas, |img| r.draw_layer_cpu(ctx, layer, img));
-    }
-    if r.quality(layer) == Quality::Wireframe {
-        // The layer's bounds as a one-pixel outline (the CPU's pixels).
-        *canvas = crate::adv3d::wireframe(e, canvas, &r.wireframe_pixels(ctx, layer, (canvas.width, canvas.height)));
-        return Some(());
     }
     let opacity = r.layer_opacity(ctx, layer);
     if opacity <= 0.0 {
@@ -291,27 +313,47 @@ fn draw_resident_fx(e: &mut Enc, r: &Renderer, ctx: &EvalCtx, layer: &Layer, can
     }
     // The decoded footage picture itself when it is the layer's input (uploaded once per frame
     // and shared with every layer that shows it), else the cached input buffer.
-    let (src, offset, scale) = match picture(r, ctx, layer) {
+    let (src, offset, scale, roi_cropped) = match picture(r, ctx, layer) {
         Some(p) => {
             if p.img.is_empty() {
                 return Some(Some(()));
             }
-            let Some(src) = e.g.upload_picture(&p.img) else { return Some(None) };
-            (src, p.effect_offset, p.scale)
+            let Some(mut src) = e.g.upload_picture(&p.img) else { return Some(None) };
+            let mut off = p.effect_offset;
+            let mut cropped = false;
+            if let Some((cx, cy, cw, ch)) = r.layer_roi_crop_effect_space(ctx, layer, src.width, src.height, off, p.scale) {
+                if cw == 0 || ch == 0 {
+                    return Some(Some(()));
+                }
+                src = e.crop(&src, cx as i64, cy as i64, cw, ch);
+                off[0] -= cx as f64;
+                off[1] -= cy as f64;
+                cropped = true;
+            }
+            (src, off, p.scale, cropped)
         }
         None => {
             let input = r.layer_input(ctx, layer, 0)?;
             if input.img.is_empty() {
                 return Some(Some(()));
             }
-            let Some(src) = e.g.upload_buf(&input) else { return Some(None) };
-            (src, input.offset, input.scale)
+            if let Some((cx, cy, cw, ch)) = r.layer_roi_crop_effect_space(ctx, layer, input.img.width, input.img.height, input.offset, input.scale) {
+                if cw == 0 || ch == 0 {
+                    return Some(Some(()));
+                }
+                let cropped_img = input.img.crop(cx as i64, cy as i64, cw, ch);
+                let Some(src) = e.g.upload_image(&cropped_img) else { return Some(None) };
+                (src, [input.offset[0] - cx as f64, input.offset[1] - cy as f64], input.scale, true)
+            } else {
+                let Some(src) = e.g.upload_buf(&input) else { return Some(None) };
+                (src, input.offset, input.scale, false)
+            }
         }
     };
     let pipe = r.pipe();
     // `layer_input` is in effect space: run the stack there, then back to layer space.
     let mut fx = crate::effects::GpuFx::new(e, src, offset, scale, pipe.levels);
-    let origin = r.run_layer_effects_on(ctx, layer, &mut fx);
+    let origin = r.run_layer_effects_cropped_on(ctx, layer, &mut fx, roi_cropped);
     let Some((mut img, mut offset, scale)) = fx.finish() else { return Some(None) };
     offset = [offset[0] - origin[0] * scale, offset[1] - origin[1] * scale];
     if img.width == 0 || img.height == 0 {
@@ -436,11 +478,12 @@ fn draw_adjustment(e: &mut Enc, r: &Renderer, ctx: &EvalCtx, layer: &Layer, canv
         Some(c) => ops::convert(e, canvas, &c),
         None => canvas.clone(),
     };
-    let mut fx = crate::effects::GpuFx::new(e, below, [0.0; 2], r.opts.scale, pipe.levels);
+    let o = r.roi_offset().map(|(x, y, _, _)| [-x, -y]).unwrap_or([0.0; 2]);
+    let mut fx = crate::effects::GpuFx::new(e, below, o, r.opts.scale, pipe.levels);
     r.run_effects_on(ctx, layer, true, &mut fx);
     let (mut adjusted, offset, _) = fx.finish()?;
     // An effect that changed the frame (Motion Tile's Output size): back onto the canvas.
-    if let Some((dx, dy)) = effectcraft_effects::adjustment_crop(offset, [0.0; 2], (adjusted.width, adjusted.height), (w, h)) {
+    if let Some((dx, dy)) = effectcraft_effects::adjustment_crop(offset, o, (adjusted.width, adjusted.height), (w, h)) {
         adjusted = e.crop(&adjusted, dx, dy, w, h);
     }
     if adjusted.width != w || adjusted.height != h {

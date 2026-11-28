@@ -127,7 +127,7 @@ impl<'a> Renderer<'a> {
 
     /// The region of interest of a top-level 2D frame: (x, y) offset of the output in output
     /// pixels and its size. `None` renders the whole comp (no ROI, or a nested comp).
-    pub(crate) fn roi_offset(&self) -> Option<(f64, f64, u32, u32)> {
+    pub fn roi_offset(&self) -> Option<(f64, f64, u32, u32)> {
         let r = self.opts.roi.filter(|_| self.top)?;
         let s = self.opts.scale;
         if r[2] <= 0.0 || r[3] <= 0.0 {
@@ -136,17 +136,63 @@ impl<'a> Renderer<'a> {
         Some(((r[0] * s).round(), (r[1] * s).round(), ((r[2] * s).round() as u32).max(1), ((r[3] * s).round() as u32).max(1)))
     }
 
+    /// A clone of this renderer with `opts.roi` cleared (used when a 3D comp must render its
+    /// full frame before cropping to the region of interest).
+    pub fn without_roi(&self) -> Renderer<'a> {
+        Renderer { opts: super::opts::RenderOpts { roi: None, ..self.opts }, ..*self }
+    }
+
     /// The region of interest's offset in output pixels for 3D projection (0 without one).
     pub(crate) fn out_offset(&self) -> (f64, f64) {
         self.roi_offset().map_or((0.0, 0.0), |(x, y, _, _)| (x, y))
     }
 
     /// Scaled comp pixel → output pixel: the region of interest's offset.
-    fn out_matrix(&self) -> Mat3 {
+    pub(crate) fn out_matrix(&self) -> Mat3 {
         match self.roi_offset() {
             Some((x, y, _, _)) => Mat3::translate(vec2(-x, -y)),
             None => Mat3::IDENTITY,
         }
+    }
+
+    /// True when a 2D layer is guaranteed to contribute no pixels inside the active Region of
+    /// Interest, so both CPU and GPU compositors can skip decoding, rasterising and running its
+    /// effect stack altogether.
+    pub fn layer_outside_roi(&self, ctx: &EvalCtx, layer: &Layer) -> bool {
+        let Some((_, _, rw, rh)) = self.roi_offset() else { return false };
+        if self.whole_raster || layer.is_3d() || layer.blend_mode.is_stencil() || self.blurred(ctx, layer) || styles::active(ctx, layer) {
+            return false;
+        }
+        let Some(mut bounds) = super::frames::content_bounds(ctx, layer) else { return false };
+        if !layer.switches.adjustment {
+            let Some(pad) = self.roi_stack_margin(ctx, layer) else { return false };
+            if pad > 0.0 {
+                bounds[0] -= pad;
+                bounds[1] -= pad;
+                bounds[2] += pad;
+                bounds[3] += pad;
+            }
+        }
+        let s = self.opts.scale;
+        let (l2c, _) = ctx.layer_to_comp(layer);
+        let m = self.out_matrix() * Mat3::scale(vec2(s, s)) * self.outer.map_or(l2c, |o| o * l2c);
+        if !m.is_affine() {
+            return false;
+        }
+        let corners = [
+            m.apply(vec2(bounds[0], bounds[1])),
+            m.apply(vec2(bounds[2], bounds[1])),
+            m.apply(vec2(bounds[2], bounds[3])),
+            m.apply(vec2(bounds[0], bounds[3])),
+        ];
+        if !corners.iter().all(|p| p.x.is_finite() && p.y.is_finite()) {
+            return false;
+        }
+        let x0 = corners.iter().map(|p| p.x).fold(f64::INFINITY, f64::min) - 4.0;
+        let x1 = corners.iter().map(|p| p.x).fold(f64::NEG_INFINITY, f64::max) + 4.0;
+        let y0 = corners.iter().map(|p| p.y).fold(f64::INFINITY, f64::min) - 4.0;
+        let y1 = corners.iter().map(|p| p.y).fold(f64::NEG_INFINITY, f64::max) + 4.0;
+        x1 <= 0.0 || y1 <= 0.0 || x0 >= rw as f64 || y0 >= rh as f64
     }
 
     /// Buffer pixel → output pixel matrix for the layer at the context time.
@@ -188,7 +234,7 @@ impl<'a> Renderer<'a> {
 
     /// Whether a layer moves within the shutter: its own motion blur, or that of a collapsed
     /// precomp layer it is drawn through.
-    fn blurred(&self, ctx: &EvalCtx, layer: &Layer) -> bool {
+    pub(crate) fn blurred(&self, ctx: &EvalCtx, layer: &Layer) -> bool {
         self.mb_on(ctx, layer) || (!self.through_lost && self.links().any(|l| l.blur))
     }
 
@@ -433,6 +479,9 @@ impl<'a> Renderer<'a> {
             return Region::Full;
         }
         if opacity <= 0.0 && !layer.switches.adjustment {
+            return Region::Empty;
+        }
+        if self.layer_outside_roi(ctx, layer) {
             return Region::Empty;
         }
         if layer.switches.adjustment {
