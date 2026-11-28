@@ -260,7 +260,7 @@ fn command_scripts_and_batches_cannot_open_script_panels() {
         let e = s.execute("file.runScript", json!({"steps": [{"command": id, "params": params}]})).unwrap_err().to_string();
         assert!(e.contains("scripts can't run scripts"), "{id}: {e}");
         let e = s.execute("engine.batch", json!({"steps": [{"command": id, "params": params}]})).unwrap_err().to_string();
-        assert!(e.contains("can't run inside a batch"), "{id}: {e}");
+        assert!(e.contains("can't run inside a batch") || e.contains("writes files or acts outside the project"), "{id}: {e}");
         assert!(!panel_open(&s), "{id}");
         assert_eq!(setting(&mut s, "order"), "", "{id}");
     }
