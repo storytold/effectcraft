@@ -57,7 +57,7 @@ nothing is left behind if either side dies. Helpers may map the file instead of 
 
 | Request | Reply | |
 |---|---|---|
-| `{"op":"hello","version":1,"frames":"<path>"}` | `{"op":"hello","version":1,"name":"OpenFX","helper_version":"1.0","loads":["ofx"]}` | First message. The helper opens `frames` read/write. `loads` lists the extensions `load` accepts. A different `version` means EffectCraft won't use the helper. |
+| `{"op":"hello","version":1,"frames":"<path>","features":["gradient_params"]}` | `{"op":"hello","version":1,"name":"OpenFX","helper_version":"1.0","loads":["ofx"]}` | First message. The helper opens `frames` read/write. `loads` lists the extensions `load` accepts. A different `version` means EffectCraft won't use the helper. `features` lists what this EffectCraft accepts beyond the basics (absent in older builds): `gradient_params` means manifests may declare `gradient` parameters (their JSON arrives in `texts`; describe them only when listed). |
 | `{"op":"describe"}` | `{"op":"effects","effects":[{"manifest":{…},"padding":true}],"errors":["…"]}` | `manifest` is a [plug-in API 2 manifest](plugins.md#plug-in-api-2-native-plug-ins) (id, name, category, params). `padding: true` means EffectCraft asks `padding` before each render. |
 | `{"op":"load","path":"…"}` | `effects` (only the new ones) or `error` | A file or folder the user picked. Replayed after a restart. |
 | `{"op":"padding","effect":"…","instance":7,"time":1.0,"scale":1.0,"layer_size":[w,h],"flat":[…],"texts":[…]}` | `{"op":"padding","pixels":3}` | Transparent pixels to add on each side before the render (at most 4096). |
