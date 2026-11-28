@@ -356,6 +356,38 @@ pub fn character(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
         p.text(pos2(er.max.x + 6.0, y + 10.0), Align2::LEFT_CENTER, label, Tokens::ui(11.5), t.text_dim);
     }
     y += 32.0;
+    // Fill gradient: paint a vertical two-colour ramp on the fill pass only.
+    let grad = doc.fill_gradient;
+    let gb = Rect::from_min_size(pos2(x0, y + 3.0), vec2(14.0, 14.0));
+    if ui.add_enabled_ui(enabled, |ui| widgets::checkbox(ui, gb, grad.is_some(), &t, egui::Id::unique("char-fill-gradient"))).inner.changed() && enabled {
+        let val = if grad.is_some() {
+            serde_json::Value::Null
+        } else {
+            json!({"top": [doc.fill[0], doc.fill[1], doc.fill[2]], "bottom": [doc.fill[0], doc.fill[1], doc.fill[2]]})
+        };
+        actions.push(json!({"fillGradient": val, "merge": "char-fill-gradient"}));
+    }
+    app.auto.add("character.fillGradient", gb, "Gradient fill");
+    p.text(pos2(gb.max.x + 6.0, y + 10.0), Align2::LEFT_CENTER, "Gradient", Tokens::ui(11.5), t.text_dim);
+    if let Some(g) = grad {
+        for (i, (key, label, col)) in [("top", "Top", g.top), ("bottom", "Bottom", g.bottom)].into_iter().enumerate() {
+            let fx = x0 + 70.0 + i as f32 * (w / 2.0 - 40.0);
+            let fs = Rect::from_min_size(pos2(fx, y), vec2(26.0, 20.0));
+            let pop = egui::Id::unique(("char-gradient-color", key));
+            if widgets::swatch(ui, fs, col, egui::Id::unique(("char-gradient", key)), &t).clicked() && enabled {
+                widgets::open_popup(ui, pop);
+            }
+            app.auto.add(&format!("character.fillGradient.{key}"), fs, label);
+            let mut rgb = [col[0], col[1], col[2]];
+            if crate::widgets::color_popup(ui, pop, fs.left_bottom(), &mut rgb) {
+                let top = if key == "top" { rgb } else { [g.top[0], g.top[1], g.top[2]] };
+                let bottom = if key == "bottom" { rgb } else { [g.bottom[0], g.bottom[1], g.bottom[2]] };
+                actions.push(json!({"fillGradient": {"top": top, "bottom": bottom}, "merge": "char-fill-gradient"}));
+            }
+            p.text(pos2(fs.max.x + 6.0, y + 10.0), Align2::LEFT_CENTER, label, Tokens::ui(11.5), t.text_dim);
+        }
+    }
+    y += 26.0;
     // Style toggles: Faux Bold, Faux Italic, All Caps, Small Caps, Superscript, Subscript.
     let sup = doc.baseline == BaselineOption::Superscript;
     let sub = doc.baseline == BaselineOption::Subscript;

@@ -413,11 +413,20 @@ impl Default for ParaStyle {
     }
 }
 
-/// The value of a text layer's Source Text (hold-interpolated).
+/// A vertical two-colour fill for text glyphs. `None` means the single `TextDoc.fill` colour.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TextFillGradient {
+    pub top: [f32; 4],
+    pub bottom: [f32; 4],
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TextDoc {
     pub text: String,
+    /// Vertical gradient painted instead of `fill` when present.
+    #[serde(default)]
+    pub fill_gradient: Option<TextFillGradient>,
     pub font: String,
     pub style: String,
     pub size: f64,
@@ -482,6 +491,7 @@ impl Default for TextDoc {
     fn default() -> Self {
         TextDoc {
             text: String::new(),
+            fill_gradient: None,
             font: "Inter".into(),
             style: "Regular".into(),
             size: 72.0,
@@ -934,6 +944,16 @@ impl TextDoc {
     /// characters `r` (None = the whole text). Returns false for unknown keys.
     pub fn set_attr(&mut self, key: &str, v: &J, r: Option<Range<usize>>) -> Result<bool, String> {
         match key {
+            "fillGradient" => {
+                if v.is_null() {
+                    self.fill_gradient = None;
+                } else {
+                    let top = v.get("top").and_then(color_json).ok_or("fillGradient: expected top colour")?;
+                    let bottom = v.get("bottom").and_then(color_json).ok_or("fillGradient: expected bottom colour")?;
+                    self.fill_gradient = Some(TextFillGradient { top, bottom });
+                }
+                return Ok(true);
+            }
             "strokeOverFill" => {
                 self.stroke_over_fill = v.as_bool().ok_or("strokeOverFill: expected a boolean")?;
                 return Ok(true);
@@ -1609,5 +1629,19 @@ mod tests {
         apply_char_attr(&mut s, "allCaps", &J::Bool(true)).unwrap();
         apply_char_attr(&mut s, "allSmallCaps", &J::Bool(true)).unwrap();
         assert!(!s.all_caps && s.opentype.all_small_caps);
+    }
+
+    #[test]
+    fn fill_gradient_round_trips_and_can_be_cleared() {
+        let mut d = TextDoc::default();
+        assert!(d.fill_gradient.is_none());
+        assert!(d.set_attr("fillGradient", &serde_json::json!({"top": "#ffe200", "bottom": [1.0, 0.55, 0.05, 1.0]}), None).unwrap());
+        let g = d.fill_gradient.unwrap();
+        assert!((g.top[1] - 0.8862745).abs() < 0.001);
+        assert!((g.bottom[1] - 0.55).abs() < 0.001);
+        let back: TextDoc = serde_json::from_str(&serde_json::to_string(&d).unwrap()).unwrap();
+        assert_eq!(back.fill_gradient, Some(g));
+        assert!(d.set_attr("fillGradient", &serde_json::Value::Null, None).unwrap());
+        assert!(d.fill_gradient.is_none());
     }
 }

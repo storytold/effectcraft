@@ -17,7 +17,7 @@ use effectcraft_time::{TICKS_PER_SECOND, Tick};
 use serde::{Deserialize, Serialize};
 use std::borrow::Borrow;
 pub use text_doc::{BaselineOption, CharStyle, Composer, Direction, FigureStyle, FigureWidth, Kerning, LineJoin, OpenType, ParaStyle, StyleRun};
-pub use value::{FeatherPoint, Gradient, Justify, ShapePath, TextDoc, Value};
+pub use value::{FeatherPoint, Gradient, Justify, ShapePath, TextDoc, TextFillGradient, Value};
 
 /// Temporal interpolation on one side of a keyframe.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]

@@ -161,7 +161,7 @@ impl ShapePath {
     }
 }
 
-pub use crate::text_doc::{Justify, TextDoc};
+pub use crate::text_doc::{Justify, TextDoc, TextFillGradient};
 
 /// A gradient: colour stops `(position 0..1, rgba)` and opacity stops `(position, alpha)`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

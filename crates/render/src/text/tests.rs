@@ -1,5 +1,5 @@
 use effectcraft_color::Label;
-use effectcraft_keyframe::{Keyframe, ShapePath, TextDoc, Value};
+use effectcraft_keyframe::{Keyframe, ShapePath, TextDoc, TextFillGradient, Value};
 use effectcraft_project::build::{self, Ids};
 use effectcraft_project::{Comp, ItemId, ItemKind, Layer, LayerSource, MaskMode, Node, Project, PropGroup};
 use effectcraft_text::layout_doc;
@@ -612,6 +612,7 @@ fn touching_glyphs_join_without_a_seam() {
             m: Mat4::IDENTITY,
             xf: CharXf::default(),
             fill,
+            fill_gradient: None,
             stroke: [0.0; 4],
             stroke_width: 0.0,
             join: effectcraft_path::Join::Miter,
@@ -683,6 +684,7 @@ fn faux_bold_under_a_non_uniform_scale() {
         m: Mat4::scale(vec3(9.0, 1.0, 1.0)),
         xf: CharXf::default(),
         fill: [1.0; 4],
+        fill_gradient: None,
         stroke: [0.0; 4],
         stroke_width: 0.0,
         join: effectcraft_path::Join::Miter,
@@ -810,4 +812,29 @@ fn selector_evaluations_are_counted_across_the_layer_not_timed() {
     assert!([b.take(), b.take(), b.take()].iter().all(|t| *t));
     assert!(!b.take() && !b.take());
     assert_eq!(SelectorBudget::new().0.get(), MAX_SELECTOR_EVALS);
+}
+
+#[test]
+fn fill_gradient_paints_top_and_bottom_of_a_glyph_differently() {
+    let (mut p, cid, comp) = setup(200, 100);
+    let d = TextDoc {
+        text: "I".into(),
+        size: 90.0,
+        fill: [1.0, 0.0, 0.0, 1.0],
+        fill_gradient: Some(TextFillGradient { top: [1.0, 0.82, 0.05, 1.0], bottom: [1.0, 0.55, 0.06, 1.0] }),
+        stroke: [0.0, 0.0, 0.0, 1.0],
+        apply_stroke: true,
+        stroke_width: 4.0,
+        ..Default::default()
+    };
+    let mut l = text_layer(&mut p, &comp, d);
+    set(&mut l, "transform/position", Value::Vec3([100.0, 50.0, 0.0]));
+    p.comp_mut(cid).unwrap().layers.push(l);
+    let img = crate::render_frame(&p, cid, Tick::ZERO, 1.0);
+    let b = alpha_bbox(&img).unwrap();
+    let x = (b[0] + b[2]) / 2;
+    let top = img.get(x, b[1] + b[3] / 4);
+    let bottom = img.get(x, b[1] + 3 * b[3] / 4);
+    assert!(top[3] > 0.5 && bottom[3] > 0.5, "sampled inside the glyph: {top:?} {bottom:?}");
+    assert!(top[1] > bottom[1] + 0.05, "top is more yellow than the bottom: {top:?} {bottom:?}");
 }
