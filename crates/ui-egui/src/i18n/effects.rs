@@ -91,6 +91,7 @@ fn catalog(language: &str) -> Option<&'static Catalog> {
     static GEORGIAN_CATALOG: Catalog = Catalog { rows: GEORGIAN, categories: GEORGIAN_CATEGORIES, index: OnceLock::new() };
     static SWEDISH_CATALOG: Catalog = Catalog { rows: SWEDISH, categories: SWEDISH_CATEGORIES, index: OnceLock::new() };
     static FRENCH_CATALOG: Catalog = Catalog { rows: FRENCH, categories: FRENCH_CATEGORIES, index: OnceLock::new() };
+    static TURKISH_CATALOG: Catalog = Catalog { rows: super::tr::EFFECTS, categories: super::tr::CATEGORIES, index: OnceLock::new() };
     match language {
         "zh-hans" => Some(&SIMPLIFIED),
         "zh-hant" => Some(&TRADITIONAL),
@@ -100,6 +101,7 @@ fn catalog(language: &str) -> Option<&'static Catalog> {
         "ka" => Some(&GEORGIAN_CATALOG),
         "sv" => Some(&SWEDISH_CATALOG),
         "fr" => Some(&FRENCH_CATALOG),
+        "tr" => Some(&TURKISH_CATALOG),
         _ => None,
     }
 }
@@ -2313,7 +2315,7 @@ mod tests {
     const COMPLETE: &[(&str, &[Row])] = &[("zh-hans", SIMPLIFIED_CHINESE), ("zh-hant", TRADITIONAL_CHINESE)];
 
     /// The languages whose tables are being filled in: guarded row by row.
-    const PARTIAL: &[(&str, &[Row])] = &[("ja", JAPANESE_EFFECTS), ("ka", GEORGIAN), ("sv", SWEDISH), ("fr", FRENCH)];
+    const PARTIAL: &[(&str, &[Row])] = &[("ja", JAPANESE_EFFECTS), ("ka", GEORGIAN), ("sv", SWEDISH), ("fr", FRENCH), ("tr", super::super::tr::EFFECTS)];
 
     /// A partial language may lag Simplified Chinese but may not invent ids or disagree about
     /// which effect an id names: a translator fills these tables row by row.
@@ -2348,6 +2350,7 @@ mod tests {
             ("ka", GEORGIAN_CATEGORIES),
             ("sv", SWEDISH_CATEGORIES),
             ("fr", FRENCH_CATEGORIES),
+            ("tr", super::super::tr::CATEGORIES),
         ] {
             for (english, translated) in rows {
                 assert!(categories.contains(english), "{language} lists {english}, which is not a category");

@@ -55,6 +55,7 @@ const ROWS: &[(&str, &[(&str, &str)])] = &[
     ("ka", GEORGIAN_PANELS),
     ("sv", SWEDISH),
     ("fr", FRENCH),
+    ("tr", super::tr::UI),
 ];
 
 /// The catalog for `language`, indexed by English source (built on first use: panels translate
@@ -71,6 +72,7 @@ fn catalog(language: &str) -> Option<&'static Index> {
     static KA: OnceLock<Index> = OnceLock::new();
     static SV: OnceLock<Index> = OnceLock::new();
     static FR: OnceLock<Index> = OnceLock::new();
+    static TR: OnceLock<Index> = OnceLock::new();
     let (index, rows) = match language {
         "ja" => (&JA, JAPANESE),
         "zh-hans" => (&HANS, SIMPLIFIED_CHINESE),
@@ -81,6 +83,7 @@ fn catalog(language: &str) -> Option<&'static Index> {
         "es" => (&ES, SPANISH),
         "pl" => (&PL, POLISH),
         "fr" => (&FR, FRENCH),
+        "tr" => (&TR, super::tr::UI),
         // Georgian also reads its own rows for text the other catalogs don't have yet.
         "ka" => return Some(KA.get_or_init(|| GEORGIAN.iter().chain(GEORGIAN_PANELS).copied().collect())),
         "sv" => (&SV, SWEDISH),
