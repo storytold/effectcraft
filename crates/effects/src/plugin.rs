@@ -292,6 +292,66 @@ impl PluginImage {
     }
 }
 
+/// Where the layer of a Layer parameter sits relative to the effect's own layer
+/// ([`PluginHost::layer_transform`]).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LayerTransform {
+    /// A point of the image [`PluginHost::layer_input`] hands over (x, y in its pixel grid:
+    /// pixel (i, j) spans i..i+1 and j..j+1) at depth z (the other layer's own pixels, away from
+    /// the viewer) → this layer's buffer-independent layer pixels (x, y, as a point parameter
+    /// before mapping to the buffer, divided back by the scale) and depth z (away from the
+    /// viewer): rows of an affine 3 × 4 matrix. It carries the other layer's position, anchor
+    /// point, scale, rotation, orientation and parents, and undoes this layer's own transform.
+    pub matrix: [[f64; 4]; 3],
+    /// The other layer's opacity (0–1).
+    pub opacity: f64,
+    /// The other layer's own extent (its pixels 0..width, 0..height) in the same image grid:
+    /// x0, y0, x1, y1. A Bounce floor in Layer Size mode stops at its edges.
+    #[serde(default)]
+    pub rect: [f64; 4],
+}
+
+/// The composition's camera as this layer sees it ([`PluginHost::comp_camera`]).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CompCamera {
+    /// This layer's pixels (x, y, as a point parameter in layer pixels, and z away from the
+    /// viewer) → homogeneous X, Y, W (rows of a 3 × 4 matrix): the point shows at (X / W, Y / W)
+    /// in this layer's pixels, and W is its depth in front of the camera (comp pixels): exact for
+    /// a 2D layer and a 3D layer facing the camera, the anchor's depth across a tilted 3D layer.
+    pub matrix: [[f64; 4]; 3],
+    /// The camera's zoom (comp pixels): a length at depth W shows `zoom / W` times as long.
+    pub zoom: f64,
+    /// It is an active camera layer's, not the comp's default view.
+    pub camera_layer: bool,
+    /// The camera's depth of field when it is on: focus distance (comp pixels from the eye),
+    /// aperture (comp pixels) and Blur Level (1 = 100 %). Older hosts leave it out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dof: Option<[f64; 3]>,
+}
+
+/// A light of the composition as an effect's layer sees it ([`PluginHost::comp_lights`]): a
+/// particle system's Light(s) emitter.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CompLightInfo {
+    /// The light layer's name (a particle system may emit only from lights named "Emitter...").
+    pub name: String,
+    /// 0 parallel, 1 spot, 2 point, 3 ambient.
+    pub kind: u8,
+    /// Position in this layer's pixels (x, y as a point parameter in layer pixels, z away from
+    /// the viewer), and the unit direction it shines (spot and parallel lights).
+    pub pos: [f64; 3],
+    pub dir: [f64; 3],
+    /// Colour (0-1, not multiplied by intensity) and Intensity (1 = 100 %).
+    pub color: [f32; 3],
+    pub intensity: f64,
+    /// Spot cone angle (degrees, the whole cone).
+    pub cone: f64,
+    /// Spot cone feather (0-1 of the half angle, softening inwards from the edge). Older hosts
+    /// leave it out.
+    #[serde(default)]
+    pub feather: f64,
+}
+
 /// Services available during an API 2 render ([`EffectPlugin::render_v2`]).
 pub trait PluginHost {
     /// This effect's input (its layer with masks and the effects above this one) at another
@@ -303,6 +363,26 @@ pub trait PluginHost {
     /// (same size, origin and scale as the frame, centred when the layers differ in size).
     /// `None` when unset or unavailable.
     fn layer_input(&self, param_id: &str, layer_time: f64) -> Option<PluginImage>;
+    /// Where the layer chosen in Layer parameter `param_id` sits at **layer time** `layer_time`
+    /// relative to this layer ([`LayerTransform`]). `None` when unset or unknown.
+    fn layer_transform(&self, _param_id: &str, _layer_time: f64) -> Option<LayerTransform> {
+        None
+    }
+    /// The composition's camera at the current time as this layer sees it ([`CompCamera`]).
+    /// `None` when unknown.
+    fn comp_camera(&self) -> Option<CompCamera> {
+        None
+    }
+    /// The composition's camera at **layer time** `layer_time` (converted to composition time)
+    /// as this layer sees it then (camera motion blur). `None` when unknown.
+    fn comp_camera_at(&self, _layer_time: f64) -> Option<CompCamera> {
+        None
+    }
+    /// The composition's lights switched on at **layer time** `layer_time`, as this layer sees
+    /// them ([`CompLightInfo`]). `None` when unknown.
+    fn comp_lights(&self, _layer_time: f64) -> Option<Vec<CompLightInfo>> {
+        None
+    }
     /// All flattened parameter values (and texts) at another layer time.
     fn params_at(&self, layer_time: f64) -> Option<(Vec<f64>, Vec<String>)>;
     /// Composition frame rate (30 when unknown).
@@ -650,6 +730,13 @@ impl RenderHost<'_, '_> {
     fn grid(&self) -> Buf {
         Buf { img: crate::Image { width: self.width, height: self.height, data: vec![] }, offset: self.offset, scale: self.scale }
     }
+
+    /// The comp time of layer time `t`: through the layer's stretch where the host knows it,
+    /// else the same distance from the current time.
+    fn comp_time(&self, t: f64) -> Option<f64> {
+        let ctx = self.ctx;
+        Some(ctx.env.host?.comp_time_of(t).unwrap_or(ctx.env.comp_time + (t - ctx.time)))
+    }
 }
 
 impl PluginHost for RenderHost<'_, '_> {
@@ -667,10 +754,49 @@ impl PluginHost for RenderHost<'_, '_> {
             let host = ctx.env.host?;
             // Source / Masks show no effects; the default (Effects & Masks) does.
             let with_effects = !matches!(ctx.params.get(&crate::layer_source_id(param_id)).map(Value::as_enum), Some(0 | 1));
-            host.layer_at(lid, ctx.env.comp_time + (layer_time - ctx.time), with_effects)?
+            host.layer_at(lid, self.comp_time(layer_time)?, with_effects)?
         };
         let img = crate::util::fit_layer(ctx, &self.grid(), &other, false);
         Some(PluginImage { width: img.width, height: img.height, pixels: img.data, origin: self.offset, scale: self.scale })
+    }
+
+    fn comp_camera(&self) -> Option<CompCamera> {
+        let sc = self.ctx.env.host?.comp_scene()?;
+        // effect-space pixels, as the frame's points are once divided back by its scale
+        Some(CompCamera { matrix: sc.camera?, zoom: sc.zoom, camera_layer: sc.camera_layer, dof: sc.dof }).filter(|c| c.zoom > 0.0)
+    }
+
+    fn comp_lights(&self, layer_time: f64) -> Option<Vec<CompLightInfo>> {
+        let ctx = self.ctx;
+        Some(ctx.env.host?.comp_lights(self.comp_time(layer_time)?))
+    }
+
+    fn comp_camera_at(&self, layer_time: f64) -> Option<CompCamera> {
+        let ctx = self.ctx;
+        let sc = ctx.env.host?.comp_scene_at(self.comp_time(layer_time)?)?;
+        Some(CompCamera { matrix: sc.camera?, zoom: sc.zoom, camera_layer: sc.camera_layer, dof: sc.dof }).filter(|c| c.zoom > 0.0)
+    }
+
+    fn layer_transform(&self, param_id: &str, layer_time: f64) -> Option<LayerTransform> {
+        let ctx = self.ctx;
+        let lid = ctx.params.get(param_id)?.as_layer()?;
+        let x = ctx.env.host?.layer_transform(lid, self.comp_time(layer_time)?)?;
+        // An image point u (buffer grid) is effect-space p = (u - origin) / scale of this layer,
+        // the other layer's effect-space q = p + d with d its centring offset (`fit_layer`).
+        let inv = 1.0 / self.scale.max(1e-9);
+        let d = [(x.size[0] - ctx.layer_size[0]) * 0.5, (x.size[1] - ctx.layer_size[1]) * 0.5];
+        let m = x.to_self;
+        let matrix = std::array::from_fn(|i| {
+            [m[i][0] * inv, m[i][1] * inv, m[i][2], m[i][0] * (d[0] - self.offset[0] * inv) + m[i][1] * (d[1] - self.offset[1] * inv) + m[i][3]]
+        });
+        // its own pixel q is the image point (q - d) * scale + origin
+        let rect = [
+            -d[0] * self.scale + self.offset[0],
+            -d[1] * self.scale + self.offset[1],
+            (x.size[0] - d[0]) * self.scale + self.offset[0],
+            (x.size[1] - d[1]) * self.scale + self.offset[1],
+        ];
+        Some(LayerTransform { matrix, opacity: x.opacity, rect })
     }
 
     fn params_at(&self, layer_time: f64) -> Option<(Vec<f64>, Vec<String>)> {

@@ -474,7 +474,14 @@ impl Helper {
         };
         let mut c = Conn { child, input, written, rx, exchange, top: 0, last_used: Instant::now(), generation };
         let frames = c.exchange.path().to_string_lossy().into_owned();
-        match c.call(&Request::Hello { version: PROTOCOL_VERSION, frames }, load_timeout()) {
+        match c.call(
+            &Request::Hello {
+                version: PROTOCOL_VERSION,
+                frames,
+                features: vec!["layer_transform".into(), "comp_camera".into(), "comp_camera_time".into(), "comp_lights".into()],
+            },
+            load_timeout(),
+        ) {
             Ok(Reply::Hello { version, name, helper_version, loads }) if version == PROTOCOL_VERSION => {
                 let mut i = lock(&self.info);
                 (i.name, i.version, i.loads) = (name, helper_version, loads);
@@ -572,6 +579,10 @@ impl Helper {
                 Reply::InputAt { time } => self.send_image(host.input_at(time), started)?,
                 Reply::LayerInput { param, time } => self.send_image(host.layer_input(&param, time), started)?,
                 Reply::ParamsAt { time } => Request::Params { values: host.params_at(time) },
+                Reply::LayerTransform { param, time } => Request::Transform { transform: host.layer_transform(&param, time) },
+                Reply::CompCamera { time: None } => Request::Camera { camera: host.comp_camera() },
+                Reply::CompCamera { time: Some(t) } => Request::Camera { camera: host.comp_camera_at(t) },
+                Reply::CompLights { time } => Request::Lights { lights: host.comp_lights(time) },
                 other => return Err(Failure::Broken(format!("unexpected reply during a render: {other:?}"))),
             };
         }
