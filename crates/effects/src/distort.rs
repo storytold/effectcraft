@@ -156,7 +156,8 @@ fn wave_pin(pin: u32, x: f64, y: f64, rect: (f64, f64, f64, f64)) -> f64 {
 }
 
 fn wave_warp(ctx: &EffectCtx, mut b: Buf) -> Buf {
-    let h = ctx.params.f("height") * b.scale;
+    // Wave Height is the trough-to-peak distance, so the wave displaces by ±Height/2 (#3924).
+    let h = ctx.params.f("height") * b.scale * 0.5;
     let w = (ctx.params.f("width") * b.scale).max(1.0);
     let dir = ctx.params.f("direction").to_radians();
     let speed = ctx.params.f("speed");
@@ -699,6 +700,31 @@ mod tests {
             let mid = 15;
             assert!((0..40).any(|x| differs(o.img.get(x + pad, mid + pad), im.get(x, mid))), "pin {edge_row}: the middle of the layer must still distort");
         }
+    }
+
+    #[test]
+    fn wave_warp_height_is_peak_to_trough() {
+        // #3924: After Effects' Wave Height is the trough-to-peak distance, so a square wave
+        // displaces each column by exactly ±Height/2. A marked row must land Height/2 from its
+        // origin (not Height), and both signs must occur so the two copies sit Height apart.
+        // Measuring the per-column shift avoids depending on where padding places the phase origin.
+        let im = crate::util::gen_image(40, 40, |_, y| if y == 20 { [1.0, 1.0, 1.0, 1.0] } else { [0.0, 0.0, 0.0, 0.0] });
+        let set = [("waveType", Value::Enum(1)), ("height", num(10.0)), ("width", num(40.0)), ("direction", num(90.0)), ("speed", num(0.0))];
+        let o = run("ec.distort.wavewarp", &set, im);
+        let pad = ((o.img.width - 40) / 2) as i64;
+        let (mut up, mut down) = (false, false);
+        for x in 0..40i64 {
+            let rows: Vec<i64> = (0..40i64).filter(|&y| o.img.get(x + pad, y + pad)[3] > 0.99).collect();
+            assert_eq!(rows.len(), 1, "column {x}: expected one displaced row, got {rows:?}");
+            let shift = rows[0] - 20;
+            assert_eq!(shift.abs(), 5, "column {x}: row moved {shift}px, expected ±Height/2 = ±5");
+            if shift < 0 {
+                up = true;
+            } else {
+                down = true;
+            }
+        }
+        assert!(up && down, "both wave signs must occur (peak-to-trough = Height)");
     }
 
     /// After Effects 2026 (cases 723, 819, 820): a grey 960 × 540 solid centred in a 1920 × 1080
