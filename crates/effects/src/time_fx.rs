@@ -174,12 +174,14 @@ fn fetch(ctx: &EffectCtx, times: &[f64]) -> Option<Frames> {
 /// [`fetch`] with the first `effects` effects of the stack only (0: source and masks).
 fn fetch_with(ctx: &EffectCtx, times: &[f64], effects: usize) -> Option<Frames> {
     let host = ctx.env.host?;
-    // Dedupe times (sub-microsecond differences are the same frame).
-    let mut uniq: Vec<i64> = times.iter().map(|t| (t * 1e6).round() as i64).collect();
-    uniq.sort_unstable();
-    uniq.dedup();
+    // Dedupe times (sub-microsecond differences are the same frame). The rounded microsecond is
+    // only the key: the host gets the exact time, since a rounded 23.976 fps frame time can land
+    // just before that frame starts and fetch the frame before it.
+    let mut uniq: Vec<(i64, f64)> = times.iter().map(|&t| ((t * 1e6).round() as i64, t)).collect();
+    uniq.sort_by_key(|&(k, _)| k);
+    uniq.dedup_by_key(|&mut (k, _)| k);
     // Every effect before this one (the host bounds the count to them).
-    let bufs: Vec<(i64, Option<Buf>)> = uniq.iter().map(|&k| (k, host.self_at(k as f64 / 1e6, effects))).collect();
+    let bufs: Vec<(i64, Option<Buf>)> = uniq.iter().map(|&(k, t)| (k, host.self_at(t, effects))).collect();
     let first = bufs.iter().find_map(|(_, b)| b.as_ref())?;
     let scale = first.scale;
     // Union of every frame's extent in layer pixels (offset = where layer (0,0) sits).
@@ -1162,6 +1164,34 @@ mod tests {
         v.push(("echoOperator", Value::Enum(6)));
         let out = run("ec.time.echo", &v, 0.8, &h);
         assert!((out.img.data[0][0] - want as f32).abs() < 1e-4, "{}", out.img.data[0][0]);
+    }
+
+    /// At 23.976 fps a frame starts at n × 1001/24000 s, which is not a whole microsecond. Echo
+    /// must fetch the frame one before, not the one before that: asking the host for the rounded
+    /// microsecond landed frame 1 (41 708.333 µs) at 41 708 µs, before it starts.
+    #[test]
+    fn echo_fetches_the_right_frame_at_23_976_fps() {
+        /// Holds footage frame n (grey n / 100) from n × 1001/24000 s until the next frame starts.
+        struct Footage;
+        impl EffectHost for Footage {
+            fn layer(&self, _: u64, _: bool) -> Option<LayerPixels> {
+                None
+            }
+            fn audio(&self, _: u64, _: f64, _: usize, _: u32) -> Option<Vec<f32>> {
+                None
+            }
+            fn self_at(&self, t: f64, _: usize) -> Option<Buf> {
+                let v = ((t * 24000.0 / 1001.0 + 1e-9).floor() / 100.0) as f32;
+                Some(Buf { img: Image::filled(6, 4, [v, v, v, 1.0]), offset: [0.0; 2], scale: 1.0 })
+            }
+        }
+        let fps = 24000.0 / 1001.0;
+        let t = 2.0 / fps;
+        let vals = [("echoTime", num(-1.0 / fps)), ("numberOfEchoes", num(1.0)), ("startingIntensity", num(1.0)), ("decay", num(1.0))];
+        let env = EffectEnv { host: Some(&Footage), frame_rate: fps, comp_time: t, ..Default::default() };
+        let out = run_fx("ec.time.echo", &vals, Image::filled(6, 4, [0.9, 0.0, 0.0, 1.0]), t, env);
+        // Add: frame 2 plus its echo, frame 1.
+        assert!((out.img.data[0][0] - 0.03).abs() < 1e-5, "{}", out.img.data[0][0]);
     }
 
     /// Row y = 130, x = 60..111 of the importer sample's SRC test card (#3124): a black-to-white
