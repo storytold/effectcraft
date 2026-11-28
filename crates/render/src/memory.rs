@@ -2,7 +2,8 @@
 //! frames, the decoded footage planes, the preview frames and the disk cache's write queue
 //! register here as [`MemoryHolder`]s and share one budget ([`Accountant::set_budget`], from
 //! Settings ▸ Memory & CPU ▸ RAM Reserved for Other Applications). No holder has a share of its
-//! own: when they hold more than the budget together, the accountant frees the least valuable
+//! own (some have a cap below it: the browser's caches, a headless session's footage frames,
+//! #4157): when they hold more than the budget together, the accountant frees the least valuable
 //! item first, whichever holder keeps it, in large steps: down to [`TRIM_TO`] of the budget, so
 //! a cache doesn't fill up and trim again with every insert.
 //!

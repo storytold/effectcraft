@@ -18,7 +18,8 @@
 //! - Kept by the memory accountant (#3298): least recently used offered first, each entry worth
 //!   what decoding it took. Also bounded by bytes by itself ([`CACHE_BUDGET`] until the caches'
 //!   budget is set, then the footage frames' cap, [`set_budget`]: the whole budget on the
-//!   desktop, at most [`crate::exr_channels::WEB_CACHE_CAP`] in the browser); there the newest
+//!   desktop, less in a headless session (the CLI, #4157), at most
+//!   [`crate::exr_channels::WEB_CACHE_CAP`] in the browser); there the newest
 //!   entry stays even when it alone is over. Entries in use (planes an effect holds, a decode in
 //!   progress, the last pictures' planes kept for their effects, [`HELD_FILES`]) are never
 //!   dropped, by either.

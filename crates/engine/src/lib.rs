@@ -231,6 +231,11 @@ pub struct Session {
     /// The system is in a low-memory episode (the cache budgets stay reduced until it ends, see
     /// [`sysinfo::SysMemory::still_low`] and [`Session::memory_budget`]).
     pub memory_low: bool,
+    /// The most the footage frames (and decoded planes) hold by themselves, below the common
+    /// budget ([`Session::apply_cache_budgets`]); `None`: the whole budget, as in the desktop app.
+    /// Headless sessions (the CLI, its MCP server) set it: their renders read each footage frame
+    /// about once, so frames kept up to the whole budget only cost memory (#4157).
+    pub footage_cap: Option<usize>,
     /// The keyframe drag in progress (`keys.move` with a merge key).
     pub key_move: Option<KeyMove>,
     /// Reads the system's memory in the background for [`Session::memory_tick`].
@@ -394,6 +399,7 @@ impl Default for Session {
             script_ui: scriptui::ScriptUi::default(),
             sys_memory: None,
             memory_low: false,
+            footage_cap: None,
             key_move: None,
             memory_watch: Default::default(),
             disk_watch: Default::default(),
