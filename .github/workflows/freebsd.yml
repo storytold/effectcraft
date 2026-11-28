@@ -30,3 +30,20 @@ jobs:
   freebsd:
     # Intentionally tracked at @main (not SHA-pinned) so org-wide CI improvements, security fixes, and build optimizations propagate without PR churn across all craftapp repos.
     uses: storytold/craft-common-actions/.github/workflows/freebsd.yml@main
+    with:
+      # Serial libtest still accumulates UI process state until the VM runs out of RAM.
+      # Keep every test, but release process-owned caches after each one, as the main gate does.
+      custom-test-command: |
+        export CARGO_PROFILE_DEV_DEBUG=0
+        nextest_dir=$(mktemp -d)
+        curl -fLsS --retry 3 -o "$nextest_dir/nextest.tar.gz" https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.150/cargo-nextest-0.9.150-x86_64-unknown-freebsd.tar.gz
+        if [ "$(sha256 -q "$nextest_dir/nextest.tar.gz")" != 7f75971eb6e0d44dfa76e75a936b438140e69292793d630e6c02331a9c6b3c31 ]; then
+          echo 'error: cargo-nextest archive checksum mismatch' >&2
+          exit 1
+        fi
+        tar -xzf "$nextest_dir/nextest.tar.gz" -C "$nextest_dir"
+        export PATH="$nextest_dir:$PATH"
+        failed=0
+        cargo nextest run --workspace --locked --no-fail-fast --test-threads=1 || failed=1
+        cargo test --workspace --locked --doc --no-fail-fast || failed=1
+        exit "$failed"
