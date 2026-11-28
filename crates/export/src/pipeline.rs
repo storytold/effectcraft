@@ -967,7 +967,8 @@ impl<'a> Cx<'a> {
         crate::fit(px, img.width, img.height, w, h)
     }
 
-    /// Open a file and remember ownership for cancellation cleanup (including overflow paths).
+    /// Open a file and remember ownership for the cleanup of an export that does not finish
+    /// (including overflow paths).
     pub fn create(&self, path: &str) -> crate::Result<out::Out<'_>> {
         let file = out::create(self.sink, path)?;
         if self.sink.is_none() {
@@ -976,19 +977,19 @@ impl<'a> Cx<'a> {
         Ok(file)
     }
 
-    pub fn remove_cancelled_outputs(&self) -> crate::Result<()> {
+    /// Remove every file [`Cx::create`] opened: an export that did not finish leaves none of
+    /// them behind (a file already gone is fine). Returns the first file that could not be
+    /// removed, with why (`"<path>: <error>"`).
+    pub fn remove_written_outputs(&self) -> Option<String> {
         let mut failure = None;
         for path in self.written.lock().unwrap_or_else(std::sync::PoisonError::into_inner).iter() {
             if let Err(e) = std::fs::remove_file(path)
                 && e.kind() != std::io::ErrorKind::NotFound
             {
-                failure.get_or_insert_with(|| crate::ExportError::Io(format!("cannot remove cancelled output {path}: {e}")));
+                failure.get_or_insert_with(|| format!("{path}: {e}"));
             }
         }
-        match failure {
-            Some(error) => Err(error),
-            None => Ok(()),
-        }
+        failure
     }
 
     /// Whether Skip Existing finds `path` already written: at its own place or, with Use Storage
