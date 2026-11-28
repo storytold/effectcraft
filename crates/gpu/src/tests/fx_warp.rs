@@ -37,6 +37,8 @@ fn warp_styles() {
     effect_case("ec.distort.warp", &[("warpStyle", e(14)), ("verticalDistortion", n(-35.0))]);
     effect_case("ec.distort.warp", &[("warpStyle", e(11)), ("warpAxis", e(1)), ("bend", n(60.0)), ("horizontalDistortion", n(30.0))]);
     effect_case("ec.distort.warp", &[("warpStyle", e(3)), ("bend", n(0.0)), ("horizontalDistortion", n(-40.0)), ("verticalDistortion", n(25.0))]);
+    effect_case("ec.distort.warp", &[("verticalDistortion", n(100.0))]);
+    effect_case("ec.distort.warp", &[("warpStyle", e(13)), ("bend", n(100.0)), ("verticalDistortion", n(-100.0))]);
 }
 
 #[test]
