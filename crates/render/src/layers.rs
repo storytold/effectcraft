@@ -32,6 +32,14 @@ impl Shutter {
         let f = if n > 1 { i as f64 / (n - 1) as f64 } else { 0.0 };
         (self.phase + self.angle * f) * self.frame
     }
+
+    /// Seconds from the frame time to motion-blur sample `i` of `n` of a 2D layer: evenly spaced
+    /// from where the shutter opens, none where it closes. Measured in After Effects 2026 (a white
+    /// edge moving 1 to 48 px per frame, shutter 180°): the edge's staircase has `n` steps starting
+    /// at the opening, so the mean is `(n - 1) / 2n` of the shutter, not its middle.
+    fn sample_offset(&self, i: usize, n: usize) -> f64 {
+        (self.phase + self.angle * i as f64 / n.max(1) as f64) * self.frame
+    }
 }
 
 /// `files` (a content's) with the files of the buffers made of it that the layer cache kept:
@@ -309,9 +317,9 @@ impl<'a> Renderer<'a> {
     }
 
     /// Motion-blur sub-samples for a layer buffer (1 = no motion blur). As in After Effects, a 2D
-    /// layer gets about one sample per output pixel its corners travel during the shutter,
-    /// at least Samples Per Frame and at most the comp's Adaptive Sample Limit; a layer that
-    /// does not move within the shutter is drawn once.
+    /// layer gets [`adaptive_samples`] for the output pixels its corners travel during the
+    /// shutter (at least 2, at most the comp's Adaptive Sample Limit); a layer that does not move
+    /// within the shutter is drawn once.
     fn mb_samples(&self, ctx: &EvalCtx, layer: &Layer, buf: &Buf) -> usize {
         if !self.blurred(ctx, layer) {
             return 1;
@@ -324,7 +332,7 @@ impl<'a> Renderer<'a> {
             return 4;
         }
         let sh = self.shutter(ctx);
-        adaptive_samples(travel, sh.samples, sh.limit)
+        adaptive_samples(travel, sh.limit)
     }
 
     /// Largest distance (output pixels) a corner of the layer buffer moves during the shutter,
@@ -397,7 +405,7 @@ impl<'a> Renderer<'a> {
             return Placement { matrices: vec![self.buf_matrix(ctx, layer, buf)], sampling, seed };
         }
         let sh = self.shutter(ctx);
-        let matrices = (0..samples).map(|i| self.buf_matrix_at(ctx, layer, buf, sh.offset(i, samples))).collect();
+        let matrices = (0..samples).map(|i| self.buf_matrix_at(ctx, layer, buf, sh.sample_offset(i, samples))).collect();
         Placement { matrices, sampling, seed }
     }
 
