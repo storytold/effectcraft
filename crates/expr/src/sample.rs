@@ -3,14 +3,14 @@
 //! The layer is rendered at full resolution through the renderer that is evaluating the
 //! expression (its footage source; [`EvalCtx::footage`]): source → masks → effects for
 //! `postEffect = true`, the bare source otherwise, in layer space (before the transform). Buffers
-//! are cached per thread for the frame, so many expressions sampling the same layer at the same
-//! time render it once. The source files a sampled render reads are kept with its buffer and
+//! are cached (one cache for every thread, within a byte budget, least recently used first), so
+//! many expressions sampling the same layer at the same time render it once. The source files a sampled render reads are kept with its buffer and
 //! noted in the evaluating render's log ([`EvalCtx::reads`]) on every use, so a frame whose
 //! expressions sample footage lists that footage too (#3184).
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 
 use effectcraft_project::{ItemId, Layer};
 use effectcraft_render::reads::{ReadFiles, ReadLog};
@@ -26,17 +26,78 @@ struct Sampled {
     scale: f64,
 }
 
-type Key = (usize, u64, u64, u64, bool, u64);
+/// (project, footage source, comp, layer, time, post-effects, layer fingerprint). The footage
+/// source is part of it: contexts without one draw footage transparent, and the cache is shared
+/// by every thread and render.
+type Key = (usize, usize, u64, u64, u64, bool, u64);
+
+type Entry = (Option<Sampled>, Arc<ReadFiles>);
+
+/// The sampled buffers and the source files each was made of, shared by every render thread.
+/// It was a per-thread map of up to 32 full float frames that was only emptied when full: with
+/// one map per Rayon worker, frame lane, preview lane and export thread (about forty), scrubbing
+/// a comp whose expressions sample a layer could hold tens of gigabytes. Now one map holds at
+/// most [`MAX_BYTES`] of pixels and [`MAX_CACHE`] entries, the least recently used going first.
+#[derive(Default)]
+struct Cache {
+    map: HashMap<Key, (Entry, usize, u64)>,
+    bytes: usize,
+    clock: u64,
+}
+
+impl Cache {
+    fn get(&mut self, key: &Key) -> Option<Entry> {
+        self.clock += 1;
+        let now = self.clock;
+        let (e, _, last) = self.map.get_mut(key)?;
+        *last = now;
+        Some(e.clone())
+    }
+
+    /// Keep `e` under `key`; then drop the least recently used entries (never this one) while
+    /// over the byte or entry budget. An entry larger than the whole budget is not kept (the
+    /// layer renders again when sampled again).
+    fn insert(&mut self, key: Key, e: Entry, max_bytes: usize) {
+        self.clock += 1;
+        let bytes = e.0.as_ref().map_or(0, |s| s.img.data.len().saturating_mul(16));
+        if bytes > max_bytes {
+            return;
+        }
+        if let Some((_, old, _)) = self.map.insert(key, (e, bytes, self.clock)) {
+            self.bytes = self.bytes.saturating_sub(old);
+        }
+        self.bytes = self.bytes.saturating_add(bytes);
+        while self.bytes > max_bytes || self.map.len() > MAX_CACHE {
+            let Some(k) = self.map.iter().filter(|(k, _)| **k != key).min_by_key(|(_, v)| v.2).map(|(k, _)| *k) else { break };
+            if let Some((_, b, _)) = self.map.remove(&k) {
+                self.bytes = self.bytes.saturating_sub(b);
+            }
+        }
+    }
+}
+
+static CACHE: LazyLock<Mutex<Cache>> = LazyLock::new(Default::default);
 
 thread_local! {
-    /// The sampled buffers and the source files each was made of.
-    static CACHE: RefCell<HashMap<Key, (Option<Sampled>, Arc<ReadFiles>)>> = RefCell::new(HashMap::new());
     /// Nested sampleImage renders (a sampled layer whose expressions sample again).
     static DEPTH: RefCell<usize> = const { RefCell::new(0) };
 }
 
 const MAX_CACHE: usize = 32;
+/// Bytes of sampled pixels kept for every thread together (a 4K float frame is 133 MB).
+const MAX_BYTES: usize = 512 << 20;
 const MAX_DEPTH: usize = 2;
+
+fn cache() -> std::sync::MutexGuard<'static, Cache> {
+    CACHE.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Forget every sampled buffer (Edit ▸ Purge, closing a project).
+pub fn purge() {
+    let mut c = cache();
+    c.map.clear();
+    c.bytes = 0;
+}
 
 /// A fingerprint of the layer's definition (so edits never reuse stale pixels).
 fn fingerprint(layer: &Layer) -> u64 {
@@ -53,13 +114,14 @@ fn render(ctx: EvalCtx, comp: ItemId, layer: &Layer, post: bool, t: f64) -> Opti
     if depth >= MAX_DEPTH {
         return None;
     }
-    let key: Key = (ctx.project as *const _ as usize, comp.0, layer.id.0, t.to_bits(), post, fingerprint(layer));
+    let source = ctx.footage.map_or(0, |f| f as *const dyn effectcraft_render::FootageSource as *const () as usize);
+    let key: Key = (ctx.project as *const _ as usize, source, comp.0, layer.id.0, t.to_bits(), post, fingerprint(layer));
     let note = |files: &ReadFiles| {
         if let Some(log) = ctx.reads {
             log.note_all(files);
         }
     };
-    if let Some((hit, files)) = CACHE.with(|c| c.borrow().get(&key).cloned()) {
+    if let Some((hit, files)) = cache().get(&key) {
         note(&files);
         return hit;
     }
@@ -84,13 +146,7 @@ fn render(ctx: EvalCtx, comp: ItemId, layer: &Layer, post: bool, t: f64) -> Opti
     };
     let files = Arc::new(log.into_files());
     note(&files);
-    CACHE.with(|c| {
-        let mut c = c.borrow_mut();
-        if c.len() >= MAX_CACHE {
-            c.clear();
-        }
-        c.insert(key, (out.clone(), files));
-    });
+    cache().insert(key, (out.clone(), files), MAX_BYTES);
     out
 }
 
@@ -132,4 +188,42 @@ pub fn sample_image(ctx: EvalCtx, comp: ItemId, layer: &Layer, point: [f64; 2], 
         return Some([0.0; 4]);
     }
     Some([(acc[0] / n / a) as f32, (acc[1] / n / a) as f32, (acc[2] / n / a) as f32, a as f32])
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+
+    fn entry(w: u32, h: u32) -> Entry {
+        let img = Arc::new(effectcraft_render::Image::new(w, h));
+        (Some(Sampled { img, offset: [0.0; 2], scale: 1.0 }), Arc::default())
+    }
+
+    /// Fail-before: the per-thread map grew to 32 full frames on every thread. The shared cache
+    /// stays within its byte budget, keeps the newest entry and drops the least recently used.
+    #[test]
+    fn sampled_buffers_stay_within_the_byte_budget() {
+        let mut c = Cache::default();
+        let key = |i: u64| (0usize, 0usize, 1u64, 2u64, i, true, 3u64);
+        // 64×64 px = 64 KiB each; a budget of four.
+        let budget = 4 * 64 * 64 * 16;
+        for i in 0..10 {
+            c.insert(key(i), entry(64, 64), budget);
+            if i == 2 {
+                // Touch the oldest so it outlives newer ones.
+                assert!(c.get(&key(0)).is_some());
+            }
+            assert!(c.bytes <= budget, "{} bytes after {i}", c.bytes);
+        }
+        assert!(c.get(&key(9)).is_some(), "the newest entry was dropped");
+        assert!(c.get(&key(1)).is_none(), "a stale entry was kept");
+        // An entry bigger than the whole budget is not kept, and evicts nothing.
+        let before = c.map.len();
+        c.insert(key(99), entry(256, 256), budget);
+        assert!(c.get(&key(99)).is_none());
+        assert_eq!(c.map.len(), before);
+        // The same layer through another footage source is another entry.
+        let other = (0usize, 7usize, 1u64, 2u64, 9u64, true, 3u64);
+        assert!(c.get(&other).is_none());
+    }
 }

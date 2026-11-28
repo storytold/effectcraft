@@ -1231,3 +1231,8 @@ pub fn specs() -> Vec<EffectSpec> {
 
 #[cfg(test)]
 mod tests;
+
+/// Drop the Particle Playground checkpoints (Edit ▸ Purge).
+pub(crate) fn purge() {
+    PG_CACHE.clear();
+}

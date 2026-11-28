@@ -20,7 +20,7 @@ use crate::{Buf, EffectCtx, EffectSpec, col, num, p, popup, slider};
 
 mod common;
 mod engine;
-mod particle_fx;
+pub(crate) mod particle_fx;
 mod registry;
 mod sprites;
 mod weather;

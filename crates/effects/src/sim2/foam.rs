@@ -409,3 +409,8 @@ fn foam_disc(out: &mut Image, x: f64, y: f64, r: f64, f: impl Fn(f64, f64) -> Px
         }
     }
 }
+
+/// Drop the Foam checkpoints (Edit ▸ Purge).
+pub(crate) fn purge() {
+    FOAM_CACHE.clear();
+}
