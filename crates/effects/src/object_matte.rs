@@ -191,14 +191,14 @@ pub fn roto_data(params: &Params, layer_size: [f64; 2], f: i64, with_model: bool
 /// Seed of the chain keys: what the frames are (the Input Key), the layer size, the frame rate,
 /// the mode and the model. The prompt is in each frame's key.
 pub fn seed(params: &Params, layer_size: [f64; 2], fps: f64, model: Option<&dyn MaskModel>) -> u64 {
-    seed_of(params, layer_size, fps, model.map_or(effectcraft_segment::CLASSICAL, |m| m.info().id))
+    seed_of(params, layer_size, fps, model.map_or(effectcraft_segment::CLASSICAL, |m| m.info().id), s(params, INPUT_KEY))
 }
 
 /// [`seed`] for the model with id `model` ([`effectcraft_segment::CLASSICAL`]: no model).
-fn seed_of(params: &Params, layer_size: [f64; 2], fps: f64, model: &str) -> u64 {
+fn seed_of(params: &Params, layer_size: [f64; 2], fps: f64, model: &str, input_key: &str) -> u64 {
     let mut h = 0xcbf2_9ce4_8422_2325;
     fnv(&mut h, ID.as_bytes());
-    fnv(&mut h, s(params, INPUT_KEY).as_bytes());
+    fnv(&mut h, input_key.as_bytes());
     for v in [layer_size[0], layer_size[1], fps] {
         fnv(&mut h, &v.to_bits().to_le_bytes());
     }
@@ -260,12 +260,12 @@ pub fn frame_keys(params: &Params, layer_size: [f64; 2], fps: f64, frames: &[i64
 /// What frozen mattes depend on: what the frames are (the seed: Input Key, size, rate, mode,
 /// model), the prompt, the tracked span and the matte settings.
 pub fn frozen_key(params: &Params, layer_size: [f64; 2], fps: f64, model: Option<&dyn MaskModel>) -> String {
-    frozen_key_of(params, layer_size, fps, model.map_or(effectcraft_segment::CLASSICAL, |m| m.info().id))
+    frozen_key_of(params, layer_size, fps, model.map_or(effectcraft_segment::CLASSICAL, |m| m.info().id), s(params, INPUT_KEY))
 }
 
 /// [`frozen_key`] for the model with id `model` ([`effectcraft_segment::CLASSICAL`]: no model).
-fn frozen_key_of(params: &Params, layer_size: [f64; 2], fps: f64, model: &str) -> String {
-    let mut h = seed_of(params, layer_size, fps, model);
+fn frozen_key_of(params: &Params, layer_size: [f64; 2], fps: f64, model: &str, input_key: &str) -> String {
+    let mut h = seed_of(params, layer_size, fps, model, input_key);
     let base = reference_frame(params);
     if let Some(st) = prompt_strokes(params, layer_size, base, model != effectcraft_segment::CLASSICAL) {
         fnv(&mut h, serde_json::to_string(&st).unwrap_or_default().as_bytes());
@@ -275,6 +275,23 @@ fn frozen_key_of(params: &Params, layer_size: [f64; 2], fps: f64, model: &str) -
     }
     fnv(&mut h, format!("{:?}", matte_params(params)).as_bytes());
     format!("{h:016x}")
+}
+
+fn known_models() -> impl Iterator<Item = &'static str> {
+    std::iter::once(effectcraft_segment::CLASSICAL).chain(effectcraft_segment::MODELS.iter().map(|m| m.id))
+}
+
+/// Reassign the Input Key of a freeze whose matte settings and original key still match.
+/// The native-project importer does this after reassigning the IDs of otherwise unchanged inputs.
+pub fn rekey_frozen_input(params: &Params, layer_size: [f64; 2], fps: f64, input_key: &str, media_fingerprint: &str) -> Option<String> {
+    let mut cache = FrozenCache::from_json(s(params, FROZEN))?;
+    if cache.media_fingerprint.as_deref().unwrap_or_default() != media_fingerprint {
+        return None;
+    }
+    let old_input = s(params, INPUT_KEY);
+    let model = known_models().find(|id| cache.key == frozen_key_of(params, layer_size, fps, id, old_input))?;
+    cache.key = frozen_key_of(params, layer_size, fps, model, input_key);
+    Some(cache.to_json())
 }
 
 /// Whether the instance is frozen (has frozen mattes).
@@ -292,11 +309,10 @@ pub fn frozen_alpha(params: &Params, layer_size: [f64; 2], fps: f64, f: i64, w: 
         return None;
     }
     let fc = frozen_cache(j)?;
-    if fc.key != frozen_key(params, layer_size, fps, model) {
-        let ids = std::iter::once(effectcraft_segment::CLASSICAL).chain(effectcraft_segment::MODELS.iter().map(|m| m.id));
-        if !ids.into_iter().any(|id| fc.key == frozen_key_of(params, layer_size, fps, id)) {
-            return None;
-        }
+    if fc.key != frozen_key(params, layer_size, fps, model)
+        && !known_models().any(|id| fc.key == frozen_key_of(params, layer_size, fps, id, s(params, INPUT_KEY)))
+    {
+        return None;
     }
     let fr = fc.frames.get(&f)?;
     let [fw, fh] = fc.size;
