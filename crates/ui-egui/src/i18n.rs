@@ -1103,6 +1103,21 @@ const SIMPLIFIED_CHINESE: &[(&str, &str, &str)] = &[
     ("help.appPage", "EffectCraft Home Page", "EffectCraft 主页"),
     ("help.github", "EffectCraft on GitHub", "GitHub 上的 EffectCraft"),
     ("file.openDemoProject", "Open Demo Project", "打开示例项目"),
+    // --- the fixed menu rows the panel report (#2252) lists as untranslated ---
+    ("", "Quick Set Anchor", "快速设置锚点"),
+    ("layer.quickSetAnchor", "Top Left", "左上"),
+    ("layer.quickSetAnchor", "Top", "顶部"),
+    ("layer.quickSetAnchor", "Top Right", "右上"),
+    ("layer.quickSetAnchor", "Left", "左"),
+    ("layer.quickSetAnchor", "Center", "居中"),
+    ("layer.quickSetAnchor", "Right", "右"),
+    ("layer.quickSetAnchor", "Bottom Left", "左下"),
+    ("layer.quickSetAnchor", "Bottom", "底部"),
+    ("layer.quickSetAnchor", "Bottom Right", "右下"),
+    ("layer.unprecompose", "Un-precompose", "取消预合成"),
+    ("effect.plugins.install", "Install Effect Plug-in Bundle (Folder)...", "安装效果插件包(文件夹)..."),
+    ("effect.plugins.install", "Install Effect Plug-in...", "安装效果插件..."),
+    ("prefs.open", "Plug-in Library...", "插件库..."),
 ];
 
 /// Swedish (`sv`), written from the English source.
@@ -2385,6 +2400,21 @@ const TRADITIONAL_CHINESE: &[(&str, &str, &str)] = &[
     ("help.appPage", "EffectCraft Home Page", "EffectCraft 首頁"),
     ("help.github", "EffectCraft on GitHub", "GitHub 上的 EffectCraft"),
     ("file.openDemoProject", "Open Demo Project", "開啟範例專案"),
+    // --- the fixed menu rows the panel report (#2252) lists as untranslated ---
+    ("", "Quick Set Anchor", "快速設定錨點"),
+    ("layer.quickSetAnchor", "Top Left", "左上"),
+    ("layer.quickSetAnchor", "Top", "頂部"),
+    ("layer.quickSetAnchor", "Top Right", "右上"),
+    ("layer.quickSetAnchor", "Left", "左"),
+    ("layer.quickSetAnchor", "Center", "置中"),
+    ("layer.quickSetAnchor", "Right", "右"),
+    ("layer.quickSetAnchor", "Bottom Left", "左下"),
+    ("layer.quickSetAnchor", "Bottom", "底部"),
+    ("layer.quickSetAnchor", "Bottom Right", "右下"),
+    ("layer.unprecompose", "Un-precompose", "取消預合成"),
+    ("effect.plugins.install", "Install Effect Plug-in Bundle (Folder)...", "安裝效果外掛套件(資料夾)..."),
+    ("effect.plugins.install", "Install Effect Plug-in...", "安裝效果外掛..."),
+    ("prefs.open", "Plug-in Library...", "外掛庫..."),
 ];
 
 const JAPANESE: &[(&str, &str, &str)] = &[
