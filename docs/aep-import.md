@@ -168,7 +168,9 @@ conversion; it also names the parameter type the file must declare and, for slid
 maximum it was verified with (`pard@128` for fixed sliders, `pard@108` for float sliders). A parameter whose type or maximum differs is reported,
 not guessed. `supported_effects()` lists the table. The effect is built with EffectCraft's own
 defaults (`effectcraft_effects::instantiate` on the layer's source size), then every mapped
-parameter gets the file's value:
+parameter gets the file's value. An integer slider's stored value or key with a fraction (set
+through scripting: Echo's Number Of Echoes stored as 1.75, Mosaic's blocks as 6.25) arrives as the
+nearest whole number, the value After Effects 26.5 reads back and renders:
 
 | After Effects (match name, index) | EffectCraft | Conversion | Evidence |
 |---|---|---|---|
