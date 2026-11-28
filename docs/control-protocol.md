@@ -57,6 +57,16 @@ Useful query commands for `engine.execute` (they aren't journaled or undoable): 
 export formats, parity summary), `jobs.list` (Progress panel jobs, e.g. the background
 `footage.check` after File ▸ Open).
 
+Whole text animators use the existing Edit commands (#2021): select an animator root with
+`prop.select {layer, prop: <animator uid>}`, then `edit.copy {}` returns `{animators: <count>}`.
+Select destination text layers with `layer.select {layers: [...]}` and call `edit.paste {}`;
+it returns `{animators: [<new uid>, ...]}` and records one undo step. Selectors, expressions,
+properties and keyframes travel with each animator. The earliest copied key lands at the CTI,
+with relative comp-time offsets and easing preserved across layer time stretches. Locked and
+non-text destinations are skipped; no eligible destination returns an error without an edit.
+`edit.cut {}` copies and removes the selected groups. An explicit `edit.copy {layers: [...]}`
+still copies layers. Clipboard contents belong to the session and are not saved in projects.
+
 Every engine command is reachable through `engine.execute`, and every interactive widget of every
 panel registers an element id; both are enforced by `crates/ui-egui/tests/it/ui_agent_audit.rs`.
 
