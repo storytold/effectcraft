@@ -30,3 +30,6 @@ jobs:
   freebsd:
     # Intentionally tracked at @main (not SHA-pinned) so org-wide CI improvements, security fixes, and build optimizations propagate without PR churn across all craftapp repos.
     uses: storytold/craft-common-actions/.github/workflows/freebsd.yml@main
+    with:
+      # UI/render tests each own caches and worker pools; keep the full suite within VM RAM.
+      cargo-test-extra-args: '-- --test-threads=1'
