@@ -1815,14 +1815,20 @@ impl GpuContext {
     }
 
     /// The effect result kept under `key` (see [`crate::upload::FxResults`]).
-    pub(crate) fn fx_result(&self, key: u64) -> Option<(GpuImage, [f64; 2], f64)> {
+    pub(crate) fn fx_result(&self, key: u64) -> Option<crate::upload::FxHit> {
         self.fx_results.lock().ok()?.get(key)
     }
 
+    /// Effect results reused so far (tests).
+    #[cfg(test)]
+    pub(crate) fn fx_result_hits(&self) -> u64 {
+        self.fx_results.lock().map(|r| r.hits).unwrap_or_default()
+    }
+
     /// Keep an effect result under `key`, within a quarter of the upload budget.
-    pub(crate) fn keep_fx_result(&self, key: u64, tex: GpuImage, offset: [f64; 2], scale: f64) {
+    pub(crate) fn keep_fx_result(&self, key: u64, result: crate::upload::FxHit) {
         if let Ok(mut r) = self.fx_results.lock() {
-            r.insert(key, tex, offset, scale, self.upload_budget() / 4);
+            r.insert(key, result, self.upload_budget() / 4);
         }
     }
 

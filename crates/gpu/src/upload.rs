@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 use effectcraft_raster::Image;
+use effectcraft_render::reads::ReadFiles;
 
 use crate::context::GpuImage;
 
@@ -267,9 +268,14 @@ struct FxResult {
     tex: GpuImage,
     offset: [f64; 2],
     scale: f64,
+    /// The source files it was made of, noted again in each frame that reuses it.
+    files: Arc<ReadFiles>,
     bytes: usize,
     last_use: u64,
 }
+
+/// A kept effect result: its texture, offset, scale and source files.
+pub(crate) type FxHit = (GpuImage, [f64; 2], f64, Arc<ReadFiles>);
 
 /// Effect results kept on the device (`walk`'s resident Classic 3D planes), by the layer cache's
 /// key of the processed pixels and the colour conversion: the same frame drawn again (a paused
@@ -281,23 +287,27 @@ pub(crate) struct FxResults {
     map: HashMap<u64, FxResult>,
     bytes: usize,
     clock: u64,
+    /// Results reused (tests).
+    pub(crate) hits: u64,
 }
 
 impl FxResults {
-    /// The result kept under `key`: (texture, offset, scale).
-    pub(crate) fn get(&mut self, key: u64) -> Option<(GpuImage, [f64; 2], f64)> {
+    /// The result kept under `key`.
+    pub(crate) fn get(&mut self, key: u64) -> Option<FxHit> {
         self.clock += 1;
         let now = self.clock;
         let e = self.map.get_mut(&key)?;
         e.last_use = now;
-        Some((e.tex.clone(), e.offset, e.scale))
+        self.hits += 1;
+        Some((e.tex.clone(), e.offset, e.scale, e.files.clone()))
     }
 
-    /// Keep `tex` under `key`, then drop the least recently used results over `budget` bytes.
-    pub(crate) fn insert(&mut self, key: u64, tex: GpuImage, offset: [f64; 2], scale: f64, budget: usize) {
+    /// Keep `tex`, made of `files`, under `key`, then drop the least recently used results over
+    /// `budget` bytes.
+    pub(crate) fn insert(&mut self, key: u64, (tex, offset, scale, files): FxHit, budget: usize) {
         let bytes = (tex.width as usize).saturating_mul(tex.height as usize).saturating_mul(16);
         self.clock += 1;
-        if let Some(old) = self.map.insert(key, FxResult { tex, offset, scale, bytes, last_use: self.clock }) {
+        if let Some(old) = self.map.insert(key, FxResult { tex, offset, scale, files, bytes, last_use: self.clock }) {
             self.bytes = self.bytes.saturating_sub(old.bytes);
         }
         self.bytes = self.bytes.saturating_add(bytes);

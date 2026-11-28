@@ -186,12 +186,14 @@ fn resident_planes(
             && !effectcraft_render::text::per_char_3d(ctx, layer)
             && !ctx.comp.layers.iter().any(|m| m.track_matte.is_some_and(|tm| tm.layer == layer.id))
     };
-    // The key of the result: the layer cache's key of the processed pixels and the colour
-    // conversion applied to them.
+    // The key of the result: the layer cache's key of the processed pixels, the colour
+    // conversion applied to them and the cache's clears (a reload or purge since makes it new).
+    let clears = r.cache.map_or(0, |c| c.clears());
     let key = |layer: &Layer| {
         r.content_buf_key(ctx, layer).map(|k| {
             let k = effectcraft_render::cache::derive(k, pipe.to_blend().is_some() as u64);
-            effectcraft_render::cache::derive(k, pipe.levels.map_or(0, |l| u64::from(l.to_bits())))
+            let k = effectcraft_render::cache::derive(k, pipe.levels.map_or(0, |l| u64::from(l.to_bits())));
+            effectcraft_render::cache::derive(k, clears)
         })
     };
     let keyed: Vec<(&Layer, Option<u64>)> = run.par_iter().copied().filter(|l| eligible(l)).map(|l| (l, key(l))).collect();
@@ -206,7 +208,13 @@ fn resident_planes(
     let mut todo = Vec::with_capacity(keyed.len());
     for (layer, k) in keyed {
         match k.and_then(|k| e.g.fx_result(k)) {
-            Some((img, offset, scale)) => keep(layer, img, offset, scale),
+            Some((img, offset, scale, files)) => {
+                // (the frame is made of the files the result was made of, as for a layer-cache hit)
+                if let Some(log) = r.reads {
+                    log.note_all(&files);
+                }
+                keep(layer, img, offset, scale);
+            }
             None => todo.push((layer, k)),
         }
     }
@@ -216,21 +224,24 @@ fn resident_planes(
         Picture(effectcraft_render::FootagePicture),
         Buf(Arc<Buf>),
     }
-    let inputs: Vec<Option<Input>> = todo
+    // (with the files each one reads, kept with the result)
+    let inputs: Vec<(Option<Input>, Arc<effectcraft_render::reads::ReadFiles>)> = todo
         .par_iter()
-        .map(|(layer, _)| match picture(r, ctx, layer) {
-            Some(p) => Some(Input::Picture(p)),
-            None => r.frame_layer_input(ctx, layer).map(Input::Buf),
+        .map(|(layer, _)| {
+            r.record_reads(|r| match picture(r, ctx, layer) {
+                Some(p) => Some(Input::Picture(p)),
+                None => r.frame_layer_input(ctx, layer).map(Input::Buf),
+            })
         })
         .collect();
-    for ((layer, k), input) in todo.into_iter().zip(inputs) {
+    for ((layer, k), (input, input_files)) in todo.into_iter().zip(inputs) {
         let (src, offset, scale) = match input {
             Some(Input::Picture(p)) if !p.img.is_empty() => (e.g.upload_picture(&p.img)?, p.effect_offset, p.scale),
             Some(Input::Buf(b)) if !b.img.is_empty() => (e.g.upload_buf(&b)?, b.offset, b.scale),
             _ => continue,
         };
         let mut fx = crate::effects::GpuFx::new(e, src, offset, scale, pipe.levels);
-        let origin = r.run_layer_effects_on(ctx, layer, &mut fx);
+        let (origin, fx_files) = r.record_reads(|r| r.run_layer_effects_on(ctx, layer, &mut fx));
         let (mut img, offset, scale) = fx.finish()?;
         let offset = [offset[0] - origin[0] * scale, offset[1] - origin[1] * scale];
         if img.width == 0 || img.height == 0 {
@@ -240,7 +251,12 @@ fn resident_planes(
             img = ops::convert(e, &img, &c);
         }
         if let Some(k) = k {
-            e.g.keep_fx_result(k, img.clone(), offset, scale);
+            let mut files = (*input_files).clone();
+            files.extend(&fx_files);
+            // Another worker can take the texture as soon as it is kept: its commands are
+            // submitted first, so a copy recorded later runs after them.
+            e.submit();
+            e.g.keep_fx_result(k, (img.clone(), offset, scale, Arc::new(files)));
         }
         keep(layer, img, offset, scale);
     }

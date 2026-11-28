@@ -251,6 +251,14 @@ impl<'a> Renderer<'a> {
     /// source, or the files of cached buffers it used), which go to [`Renderer::reads`] too. A
     /// cached buffer then reports the files it was made of whichever render uses it. Without a
     /// cache or a key, `make` runs on this renderer as it is (no files: nothing is kept).
+    /// Run `make` and return what it made with the source files it read, which are also noted in
+    /// this render's [`Renderer::reads`], as for a buffer this render keeps in the layer cache:
+    /// what an accelerator keeps a result of its own with, to note the files again when it reuses
+    /// it. Without a layer cache nothing is recorded.
+    pub fn record_reads<T>(&self, make: impl FnOnce(&Renderer<'_>) -> T) -> (T, Arc<ReadFiles>) {
+        self.recorded(self.cache.map(|_| 0), make)
+    }
+
     pub(crate) fn recorded<T>(&self, key: Option<u64>, make: impl FnOnce(&Renderer<'_>) -> T) -> (T, Arc<ReadFiles>) {
         if key.is_none() || self.cache.is_none() {
             return (make(self), Arc::default());
