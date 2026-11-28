@@ -190,8 +190,8 @@ See [docs/agents.md](docs/agents.md) and [docs/control-protocol.md](docs/control
 ## Get started
 
 Installers for each version are on the [Releases](https://github.com/storytold/effectcraft/releases)
-page: a universal macOS app; Windows MSIs and portable zips for x64, x86 and ARM64; Linux
-AppImage, Flatpak, deb, rpm and tar.gz for x86_64 and aarch64, plus a riscv64 tar.gz; a FreeBSD x86_64 tarball; and the
+page. Current releases include a universal macOS app, Windows MSIs and portable ZIPs for x64 and ARM64,
+Linux packages for x86_64, aarch64 and riscv64, FreeBSD tarballs for x86_64 and aarch64, and a
 web build. [Downloads](#downloads) lists every file. The Windows ARM64 build runs natively on
 Windows on ARM, without x64 emulation. CI installs that MSI on Windows 11 ARM64 hardware, checks
 both programs are ARM64 and runs the command-line tool there, but it doesn't open the app's window
@@ -273,11 +273,10 @@ send us right now.
 |---|---|---|
 | x64 (64-bit Intel/AMD) | `effectcraft-<ver>-windows-x64.msi` | `effectcraft-<ver>-windows-x64-portable.zip` |
 | arm64 (Snapdragon and other ARM PCs) | `effectcraft-<ver>-windows-arm64.msi` | `effectcraft-<ver>-windows-arm64-portable.zip` |
-| x86 (32-bit) | `effectcraft-<ver>-windows-x86.msi` | `effectcraft-<ver>-windows-x86-portable.zip` |
 
 Installers and executables are code-signed. The installer asks who to install EffectCraft for and where. By default it installs for your
 account only, into `%LOCALAPPDATA%\Programs\ArtCraft\EffectCraft`, without an administrator prompt;
-"Everyone on this computer" installs into `C:\Program Files\ArtCraft\EffectCraft` (`Program Files (x86)` for the 32-bit build). Later versions
+"Everyone on this computer" installs into `C:\Program Files\ArtCraft\EffectCraft`. Later versions
 install into the same folder. To install silently
 into a folder of your choice: `msiexec /i effectcraft-<ver>-windows-x64.msi /qn INSTALLFOLDER="D:\Apps\EffectCraft"`.
 A silent install is per-user by default. `INSTALLFOLDER` chooses the folder, not who it is installed for;
@@ -300,7 +299,7 @@ add `ALLUSERS=1`, from an elevated terminal or deployment tool, for an all-users
 | Fedora/RHEL/openSUSE | `effectcraft-<ver>-linux-x86_64.rpm` | `effectcraft-<ver>-linux-aarch64.rpm` | |
 | Tarball | `effectcraft-<ver>-linux-x86_64.tar.gz` | `effectcraft-<ver>-linux-aarch64.tar.gz` | Unpack anywhere |
 
-RISC-V 64-bit: `effectcraft-<ver>-linux-riscv64.tar.gz` (tarball only; needs glibc 2.39+, e.g. Ubuntu 24.04+ or Debian 13+).
+RISC-V 64-bit: `effectcraft-<ver>-linux-riscv64.deb`, `effectcraft-<ver>-linux-riscv64.rpm`, and `effectcraft-<ver>-linux-riscv64.tar.gz` (needs glibc 2.39+, e.g. Ubuntu 24.04+ or Debian 13+).
 
 **File drag-and-drop on Linux:** The current eframe/winit 0.30 native Wayland backend does not
 deliver file-hover or file-drop events. On Hyprland and other native Wayland sessions, use
@@ -321,6 +320,7 @@ File ▸ Import fallback instead.
 | Build | File |
 |---|---|
 | x86_64 | `effectcraft-<ver>-freebsd-x86_64.tar.gz` |
+| aarch64 (ARM64) | `effectcraft-<ver>-freebsd-aarch64.tar.gz` |
 
 ### Web (WebAssembly)
 
