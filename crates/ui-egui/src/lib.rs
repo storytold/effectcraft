@@ -41,6 +41,7 @@ pub mod menu_keys;
 pub mod menus;
 pub mod native_menu;
 pub mod num_math;
+mod open_local;
 pub mod panels;
 mod pointer_wrap;
 pub mod prefs_live;
