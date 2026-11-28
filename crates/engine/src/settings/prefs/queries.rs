@@ -172,6 +172,11 @@ pub const WEB_LAYER_CACHE: u64 = 512 << 20;
 /// The most the footage frame cache holds in the browser (see [`WEB_LAYER_CACHE`]).
 pub const WEB_MEDIA_CACHE: u64 = 256 << 20;
 
+/// The most the footage frame cache holds in a headless session ([`crate::Session::footage_cap`],
+/// #4157): an export reads each frame about once, so this keeps only what a frame's layers share
+/// and what time effects read again (the footage cache's default size before the common budget).
+pub const HEADLESS_MEDIA_CACHE: u64 = 1 << 30;
+
 /// Above this part (percent) of the installed RAM left after **RAM Reserved for Other
 /// Applications**, the process's measured memory makes the caches give way even within their
 /// budget ([`Prefs::process_limits`]): above the caches' budget plus most of the room left for

@@ -444,6 +444,69 @@ fn cancelled_export_removes_only_files_it_opened() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+/// #4142: an export that fails or panics part way leaves none of the files it opened, as a
+/// cancelled one already did, and keeps the files it did not open.
+#[test]
+fn failed_or_panicked_export_removes_only_files_it_opened() {
+    use effectcraft_export::ExportError;
+    let (p, cid) = project(FrameRate::new(25, 1), |_, _| {});
+    let settings = RenderSettings::default();
+    let decoys = ["clip.aep", "clip_99999.png", "clip.txt", "clip000.mp4"];
+    let listing = |dir: &std::path::Path| -> Vec<String> {
+        let mut names: Vec<_> = std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        names.sort();
+        names
+    };
+    // (`blocked` is a folder where a frame wants to go: writing that frame fails)
+    let blocked = "clip_00020.png";
+    for (format, panics) in [(OutputFormat::PngSequence, false), (OutputFormat::PngSequence, true), (OutputFormat::H264, true)] {
+        let guard = tempfile::tempdir().unwrap();
+        let dir = guard.path();
+        for name in decoys {
+            std::fs::write(dir.join(name), b"keep").unwrap();
+        }
+        std::fs::create_dir(dir.join(blocked)).unwrap();
+        let mut expected = listing(dir);
+        let om = OutputModule::for_format(format);
+        let (path, first) = if format.is_sequence() { ("clip_[#####].png", "clip_00000.png") } else { ("clip.mp4", "clip.mp4") };
+        let path = dir.join(path);
+        let first = dir.join(first);
+        let job = Job {
+            project: &p,
+            footage: &NoFootage,
+            expr: None,
+            accel: None,
+            comp: cid,
+            settings: &settings,
+            output: &om,
+            path: path.to_str().unwrap(),
+            sink: None,
+            nested_switches: true,
+            options: JobOptions::default(),
+        };
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            export(&job, &mut |_| {
+                // Stop the export by a panic once its output is on disk.
+                assert!(!(panics && first.exists()), "a stage panics part way");
+                true
+            })
+        }));
+        if panics {
+            assert!(outcome.is_err(), "{format:?}: the panic reaches the caller");
+        } else {
+            let result = outcome.expect("a failure is an error, not a panic");
+            assert!(matches!(result, Err(ExportError::Io(_))), "{format:?}: the export's own error, {result:?}");
+            // The failure's render log stays next to the output: it is a report, not a render.
+            expected.push("clip_RenderLog.txt".into());
+            expected.sort();
+        }
+        assert_eq!(listing(dir), expected, "{format:?} (panics: {panics}): partial files remain");
+        for name in decoys {
+            assert_eq!(std::fs::read(dir.join(name)).unwrap(), b"keep", "{name}");
+        }
+    }
+}
+
 /// Skip Existing keeps a frame that is already in the overflow folder the frame is placed in
 /// (it checked only the primary destination, then truncated the overflow file).
 #[test]

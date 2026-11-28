@@ -189,7 +189,7 @@ pub fn active_contexts(app: &EffectcraftApp) -> Vec<&'static str> {
     }
     match app.ui.tool {
         Tool::Brush | Tool::Clone | Tool::Eraser => out.push("Paint"),
-        Tool::Orbit | Tool::PanCamera | Tool::Dolly => out.push("Camera"),
+        t if t.is_camera() => out.push("Camera"),
         _ => {}
     }
     if app.session.selected_mask().is_some() {

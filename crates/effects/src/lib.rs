@@ -670,6 +670,20 @@ impl EffectSpec {
     pub fn skips_cover(&self) -> bool {
         SKIPS_COVER.contains(&self.id)
     }
+
+    /// [`EffectSpec::skips_cover`] for one instance, given its current parameters (evaluated only
+    /// when the answer depends on them). Fill without Invert or feather only recolours pixels the
+    /// layer already has, masked or not, so it needs no room beyond them: covering the whole layer
+    /// rectangle only inflated working images on scaled-up text (#4158). Inverted, it paints the
+    /// layer's transparent area; feathered, a mask edge outside the painted pixels still blurs into
+    /// them. Both keep the cover.
+    pub fn skips_cover_for(&self, params: impl FnOnce() -> Params) -> bool {
+        self.skips_cover()
+            || (self.id == "ec.generate.fill" && {
+                let p = params();
+                !p.b("invert") && p.f("horizontalFeather") <= 0.0 && p.f("verticalFeather") <= 0.0
+            })
+    }
 }
 
 pub(crate) fn p(id: &'static str, name: &'static str, default: Value, ui: ParamUi) -> ParamSpec {

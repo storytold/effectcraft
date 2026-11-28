@@ -208,6 +208,7 @@ const IMAGE: &[&str] = &[
     "webp",
     "psd",
     "psb",
+    "pcraft",
     "svg",
     "tga",
     "dpx",

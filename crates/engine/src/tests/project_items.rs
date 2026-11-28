@@ -257,3 +257,51 @@ fn used_in_counts_layers_across_comps() {
     assert_eq!(r["comps"], json!([]));
     assert!(s.execute("project.usedIn", json!({"item": "Nope"})).is_err());
 }
+
+/// #4097: stored and animated layer pickers follow their targets into the copied comp.
+#[test]
+fn duplicated_comp_keeps_its_layer_property_targets() {
+    use effectcraft_keyframe::{Keyframe, Value};
+    use effectcraft_time::Tick;
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Rig", "width": 64, "height": 64, "duration": 2})).unwrap();
+    let original = s.active_comp_id().unwrap();
+    let target = s.execute("layer.newNull", json!({"name": "Target"})).unwrap()["layer"].as_u64().unwrap();
+    let holder = s.execute("layer.newNull", json!({"name": "Holder"})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("effect.apply", json!({"layers": [holder], "effect": "Set Matte"})).unwrap();
+    for stored in [Value::Layer(Some(target)), Value::Layer(Some(effectcraft_project::NO_LAYER)), Value::Layer(None)] {
+        let mut configured = 0;
+        std::sync::Arc::make_mut(&mut s.project).comp_mut(original).unwrap().layer_mut(LayerId(holder)).unwrap().props.walk_mut(&mut |p| {
+            if matches!(p.value, Value::Layer(_)) {
+                p.value = stored.clone();
+                p.keys = vec![
+                    Keyframe::new(Tick::ZERO, Value::Layer(Some(target))),
+                    Keyframe::new(Tick::from_seconds_f64(1.0), Value::Layer(None)),
+                    Keyframe::new(Tick::from_seconds_f64(1.5), Value::Layer(Some(effectcraft_project::NO_LAYER))),
+                ];
+                configured += 1;
+            }
+        });
+        assert!(configured > 0);
+        let before = s.project.clone();
+        let copy = ItemId(s.execute("project.duplicate", json!({"items": [original.0]})).unwrap()["items"][0].as_u64().unwrap());
+        let comp = s.project.comp(copy).unwrap();
+        let copied_target = comp.layers.iter().find(|l| l.name == "Target").unwrap().id;
+        assert_ne!(copied_target.0, target);
+        let copied_holder = comp.layers.iter().find(|l| l.name == "Holder").unwrap();
+        let mut checked = 0;
+        copied_holder.props.walk("", &mut |_, p| {
+            if matches!(p.value, Value::Layer(_)) {
+                assert_eq!(p.value, if stored == Value::Layer(Some(target)) { Value::Layer(Some(copied_target.0)) } else { stored.clone() });
+                assert_eq!(p.keys[0].value, Value::Layer(Some(copied_target.0)));
+                assert_eq!(p.keys[1].value, Value::Layer(None));
+                assert_eq!(p.keys[2].value, Value::Layer(Some(effectcraft_project::NO_LAYER)));
+                checked += 1;
+            }
+        });
+        assert_eq!(checked, configured);
+        assert_eq!(s.project.comp(original), before.comp(original));
+        s.undo();
+        assert_eq!(s.project, before);
+    }
+}

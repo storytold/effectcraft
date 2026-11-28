@@ -607,6 +607,10 @@ impl Services for ConfinedServices {
         self.confinement.check(path, Access::Read).map_err(|e| std::io::Error::new(std::io::ErrorKind::PermissionDenied, e.to_string()))?;
         self.inner.read_file(path)
     }
+    fn file_fingerprint(&self, path: &str) -> std::io::Result<[u8; 32]> {
+        self.confinement.check(path, Access::Read).map_err(|e| std::io::Error::new(std::io::ErrorKind::PermissionDenied, e.to_string()))?;
+        self.inner.file_fingerprint(path)
+    }
     fn write_file(&self, path: &str, data: &[u8]) -> std::io::Result<()> {
         self.inner.write_file(path, data)
     }

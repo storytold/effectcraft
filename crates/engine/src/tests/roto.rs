@@ -603,6 +603,77 @@ fn object_matte_background_job_cancel_and_freeze() {
     assert_eq!(status(&mut s)["frozen"], true);
 }
 
+/// A clip replacement with the same project metadata must not acquire the previous
+/// segmentation. The metadata-only cache is deliberately primed with an empty result.
+#[test]
+fn object_matte_freeze_uses_the_current_media_fingerprint() {
+    use effectcraft_effects::roto::{self, FROZEN, FrameSeg, FrozenCache};
+    use effectcraft_project::{Footage, ItemId, ItemKind};
+    use effectcraft_render::FootageSource;
+    use effectcraft_time::Tick;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed};
+
+    struct CachedDecoder {
+        inner: Arc<dyn FootageSource>,
+        reopened: AtomicBool,
+        reads: AtomicUsize,
+    }
+    impl FootageSource for CachedDecoder {
+        fn frame(&self, item: ItemId, footage: &Footage, time: Tick) -> Option<Arc<Image>> {
+            if self.reopened.load(Relaxed) {
+                self.reads.fetch_add(1, Relaxed);
+                self.inner.frame(item, footage, time)
+            } else {
+                Some(Arc::new(Image::new(W, H)))
+            }
+        }
+        fn forget(&self, _: &str) {
+            self.reopened.store(true, Relaxed);
+        }
+    }
+
+    hold_roto_cache_test_lock();
+    let media = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(media.path(), b"replacement clip data").unwrap();
+    let (mut s, clip, solid) = setup(|_| draw(center(0)));
+    let decoder = Arc::new(CachedDecoder { inner: s.footage.clone(), reopened: AtomicBool::new(false), reads: AtomicUsize::new(0) });
+    s.footage = decoder.clone();
+    let cid = s.active_comp_id().unwrap();
+    s.edit("use replacement footage", None, |p, _| {
+        p.comp_mut(cid).unwrap().layers.retain(|l| l.id != solid);
+        let item = p.comp(cid).unwrap().layer(clip).unwrap().source.item().unwrap();
+        if let ItemKind::Footage(f) = &mut p.item_mut(item).unwrap().kind {
+            f.path = media.path().to_string_lossy().into_owned();
+        }
+        Ok(())
+    })
+    .unwrap();
+    let point = center(0);
+    let uid = s.execute_checked("objectMatte.apply", json!({"layer": clip.0, "point": point, "before": 0, "after": 0, "frame": 0})).unwrap()["effect"]
+        .as_u64()
+        .unwrap();
+    let comp = s.project.comp(cid).unwrap();
+    let layer = comp.layer(clip).unwrap();
+    let mut warm = crate::roto::FrameSource::new(&s.project, decoder.as_ref(), None, &s.layer_cache, cid, comp, layer, 0, [W as f64, H as f64]);
+    assert_eq!(warm.get(0).unwrap().get(90, 110)[3], 0.0);
+    let key = s.roto_keys(cid, clip, uid).unwrap().into_iter().find(|(f, _)| *f == 0).unwrap().1;
+    let size = W as usize * H as usize;
+    let stale = FrameSeg { w: W as usize, h: H as usize, matte: vec![0; size], refine: vec![0; size], ..Default::default() };
+    roto::store(key, 1.0, Arc::new(stale));
+    let result = s.execute_checked("objectMatte.freeze", json!({"layer": clip.0, "effect": uid, "wait": true})).unwrap();
+    assert_eq!(result["frozen"], true, "{result}");
+    assert!(decoder.reads.load(Relaxed) > 0, "Freeze decoded fresh pixels");
+    let g = s.project.comp(cid).unwrap().layer(clip).unwrap().props.find_group(uid).unwrap();
+    let params = crate::roto::params_static(g);
+    let effectcraft_keyframe::Value::Str(payload) = params.get(FROZEN).unwrap() else { panic!("expected a frozen matte") };
+    let cache = FrozenCache::from_json(payload).unwrap();
+    assert!(cache.media_fingerprint.is_some_and(|fingerprint| !fingerprint.is_empty()));
+    let center = point[1] as usize * W as usize + point[0] as usize;
+    assert!(alpha_at(&s, 0)[center] > 0.9, "the frozen matte was computed from the replacement");
+    roto::forget([key]);
+}
+
 /// A queue edit preserves a frozen matte made before the footage signature gained placed_page.
 #[test]
 fn render_queue_keeps_frozen_object_matte_with_legacy_footage_key() {

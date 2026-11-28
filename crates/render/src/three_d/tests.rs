@@ -435,16 +435,36 @@ fn orientation_for_round_trips() {
     }
 }
 
-#[test]
-fn depth_of_field_blurs_out_of_focus_layers() {
+/// A comp whose camera (layer 0) has depth of field, Aperture 60 and Focus Distance `focus`, over
+/// a white `w`×`h` 3D solid (layer 1) centred in the frame at z = 0, scaled `scale` %.
+fn dof_scene(focus: f64, (w, h): (u32, u32), scale: f64) -> (Project, ItemId) {
     let (mut p, cid, comp) = setup();
     let mut cam = camera(&mut p, &comp);
     set(&mut cam, "cameraOptions/dof", Value::Bool(true));
     set(&mut cam, "cameraOptions/aperture", Value::Scalar(60.0));
-    let s = solid3(&mut p, &comp, [1.0, 1.0, 1.0], 60, 60, [100.0, 50.0, 0.0]);
+    set(&mut cam, "cameraOptions/focusDistance", Value::Scalar(focus));
+    let mut s = solid3(&mut p, &comp, [1.0, 1.0, 1.0], w, h, [100.0, 50.0, 0.0]);
+    set(&mut s, "transform/scale", Value::Vec3([scale, scale, 100.0]));
     push(&mut p, cid, cam);
     push(&mut p, cid, s);
+    (p, cid)
+}
+
+/// The blur radius map of a [`dof_scene`]'s `w`×`h` plane as its camera sees it, and the cap it
+/// is held to.
+fn plane_dof_radii(p: &Project, cid: ItemId, (w, h): (u32, u32)) -> (Vec<f32>, f64) {
+    let cp = p.comp(cid).unwrap();
+    let ctx = crate::EvalCtx::new(p, cid, cp, Tick::ZERO);
+    let cs = super::camera::layer_camera(&ctx, &cp.layers[0]);
+    let dof = cs.dof.unwrap();
+    let cap = super::compose::dof_radius_cap(&dof, w, h);
+    (super::compose::dof_radii_at(&cs, &dof, ctx.world_matrix(&cp.layers[1]), (w as usize, h as usize), [0.0; 2], 1.0, cap), cap)
+}
+
+#[test]
+fn depth_of_field_blurs_out_of_focus_layers() {
     // In focus (focus distance = zoom = distance to z=0): hard edge at x = 70.
+    let (mut p, cid) = dof_scene(zoom(), (60, 60), 100.0);
     let a = render(&p, cid);
     assert!(a.get(71, 50)[3] > 0.99 && a.get(69, 50)[3] < 0.01);
     let c = p.comp_mut(cid).unwrap();
@@ -460,14 +480,7 @@ fn depth_of_field_blurs_out_of_focus_layers() {
 #[test]
 fn dof_falls_back_when_focus_distance_is_not_finite() {
     for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-        let (mut p, cid, comp) = setup();
-        let mut cam = camera(&mut p, &comp);
-        set(&mut cam, "cameraOptions/dof", Value::Bool(true));
-        set(&mut cam, "cameraOptions/aperture", Value::Scalar(60.0));
-        set(&mut cam, "cameraOptions/focusDistance", Value::Scalar(bad));
-        let s = solid3(&mut p, &comp, [1.0, 1.0, 1.0], 60, 60, [100.0, 50.0, 0.0]);
-        push(&mut p, cid, cam);
-        push(&mut p, cid, s);
+        let (p, cid) = dof_scene(bad, (60, 60), 100.0);
         let cp = p.comp(cid).unwrap();
         let ctx = crate::EvalCtx::new(&p, cid, cp, Tick::ZERO);
         let cs = crate::three_d::camera::layer_camera(&ctx, &cp.layers[0]);
@@ -486,15 +499,7 @@ fn dof_falls_back_when_focus_distance_is_not_finite() {
 #[test]
 fn dof_blur_radius_is_bounded_for_degenerate_inputs() {
     let scene = |focus: f64, scale: f64| {
-        let (mut p, cid, comp) = setup();
-        let mut cam = camera(&mut p, &comp);
-        set(&mut cam, "cameraOptions/dof", Value::Bool(true));
-        set(&mut cam, "cameraOptions/aperture", Value::Scalar(60.0));
-        set(&mut cam, "cameraOptions/focusDistance", Value::Scalar(focus));
-        let mut s = solid3(&mut p, &comp, [1.0, 1.0, 1.0], 60, 60, [100.0, 50.0, 0.0]);
-        set(&mut s, "transform/scale", Value::Vec3([scale, scale, 100.0]));
-        push(&mut p, cid, cam);
-        push(&mut p, cid, s);
+        let (p, cid) = dof_scene(focus, (60, 60), scale);
         render(&p, cid)
     };
     let finite = |img: &effectcraft_raster::Image| img.data.iter().all(|px| px.iter().all(|c| c.is_finite()));
@@ -515,27 +520,68 @@ fn dof_blur_radius_is_bounded_for_degenerate_inputs() {
 #[test]
 fn dof_radii_skip_degenerate_planes_and_respect_the_cap() {
     let radii = |focus: f64, scale: f64| {
-        let (mut p, cid, comp) = setup();
-        let mut cam = camera(&mut p, &comp);
-        set(&mut cam, "cameraOptions/dof", Value::Bool(true));
-        set(&mut cam, "cameraOptions/aperture", Value::Scalar(60.0));
-        set(&mut cam, "cameraOptions/focusDistance", Value::Scalar(focus));
-        let mut s = solid3(&mut p, &comp, [1.0, 1.0, 1.0], 60, 60, [100.0, 50.0, 0.0]);
-        set(&mut s, "transform/scale", Value::Vec3([scale, scale, 100.0]));
-        push(&mut p, cid, cam);
-        push(&mut p, cid, s);
-        let cp = p.comp(cid).unwrap();
-        let ctx = crate::EvalCtx::new(&p, cid, cp, Tick::ZERO);
-        let cs = super::camera::layer_camera(&ctx, &cp.layers[0]);
-        let dof = cs.dof.unwrap();
-        let cap = super::compose::dof_radius_cap(&dof, 60, 60);
-        (super::compose::dof_radii_at(&cs, &dof, ctx.world_matrix(&cp.layers[1]), (60, 60), [0.0; 2], 1.0, cap), cap)
+        let (p, cid) = dof_scene(focus, (60, 60), scale);
+        plane_dof_radii(&p, cid, (60, 60))
     };
     let (r, _) = radii(zoom() + 10.0, 0.0);
     assert!(r.iter().all(|&r| r == 0.0), "a 0%-scaled plane is not blurred");
     let (r, cap) = radii(1.0e12, 100.0);
     assert!(cap > 1000.0, "a 60×60 buffer may blur by well over 1000 px: {cap}");
     assert!(r.iter().all(|&r| r as f64 <= cap && r as f64 > cap - 1.0), "huge focus: every radius at the cap {cap}");
+}
+
+/// A NaN blur radius has no defocus, so the plane isn't blurred, where `min` would make NaN the
+/// cap, the largest blur there is. Values from an expression or a script can produce one in two
+/// ways: a plane and a camera at finite but opposite extreme depths (z = ±1e308), whose depth
+/// overflows to infinity, so its slope across the buffer is ∞ − ∞ and every pixel's depth is NaN;
+/// and Aperture 1e308 at Blur Level 0 %, whose circle of confusion overflows to infinity before
+/// the blur level scales it to ∞ × 0, at a finite depth that a check on the depth alone would let
+/// through.
+#[test]
+fn dof_radii_are_zero_where_the_radius_is_nan() {
+    let radii = |edit: &dyn Fn(&mut effectcraft_project::Layers)| {
+        let (mut p, cid) = dof_scene(zoom() + 10.0, (60, 60), 100.0);
+        edit(&mut p.comp_mut(cid).unwrap().layers);
+        plane_dof_radii(&p, cid, (60, 60))
+    };
+    let nan_depth = radii(&|l| {
+        set(&mut l[0], "transform/position", Value::Vec3([100.0, 50.0, -1.0e308]));
+        set(&mut l[1], "transform/position", Value::Vec3([100.0, 50.0, 1.0e308]));
+    });
+    let nan_coc = radii(&|l| {
+        set(&mut l[0], "cameraOptions/aperture", Value::Scalar(1.0e308));
+        set(&mut l[0], "cameraOptions/blurLevel", Value::Scalar(0.0));
+    });
+    for (case, (r, cap)) in [("NaN depth", nan_depth), ("∞ × 0 circle of confusion", nan_coc)] {
+        assert!(r.iter().all(|&r| r == 0.0), "{case}: not blurred (cap {cap}): {:?}", &r[..4]);
+    }
+}
+
+/// A plane as long as a layer may be ([`effectcraft_project::limits::MAX_SIZE`]) can't be
+/// padded for its blur: the padded copy is well within the area budget, but longer on a side
+/// than a layer may be. It is drawn sharp instead, whichever side is the long one. Half as long,
+/// the same defocused plane blurs.
+#[test]
+fn dof_blur_refuses_a_padded_buffer_longer_than_a_layer() {
+    // A 20 px strip `len` px long through the centre of the frame, lying across it or up it, with
+    // a ~15 px blur radius: its soft and opaque pixels on the frame's centre line at right angles
+    // to it.
+    let strip = |len: u32, across: bool| {
+        let (p, cid) = dof_scene(zoom() * 0.5, if across { (len, 20) } else { (20, len) }, 100.0);
+        let img = render(&p, cid);
+        let line: Vec<(i64, i64)> = if across { (0..H as i64).map(|y| (100, y)).collect() } else { (0..W as i64).map(|x| (x, 50)).collect() };
+        (soft_count(&img, line.iter().copied()), line.iter().filter(|&&(x, y)| img.get(x, y)[3] > 0.99).count())
+    };
+    let max = effectcraft_project::limits::MAX_SIZE;
+    for across in [true, false] {
+        let (soft, _) = strip(max / 2, across);
+        assert!(soft > 10, "a {}-px-long plane out of focus blurs (across {across}): {soft} soft px", max / 2);
+        let (soft, opaque) = strip(max, across);
+        assert!(
+            soft == 0 && opaque == 20,
+            "a {max}-px-long plane is drawn sharp, not padded past the largest layer size (across {across}): {soft} soft px, {opaque} opaque"
+        );
+    }
 }
 
 /// Two layers that look the same on screen (400×100 at 100%, 1600×400 at 25%) at the same depth
@@ -718,4 +764,199 @@ fn rig_orbit_keeps_distance_and_pan_moves_both() {
     r.orbit(0.0, 500.0);
     let off = r.eye - r.poi;
     assert!(off.y.abs() / off.length() < 0.9999);
+}
+
+// ---- the eight camera tools (#2586): pivots of the Cursor / Scene / Camera POI variants
+
+const CW: f64 = 1920.0;
+const CH: f64 = 1080.0;
+
+/// Returns the rig of the default Custom View 1 camera in a comp of size `CW` by `CH`.
+fn custom_rig() -> Rig {
+    Rig::from_view(&default_view_cam(View3D::Custom1, CW, CH))
+}
+
+/// Projects the world point `p` through the rig's camera to comp pixels; panics when the point is behind the camera.
+fn screen(r: &Rig, p: Vec3) -> effectcraft_geom::Vec2 {
+    r.state().project(CW, CH, p).expect("in front of the camera")
+}
+
+/// Checks that orbiting about the point of interest equals the plain orbit step.
+#[test]
+fn orbit_around_camera_poi_is_orbit_about_the_poi() {
+    let (mut a, mut b) = (custom_rig(), custom_rig());
+    a.orbit(25.0, -10.0);
+    b.orbit_about(b.poi, 25.0, -10.0);
+    assert!((a.eye - b.eye).length() < 1e-6, "{:?} vs {:?}", a.eye, b.eye);
+    assert!((a.poi - b.poi).length() < 1e-9);
+}
+
+/// Checks that orbiting about a pivot keeps the pivot's distance and screen position while the point of interest turns too, and that a NaN pivot is ignored.
+#[test]
+fn orbit_around_a_pivot_keeps_it_on_screen_and_turns_the_whole_camera() {
+    let mut r = custom_rig();
+    // A pivot well off the point of interest (the cursor over a layer, or the scene's centre).
+    let pivot = r.poi + vec3(300.0, -120.0, 400.0);
+    let (s0, de, dp, poi0) = (screen(&r, pivot), (r.eye - pivot).length(), (r.poi - pivot).length(), r.poi);
+    r.orbit_about(pivot, 30.0, -12.0);
+    let s1 = screen(&r, pivot);
+    assert!((s1.x - s0.x).abs() < 1e-6 && (s1.y - s0.y).abs() < 1e-6, "{s0:?} → {s1:?}");
+    assert!(((r.eye - pivot).length() - de).abs() < 1e-6);
+    assert!(((r.poi - pivot).length() - dp).abs() < 1e-6);
+    // Unlike Orbit Around Camera POI, the point of interest goes round too.
+    assert!((r.poi - poi0).length() > 10.0);
+    // Pitch stops short of the poles; a pivot that is not a number leaves the camera alone.
+    r.orbit_about(pivot, 0.0, 500.0);
+    let off = r.eye - r.poi;
+    assert!(off.y.abs() / off.length() < 0.9999);
+    let before = r;
+    r.orbit_about(vec3(f64::NAN, 0.0, 0.0), 10.0, 10.0);
+    assert_eq!(r, before);
+}
+
+/// Checks that Pan Under Cursor moves a point by exactly the drag, unlike Pan Camera POI, and falls back to the POI depth behind the camera.
+#[test]
+fn pan_under_cursor_keeps_the_grabbed_point_under_the_pointer() {
+    // A point nearer than the point of interest: Pan Camera POI moves it by less
+    // than the drag, Pan Under Cursor by exactly the drag.
+    let r0 = custom_rig();
+    let at = r0.eye + (r0.poi - r0.eye) * 0.3 + vec3(40.0, 25.0, 0.0);
+    let s0 = screen(&r0, at);
+    let mut r = r0;
+    r.pan_at(30.0, -12.0, at);
+    let s1 = screen(&r, at);
+    assert!((s1.x - s0.x - 30.0).abs() < 1e-6 && (s1.y - s0.y + 12.0).abs() < 1e-6, "{s0:?} → {s1:?}");
+    assert!(((r.eye - r.poi) - (r0.eye - r0.poi)).length() < 1e-9, "the aim is kept");
+    let mut target = r0;
+    target.pan(30.0, -12.0);
+    let st = screen(&target, at);
+    assert!((st.x - s0.x - 30.0).abs() > 1.0, "Pan Camera POI scales by the POI depth");
+    // A point behind the camera falls back to the point of interest's depth.
+    let mut back = r0;
+    back.pan_at(30.0, -12.0, r0.eye - (r0.poi - r0.eye));
+    assert!((back.eye - target.eye).length() < 1e-9);
+}
+
+/// Checks that both cursor dollies keep the point under the cursor fixed and that Dolly to Cursor stops short of it.
+#[test]
+fn dolly_towards_and_to_cursor_move_along_the_cursor_ray() {
+    let r0 = custom_rig();
+    let target = r0.poi + vec3(-200.0, 90.0, 150.0);
+    let (s0, d0) = (screen(&r0, target), (r0.eye - target).length());
+    let mut r = r0;
+    r.dolly_towards(150.0, target, false);
+    let s1 = screen(&r, target);
+    assert!((s1.x - s0.x).abs() < 1e-6 && (s1.y - s0.y).abs() < 1e-6, "the point under the cursor stays put");
+    assert!(((r.eye - target).length() - (d0 - 150.0)).abs() < 1e-6);
+    assert!(((r.eye - r.poi) - (r0.eye - r0.poi)).length() < 1e-9, "the aim is kept");
+    // Dolly Towards Cursor goes on past the point; Dolly to Cursor stops just short of it.
+    let mut past = r0;
+    past.dolly_towards(d0 + 500.0, target, false);
+    assert!(((past.eye - target).length() - 500.0).abs() < 1e-6);
+    let mut to = r0;
+    to.dolly_towards(d0 + 500.0, target, true);
+    assert!(((to.eye - target).length() - 1.0).abs() < 1e-6);
+    to.dolly_towards(50.0, target, true);
+    assert!(((to.eye - target).length() - 1.0).abs() < 1e-6, "no further");
+    // Backwards is not limited.
+    to.dolly_towards(-100.0, target, true);
+    assert!(((to.eye - target).length() - 101.0).abs() < 1e-6);
+}
+
+/// A Dolly Towards Cursor drag is many small steps towards one point: past the point it keeps
+/// going forward instead of turning back towards it.
+#[test]
+fn dolly_towards_cursor_keeps_going_past_the_point() {
+    let r0 = custom_rig();
+    let target = r0.poi + vec3(-200.0, 90.0, 150.0);
+    let f = (r0.poi - r0.eye).normalize();
+    let d0 = (r0.eye - target).length();
+    let mut r = r0;
+    let mut last = r.eye.dot(f);
+    let steps = (d0 / 50.0) as usize + 40;
+    for _ in 0..steps {
+        r.dolly_towards(50.0, target, false);
+        let now = r.eye.dot(f);
+        assert!(now > last + 1.0, "the drag turned back at {:?}", r.eye);
+        last = now;
+    }
+    assert!((r.eye - target).length() > 1000.0, "well past the point");
+}
+
+/// Checks that Dolly to Camera POI leaves the camera in place when it is already within a pixel of the point.
+#[test]
+fn dolly_to_camera_poi_never_backs_off_when_closer_than_a_pixel() {
+    let mut r = custom_rig();
+    let f = (r.poi - r.eye).normalize();
+    r.eye = r.poi - f * 0.5;
+    let eye = r.eye;
+    r.dolly(10.0, false);
+    assert!((r.eye - eye).length() < 1e-12, "{:?}", r.eye);
+}
+
+/// Checks that every camera tool keeps the rig finite for degenerate cameras, pivots and targets.
+#[test]
+fn camera_tools_never_produce_nan_cameras() {
+    let nan_free = |r: &Rig| assert!(r.is_finite(), "{r:?}");
+    // Eye on the point of interest, zero zoom, and pivots / targets on the eye.
+    let mut r = Rig { eye: vec3(10.0, 20.0, 30.0), poi: vec3(10.0, 20.0, 30.0), zoom: 0.0, ortho: false };
+    r.orbit(10.0, 10.0);
+    nan_free(&r);
+    r.orbit_about(r.eye, 10.0, 10.0);
+    nan_free(&r);
+    r.pan_at(5.0, 5.0, r.eye);
+    nan_free(&r);
+    r.dolly_towards(10.0, r.eye, false);
+    nan_free(&r);
+    r.dolly_towards(10.0, r.eye, true);
+    nan_free(&r);
+    r.dolly(10.0, false);
+    nan_free(&r);
+    // Looking straight down: orbiting about a pivot still has an axis to pitch about.
+    let mut down = Rig { eye: vec3(0.0, -500.0, 0.0), poi: Vec3::ZERO, zoom: 800.0, ortho: false };
+    down.orbit_about(vec3(50.0, 0.0, 50.0), 20.0, -30.0);
+    nan_free(&down);
+    let cam = down.state();
+    nan_free(&Rig { eye: super::camera::point_under(&cam, CW, CH, [10.0, 10.0], &[], down.poi), ..down });
+}
+
+/// #3259 review: a layer between the eye and the near plane is not on screen, so it is not under
+/// the cursor; the layer behind it is. An orthographic camera has no such cut.
+#[test]
+fn a_layer_nearer_than_the_near_plane_is_not_under_the_cursor() {
+    let r = Rig::from_view(&default_view_cam(View3D::Default, CW, CH));
+    let cam = r.state();
+    let quad = [vec3(0.0, 0.0, 0.0), vec3(CW, 0.0, 0.0), vec3(CW, CH, 0.0), vec3(0.0, CH, 0.0)];
+    // A big plane 0.5 in front of the eye (the near plane is 1).
+    let (f, rt, dn) = (cam.forward(), cam.right(), cam.down());
+    let c = cam.eye + f * 0.5;
+    let inside = [c - rt * 1e5 - dn * 1e5, c + rt * 1e5 - dn * 1e5, c + rt * 1e5 + dn * 1e5, c - rt * 1e5 + dn * 1e5];
+    let p = super::camera::point_under(&cam, CW, CH, [960.0, 540.0], &[quad, inside], r.poi);
+    assert!(cam.depth(p) > 1.0 && (p - vec3(960.0, 540.0, 0.0)).length() < 1e-6, "the layer behind it is picked: {p:?}");
+}
+
+/// Checks that the point under the cursor lies on the nearest layer it hits, else at the POI depth.
+#[test]
+fn the_point_under_the_cursor_is_on_the_layer_it_hits() {
+    let r = Rig::from_view(&default_view_cam(View3D::Default, CW, CH));
+    let cam = r.state();
+    // A comp-sized layer at z = 0 maps 1:1 to the default camera's pixels.
+    let quad = [vec3(0.0, 0.0, 0.0), vec3(CW, 0.0, 0.0), vec3(CW, CH, 0.0), vec3(0.0, CH, 0.0)];
+    let p = super::camera::point_under(&cam, CW, CH, [100.0, 200.0], &[quad], r.poi);
+    assert!((p - vec3(100.0, 200.0, 0.0)).length() < 1e-6, "{p:?}");
+    // The nearer of two layers wins.
+    let near: [Vec3; 4] = quad.map(|c| c + vec3(0.0, 0.0, -300.0));
+    let p = super::camera::point_under(&cam, CW, CH, [960.0, 540.0], &[quad, near], r.poi);
+    assert!((p.z + 300.0).abs() < 1e-6, "{p:?}");
+    // Off every layer: the cursor's point at the depth of the point of interest.
+    let small = [vec3(0.0, 0.0, 0.0), vec3(10.0, 0.0, 0.0), vec3(10.0, 10.0, 0.0), vec3(0.0, 10.0, 0.0)];
+    let off = r.poi + vec3(0.0, 0.0, 200.0);
+    let p = super::camera::point_under(&cam, CW, CH, [1500.0, 700.0], &[small], off);
+    assert!((cam.depth(p) - cam.depth(off)).abs() < 1e-6);
+    let s = cam.project(CW, CH, p).unwrap();
+    assert!((s.x - 1500.0).abs() < 1e-6 && (s.y - 700.0).abs() < 1e-6, "{s:?}");
+    // The scene's centre is the middle of the box around the points.
+    let c = super::camera::bounds_center(&[vec3(0.0, 0.0, 0.0), vec3(100.0, 50.0, -40.0), vec3(20.0, 10.0, 60.0)]).unwrap();
+    assert!((c - vec3(50.0, 25.0, 10.0)).length() < 1e-12);
+    assert!(super::camera::bounds_center(&[]).is_none());
 }

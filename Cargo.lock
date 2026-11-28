@@ -618,6 +618,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "blake3"
+version = "1.8.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6d9e454fc11f76977dc803893aff6304ed33d6a26efae8696573bea74baa27ae"
+dependencies = [
+ "arrayvec",
+ "cc",
+ "cfg-if",
+ "constant_time_eq",
+ "cpufeatures 0.3.1",
+]
+
+[[package]]
 name = "block"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1144,6 +1157,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "constant_time_eq"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
+
+[[package]]
 name = "cookie-factory"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1406,10 +1425,12 @@ name = "craft-doc"
 version = "0.1.0"
 source = "git+https://github.com/storytold/craft-libs?rev=8fa4db64a9bb943520259ea95331a303ba788f21#8fa4db64a9bb943520259ea95331a303ba788f21"
 dependencies = [
+ "blake3",
  "craft-ecproj-format",
  "craft-pcraft-format",
  "craft-vectorcraft-format",
  "flate2",
+ "ruzstd",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
@@ -2552,6 +2573,7 @@ name = "effectcraft-engine"
 version = "0.25.1"
 dependencies = [
  "chrono",
+ "craft-doc",
  "craft-docpath",
  "effectcraft-aep",
  "effectcraft-color",
@@ -2560,6 +2582,7 @@ dependencies = [
  "effectcraft-interchange",
  "effectcraft-keyframe",
  "effectcraft-lottie",
+ "effectcraft-media",
  "effectcraft-model",
  "effectcraft-path",
  "effectcraft-pdf",
@@ -2582,6 +2605,7 @@ dependencies = [
  "same-file",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror 2.0.21",
  "web-time",
@@ -2661,6 +2685,7 @@ dependencies = [
  "wasm-bindgen",
  "web-time",
  "wgpu",
+ "windows-registry",
 ]
 
 [[package]]
@@ -2759,6 +2784,7 @@ version = "0.25.1"
 dependencies = [
  "craft-audio",
  "craft-color",
+ "craft-doc",
  "craft-docpath",
  "craft-dpx 0.1.0 (git+https://github.com/storytold/craft-libs?rev=8fa4db64a9bb943520259ea95331a303ba788f21)",
  "craft-exr 0.1.0 (git+https://github.com/storytold/craft-libs?rev=8fa4db64a9bb943520259ea95331a303ba788f21)",
@@ -7023,6 +7049,12 @@ dependencies = [
  "tempfile",
  "wait-timeout",
 ]
+
+[[package]]
+name = "ruzstd"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69e4ce4a039f42bf25920b95667e4d789e98749ab11bbb8d2c2936f788421bb5"
 
 [[package]]
 name = "ryu"

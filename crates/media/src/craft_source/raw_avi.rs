@@ -76,21 +76,29 @@ impl RawAvi {
         if let Some((cached_index, frame)) = &self.cached
             && *cached_index == index
         {
+            super::stats::hit();
             return Ok(frame.clone());
         }
         if filmcraft_media::cancel::cancelled() {
             return Err(MediaError::Cancelled);
         }
+        super::stats::miss();
         let packet = file.read_chunk_range(source, stream, index, 0, self.payload_bytes).map_err(|e| MediaError::Io(e.to_string()))?;
+        let started = super::stats::timer();
         let pixels = raw_video::decode(self.format, self.width, self.height, self.bottom_up, &packet)
             .map_err(|e| MediaError::Decode(format!("uncompressed AVI picture: {e:?}")))?;
+        super::stats::add_decode_time(started);
         let RawPixels::Rgba(pixels) = pixels else {
             return Err(MediaError::Unsupported("unexpected uncompressed AVI pixel layout".into()));
         };
         let mut frame = VideoFrame::rgba8(self.width, self.height, pixels).map_err(|e| MediaError::Decode(e.to_string()))?;
         frame.pts = self.rate.tick_of(i64::try_from(index).unwrap_or(i64::MAX));
         let frame = Arc::new(frame);
-        self.cached = Some((index, frame.clone()));
+        super::stats::decoded(1);
+        super::stats::frames(1);
+        if self.cached.replace((index, frame.clone())).is_some() {
+            super::stats::evicted(1);
+        }
         Ok(frame)
     }
 }

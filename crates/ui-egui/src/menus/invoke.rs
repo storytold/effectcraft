@@ -281,6 +281,24 @@ pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: V
             None => Err("select a Render Queue item first".into()),
         };
     }
+    // Duplicate follows panel focus too: in the Render Queue it copies the selected item (#3668),
+    // as its context menu's Duplicate does, instead of reporting that no layer is selected. The
+    // copy takes the selection, so Duplicate again copies the copy.
+    if id == "edit.duplicate" && no_params(&params) && app.ui.focused == PanelKind::RenderQueue {
+        if app.session.is_rendering() {
+            return Err("the Render Queue is rendering".into());
+        }
+        let key = egui::Id::unique("rq-ui");
+        let selected = ctx.data(|d| d.get_temp::<(Vec<u64>, Option<u64>)>(key)).and_then(|(_, id)| id);
+        let Some(item) = selected else { return Err("select a Render Queue item first".into()) };
+        let out = run_engine(app, ctx, "renderQueue.duplicate", json!({"item": item}))?;
+        if let Some(copy) = out.get("item").and_then(Value::as_u64) {
+            let mut state: (Vec<u64>, Option<u64>) = ctx.data(|d| d.get_temp(key)).unwrap_or_default();
+            state.1 = Some(copy);
+            ctx.data_mut(|d| d.insert_temp(key, state));
+        }
+        return Ok(out);
+    }
     // Shift+Delete deletes the Project panel's selection without asking; it does nothing in the
     // other panels.
     if id == "project.deleteWithoutConfirmation" {
@@ -348,13 +366,23 @@ pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: V
         return frontend(app, ctx, "window.workspace", json!({"name": ws}));
     }
     if let Some(t) = id.strip_prefix("tool.") {
-        // C cycles through the camera tools.
-        if t == "camera" {
-            let tools = [Tool::Orbit, Tool::PanCamera, Tool::Dolly];
-            let next = match tools.iter().position(|x| *x == app.ui.tool) {
-                Some(i) => tools[(i + 1) % tools.len()],
-                None => Tool::Orbit,
-            };
+        // The camera tools: the Orbit, Pan and Dolly slots, each showing the variant last picked
+        // from its flyout. C cycles the three; 1, 2 and 3 pick one.
+        let camera_tool = |g: usize| {
+            let lead = [Tool::Orbit, Tool::PanCamera, Tool::Dolly].get(g).copied().unwrap_or(Tool::Orbit);
+            let Some(si) = Tool::SLOTS.iter().position(|s| s.contains(&lead)) else { return lead };
+            let slot = Tool::SLOTS.get(si).copied().unwrap_or(&[]);
+            app.ui.slot_tools.get(si).copied().filter(|x| slot.contains(x)).unwrap_or(lead)
+        };
+        let group = match t {
+            "camera" => Some(app.ui.tool.camera_group().map_or(0, |g| (g + 1) % 3)),
+            "orbit" => Some(0),
+            "panCamera" => Some(1),
+            "dolly" => Some(2),
+            _ => None,
+        };
+        if let Some(g) = group {
+            let next = camera_tool(g);
             app.ui.tool = next;
             return Ok(json!({"tool": next}));
         }

@@ -365,7 +365,7 @@ impl<'a> Renderer<'a> {
     /// Properties overrides travel with it and are applied as the nested layers are evaluated,
     /// so the nested comp is not rasterised at its frame.
     pub fn collapsed(&self, ctx: &EvalCtx, layer: &Layer) -> Option<Collapsed> {
-        if !layer.switches.collapse || layer.switches.adjustment || self.depth > 12 {
+        if !layer.switches.collapse || layer.switches.adjustment || self.depth > super::MAX_COLLAPSE_DEPTH {
             return None;
         }
         let LayerSource::Comp { item } = &layer.source else { return None };
@@ -829,12 +829,14 @@ impl<'a> Renderer<'a> {
         // get the cover: they move content past the painted bounds without growing the buffer.
         let video = || {
             fx.groups().filter(|g| g.enabled).filter_map(|g| match &g.kind {
-                GroupKind::Effect { effect } => effectcraft_effects::find(effect).filter(|s| !effectcraft_effects::audio_fx::is_audio_effect(s.id)),
+                GroupKind::Effect { effect } => {
+                    effectcraft_effects::find(effect).filter(|s| !effectcraft_effects::audio_fx::is_audio_effect(s.id)).map(|s| (s, g))
+                }
                 _ => None,
             })
         };
         if !adjustment && video().next().is_some() {
-            if video().all(|s| s.skips_cover()) {
+            if video().all(|(s, g)| s.skips_cover_for(|| self.effect_params(ctx, layer, g))) {
                 target.align(layer_size);
             } else {
                 target.cover(layer_size);

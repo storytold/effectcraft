@@ -3,6 +3,11 @@ use super::hooks::Hooks;
 use super::state::{FrameWindow, PlaybackPass, ShotTarget};
 use super::*;
 
+/// How long one tick runs control requests before the window paints again
+/// ([`EffectcraftApp::control_budget`]): a tenth of a second, so a script's quick requests run
+/// in one tick and a backlog of slow ones still lets the window answer.
+const CONTROL_BUDGET: std::time::Duration = std::time::Duration::from_millis(100);
+
 mod clipboard;
 mod files;
 mod frame;
@@ -66,6 +71,8 @@ impl EffectcraftApp {
             last_viewer_scale: None,
             control_rx: None,
             deferred: vec![],
+            control_backlog: vec![],
+            control_budget: CONTROL_BUDGET,
             synthetic: vec![],
             forwarded: ForwardedInput::default(),
             input_waiters: vec![],
@@ -153,6 +160,11 @@ impl EffectcraftApp {
 
 impl eframe::App for EffectcraftApp {
     fn on_exit(&mut self) {
+        // The frame workers must be off the GPU before `main` returns (see `Frames::shutdown`).
+        #[cfg(not(target_arch = "wasm32"))]
+        while !self.frames.shutdown(std::time::Duration::from_secs(5)) {
+            log::warn!("waiting for frame renders to stop before GPU teardown");
+        }
         self.save_workspace_state();
         // Clean exit: no crash recovery next launch (unless the graphics device was lost with
         // unsaved changes, which are in the auto-save it offers).

@@ -112,12 +112,13 @@ impl Session {
     /// (the layer cache, the footage frames and decoded planes, the preview frames), kept by the
     /// memory accountant, which frees the least valuable data first whichever cache holds it. No
     /// cache has a limit of its own below that budget, except the browser's caps
-    /// ([`crate::prefs::MemoryBudget::caps`]; frontends apply the preview frames' cap).
+    /// ([`crate::prefs::MemoryBudget::caps`]; frontends apply the preview frames' cap) and a
+    /// headless session's footage cap ([`Session::footage_cap`]).
     pub fn apply_cache_budgets(&mut self) {
         let b = self.memory_budget();
         let caps = b.caps(cfg!(target_arch = "wasm32"));
         self.layer_cache.set_budget(caps.layer);
-        self.footage.set_cache_budget(caps.footage);
+        self.footage.set_cache_budget(self.footage_cap.map_or(caps.footage, |cap| cap.min(caps.footage)));
         let accountant = effectcraft_render::memory::Accountant::global();
         let layers: std::sync::Arc<dyn effectcraft_render::memory::MemoryHolder> = self.layer_cache.clone();
         accountant.register(&layers);

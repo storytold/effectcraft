@@ -84,6 +84,7 @@ impl Exporter for FileExporter {
                     audio: r.audio,
                     log: r.log,
                     overflow: r.overflow,
+                    timing: Some(r.timing),
                 }),
                 Err(effectcraft_export::ExportError::Cancelled) => Err(effectcraft_engine::render_queue::CANCELLED.into()),
                 Err(e) => Err(e.to_string()),
@@ -129,8 +130,13 @@ pub fn session() -> Session {
 /// as in the desktop app instead of the budget for unknown RAM. The desktop app reads it in the
 /// background every few seconds instead (`Session::memory_tick`); this waits for the reading
 /// (about a second on Windows). A session that can't read it keeps the budget for unknown RAM.
+/// Its footage frames keep at most [`effectcraft_engine::prefs::HEADLESS_MEDIA_CACHE`] (#4157): a
+/// render reads each frame about once, and frames kept up to the whole budget ran a render under
+/// a container's memory limit out of memory.
 pub fn headless_session() -> Session {
     let mut s = session();
+    s.footage_cap = Some(usize::try_from(effectcraft_engine::prefs::HEADLESS_MEDIA_CACHE).unwrap_or(usize::MAX));
+    s.apply_cache_budgets();
     s.take_memory_reading(effectcraft_engine::sysinfo::memory());
     s
 }

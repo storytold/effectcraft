@@ -112,9 +112,6 @@ type EffectPipelines = HashMap<&'static str, (usize, std::sync::OnceLock<Result<
 /// 8/16 bpc are emulated by clamping and quantising, as on the CPU).
 pub const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba32Float;
 
-/// Uploaded layer buffers kept on the GPU by default (bytes; [`GpuContext::set_upload_budget`]).
-const UPLOAD_BUDGET: usize = 1536 << 20;
-
 /// Working textures kept for reuse once their last image is dropped (bytes).
 const POOL_BUDGET: usize = 256 << 20;
 
@@ -1028,7 +1025,7 @@ impl GpuContext {
             uploads: Mutex::new(Uploads::default()),
             pictures: Default::default(),
             upload_staging: Default::default(),
-            upload_budget: std::sync::atomic::AtomicUsize::new(UPLOAD_BUDGET),
+            upload_budget: std::sync::atomic::AtomicUsize::new(memcap.upload_budget()),
             upload_full_warned: Default::default(),
             pool,
             staging: Default::default(),
@@ -1093,7 +1090,7 @@ impl GpuContext {
                 },
                 _ => self.poll_lock.lock().unwrap_or_else(|e| e.into_inner()),
             };
-            self.device.poll(kind)
+            self.readbacks.run_device(|| self.device.poll(kind))?
         };
         res.map_err(|e| {
             let error = format!("GPU readback poll: {e}");
@@ -1117,7 +1114,13 @@ impl GpuContext {
             let slice = remaining.min(Self::POLL_SLICE);
             let res = {
                 let _guard = self.poll_lock.lock().unwrap_or_else(|e| e.into_inner());
-                self.device.poll(wgpu::PollType::Wait { submission_index: Some(submission_index.clone()), timeout: Some(slice) })
+                match self
+                    .readbacks
+                    .run_device(|| self.device.poll(wgpu::PollType::Wait { submission_index: Some(submission_index.clone()), timeout: Some(slice) }))
+                {
+                    Ok(result) => result,
+                    Err(_) => return,
+                }
             };
             let done = match res {
                 Ok(_) => true,
@@ -1166,6 +1169,11 @@ impl GpuContext {
         let staging: u64 = self.staging.lock().map(|s| s.iter().map(|(k, v)| k * v.len() as u64).sum()).unwrap_or(0);
         let zeros: u64 = self.zeros.lock().map(|z| z.keys().map(|&(w, h)| w as u64 * h as u64 * 16).sum()).unwrap_or(0);
         pool + staging + self.upload_staging.bytes() + zeros
+    }
+
+    #[cfg(test)]
+    pub(crate) fn upload_budget_from_rule(&self) -> usize {
+        self.memcap.upload_budget()
     }
 
     #[cfg(test)]
@@ -1345,7 +1353,8 @@ impl GpuContext {
                     (remaining, std::time::Duration::ZERO, Ok(wgpu::PollStatus::Poll))
                 } else {
                     let slice = remaining.min(Self::POLL_SLICE);
-                    let res = self.device.poll(wgpu::PollType::Wait { submission_index: submission.clone(), timeout: Some(slice) });
+                    let res =
+                        self.readbacks.run_device(|| self.device.poll(wgpu::PollType::Wait { submission_index: submission.clone(), timeout: Some(slice) }))?;
                     (remaining, slice, res)
                 }
             };
@@ -1598,7 +1607,7 @@ impl GpuContext {
             uploads: Mutex::new(Uploads::default()),
             pictures: Default::default(),
             upload_staging: Default::default(),
-            upload_budget: std::sync::atomic::AtomicUsize::new(UPLOAD_BUDGET),
+            upload_budget: std::sync::atomic::AtomicUsize::new(self.upload_budget()),
             upload_full_warned: Default::default(),
             pool: self.pool.clone(),
             staging: Default::default(),
@@ -1676,9 +1685,13 @@ impl GpuContext {
         (GpuImage { texture, width: w, height: h, _lease: Some(lease), levels: None }, was_reused)
     }
 
-    /// Bytes of uploaded layer textures the context keeps (default 1536 MB). An application that
-    /// knows the device's memory can raise it (static layers of a big frame upload once) or lower
-    /// it (a small GPU); the least recently used textures go first.
+    /// Bytes of uploaded layer textures the context keeps (by default 3/8 of the card's memory
+    /// when known, 1536 MiB otherwise; a positive `EFFECTCRAFT_GPU_MEMCAP_MB` can only lower that
+    /// default: to at most the larger of half the cap and 1536 MiB, so a smaller default, like the
+    /// 768 MiB of a 2 GiB card, stays; a positive `EFFECTCRAFT_GPU_UPLOAD_MB` sets it and is not
+    /// lowered by the cap; see `memcap`). An application
+    /// can raise it (static layers of a big frame upload once) or lower it (a small GPU); the
+    /// least recently used textures go first.
     pub fn set_upload_budget(&self, bytes: usize) {
         self.upload_budget.store(bytes.max(1 << 20), std::sync::atomic::Ordering::Relaxed);
     }
@@ -1718,10 +1731,14 @@ impl GpuContext {
     /// count; if the wait frees none of them, later frames only poll until `dying` drops (a
     /// stopped queue must not re-wait [`crate::readback::TIMEOUT`] on every frame).
     pub fn pool_frame_end(&self) {
+        // CPU fallback still ends frames. Skip cleanup once retirement is already known.
+        if self.readbacks.check().is_err() {
+            return;
+        }
         let before = self.pool.lock().map(|mut p| p.frame_end()).unwrap_or_default();
         if before > 0 {
             // A work-done callback waits for a submission; an empty one closes the wait.
-            let index = self.queue.submit([]);
+            let Ok(index) = self.readbacks.run_device(|| self.queue.submit([])) else { return };
             self.poll_wait(index, crate::readback::TIMEOUT);
             if let Ok(mut p) = self.pool.lock() {
                 p.waited(before);

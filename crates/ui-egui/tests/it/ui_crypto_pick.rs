@@ -247,11 +247,11 @@ fn eyedropper_arms_hovers_picks_with_modifiers_and_stays_armed_until_esc() {
     h.event(Event::PointerButton { pos: b, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
     h.run_steps(3);
     assert_eq!(selection(&h, &ids), "c1_1, c3_3", "Shift held at the press adds");
-    // On a Mac the hint says Option or Cmd, and Ctrl (no Cmd there) removes too.
+    // On a Mac Ctrl-click is secondary click; Option remains the remove modifier.
     h.ctx.set_os(egui::os::OperatingSystem::Mac);
     assert_eq!(hover(&mut h, hint), MAC_HINT);
-    click(&mut h, a, Modifiers::CTRL);
-    assert_eq!(selection(&h, &ids), "c3_3", "Ctrl on a Mac");
+    click(&mut h, a, Modifiers::ALT);
+    assert_eq!(selection(&h, &ids), "c3_3", "Option on a Mac");
     h.ctx.set_os(egui::os::OperatingSystem::Nix);
     click(&mut h, b, Modifiers::ALT);
     assert_eq!(selection(&h, &ids), "");

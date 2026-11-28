@@ -98,7 +98,8 @@ pub use doc_state::{CompSelection, EditorState, KeyClip, KeyMove, KeyRef, LinkCl
 pub use error::{EngineError, Result};
 pub use event::Event;
 pub use fonts::{FontRow, font_features, font_menu, font_preview, font_styles, text_families};
-pub use services::{FsServices, Importer, Services};
+pub use output_guard::OutputGuard;
+pub use services::{FsServices, Importer, PCRAFT_MAX_INPUT, Services, pcraft_too_large};
 pub use session::upgrade_effects;
 
 pub struct Session {
@@ -230,6 +231,11 @@ pub struct Session {
     /// The system is in a low-memory episode (the cache budgets stay reduced until it ends, see
     /// [`sysinfo::SysMemory::still_low`] and [`Session::memory_budget`]).
     pub memory_low: bool,
+    /// The most the footage frames (and decoded planes) hold by themselves, below the common
+    /// budget ([`Session::apply_cache_budgets`]); `None`: the whole budget, as in the desktop app.
+    /// Headless sessions (the CLI, its MCP server) set it: their renders read each footage frame
+    /// about once, so frames kept up to the whole budget only cost memory (#4157).
+    pub footage_cap: Option<usize>,
     /// The keyframe drag in progress (`keys.move` with a merge key).
     pub key_move: Option<KeyMove>,
     /// Reads the system's memory in the background for [`Session::memory_tick`].
@@ -282,6 +288,9 @@ pub struct Session {
     /// is, settings that guard what scripts may do can't change (see
     /// [`prefs::Scripting::same_permissions`]).
     pub script_calls: ScriptCalls,
+    /// Output guards built so far ([`Session::output_guard`]; a command checks all the files it
+    /// writes with one, #3328).
+    pub output_guards: std::sync::atomic::AtomicU64,
 }
 
 /// The count behind [`Session::running_for_script`]; only the engine changes it.
@@ -390,6 +399,7 @@ impl Default for Session {
             script_ui: scriptui::ScriptUi::default(),
             sys_memory: None,
             memory_low: false,
+            footage_cap: None,
             key_move: None,
             memory_watch: Default::default(),
             disk_watch: Default::default(),
@@ -411,6 +421,7 @@ impl Default for Session {
             aux_footage: None,
             aux_needs: None,
             script_calls: ScriptCalls::default(),
+            output_guards: Default::default(),
         }
     }
 }

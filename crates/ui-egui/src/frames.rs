@@ -758,6 +758,12 @@ pub struct Frames {
     #[cfg(not(target_arch = "wasm32"))]
     content_key_jobs: Arc<Mutex<ContentKeyJobs>>,
     gpu_retired: Arc<AtomicBool>,
+    /// [`Frames::shutdown`] was called: the workers start no more frames.
+    #[cfg(not(target_arch = "wasm32"))]
+    closing: Arc<AtomicBool>,
+    /// Pool and lane threads inside [`Worker::drain`] (see [`Frames::shutdown`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    draining: Arc<std::sync::atomic::AtomicUsize>,
     /// [`comp_content`] identities by (revision, comp), with the project that keeps an identity
     /// found by [`Frames::identity`] in another project.
     identities: Mutex<HashMap<(u64, u64), Identity>>,
@@ -881,6 +887,10 @@ impl Frames {
             #[cfg(not(target_arch = "wasm32"))]
             content_key_jobs: Arc::default(),
             gpu_retired: Arc::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            closing: Arc::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            draining: Arc::default(),
             identities: Mutex::default(),
             bases: Mutex::default(),
             keepers: Mutex::default(),
@@ -1047,6 +1057,31 @@ impl Frames {
         if let Some(ctx) = &self.ctx {
             ctx.request_repaint();
         }
+    }
+
+    /// Stops the frame workers before the app exits: queued frames are dropped, the viewer's
+    /// running frames are called off, and this waits up to `limit` for the frames still
+    /// rendering. Rayon's pools don't join their threads, so without it `main` returned while a
+    /// worker was still polling or reading back from the GPU, and the exit handlers that tear
+    /// the driver's device down crashed it (SIGSEGV or abort at exit). `false` if workers were
+    /// still rendering at `limit`.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn shutdown(&self, limit: std::time::Duration) -> bool {
+        self.closing.store(true, Ordering::SeqCst);
+        if let Ok(mut q) = self.queue.lock() {
+            q.jobs.clear();
+            for (_, cancel) in &q.urgent_cancels {
+                cancel.store(true, Ordering::Relaxed);
+            }
+        }
+        let end = std::time::Instant::now() + limit;
+        while self.draining.load(Ordering::SeqCst) > 0 {
+            if std::time::Instant::now() >= end {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        true
     }
 
     /// Actual native frame-worker capacity, including the OS fallback pool.
@@ -1692,6 +1727,10 @@ impl Frames {
             content_keys: self.content_keys.clone(),
             virtual_id: self.virtual_id.clone(),
             gpu_retired: self.gpu_retired.clone(),
+            #[cfg(not(target_arch = "wasm32"))]
+            closing: self.closing.clone(),
+            #[cfg(not(target_arch = "wasm32"))]
+            draining: self.draining.clone(),
         }
     }
 
@@ -1830,6 +1869,10 @@ struct Worker {
     content_keys: ContentKeys,
     virtual_id: Option<Arc<dyn Fn(&str) -> Option<(u64, u64)> + Send + Sync>>,
     gpu_retired: Arc<AtomicBool>,
+    #[cfg(not(target_arch = "wasm32"))]
+    closing: Arc<AtomicBool>,
+    #[cfg(not(target_arch = "wasm32"))]
+    draining: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1840,24 +1883,27 @@ thread_local! {
     static DRAINING_LANE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// Clears [`DRAINING`] when the drain ends, even by a panic.
+/// Clears [`DRAINING`] and leaves the count of drains ([`Frames::shutdown`] waits for it) when
+/// the drain ends, even by a panic.
 #[cfg(not(target_arch = "wasm32"))]
-struct Draining;
+struct Draining<'a>(&'a std::sync::atomic::AtomicUsize);
 
 #[cfg(not(target_arch = "wasm32"))]
-impl Draining {
-    fn enter(lane: Option<usize>) -> Option<Self> {
+impl<'a> Draining<'a> {
+    fn enter(lane: Option<usize>, count: &'a std::sync::atomic::AtomicUsize) -> Option<Self> {
         if DRAINING.replace(true) {
             return None;
         }
         DRAINING_LANE.set(lane.is_some());
-        Some(Self)
+        count.fetch_add(1, Ordering::SeqCst);
+        Some(Self(count))
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-impl Drop for Draining {
+impl Drop for Draining<'_> {
     fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
         DRAINING_LANE.set(false);
         DRAINING.set(false);
     }
@@ -1887,8 +1933,9 @@ impl Worker {
     /// `lane`: the lane this runs on (see [`Queue::idle_lanes`]), `None` on the pool.
     #[cfg(not(target_arch = "wasm32"))]
     fn drain(&self, lane: Option<usize>) {
-        let Some(_reset) = Draining::enter(lane) else { return };
-        while self.run_next(lane) {}
+        let Some(_reset) = Draining::enter(lane, &self.draining) else { return };
+        // (`closing` is read after joining the count: `shutdown` sets it before reading the count)
+        while !self.closing.load(Ordering::SeqCst) && self.run_next(lane) {}
     }
 
     /// Render the queued job that matters most right now, on lane `lane` (`None`: on

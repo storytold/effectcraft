@@ -238,18 +238,70 @@ pub(crate) fn native_file_dialog(_: &JsValue, args: &[JsValue], ctx: &mut Contex
 
 // ---------------------------------------------------------------- script-host threads
 
+type Recovery = std::sync::Arc<std::sync::Mutex<Option<Session>>>;
+
+/// Own the actual session throughout a handoff. Dropping an undelivered message or unwinding
+/// the host returns it to the caller, including edits, history and host services, without cloning.
+#[derive(Default)]
+pub(crate) struct SessionParcel {
+    session: Session,
+    recovery: Option<Recovery>,
+}
+
+impl From<Session> for SessionParcel {
+    fn from(session: Session) -> Self {
+        Self { session, recovery: None }
+    }
+}
+
+impl std::ops::Deref for SessionParcel {
+    type Target = Session;
+    fn deref(&self) -> &Session {
+        &self.session
+    }
+}
+
+impl std::ops::DerefMut for SessionParcel {
+    fn deref_mut(&mut self) -> &mut Session {
+        &mut self.session
+    }
+}
+
+impl SessionParcel {
+    pub(crate) fn recoverable(&self) -> bool {
+        self.recovery.is_some()
+    }
+
+    fn handoff(session: &mut Session, recovery: &Recovery) -> Self {
+        Self { session: std::mem::take(session), recovery: Some(recovery.clone()) }
+    }
+
+    pub(crate) fn into_session(mut self) -> Session {
+        self.recovery = None;
+        std::mem::take(&mut self.session)
+    }
+}
+
+impl Drop for SessionParcel {
+    fn drop(&mut self) {
+        if let Some(recovery) = self.recovery.take() {
+            *recovery.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(std::mem::take(&mut self.session));
+        }
+    }
+}
+
 pub(crate) enum ToHost {
     /// Run the script (script-host threads exist only off the web: the browser runs scripts
     /// inline).
     #[cfg(not(target_arch = "wasm32"))]
-    Start(Session),
-    Event(Session, ScriptUiEvent),
+    Start(SessionParcel),
+    Event(SessionParcel, ScriptUiEvent),
     /// Run the scheduled tasks due at this time (see [`crate::tasks`]; the web has no
     /// script-host threads).
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-    Tick(Session, Instant),
+    Tick(SessionParcel, Instant),
     /// Resume the suspended native render call, never a callback or scheduled task.
-    ResumeRender(Session),
+    ResumeRender(SessionParcel),
 }
 
 impl ToHost {
@@ -257,14 +309,14 @@ impl ToHost {
     fn into_session(self) -> Session {
         match self {
             #[cfg(not(target_arch = "wasm32"))]
-            ToHost::Start(s) => s,
-            ToHost::Event(s, _) | ToHost::Tick(s, _) | ToHost::ResumeRender(s) => s,
+            ToHost::Start(s) => s.into_session(),
+            ToHost::Event(s, _) | ToHost::Tick(s, _) | ToHost::ResumeRender(s) => s.into_session(),
         }
     }
 }
 
 pub(crate) struct FromHost {
-    session: Session,
+    session: SessionParcel,
     outcome: crate::Outcome,
     windows: Vec<ScriptWindow>,
     name: String,
@@ -293,6 +345,9 @@ struct HostEnd {
     epoch: u64,
     /// Retained across render yields so a later error still names its included source file.
     source_map: Option<crate::include::Expanded>,
+    recovery: Recovery,
+    #[cfg(not(target_arch = "wasm32"))]
+    thread: std::thread::JoinHandle<()>,
 }
 
 fn hosts() -> &'static std::sync::Mutex<BTreeMap<u32, HostEnd>> {
@@ -334,7 +389,8 @@ fn yield_wake(outcome: crate::Outcome, windows: Vec<ScriptWindow>, done: bool, n
     let (session, link, name) = ACTIVE.with(|a| {
         let mut a = a.borrow_mut();
         let a = a.as_mut()?;
-        Some((std::mem::take(&mut a.session), a.link.take()?, a.name.clone()))
+        let link = a.link.take()?;
+        Some((std::mem::take(&mut a.session), link, a.name.clone()))
     })?;
     if link.tx.send(FromHost { session, outcome, windows, name, done, next_due, render_wait }).is_err() {
         return None;
@@ -397,13 +453,21 @@ fn host_main(host: u32, name: String, code: String, link: Link) {
         }
         crate::tasks::drop_host(host);
     }));
+    finish_host(file, name, body.is_err());
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn finish_host(file: String, name: String, panicked: bool) {
     // A panic: give the session back all the same.
+    // Close the outer undo group before its saved pre-group history is dropped with Active.
+    let output = if panicked { settle() } else { vec![] };
     let left = ACTIVE.with(|c| c.borrow_mut().take());
     if let Some(mut a) = left
         && let Some(link) = a.link.take()
     {
-        let message = if body.is_err() { "the script engine stopped unexpectedly" } else { "the script ended" };
-        let out = crate::Outcome { error: Some(ScriptError { message: message.into(), file, ..Default::default() }), ..Default::default() };
+        crate::tasks::drop_host(a.host);
+        let message = if panicked { "the script engine stopped unexpectedly" } else { "the script ended" };
+        let out = crate::Outcome { output, error: Some(ScriptError { message: message.into(), file, ..Default::default() }), ..Default::default() };
         let _ = link.tx.send(FromHost {
             session: std::mem::take(&mut a.session),
             outcome: out,
@@ -420,7 +484,7 @@ fn host_main(host: u32, name: String, code: String, link: Link) {
 fn receive(session: &mut Session, host: u32, end: HostEnd) -> crate::Outcome {
     match end.rx.recv() {
         Ok(FromHost { session: s, mut outcome, windows, name, done, next_due, render_wait }) => {
-            *session = s;
+            *session = s.into_session();
             session.script_ui.render_host = render_wait.then_some(host);
             if !render_wait
                 && let Some(map) = &end.source_map
@@ -436,7 +500,16 @@ fn receive(session: &mut Session, host: u32, end: HostEnd) -> crate::Outcome {
             }
             outcome
         }
-        Err(_) => crate::Outcome { error: Some(ScriptError { message: "the script host stopped".into(), ..Default::default() }), ..Default::default() },
+        Err(_) => {
+            // The sender can drop just before the host's session. Join before taking recovery.
+            #[cfg(not(target_arch = "wasm32"))]
+            let _ = end.thread.join();
+            if let Some(recovered) = end.recovery.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take() {
+                *session = recovered;
+            }
+            forget_host(session, host);
+            crate::Outcome { error: Some(ScriptError { message: "the script host stopped unexpectedly".into(), ..Default::default() }), ..Default::default() }
+        }
     }
 }
 
@@ -459,14 +532,21 @@ pub(crate) fn run_threaded(session: &mut Session, req: &effectcraft_engine::Scri
         .name(format!("script-{host}"))
         .stack_size(64 << 20)
         .spawn(move || host_main(host, name, code, Link { rx: to_rx, tx: from_tx }));
-    if spawned.is_err() {
-        return crate::runtime::run_inline(session, req);
-    }
-    if let Err(std::sync::mpsc::SendError(msg)) = to_tx.send(ToHost::Start(std::mem::take(session))) {
+    let thread = match spawned {
+        Ok(thread) => thread,
+        Err(_) => {
+            return crate::Outcome {
+                error: Some(ScriptError { message: "the script host could not start".into(), ..Default::default() }),
+                ..Default::default()
+            };
+        }
+    };
+    let recovery = Recovery::default();
+    if let Err(std::sync::mpsc::SendError(msg)) = to_tx.send(ToHost::Start(SessionParcel::handoff(session, &recovery))) {
         *session = msg.into_session();
         return crate::Outcome { error: Some(ScriptError { message: "the script host did not start".into(), ..Default::default() }), ..Default::default() };
     }
-    receive(session, host, HostEnd { tx: to_tx, rx: from_rx, next_due: None, epoch: 0, source_map: None })
+    receive(session, host, HostEnd { tx: to_tx, rx: from_rx, next_due: None, epoch: 0, source_map: None, recovery, thread })
 }
 
 /// Suspend only the JavaScript stack, not the window's event loop (#3289). Keep the output
@@ -514,7 +594,7 @@ pub(crate) fn poll_render_wait(session: &mut Session) -> Option<J> {
     if end.epoch != session.script_ui.project_epoch {
         return Some(fail("the project changed while the script was rendering"));
     }
-    if let Err(std::sync::mpsc::SendError(msg)) = end.tx.send(ToHost::ResumeRender(std::mem::take(session))) {
+    if let Err(std::sync::mpsc::SendError(msg)) = end.tx.send(ToHost::ResumeRender(SessionParcel::handoff(session, &end.recovery))) {
         *session = msg.into_session();
         return Some(fail("the script host stopped while rendering"));
     }
@@ -574,7 +654,7 @@ pub fn dispatch_ui(session: &mut Session, ev: &ScriptUiEvent) -> Result<J, Strin
         forget_host(session, host);
         return Err("the script that made this window has ended".into());
     };
-    if let Err(std::sync::mpsc::SendError(msg)) = end.tx.send(ToHost::Event(std::mem::take(session), ev.clone())) {
+    if let Err(std::sync::mpsc::SendError(msg)) = end.tx.send(ToHost::Event(SessionParcel::handoff(session, &end.recovery), ev.clone())) {
         *session = msg.into_session();
         forget_host(session, host);
         return Err("the script that made this window has ended".into());
@@ -646,7 +726,7 @@ pub(crate) fn tick_threaded(session: &mut Session, now: Instant, report: &mut cr
             break;
         }
         let Some(end) = hosts().lock().ok().and_then(|mut h| h.remove(&host)) else { continue };
-        if let Err(std::sync::mpsc::SendError(msg)) = end.tx.send(ToHost::Tick(std::mem::take(session), now)) {
+        if let Err(std::sync::mpsc::SendError(msg)) = end.tx.send(ToHost::Tick(SessionParcel::handoff(session, &end.recovery), now)) {
             *session = msg.into_session();
             forget_host(session, host);
             continue;
@@ -712,4 +792,82 @@ fn tick_inline_host(session: &mut Session, host: u32, name: &str, now: Instant) 
 pub(crate) fn prune_task_hosts(session: &mut Session) {
     let threaded = |host: &u32| hosts().lock().ok().is_some_and(|h| h.contains_key(host));
     session.script_ui.task_hosts.retain(|host| crate::tasks::has(*host) || threaded(host));
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod handoff_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn failed_host_closes_a_group_that_exceeded_the_undo_limit() {
+        let mut session = Session::default();
+        session.prefs.general.undo_levels = 2;
+        session.execute("comp.new", json!({"name": "Before", "width": 64, "height": 64})).unwrap();
+        let before = session.project.clone();
+        let mut active = Active::new(session, "failed script", new_host_id());
+        active.groups.push(("Partial script".into(), before.clone(), active.session.history.clone(), active.session.saved_project.clone()));
+        for _ in 0..4 {
+            active.session.execute("layer.newNull", json!({})).unwrap();
+        }
+        let (_tx, rx) = std::sync::mpsc::channel();
+        let (tx, replies) = std::sync::mpsc::channel();
+        active.link = Some(Link { rx, tx });
+        ACTIVE.with(|slot| *slot.borrow_mut() = Some(active));
+        finish_host("failed script".into(), "failed script".into(), true);
+        let reply = replies.recv().unwrap();
+        assert!(reply.outcome.error.is_some());
+        let mut session = reply.session.into_session();
+        assert_eq!(session.active_comp().unwrap().layers.len(), 4);
+        session.undo();
+        assert_eq!(session.project, before, "partial script edits undo as one group");
+        session.undo();
+        assert_eq!(session.project.comps().count(), 0, "history from before the group survives");
+    }
+
+    #[test]
+    fn a_disconnected_script_host_returns_the_actual_session_and_history() {
+        for edited in [false, true] {
+            let mut session = Session::default();
+            crate::install(&mut session);
+            session.prefs.general.undo_levels = 2;
+            session.execute("comp.new", json!({"name": "Before", "width": 64, "height": 64})).unwrap();
+            let before = session.project.clone();
+            let services = session.services.clone();
+            let recovery = Recovery::default();
+            let (tx, to_host) = std::sync::mpsc::channel();
+            let (from_host, rx) = std::sync::mpsc::channel();
+            let host = new_host_id();
+            let thread = std::thread::spawn(move || {
+                let ToHost::Start(parcel) = to_host.recv().unwrap() else { panic!("expected start") };
+                let mut active = Active::new(parcel, "failed script", host);
+                if edited {
+                    active.groups.push((
+                        "Partial script".into(),
+                        active.session.project.clone(),
+                        active.session.history.clone(),
+                        active.session.saved_project.clone(),
+                    ));
+                    for _ in 0..4 {
+                        active.session.execute("layer.newNull", json!({"name": "During script"})).unwrap();
+                    }
+                }
+                // Disconnect first: receive must wait for the parcel's unwind before recovery.
+                drop(from_host);
+                panic!("injected script host failure");
+            });
+            tx.send(ToHost::Start(SessionParcel::handoff(&mut session, &recovery))).ok().unwrap();
+            let result = receive(&mut session, host, HostEnd { tx, rx, next_due: None, epoch: 0, source_map: None, recovery, thread });
+            assert!(result.error.is_some());
+            assert!(std::sync::Arc::ptr_eq(&session.services, &services), "host services survive too");
+            assert!(session.script.is_some());
+            if edited {
+                assert_eq!(session.active_comp().unwrap().layers.len(), 4, "partial script edits survive");
+                session.undo();
+            }
+            assert_eq!(session.project, before, "the project and its prior undo history survive");
+            session.undo();
+            assert_eq!(session.project.comps().count(), 0, "pre-script undo history remains usable");
+        }
+    }
 }

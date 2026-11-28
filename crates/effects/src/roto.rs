@@ -953,6 +953,9 @@ fn needs_neighbours(mp: &MatteParams) -> bool {
 #[serde(default, rename_all = "camelCase")]
 pub struct FrozenCache {
     pub key: String,
+    /// Object Matte's external media at Freeze time. Older caches omit this field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub media_fingerprint: Option<String>,
     pub size: [usize; 2],
     pub frames: BTreeMap<i64, FrozenFrame>,
 }
@@ -1429,8 +1432,12 @@ mod tests {
         let mut d = RotoData::default();
         d.add(Stroke { kind: StrokeKind::Fg, frame: 0, radius: 3.0, points: vec![[35.0, 40.0], [45.0, 40.0]], object: 0 }, 20, [0, 24]);
         let mut params = params_with(&d);
-        let fc =
-            FrozenCache { key: frozen_key(&params, [100.0, 80.0], 25.0), size: [10, 8], frames: BTreeMap::from([(5, freeze_frame(&[1.0; 80], &[0; 80]))]) };
+        let fc = FrozenCache {
+            key: frozen_key(&params, [100.0, 80.0], 25.0),
+            size: [10, 8],
+            frames: BTreeMap::from([(5, freeze_frame(&[1.0; 80], &[0; 80]))]),
+            ..Default::default()
+        };
         let host = Seq;
         let render = |params: &Params| {
             let ctx = EffectCtx {

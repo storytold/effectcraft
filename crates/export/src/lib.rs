@@ -44,7 +44,9 @@ mod webm_av1;
 
 use web_time::Instant;
 
-use effectcraft_project::render_queue::{AudioOutput, Channels, OutputFormat, OutputModule, RenderLog, RenderQuality, RenderSettings, sequence_path};
+use effectcraft_project::render_queue::{
+    AudioOutput, Channels, OutputFormat, OutputModule, RenderLog, RenderQuality, RenderSettings, RenderTiming, sequence_path,
+};
 use effectcraft_project::{Comp, ItemId, Project};
 use effectcraft_raster::Image;
 use effectcraft_render::{ExprHost, FootageSource};
@@ -67,6 +69,22 @@ pub enum ExportError {
     Encode(String),
     #[error("{0}")]
     Unsupported(String),
+}
+
+impl ExportError {
+    /// This error, also naming an output file the failed export could not remove (`why`:
+    /// `"<path>: <error>"`). The variant stays; a cancel becomes the removal's i/o error, as a
+    /// cancel whose files cannot be removed did not finish cleanly.
+    fn with_unremoved(self, why: &str) -> Self {
+        match self {
+            ExportError::Cancelled => ExportError::Io(format!("cannot remove cancelled output {why}")),
+            ExportError::Io(e) => ExportError::Io(format!("{e}; cannot remove partial output {why}")),
+            ExportError::Encode(e) => ExportError::Encode(format!("{e}; cannot remove partial output {why}")),
+            ExportError::Unsupported(e) => ExportError::Unsupported(format!("{e}; cannot remove partial output {why}")),
+            // Fails before any file is opened.
+            ExportError::NoComp => ExportError::NoComp,
+        }
+    }
 }
 
 pub type Result<T> = std::result::Result<T, ExportError>;
@@ -173,7 +191,7 @@ impl Progress {
 }
 
 /// What an export produced.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Report {
     /// The movie file, or the first file of a sequence.
     pub path: String,
@@ -187,6 +205,8 @@ pub struct Report {
     pub log: Option<String>,
     /// Files that went to an overflow folder.
     pub overflow: Vec<String>,
+    /// Where the time went and what ran the job; the same as the summary line in the render log.
+    pub timing: RenderTiming,
 }
 
 /// Formats this build can write (all of them; kept as the hook for optional encoders).
@@ -223,14 +243,38 @@ pub async fn export_async(job: &Job<'_>, progress: &mut dyn FnMut(&Progress) -> 
     let cx = Cx::new(job);
     // A job of a Render Queue run leaves the pooled working textures warm for the next one.
     let render = RenderEnd(job.accel.filter(|_| job.options.caches.is_none()));
+    // (dropped before `render`: an export that panics leaves none of the files it opened)
+    let mut outputs = RemoveOutputs(Some(&cx));
     let mut r = export_with(&cx, progress, t0).await;
+    outputs.0 = None;
     drop(render);
-    if matches!(r, Err(ExportError::Cancelled)) {
-        cx.remove_cancelled_outputs()?;
+    let wall = t0.elapsed().as_secs_f64();
+    // (what a failed export got done: its render log carries the line too, with the compositor)
+    let mut unfinished = None;
+    if let Err(e) = &r {
+        // A stopped or failed export gets its line too: slow ones are the ones people stop.
+        let how = if matches!(e, ExportError::Cancelled) { "stopped" } else { "failed" };
+        let t = cx.timing(wall, 0);
+        log::info!(target: "effectcraft_export", "{}: {}", cx.job.options.label, t.summary_of_unfinished(how));
+        unfinished = Some(t);
+    }
+    // A cancelled or failed export leaves none of the files it opened: a file at the output
+    // path means a finished render. Removed before the log is written, which is not a render.
+    let cancelled = matches!(r, Err(ExportError::Cancelled));
+    r = r.map_err(|e| match cx.remove_written_outputs() {
+        None => e,
+        Some(why) => e.with_unremoved(&why),
+    });
+    if cancelled {
         return r;
     }
-    let log = cx.write_log(&r, t0.elapsed().as_secs_f64());
+    let timing = r.as_ref().ok().map(|rep| cx.timing(wall, rep.frames));
+    if let Some(t) = &timing {
+        log::info!(target: "effectcraft_export", "{}: {}", cx.job.options.label, t.summary());
+    }
+    let log = cx.write_log(&r, wall, timing.as_ref().or(unfinished.as_ref()));
     if let Ok(rep) = &mut r {
+        rep.timing = timing.unwrap_or_default();
         rep.log = log;
         rep.overflow = cx.overflowed.lock().unwrap_or_else(|e| e.into_inner()).clone();
     }
@@ -245,6 +289,21 @@ impl Drop for RenderEnd<'_> {
     fn drop(&mut self) {
         if let Some(a) = self.0 {
             a.render_end();
+        }
+    }
+}
+
+/// Removes the files an export opened when dropped armed: when the export panics, or its
+/// future is dropped before it finished (a browser worker aborting it). Disarmed once
+/// `export_with` returns; `export_async` handles its result itself.
+struct RemoveOutputs<'a, 'b>(Option<&'a Cx<'b>>);
+
+impl Drop for RemoveOutputs<'_, '_> {
+    fn drop(&mut self) {
+        if let Some(cx) = self.0
+            && let Some(why) = cx.remove_written_outputs()
+        {
+            log::warn!(target: "effectcraft_export", "{}: cannot remove partial output {why}", cx.job.options.label);
         }
     }
 }
@@ -346,7 +405,18 @@ async fn sequence(cx: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut State<'_>) 
         st.advance(end - i)?;
         i = end;
     }
-    Ok(Report { path: sequence_path(cx.path, f0), frames: 0, width: w, height: h, seconds: 0.0, bytes, audio: false, log: None, overflow: vec![] })
+    Ok(Report {
+        path: sequence_path(cx.path, f0),
+        frames: 0,
+        width: w,
+        height: h,
+        seconds: 0.0,
+        bytes,
+        audio: false,
+        log: None,
+        overflow: vec![],
+        timing: Default::default(),
+    })
 }
 
 struct StillOutput {
@@ -437,8 +507,10 @@ async fn gif_export(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut State<'_
 
     validate_gif_dimensions(w, h)?;
     let path = job.place(job.path, 1);
-    let mut file = job.create(&path)?;
-    let mut enc = AnimationWriter::new(
+    // Each write is timed before its error is passed on: a failed export's line keeps the time.
+    let mut file = job.timed(pipeline::Stage::EncodeWrite, || job.create(&path))?;
+    let t = Instant::now();
+    let enc = AnimationWriter::new(
         &mut file,
         w,
         h,
@@ -448,7 +520,9 @@ async fn gif_export(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut State<'_
             speed: 10,
         },
     )
-    .map_err(|e| ExportError::Encode(e.to_string()))?;
+    .map_err(|e| ExportError::Encode(e.to_string()));
+    job.add_time(pipeline::Stage::EncodeWrite, t);
+    let mut enc = enc?;
     let rate = job.settings.rate(comp);
     // GIF delays are in 1/100 s: carry the rounding error so long animations keep their timing.
     let cs_per_frame = 100.0 * rate.den as f64 / rate.num as f64;
@@ -461,19 +535,26 @@ async fn gif_export(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut State<'_
         let frames: Vec<std::result::Result<PreparedFrame, craft_gif::write::Error>> = job
             .frames(comp, (i..end).collect(), |_, img| craft_gif::write::prepare_frame(w, h, job.pixels_with(&img, comp, job.output.channels, w, h, false), 10))
             .await;
-        for frame in frames {
+        let t = Instant::now();
+        let wrote = frames.into_iter().try_for_each(|frame| {
             clock += cs_per_frame;
             let d = (clock.round() as u64).saturating_sub(emitted).max(1);
             emitted += d;
             let frame = frame.map_err(|e| ExportError::Encode(e.to_string()))?;
-            enc.write_prepared_frame(frame, d.min(u16::MAX as u64) as u16).map_err(|e| ExportError::Encode(e.to_string()))?;
-        }
+            enc.write_prepared_frame(frame, d.min(u16::MAX as u64) as u16).map_err(|e| ExportError::Encode(e.to_string()))
+        });
+        // The GIF writer compresses as it writes: the two are not measured apart.
+        job.add_time(pipeline::Stage::EncodeWrite, t);
+        wrote?;
         st.advance(end - i)?;
         i = end;
     }
-    let _ = enc.finish().map_err(|e| ExportError::Encode(e.to_string()))?;
-    let bytes = file.finish()?;
-    Ok(Report { path, frames: 0, width: w, height: h, seconds: 0.0, bytes, audio: false, log: None, overflow: vec![] })
+    let t = Instant::now();
+    let finished = enc.finish().map(drop).map_err(|e| ExportError::Encode(e.to_string()));
+    job.add_time(pipeline::Stage::EncodeWrite, t);
+    finished?;
+    let bytes = job.timed(pipeline::Stage::EncodeWrite, || file.finish())?;
+    Ok(Report { path, frames: 0, width: w, height: h, seconds: 0.0, bytes, audio: false, log: None, overflow: vec![], timing: Default::default() })
 }
 
 fn validate_gif_dimensions(w: u32, h: u32) -> Result<()> {
