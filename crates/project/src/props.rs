@@ -43,6 +43,13 @@ pub enum ParamUi {
         filters: Vec<String>,
     },
     Gradient,
+    /// A 0..1 spline curve (string of `"x,y x,y ..."` control points; when `rgb` is true, JSON
+    /// `{rgb, red, green, blue}` or single-curve fallback), shown as an inline curve editor in
+    /// Effect Controls.
+    Curve {
+        #[serde(default)]
+        rgb: bool,
+    },
     /// Not shown in Effect Controls / the timeline (internal data).
     Hidden,
 }
