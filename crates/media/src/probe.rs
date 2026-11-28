@@ -28,6 +28,11 @@ pub fn probe(path: impl AsRef<Path>) -> Result<Footage> {
     // A movie is read in place (its index), not loaded whole.
     if let Some(src) = crate::stream::probe_source(path) {
         let mut f = footage_from_source(&path.to_string_lossy(), &src?);
+        if ext_of(path) == "wav"
+            && let Ok(bytes) = crate::read_regular_file(path)
+        {
+            f.markers = crate::wav_markers::read(&bytes);
+        }
         let header = crate::stream::movie_header(path);
         let turn = header.as_deref().map_or(Orientation::NoTransforms, video_turn);
         turn_footage(&mut f, turn);
@@ -238,7 +243,7 @@ pub(crate) fn footage_from_craft_info(path: &str, info: &craft_media_source::Med
     }
 }
 
-fn profile_of_craft(c: &craft_color::ColorInfo) -> Option<effectcraft_project::ColorSpace> {
+pub(crate) fn profile_of_craft(c: &craft_color::ColorInfo) -> Option<effectcraft_project::ColorSpace> {
     use craft_color::{Primaries, Transfer};
     use effectcraft_project::ColorSpace;
     match (c.primaries, c.transfer) {
