@@ -4,7 +4,7 @@ mod deep_nesting;
 mod fuzz;
 
 use effectcraft_color::Label;
-use effectcraft_keyframe::{Keyframe, ShapePath, TextDoc, Value};
+use effectcraft_keyframe::{FeatherPoint, Keyframe, ShapePath, TextDoc, Value};
 use effectcraft_project::build::{self, Ids};
 use effectcraft_project::{Comp, Expression, ItemId, ItemKind, Layer, LayerId, LayerSource, Marker, MaskMode, Project, PropGroup, Solid};
 use effectcraft_render::{EvalCtx, NoFootage, RenderOpts, Renderer};
@@ -866,6 +866,50 @@ fn a_path_with_non_numeric_points_is_an_error() {
     r.expr = Some(&host);
     r.comp_frame(f.cid, Tick::ZERO);
     assert!(f.ev(f.a, "masks/#1/path", "createPath([[0, 0], [10, 0], [10, 10]], [], [], true)", 0.0).is_ok());
+}
+
+#[test]
+fn path_rigs_read_properties_the_paths_own_closed_flag_and_the_layer_surface() {
+    // #4098: After Effects path rigs build a path from other properties, keep the path's own
+    // closed flag, and bring comp points onto the layer with `fromCompToSurface`.
+    let f = fx();
+    let path = |text: &str| match f.ev(f.a, "masks/#1/path", text, 0.0) {
+        Ok(Value::Path(p)) => p,
+        other => panic!("{text}: {other:?}"),
+    };
+    // Layer A's Position is [50, 40]: a property in a list stands for its value.
+    let plain = path("createPath([[0, 0], [50, 40]], [[0, 0], [50, 40]], [[50, 40], [0, 0]], false)");
+    let props = path("createPath([[0, 0], transform.position], [[0, 0], transform.position], [transform.position, [0, 0]], false)");
+    assert_eq!(props.vertices, plain.vertices);
+    assert_eq!(props.in_tangents, plain.in_tangents);
+    assert_eq!(props.out_tangents, plain.out_tangents);
+    // The mask is closed; its own expression can ask, and so can another property's.
+    assert!(path("createPath([[0, 0], [50, 50]], [], [], thisProperty.isClosed())").closed);
+    assert!(!path("createPath([[0, 0], [50, 50]], [], [], !thisProperty.isClosed())").closed);
+    assert_eq!(path("createPath(thisProperty.points(), value.inTangents(), thisProperty.outTangents(), false)").vertices, path("value").vertices);
+    // A layer's surface is where `fromComp` already lands, for 2D and 3D layers alike.
+    assert_eq!(f.pos("fromCompToSurface([50, 40])", 0.0), f.pos("fromComp([50, 40])", 0.0));
+    assert_eq!(f.pos("thisComp.layer(\"B\").fromCompToSurface([50, 40], 0.5)", 0.0), f.pos("thisComp.layer(\"B\").fromComp([50, 40], 0.5)", 0.0));
+}
+
+#[test]
+fn a_path_expression_returning_its_own_value_keeps_the_mask_feather() {
+    let mut f = fx();
+    let Value::Path(mut feathered) = f.layer_mut(f.a).props.prop_mut("masks/#1/path").unwrap().value.clone() else { panic!("not a path") };
+    feathered.feather = vec![FeatherPoint { segment: 1, t: 0.5, radius: 8.0, tension: 0.0 }];
+    f.layer_mut(f.a).props.prop_mut("masks/#1/path").unwrap().value = Value::Path(feathered.clone());
+    let path = |text: &str| match f.ev(f.a, "masks/#1/path", text, 0.0) {
+        Ok(Value::Path(p)) => p,
+        other => panic!("{text}: {other:?}"),
+    };
+    for text in ["value", "thisProperty", "thisProperty.value", "valueAtTime(time)"] {
+        assert_eq!(path(text), feathered, "{text}");
+    }
+    // A path the script builds, or the own value's points edited in place, has none.
+    assert!(path("createPath(value.points(), value.inTangents(), value.outTangents(), true)").feather.is_empty());
+    let moved = path("value.points()[0][0] += 5; value");
+    assert_ne!(moved.vertices, feathered.vertices);
+    assert!(moved.feather.is_empty());
 }
 
 #[test]

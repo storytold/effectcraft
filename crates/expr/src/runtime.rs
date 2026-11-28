@@ -104,6 +104,8 @@ pub enum Out {
         ins: Vec<[f64; 2]>,
         outs: Vec<[f64; 2]>,
         closed: bool,
+        /// It is the property's own `value`, not a path the script built or read elsewhere.
+        own: bool,
     },
     /// A text style object: JSON `{doc: TextDoc | null, ops: [[key, value, start, count], …]}`.
     Style(String),
@@ -447,7 +449,8 @@ fn detach(v: &JsValue, ctx: &mut Context, depth: usize) -> Result<Out, String> {
             let ins = pts(js_string!("__in"), ctx)?;
             let outs = pts(js_string!("__out"), ctx)?;
             let closed = o.get(js_string!("__closed"), ctx).map_err(err)?.to_boolean();
-            return Ok(Out::Path { points, ins, outs, closed });
+            let own = o.get(js_string!("__own"), ctx).map_err(err)?.to_boolean();
+            return Ok(Out::Path { points, ins, outs, closed, own });
         }
     }
     // Below the levels detached above, an object's text could be its whole nested content
@@ -633,8 +636,15 @@ pub fn to_value(out: &Out, current: &Value) -> Result<Value, String> {
             }
         },
         Value::Str(_) => Value::Str(text(out)),
-        Value::Path(_) => match out {
-            Out::Path { points, ins, outs, closed } => {
+        Value::Path(cur) => match out {
+            // The own value returned untouched keeps its mask feather points, which scripts don't see.
+            // (Its lists are live, so a script may have edited them.)
+            Out::Path { points, ins, outs, closed, own: true }
+                if *points == cur.vertices && *ins == cur.in_tangents && *outs == cur.out_tangents && *closed == cur.closed =>
+            {
+                current.clone()
+            }
+            Out::Path { points, ins, outs, closed, .. } => {
                 // A vertex that isn't a number (`[[0, 0], [[1, 2], 0]]`) comes through as NaN, which
                 // the rasterizer must never see.
                 if points.iter().chain(ins).chain(outs).flatten().any(|c| !c.is_finite()) {

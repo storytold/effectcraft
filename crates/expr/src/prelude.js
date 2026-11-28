@@ -22,7 +22,9 @@ var __FOOT = 11, __FDATA = 12, __SAMPLE = 13, __PROJ = 14, __SOURCE = 15, __ANCE
 
 function __begin(t, v, c, l, path, uid, idx, fd, ti, tt, sv) {
   time = t;
-  value = v;
+  // A path's own value arrives as [points, inTangents, outTangents, closed], the one list that
+  // ends in a boolean; scripts read it as a Path, like every other path value (#4098).
+  value = Array.isArray(v) && v.length === 4 && typeof v[3] === 'boolean' ? new __Path(v[0], v[1], v[2], v[3], true) : v;
   textIndex = ti;
   textTotal = tt;
   selectorValue = sv;
@@ -426,8 +428,10 @@ function hexToRgb(hex) {
 // ---------------------------------------------------------------------------------------------
 // Paths.
 
-function __Path(pts, ins, outs, closed) {
+function __Path(pts, ins, outs, closed, own) {
   this.__path = true;
+  // The property's own value, so returning it untouched keeps what a script can't see (feather).
+  this.__own = own === true;
   this.__pts = pts; this.__in = ins; this.__out = outs; this.__closed = !!closed;
 }
 __Path.prototype.points = function () { return this.__pts; };
@@ -482,9 +486,11 @@ function __pathAt(p, pct, tangent) {
 }
 
 function createPath(points, inTangents, outTangents, isClosed) {
-  points = points || [];
+  // A property in a list (or as a list) stands for its value, as in After Effects (#4098).
+  var vals = function (list) { list = __v(list); return Array.isArray(list) ? list.map(__v) : list; };
+  points = vals(points) || [];
   var zero = points.map(function () { return [0, 0]; });
-  return new __Path(points, inTangents || zero, outTangents || zero, isClosed === undefined ? true : isClosed);
+  return new __Path(points, vals(inTangents) || zero, vals(outTangents) || zero, isClosed === undefined ? true : __v(isClosed));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -738,6 +744,9 @@ Layer.prototype = {
   __x: function (t) { return __h(__XFORM, this.__c, this.__l, t === undefined ? time : t); },
   toComp: function (p, t) { return __m3(this.__x(t)[0], __v(p)); },
   fromComp: function (p, t) { return __m3(this.__x(t)[1], __v(p)); },
+  // The layer-to-comp matrix already carries the active camera for a 3D layer, so its inverse
+  // lands a comp point on the layer's surface (z = 0).
+  fromCompToSurface: function (p, t) { return __m3(this.__x(t)[1], __v(p)); },
   toWorld: function (p, t) { return __m4(this.__x(t)[2], __v(p), false); },
   fromWorld: function (p, t) { return __m4(this.__x(t)[3], __v(p), false); },
   toCompVec: function (p, t) { return __m3v(this.__x(t)[0], __v(p)); },
@@ -1195,6 +1204,7 @@ function mask(k) { return thisLayer.mask(k); }
 function content(k) { return thisLayer.content(k); }
 function toComp(p, t) { return thisLayer.toComp(p, t); }
 function fromComp(p, t) { return thisLayer.fromComp(p, t); }
+function fromCompToSurface(p, t) { return thisLayer.fromCompToSurface(p, t); }
 function toWorld(p, t) { return thisLayer.toWorld(p, t); }
 function fromWorld(p, t) { return thisLayer.fromWorld(p, t); }
 function toCompVec(p, t) { return thisLayer.toCompVec(p, t); }
