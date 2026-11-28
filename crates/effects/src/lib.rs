@@ -93,7 +93,7 @@ use effectcraft_project::{GroupKind, ParamUi, PropGroup, Property};
 pub use effectcraft_raster::{AuxChannels, Image};
 pub use misc::{
     GLOW_GAIN, GLOW_KNEE, INVERT_ALPHA, INVERT_CHANNELS, drop_shadow_pad, glow_ab_t, glow_operation, glow_sigma, linear_wipe_axis, linear_wipe_sigma,
-    radial_wipe_sigma, radial_wipe_wedge, venetian_cover, venetian_origin,
+    mosaic_tile_last, radial_wipe_sigma, radial_wipe_wedge, venetian_cover, venetian_origin,
 };
 pub use sim::particle_state;
 pub use sim3::{PgBlit, PgPlan, playground_plan, playground_state};
