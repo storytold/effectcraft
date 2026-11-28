@@ -453,3 +453,134 @@ fn socket_edge_cases() {
     assert_eq!(o.result, json!(0), "{:?}", o.error);
     assert!(t.elapsed().as_secs_f64() < 5.0);
 }
+
+const CANVAS: &str = r#"
+var w = new Window("palette", "Canvas");
+var cv = w.add("canvas", undefined, undefined, { name: "plot" });
+cv.preferredSize = [120, 80];
+var paints = 0;
+cv.onDraw = function () {
+  paints++;
+  var g = this.graphics;
+  var bg = g.newBrush(g.BrushType.SOLID_COLOR, [0.1, 0.1, 0.1, 1]);
+  g.newPath();
+  g.rectPath(0, 0, this.size.width, this.size.height);
+  g.fillPath(bg);
+  g.drawString("paint " + paints, g.newPen(g.PenType.SOLID_COLOR, [1, 1, 1], 1), 2.3456, 2.9876, ScriptUI.newFont("dialog", "REGULAR", 12));
+};
+cv.addEventListener("mousedown", function (e) { cv.helpTip = e.clientX + "x" + e.clientY; cv.repaint(); });
+var b = w.add("button", undefined, "Noop", { name: "noop" });
+b.onClick = function () { writeLn("noop"); };
+w.show();
+"#;
+
+#[test]
+fn canvas_paints_only_when_dirty() {
+    let mut s = session();
+    let o = run_code(&mut s, CANVAS, "canvas.jsx");
+    assert!(o.error.is_none(), "{:?}", o.error);
+    let w = s.script_ui.windows[0].clone();
+    // The canvas is a leaf laid out at its preferred size, and it painted once.
+    let cv = w.root.lookup(&json!("plot")).unwrap();
+    assert_eq!(cv.kind, WidgetKind::Canvas);
+    assert_eq!([cv.bounds[2], cv.bounds[3]], [120.0, 80.0]);
+    assert!(cv.handlers.contains(&"onDraw".to_string()));
+    assert_eq!(cv.mouse, ["mousedown"]);
+    assert_eq!(cv.draw.len(), 2, "{:?}", cv.draw);
+    assert_eq!(cv.draw[0], DrawOp::Fill { color: Some([0.1, 0.1, 0.1, 1.0]), path: vec![PathSeg::R { x: 0.0, y: 0.0, w: 120.0, h: 80.0 }] });
+    // Coordinates are rounded to hundredths of a pixel: the draw list is JSON in every snapshot.
+    assert!(matches!(&cv.draw[1], DrawOp::Text { text, x, y, .. } if text == "paint 1" && *x == 2.35 && *y == 2.99), "{:?}", cv.draw);
+    // Agents see the control type through scriptui.get.
+    let tree = s.execute("scriptui.get", json!({})).unwrap();
+    assert_eq!(tree["root"]["children"][0]["type"], "canvas", "{tree}");
+    // A mouse press repaints: the handler stores the pointer and calls repaint().
+    s.execute("scriptui.mouse", json!({"widget": "plot", "type": "mousedown", "x": 12.5, "y": 34})).unwrap();
+    let cv = s.script_ui.windows[0].root.lookup(&json!("plot")).unwrap();
+    assert_eq!(cv.help_tip, "12.5x34");
+    assert!(matches!(&cv.draw[1], DrawOp::Text { text, .. } if text == "paint 2"), "{:?}", cv.draw);
+    // Snapshots that do not touch the canvas keep its cached draw list.
+    s.execute("scriptui.mouse", json!({"widget": "plot", "type": "mousemove", "x": 5, "y": 6})).unwrap();
+    s.execute("scriptui.click", json!({"widget": "noop"})).unwrap();
+    let cv = s.script_ui.windows[0].root.lookup(&json!("plot")).unwrap();
+    assert!(matches!(&cv.draw[1], DrawOp::Text { text, .. } if text == "paint 2"), "repainted without repaint(): {:?}", cv.draw);
+    s.execute("scriptui.close", json!({})).unwrap();
+}
+
+const CANVAS_TABS: &str = r#"
+var w = new Window("palette", "Canvas tabs");
+var tp = w.add("tabbedpanel", undefined, undefined, { name: "tabs" });
+var one = tp.add("tab", undefined, "One");
+var two = tp.add("tab", undefined, "Two", { name: "two" });
+var cv = two.add("canvas", undefined, undefined, { name: "plot" });
+cv.preferredSize = [60, 40];
+var paints = 0;
+cv.onDraw = function () {
+  paints++;
+  var g = this.graphics;
+  g.newPath();
+  g.rectPath(0, 0, this.size.width, this.size.height);
+  g.fillPath(g.newBrush(g.BrushType.SOLID_COLOR, [1, 0, 0, 1]));
+};
+w.show();
+"#;
+
+#[test]
+fn canvas_on_an_unselected_tab_waits_until_it_is_shown() {
+    let mut s = session();
+    let o = run_code(&mut s, CANVAS_TABS, "canvas-tabs.jsx");
+    assert!(o.error.is_none(), "{:?}", o.error);
+    // The canvas lives on the second tab, so it must not paint while the first tab is showing.
+    let cv = s.script_ui.windows[0].root.lookup(&json!("plot")).unwrap();
+    assert_eq!(cv.kind, WidgetKind::Canvas);
+    assert!(cv.draw.is_empty(), "painted before its tab was selected: {:?}", cv.draw);
+    // Selecting its tab lets the first paint happen, without an explicit repaint().
+    s.execute("scriptui.click", json!({"widget": "two"})).unwrap();
+    let cv = s.script_ui.windows[0].root.lookup(&json!("plot")).unwrap();
+    assert_eq!(cv.draw.len(), 1, "did not paint after its tab was selected: {:?}", cv.draw);
+    assert!(matches!(&cv.draw[0], DrawOp::Fill { .. }), "{:?}", cv.draw);
+    // A second snapshot keeps the cached list.
+    s.execute("scriptui.click", json!({"widget": "two"})).unwrap();
+    let cv = s.script_ui.windows[0].root.lookup(&json!("plot")).unwrap();
+    assert_eq!(cv.draw.len(), 1, "repainted without repaint(): {:?}", cv.draw);
+    s.execute("scriptui.close", json!({})).unwrap();
+}
+
+const CANVAS_RESIZE: &str = r#"
+var w = new Window("palette", "Canvas resize");
+var cv = w.add("canvas", undefined, undefined, { name: "plot" });
+cv.preferredSize = [100, 60];
+cv.onDraw = function () {
+  var g = this.graphics;
+  g.newPath();
+  g.rectPath(0, 0, this.size.width, this.size.height);
+  g.fillPath(g.newBrush(g.BrushType.SOLID_COLOR, [0.2, 0.3, 0.4, 1]));
+};
+var grow = w.add("button", undefined, "Grow", { name: "grow" });
+grow.onClick = function () {
+  cv.preferredSize = [240, 110];
+  cv.repaint();
+};
+var nudge = w.add("button", undefined, "Nudge", { name: "nudge" });
+nudge.onClick = function () {
+  cv.preferredSize[0] = 300;
+};
+w.show();
+"#;
+
+#[test]
+fn canvas_preferred_size_change_refreshes_layout_and_repaints() {
+    let mut s = session();
+    let o = run_code(&mut s, CANVAS_RESIZE, "canvas-resize.jsx");
+    assert!(o.error.is_none(), "{:?}", o.error);
+    let cv = s.script_ui.windows[0].root.lookup(&json!("plot")).unwrap();
+    assert_eq!(cv.draw[0], DrawOp::Fill { color: Some([0.2, 0.3, 0.4, 1.0]), path: vec![PathSeg::R { x: 0.0, y: 0.0, w: 100.0, h: 60.0 }] });
+    // Reassigning preferredSize invalidates the cached layout and repaints at the new size.
+    s.execute("scriptui.click", json!({"widget": "grow"})).unwrap();
+    let cv = s.script_ui.windows[0].root.lookup(&json!("plot")).unwrap();
+    assert_eq!(cv.draw[0], DrawOp::Fill { color: Some([0.2, 0.3, 0.4, 1.0]), path: vec![PathSeg::R { x: 0.0, y: 0.0, w: 240.0, h: 110.0 }] });
+    // Even an in-place preferredSize[0] mutation without repaint() triggers layout and redraw.
+    s.execute("scriptui.click", json!({"widget": "nudge"})).unwrap();
+    let cv = s.script_ui.windows[0].root.lookup(&json!("plot")).unwrap();
+    assert_eq!(cv.draw[0], DrawOp::Fill { color: Some([0.2, 0.3, 0.4, 1.0]), path: vec![PathSeg::R { x: 0.0, y: 0.0, w: 300.0, h: 110.0 }] });
+    s.execute("scriptui.close", json!({})).unwrap();
+}

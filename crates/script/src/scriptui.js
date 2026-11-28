@@ -52,7 +52,8 @@ var __uiTypes = {
   window: "Window", panel: "Panel", group: "Group", button: "Button", iconbutton: "IconButton",
   statictext: "StaticText", edittext: "EditText", checkbox: "Checkbox", radiobutton: "RadioButton",
   slider: "Slider", scrollbar: "Scrollbar", progressbar: "Progressbar", dropdownlist: "DropDownList",
-  listbox: "ListBox", tabbedpanel: "TabbedPanel", tab: "Tab", image: "ScriptUIImage"
+  listbox: "ListBox", tabbedpanel: "TabbedPanel", tab: "Tab", image: "ScriptUIImage",
+  canvas: "Canvas"
 };
 var __uiContainers = { window: 1, panel: 1, group: 1, tabbedpanel: 1, tab: 1 };
 
@@ -287,6 +288,8 @@ function DropDownList() {}
 function ListBox() {}
 function TabbedPanel() {}
 function Tab() {}
+// A script-painted canvas: `onDraw` paints it and `repaint()` asks for another pass.
+function Canvas() {}
 // ScriptUIImage: an image file (`src`) or embedded image bytes (`data`, a binary string as in
 // resource-string images: one character per byte).
 function ScriptUIImage(src, data, name) {
@@ -339,6 +342,10 @@ function __uiFontSize(f, g) {
   return x > 0 ? x : 12;
 }
 
+// Draw coordinates are rounded to hundredths of a pixel: the draw list travels as JSON inside
+// the window snapshot, and unrounded floats ("123.45678901234567") are most of its size.
+function __px(v) { return Math.round(__num(v) * 100) / 100; }
+
 // ScriptUIGraphics: what onDraw handlers paint with. Paths and paint calls are recorded into the
 // control's draw list (`draw` in the window snapshot), which frontends paint.
 function __uiGraphics() {
@@ -352,19 +359,19 @@ function __uiGraphics() {
     __rec: null,
     __push: function (op) { if (this.__rec) this.__rec.push(op); },
     newBrush: function (t, c) { return { type: t, color: __uiColor(c), theme: typeof c === "string" ? c : "" }; },
-    newPen: function (t, c, w) { return { type: t, color: __uiColor(c), theme: typeof c === "string" ? c : "", lineWidth: w === undefined ? 1 : __num(w) }; },
+    newPen: function (t, c, w) { return { type: t, color: __uiColor(c), theme: typeof c === "string" ? c : "", lineWidth: w === undefined ? 1 : __px(w) }; },
     newPath: function () { this.currentPath = []; return this.currentPath; },
-    moveTo: function (x, y) { this.currentPath.push({ k: "M", x: __num(x), y: __num(y) }); this.currentPoint = [__num(x), __num(y)]; },
-    lineTo: function (x, y) { this.currentPath.push({ k: "L", x: __num(x), y: __num(y) }); this.currentPoint = [__num(x), __num(y)]; },
+    moveTo: function (x, y) { this.currentPath.push({ k: "M", x: __px(x), y: __px(y) }); this.currentPoint = [__px(x), __px(y)]; },
+    lineTo: function (x, y) { this.currentPath.push({ k: "L", x: __px(x), y: __px(y) }); this.currentPoint = [__px(x), __px(y)]; },
     closePath: function () { this.currentPath.push({ k: "Z" }); },
     rectPath: function (x, y, w, h) {
       if (x instanceof Array) { h = x[3] - x[1]; w = x[2] - x[0]; y = x[1]; x = x[0]; }
-      this.currentPath.push({ k: "R", x: __num(x), y: __num(y), w: __num(w), h: __num(h) });
+      this.currentPath.push({ k: "R", x: __px(x), y: __px(y), w: __px(w), h: __px(h) });
       return this.currentPath;
     },
     ellipsePath: function (x, y, w, h) {
       if (x instanceof Array) { h = x[3] - x[1]; w = x[2] - x[0]; y = x[1]; x = x[0]; }
-      this.currentPath.push({ k: "E", x: __num(x), y: __num(y), w: __num(w), h: __num(h) });
+      this.currentPath.push({ k: "E", x: __px(x), y: __px(y), w: __px(w), h: __px(h) });
       return this.currentPath;
     },
     fillPath: function (brush, path) {
@@ -375,10 +382,10 @@ function __uiGraphics() {
     },
     drawString: function (text, pen, x, y, font) {
       var f = font || this.font;
-      this.__push({ op: "text", text: String(text), color: pen ? pen.color : null, x: __num(x || 0), y: __num(y || 0), size: __uiFontSize(f, this), style: String(f?.style !== undefined ? f.style : "") });
+      this.__push({ op: "text", text: String(text), color: pen ? pen.color : null, x: __px(x || 0), y: __px(y || 0), size: __px(__uiFontSize(f, this)), style: String(f?.style !== undefined ? f.style : "") });
     },
     drawOSControl: function () { this.__push({ op: "os" }); },
-    drawImage: function (img, x, y, w, h) { this.__push({ op: "image", image: __uiImageJson(img), x: __num(x || 0), y: __num(y || 0), w: w === undefined ? 0 : __num(w), h: h === undefined ? 0 : __num(h) }); },
+    drawImage: function (img, x, y, w, h) { this.__push({ op: "image", image: __uiImageJson(img), x: __px(x || 0), y: __px(y || 0), w: w === undefined ? 0 : __px(w), h: h === undefined ? 0 : __px(h) }); },
     drawFocusRing: function () {},
     measureString: function (s, font, boundaryWidth) {
       var size = __uiFontSize(font, this);
@@ -395,18 +402,56 @@ function __uiGraphics() {
   };
 }
 
+// Whether a canvas can be seen: it and its ancestors below the window are visible, and every
+// enclosing tab is the selected one of its tabbed panel.
+function __uiCanvasShown(c, win) {
+  for (var n = c; n && n !== win; n = n.parent) {
+    if (n.visible === false) return false;
+    if (n.parent && n.parent.type === "tabbedpanel") {
+      var sel = n.parent.__sel || [];
+      if (sel.length === 0 || sel[0] !== n.parent.children.indexOf(n)) return false;
+    }
+  }
+  return true;
+}
+
 // Run the onDraw handlers of a window's controls (after laying it out, so `size` is known),
 // recording what they paint.
 function __uiRunDraws(win) {
   var drawn = [];
   (function walk(c) {
-    if (typeof c.onDraw === "function") drawn.push(c);
+    // A hidden canvas keeps its dirty flag: its first paint happens once it is shown.
+    if (typeof c.onDraw === "function" && (c.type !== "canvas" || __uiCanvasShown(c, win))) drawn.push(c);
     for (var i = 0; i < (c.children || []).length; i++) walk(c.children[i]);
   })(win);
   if (!drawn.length) return;
-  __uiLayout(win);
+  // Catch in-place edits such as `cv.preferredSize[0] = 300` that bypass the property setter.
+  if (win.__laidOut) {
+    for (const elem of drawn) {
+      var ps = __uiSize(elem.preferredSize);
+      var prev = elem.__laidPs || null;
+      if ((ps === null) !== (prev === null) || (ps && (ps[0] !== prev[0] || ps[1] !== prev[1]))) {
+        win.__laidOut = false;
+        break;
+      }
+    }
+  }
+  // Laying out the whole window costs a full JSON round trip; a draw pass only needs it once
+  // (or after the tree or a layout property changed), not on every canvas repaint.
+  if (!win.__laidOut) {
+    __uiLayout(win);
+  }
   for (const elem of drawn) {
     var c = elem;
+    if (c.type === "canvas") {
+      // A canvas keeps its draw list until it asks for a repaint; a resize invalidates it.
+      var b = c.__lb;
+      var size = [b[2] - b[0], b[3] - b[1]];
+      if (c.__lastSize && (c.__lastSize[0] !== size[0] || c.__lastSize[1] !== size[1])) c.__dirty = true;
+      c.__lastSize = size;
+      if (!c.__dirty && c.__draw) continue;
+      c.__dirty = false;
+    }
     c.__draw = [];
     c.graphics.__rec = c.__draw;
     try {
@@ -415,12 +460,14 @@ function __uiRunDraws(win) {
       try { writeLn("onDraw: " + (e?.message ? e.message : e)); } catch (e2) {}
     }
     c.graphics.__rec = null;
+    c.__drawRev = (c.__drawRev || 0) + 1;
   }
 }
 
 function __uiInit(o, type, win, parent, bounds, text, props) {
   o.type = type;
   o.window = win || o;
+  if (win) win.__laidOut = false;
   o.parent = parent || null;
   o.__id = win ? win.__next++ : 0;
   if (!win) {
@@ -435,17 +482,23 @@ function __uiInit(o, type, win, parent, bounds, text, props) {
   }
   o.text = text === undefined || text === null ? "" : String(text);
   o.enabled = true;
-  o.visible = true;
+  o.__vis = true;
   o.helpTip = "";
   o.children = [];
   o.__ub = __toBounds(bounds);
   o.__lb = [0, 0, 0, 0];
-  o.preferredSize = __dim(-1, -1);
+  o.__ps = __dim(-1, -1);
   o.minimumSize = __dim(0, 0);
   o.maximumSize = __dim(10000, 10000);
   o.alignment = null;
   o.graphics = __uiGraphics();
   o.__listeners = {};
+  // A canvas paints on demand: onDraw runs when it is dirty (the first snapshot and after
+  // repaint()), not on every snapshot as the other controls do.
+  if (type === "canvas") {
+    o.__dirty = true;
+    o.__lastSize = null;
+  }
   if (o.properties.name) o.name = o.properties.name;
   if (__uiContainers[type]) {
     o.orientation = type === "group" ? "row" : type === "tabbedpanel" ? "stack" : "column";
@@ -535,12 +588,14 @@ function __uiProto() {
         for (var k = 0; k < this.items.length; k++) this.items[k].index = k;
         this.__sel = this.__sel.filter(function (s) { return s !== i; }).map(function (s) { return s > i ? s - 1 : s; });
       }
+      if (this.window) this.window.__laidOut = false;
     },
     removeAll: function () {
       if (this.items) {
         this.items = [];
         this.__sel = [];
       } else this.children = [];
+      if (this.window) this.window.__laidOut = false;
     },
     find: function (text) {
       var list = this.items || this.children;
@@ -594,6 +649,10 @@ function __uiProto() {
       if (e.indexOf("on") !== 0) e = "on" + e.charAt(0).toUpperCase() + e.slice(1);
       this.__fire(e);
     },
+    // A canvas repaints on the next snapshot; other controls redraw with every snapshot anyway.
+    repaint: function () {
+      if (this.type === "canvas") this.__dirty = true;
+    },
     // `capture`: the listener runs in the capture phase of mouse events (on the way down from
     // the window to the target) instead of the bubble phase.
     addEventListener: function (name, fn, capture) {
@@ -633,14 +692,14 @@ function __uiProto() {
 
 (function () {
   var all = ["Window", "Panel", "Group", "Button", "IconButton", "StaticText", "EditText", "Checkbox", "RadioButton", "Slider",
-    "Scrollbar", "Progressbar", "DropDownList", "ListBox", "TabbedPanel", "Tab", "ScriptUIImage"];
+    "Scrollbar", "Progressbar", "DropDownList", "ListBox", "Canvas", "TabbedPanel", "Tab", "ScriptUIImage"];
   for (const elem of all) {
     var C = __ecGlobal[elem];
     var p = __uiProto();
     for (var k in p) C.prototype[k] = p[k];
     Object.defineProperty(C.prototype, "bounds", {
       get: function () { var b = this.__ub || this.__lb; return __bounds4(b[0], b[1], b[2], b[3]); },
-      set: function (v) { this.__ub = __toBounds(v); },
+      set: function (v) { this.__ub = __toBounds(v); if (this.window) this.window.__laidOut = false; },
       configurable: true
     });
     Object.defineProperty(C.prototype, "size", {
@@ -649,6 +708,7 @@ function __uiProto() {
         var b = this.bounds;
         var w = v.width !== undefined ? v.width : v[0], h = v.height !== undefined ? v.height : v[1];
         this.__ub = [b[0], b[1], b[0] + __num(w), b[1] + __num(h)];
+        if (this.window) this.window.__laidOut = false;
       },
       configurable: true
     });
@@ -658,6 +718,23 @@ function __uiProto() {
         var b = this.bounds;
         var x = v.x !== undefined ? v.x : v[0], y = v.y !== undefined ? v.y : v[1];
         this.__ub = [__num(x), __num(y), __num(x) + b[2] - b[0], __num(y) + b[3] - b[1]];
+        if (this.window) this.window.__laidOut = false;
+      },
+      configurable: true
+    });
+    Object.defineProperty(C.prototype, "preferredSize", {
+      get: function () { return this.__ps; },
+      set: function (v) { this.__ps = v; if (this.window) this.window.__laidOut = false; },
+      configurable: true
+    });
+    Object.defineProperty(C.prototype, "visible", {
+      get: function () { return this.__vis !== false; },
+      set: function (v) {
+        var next = !!v;
+        if (this.__vis !== next) {
+          this.__vis = next;
+          if (this.window) this.window.__laidOut = false;
+        }
       },
       configurable: true
     });
@@ -808,7 +885,7 @@ function __uiMouseFire(target, type, v) {
   return e;
 }
 
-function __uiJson(c, inherited) {
+function __uiJson(c, inherited, skipDraw, allowKeep) {
   var mouse = __uiMouseWanted(c, inherited || []);
   var ps = __uiSize(c.preferredSize);
   if (c.type === "edittext" && c.characters > 0) ps = [c.characters * 7 + 12, ps ? ps[1] : 0];
@@ -834,7 +911,7 @@ function __uiJson(c, inherited) {
     if (m) o.margins = m;
     if (typeof c.spacing === "number") o.spacing = c.spacing;
     var kids = c.children;
-    for (const elem of kids) o.children.push(__uiJson(elem, mouse));
+    for (const elem of kids) o.children.push(__uiJson(elem, mouse, skipDraw, allowKeep));
   }
   if (c.alignment !== null && c.alignment !== undefined) o.alignment = __uiAlign(c.alignment);
   if (c.type === "checkbox" || c.type === "radiobutton") o.checked = !!c.value;
@@ -849,7 +926,14 @@ function __uiJson(c, inherited) {
     o.selection = c.__sel.slice();
   }
   if (c.type === "tabbedpanel") o.activeTab = c.__sel.length ? c.__sel[0] : 0;
-  if (c.__draw && typeof c.onDraw === "function") o.draw = c.__draw;
+  if (!skipDraw && c.__draw && typeof c.onDraw === "function") {
+    if (allowKeep && c.type === "canvas" && c.__drawRev && c.__drawSentRev === c.__drawRev) {
+      o.drawKeep = true;
+    } else {
+      o.draw = c.__draw;
+      if (c.type === "canvas") c.__drawSentRev = c.__drawRev || 0;
+    }
+  }
   if ((c.type === "image" || c.type === "iconbutton") && c.image) o.image = __uiImageJson(c.image);
   if (c.type === "edittext") {
     o.multiline = !!c.__multiline;
@@ -863,8 +947,10 @@ function __uiSnapshot() {
   var out = [];
   for (const elem of __uiWins) {
     var w = elem;
-    if (w.__shown && !w.__closed) __uiRunDraws(w);
-    out.push({ id: w.__wid, kind: w.__kind, title: String(w.text || ""), visible: !!w.__shown && !w.__closed, modal: !!w.__modal, root: __uiJson(w) });
+    var vis = !!w.__shown && !w.__closed;
+    if (vis) __uiRunDraws(w);
+    out.push({ id: w.__wid, kind: w.__kind, title: String(w.text || ""), visible: vis, modal: !!w.__modal, root: __uiJson(w, null, false, !!w.__published && vis) });
+    w.__published = vis;
   }
   // Closed windows are forgotten.
   __uiWins = __uiWins.filter(function (w) { return !w.__closed; });
@@ -893,14 +979,16 @@ function __uiFind(c, id) {
 // layout.layout(): lay the window out now (the host does it before drawing anyway) so scripts
 // can read bounds and sizes.
 function __uiLayout(win) {
-  var b = JSON.parse(__uiLayoutNative(JSON.stringify({ id: win.__wid, kind: win.__kind, title: String(win.text || ""), visible: true, root: __uiJson(win) })));
+  var b = JSON.parse(__uiLayoutNative(JSON.stringify({ id: win.__wid, kind: win.__kind, title: String(win.text || ""), visible: true, root: __uiJson(win, null, true, false) })));
   // Bounds are relative to the parent container, as in ScriptUI.
   (function apply(c, ox, oy) {
     var r = b[c.__id];
     if (!r) return;
     c.__lb = [r[0] - ox, r[1] - oy, r[0] - ox + r[2], r[1] - oy + r[3]];
+    c.__laidPs = __uiSize(c.preferredSize);
     for (var i = 0; i < (c.children || []).length; i++) apply(c.children[i], r[0], r[1]);
   })(win, 0, 0);
+  win.__laidOut = true;
 }
 
 // A user action from the frontend.
