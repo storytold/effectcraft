@@ -1090,7 +1090,7 @@ impl GpuContext {
                 },
                 _ => self.poll_lock.lock().unwrap_or_else(|e| e.into_inner()),
             };
-            self.device.poll(kind)
+            self.readbacks.poll(|| self.device.poll(kind))?
         };
         res.map_err(|e| {
             let error = format!("GPU readback poll: {e}");
@@ -1114,7 +1114,11 @@ impl GpuContext {
             let slice = remaining.min(Self::POLL_SLICE);
             let res = {
                 let _guard = self.poll_lock.lock().unwrap_or_else(|e| e.into_inner());
-                self.device.poll(wgpu::PollType::Wait { submission_index: Some(submission_index.clone()), timeout: Some(slice) })
+                match self.readbacks.poll(|| self.device.poll(wgpu::PollType::Wait { submission_index: Some(submission_index.clone()), timeout: Some(slice) }))
+                {
+                    Ok(result) => result,
+                    Err(_) => return,
+                }
             };
             let done = match res {
                 Ok(_) => true,
@@ -1347,7 +1351,7 @@ impl GpuContext {
                     (remaining, std::time::Duration::ZERO, Ok(wgpu::PollStatus::Poll))
                 } else {
                     let slice = remaining.min(Self::POLL_SLICE);
-                    let res = self.device.poll(wgpu::PollType::Wait { submission_index: submission.clone(), timeout: Some(slice) });
+                    let res = self.readbacks.poll(|| self.device.poll(wgpu::PollType::Wait { submission_index: submission.clone(), timeout: Some(slice) }))?;
                     (remaining, slice, res)
                 }
             };

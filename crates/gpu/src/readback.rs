@@ -181,6 +181,20 @@ impl Readbacks {
         }
     }
 
+    /// A driver polling panic invalidates this context just as a reported device failure does.
+    /// Do not let later renders reuse it or leave its readback callbacks waiting for a timeout.
+    pub(crate) fn poll<T>(&self, poll: impl FnOnce() -> T) -> Result<T, Error> {
+        self.check()?;
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(poll)).map_err(|panic| {
+            let detail =
+                panic.downcast_ref::<String>().map(String::as_str).or_else(|| panic.downcast_ref::<&str>().copied()).unwrap_or("internal driver error");
+            let error = format!("GPU polling failed ({detail}); context retired");
+            self.retire(error.clone());
+            log::error!("{error}");
+            error
+        })
+    }
+
     pub(crate) fn start(self: &Arc<Self>, done: impl FnOnce(Result<Vec<u8>, Error>) + wgpu::WasmNotSend + 'static) -> Result<Ticket, Error> {
         let mut done: Option<Done> = Some(Box::new(done));
         let result = {
@@ -444,6 +458,26 @@ pub(crate) fn rows<T: bytemuck::Pod>(view: &[u8], row: usize, stride: usize, hei
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn polling_panic_retires_context_and_settles_readbacks_once() {
+        let me = Readbacks::new().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let ticket = me
+            .start(move |result| {
+                tx.send(result).unwrap();
+            })
+            .unwrap();
+        let error = me.poll(|| panic!("submission index mismatch")).unwrap_err();
+        assert!(error.contains("submission index mismatch"));
+        assert_eq!(rx.recv().unwrap(), Err(error.clone()));
+        assert_eq!(me.check(), Err(error));
+        ticket.complete(Ok(vec![1]));
+        assert!(rx.try_recv().is_err(), "a late callback cannot complete twice");
+        let called = std::cell::Cell::new(false);
+        assert!(me.poll(|| called.set(true)).is_err());
+        assert!(!called.get(), "a retired device is never polled again");
+    }
 
     #[test]
     fn timeout_racing_late_map_callback_unmaps_once() {
