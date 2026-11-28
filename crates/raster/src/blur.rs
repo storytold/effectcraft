@@ -160,6 +160,9 @@ fn box_radii(sigma: f64, n: usize) -> Vec<usize> {
     }
     let w_ideal = (12.0 * sigma * sigma / n as f64 + 1.0).sqrt();
     let mut wl = w_ideal.floor() as i64;
+    if wl <= 0 || wl >= 1 << 30 {
+        return vec![1 << 29; n];
+    }
     if wl % 2 == 0 {
         wl -= 1;
     }
@@ -412,12 +415,12 @@ pub fn gaussian_blur_exact(img: &Image, sigma_x: f64, sigma_y: f64, repeat: bool
 /// Motion blur along `angle_deg` (0 = vertical in AE's Directional Blur, measured clockwise from
 /// up) over `length` pixels.
 pub fn directional_blur(img: &Image, angle_deg: f64, length: f64) -> Image {
-    if length < 0.5 {
+    if !(0.5..f64::INFINITY).contains(&length) || !angle_deg.is_finite() {
         return img.clone();
     }
     let a = angle_deg.to_radians();
     let (dx, dy) = (a.sin(), -a.cos());
-    let n = (length.ceil() as usize * 2 + 1).clamp(3, 257);
+    let n = (length.ceil() as usize).saturating_mul(2).saturating_add(1).clamp(3, 257);
     let mut out = Image::new(img.width, img.height);
     out.rows_mut().for_each(|(y, row)| {
         for (x, px) in row.iter_mut().enumerate() {
@@ -700,6 +703,24 @@ mod tests {
         let r = box_radii(10.0, 3);
         assert_eq!(r.len(), 3);
         assert!(r.iter().all(|&v| (7..=10).contains(&v)), "{r:?}");
+    }
+
+    #[test]
+    fn huge_blur_parameters_do_not_overflow() {
+        let mut img = Image::new(3, 3);
+        img.set(1, 1, [1.0; 4]);
+        let r = box_radii(2e6, 3);
+        assert!(r.iter().all(|&v| (1_999_999..=2_000_001).contains(&v)), "{r:?}");
+        for v in [2e9, 1e19, f64::INFINITY] {
+            let g = gaussian_blur(&img, v, v, false);
+            assert_eq!((g.width, g.height), (3, 3), "gaussian {v}");
+            assert!(g.data.iter().flatten().all(|c| c.is_finite()), "gaussian {v}");
+            let d = directional_blur(&img, 0.0, v);
+            assert_eq!((d.width, d.height), (3, 3), "directional {v}");
+            assert!(d.data.iter().flatten().all(|c| c.is_finite()), "directional {v}");
+            assert_eq!(img.sample_bilinear(v, v), [0.0; 4], "sample {v}");
+        }
+        assert_eq!(img.sample_bilinear(f64::NAN, 0.5), [0.0; 4]);
     }
 
     /// #3464: moving the image before [`gaussian_blur_unbounded`] and blurring it moved with
