@@ -218,9 +218,9 @@ fn a_pin_added_to_a_bent_mesh_moves_nothing() {
         s.execute("puppet.addPin", json!({"layer": id, "position": at})).unwrap();
         let after = s.render(cid, t, RenderOpts::default());
         let moved = after.data.iter().zip(&before.data).filter(|(a, b)| (a[3] - b[3]).abs() > 0.25).count();
-        // (Before #318 the pin at [50, 54] moved about 250 edge pixels; the solver's round-off
-        // still touches a few.)
-        assert!(moved <= 16, "a pin at {at:?} moved {moved} pixels");
+        // (Before #318 the pin at [50, 54] moved about 250 edge pixels. A few still change: the
+        // mesh settles towards the pins' rigid fit, and a new pin changes that fit a little.)
+        assert!(moved <= 24, "a pin at {at:?} moved {moved} pixels");
         s.undo();
     }
 }
@@ -288,6 +288,59 @@ fn new_mesh_option_starts_a_mesh_on_meshed_art() {
     s.execute("puppet.addPin", json!({"layer": id, "position": [10, 30]})).unwrap();
     s.execute("puppet.addPin", json!({"layer": id, "position": [50, 30], "newMesh": true})).unwrap();
     assert_eq!((mesh_count(&mut s, id), pin_count(&s, id)), (2, 2));
+}
+
+/// A click just off a turned mesh's outline unmaps to a rest point that can be on the mesh. The pin
+/// then holds that point (puppet::solve), so it has to go where that point already is, not to the
+/// click. The mesh is turned rigidly here, so nothing else (the settling towards the pins' rigid fit,
+/// say) can move it.
+#[test]
+fn a_pin_added_just_off_a_turned_mesh_moves_nothing() {
+    let (mut s, id) = setup();
+    s.execute("puppet.addPin", json!({"layer": id, "position": [5, 30]})).unwrap();
+    s.execute("puppet.addPin", json!({"layer": id, "position": [95, 30]})).unwrap();
+    s.set_time(Tick::from_seconds_f64(1.0));
+    // A third of a turn about the layer's centre: 45 px from it, each way.
+    let (sn, cs) = 120f64.to_radians().sin_cos();
+    s.execute("puppet.movePin", json!({"layer": id, "pin": "Puppet Pin 1", "position": [50.0 - 45.0 * cs, 30.0 - 45.0 * sn]})).unwrap();
+    s.execute("puppet.movePin", json!({"layer": id, "pin": "Puppet Pin 2", "position": [50.0 + 45.0 * cs, 30.0 + 45.0 * sn]})).unwrap();
+    let at = |v: &Value| [v[0].as_f64().unwrap(), v[1].as_f64().unwrap()];
+    let deformed = |s: &mut Session| -> Vec<[f64; 2]> {
+        s.execute("puppet.info", json!({"layer": id})).unwrap()["meshes"][0]["deformed"].as_array().unwrap().iter().map(at).collect()
+    };
+    let def = deformed(&mut s);
+    let info = s.execute("puppet.info", json!({"layer": id})).unwrap();
+    let tris: Vec<[usize; 3]> = info["meshes"][0]["tris"].as_array().unwrap().iter().map(|t| [0, 1, 2].map(|k| t[k].as_u64().unwrap() as usize)).collect();
+    let mut sides: std::collections::BTreeMap<(usize, usize), (u32, usize)> = Default::default();
+    for t in &tris {
+        for k in 0..3 {
+            let (a, b, c) = (t[k], t[(k + 1) % 3], t[(k + 2) % 3]);
+            sides.entry((a.min(b), a.max(b))).or_insert((0, c)).0 += 1;
+        }
+    }
+    // Every outline edge's midpoint, a little way out from it.
+    let mut tried = 0;
+    for ((a, b), (count, c)) in &sides {
+        if *count != 1 {
+            continue;
+        }
+        let (p, q, inner) = (def[*a], def[*b], def[*c]);
+        let mid = [(p[0] + q[0]) / 2.0, (p[1] + q[1]) / 2.0];
+        let len = (q[0] - p[0]).hypot(q[1] - p[1]).max(1e-9);
+        let mut n = [(q[1] - p[1]) / len, (p[0] - q[0]) / len];
+        if (inner[0] - mid[0]) * n[0] + (inner[1] - mid[1]) * n[1] > 0.0 {
+            n = [-n[0], -n[1]];
+        }
+        let click = [mid[0] + n[0] * 5.0, mid[1] + n[1] * 5.0];
+        let added = s.execute("puppet.addPin", json!({"layer": id, "position": click})).unwrap();
+        assert!(added["pin"].is_u64(), "no pin at {click:?}: {added}");
+        let after = deformed(&mut s);
+        let moved = def.iter().zip(&after).map(|(u, v)| (u[0] - v[0]).hypot(u[1] - v[1])).fold(0.0, f64::max);
+        assert!(moved < 0.5, "a pin at {click:?} moved the mesh by {moved} px");
+        s.undo();
+        tried += 1;
+    }
+    assert!(tried > 20, "only {tried} clicks");
 }
 
 #[test]
