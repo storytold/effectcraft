@@ -165,6 +165,32 @@ fn blurs() {
     effect_case("ec.blur.reduceflicker", &[("softness", n(0.5))]);
 }
 
+/// #3816: a huge Map Softness (from an expression or a file value) softens CC Vector Blur's map
+/// with box radii near the cap, 1e8; `fp2_box` counts the repeated edge pixels instead of
+/// reading each one, so the pass costs the image's extent and still matches the CPU.
+#[test]
+fn vector_blur_with_a_huge_map_softness_matches_cpu() {
+    effect_case("ec.blur.ccvector", &[("type", e(4)), ("amount", n(12.0)), ("mapSoftness", n(2e20))]);
+}
+
+/// #3816: at a sigma near the box-radius cap a plane blur reads every line in full for every
+/// pixel; on a 3840 × 2160 plane that renders on the CPU instead, without dispatching. The
+/// widest blur the controls allow (Advanced Lightning's Glow Radius 1000, sigma 333) and the
+/// small case above stay on the GPU; NaN doesn't blur.
+#[test]
+fn plane_blurs_too_wide_for_the_gpu_fall_back_to_the_cpu() {
+    use crate::fx_pixel2::plane_blur_on_gpu;
+    // CC Vector Blur's Map Softness 2e20 is sigma 1e20.
+    for sigma in [1e20, 1e8, f64::INFINITY] {
+        assert!(!plane_blur_on_gpu(3840, 2160, sigma, sigma), "sigma {sigma}");
+    }
+    assert!(plane_blur_on_gpu(3840, 2160, 1000.0 / 3.0, 1000.0 / 3.0));
+    assert!(plane_blur_on_gpu(3840, 2160, f64::NAN, f64::NAN));
+    assert!(plane_blur_on_gpu(70, 44, 1e20, 1e20));
+    // Rows read in full plus both edges: 4096 × 1365 × 3 × 4098 reads, past 2^36 only with the edges.
+    assert!(!plane_blur_on_gpu(4096, 1365, 1e20, 0.0));
+}
+
 #[test]
 fn composites_and_colour() {
     for m in [0, 1, 2, 3, 5, 8, 11, 14, 15] {

@@ -153,11 +153,20 @@ fn box_passes(img: &Image, rx: &[usize], ry: &[usize], repeat: bool) -> Image {
     a
 }
 
+/// Above this sigma (pixels) [`box_radii`] gives this sigma's radii: a numerical cap, since the
+/// `i64` arithmetic below overflows near 9e8. It isn't pixel-exact: with transparent edges each
+/// pass still divides by `2r + 1`, so a larger sigma would come out fainter. But boxes this wide
+/// dwarf any buffer ([`crate::MAX_PADDED_SIDE`]): each pass keeps at most 30 000 / (2e8 + 1) of
+/// a line, so three passes leave under 4e-12 of it either way.
+const MAX_BOX_SIGMA: f64 = 1e8;
+
 /// Box radii for `n` passes approximating a Gaussian of `sigma` (Kovesi / "boxes for Gauss").
-fn box_radii(sigma: f64, n: usize) -> Vec<usize> {
-    if sigma <= 0.0 {
+/// A NaN sigma doesn't blur, and a sigma above [`MAX_BOX_SIGMA`] blurs as that.
+pub fn box_radii(sigma: f64, n: usize) -> Vec<usize> {
+    if sigma.is_nan() || sigma <= 0.0 || n == 0 {
         return vec![0; n];
     }
+    let sigma = sigma.min(MAX_BOX_SIGMA);
     let w_ideal = (12.0 * sigma * sigma / n as f64 + 1.0).sqrt();
     let mut wl = w_ideal.floor() as i64;
     if wl % 2 == 0 {
@@ -700,6 +709,27 @@ mod tests {
         let r = box_radii(10.0, 3);
         assert_eq!(r.len(), 3);
         assert!(r.iter().all(|&v| (7..=10).contains(&v)), "{r:?}");
+    }
+
+    /// #3816: a sigma past what `i64` holds (from an expression or a file value) gives the
+    /// radii of the largest sigma that blurs, not an overflow; NaN doesn't blur, and no passes
+    /// give no radii.
+    #[test]
+    fn huge_sigma_radii_are_capped() {
+        let cap = box_radii(1e8, 3);
+        for sigma in [1e9, 1e300, f64::MAX, f64::INFINITY] {
+            assert_eq!(box_radii(sigma, 3), cap, "sigma {sigma}");
+        }
+        assert_eq!(box_radii(f64::NAN, 3), vec![0; 3]);
+        assert!(box_radii(10.0, 0).is_empty());
+        let mut img = Image::new(5, 5);
+        img.set(2, 2, [1.0; 4]);
+        for sigma in [1e9, f64::INFINITY] {
+            for repeat in [false, true] {
+                let b = gaussian_blur(&img, sigma, sigma, repeat);
+                assert!(b.data.iter().flatten().all(|v| v.is_finite()), "sigma {sigma} repeat {repeat}");
+            }
+        }
     }
 
     /// #3464: moving the image before [`gaussian_blur_unbounded`] and blurring it moved with
