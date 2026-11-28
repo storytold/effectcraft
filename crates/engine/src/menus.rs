@@ -593,6 +593,7 @@ File
     ---
     Essential Graphics Template... | essential.importTemplate
     Lottie... | file.importLottie
+    Apple Motion... | file.importMotion
   Import Recent Footage
     @dynamic:recentFootage
     ---

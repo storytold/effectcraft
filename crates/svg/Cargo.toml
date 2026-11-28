@@ -15,6 +15,6 @@ effectcraft-geom = { workspace = true }
 effectcraft-raster = { workspace = true }
 effectcraft-path = { workspace = true }
 kurbo = { workspace = true }
-roxmltree = "0.21"
+roxmltree = { workspace = true }
 rayon = { workspace = true }
 log = { workspace = true }

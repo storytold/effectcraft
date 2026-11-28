@@ -185,6 +185,7 @@ fn the_import_menu_groups_the_project_imports() {
             "---",
             "Essential Graphics Template...",
             "Lottie...",
+            "Apple Motion...",
         ]
     );
 }
