@@ -28,7 +28,7 @@ web-time = { workspace = true }
 pollster = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
-windows-registry = "=0.6.1"
+windows-registry = "=0.100.0"
 
 [dev-dependencies]
 effectcraft-text = { workspace = true }
