@@ -55,7 +55,9 @@ fn watch_folder_renders_queued_projects_and_writes_status() {
     assert_eq!(r["rendered"][0]["state"], "failed");
     host.execute("file.watchFolder", json!({"stop": true})).unwrap();
     assert!(host.state.watch_folder.is_none());
-    assert!(host.execute("file.watchFolder", json!({"folder": "/no/such/folder"})).is_err());
+    let missing = dir.join("absent-watch-folder");
+    assert!(!missing.exists(), "the rejection fixture must not exist");
+    assert!(host.execute("file.watchFolder", json!({"folder": missing.to_string_lossy()})).is_err());
 }
 
 #[test]

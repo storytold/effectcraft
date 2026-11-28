@@ -1796,7 +1796,10 @@ fn automation_roots_confine_the_footage_a_project_names() {
     let own = project("own.ecproj", &p(&read, "own.png"));
     let text = std::fs::read_to_string(&own).unwrap();
     assert!(text.contains(&p(&read, "own.png")) || text.contains("own.png"), "{text}");
-    let relative = text.replace(&p(&read, "own.png"), "../elsewhere/secret.png").replace("\"own.png\"", "\"../elsewhere/secret.png\"");
+    // Match serialized JSON strings, including escaped Windows path separators.
+    let absolute = serde_json::to_string(&p(&read, "own.png")).unwrap();
+    let relative = text.replace(&absolute, "\"../elsewhere/secret.png\"").replace("\"own.png\"", "\"../elsewhere/secret.png\"");
+    assert_ne!(relative, text, "the relative-footage fixture must change the saved path");
     std::fs::write(read.join("relative.ecproj"), relative).unwrap();
     projects.push(("relative", p(&read, "relative.ecproj")));
 
