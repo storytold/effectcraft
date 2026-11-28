@@ -5,6 +5,11 @@
 //! Every engine command an agent runs ([`crate::Backend::exec`], also each step of an
 //! `engine.batch`) is checked before it runs: its file parameters must be absolute paths inside
 //! the roots (symbolic links resolved, no `..`), any other absolute path in its parameters too,
+//! and on Windows a network path (`\\server\share`, `\\?\UNC\...`, WebDAV's `\\host@SSL\share`), a
+//! device path (`\\.\...`) or a verbatim path that isn't a disk (a volume by its `\\?\Volume{…}` name is local) is refused by its name before the
+//! file system is asked about it, unless a root is on that same server and share (or the same
+//! verbatim prefix): looking it up would contact a host the agent chose. A link whose text leads
+//! to one is refused before it is followed,
 //! and commands that write to a file they are not given (Save, Increment and Save, rendering the
 //! Render Queue) are checked against where they would write. Queueing a render without naming
 //! its output needs a saved project, because the default output of an unsaved one is the home
@@ -14,6 +19,7 @@
 //! Execute File, effect helpers, Reveal in Finder…) are refused while confined, as is granting scripts the file
 //! and network access the user withheld.
 
+use std::ffi::{OsStr, OsString};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -201,13 +207,22 @@ impl Confinement {
             Error::BadArgs(format!("cannot {kind} `{path}`: {why} (automation {kind} roots: {roots})"))
         };
         let p = Path::new(path);
+        // Before the absolute-path rule: `\\server` alone is no absolute path to `std`, yet Windows reads it as a computer.
+        let roots: Vec<&Path> = self.roots(access).map(PathBuf::as_path).collect();
+        if let Some(why) = refused_prefix(p, &roots) {
+            return Err(denied(why));
+        }
+        // Win32 trims a trailing period or space from a name where it looks one up, but not always from a name in the middle: refused as given.
+        if cfg!(windows) && has_trimmed_name(p) {
+            return Err(denied("a name Windows trims"));
+        }
         if !p.is_absolute() {
             return Err(denied("give an absolute path"));
         }
         if p.components().any(|c| matches!(c, Component::ParentDir)) {
             return Err(denied("`..` is not allowed"));
         }
-        let real = resolve(p).ok_or_else(|| denied("it can't be resolved"))?;
+        let real = resolve(p, &roots).map_err(denied)?;
         if self.roots(access).any(|r| real.starts_with(r)) { Ok(real) } else { Err(denied("it is outside the automation roots")) }
     }
 
@@ -236,6 +251,7 @@ impl Confinement {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(e) => return Err(Error::BadArgs(format!("cannot render to `{output}`: its numbered folders in `{}` can't be checked: {e}", scan.display()))),
         };
+        let write_roots: Vec<&Path> = self.roots(Access::Write).map(PathBuf::as_path).collect();
         let mut seen = 0;
         for e in entries {
             let e =
@@ -253,7 +269,7 @@ impl Confinement {
             let frame_file = e.path().join(rest);
             let frame_file = frame_file.to_string_lossy();
             self.check(&frame_file, Access::Write)?;
-            if let Some(dir) = Path::new(&*frame_file).parent().and_then(resolve) {
+            if let Some(dir) = Path::new(&*frame_file).parent().and_then(|p| resolve(p, &write_roots).ok()) {
                 self.check_no_outward_links(&dir, output)?;
             }
         }
@@ -269,15 +285,19 @@ impl Confinement {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(e) => return Err(cannot(e)),
         };
+        let write_roots: Vec<&Path> = self.write.iter().map(PathBuf::as_path).collect();
         for e in entries {
             let e = e.map_err(cannot)?;
             if !e.file_type().map_err(cannot)?.is_symlink() {
                 continue;
             }
             let link = e.path();
-            if !link.canonicalize().is_ok_and(|r| self.write.iter().any(|w| r.starts_with(w))) {
+            // Judged from its own text first: canonicalizing a link to a network path would open that host.
+            let refused = if cfg!(windows) { link_leads_to_refused_prefix(&link, &write_roots) } else { None };
+            if refused.is_some() || !link.canonicalize().is_ok_and(|r| self.write.iter().any(|w| r.starts_with(w))) {
+                let why = refused.map_or(String::new(), |why| format!(" ({why})"));
                 return Err(Error::BadArgs(format!(
-                    "cannot render to `{output}`: its folder holds `{}`, a link that leads outside the automation write roots, where a numbered frame could be written",
+                    "cannot render to `{output}`: its folder holds `{}`, a link that leads outside the automation write roots{why}, where a numbered frame could be written",
                     link.display()
                 )));
             }
@@ -690,17 +710,259 @@ fn absolute_strings(v: &Value, skip: &[&str], out: &mut Vec<String>) {
 }
 
 /// `p` with symbolic links resolved: its longest existing ancestor's real path plus the rest
-/// (which doesn't exist yet, so can't be a link).
-fn resolve(p: &Path) -> Option<PathBuf> {
+/// (which doesn't exist yet, so can't be a link). `Err` says why not: a link whose text leads to a
+/// Windows network, device or non-disk verbatim path that none of `roots` stands on is refused
+/// before it is followed, and a path that can't be resolved says so.
+fn resolve(p: &Path, roots: &[&Path]) -> std::result::Result<PathBuf, &'static str> {
+    const CANT: &str = "it can't be resolved";
+    // A link is judged by its own text: canonicalizing one that leads to a network path would
+    // contact that host. Only Windows has such prefixes. One walk of the whole path covers every
+    // shorter one the loop below tries.
+    if cfg!(windows)
+        && let Some(why) = link_leads_to_refused_prefix(p, roots)
+    {
+        return Err(why);
+    }
     let mut rest = vec![];
     let mut at = p;
     loop {
         if let Ok(real) = at.canonicalize() {
-            return Some(rest.iter().rev().fold(real, |acc: PathBuf, c| acc.join(c)));
+            return Ok(rest.iter().rev().fold(real, |acc: PathBuf, c| acc.join(c)));
         }
-        rest.push(at.file_name()?.to_os_string());
-        at = at.parent()?;
+        rest.push(at.file_name().ok_or(CANT)?.to_os_string());
+        at = at.parent().ok_or(CANT)?;
     }
+}
+
+/// A Windows path prefix that isn't a local disk: opening or even resolving a path that starts
+/// with one can reach another computer.
+#[derive(Debug)]
+enum OffDisk {
+    /// `\\server\share` or `\\?\UNC\server\share`; WebDAV's `\\host@SSL\share` is a server name too.
+    Unc(OsString, OsString),
+    /// `\\.\device`, which no root stands on: a configured one is canonicalized to a disk path.
+    Device,
+    /// `\\?\` followed by anything but a drive or `UNC`.
+    Verbatim(OsString),
+}
+
+impl OffDisk {
+    /// The prefix of `path` when it isn't a local disk. A drive letter, a path without a prefix
+    /// and every path off Windows give `None`.
+    fn of(path: &Path) -> Option<Self> {
+        use std::path::Prefix;
+        let Some(Component::Prefix(prefix)) = path.components().next() else { return Self::unparsed(path) };
+        match prefix.kind() {
+            Prefix::Disk(_) | Prefix::VerbatimDisk(_) => None,
+            Prefix::UNC(server, share) | Prefix::VerbatimUNC(server, share) => Some(Self::Unc(server.to_os_string(), share.to_os_string())),
+            Prefix::DeviceNS(_) => Some(Self::Device),
+            // `std` knows only the upper-case marker: `\\?\unc\server\share` is the same share to Windows.
+            Prefix::Verbatim(rest) if rest.eq_ignore_ascii_case("UNC") => {
+                let mut names = path.components().skip(1).filter_map(|c| match c {
+                    Component::Normal(n) => Some(n.to_os_string()),
+                    _ => None,
+                });
+                Some(Self::Unc(names.next().unwrap_or_default(), names.next().unwrap_or_default()))
+            }
+            // A volume named by its GUID (a folder a volume is mounted in) is on this computer.
+            Prefix::Verbatim(rest) if is_volume_name(rest) => None,
+            Prefix::Verbatim(rest) => Some(Self::Verbatim(rest.to_os_string())),
+        }
+    }
+
+    /// A Windows path `std` finds no prefix in, though Windows reads one: two separators that aren't a whole
+    /// `\\server\share` (`\\server`, `\\\x`) name a computer, so that is a UNC path with no share; `\??\` is
+    /// the NT form of `\\?\` (`\??\UNC\server\share`), so that is a device path.
+    fn unparsed(path: &Path) -> Option<Self> {
+        let bytes = path.as_os_str().as_encoded_bytes();
+        let separator = |b: Option<&u8>| matches!(b, Some(b'\\' | b'/'));
+        if !cfg!(windows) {
+            None
+        } else if separator(bytes.first()) && separator(bytes.get(1)) {
+            Some(Self::Unc(OsString::new(), OsString::new()))
+        } else if bytes.get(..4).is_some_and(|b| b.eq_ignore_ascii_case(br"\??\")) {
+            Some(Self::Device)
+        } else {
+            None
+        }
+    }
+
+    /// The refusal for a path with this prefix, which names the prefix.
+    fn refusal(&self) -> &'static str {
+        match self {
+            Self::Unc(..) => "UNC paths are refused unless a root is on the same server and share",
+            Self::Device => "device paths are refused",
+            Self::Verbatim(_) => "verbatim paths are refused unless a root uses the same prefix",
+        }
+    }
+
+    /// Whether `other` is the same server and share, or the same verbatim prefix, the ASCII case aside. This
+    /// decides only whether that host may be contacted; the roots still decide the folder.
+    fn same_as(&self, other: &Self) -> bool {
+        let same = |a: &OsString, b: &OsString| a.eq_ignore_ascii_case(b);
+        match (self, other) {
+            (Self::Unc(server, share), Self::Unc(other_server, other_share)) => same(server, other_server) && same(share, other_share),
+            (Self::Verbatim(rest), Self::Verbatim(other)) => same(rest, other),
+            _ => false,
+        }
+    }
+}
+
+/// Why `path` must not be looked up: it starts with a Windows network, device or non-disk
+/// verbatim prefix and none of `roots` stands on that same server and share or verbatim prefix. A local path gives `None`.
+fn refused_prefix(path: &Path, roots: &[&Path]) -> Option<&'static str> {
+    let prefix = OffDisk::of(path)?;
+    if roots.iter().filter_map(|root| OffDisk::of(root)).any(|root| root.same_as(&prefix)) { None } else { Some(prefix.refusal()) }
+}
+
+/// How many links in a row [`link_leads_to_refused_prefix`] follows before it gives up and refuses.
+const MAX_LINK_HOPS: usize = 40;
+
+/// How many spellings of a path one walk scans in all, so a hostile set of links can't make it
+/// scan without end.
+const MAX_SPELLINGS: usize = 1024;
+
+/// The refusal for a link in `path`, taken from the link's own text.
+///
+/// Folders are inspected from the top down with [`std::fs::symlink_metadata`], which doesn't follow
+/// a link, and a link's target is read with [`std::fs::read_link`]. A link to a network path is
+/// therefore refused before [`std::fs::canonicalize`] could open that host, also when the link is
+/// only an ancestor of the name. A link whose target can't be read, the one after
+/// [`MAX_LINK_HOPS`] in a row, or a walk past [`MAX_SPELLINGS`] spellings, is refused rather than
+/// opened.
+fn link_leads_to_refused_prefix(path: &Path, roots: &[&Path]) -> Option<&'static str> {
+    follow_links(path, roots, &mut std::collections::HashSet::new(), MAX_LINK_HOPS)
+}
+
+/// [`link_leads_to_refused_prefix`] for one spelling of the path. `judged` holds every spelling the
+/// walk has scanned (so none is scanned twice, nor in a cycle forever) and `hops_left` the links
+/// still allowed in this chain, which the other spelling of a target does not use up.
+fn follow_links(path: &Path, roots: &[&Path], judged: &mut std::collections::HashSet<PathBuf>, hops_left: usize) -> Option<&'static str> {
+    // Without a trailing separator, the rest as written: Windows reads `remote\` as a folder to go into, so the probe itself would follow a link
+    // named `remote` to wherever it leads instead of seeing a link.
+    let normalized = without_trailing_separator(path);
+    let path = normalized.as_path();
+    if !judged.insert(path.to_path_buf()) {
+        return None;
+    }
+    if judged.len() > MAX_SPELLINGS {
+        return Some("too many links");
+    }
+    // The whole path decides about its prefix: a shorter ancestor can be the bare prefix (`\\?\unc\`), which names no share.
+    if let Some(why) = refused_prefix(path, roots) {
+        return Some(why);
+    }
+    let mut ancestors: Vec<&Path> = path.ancestors().collect();
+    ancestors.reverse();
+    for prefix in ancestors {
+        if prefix.as_os_str().is_empty() {
+            continue;
+        }
+        let meta = match std::fs::symlink_metadata(prefix) {
+            Ok(meta) => meta,
+            // Nothing is there, so no link is below it.
+            Err(e) if matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory) => return None,
+            // Anything else (no permission to look): a link below it can't be seen, so don't go on.
+            Err(_) => return Some("a folder that can't be looked at"),
+        };
+        if !meta.file_type().is_symlink() {
+            continue;
+        }
+        if hops_left == 0 {
+            return Some("too many links");
+        }
+        let Ok(target) = std::fs::read_link(prefix) else { return Some("a link that leads nowhere") };
+        if cfg!(windows) && is_native_name(&target) {
+            return Some("device paths are refused");
+        }
+        // Win32 lookups trim a trailing period or space, the kernel follows a link target as written: the two could name different things.
+        if cfg!(windows) && has_trimmed_name(&target) {
+            return Some("a link to a name Windows trims");
+        }
+        // Judged as written: joined onto the link's folder, a bare `\\server` would keep that folder's drive.
+        if let Some(why) = refused_prefix(&target, roots) {
+            return Some(why);
+        }
+        let joined = match prefix.parent() {
+            Some(parent) if !target.is_absolute() && !parent.as_os_str().is_empty() => join_as_written(parent, &target),
+            _ => target,
+        };
+        let next = match path.strip_prefix(prefix) {
+            Ok(rest) if !rest.as_os_str().is_empty() => join_as_written(&joined, rest),
+            _ => joined,
+        };
+        if let Some(why) = refused_prefix(&next, roots) {
+            return Some(why);
+        }
+        // Windows takes the `..` of a relative target by name, so `missing\..\remote` is `remote`
+        // though `missing` isn't there: judge that spelling as well as the one written.
+        let by_name = lexical(&next);
+        if by_name != next
+            && let Some(why) = follow_links(&by_name, roots, judged, hops_left - 1)
+        {
+            return Some(why);
+        }
+        return follow_links(&next, roots, judged, hops_left - 1);
+    }
+    None
+}
+
+/// Whether `rest` (the part after `\\?\`) names a volume by its GUID, `Volume{xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}`: a local volume, such as the one
+/// a folder is a mount point of.
+fn is_volume_name(rest: &OsStr) -> bool {
+    let bytes = rest.as_encoded_bytes();
+    bytes.len() == 44
+        && bytes.get(..7).is_some_and(|b| b.eq_ignore_ascii_case(b"Volume{"))
+        && bytes.ends_with(b"}")
+        && bytes[7..43].iter().enumerate().all(|(i, b)| if matches!(i, 8 | 13 | 18 | 23) { *b == b'-' } else { b.is_ascii_hexdigit() })
+}
+
+/// Whether `path` is a name that starts with one separator and no drive (`\Device\Mup\server\share`, `\RPC Control\x`,
+/// `\??\UNC\x`, `\work`), as a link may hold one: `std` sees no prefix in it, yet the system reads it in its own object
+/// namespace or on the link's drive, and may follow it to wherever it names. Joined onto the link's folder it would look local.
+fn is_native_name(path: &Path) -> bool {
+    matches!(path.as_os_str().as_encoded_bytes(), [b'\\', rest @ ..] if rest.first() != Some(&b'\\'))
+}
+
+/// `base` and `rest` as one path, each as it was written: `Path::join` onto a verbatim path (`\\?\C:\work`) drops a `..` of `rest`
+/// together with the name before it, which would hide that name (a link) from the walk.
+fn join_as_written(base: &Path, rest: &Path) -> PathBuf {
+    let mut joined = base.as_os_str().to_owned();
+    if !matches!(joined.as_encoded_bytes().last(), Some(b'\\' | b'/')) {
+        joined.push(std::path::MAIN_SEPARATOR_STR);
+    }
+    joined.push(rest.as_os_str());
+    PathBuf::from(joined)
+}
+
+/// `path` without the separator it ends in, when it has a name to end in: `C:\work\remote\` is `C:\work\remote`, but the
+/// root `C:\` and a path ending in `..` are kept. Every other component is kept as it was written, `..` included.
+fn without_trailing_separator(path: &Path) -> PathBuf {
+    let ends_in_separator = matches!(path.as_os_str().as_encoded_bytes().last(), Some(b'\\' | b'/'));
+    match (ends_in_separator, path.parent(), path.file_name()) {
+        (true, Some(parent), Some(name)) => parent.join(name),
+        _ => path.to_path_buf(),
+    }
+}
+
+/// Whether any plain name in `path` ends in a period or a space, which Win32 path handling trims before it looks the name up.
+fn has_trimmed_name(path: &Path) -> bool {
+    path.components().any(|c| matches!(c, Component::Normal(n) if n.as_encoded_bytes().last().is_some_and(|b| matches!(b, b'.' | b' '))))
+}
+
+/// `path` with its `.` and `..` taken by name, never above its root.
+fn lexical(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -821,6 +1083,291 @@ mod tests {
         assert!(!shown && !files.is_complete(), "outside the roots: {files:?}");
         // The next render on the thread is not affected.
         assert!(read(&footage(&inside)).1.is_complete());
+    }
+
+    /// A path with no Windows prefix, a drive letter, and every path off Windows have no off-disk prefix to refuse.
+    #[test]
+    fn a_local_path_has_no_off_disk_prefix() {
+        for p in ["/home/me/a.aep", "a.aep", r"C:\Projects\a.aep", r"\\?\C:\Projects\a.aep"] {
+            assert!(OffDisk::of(Path::new(p)).is_none(), "{p}");
+            assert_eq!(refused_prefix(Path::new(p), &[]), None, "{p}");
+        }
+    }
+
+    /// A network, device or non-disk verbatim path is refused by its name before the file system is
+    /// asked, so no host the agent names is contacted. The error names the prefix; it is not the
+    /// error that opening the path would give. Nothing here touches the network.
+    #[cfg(windows)]
+    #[test]
+    fn a_network_path_is_refused_before_it_is_opened() {
+        let dir = std::env::temp_dir().join(format!("ec-network-path-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let c = Confinement::new(std::slice::from_ref(&dir), std::slice::from_ref(&dir)).unwrap();
+        let paths = [
+            (r"\\203.0.113.5\s\x.aep", "UNC"),
+            (r"\\?\UNC\203.0.113.5\s\x.aep", "UNC"),
+            ("//203.0.113.5/s/x.aep", "UNC"),
+            (r"\\host@SSL\share\x.aep", "UNC"),
+            (r"\\host@SSL@443\share\x.aep", "UNC"),
+            (r"\\203.0.113.5", "UNC"),
+            (r"\\\203.0.113.5\s\x.aep", "UNC"),
+            ("//203.0.113.5", "UNC"),
+            (r"\\.\PhysicalDrive0", "device path"),
+            (r"\\?\GLOBALROOT\Device\Mup\203.0.113.5\s\x.aep", "verbatim path"),
+            (r"\??\UNC\203.0.113.5\s\x.aep", "device path"),
+        ];
+        for (p, kind) in paths {
+            for access in [Access::Read, Access::Write] {
+                let e = c.check(p, access).unwrap_err().to_string();
+                assert!(e.contains(kind), "{p}: {e}");
+                assert!(!e.contains("can't be resolved") && !e.to_ascii_lowercase().contains("os error"), "{p}: {e}");
+            }
+        }
+        let local = dir.join("a.aep");
+        assert!(c.check(&local.to_string_lossy(), Access::Write).is_ok(), "a local path inside is still allowed");
+        let verbatim = format!(r"\\?\{}", local.display());
+        assert!(c.check(&verbatim, Access::Write).is_ok(), "a verbatim disk path is a local path: {verbatim}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A root on a share lets that server and share through (either spelling, any ASCII case) and nothing else.
+    #[cfg(windows)]
+    #[test]
+    fn a_root_on_a_share_lets_only_that_share_through() {
+        assert!(OffDisk::of(Path::new(r"\\?\Volume{00000000-0000-0000-0000-000000000000}\x")).is_none(), "a volume by GUID is local");
+        assert!(OffDisk::of(Path::new(r"\\?\Volume{remote}\x")).is_some(), "a name that is not a GUID is not a volume");
+        let share = [Path::new(r"\\?\UNC\FileServer\Projects\work")];
+        assert_eq!(refused_prefix(Path::new(r"\\fileserver\projects\a.aep"), &share), None);
+        assert_eq!(refused_prefix(Path::new(r"\\?\UNC\FILESERVER\PROJECTS\a.aep"), &share), None);
+        assert_eq!(refused_prefix(Path::new(r"\\?\unc\FileServer\Projects\a.aep"), &share), None, "the marker in lower case");
+        assert_eq!(refused_prefix(Path::new(r"\\?\Unc\FILESERVER\projects\a.aep"), &share), None, "the marker in mixed case");
+        assert!(refused_prefix(Path::new(r"\\?\unc\FileServer\secret\a.aep"), &share).is_some(), "another share, marker in lower case");
+        assert!(refused_prefix(Path::new(r"\\?\unc\203.0.113.5\Projects\a.aep"), &share).is_some(), "another server, marker in lower case");
+        assert!(refused_prefix(Path::new(r"\\fileserver\secret\a.aep"), &share).is_some(), "another share");
+        assert!(refused_prefix(Path::new(r"\\203.0.113.5\Projects\a.aep"), &share).is_some(), "another server");
+        let work = [Path::new(r"\\?\UNC\work\Projects\w")];
+        assert!(refused_prefix(Path::new("\\\\wor\u{212a}\\Projects\\a.aep"), &work).is_some(), "U+212A is not k");
+        assert!(refused_prefix(Path::new(r"\\.\PhysicalDrive0"), &share).is_some(), "a share is not a device");
+        let device = [Path::new(r"\\.\PhysicalDrive0")];
+        assert!(refused_prefix(Path::new(r"\\.\PhysicalDrive0"), &device).is_some(), "a device is refused even when a root names it");
+    }
+
+    /// A link whose text is a bare `\\server` (no share) is refused as written: joined onto the link's folder
+    /// it would read as a local path and pass.
+    #[cfg(windows)]
+    #[test]
+    fn a_link_to_a_bare_server_name_is_refused() {
+        let base = std::env::temp_dir().join(format!("ec-network-bare-{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let c = Confinement::new(std::slice::from_ref(&base), &[]).unwrap();
+        let link = base.join("bare");
+        if std::os::windows::fs::symlink_dir(r"\\203.0.113.5", &link).is_err() {
+            eprintln!("skipped: symbolic links can't be made here");
+            let _ = std::fs::remove_dir_all(base);
+            return;
+        }
+        let e = c.check(&link.join("x.aep").to_string_lossy(), Access::Read).unwrap_err().to_string();
+        assert!(e.contains("UNC"), "{e}");
+        assert!(!e.contains("cannot resolve") && !e.to_ascii_lowercase().contains("os error"), "{e}");
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// Nine links that each go through `sub\..\` to the next are nine links, not a reason to give up: both
+    /// spellings of each target are judged once.
+    #[cfg(windows)]
+    #[test]
+    fn a_chain_of_links_with_parent_names_is_followed_in_few_steps() {
+        let base = std::env::temp_dir().join(format!("ec-network-chain-{}", std::process::id()));
+        let folder = base.clone();
+        std::fs::create_dir_all(folder.join("sub")).unwrap();
+        let c = Confinement::new(std::slice::from_ref(&base), &[]).unwrap();
+        for n in 1..=9 {
+            let target = if n == 9 { "sub".to_string() } else { format!(r"sub\..\l{}", n + 1) };
+            if std::os::windows::fs::symlink_dir(&target, folder.join(format!("l{n}"))).is_err() {
+                eprintln!("skipped: symbolic links can't be made here");
+                let _ = std::fs::remove_dir_all(base);
+                return;
+            }
+        }
+        assert!(c.check(&folder.join("l1").join("x.aep").to_string_lossy(), Access::Read).is_ok());
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// A name that starts with one separator and no drive is a native or rooted name, whichever object directory it
+    /// names (`\Device`, `\RPC Control`, `\BaseNamedObjects`, `\??`): a link to it is refused, and it is the same
+    /// with the rest of the path after it.
+    #[test]
+    fn rooted_names_without_a_drive_are_native_names() {
+        for p in [r"\Device", r"\Device\Mup\203.0.113.5\s", r"\RPC Control\remote", r"\BaseNamedObjects\x", r"\??\UNC\x\y", r"\GLOBAL??", r"\work", r"\"] {
+            assert!(is_native_name(Path::new(p)), "{p}");
+        }
+        for p in [r"Device", r"work\x", r"C:\x", r"C:\Device", r"\\server\share", r"\\?\C:\x", ""] {
+            assert!(!is_native_name(Path::new(p)), "{p}");
+        }
+    }
+
+    /// A link whose text is a native NT name (`\Device\Mup\server\share`) isn't a local path just because
+    /// `std` sees no prefix in it: it is refused as written, before it is joined onto the link's folder.
+    #[cfg(windows)]
+    #[test]
+    fn a_link_to_a_native_device_name_is_refused() {
+        let base = std::env::temp_dir().join(format!("ec-network-native-{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let c = Confinement::new(std::slice::from_ref(&base), &[]).unwrap();
+        let link = base.join("native");
+        if std::os::windows::fs::symlink_dir(r"\Device\Mup\203.0.113.5\s", &link).is_err()
+            || std::fs::read_link(&link).ok().as_deref() != Some(std::path::Path::new(r"\Device\Mup\203.0.113.5\s"))
+        {
+            eprintln!("skipped: this system can't make that link, or stores its text differently");
+            let _ = std::fs::remove_dir_all(base);
+            return;
+        }
+        let e = c.check(&link.join("x.aep").to_string_lossy(), Access::Read).unwrap_err().to_string();
+        assert!(e.contains("device path"), "{e}");
+        assert!(!e.contains("cannot resolve") && !e.to_ascii_lowercase().contains("os error"), "{e}");
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// A link whose target ends in a period or a space (`remote.`) is refused as written: Win32 lookups trim
+    /// that ending but the kernel follows the text as it is, so the two could name different things.
+    #[cfg(windows)]
+    #[test]
+    fn a_link_to_a_name_windows_trims_is_refused() {
+        let base = std::env::temp_dir().join(format!("ec-network-trimmed-{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let c = Confinement::new(std::slice::from_ref(&base), &[]).unwrap();
+        let link = base.join("trimmed");
+        if std::os::windows::fs::symlink_dir(r"remote.", &link).is_err() {
+            eprintln!("skipped: symbolic links can't be made here");
+            let _ = std::fs::remove_dir_all(base);
+            return;
+        }
+        let e = c.check(&link.join("x.aep").to_string_lossy(), Access::Read).unwrap_err().to_string();
+        assert!(e.contains("name Windows trims"), "{e}");
+        assert!(!e.contains("cannot resolve") && !e.to_ascii_lowercase().contains("os error"), "{e}");
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// Two paths are joined with every component as written, `..` included, even onto a verbatim path.
+    #[test]
+    fn paths_are_joined_as_written() {
+        assert_eq!(join_as_written(Path::new("/a/b"), Path::new("c/../d")), Path::new("/a/b/c/../d"));
+        assert_eq!(join_as_written(Path::new("/a/b/"), Path::new("c")), Path::new("/a/b/c"));
+        #[cfg(windows)]
+        assert_eq!(join_as_written(Path::new(r"\\?\C:\work"), Path::new(r"remote\..\a.docx")).as_os_str(), r"\\?\C:\work\remote\..\a.docx");
+    }
+
+    /// A trailing separator is dropped from the last name only: the root, a `..` and the other names stay as written.
+    #[test]
+    fn a_trailing_separator_is_dropped_from_the_last_name_only() {
+        assert_eq!(without_trailing_separator(Path::new("a/b/")), Path::new("a/b"));
+        assert_eq!(without_trailing_separator(Path::new("a/b//")), Path::new("a/b"));
+        assert_eq!(without_trailing_separator(Path::new("a/b")), Path::new("a/b"));
+        assert_eq!(without_trailing_separator(Path::new("a/b/../c/")), Path::new("a/b/../c"));
+        assert_eq!(without_trailing_separator(Path::new("a/b/../")), Path::new("a/b/../"));
+        #[cfg(windows)]
+        {
+            assert_eq!(without_trailing_separator(Path::new(r"C:\")), Path::new(r"C:\"));
+            assert_eq!(without_trailing_separator(Path::new(r"\\?\C:\work\remote\..\a")), Path::new(r"\\?\C:\work\remote\..\a"));
+            assert_eq!(without_trailing_separator(Path::new(r"\\?\C:\work\remote\")), Path::new(r"\\?\C:\work\remote"));
+        }
+    }
+
+    /// A path that names a link with a trailing separator (`remote\`) is judged as the link: Windows reads that as a
+    /// folder to go into, and would follow the link to a network path to find out what it is.
+    #[cfg(windows)]
+    #[test]
+    fn a_link_with_a_trailing_separator_is_judged_as_the_link() {
+        let base = std::env::temp_dir().join(format!("ec-network-slashed-{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let c = Confinement::new(std::slice::from_ref(&base), &[]).unwrap();
+        let link = base.join("slashed");
+        if std::os::windows::fs::symlink_dir(r"\\203.0.113.5\s", &link).is_err() {
+            eprintln!("skipped: symbolic links can't be made here");
+            let _ = std::fs::remove_dir_all(base);
+            return;
+        }
+        let e = c.check(&format!(r"{}\", link.display()), Access::Read).unwrap_err().to_string();
+        assert!(e.contains("UNC"), "{e}");
+        assert!(!e.contains("cannot resolve") && !e.to_ascii_lowercase().contains("os error"), "{e}");
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// A path with a name that ends in a space (`remote \x`) is refused as given: Windows keeps that space in the
+    /// middle of a path but trims it when it looks the folder up by itself, so the two could name different things.
+    #[cfg(windows)]
+    #[test]
+    fn a_path_with_a_name_windows_trims_is_refused() {
+        let base = std::env::temp_dir().join(format!("ec-network-trimmed-path-{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let c = Confinement::new(std::slice::from_ref(&base), &[]).unwrap();
+        let e = c.check(&base.join("remote ").join("x.aep").to_string_lossy(), Access::Read).unwrap_err().to_string();
+        assert!(e.contains("name Windows trims"), "{e}");
+        assert!(!e.contains("cannot resolve") && !e.to_ascii_lowercase().contains("os error"), "{e}");
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// A link whose relative target goes through a missing folder and back (`missing\..\remote`) is
+    /// judged with the `..` taken by name too, as Windows takes it: `remote` is a link to a network path.
+    #[cfg(windows)]
+    #[test]
+    fn a_relative_link_through_a_missing_folder_still_reaches_the_network_check() {
+        let base = std::env::temp_dir().join(format!("ec-network-dotdot-{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let c = Confinement::new(std::slice::from_ref(&base), &[]).unwrap();
+        let (remote, alias) = (base.join("remote"), base.join("alias"));
+        if std::os::windows::fs::symlink_dir(r"\\203.0.113.5\s", &remote).is_err() {
+            eprintln!("skipped: symbolic links can't be made here");
+            let _ = std::fs::remove_dir_all(base);
+            return;
+        }
+        assert!(std::os::windows::fs::symlink_dir(r"missing\..\remote", &alias).is_ok());
+        let e = c.check(&alias.join("x.aep").to_string_lossy(), Access::Read).unwrap_err().to_string();
+        assert!(e.contains("UNC"), "{e}");
+        assert!(!e.contains("cannot resolve") && !e.to_ascii_lowercase().contains("os error"), "{e}");
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// A numbered frame that is a link to a network path is refused from the link's text, before
+    /// the scan of a render folder canonicalizes it and so opens that host.
+    #[cfg(windows)]
+    #[test]
+    fn a_frame_link_to_a_network_path_is_refused_before_it_is_opened() {
+        let dir = std::env::temp_dir().join(format!("ec-render-link-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let c = Confinement::new(&[], std::slice::from_ref(&dir)).unwrap();
+        if std::os::windows::fs::symlink_file(r"\\203.0.113.5\s\victim.png", dir.join("frames_00001.png")).is_err() {
+            eprintln!("skipped: symbolic links can't be made here");
+            let _ = std::fs::remove_dir_all(dir);
+            return;
+        }
+        let e = c.check_no_outward_links(&dir, "frames_[#####].png").unwrap_err().to_string();
+        assert!(e.contains("UNC"), "{e}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A link whose text names a network path, or that has one as a folder on the way, is refused
+    /// from that text before the link is followed: following it would contact the host.
+    #[cfg(windows)]
+    #[test]
+    fn a_link_to_a_network_path_is_refused_before_it_is_followed() {
+        let dir = std::env::temp_dir().join(format!("ec-network-link-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let c = Confinement::new(std::slice::from_ref(&dir), &[]).unwrap();
+        let file_link = dir.join("leak.aep");
+        if std::os::windows::fs::symlink_file(r"\\203.0.113.5\s\x.aep", &file_link).is_err() {
+            eprintln!("skipped: symbolic links can't be made here");
+            let _ = std::fs::remove_dir_all(dir);
+            return;
+        }
+        let folder_link = dir.join("folder-leak");
+        assert!(std::os::windows::fs::symlink_dir(r"\\203.0.113.5\s", &folder_link).is_ok());
+        for path in [file_link, folder_link.join("x.aep")] {
+            let e = c.check(&path.to_string_lossy(), Access::Read).unwrap_err().to_string();
+            assert!(e.contains("UNC"), "{}: {e}", path.display());
+            assert!(!e.contains("can't be resolved") && !e.to_ascii_lowercase().contains("os error"), "{}: {e}", path.display());
+        }
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
