@@ -249,6 +249,18 @@ fn duplicate(s: &mut Session, p: &Value) -> Result<Value> {
                     proj.next_id = next + 1;
                 }
                 for l in &mut comp.layers {
+                    // Layer controls and animated layer pickers refer to the copied layers too.
+                    l.props.walk_mut(&mut |property| {
+                        let remap = |value: &mut effectcraft_keyframe::Value| {
+                            if let effectcraft_keyframe::Value::Layer(Some(id)) = value {
+                                *value = effectcraft_keyframe::Value::Layer(map.get(&effectcraft_project::LayerId(*id)).map(|id| id.0));
+                            }
+                        };
+                        remap(&mut property.value);
+                        for key in &mut property.keys {
+                            remap(&mut key.value);
+                        }
+                    });
                     l.parent = l.parent.and_then(|p| map.get(&p).copied());
                     if let Some(m) = &mut l.track_matte {
                         m.layer = map.get(&m.layer).copied().unwrap_or(m.layer);
