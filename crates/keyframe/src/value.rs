@@ -71,7 +71,7 @@ impl ShapePath {
                     }
                 }
             } else if f.segment >= i {
-                f.segment += 1;
+                f.segment = f.segment.saturating_add(1);
             }
         }
     }
