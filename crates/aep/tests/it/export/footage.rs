@@ -336,3 +336,54 @@ fn hostile_footage_never_panics() {
     assert_eq!(effectcraft_aep::write(&file).expect("write"), r.bytes);
     let _ = reimport(&r.bytes);
 }
+
+/// One layer of a Photoshop file is written as After Effects stores it (lab psd-layers): the index
+/// in `opti` (14) and `sspc` (192), the name in `Pin` (the `Utf8` after `sspc`, which After Effects
+/// finds the layer by: read-back psd-layer v4) and in `opti` (344), `sspc` 199 set for an item of
+/// the document's size (the bounds, the layer id and the byte count it also stores may be zero:
+/// read-back psd_layers_zeroed).
+#[test]
+fn one_layer_of_a_photoshop_file_is_written() {
+    let mut p = Project::default();
+    let c = add_comp(&mut p, "C", 200, 100, FrameRate::new(25, 1), 2.0, None);
+    let layer = |index: u32, name: &str, layer_size: bool, w: u32, h: u32| Footage {
+        layer: Some(effectcraft_project::SourceLayer { index, name: name.into(), layer_size, ..Default::default() }),
+        ..still(r"C:\media\layers.psd", w, h)
+    };
+    add_footage(&mut p, c, "Blue box/layers.psd", layer(1, "Blue box", true, 60, 50));
+    add_footage(&mut p, c, "Green bar/layers.psd", layer(2, "Green bar", false, 200, 100));
+    let r = export_all(&p);
+    assert_eq!(r.report.count(LossCategory::FootageItems), 0, "{:?}", r.report.losses);
+    assert_eq!((r.report.exported.footage, r.report.exported.footage_layers), (2, 2));
+    let file = parse(&r.bytes).expect("parse");
+    assert_eq!(effectcraft_aep::write(&file).expect("write"), r.bytes);
+    let view = effectcraft_aep::Project::new(&file).expect("project");
+    let mut seen = Vec::new();
+    for item in view.all_items() {
+        let Some(f) = item.footage() else { continue };
+        let l = f.psd_layer.expect("a Photoshop layer");
+        let pin = item.chunk().child_list(b"Pin ").expect("Pin");
+        let sspc = pin.child(b"sspc").and_then(|c| c.bytes()).expect("sspc");
+        let index = i32::from_be_bytes(sspc[192..196].try_into().unwrap());
+        // The name After Effects finds the layer by: the `Utf8` after `sspc`.
+        let pin_name = pin.child(b"Utf8").and_then(|c| c.bytes()).map(|b| String::from_utf8_lossy(b).into_owned());
+        assert_eq!(pin_name.as_deref(), Some(l.name.as_str()));
+        seen.push((l.index, l.name, (f.width, f.height), index, sspc[199]));
+    }
+    seen.sort();
+    assert_eq!(seen, [(1, "Blue box".to_string(), (60, 50), 1, 0), (2, "Green bar".to_string(), (200, 100), 2, 1)]);
+}
+
+/// A smart object's embedded file or a placed layer is still reported.
+#[test]
+fn a_smart_object_layer_is_reported() {
+    let mut p = Project::default();
+    let c = add_comp(&mut p, "C", 200, 100, FrameRate::new(25, 1), 2.0, None);
+    let f = Footage {
+        layer: Some(effectcraft_project::SourceLayer { index: 3, name: "SO".into(), layer_size: true, embedded: Some("id".into()), placed: false }),
+        ..still(r"C:\media\layers.psd", 60, 50)
+    };
+    add_footage(&mut p, c, "SO/layers.psd", f);
+    let r = export_all(&p);
+    assert_eq!(r.report.count(LossCategory::FootageItems), 1, "{:?}", r.report.losses);
+}
