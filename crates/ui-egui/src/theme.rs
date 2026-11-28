@@ -647,6 +647,7 @@ pub fn apply_visuals(ctx: &egui::Context, t: &Tokens) {
     // egui keeps one style per light/dark theme and picks it by its theme preference (see
     // [`theme_preference`]); both get ours, so whichever it picks, egui's defaults never show.
     ctx.all_styles_mut(|s| {
+        s.right_to_left = crate::i18n::is_rtl();
         s.visuals = v.clone();
         s.spacing.item_spacing = egui::vec2(6.0, 4.0);
         s.spacing.button_padding = egui::vec2(8.0, 3.0);

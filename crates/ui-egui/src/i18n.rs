@@ -14,8 +14,31 @@ use effectcraft_engine::menus::{MenuEntry, MenuNode};
 pub(crate) use ui::catalog_characters;
 pub(crate) use ui::{set_current, tr, tr_args};
 
+/// An optional Arabic menu catalog loaded dynamically on native or registered by a consumer.
+static ARABIC_CATALOG: std::sync::OnceLock<&'static [(&'static str, &'static str, &'static str)]> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+std::thread_local! {
+    static TEST_ARABIC_CATALOG: std::cell::Cell<Option<&'static [(&'static str, &'static str, &'static str)]>> = const { std::cell::Cell::new(None) };
+}
+
+/// Registers an Arabic menu catalog. Returns whether registration succeeded.
+#[allow(dead_code)]
+pub(crate) fn set_arabic_catalog(catalog: &'static [(&'static str, &'static str, &'static str)]) -> bool {
+    ARABIC_CATALOG.set(catalog).is_ok()
+}
+
+/// Whether an Arabic catalog has been loaded into the runtime.
+pub(crate) fn has_arabic_catalog() -> bool {
+    #[cfg(test)]
+    if TEST_ARABIC_CATALOG.with(|c| c.get().is_some()) {
+        return true;
+    }
+    ARABIC_CATALOG.get().is_some()
+}
+
 /// Every language with a catalog, in the order Settings ▸ General ▸ Language lists them.
-const CATALOG_CODES: [&str; 13] = ["cs", "de", "es", "fr", "pl", "pt-br", "sv", "ru", "uk", "ka", "ja", "zh-hans", "zh-hant"];
+const CATALOG_CODES: [&str; 14] = ["cs", "de", "es", "fr", "pl", "pt-br", "sv", "ru", "uk", "ka", "ar", "ja", "zh-hans", "zh-hant"];
 
 /// The active interface language: the stored preference when it names a catalog, otherwise `en`
 /// (English is the source of every label and needs no lookup).
@@ -26,9 +49,20 @@ pub(crate) fn language(app: &EffectcraftApp) -> &'static str {
     }
 }
 
+/// Resolve the interface language for `stored` preference on a specific platform (`is_web`).
+pub(crate) fn resolve_language(stored: &str, is_web: bool) -> &'static str {
+    if stored == "ar" && (is_web || !has_arabic_catalog()) {
+        return "en";
+    }
+    if stored == "system" {
+        return "en";
+    }
+    CATALOG_CODES.iter().copied().find(|c| *c == stored).unwrap_or("en")
+}
+
 /// `stored` as the language to show: a catalog's code, otherwise `en`.
 fn code(stored: &str) -> &'static str {
-    CATALOG_CODES.iter().copied().find(|c| *c == stored).unwrap_or("en")
+    resolve_language(stored, cfg!(target_arch = "wasm32"))
 }
 
 /// The UI is in Japanese: the fast path for the menu builders.
@@ -79,6 +113,21 @@ pub(crate) fn georgian(app: &EffectcraftApp) -> bool {
 /// The UI is in Swedish.
 pub(crate) fn swedish(app: &EffectcraftApp) -> bool {
     language(app) == "sv"
+}
+
+/// The UI is in Arabic.
+pub(crate) fn arabic(app: &EffectcraftApp) -> bool {
+    language(app) == "ar"
+}
+
+/// Whether `language` reads right-to-left.
+pub(crate) fn is_rtl_language(language: &str) -> bool {
+    matches!(language, "ar" | "he")
+}
+
+/// Whether the current interface language reads right-to-left.
+pub(crate) fn is_rtl() -> bool {
+    is_rtl_language(ui::current())
 }
 
 /// Settings ▸ General ▸ Language ▸ Match System: the operating system's interface language
@@ -135,7 +184,7 @@ fn first_supported(requested: Option<&str>, browser: &[String], drawable: impl F
 /// rather than draw boxes; `?lang=` and a language chosen in Settings still select them.
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 fn web_draws(language: &str) -> bool {
-    !matches!(language, "ja" | "zh-hans" | "zh-hant" | "ka")
+    !matches!(language, "ja" | "zh-hans" | "zh-hant" | "ka" | "ar")
 }
 
 /// The language EffectCraft shows for a BCP 47 locale (`ja-JP` → `ja`, `zh-Hans-CN` → `zh-hans`,
@@ -214,6 +263,13 @@ pub(crate) fn label<'a>(app: &EffectcraftApp, command: &str, source: &'a str) ->
 
 /// The menu catalog for `language`; `None` for English.
 fn menu_catalog(language: &str) -> Option<&'static [(&'static str, &'static str, &'static str)]> {
+    if language == "ar" {
+        #[cfg(test)]
+        if let Some(cat) = TEST_ARABIC_CATALOG.with(|c| c.get()) {
+            return Some(cat);
+        }
+        return ARABIC_CATALOG.get().copied();
+    }
     Some(match language {
         "ja" => JAPANESE,
         "zh-hans" => SIMPLIFIED_CHINESE,
@@ -9021,7 +9077,9 @@ mod tests {
             keys(&parse(TREE, mac).unwrap(), &mut actual);
         }
         for code in CATALOG_CODES {
-            let catalog = menu_catalog(code).unwrap();
+            let Some(catalog) = menu_catalog(code) else {
+                continue;
+            };
             let mut unique = BTreeSet::new();
             for (command, en, translated) in catalog {
                 let key = (command.to_string(), en.to_string());
@@ -9327,6 +9385,9 @@ mod tests {
         let closed_path = menu_entry("path.toggleClosed", "Closed");
         let undo = menu_entry("edit.undo", "Undo");
         for code in CATALOG_CODES {
+            if menu_catalog(code).is_none() {
+                continue;
+            }
             app.session.execute("prefs.set", json!({"key":"general.language", "value":code})).unwrap();
             let drawn = entry(&app, &new_comp, new_comp.label.clone());
             assert_eq!(drawn, label(&app, "comp.new", "New Composition..."), "{code}");
@@ -9357,5 +9418,50 @@ mod tests {
         // No renderer here: drop the frame's texture uploads (egui asserts on unhandled ones in debug).
         out.textures_delta.clear();
         assert!(app.auto.find("settings.general.language").is_some());
+    }
+
+    #[test]
+    fn web_arabic_preference_falls_back_to_english() {
+        assert_eq!(resolve_language("ar", true), "en");
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        app.session.execute("prefs.set", json!({"key": "general.language", "value": "ar"})).unwrap();
+        // On web, stored "ar" preference must fall back to "en".
+        assert_eq!(resolve_language(&app.session.prefs.general.language, true), "en");
+    }
+
+    #[test]
+    fn native_arabic_availability_is_gated_on_catalog_and_verifies_real_translations() {
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        assert!(!arabic(&app));
+        assert!(is_rtl_language("ar"));
+        assert!(is_rtl_language("he"));
+        assert!(!is_rtl_language("en"));
+
+        // When the catalog is not loaded, native resolution falls back to "en" and stays LTR.
+        assert_eq!(resolve_language("ar", false), "en");
+
+        // Now load an Arabic catalog on native (scoped to this test thread so parallel tests remain isolated).
+        static AR_TEST_CATALOG: &[(&str, &str, &str)] = &[("comp.new", "New Composition...", "تركيب جديد..."), ("file.new", "New", "جديد")];
+        struct Reset(Option<&'static [(&'static str, &'static str, &'static str)]>);
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                TEST_ARABIC_CATALOG.with(|c| c.set(self.0));
+            }
+        }
+        let prev = TEST_ARABIC_CATALOG.with(|c| c.replace(Some(AR_TEST_CATALOG)));
+        let _reset = Reset(prev);
+        assert!(has_arabic_catalog());
+        assert_eq!(resolve_language("ar", false), "ar");
+
+        // With catalog loaded on native, selecting Arabic activates "ar", RTL, and real translations.
+        set_current("ar");
+        app.session.execute("prefs.set", json!({"key": "general.language", "value": "ar"})).unwrap();
+        assert!(arabic(&app));
+        assert!(is_rtl());
+        assert_eq!(language(&app), "ar");
+        assert_eq!(label(&app, "comp.new", "New Composition..."), "تركيب جديد...");
+
+        set_current("en");
+        assert!(!is_rtl());
     }
 }
