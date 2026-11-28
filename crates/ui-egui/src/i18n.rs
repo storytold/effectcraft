@@ -201,7 +201,7 @@ const REVEAL_FINDER: &[(&str, &str, &str)] = &[
     ("pt-br", "Mostrar no Explorador", "Mostrar no gerenciador de arquivos"),
     ("fr", "Afficher dans l’Explorateur", "Afficher dans le gestionnaire de fichiers"),
     ("ru", "Показать в Проводнике", "Показать в файловом менеджере"),
-    ("he", "הצג בסייר הקבצים", "הצג במנהל הקבצים"),
+    ("he", "הצגה בסייר הקבצים", "הצגה במנהל הקבצים"),
 ];
 
 pub(crate) fn label<'a>(app: &EffectcraftApp, command: &str, source: &'a str) -> &'a str {

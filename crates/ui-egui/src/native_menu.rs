@@ -758,7 +758,7 @@ mod tests {
         }
         let mut translated = vec![];
         labels(&build(&app).menus, &mut translated);
-        assert_eq!(translated, ["שירותים", "הסתר את EffectCraft", "הסתר אחרים", "הצג הכול"]);
+        assert_eq!(translated, ["שירותים", "הסתרת EffectCraft", "הסתרת אחרים", "הצגת הכול"]);
     }
 
     #[test]
