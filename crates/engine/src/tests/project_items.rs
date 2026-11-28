@@ -64,7 +64,7 @@ fn new_folder_with_items_moves_them_into_it_in_one_undo_step() {
     assert_eq!(s.state.project_selection, [f], "the new folder is selected");
     assert_eq!(s.history.undo.len(), undo + 1, "one undo step");
     s.execute("edit.undo", json!({})).unwrap();
-    assert_eq!(s.project, before, "one undo takes back the folder and the move");
+    assert_eq!(*s.project, before, "one undo takes back the folder and the move");
 
     // A folder dropped on New Folder goes into the new folder; a new folder made inside the
     // folder that is moving into it is refused, and nothing changes.
@@ -83,7 +83,7 @@ fn new_folder_with_items_moves_them_into_it_in_one_undo_step() {
     assert!(s.execute("project.newFolder", json!({"parent": bin.0, "items": [bin.0]})).is_err());
     assert!(s.execute("project.newFolder", json!({"items": [999_999]})).is_err(), "an unknown item");
     assert!(s.execute("project.newFolder", json!({"items": a.0})).is_err(), "not an array");
-    assert_eq!(s.project, before);
+    assert_eq!(*s.project, before);
 }
 
 #[test]
@@ -129,7 +129,8 @@ fn new_layers_take_their_items_label() {
     s.execute("comp.new", json!({"name": "Main", "width": 64, "height": 64, "duration": 1})).unwrap();
     s.execute("file.importPlaceholder", json!({"name": "Clip"})).unwrap();
     let clip = s.state.project_selection[0].0;
-    let model = std::sync::Arc::make_mut(&mut s.project)
+    let model = s
+        .project_mut()
         .add_item("Model", Label::Aqua, None, ItemKind::Footage(Footage { kind: FootageKind::Model, path: "missing.glb".into(), ..Default::default() }))
         .0;
     let solid = s.execute("layer.newSolid", json!({"name": "Solid", "color": "#406080"})).unwrap()["layer"].as_u64().unwrap();
@@ -199,7 +200,7 @@ fn delete_removes_selected_groups_not_their_layer() {
     assert_eq!(s.active_comp().unwrap().layers.len(), 2, "its layer stays");
     assert!(s.state.selected_props.is_empty());
     s.execute("edit.undo", json!({})).unwrap();
-    assert_eq!(s.project, before);
+    assert_eq!(*s.project, before);
 
     s.execute("prop.select", json!({"layer": sh, "prop": mask, "selectKeys": false})).unwrap();
     s.execute("prop.select", json!({"layer": sh, "prop": shape, "selectKeys": false, "add": true})).unwrap();

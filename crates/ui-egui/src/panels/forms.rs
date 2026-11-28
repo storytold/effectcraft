@@ -1292,7 +1292,7 @@ mod tests {
         for command in ["file.interpretFootage", "file.interpretProxy"] {
             let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
             let footage = Footage { path: "/m/scan.dpx".into(), kind: FootageKind::Still, width: 4, height: 4, has_video: true, ..Default::default() };
-            let project = std::sync::Arc::make_mut(&mut app.session.project);
+            let project = app.session.project_mut();
             let item = project.add_item("scan.dpx", Default::default(), None, ItemKind::Footage(footage.clone()));
             project.item_mut(item).unwrap().proxy = Some(Box::new(Proxy { footage, enabled: true }));
             app.session.state.project_selection = vec![item];
@@ -1350,7 +1350,7 @@ mod tests {
             (50.0, 2, AlphaMode::Ignore, Some(ColorSpace::DisplayP3), false),
         ];
         let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
-        let project = std::sync::Arc::make_mut(&mut app.session.project);
+        let project = app.session.project_mut();
         let ids = looks.map(|(fps, loops, alpha, profile, invert)| {
             if !proxy {
                 return project.add_item("clip.mov", Default::default(), None, ItemKind::Footage(clip(fps, loops, alpha, profile, invert)));
@@ -1423,7 +1423,7 @@ mod tests {
             let solid = app.session.project.items.values().find(|i| matches!(i.kind, effectcraft_engine::project::ItemKind::Solid(_))).unwrap().id;
             // Footage without a proxy.
             let kind = app.session.project.item(a).unwrap().kind.clone();
-            let plain = std::sync::Arc::make_mut(&mut app.session.project).add_item("plain.mov", Default::default(), None, kind);
+            let plain = app.session.project_mut().add_item("plain.mov", Default::default(), None, kind);
             app.session.state.project_selection = vec![a];
             let mut invalid = vec![json!({"item": 999}), json!({"items": [999]}), json!({"item": comp.0}), json!({"item": solid.0})];
             if proxy {
@@ -1441,7 +1441,7 @@ mod tests {
                     assert_eq!(r, Ok(json!({"items": []})), "{command}: {params}");
                 }
             }
-            assert_eq!(*app.session.project, *before);
+            assert_eq!(*app.session.project, before);
         }
     }
 
@@ -1453,7 +1453,7 @@ mod tests {
         let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
         let sequence: Vec<String> = ["/m/a_001.png", "/m/a_002.png", "/m/a_005.png"].map(String::from).to_vec();
         let footage = Footage { path: sequence[0].clone(), kind: FootageKind::Sequence, sequence, width: 4, height: 4, has_video: true, ..Default::default() };
-        let project = std::sync::Arc::make_mut(&mut app.session.project);
+        let project = app.session.project_mut();
         let item = project.add_item("a_[001-005].png", Default::default(), None, ItemKind::Footage(footage));
         app.session.state.project_selection = vec![item];
         assert!(open_form(&mut app, "file.interpretFootage", &json!({})));
@@ -1471,7 +1471,7 @@ mod tests {
         let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
         let still =
             |path: &str| ItemKind::Footage(Footage { path: path.into(), kind: FootageKind::Still, width: 4, height: 4, has_video: true, ..Default::default() });
-        let project = std::sync::Arc::make_mut(&mut app.session.project);
+        let project = app.session.project_mut();
         let dpx = project.add_item("scan.dpx", Default::default(), None, still("/m/scan.dpx"));
         let png = project.add_item("still.png", Default::default(), None, still("/m/still.png"));
         let keys = |app: &EffectcraftApp| app.dialog_state.form.fields.iter().map(|f| f.key.clone()).collect::<Vec<_>>();

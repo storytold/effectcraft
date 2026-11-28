@@ -1421,6 +1421,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "craft-command"
+version = "0.1.0"
+source = "git+https://github.com/storytold/craft-libs?rev=0800de6e8a3c1947f52650cf81906d54b0b89061#0800de6e8a3c1947f52650cf81906d54b0b89061"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "craft-doc"
 version = "0.1.0"
 source = "git+https://github.com/storytold/craft-libs?rev=8fa4db64a9bb943520259ea95331a303ba788f21#8fa4db64a9bb943520259ea95331a303ba788f21"
@@ -1513,6 +1522,11 @@ dependencies = [
 [[package]]
 name = "craft-fonts-build"
 version = "0.1.0"
+source = "git+https://github.com/storytold/craft-libs?rev=0800de6e8a3c1947f52650cf81906d54b0b89061#0800de6e8a3c1947f52650cf81906d54b0b89061"
+
+[[package]]
+name = "craft-fonts-build"
+version = "0.1.0"
 source = "git+https://github.com/storytold/craft-libs?rev=8fa4db64a9bb943520259ea95331a303ba788f21#8fa4db64a9bb943520259ea95331a303ba788f21"
 
 [[package]]
@@ -1549,11 +1563,34 @@ version = "0.1.0"
 source = "git+https://github.com/storytold/craft-libs?rev=8fa4db64a9bb943520259ea95331a303ba788f21#8fa4db64a9bb943520259ea95331a303ba788f21"
 dependencies = [
  "bitflags 2.13.2",
- "craft-i18n",
+ "craft-i18n 0.1.0 (git+https://github.com/storytold/craft-libs?rev=8fa4db64a9bb943520259ea95331a303ba788f21)",
  "egui",
  "serde",
  "toml",
  "web-time",
+]
+
+[[package]]
+name = "craft-i18n"
+version = "0.1.0"
+source = "git+https://github.com/storytold/craft-libs?rev=0800de6e8a3c1947f52650cf81906d54b0b89061#0800de6e8a3c1947f52650cf81906d54b0b89061"
+dependencies = [
+ "fixed_decimal",
+ "icu_decimal",
+ "icu_locale_core",
+ "icu_locale_fallback",
+ "icu_normalizer",
+ "icu_plurals",
+ "icu_properties",
+ "icu_provider",
+ "icu_provider_adapters",
+ "icu_provider_blob",
+ "log",
+ "objc2-foundation 0.3.2",
+ "sys-locale",
+ "unicode-bidi",
+ "windows-registry",
+ "writeable",
 ]
 
 [[package]]
@@ -1585,6 +1622,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "craft-ipc"
+version = "0.1.0"
+source = "git+https://github.com/storytold/craft-libs?rev=0800de6e8a3c1947f52650cf81906d54b0b89061#0800de6e8a3c1947f52650cf81906d54b0b89061"
+dependencies = [
+ "chrono",
+ "getrandom 0.2.17",
+ "interprocess",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2",
+ "widestring",
+]
+
+[[package]]
 name = "craft-jpeg"
 version = "0.1.0"
 source = "git+https://github.com/storytold/craft-libs?rev=33be35625e252cc4f06aa375b3b428521faea37d#33be35625e252cc4f06aa375b3b428521faea37d"
@@ -1606,7 +1658,7 @@ version = "0.1.0"
 source = "git+https://github.com/storytold/craft-libs?rev=8fa4db64a9bb943520259ea95331a303ba788f21#8fa4db64a9bb943520259ea95331a303ba788f21"
 dependencies = [
  "craft-host",
- "craft-i18n",
+ "craft-i18n 0.1.0 (git+https://github.com/storytold/craft-libs?rev=8fa4db64a9bb943520259ea95331a303ba788f21)",
  "craft-tracked",
  "craft-ui-macros",
  "craft-xml 0.1.0 (git+https://github.com/storytold/craft-libs?rev=8fa4db64a9bb943520259ea95331a303ba788f21)",
@@ -1702,7 +1754,7 @@ dependencies = [
  "craft-atomic",
  "craft-docpath",
  "craft-host",
- "craft-i18n",
+ "craft-i18n 0.1.0 (git+https://github.com/storytold/craft-libs?rev=8fa4db64a9bb943520259ea95331a303ba788f21)",
  "craft-theme",
  "futures-lite",
  "js-sys",
@@ -1719,6 +1771,45 @@ dependencies = [
  "x11rb",
  "xcap",
  "zbus",
+]
+
+[[package]]
+name = "craft-plugin-abi"
+version = "0.1.0"
+source = "git+https://github.com/storytold/craft-libs?rev=0800de6e8a3c1947f52650cf81906d54b0b89061#0800de6e8a3c1947f52650cf81906d54b0b89061"
+dependencies = [
+ "serde",
+ "serde_json",
+ "wasmparser 0.262.0",
+]
+
+[[package]]
+name = "craft-plugin-host"
+version = "0.1.0"
+source = "git+https://github.com/storytold/craft-libs?rev=0800de6e8a3c1947f52650cf81906d54b0b89061#0800de6e8a3c1947f52650cf81906d54b0b89061"
+dependencies = [
+ "bitflags 2.13.2",
+ "craft-command",
+ "craft-ipc",
+ "craft-plugin-abi",
+ "serde",
+ "serde_json",
+ "sha2",
+ "wasmi",
+ "wasmi_core",
+]
+
+[[package]]
+name = "craft-plugin-ui"
+version = "0.1.0"
+source = "git+https://github.com/storytold/craft-libs?rev=0800de6e8a3c1947f52650cf81906d54b0b89061#0800de6e8a3c1947f52650cf81906d54b0b89061"
+dependencies = [
+ "craft-plugin-abi",
+ "craft-plugin-host",
+ "craft-ui 0.1.0 (git+https://github.com/storytold/craft-libs?rev=0800de6e8a3c1947f52650cf81906d54b0b89061)",
+ "egui",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1881,6 +1972,26 @@ source = "git+https://github.com/storytold/craft-libs?rev=8fa4db64a9bb943520259e
 [[package]]
 name = "craft-ui"
 version = "0.1.0"
+source = "git+https://github.com/storytold/craft-libs?rev=0800de6e8a3c1947f52650cf81906d54b0b89061#0800de6e8a3c1947f52650cf81906d54b0b89061"
+dependencies = [
+ "craft-fonts-build 0.1.0 (git+https://github.com/storytold/craft-libs?rev=0800de6e8a3c1947f52650cf81906d54b0b89061)",
+ "craft-i18n 0.1.0 (git+https://github.com/storytold/craft-libs?rev=0800de6e8a3c1947f52650cf81906d54b0b89061)",
+ "egui",
+ "epaint",
+ "js-sys",
+ "log",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
+ "skrifa 0.44.0",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+]
+
+[[package]]
+name = "craft-ui"
+version = "0.1.0"
 source = "git+https://github.com/storytold/craft-libs?rev=8fa4db64a9bb943520259ea95331a303ba788f21#8fa4db64a9bb943520259ea95331a303ba788f21"
 dependencies = [
  "craft-cloud-ui",
@@ -1898,7 +2009,7 @@ version = "0.1.0"
 source = "git+https://github.com/storytold/craft-libs?rev=8fa4db64a9bb943520259ea95331a303ba788f21#8fa4db64a9bb943520259ea95331a303ba788f21"
 dependencies = [
  "craft-behavior",
- "craft-i18n",
+ "craft-i18n 0.1.0 (git+https://github.com/storytold/craft-libs?rev=8fa4db64a9bb943520259ea95331a303ba788f21)",
  "craft-keymap",
  "craft-theme",
  "craft-ui-macros",
@@ -1917,9 +2028,9 @@ dependencies = [
  "craft-behavior",
  "craft-codepage",
  "craft-font-catalog",
- "craft-fonts-build",
+ "craft-fonts-build 0.1.0 (git+https://github.com/storytold/craft-libs?rev=8fa4db64a9bb943520259ea95331a303ba788f21)",
  "craft-host",
- "craft-i18n",
+ "craft-i18n 0.1.0 (git+https://github.com/storytold/craft-libs?rev=8fa4db64a9bb943520259ea95331a303ba788f21)",
  "craft-keymap",
  "craft-platform",
  "craft-quit",
@@ -1964,7 +2075,7 @@ source = "git+https://github.com/storytold/craft-libs?rev=8fa4db64a9bb943520259e
 dependencies = [
  "craft-behavior",
  "craft-host",
- "craft-i18n",
+ "craft-i18n 0.1.0 (git+https://github.com/storytold/craft-libs?rev=8fa4db64a9bb943520259ea95331a303ba788f21)",
  "craft-keymap",
  "craft-quit",
  "craft-theme",
@@ -1982,7 +2093,7 @@ source = "git+https://github.com/storytold/craft-libs?rev=8fa4db64a9bb943520259e
 dependencies = [
  "craft-behavior",
  "craft-host",
- "craft-i18n",
+ "craft-i18n 0.1.0 (git+https://github.com/storytold/craft-libs?rev=8fa4db64a9bb943520259ea95331a303ba788f21)",
  "craft-keymap",
  "craft-pdf",
  "craft-theme",
@@ -2003,7 +2114,7 @@ source = "git+https://github.com/storytold/craft-libs?rev=8fa4db64a9bb943520259e
 dependencies = [
  "craft-behavior",
  "craft-host",
- "craft-i18n",
+ "craft-i18n 0.1.0 (git+https://github.com/storytold/craft-libs?rev=8fa4db64a9bb943520259ea95331a303ba788f21)",
  "craft-platform",
  "craft-svg",
  "craft-theme",
@@ -2023,7 +2134,7 @@ source = "git+https://github.com/storytold/craft-libs?rev=8fa4db64a9bb943520259e
 dependencies = [
  "craft-behavior",
  "craft-host",
- "craft-i18n",
+ "craft-i18n 0.1.0 (git+https://github.com/storytold/craft-libs?rev=8fa4db64a9bb943520259ea95331a303ba788f21)",
  "craft-keymap",
  "craft-svg",
  "craft-theme",
@@ -2043,7 +2154,7 @@ dependencies = [
  "chrono",
  "craft-host",
  "craft-theme",
- "craft-ui",
+ "craft-ui 0.1.0 (git+https://github.com/storytold/craft-libs?rev=8fa4db64a9bb943520259ea95331a303ba788f21)",
  "dunce",
  "egui",
  "flate2",
@@ -2290,7 +2401,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2330,6 +2441,12 @@ checksum = "ab8ecd87370524b461f8557c119c405552c396ed91fc0a8eec68679eab26f94a"
 dependencies = [
  "libloading",
 ]
+
+[[package]]
+name = "doctest-file"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c2db04e74f0a9a93103b50e90b96024c9b2bdca8bce6a632ec71b88736d3d359"
 
 [[package]]
 name = "document-features"
@@ -2464,9 +2581,12 @@ version = "0.25.1"
 dependencies = [
  "chrono",
  "cpal",
+ "craft-ipc",
  "craft-update",
  "effectcraft-engine",
  "effectcraft-host",
+ "effectcraft-link",
+ "effectcraft-plugins",
  "effectcraft-ui-egui",
  "eframe",
  "egui",
@@ -2573,8 +2693,10 @@ name = "effectcraft-engine"
 version = "0.25.1"
 dependencies = [
  "chrono",
+ "craft-command",
  "craft-doc",
  "craft-docpath",
+ "craft-plugin-host",
  "effectcraft-aep",
  "effectcraft-color",
  "effectcraft-effects",
@@ -2759,6 +2881,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "effectcraft-link"
+version = "0.25.1"
+dependencies = [
+ "craft-command",
+ "craft-ipc",
+ "effectcraft-engine",
+ "effectcraft-export",
+ "effectcraft-host",
+ "effectcraft-interchange",
+ "effectcraft-media",
+ "effectcraft-project",
+ "effectcraft-render",
+ "effectcraft-time",
+ "egui",
+ "log",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "effectcraft-lottie"
 version = "0.25.1"
 dependencies = [
@@ -2876,6 +3018,31 @@ dependencies = [
  "effectcraft-raster",
  "serde_json",
  "wasmi",
+]
+
+[[package]]
+name = "effectcraft-plugins"
+version = "0.25.1"
+dependencies = [
+ "bytemuck",
+ "craft-command",
+ "craft-ipc",
+ "craft-plugin-abi",
+ "craft-plugin-host",
+ "craft-plugin-ui",
+ "effectcraft-effects",
+ "effectcraft-engine",
+ "effectcraft-link",
+ "effectcraft-media",
+ "effectcraft-project",
+ "effectcraft-raster",
+ "effectcraft-time",
+ "egui",
+ "getrandom 0.3.4",
+ "log",
+ "serde",
+ "serde_json",
+ "wat",
 ]
 
 [[package]]
@@ -3033,10 +3200,11 @@ dependencies = [
  "chrono",
  "craft-behavior",
  "craft-host",
+ "craft-ipc",
  "craft-keymap",
  "craft-mime",
  "craft-theme",
- "craft-ui",
+ "craft-ui 0.1.0 (git+https://github.com/storytold/craft-libs?rev=8fa4db64a9bb943520259ea95331a303ba788f21)",
  "craft-update",
  "craft-window",
  "effectcraft-color",
@@ -3044,7 +3212,9 @@ dependencies = [
  "effectcraft-geom",
  "effectcraft-gpu",
  "effectcraft-host",
+ "effectcraft-interchange",
  "effectcraft-keyframe",
+ "effectcraft-link",
  "effectcraft-media",
  "effectcraft-path",
  "effectcraft-project",
@@ -3400,7 +3570,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4291,6 +4461,8 @@ dependencies = [
  "allocator-api2",
  "equivalent",
  "foldhash 0.2.0",
+ "serde",
+ "serde_core",
 ]
 
 [[package]]
@@ -4372,7 +4544,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.61.2",
+ "windows-core 0.62.2",
 ]
 
 [[package]]
@@ -4702,6 +4874,8 @@ checksum = "cc4e190f5d26ca7051642629da2c52fc03bde85a03197c99408dcd291734c855"
 dependencies = [
  "equivalent",
  "hashbrown 0.17.1",
+ "serde",
+ "serde_core",
 ]
 
 [[package]]
@@ -4713,6 +4887,19 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "interprocess"
+version = "2.4.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6cb02ffbf25e8ef0f4a95bff054eef75f6d1bf16919474cf2caa63b21997478a"
+dependencies = [
+ "doctest-file",
+ "libc",
+ "recvmsg",
+ "widestring",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5391,7 +5578,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6080,7 +6267,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
 dependencies = [
  "libc",
- "windows-sys 0.45.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6750,6 +6937,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "03251193000f4bd3b042892be858ee50e8b3719f2b08e5833ac4353724632430"
 
 [[package]]
+name = "recvmsg"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3edd4d5d42c92f0a659926464d4cce56b562761267ecf0f469d85b7de384175"
+
+[[package]]
 name = "redox_syscall"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6954,7 +7147,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7011,7 +7204,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -8020,7 +8213,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.6",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -8707,19 +8900,19 @@ checksum = "4f692aa943ccd88363733b77063f32cfed5bc6cbea8e6e8b251b302f881606fe"
 
 [[package]]
 name = "wasm-encoder"
-version = "0.261.0"
+version = "0.263.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2608e8bb6d67fd68f5a8d0eb1363d6e7bcbc1f8ded5a0bd3a1e382462b876b22"
+checksum = "0b883a26aea02eaabe2d2c3fba7eb039ef5cdcb5d5201ae5551e73d5e251a81f"
 dependencies = [
  "leb128fmt",
- "wasmparser 0.261.0",
+ "wasmparser 0.263.0",
 ]
 
 [[package]]
 name = "wasmi"
-version = "2.0.0"
+version = "2.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "78693fcdd618e0fc34af59c6b8efa9ac5d58c68df940beff4bedddb6acfe7c27"
+checksum = "36dcb6cbd722c1575daf8c3063dd7ba1883fcd35b51fcbd377ae4f3371ac4dba"
 dependencies = [
  "spin",
  "wasmi_collections",
@@ -8731,27 +8924,27 @@ dependencies = [
 
 [[package]]
 name = "wasmi_collections"
-version = "2.0.0"
+version = "2.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8a8be2aa467cf2d29e96ff759472c36eeb44a3c81c67fc9cb76c9a24c519c557"
+checksum = "b62dc4c1a17f3294aa2b23ac39979e3b38f3ee6afe5673eea76b76902d11103b"
 dependencies = [
  "string-interner",
 ]
 
 [[package]]
 name = "wasmi_core"
-version = "2.0.0"
+version = "2.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "69372d5fda3ea3d1e0aa6603c7888110e0187e88ea17cd8fc2e2df0a0e1f37fa"
+checksum = "c19f6f7fcf32b9e12cebc8fec606fefac71af3d386bae1472e35d620b5471754"
 dependencies = [
  "libm",
 ]
 
 [[package]]
 name = "wasmi_ir"
-version = "2.0.0"
+version = "2.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f17b774caa13c618c7244f1ee51fe23c5e7b8538a471fa46d9949779758aed6"
+checksum = "14f9c115dfd2397700880a64d14161db3a4da0a11059fac39c6a7935eb8f6b36"
 dependencies = [
  "wasmi_core",
 ]
@@ -8768,19 +8961,33 @@ dependencies = [
 
 [[package]]
 name = "wasmparser"
-version = "0.261.0"
+version = "0.262.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4f20f20e44f7e8aeb6744823ea9d869ede51e51be4fdaedede2852282e54d2d8"
+checksum = "974d643b125b272607e2fff8012ea14a8328acd7621e4bafa7afb32500052b1b"
+dependencies = [
+ "bitflags 2.13.2",
+ "hashbrown 0.17.1",
+ "indexmap",
+ "semver",
+ "serde",
+]
+
+[[package]]
+name = "wasmparser"
+version = "0.263.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4f5fa0a054ae153606df820eb0a84213e28cda41bbe04ba2628e71b6ba100fcb"
 dependencies = [
  "bitflags 2.13.2",
  "indexmap",
+ "semver",
 ]
 
 [[package]]
 name = "wast"
-version = "261.0.0"
+version = "263.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "776443145731a4062e5b0d392892a2005909b6ab72d9fdc3cad53dd1a714e44a"
+checksum = "69d90bcf581b501aa1c358bc5dc0faa979cd375796908860ebcb6d1d70b907c7"
 dependencies = [
  "bumpalo",
  "leb128fmt",
@@ -8791,9 +8998,9 @@ dependencies = [
 
 [[package]]
 name = "wat"
-version = "1.261.0"
+version = "1.263.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a7b4d1a49ea73a8f3326e74e3a05db667001b16bd1035ed3356fc1a0ed05ca7f"
+checksum = "bbc9c5aca783b3f1838be89f3f9937c528b90ec5faa6fb62d809726c16a7d8f7"
 dependencies = [
  "wast",
 ]
@@ -9210,7 +9417,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

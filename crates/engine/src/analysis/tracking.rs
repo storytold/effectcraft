@@ -318,9 +318,9 @@ pub(crate) fn key(g: &mut PropGroup, m: &str, t: Tick, v: Value) {
 }
 
 /// Write analysed frames into the tracker's points.
-fn write_frames(p: &mut Project, job: &TrackJob, frames: &[FrameResult]) {
-    let Some(comp) = p.comp_mut(job.comp) else { return };
-    let Some(layer) = comp.layer_mut(job.layer) else { return };
+fn write_frames(p: &mut Project, comp: ItemId, layer_id: LayerId, frames: &[FrameResult]) {
+    let Some(comp) = p.comp_mut(comp) else { return };
+    let Some(layer) = comp.layer_mut(layer_id) else { return };
     for f in frames {
         for (uid, r, a) in &f.points {
             let Some(tp) = layer.props.find_group_mut(*uid) else { continue };
@@ -395,18 +395,21 @@ impl Session {
     /// Write new results into the project and move the CTI to the last analysed frame; drop the
     /// job once it finished. Frontends call this every frame while tracking.
     pub fn poll_track(&mut self) -> bool {
-        let Some(job) = &self.track_job else { return false };
-        let frames = std::mem::take(&mut *lock(&job.shared.frames));
-        let finished = job.is_finished();
+        let (frames, finished, comp, layer) = {
+            let Some(job) = &self.track_job else { return false };
+            let frames = std::mem::take(&mut *lock(&job.shared.frames));
+            (frames, job.is_finished(), job.comp, job.layer)
+        };
         let changed = !frames.is_empty();
         if changed {
-            write_frames(Arc::make_mut(&mut self.project), job, &frames);
-            if self.state.active_comp == Some(job.comp)
+            write_frames(self.project_mut(), comp, layer, &frames);
+            if self.state.active_comp == Some(comp)
                 && let Some(last) = frames.last()
             {
-                self.state.times.insert(job.comp, last.comp_time);
+                self.state.times.insert(comp, last.comp_time);
             }
-            self.bump();
+            let hooks = self.hooks.clone();
+            hooks.with_cause(craft_command::Cause::Job("track"), || self.bump());
         }
         if finished && let Some(mut job) = self.track_job.take() {
             if let Some(t) = job.thread.take() {

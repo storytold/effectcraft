@@ -124,7 +124,7 @@ fn opening_a_project_gives_the_set_before_the_first_frame() {
     let item = import(&mut s, "/renders/crypto.exr");
     let l = add_layer(&mut s, &item);
     s.execute_checked("effect.apply", json!({"effect": "Cryptomatte", "layers": [l]})).unwrap();
-    let project: Project = (*s.project).clone();
+    let project: Project = (**s.project).clone();
     let comp = s.state.active_comp.unwrap();
 
     let rec = Arc::new(Recorder::default());
@@ -251,7 +251,7 @@ fn a_keyed_channel_selection_opens_static() {
     s.execute_checked("effect.apply", json!({"effect": "EXtractoR", "layers": [l]})).unwrap();
     let cid = s.active_comp_id().unwrap();
     {
-        let p = Arc::make_mut(&mut s.project);
+        let p = s.project_mut();
         let pr = p.comp_mut(cid).unwrap().layer_mut(effectcraft_project::LayerId(l)).unwrap().props.prop_mut("effects/#1/red").unwrap();
         // (as a document from before)
         pr.static_only = false;
@@ -285,7 +285,7 @@ fn a_channel_selections_old_expression_can_be_removed() {
     let cid = s.active_comp_id().unwrap();
     let red = "effects/#1/red";
     {
-        let p = Arc::make_mut(&mut s.project);
+        let p = s.project_mut();
         let pr = p.comp_mut(cid).unwrap().layer_mut(effectcraft_project::LayerId(l)).unwrap().props.prop_mut(red).unwrap();
         pr.expr = Some(effectcraft_project::Expression { text: "'Z'".into(), enabled: true });
     }
@@ -309,7 +309,7 @@ fn a_channel_selections_old_expression_is_not_converted_to_keys() {
     let cid = s.active_comp_id().unwrap();
     let red = "effects/#1/red";
     {
-        let p = Arc::make_mut(&mut s.project);
+        let p = s.project_mut();
         let pr = p.comp_mut(cid).unwrap().layer_mut(effectcraft_project::LayerId(l)).unwrap().props.prop_mut(red).unwrap();
         pr.expr = Some(effectcraft_project::Expression { text: "'Z'".into(), enabled: true });
     }
@@ -387,7 +387,7 @@ fn importing_a_keyed_channel_selection_says_so() {
     let (mut s, l) = extractor_layer(&rec, "/renders/imported.exr");
     let cid = s.active_comp_id().unwrap();
     {
-        let p = Arc::make_mut(&mut s.project);
+        let p = s.project_mut();
         let pr = p.comp_mut(cid).unwrap().layer_mut(effectcraft_project::LayerId(l)).unwrap().props.prop_mut("effects/#1/red").unwrap();
         pr.static_only = false;
         pr.keys = vec![Keyframe::new(Tick::ZERO, K::Str("Z".into())), Keyframe::new(Tick::from_seconds_f64(1.0), K::Str("N.X".into()))];

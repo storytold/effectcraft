@@ -288,6 +288,7 @@ fn right_side(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, re
     let t = app.tokens;
     let rx = community_buttons(app, ui, p, rect.max.x - 10.0, cy);
     let mut rx = appearance_button(app, ui, rx, cy);
+    rx = crate::link_ui::back_button(app, ui, p, rx, cy);
     rx -= 10.0;
     p.line_segment([pos2(rx, cy - 10.0), pos2(rx, cy + 10.0)], Stroke::new(1.0, t.separator));
     rx -= 10.0;

@@ -18,6 +18,9 @@ egui = { workspace = true }
 eframe = { workspace = true, features = ["default_fonts", "wgpu", "accesskit", "clipboard", "links", "wayland", "x11"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+craft-ipc = { workspace = true }
+effectcraft-link = { workspace = true }
+effectcraft-plugins = { workspace = true }
 # The window's monitors, size and position (src/window.rs), and macOS event-loop options (no app
 # activation when driven by an agent). The same winit eframe runs on.
 winit = { version = "0.30", default-features = false }

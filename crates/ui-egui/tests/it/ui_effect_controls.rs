@@ -125,7 +125,7 @@ fn effect_header_arrows_collapse_and_expand_without_editing_the_document() {
     click(&mut h, at);
     assert_eq!(h.state().ui.focused, PanelKind::EffectControls);
     assert_eq!(h.state().session.state.selected_props, vec![(lid, fx)]);
-    let project = serde_json::to_value(&h.state().session.project).unwrap();
+    let project = serde_json::to_value(&*h.state().session.project).unwrap();
     let time = h.state().session.time();
     let undo = h.state().session.history.undo.len();
     let redo = h.state().session.history.redo.len();
@@ -134,7 +134,7 @@ fn effect_header_arrows_collapse_and_expand_without_editing_the_document() {
         assert_eq!(h.state().auto.find(&format!("effectControls.row.{prop}")).is_some(), key == egui::Key::ArrowRight);
         assert!(h.state().auto.find(&format!("effectControls.row.{other}")).is_some(), "unselected effect stays open");
         assert_eq!(h.state().session.state.selected_props, vec![(lid, fx)]);
-        assert_eq!(serde_json::to_value(&h.state().session.project).unwrap(), project);
+        assert_eq!(serde_json::to_value(&*h.state().session.project).unwrap(), project);
         assert_eq!(h.state().session.time(), time);
         assert_eq!((h.state().session.history.undo.len(), h.state().session.history.redo.len()), (undo, redo));
     }
@@ -152,10 +152,10 @@ fn effect_header_arrows_only_disclose_selected_headers_on_the_displayed_layer() 
 
     // A parameter selection, stale header, or header on another layer must still fall through.
     h.state_mut().session.state.selected_props = vec![(lid, prop), (LayerId(0), first), (lid, u64::MAX)];
-    let before = serde_json::to_value(&h.state().session.project).unwrap();
+    let before = serde_json::to_value(&*h.state().session.project).unwrap();
     header_arrow_key(&mut h, egui::Key::ArrowLeft, egui::Modifiers::NONE);
     assert!(h.state().ui.fx_closed.is_empty());
-    assert_ne!(serde_json::to_value(&h.state().session.project).unwrap(), before, "the existing layer nudge still runs");
+    assert_ne!(serde_json::to_value(&*h.state().session.project).unwrap(), before, "the existing layer nudge still runs");
 }
 
 #[test]
@@ -294,7 +294,7 @@ fn effect_header_down_and_up_select_the_next_and_previous_effect() {
     click(&mut h, at);
     assert_eq!(h.state().session.state.selected_props, vec![(lid, first)]);
     h.state_mut().ui.fx_closed.insert(second);
-    let project = serde_json::to_value(&h.state().session.project).unwrap();
+    let project = serde_json::to_value(&*h.state().session.project).unwrap();
     let time = h.state().session.time();
     let history = (h.state().session.history.undo.len(), h.state().session.history.redo.len());
     let closed = h.state().ui.fx_closed.clone();
@@ -302,7 +302,7 @@ fn effect_header_down_and_up_select_the_next_and_previous_effect() {
     for (key, want) in [(down, second), (down, third), (down, third), (up, second), (up, first), (up, first)] {
         header_arrow_key(&mut h, key, egui::Modifiers::NONE);
         assert_eq!(h.state().session.state.selected_props, vec![(lid, want)], "{key:?}");
-        assert_eq!(serde_json::to_value(&h.state().session.project).unwrap(), project, "{key:?}: the layer is not nudged");
+        assert_eq!(serde_json::to_value(&*h.state().session.project).unwrap(), project, "{key:?}: the layer is not nudged");
         assert_eq!(h.state().session.time(), time, "{key:?}");
         assert_eq!((h.state().session.history.undo.len(), h.state().session.history.redo.len()), history, "{key:?}: no undo step");
         assert_eq!(h.state().ui.fx_closed, closed, "{key:?}: nothing opens or closes");
@@ -1491,7 +1491,7 @@ fn replacing_the_project_unlocks_effect_controls() {
     assert_eq!(h.state().ui.effect_controls_lock.map(|l| l.layer), Some(a));
     select_layer(&mut h, b);
     // The same project opened again: every id is alive.
-    let project = (*h.state().session.project).clone();
+    let project = (**h.state().session.project).clone();
     h.state_mut().session.replace_project(project, None);
     h.run_steps(3);
     assert_eq!(h.state().ui.effect_controls_lock, None, "the lock belongs to the replaced project");
@@ -1583,7 +1583,7 @@ fn a_lock_request_after_a_project_replacement_does_not_report_the_old_lock() {
     h.run_steps(4);
     assert_eq!(send(&mut h)["ok"], true);
     assert_eq!(h.state().ui.effect_controls_lock.map(|l| l.layer), Some(a));
-    let project = (*h.state().session.project).clone();
+    let project = (**h.state().session.project).clone();
     h.state_mut().session.replace_project(project, None);
     let reply = send(&mut h);
     h.run_steps(3);

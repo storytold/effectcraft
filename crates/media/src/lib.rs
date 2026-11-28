@@ -25,6 +25,7 @@ pub mod exr_channels;
 mod exr_index;
 mod exr_planes;
 mod exr_read;
+pub mod foreign;
 mod gif_anim;
 mod layered;
 mod localize;

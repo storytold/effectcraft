@@ -604,7 +604,7 @@ fn toggle_closed_falls_back_from_stale_selection_and_rejects_locked_or_pathless_
     s.execute("edit.undo", json!({})).unwrap();
     s.state.selected_vertices.clear();
     let cid = s.active_comp_id().unwrap();
-    std::sync::Arc::make_mut(&mut s.project).comp_mut(cid).unwrap().layer_mut(LayerId(lid)).unwrap().switches.locked = true;
+    s.project_mut().comp_mut(cid).unwrap().layer_mut(LayerId(lid)).unwrap().switches.locked = true;
     assert!(!s.is_enabled("path.toggleClosed"));
     assert!(s.execute("path.toggleClosed", json!({})).is_err());
     assert!(shape_path(&s, lid, uid).closed);
@@ -638,7 +638,7 @@ fn toggle_closed_handles_masks_and_preserves_explicit_set_closed() {
     s.execute("path.toggleClosed", json!({})).unwrap();
     assert_eq!(path(&s), original);
     let cid = s.active_comp_id().unwrap();
-    let g = std::sync::Arc::make_mut(&mut s.project).comp_mut(cid).unwrap().layer_mut(LayerId(lid)).unwrap().props.find_group_mut(uid).unwrap();
+    let g = s.project_mut().comp_mut(cid).unwrap().layer_mut(LayerId(lid)).unwrap().props.find_group_mut(uid).unwrap();
     if let effectcraft_project::GroupKind::Mask { locked, .. } = &mut g.kind {
         *locked = true;
     }
@@ -674,7 +674,7 @@ fn toggle_closed_fits_short_tangent_lists() {
     let lid = s.execute("layer.newSolid", json!({})).unwrap()["layer"].as_u64().unwrap();
     let uid = s.execute("mask.new", json!({"layer": lid, "vertices": [[0, 0], [100, 0], [100, 100]], "closed": true})).unwrap()["mask"].as_u64().unwrap();
     let cid = s.active_comp_id().unwrap();
-    let layer_mut = std::sync::Arc::make_mut(&mut s.project).comp_mut(cid).unwrap().layer_mut(LayerId(lid)).unwrap();
+    let layer_mut = s.project_mut().comp_mut(cid).unwrap().layer_mut(LayerId(lid)).unwrap();
     let prop = layer_mut.props.find_group_mut(uid).unwrap().get_mut("path").unwrap();
     let KV::Path(path) = &mut prop.value else { panic!("not a path") };
     // A file can store fewer tangents than vertices (#1250).
@@ -696,7 +696,7 @@ fn toggle_closed_edits_layer_time_and_roundtrips() {
     let cid = s.active_comp_id().unwrap();
     let original = shape_path(&s, lid, uid);
     let second = Tick::from_seconds_f64(1.0);
-    let layer = std::sync::Arc::make_mut(&mut s.project).comp_mut(cid).unwrap().layer_mut(LayerId(lid)).unwrap();
+    let layer = s.project_mut().comp_mut(cid).unwrap().layer_mut(LayerId(lid)).unwrap();
     layer.start_time = second;
     layer.stretch = 200.0;
     let prop = layer.props.find_group_mut(uid).unwrap().get_mut("path").unwrap();
@@ -728,7 +728,7 @@ fn toggle_closed_rejects_excessive_group_nesting_without_an_edit() {
     let r = s.execute("shape.newPath", json!({"vertices": [[0, 0], [100, 0], [100, 100]], "closed": true})).unwrap();
     let lid = LayerId(r["layer"].as_u64().unwrap());
     let cid = s.active_comp_id().unwrap();
-    let project = std::sync::Arc::make_mut(&mut s.project);
+    let project = s.project_mut();
     let mut next = project.next_id;
     let contents = project.comp_mut(cid).unwrap().layer_mut(lid).unwrap().props.sub_mut("contents").unwrap();
     let node = contents.children.first_mut().unwrap();

@@ -17,20 +17,32 @@ pub(crate) struct Source {
 impl Source {
     /// Find the same source settings in a newer project, ignoring only the disk-derived
     /// missing flag so an overlapping check cannot invalidate moved-source recovery.
-    pub fn current<'a>(&self, project: &'a mut Project) -> Option<&'a mut Footage> {
-        let item = project.item_mut(self.id)?;
+    pub fn locate<'a>(&self, project: &'a Project) -> Option<&'a Footage> {
+        let item = project.item(self.id)?;
         let f = if self.proxy {
-            &mut item.proxy.as_mut()?.footage
+            &item.proxy.as_ref()?.footage
         } else {
-            let ItemKind::Footage(f) = &mut item.kind else { return None };
+            let ItemKind::Footage(f) = &item.kind else { return None };
             f
         };
         // Availability is an observation, not a source edit. Another disk check must not
         // invalidate an open-time probe or recovery of a source moved with the project.
-        let missing = std::mem::replace(&mut f.missing, self.footage.missing);
-        let same = *f == self.footage;
-        f.missing = missing;
-        same.then_some(f)
+        let mut want = self.footage.clone();
+        want.missing = f.missing;
+        (*f == want).then_some(f)
+    }
+
+    /// [`Source::locate`] for writing. The lookup is read-only, so a source that no longer
+    /// matches leaves the project untouched.
+    pub fn current<'a>(&self, project: &'a mut Project) -> Option<&'a mut Footage> {
+        self.locate(project)?;
+        let item = project.item_mut(self.id)?;
+        if self.proxy {
+            Some(&mut item.proxy.as_mut()?.footage)
+        } else {
+            let ItemKind::Footage(f) = &mut item.kind else { return None };
+            Some(f)
+        }
     }
 }
 
@@ -253,7 +265,7 @@ impl Update {
             return false;
         }
         let dirty = s.is_dirty();
-        s.project = self.after;
+        s.set_project(self.after);
         s.bump();
         if !dirty {
             s.mark_saved();
@@ -312,9 +324,8 @@ mod tests {
         let mut s = Session { services: disk, ..Default::default() };
         s.prefs.import.auto_reload_footage = "off".into();
         let f = Footage { path: "/media/original.png".into(), width: 64, height: 32, has_video: true, ..Default::default() };
-        let id = Arc::make_mut(&mut s.project).add_item("Plate", Default::default(), None, ItemKind::Footage(f.clone()));
-        Arc::make_mut(&mut s.project).item_mut(id).unwrap().proxy =
-            Some(Box::new(Proxy { footage: Footage { path: "/media/proxy.png".into(), ..f }, enabled: false }));
+        let id = s.project_mut().add_item("Plate", Default::default(), None, ItemKind::Footage(f.clone()));
+        s.project_mut().item_mut(id).unwrap().proxy = Some(Box::new(Proxy { footage: Footage { path: "/media/proxy.png".into(), ..f }, enabled: false }));
         s.mark_saved();
         (s, id)
     }
@@ -365,7 +376,7 @@ mod tests {
         let (mut s, id) = session(Arc::new(Disk::default()));
         let old = sources(&s);
         let update = prepare(&s.project, &old, &[true, true]).unwrap();
-        if let ItemKind::Footage(f) = &mut Arc::make_mut(&mut s.project).item_mut(id).unwrap().kind {
+        if let ItemKind::Footage(f) = &mut s.project_mut().item_mut(id).unwrap().kind {
             f.path = "/new.png".into();
         }
         assert!(!update.apply(&mut s));
@@ -377,7 +388,7 @@ mod tests {
         let disk = Arc::new(Disk::default());
         disk.set(&["/media/frame1.png"]);
         let (mut s, id) = session(disk.clone());
-        if let ItemKind::Footage(f) = &mut Arc::make_mut(&mut s.project).item_mut(id).unwrap().kind {
+        if let ItemKind::Footage(f) = &mut s.project_mut().item_mut(id).unwrap().kind {
             f.kind = FootageKind::Sequence;
             f.path = "/media/frame0.png".into();
             f.sequence = (0..10_000).map(|n| format!("/media/frame{n}.png")).collect();
@@ -401,7 +412,7 @@ mod tests {
         let file = dir.join("plate.png");
         std::fs::write(&file, b"plate").unwrap();
         let mut s = Session::default();
-        Arc::make_mut(&mut s.project).add_item(
+        s.project_mut().add_item(
             "Plate",
             Default::default(),
             None,
@@ -425,7 +436,7 @@ mod tests {
     fn automatic_sequence_checks_are_bounded_and_resume_without_starving_other_sources() {
         let disk = Arc::new(Disk { existing_dir: true, ..Default::default() });
         let (mut s, id) = session(disk.clone());
-        if let ItemKind::Footage(f) = &mut Arc::make_mut(&mut s.project).item_mut(id).unwrap().kind {
+        if let ItemKind::Footage(f) = &mut s.project_mut().item_mut(id).unwrap().kind {
             f.kind = FootageKind::Sequence;
             f.path = "/media/frame0.png".into();
             f.sequence = (0..10_000).map(|n| format!("/media/frame{n}.png")).collect();
@@ -490,7 +501,7 @@ mod tests {
         let disk = Arc::new(Disk::default());
         disk.set(&["/media/original.png"]);
         let (mut s, id) = session(disk.clone());
-        Arc::make_mut(&mut s.project).item_mut(id).unwrap().proxy.as_mut().unwrap().footage.path = "/media/original.png".into();
+        s.project_mut().item_mut(id).unwrap().proxy.as_mut().unwrap().footage.path = "/media/original.png".into();
         assert_eq!(scan(&sources(&s), disk.as_ref()), [false, false]);
         assert_eq!(disk.looks.load(Ordering::Relaxed), 1);
     }

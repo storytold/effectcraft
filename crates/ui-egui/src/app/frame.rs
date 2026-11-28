@@ -238,6 +238,10 @@ impl EffectcraftApp {
         }
         // Plug-in Library: a finished job's toast (also polled with Roto, for other frontends).
         self.session.poll_library();
+        // The host's per-tick work, such as the calls plug-in threads queued for the session.
+        if let Some(per_tick) = self.hooks.per_tick.as_mut() {
+            per_tick(ctx, &mut self.session);
+        }
         // Warp Stabilizer: finish analyses and start queued (re-)analyses in the background.
         if self.session.warp_job.is_some() || !self.session.warp_pending.is_empty() {
             self.session.poll_warp(true);
@@ -305,6 +309,11 @@ impl EffectcraftApp {
         if self.session.script_ui.render_host.is_some() {
             self.tick_script_render(ctx);
             return;
+        }
+        // Craft Link: epochs, frame snapshot, result render. Returns when it wants the next frame.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(wait) = effectcraft_link::live::tick(&mut self.session) {
+            ctx.request_repaint_after(wait);
         }
         // Screenshot completion, deadlines and issuance are app-side work: the callback only
         // stores pixels and wakes this viewport.
@@ -420,6 +429,9 @@ impl EffectcraftApp {
         panels::crypto_pick::pass_start(self, &ctx);
         self.frame(ui);
         panels::crypto_pick::upkeep(self, &ctx);
+        if let Some(per_frame) = self.hooks.per_frame.as_mut() {
+            per_frame(&ctx, &mut self.session);
+        }
         #[cfg(not(target_arch = "wasm32"))]
         pointer_wrap::finish_native(&ctx, _frame);
         // wasm32: no frame threads; render queued frames now, between UI frames.

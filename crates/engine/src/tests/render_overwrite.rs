@@ -101,7 +101,7 @@ impl Fixture {
             duration: Tick::from_seconds_f64(1.0),
             ..Default::default()
         };
-        Arc::make_mut(&mut self.s.project).add_item(file, Label::None, None, ItemKind::Footage(f))
+        self.s.project_mut().add_item(file, Label::None, None, ItemKind::Footage(f))
     }
 
     /// Numbered stills in the project's folder, imported as one image sequence.
@@ -128,7 +128,7 @@ impl Fixture {
             duration: Tick::from_seconds_f64(0.5),
             ..Default::default()
         };
-        Arc::make_mut(&mut self.s.project).add_item(&format!("{name}_[00000-00004].{ext}"), Label::None, None, ItemKind::Footage(f))
+        self.s.project_mut().add_item(&format!("{name}_[00000-00004].{ext}"), Label::None, None, ItemKind::Footage(f))
     }
 
     /// A five-frame composition.
@@ -267,7 +267,7 @@ fn a_proxy_is_not_an_output_either() {
     f.comp("Main");
     let proxy = Footage { path: f.text("proxy.mov"), kind: FootageKind::Video, has_video: true, ..Default::default() };
     let comp = f.s.active_comp_id().unwrap();
-    Arc::make_mut(&mut f.s.project).item_mut(comp).unwrap().proxy = Some(Box::new(effectcraft_project::Proxy { footage: proxy, enabled: true }));
+    f.s.project_mut().item_mut(comp).unwrap().proxy = Some(Box::new(effectcraft_project::Proxy { footage: proxy, enabled: true }));
     let target = f.text("proxy.mov");
     f.s.execute("renderQueue.add", json!({"format": "prores", "output": target})).unwrap();
     let e = f.render(json!({"overwrite": true})).unwrap_err().to_string();
@@ -431,7 +431,7 @@ fn a_sequence_never_replaces_one_of_its_footage_frames() {
     let mut f = Fixture::new("sequence-one-frame");
     f.write("shot_00002.png", SOURCE);
     let still = Footage { path: f.text("shot_00002.png"), kind: FootageKind::Still, width: 16, height: 16, has_video: true, ..Default::default() };
-    Arc::make_mut(&mut f.s.project).add_item("shot_00002.png", Label::None, None, ItemKind::Footage(still));
+    f.s.project_mut().add_item("shot_00002.png", Label::None, None, ItemKind::Footage(still));
     f.comp("shot");
     let pattern = f.text("shot_[#####].png");
     f.s.execute("renderQueue.add", json!({"format": "png", "output": pattern})).unwrap();
@@ -544,7 +544,7 @@ fn footage_reached_through_a_linked_folder_is_still_footage() {
     }
     let via_link =
         Footage { path: f.path("linked").join("clip.mov").to_string_lossy().into_owned(), kind: FootageKind::Video, has_video: true, ..Default::default() };
-    Arc::make_mut(&mut f.s.project).add_item("clip.mov", Label::None, None, ItemKind::Footage(via_link));
+    f.s.project_mut().add_item("clip.mov", Label::None, None, ItemKind::Footage(via_link));
     f.comp("Main");
     f.s.execute("renderQueue.add", json!({"format": "prores", "output": f.path("real").join("clip.mov").to_string_lossy()})).unwrap();
     let e = f.render(json!({"overwrite": true})).unwrap_err().to_string();
@@ -673,7 +673,7 @@ fn with_overflow(f: &mut Fixture) {
     }
     f.s.storage_quota = Some(Arc::new(Room));
     std::fs::create_dir_all(f.path("overflow")).unwrap();
-    Arc::make_mut(&mut f.s.project).render_prefs.overflow_folders = vec![f.text("overflow")];
+    f.s.project_mut().render_prefs.overflow_folders = vec![f.text("overflow")];
 }
 
 #[test]

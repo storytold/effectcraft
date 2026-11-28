@@ -530,8 +530,8 @@ fn protected_regions_keep_speed_under_time_stretch() {
     assert!(near(st(&s, 1.0 + 0.5), 1.0 + 0.5 / 0.5), "{}", st(&s, 1.5));
     // Without protected regions the plain stretch applies.
     s.execute("comp.open", json!({"comp": inner.0})).ok();
-    let mut p = (*s.project).clone();
+    let mut p = (**s.project).clone();
     p.comp_mut(inner).unwrap().markers.clear();
-    s.project = std::sync::Arc::new(p);
+    s.set_project(std::sync::Arc::new(p));
     assert!(near(st(&s, 1.5), 2.0));
 }

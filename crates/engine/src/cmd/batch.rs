@@ -99,7 +99,7 @@ fn batch(s: &mut Session, p: &Value) -> Result<Value> {
                     // failed batch did not advance it, so its value stays exactly as it was.
                     let edited = crate::commands::text_edit::active_editor_snapshot(s);
                     let interim_revision = s.ime_revision;
-                    s.project = project;
+                    s.set_project(project);
                     s.history = history;
                     s.state = state;
                     s.events.truncate(event_mark);

@@ -119,7 +119,7 @@ fn an_edited_lut_file_is_not_served_from_the_disk_cache() {
     // A restart on the same cache, after the file changed.
     write(&lut, WHITE, 2_000);
     let mut s = session(Some(&disk));
-    s.project = project;
+    s.set_project(project);
     s.bump();
     assert_all(colours(&s, comps), 1.0);
 }

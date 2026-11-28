@@ -10,18 +10,26 @@ fn list(s: &mut Session, p: &Value) -> Result<Value> {
     let filter = str_p(p, "filter").map(str::to_ascii_lowercase);
     let only = b_p(p, "enabledOnly").unwrap_or(false);
     let schemas = b_p(p, "schemas").unwrap_or(false);
-    let v: Vec<Value> = super::command_specs()
-        .iter()
-        .filter(|c| filter.as_ref().is_none_or(|f| c.id.to_ascii_lowercase().contains(f) || c.label.to_ascii_lowercase().contains(f)))
-        .filter_map(|c| {
-            let en = (c.enabled)(s);
+    // Copy first. `for_each` borrows the registry, and enablement resolves it again.
+    let mut rows = Vec::new();
+    s.registry.for_each(|view| {
+        let menu = match view.menu {
+            craft_command::Menu::Static(path) => path.iter().map(|part| (*part).to_string()).collect::<Vec<_>>(),
+            craft_command::Menu::Shared(path) => path.iter().map(|part| part.to_string()).collect(),
+        };
+        rows.push((view.id.to_string(), view.label.to_string(), menu, view.shortcut.map(str::to_string), view.params.to_string()));
+    });
+    let v: Vec<Value> = rows
+        .into_iter()
+        .filter(|(id, label, _, _, _)| filter.as_ref().is_none_or(|f| id.to_ascii_lowercase().contains(f) || label.to_ascii_lowercase().contains(f)))
+        .filter_map(|(id, label, menu, shortcut, params)| {
+            let en = s.registry.resolve(&id).map(|cmd| s.command_enabled(&cmd)).unwrap_or(Err("unknown command".into()));
             if only && en.is_err() {
                 return None;
             }
-            let mut o =
-                json!({"id": c.id, "label": c.label, "menu": c.menu, "shortcut": c.shortcut, "params": c.params, "enabled": en.is_ok(), "why": en.err()});
-            if schemas {
-                o["schema"] = super::params_schema(c);
+            let mut o = json!({"id": id, "label": label, "menu": menu, "shortcut": shortcut, "params": params, "enabled": en.is_ok(), "why": en.err()});
+            if schemas && let Some(schema) = s.registry.schema(&id) {
+                o["schema"] = (*schema).clone();
             }
             Some(o)
         })
@@ -170,11 +178,25 @@ fn layer_tree(s: &mut Session, p: &Value) -> Result<Value> {
 /// One command in full, with the JSON Schema of its parameters.
 fn describe(s: &mut Session, p: &Value) -> Result<Value> {
     let id = str_p(p, "command").or(str_p(p, "id")).ok_or_else(|| super::bad("command.describe", "missing `command`"))?;
-    let c = super::find(id).ok_or_else(|| EngineError::UnknownCommand(id.to_string()))?;
-    let en = (c.enabled)(s);
+    let cmd = s.registry.resolve(id).ok_or_else(|| EngineError::UnknownCommand(id.to_string()))?;
+    let en = s.command_enabled(&cmd);
+    let schema = match s.registry.schema(id) {
+        Some(schema) => (*schema).clone(),
+        None => Value::Null,
+    };
+    let (label, menu, shortcut, params, undoable) = match &cmd {
+        craft_command::CommandEntry::Static(spec) => {
+            let menu = spec.menu.iter().map(|part| (*part).to_string()).collect::<Vec<_>>();
+            (spec.label.to_string(), menu, spec.shortcut.map(str::to_string), spec.params.to_string(), spec.journal)
+        }
+        craft_command::CommandEntry::Dynamic(dyn_cmd) => {
+            let menu = dyn_cmd.menu.iter().map(|part| part.to_string()).collect::<Vec<_>>();
+            (dyn_cmd.label.to_string(), menu, dyn_cmd.shortcut.as_deref().map(str::to_string), dyn_cmd.params.to_string(), dyn_cmd.journal)
+        }
+    };
     Ok(json!({
-        "id": c.id, "label": c.label, "menu": c.menu, "shortcut": c.shortcut, "params": c.params,
-        "schema": super::params_schema(c), "undoable": c.journal, "enabled": en.is_ok(), "why": en.err(),
+        "id": id, "label": label, "menu": menu, "shortcut": shortcut, "params": params,
+        "schema": schema, "undoable": undoable, "enabled": en.is_ok(), "why": en.err(),
     }))
 }
 
@@ -184,7 +206,7 @@ fn capabilities(s: &mut Session, _: &Value) -> Result<Value> {
     let formats: Vec<Value> = s.exporter.as_ref().map(|e| e.formats().iter().map(|f| json!(format!("{f:?}"))).collect()).unwrap_or_default();
     Ok(json!({
         "version": env!("CARGO_PKG_VERSION"),
-        "commands": super::command_specs().len(),
+        "commands": s.command_count(),
         "effects": {"total": fx.len(), "gpu": fx.iter().filter(|e| e.gpu).count(), "float": fx.iter().filter(|e| e.float).count()},
         "export": formats,
         "import": s.importer.is_some(),
