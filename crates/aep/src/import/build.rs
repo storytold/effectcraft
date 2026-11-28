@@ -442,7 +442,9 @@ fn blend(mode: AepBlend) -> Option<BlendMode> {
 /// render like 27 / 28 on that image; they are taken as the classic variants, which After Effects
 /// keeps beside the newer ones (E). Not imported: 1, 21 and 22 (Alpha Add and Luminescent
 /// Premul render alike on opaque layers), 3 (Dissolve and Dancing Dissolve share it, 906 sweep)
-/// and codes above 34 (not sampled).
+/// and codes above 38. Codes 35-38 come from a project whose layers were set by name with the
+/// scripting API (After Effects 2026, corpus `10_blend_modes`: Lighter Color 35, Darker Color 36,
+/// Subtract 37, Divide 38) and render as those modes there.
 fn blend_code(code: u8) -> Option<BlendMode> {
     Some(match code {
         8 => BlendMode::SoftLight,
@@ -469,6 +471,10 @@ fn blend_code(code: u8) -> Option<BlendMode> {
         32 => BlendMode::VividLight,
         33 => BlendMode::PinLight,
         34 => BlendMode::HardMix,
+        35 => BlendMode::LighterColor,
+        36 => BlendMode::DarkerColor,
+        37 => BlendMode::Subtract,
+        38 => BlendMode::Divide,
         _ => return None,
     })
 }

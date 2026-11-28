@@ -316,6 +316,10 @@ fn blend_code(mode: BlendMode) -> Option<u8> {
         BlendMode::VividLight => 32,
         BlendMode::PinLight => 33,
         BlendMode::HardMix => 34,
+        BlendMode::LighterColor => 35,
+        BlendMode::DarkerColor => 36,
+        BlendMode::Subtract => 37,
+        BlendMode::Divide => 38,
         _ => return None,
     })
 }
