@@ -408,9 +408,7 @@ fn find_edges(e: &mut Enc, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
 }
 
 fn emboss(e: &mut Enc, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
-    let ang = ctx.params.f("direction").to_radians();
-    let relief = ctx.params.f("relief") * b.scale;
-    let (dx, dy) = (ang.cos() * relief, -ang.sin() * relief);
+    let (dx, dy) = effectcraft_effects::emboss_offset(ctx.params.f("direction"), ctx.params.f("relief") * b.scale);
     let mut p = Params::default();
     p.f[0] = [dx as f32, dy as f32, ctx.params.f("contrast") as f32 / 100.0, ctx.params.f("blend") as f32 / 100.0];
     run(e, "dst_emboss", &p, b, None)
