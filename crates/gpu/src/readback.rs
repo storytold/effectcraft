@@ -181,18 +181,21 @@ impl Readbacks {
         }
     }
 
-    /// A driver polling panic invalidates this context just as a reported device failure does.
-    /// Do not let later renders reuse it or leave its readback callbacks waiting for a timeout.
-    pub(crate) fn poll<T>(&self, poll: impl FnOnce() -> T) -> Result<T, Error> {
+    /// A driver panic invalidates this context just as a reported device failure does.
+    /// Driver calls can synchronously retire the context through error callbacks, so never
+    /// hold the retirement lock across them. Reject results if retirement races the call.
+    pub(crate) fn run_device<T>(&self, run: impl FnOnce() -> T) -> Result<T, Error> {
         self.check()?;
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(poll)).map_err(|panic| {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)).map_err(|panic| {
             let detail =
                 panic.downcast_ref::<String>().map(String::as_str).or_else(|| panic.downcast_ref::<&str>().copied()).unwrap_or("internal driver error");
-            let error = format!("GPU polling failed ({detail}); context retired");
+            let error = format!("GPU operation failed ({detail}); context retired");
             self.retire(error.clone());
             log::error!("{error}");
             error
-        })
+        })?;
+        self.check()?;
+        Ok(result)
     }
 
     pub(crate) fn start(self: &Arc<Self>, done: impl FnOnce(Result<Vec<u8>, Error>) + wgpu::WasmNotSend + 'static) -> Result<Ticket, Error> {
@@ -468,15 +471,26 @@ mod tests {
                 tx.send(result).unwrap();
             })
             .unwrap();
-        let error = me.poll(|| panic!("submission index mismatch")).unwrap_err();
+        let error = me.run_device(|| panic!("submission index mismatch")).unwrap_err();
         assert!(error.contains("submission index mismatch"));
         assert_eq!(rx.recv().unwrap(), Err(error.clone()));
         assert_eq!(me.check(), Err(error));
         ticket.complete(Ok(vec![1]));
         assert!(rx.try_recv().is_err(), "a late callback cannot complete twice");
         let called = std::cell::Cell::new(false);
-        assert!(me.poll(|| called.set(true)).is_err());
+        assert!(me.run_device(|| called.set(true)).is_err());
         assert!(!called.get(), "a retired device is never polled again");
+    }
+
+    #[test]
+    fn retirement_during_a_driver_call_rejects_its_result_without_locking_callbacks() {
+        let me = Readbacks::new().unwrap();
+        let result = me.run_device(|| {
+            // A device-error callback can run inside poll or submit, before the call returns.
+            me.retire("device lost during submission".into());
+            42
+        });
+        assert_eq!(result, Err("device lost during submission".into()));
     }
 
     #[test]
