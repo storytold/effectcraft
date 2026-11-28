@@ -77,11 +77,35 @@ fn the_codes_of_907_map_to_their_modes() {
 }
 
 #[test]
-fn unsampled_and_ambiguous_codes_stay_reported() {
-    for code in [0u8, 1, 3, 21, 22, 35, 200, 255] {
+fn unsampled_codes_stay_reported() {
+    for code in [0u8, 1, 21, 22, 35, 200, 255] {
         let (p, r) = skip!(with_code(code));
         assert_eq!(r.report.count(LossCategory::BlendModes), 1, "{code}");
         let (_, c) = comp(&p, &r, "C");
         assert_eq!(c.layers.iter().find(|l| l.name == "lighten").unwrap().blend_mode, BlendMode::Normal, "{code}");
+    }
+}
+
+/// Code 3 is Dissolve, or Dancing Dissolve when `ldta` byte 103 has bit 1 set (`dissolve_pair`,
+/// After Effects 26.5).
+#[test]
+fn code_3_is_dissolve_or_dancing_dissolve_by_the_flag() {
+    // Byte 103 holds flags: bit 0 is Preserve Transparency, bit 1 Dancing Dissolve (After Effects
+    // 2026 lab sample `pt_dissolve`: 2, 0, 3 and 1 for the four combinations).
+    for (flag, want) in [(0u8, BlendMode::Dissolve), (1, BlendMode::Dissolve), (2, BlendMode::DancingDissolve), (3, BlendMode::DancingDissolve)] {
+        let mut b = match crate::common::try_fixture(F906) {
+            Some(b) => b,
+            None => return,
+        };
+        let at = b.windows(4).position(|w| w == b"ldta").expect("ldta") + 8;
+        assert_eq!(b[at + 99], 11, "the top layer is Lighten");
+        b[at + 99] = 3;
+        b[at + 103] = flag;
+        let none = |_: &str| false;
+        let mut p = Project::default();
+        let r = import(&mut p, &b, &ImportOptions { allow_losses: true, ..ImportOptions::new(&none) }).expect("imports");
+        assert!(r.report.is_lossless(), "{flag}: {:?}", r.report.losses);
+        let (_, c) = comp(&p, &r, "C");
+        assert_eq!(c.layers.iter().find(|l| l.name == "lighten").unwrap().blend_mode, want, "{flag}");
     }
 }
