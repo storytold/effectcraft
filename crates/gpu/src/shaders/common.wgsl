@@ -242,6 +242,112 @@ fn powz(x: f32, y: f32) -> f32 {
     return pow(x, y);
 }
 
+const F32_MAX: f32 = 0x1.fffffep+127f;
+const LEVELS_DIRECT_LOG2: f32 = 127.9997;
+const LEVELS_OVERFLOW_LOG2: f32 = 129.0;
+
+struct LevelsValue {
+    value: f32,
+    beyond_f32: bool,
+}
+
+fn levels_gamma(t: f32, g: f32) -> f32 {
+    if (t >= 0.0) {
+        return powz(t, 1.0 / g);
+    }
+    return -powz(-t, 1.0 / g);
+}
+
+fn levels_scaled(mantissa: f32, exponent: i32) -> LevelsValue {
+    let m = frexp(mantissa);
+    let e = m.exp + exponent;
+    if (e > 128) {
+        return LevelsValue(sign(mantissa) * F32_MAX, true);
+    }
+    return LevelsValue(ldexp(m.fract, e), false);
+}
+
+fn levels_quotient(x: f32, d: f32) -> LevelsValue {
+    let a = frexp(x);
+    let b = frexp(d);
+    if (a.exp - b.exp <= 126) {
+        return LevelsValue(x / d, false);
+    }
+    return levels_scaled(a.fract / b.fract, a.exp - b.exp);
+}
+
+fn levels_product(x: f32, y: f32) -> LevelsValue {
+    let a = frexp(x);
+    let b = frexp(y);
+    if (a.exp + b.exp <= 126) {
+        return LevelsValue(x * y, false);
+    }
+    return levels_scaled(a.fract * b.fract, a.exp + b.exp);
+}
+
+fn levels_input(v: f32, ib: f32, iw: f32, clip_b: bool, clip_w: bool) -> LevelsValue {
+    var n = levels_quotient(v - ib, max(iw - ib, 1e-6));
+    if (clip_b && n.value < 0.0) {
+        n = LevelsValue(0.0, false);
+    }
+    if (clip_w && n.value > 1.0) {
+        n = LevelsValue(1.0, false);
+    }
+    return n;
+}
+
+fn levels_from_log2(direction: f32, out_log2: f32, ob: f32) -> f32 {
+    if (out_log2 >= LEVELS_OVERFLOW_LOG2) {
+        return direction * F32_MAX;
+    }
+    let quarter = exp2(out_log2 - 2.0);
+    if (quarter > F32_MAX * 0.25) {
+        return direction * F32_MAX;
+    }
+    return ob + direction * (quarter * 4.0);
+}
+
+fn levels_output(curve: f32, ob: f32, span: f32) -> f32 {
+    let p = levels_product(span, curve);
+    if (p.beyond_f32) {
+        return p.value;
+    }
+    return ob + p.value;
+}
+
+fn levels_level(v: f32, ib: f32, iw: f32, g: f32, ob: f32, ow: f32, clip_b: bool, clip_w: bool) -> f32 {
+    if (ow == ob) {
+        return ob;
+    }
+    let span = ow - ob;
+    let n = levels_input(v, ib, iw, clip_b, clip_w);
+    if (n.beyond_f32) {
+        let t_log2 = log2(abs(v - ib)) - log2(max(iw - ib, 1e-6));
+        return levels_from_log2(sign(n.value) * sign(span), t_log2 / g + log2(abs(span)), ob);
+    }
+    let t = n.value;
+    if (g == 1.0) {
+        return levels_output(t, ob, span);
+    }
+    if (abs(t) > 1.0) {
+        let curve_log2 = log2(abs(t)) / g;
+        if (curve_log2 >= LEVELS_DIRECT_LOG2) {
+            return levels_from_log2(sign(t) * sign(span), curve_log2 + log2(abs(span)), ob);
+        }
+    }
+    return levels_output(levels_gamma(t, g), ob, span);
+}
+
+fn levels_alpha(v: f32, ib: f32, iw: f32, g: f32, ob: f32, ow: f32, clip_b: bool, clip_w: bool) -> f32 {
+    if (ow != ob) {
+        let n = levels_input(v, ib, iw, clip_b, clip_w);
+        if (n.beyond_f32 || (abs(n.value) > 1.0 && log2(abs(n.value)) / g >= 128.0)) {
+            return select(0.0, 1.0, sign(n.value) * sign(ow - ob) > 0.0);
+        }
+    }
+    return clamp(levels_level(v, ib, iw, g, ob, ow, clip_b, clip_w), 0.0, 1.0);
+}
+
 // Rust's f32::round (half away from zero; WGSL's round() is half to even). Decided by comparing
 // `x` with `t ± 0.5` (exact for integer `t`) rather than subtracting: drivers may fuse a product
 // that feeds `x - t` into one fma (AMD does), skipping the product's rounding, so `5/6 · 3`,
