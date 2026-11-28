@@ -98,6 +98,7 @@ pub use doc_state::{CompSelection, EditorState, KeyClip, KeyMove, KeyRef, LinkCl
 pub use error::{EngineError, Result};
 pub use event::Event;
 pub use fonts::{FontRow, font_features, font_menu, font_preview, font_styles, text_families};
+pub use output_guard::OutputGuard;
 pub use services::{FsServices, Importer, PCRAFT_MAX_INPUT, Services, pcraft_too_large};
 pub use session::upgrade_effects;
 
@@ -282,6 +283,9 @@ pub struct Session {
     /// is, settings that guard what scripts may do can't change (see
     /// [`prefs::Scripting::same_permissions`]).
     pub script_calls: ScriptCalls,
+    /// Output guards built so far ([`Session::output_guard`]; a command checks all the files it
+    /// writes with one, #3328).
+    pub output_guards: std::sync::atomic::AtomicU64,
 }
 
 /// The count behind [`Session::running_for_script`]; only the engine changes it.
@@ -411,6 +415,7 @@ impl Default for Session {
             aux_footage: None,
             aux_needs: None,
             script_calls: ScriptCalls::default(),
+            output_guards: Default::default(),
         }
     }
 }

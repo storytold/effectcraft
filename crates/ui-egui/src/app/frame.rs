@@ -18,13 +18,31 @@ impl EffectcraftApp {
     /// through `control::handle`, answer `Done` immediately, retry `Retry` until its three-second deadline, hold
     /// input/job/screenshot replies until their event happens and finish job waiters. Retry timeouts and refused
     /// screenshots are answered as `{"ok": false, "error": ...}`; the receiver is kept for the next tick.
+    ///
+    /// A request its sender no longer waits for ([`ControlRequest::is_abandoned`]) is dropped
+    /// unrun. Once [`EffectcraftApp::control_budget`] is spent, the rest wait for the next tick
+    /// in their order, ahead of the retries and new requests (#3328: a backlog of slow requests
+    /// kept the window from painting until all had run).
     fn drain_control(&mut self, ctx: &egui::Context, now: f64) {
         let Some(rx) = self.control_rx.take() else { return };
-        let mut reqs: Vec<(ControlRequest, f64)> = std::mem::take(&mut self.deferred);
+        let mut reqs: Vec<(ControlRequest, Option<f64>)> = std::mem::take(&mut self.control_backlog);
+        reqs.extend(std::mem::take(&mut self.deferred).into_iter().map(|(req, deadline)| (req, Some(deadline))));
         while let Ok(req) = rx.try_recv() {
-            reqs.push((req, now + 3.0));
+            reqs.push((req, None));
         }
+        let started = web_time::Instant::now();
+        let mut ran = 0usize;
         for (req, deadline) in reqs {
+            if req.is_abandoned() {
+                continue;
+            }
+            if ran > 0 && started.elapsed() >= self.control_budget {
+                self.control_backlog.push((req, deadline));
+                continue;
+            }
+            ran += 1;
+            // (a request's three seconds of retries count from when it first ran)
+            let deadline = deadline.unwrap_or(now + 3.0);
             let reply = req.reply.clone();
             match control::handle(self, ctx, &req, now) {
                 control::Outcome::Done(v) => {
@@ -64,6 +82,9 @@ impl EffectcraftApp {
                     self.admit_screenshot(ctx, path, target, reply);
                 }
             }
+        }
+        if !self.control_backlog.is_empty() {
+            ctx.request_repaint();
         }
         self.control_rx = Some(rx);
         self.finish_job_waiters(ctx);
