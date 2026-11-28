@@ -798,6 +798,11 @@ fn run(cmd: &str, args: &Args, json_out: bool) -> Result<(), Failure> {
             emit(&with_saved(v, saved), json_out);
         }
         "render-frame" | "frame" => {
+            for (first, second) in [("--time", "--frame"), ("--max-side", "--scale")] {
+                if args.opt(first).is_some() && args.opt(second).is_some() {
+                    return usage_err(&format!("{first} and {second} cannot be used together"));
+                }
+            }
             let mut b = if args.opt("--template").is_some() {
                 let mut s = session(args)?;
                 template::prepare(&mut s, args)?;
@@ -1642,6 +1647,17 @@ mod tests {
 
     fn parse(args: &[&str]) -> Result<Args, String> {
         Args::parse(args.iter().map(|a| a.to_string()).collect())
+    }
+
+    #[test]
+    fn render_frame_rejects_conflicting_time_and_size_flags() {
+        for command in ["render-frame", "frame"] {
+            for (first, value, second, other) in [("--time", "0", "--frame", "1"), ("--max-side", "320", "--scale", "0.5")] {
+                let args = parse(&[command, "--project", "missing-render-frame-input.ecproj", first, value, second, other]).unwrap();
+                let expected = format!("{first} and {second} cannot be used together");
+                assert!(matches!(run(command, &args, false), Err(Failure::Usage(message)) if message == expected), "{command}: {expected}");
+            }
+        }
     }
 
     /// Unknown options are usage errors naming them, not ignored (#168).
