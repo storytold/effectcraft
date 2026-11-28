@@ -327,7 +327,7 @@ fn node_json(c: &Comp, l: &Layer, uid: u64) -> R {
     let node = *ch.last().ok_or("bad property")?;
     let parent_group: &PropGroup = if ch.len() >= 2 { ch[ch.len() - 2].as_group().ok_or("bad tree")? } else { &l.props };
     let top = if ch.len() == 1 { ae_order::ae_index(l, node.match_id()) } else { None };
-    let index = top.unwrap_or_else(|| parent_group.children.iter().position(|x| x.uid() == uid).map(|i| i + 1).unwrap_or(0));
+    let index = top.unwrap_or_else(|| matchnames::numbered(parent_group).iter().position(|x| x.uid() == uid).map(|i| i + 1).unwrap_or(0));
     let parent_uid = if ch.len() >= 2 { ch[ch.len() - 2].uid() } else { l.props.uid };
     let match_name = matchnames::node(&ch);
     let instance_parent = indexed_parade(parent_group) && ch.len() >= 2 || (ch.len() == 2 && ch[0].match_id() == "contents");
@@ -342,7 +342,7 @@ fn node_json(c: &Comp, l: &Layer, uid: u64) -> R {
             let instance = matches!(g.kind, GroupKind::Indexed | GroupKind::Effect { .. } | GroupKind::Mask { .. } | GroupKind::Tracker { .. });
             o["kind"] = json!("group");
             o["numProperties"] = json!(g.children.len());
-            o["children"] = json!(g.children.iter().map(Node::uid).collect::<Vec<_>>());
+            o["children"] = json!(matchnames::numbered(g).into_iter().map(Node::uid).collect::<Vec<_>>());
             o["propertyType"] = json!(if indexed_parade(g) { "INDEXED_GROUP" } else { "NAMED_GROUP" });
             o["enabled"] = json!(g.enabled);
             o["canSetEnabled"] = json!(instance);
@@ -493,7 +493,7 @@ fn child(s: &Session, a: &J) -> R {
         };
     }
     let found = match &key {
-        J::Number(n) => n.as_u64().and_then(|i| g.children.get((i as usize).checked_sub(1)?)),
+        J::Number(n) => n.as_u64().and_then(|i| matchnames::numbered(g).get((i as usize).checked_sub(1)?).copied()),
         J::String(k) => find_child(l, g, k, NESTED_CHILD_DEPTH),
         _ => None,
     };

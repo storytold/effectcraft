@@ -6,7 +6,7 @@
 //! ▸ match names). Properties without a documented equivalent keep our own match id
 //! (`perChar3d`, `ec.blur.bilateral`), which `property()` and `addProperty()` accept too.
 
-use effectcraft_project::{LayerSource, Node};
+use effectcraft_project::{LayerSource, Node, ParamUi, PropGroup};
 
 /// Match name of a layer (its root property group).
 pub fn layer(source: &LayerSource) -> &'static str {
@@ -535,8 +535,26 @@ const PARAM_NUMBERS: &[(&str, &str, usize)] = &[
     ("ec.color.huesaturation", "colorizeLightness", 10),
 ];
 
+/// Whether `n` is the hidden Source choice (Source / Masks / Effects & Masks) that sits beside a
+/// layer parameter of `g`. After Effects keeps that choice inside the layer parameter, so there
+/// it is not a parameter and takes no number.
+fn is_layer_source(g: &PropGroup, n: &Node) -> bool {
+    let Node::Prop(p) = n else { return false };
+    p.ui == ParamUi::Hidden && p.match_id.strip_suffix("Source").is_some_and(|id| g.props().any(|l| l.ui == ParamUi::Layer && l.match_id == id))
+}
+
+/// `g`'s children in the order scripts number them (`property(i)`, `propertyIndex`, `-NNNN`).
+/// That is the stored order, except that a layer parameter's hidden Source choice comes after
+/// everything else: counted where it is stored, it would move every later parameter one up from
+/// its After Effects number, and a script setting parameters by number would write to the wrong
+/// ones without an error (#1796).
+pub fn numbered(g: &PropGroup) -> Vec<&Node> {
+    let (sources, params): (Vec<&Node>, Vec<&Node>) = g.children.iter().partition(|n| is_layer_source(g, n));
+    params.into_iter().chain(sources).collect()
+}
+
 /// The `-NNNN` number of the param `id` at 0-based `pos` among `fx`'s `params`.
-fn param_number(fx: &str, params: &[Node], id: &str, pos: usize) -> usize {
+fn param_number(fx: &str, params: &[&Node], id: &str, pos: usize) -> usize {
     let listed = |p: &str| PARAM_NUMBERS.iter().find(|(f, q, _)| *f == fx && *q == p).map(|(_, _, n)| *n);
     if let Some(n) = listed(id) {
         return n;
@@ -570,8 +588,9 @@ pub fn node(chain: &[&Node]) -> String {
             let fx = parent.and_then(Node::as_group);
             match fx {
                 Some(g) => {
-                    let pos = g.children.iter().position(|c| c.uid() == last.uid()).unwrap_or(0);
-                    let i = param_number(&g.match_id, &g.children, id, pos);
+                    let params = numbered(g);
+                    let pos = params.iter().position(|c| c.uid() == last.uid()).unwrap_or(0);
+                    let i = param_number(&g.match_id, &params, id, pos);
                     format!("{}-{i:04}", effect(&g.match_id))
                 }
                 None => own(),

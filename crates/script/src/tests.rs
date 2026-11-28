@@ -1472,6 +1472,44 @@ fn script_key_lookup_fetches_only_that_key() {
 
 /// #815: a stroke's Dashes use After Effects' match names, and addProperty with them returns
 /// Dash 1 / Gap 1 / Offset or adds the Dash 2 / Gap 2 pair.
+/// #1796: Time Displacement's four After Effects parameters are 1–4 by number and by `-NNNN`
+/// match name. The hidden Source choice of its layer parameter is stored second; counted there
+/// it moved the three after it one up, so `property(2).setValue(…)` set the wrong parameter.
+#[test]
+fn script_layer_source_choice_does_not_renumber_effect_parameters() {
+    let mut s = session();
+    let o = ok(
+        &mut s,
+        "var c = app.project.items.addComp('TD', 100, 100, 1, 5, 25); var l = c.layers.addSolid([1,1,1], 'S', 100, 100, 1);\
+         var td = l.property('ADBE Effect Parade').addProperty('ADBE Time Displacement'), names = [], matches = [], indices = [];\
+         for (var i = 1; i <= td.numProperties; i++) { var p = td.property(i); names.push(p.name); matches.push(p.matchName); indices.push(p.propertyIndex); }\
+         td.property(2).setValue(1); td.property(3).setValue(100); td.property(4).setValue(0);\
+         var src = td.property('Time Displacement Layer Source');\
+         [names, matches, indices, td.property('ADBE Time Displacement-0002').name, td.property('maxDisplacementTime').value,\
+          td.property('timeResolution').value, td.property('stretchMap').value, src.value, src.propertyIndex]",
+    );
+    assert_eq!(
+        o.result,
+        json!([
+            ["Time Displacement Layer", "Max Displacement Time (sec)", "Time Resolution (fps)", "Stretch Map To Fit", "Time Displacement Layer Source"],
+            [
+                "ADBE Time Displacement-0001",
+                "ADBE Time Displacement-0002",
+                "ADBE Time Displacement-0003",
+                "ADBE Time Displacement-0004",
+                "ADBE Time Displacement-0005"
+            ],
+            [1, 2, 3, 4, 5],
+            "Max Displacement Time (sec)",
+            1,
+            100,
+            0,
+            3,
+            5
+        ])
+    );
+}
+
 #[test]
 fn script_stroke_dashes_use_after_effects_match_names() {
     let mut s = session();
