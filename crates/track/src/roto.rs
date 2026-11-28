@@ -120,12 +120,27 @@ fn fnv(h: &mut u64, bytes: &[u8]) {
     }
 }
 
+/// Frames a segmentation span may reach on each side of its base frame: the one limit of the
+/// stored span, the commands and the propagation chain, so a stroke a command accepts always
+/// takes effect.
+pub const MAX_SPAN_FRAMES: i64 = MAX_CHAIN;
+
 impl RotoData {
+    /// Read saved data. The span is kept around the base frame and within [`MAX_SPAN_FRAMES`]
+    /// of it on each side, whatever the file says.
     pub fn from_json(s: &str) -> RotoData {
         if s.trim().is_empty() {
             return RotoData::default();
         }
-        serde_json::from_str(s).unwrap_or_default()
+        let mut d: RotoData = serde_json::from_str(s).unwrap_or_default();
+        d.bound_span();
+        d
+    }
+    /// Keep the span around the base frame and within [`MAX_SPAN_FRAMES`] of it on each side.
+    pub fn bound_span(&mut self) {
+        let Some(base) = self.base else { return };
+        let [a, b] = self.span;
+        self.span = [a.min(base).max(base.saturating_sub(MAX_SPAN_FRAMES)), b.max(base).min(base.saturating_add(MAX_SPAN_FRAMES))];
     }
     pub fn to_json(&self) -> String {
         serde_json::to_string(self).unwrap_or_default()
@@ -181,6 +196,7 @@ impl RotoData {
             }
             None => {}
         }
+        self.bound_span();
         self.strokes.push(s);
     }
     /// Largest Refine Edge stroke radius (layer pixels).
