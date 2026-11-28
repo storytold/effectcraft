@@ -442,10 +442,13 @@ fn motion_tile(ctx: &EffectCtx, b: Buf) -> Buf {
             let v = (y as f64 + 0.5 - noff[1]) / s;
             let mut tx = (u - tc[0]) / tw + 0.5;
             let mut ty = (v - tc[1]) / th + 0.5;
+            // Phase offsets every other column (row, with Horizontal Phase Shift) by its
+            // fraction of a tile, against the direction of the axis; the centre tile's column
+            // stays put (After Effects 26.5). It does not accumulate column by column.
             if hshift {
-                tx += phase * ty.floor();
+                phase_shift(&mut tx, ty, phase);
             } else {
-                ty += phase * tx.floor();
+                phase_shift(&mut ty, tx, phase);
             }
             let (i, j) = (tx.floor(), ty.floor());
             let (mut fx, mut fy) = (tx - i, ty - j);
@@ -465,6 +468,14 @@ fn motion_tile(ctx: &EffectCtx, b: Buf) -> Buf {
         }
     });
     Buf { img: out, offset: noff, scale: s }
+}
+
+/// Motion Tile's Phase: shifts coordinate `t` by `-phase` (a fraction of a tile) where the tile
+/// index along the other axis, `other.floor()`, is odd.
+fn phase_shift(t: &mut f64, other: f64, phase: f64) {
+    if other.floor().rem_euclid(2.0) == 1.0 {
+        *t -= phase;
+    }
 }
 
 // ---- Color Emboss ----
@@ -809,6 +820,24 @@ mod tests {
         let img = ramp(10, 8);
         for (a, b) in same.img.data.iter().zip(img.data.iter()) {
             assert!((a[0] - b[0]).abs() < 1e-4);
+        }
+    }
+
+    #[test]
+    fn motion_tile_phase_shifts_every_other_column() {
+        // Rows of distinct values; tiles half the layer wide, so the centre column of tiles is
+        // x 2.5..7.5 and its neighbours are on either side. Phase 90 is a quarter of the 8 px
+        // tile height: both neighbours move down by 2 px, the centre column stays (After
+        // Effects 26.5). It used to grow column by column, moving the right neighbour up.
+        let mut img = Image::new(10, 8);
+        img.rows_mut().for_each(|(y, row)| row.iter_mut().for_each(|px| *px = [y as f32 / 8.0, 0.0, 0.0, 1.0]));
+        let out = run_at("ec.stylize.motiontile", &[("tileCenter", Value::Vec2([5.0, 4.0])), ("tileWidth", num(50.0)), ("phase", num(90.0))], img, 0.0);
+        for y in 0..8i64 {
+            let shifted = (y - 2).rem_euclid(8) as f32 / 8.0;
+            assert!((out.img.get(5, y)[0] - y as f32 / 8.0).abs() < 1e-5, "centre column, y={y}");
+            for x in [0, 9] {
+                assert!((out.img.get(x, y)[0] - shifted).abs() < 1e-5, "x={x}, y={y}: {}", out.img.get(x, y)[0]);
+            }
         }
     }
 
