@@ -367,7 +367,11 @@ fn probe_still_bytes(path: &str, bytes: &[u8], fmt: image::ImageFormat) -> Resul
             (w, h, alpha)
         }
     };
-    Ok(still_footage(path, w, h, fmt, has_alpha))
+    let mut f = still_footage(path, w, h, fmt, has_alpha);
+    if fmt == image::ImageFormat::OpenExr {
+        f.color_profile = crate::exr_channels::aces_profile(bytes);
+    }
+    Ok(f)
 }
 
 /// Whether an Exif orientation turns the picture a quarter turn (its width and height trade places).

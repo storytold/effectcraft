@@ -33,6 +33,21 @@ pub(crate) fn part_name(part: &PartInfo) -> Option<String> {
     part.name.clone().filter(|s| !s.is_empty())
 }
 
+/// The colour profile an OpenEXR file's `chromaticities` attribute names, when it is one of the
+/// ACES spaces: AP0 primaries are ACES2065-1, AP1 ACEScg, both with the ACES white (renders and
+/// deliveries from Nuke, Resolve, Maya and Houdini tag them so). Their values are linear, as
+/// those spaces are. `None` for every other file, so it keeps the default interpretation: no
+/// attribute (Rec. 709 primaries by the OpenEXR convention), other primaries, or a file whose
+/// header the single-part reader doesn't take (multi-part, tiled, deep).
+pub(crate) fn aces_profile(bytes: &[u8]) -> Option<effectcraft_project::ColorSpace> {
+    use effectcraft_project::ColorSpace;
+    let decoder = craft_exr::stream::Decoder::new(std::io::Cursor::new(bytes), &|| false).ok()?;
+    let c = decoder.info().chromaticities?;
+    // The file stores f32; allow for its rounding of the published values.
+    let names = |space: ColorSpace| space.exr_chromaticities().as_flattened().iter().zip(&c).all(|(a, b)| (a - b).abs() < 1e-3);
+    [ColorSpace::Aces2065, ColorSpace::AcesCg].into_iter().find(|s| names(*s))
+}
+
 /// Why an OpenEXR file's pixels can't be decoded when its headers name a compression this build
 /// can't decompress (HTJ2K, OpenEXR 3.4's High-Throughput JPEG 2000): the decoders only said
 /// "no non-deep rgb channels" or showed a transparent frame (#482). `None` for other files.

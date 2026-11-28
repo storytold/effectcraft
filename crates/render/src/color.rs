@@ -66,16 +66,22 @@ impl Pipe {
 
     /// The space Interpret As Linear Light encodes footage `f` in: its colour profile, else sRGB
     /// (managed; the working space converts from there) or the Working Gamma's curve (unmanaged).
+    /// Unmanaged, a linear profile (ACES) is ignored too: with no working space to convert from
+    /// it, its curve would leave linear values in the gamma-encoded composition.
     pub fn linear_footage_space(&self, f: &Footage) -> ColorSpace {
-        f.color_profile.unwrap_or(if self.space.is_some() { ColorSpace::Srgb } else { self.curve() })
+        let profile = f.color_profile.filter(|c| self.space.is_some() || !c.is_linear());
+        profile.unwrap_or(if self.space.is_some() { ColorSpace::Srgb } else { self.curve() })
     }
 
     /// How float footage `f` (OpenEXR, float TIFF; linear light) is decoded: as stored when
     /// Interpret As Linear Light encodes it afterwards (once, with
-    /// [`Pipe::linear_footage_space`]), else with the Working Gamma's curve when unmanaged and
-    /// the sRGB curve otherwise (the working space converts from there).
+    /// [`Pipe::linear_footage_space`]) or when a managed project converts it from a linear colour
+    /// profile (ACEScg, ACES2065-1: the file's values already are that space's), else with the
+    /// Working Gamma's curve when unmanaged and the sRGB curve otherwise (the working space
+    /// converts from there).
     pub fn float_curve(&self, f: &Footage) -> crate::FloatCurve {
-        if f.linear_light_applies() { crate::FloatCurve::Linear } else { self.float_encoding() }
+        let linear_profile = self.space.is_some() && f.color_profile.is_some_and(|c| c.is_linear());
+        if f.linear_light_applies() || linear_profile { crate::FloatCurve::Linear } else { self.float_encoding() }
     }
 
     /// The curve float footage is encoded with when nothing interprets it afterwards: the
@@ -399,6 +405,53 @@ mod tests {
                 let bits = |i: &Image| i.data.iter().map(|p| p.map(f32::to_bits)).collect::<Vec<_>>();
                 assert_eq!(bits(&got), bits(&want), "{depth:?} conversion {}", c.is_some());
             }
+        }
+    }
+
+    /// Float footage in a linear colour profile (an ACES EXR) reaches a managed project as its
+    /// linear values converted from that profile, Interpret As Linear Light on or off: the
+    /// float decode must not sRGB-encode values the profile then reads as linear. Unmanaged
+    /// projects ignore the profile and keep encoding float footage as before.
+    #[test]
+    fn linear_profile_float_footage_is_converted_from_its_linear_values() {
+        let file = [0.8f32, 0.3, 0.1];
+        let decode = |curve: crate::FloatCurve, v: f32| match curve {
+            crate::FloatCurve::Srgb => ColorSpace::Srgb.encode(v),
+            crate::FloatCurve::Gamma24 => v.powf(1.0 / 2.4),
+            crate::FloatCurve::Linear => v,
+        };
+        for ws in [ColorSpace::Aces2065, ColorSpace::AcesCg, ColorSpace::Srgb] {
+            let pipe = Pipe::of(&ProjectSettings { working_space: Some(ws), ..Default::default() });
+            for profile in [ColorSpace::Aces2065, ColorSpace::AcesCg] {
+                for linear_light in [false, true] {
+                    let f = Footage { color_profile: Some(profile), linear_light, ..Default::default() };
+                    let mut got = Image::new(1, 1);
+                    let c = file.map(|v| decode(pipe.float_curve(&f), v));
+                    got.data[0] = [c[0], c[1], c[2], 1.0];
+                    if linear_light {
+                        got = crate::frames::interpret_pixels(&got, &f, pipe.linear_footage_space(&f));
+                    }
+                    if let Some(m) = pipe.media_in(&f) {
+                        convert(&mut got, &m);
+                    }
+                    let mut want = Image::new(1, 1);
+                    want.data[0] = [file[0], file[1], file[2], 1.0];
+                    if let Some(m) = Conversion::new(profile, true, ws, pipe.linear) {
+                        convert(&mut want, &m);
+                    }
+                    for (g, w) in got.data[0].iter().zip(&want.data[0]) {
+                        assert!((g - w).abs() < 1e-4, "{profile:?} in {ws:?}, linear light {linear_light}: {:?} vs {:?}", got.data[0], want.data[0]);
+                    }
+                }
+            }
+        }
+        // No working space: an ACES profile changes nothing, Interpret As Linear Light on or off.
+        let unmanaged = Pipe::of(&ProjectSettings::default());
+        for linear_light in [false, true] {
+            let aces = Footage { color_profile: Some(ColorSpace::Aces2065), linear_light, ..Default::default() };
+            let plain = Footage { linear_light, ..Default::default() };
+            assert_eq!(unmanaged.float_curve(&aces), unmanaged.float_curve(&plain), "linear light {linear_light}");
+            assert_eq!(unmanaged.linear_footage_space(&aces), unmanaged.linear_footage_space(&plain), "linear light {linear_light}");
         }
     }
 
