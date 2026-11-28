@@ -175,7 +175,8 @@ label is the chip's text), `viewer.cryptoPick.error` (the chip when it shows an 
 `viewer.cryptoSelect` (the Selection tool picking Cryptomatte IDs over the layer while its Cryptomatte
 effect is selected in Effect Controls, no eyedropper armed; label: the Selection's name) and
 `viewer.regionOfInterest`; the Graph Editor adds `timeline.graph.transformBox[.<i>]`,
-`timeline.graph.snap` and `timeline.graph.reference`. Use `ui.elements` to see what is on screen.
+`timeline.graph.snap`, `timeline.graph.reference` and `timeline.graph.betweenFrames` (Allow
+Keyframes Between Frames). Use `ui.elements` to see what is on screen.
 
 Viewer state that agents drive headless too: `view.snapping`, `view.snappingOptions
 {edgesExtended?, collapsedFeatures?, toggle?}` (the Tools bar's Snapping options,
@@ -194,7 +195,8 @@ step; `ui.set {viewer: {res}}` sets the active comp's, and `ui.inspect` reports 
 `shape.toolOptions` (the Tools bar's Tool Creates Shape / Mask and Fill and Stroke Options),
 `mask.insertVertex`, `mask.convertVertex`, `mask.deleteVertices`, `path.freeTransform` (masks and
 shape paths by uid), `keys.setSpatialTangents` (motion-path handles) and `keys.transform` (Graph
-Editor transform box, timeline Alt-drag scaling).
+Editor key drags and transform box, timeline Alt-drag scaling; moves go by whole frames and scales
+land on frames unless `betweenFrames` is true).
 
 Camera tools: the Tools bar's Orbit, Pan and Dolly slots hold After Effects' variants
 (`tools.Orbit|OrbitScene|OrbitTarget`, `tools.PanCamera|PanTarget`,

@@ -31,6 +31,7 @@ mod key_metadata_order;
 mod key_time;
 mod keyframe_text;
 mod keylight;
+mod keys_between_frames;
 mod legacy_analysis_keys;
 mod limits;
 mod lottie;
