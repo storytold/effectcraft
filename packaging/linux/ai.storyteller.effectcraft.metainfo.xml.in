@@ -7,6 +7,7 @@
   <project_license>MIT OR Apache-2.0</project_license>
   <name>EffectCraft</name>
   <summary>Motion graphics and visual effects compositor</summary>
+  <summary xml:lang="ru">Композитинг моушн-графики и визуальных эффектов</summary>
   <developer id="ai.storyteller">
     <name>Learning Machines LLC</name>
   </developer>
@@ -15,6 +16,12 @@
       EffectCraft is an open-source motion graphics and visual effects compositor: layers with
       keyframes and a graph editor, masks and shapes, text animators, expressions, 3D cameras and
       lights, over 300 effects and a render queue, with GPU compositing.
+    </p>
+    <p xml:lang="ru">
+      EffectCraft — открытая программа композитинга моушн-графики и визуальных эффектов:
+      слои с ключевыми кадрами и редактор графиков, маски и фигуры, текстовые аниматоры,
+      выражения, 3D-камеры и источники света, более 300 эффектов и очередь рендеринга,
+      композитинг на GPU.
     </p>
   </description>
   <launchable type="desktop-id">ai.storyteller.effectcraft.desktop</launchable>
@@ -31,13 +38,18 @@
   </categories>
   <keywords>
     <keyword>photo</keyword>
+    <keyword xml:lang="ru">фото</keyword>
     <keyword>image editor</keyword>
+    <keyword xml:lang="ru">редактор изображений</keyword>
     <keyword>psd</keyword>
+    <keyword xml:lang="ru">psd</keyword>
     <keyword>layers</keyword>
+    <keyword xml:lang="ru">слои</keyword>
   </keywords>
   <screenshots>
     <screenshot type="default">
       <caption>Demo composition with text layers, timeline and properties</caption>
+      <caption xml:lang="ru">Демонстрационная композиция с текстовыми слоями, шкалой времени и свойствами</caption>
       <image type="source">https://raw.githubusercontent.com/storytold/effectcraft/05955c08b4fd025f1a09882df72e6dbff1a8148a/docs/images/effectcraft-hero.png</image>
     </screenshot>
   </screenshots>

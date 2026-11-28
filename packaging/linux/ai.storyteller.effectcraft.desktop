@@ -1,8 +1,11 @@
 [Desktop Entry]
 Type=Application
 Name=EffectCraft
+Name[ru]=EffectCraft
 GenericName=Motion Graphics Editor
+GenericName[ru]=Редактор моушн-графики
 Comment=Motion graphics and visual effects compositor
+Comment[ru]=Композитинг моушн-графики и визуальных эффектов
 Exec=effectcraft %F
 TryExec=effectcraft
 Icon=ai.storyteller.effectcraft
@@ -11,3 +14,4 @@ StartupNotify=true
 StartupWMClass=ai.storyteller.effectcraft
 Categories=AudioVideo;Video;Graphics;2DGraphics;
 Keywords=motion;graphics;animation;compositor;effects;keyframe;vfx;
+Keywords[ru]=моушн-графика;моушн-дизайн;графика;анимация;композитинг;эффекты;ключевой кадр;vfx;
