@@ -40,8 +40,22 @@ fn demo(s: &mut Session, _: &Value) -> Result<Value> {
     Ok(json!({"comp": s.state.active_comp.map(|c| c.0)}))
 }
 
+/// Let a project-file auto-save that is still writing in the background land before the project
+/// file is read or written (Open, Revert, Save): otherwise the read could see the older file and
+/// an older snapshot could overwrite a newer save. A copy write needs no wait, since it never
+/// touches the project file. If that write failed, collecting it here removes the error from the
+/// auto-save, so it is shown now: the project stays unsaved and the user should know why.
+pub(crate) fn wait_for_project_save(s: &mut Session) {
+    if s.autosave.pending.as_ref().is_some_and(|w| w.saves_project.is_some())
+        && let Err(e) = s.autosave_wait()
+    {
+        s.toast(e.to_string());
+    }
+}
+
 pub(crate) fn open(s: &mut Session, p: &Value) -> Result<Value> {
     let path = str_p(p, "path").ok_or_else(|| bad("file.open", "missing `path`"))?;
+    wait_for_project_save(s);
     let bytes = s.services.read_file(path).map_err(|e| EngineError::Other(format!("cannot read {path}: {e}")))?;
     let text = String::from_utf8(bytes).map_err(|_| EngineError::Other("not a text project file".into()))?;
     // XML copies (File ▸ Save a Copy As XML…) open like the JSON project.
@@ -87,12 +101,21 @@ pub(crate) fn open(s: &mut Session, p: &Value) -> Result<Value> {
 /// project opened from an XML copy saves as XML again). Fails, writing nothing, when the project
 /// wouldn't read back.
 pub(crate) fn file_text(s: &Session, path: &str) -> Result<String> {
-    let compact = s.prefs.project.compact_project_files && !crate::xml_project::is_xml_path(path);
-    let json = s.project.to_file_json_with_view(&s.saved_view(), compact)?;
+    file_text_of(&s.project, &s.saved_view(), s.prefs.project.compact_project_files, path)
+}
+
+/// [`file_text`] from a snapshot, so a background save can serialise without the session.
+pub(crate) fn file_text_of(project: &effectcraft_project::Project, view: &effectcraft_project::SavedView, compact_pref: bool, path: &str) -> Result<String> {
+    let compact = compact_pref && !crate::xml_project::is_xml_path(path);
+    let json = project.to_file_json_with_view(view, compact)?;
     if crate::xml_project::is_xml_path(path) { crate::xml_project::to_xml(&json).map_err(EngineError::Other) } else { Ok(json) }
 }
 
 fn save_to(s: &mut Session, path: &str) -> Result<Value> {
+    // A project-file auto-save still writing in the background holds an older snapshot: let it land
+    // first, so it cannot overwrite this save afterwards. Its own failure is reported by the
+    // auto-save, not here.
+    wait_for_project_save(s);
     let json = file_text(s, path)?;
     s.services.write_file(path, json.as_bytes()).map_err(|e| EngineError::Other(format!("cannot write {path}: {e}")))?;
     s.path = Some(path.to_string());

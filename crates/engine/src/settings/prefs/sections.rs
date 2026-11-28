@@ -77,7 +77,8 @@ page!(AutoSave {
     enabled: bool = true,
     interval_minutes: u32 = 20,
     max_versions: u32 = 5,
-    /// `nextToProject` (an "EffectCraft Auto-Save" folder beside the project) or `custom`.
+    /// `nextToProject` (an "EffectCraft Auto-Save" folder beside the project), `custom`, or
+    /// `projectFile` (the timed auto-save writes the open project file itself, like File ▸ Save).
     location: String = "nextToProject".into(),
     folder: String = String::new(),
     save_on_render_start: bool = false,
