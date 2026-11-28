@@ -177,6 +177,7 @@ pub fn pages() -> Vec<Page> {
                 s("previews.adaptivePlayback", "Lower Resolution When Playback Can't Keep Up", B, true),
                 s("previews.showInternalWireframes", "Show Internal Wireframes", B, true),
                 s("previews.cacheFramesWhenIdle", "Cache Frames When Idle", B, true),
+                s("previews.onlyCacheActiveComp", "Only Cache Active Composition", B, true),
                 s("previews.fastPreviews", "Fast Previews (Draft 3D, Faster Effects)", B, true),
                 s("previews.zoomQuality", "Viewer Zoom Quality", Kind::Choice(&[("Faster", "faster"), ("More Accurate", "moreAccurate")]), true),
                 s("previews.displayProfile", "Display Color Space", Kind::Choice(&[("sRGB", "srgb"), ("Display P3", "p3")]), true),

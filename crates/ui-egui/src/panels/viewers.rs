@@ -111,11 +111,20 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, id: u32, rect: Rect) {
             // Render at the size it is drawn (eighths, so resizing reuses frames), at most 100%.
             let scale = ((fit * ctx.pixels_per_point()) as f64 * 8.0).ceil().clamp(1.0, 8.0) / 8.0;
             let frame = c.frame_rate.frame_at(app.session.time_of(cid));
-            app.request_frame(cid, frame, scale);
             let key = app.frame_key(cid, frame, scale);
+            // A passive viewer keeps the frame it already shows: asking again every pass would
+            // render it again as soon as the cache evicts it, in the background, and slow the
+            // active comp's preview (#4185). While the active comp plays, an inactive comp's
+            // viewer waits for the play to end (Only Cache Active Composition).
+            let dc = effectcraft_engine::viewer::DisplayColor::of(&app.session);
+            let dkey = display_hash(&super::viewer_tools::display_key(app, dc.is_some()));
+            let same_display = ctx.data(|d| d.get_temp::<u64>(egui::Id::unique(("passive-viewer-display", id)))) == Some(dkey);
+            let shown = app.passive_tex.get(&id).is_some_and(|(k, _)| *k == key) && same_display;
+            let playing_elsewhere = app.ui.only_cache_active_comp && app.playback.playing && app.session.active_comp_id() != Some(cid);
+            if !shown && !playing_elsewhere {
+                app.request_frame(cid, frame, scale);
+            }
             if let Some((key, img)) = app.frames.get_for_viewer(&key, app.passive_tex.get(&id).map(|(k, _)| k)) {
-                let dc = effectcraft_engine::viewer::DisplayColor::of(&app.session);
-                let dkey = display_hash(&super::viewer_tools::display_key(app, dc.is_some()));
                 set_texture(app, &ctx, id, key, img, dc, dkey);
             }
             match app.passive_tex.get(&id).filter(|(k, _)| k.comp == cid.0).and_then(|(_, tex)| Some((tex.id()?, tex.uv()))) {
@@ -357,4 +366,73 @@ pub fn on_close(app: &mut EffectcraftApp, p: PanelKind) {
 pub fn title(app: &EffectcraftApp, id: u32) -> Option<String> {
     let c = comp_of(app, id)?;
     Some(format!("{} {}", crate::i18n::command_label("window.panel", "Composition"), app.session.project.item(c)?.name))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn comp(s: &mut effectcraft_engine::Session, name: &str, color: &str) -> ItemId {
+        let id = ItemId(s.execute("comp.new", json!({"name": name, "width": 64, "height": 36, "duration": 2})).unwrap()["comp"].as_u64().unwrap());
+        s.execute("layer.newSolid", json!({"name": "Color", "color": color, "width": 64, "height": 36})).unwrap();
+        id
+    }
+
+    fn draw(app: &mut EffectcraftApp, ctx: &egui::Context, id: u32) {
+        let input = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(256.0, 256.0))), ..Default::default() };
+        let mut output = ctx.run_ui(input, |ui| show(app, ui, id, egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(128.0, 256.0))));
+        output.textures_delta.clear();
+    }
+
+    /// A passive viewer keeps the frame it shows: it is not rendered again every pass once the
+    /// cache drops it, and it waits while the active comp plays (Only Cache Active Composition,
+    /// #4185). Turning the setting off lets it render again during a play.
+    #[test]
+    fn a_passive_viewer_does_not_render_the_frame_it_already_shows() {
+        let mut s = effectcraft_engine::Session::default();
+        let a = comp(&mut s, "A", "#ff0000");
+        let b = comp(&mut s, "B", "#0000ff");
+        s.open_comp(b);
+        let mut app = EffectcraftApp::new(s);
+        app.ui.viewers.insert(1, Some(a.0));
+        let ctx = egui::Context::default();
+        for _ in 0..500 {
+            draw(&mut app, &ctx, 1);
+            if app.passive_tex.contains_key(&1) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let key = app.passive_tex.get(&1).expect("the passive viewer rendered its frame").0;
+        // The frame leaves the cache: the viewer still shows it, and does not render it again.
+        app.frames.clear();
+        for _ in 0..3 {
+            draw(&mut app, &ctx, 1);
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(!app.frames.is_cached(&key), "a shown frame is not rendered again in the background");
+        // Playing the active comp: a passive viewer on another comp waits.
+        app.playback.playing = true;
+        let later = key.frame + 5;
+        let tick = app.session.project.comp(a).unwrap().frame_rate.tick_of(later);
+        app.session.set_time_of(a, tick);
+        for _ in 0..3 {
+            draw(&mut app, &ctx, 1);
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let later_key = FrameKey { frame: later, ..key };
+        assert!(!app.frames.is_cached(&later_key), "a passive viewer does not render while another comp plays");
+        // Off, it renders again during the play.
+        app.set_pref("previews.onlyCacheActiveComp", json!(false)).unwrap();
+        app.apply_prefs(&ctx);
+        for _ in 0..500 {
+            draw(&mut app, &ctx, 1);
+            if app.frames.is_cached(&later_key) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(app.frames.is_cached(&later_key), "the setting off lets the passive viewer render again");
+    }
 }

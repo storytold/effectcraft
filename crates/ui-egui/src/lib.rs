@@ -384,6 +384,8 @@ pub struct EffectcraftApp {
     synthetic_in_flight_events: Vec<egui::Event>,
     /// The viewer scale the last UI pass drew at: playback prefetches without a viewer pass.
     last_viewer_scale: Option<f64>,
+    /// The active composition the frame cache was last focused on (`Frames::focus_comp`).
+    last_active_comp: Option<ItemId>,
     pub(crate) control_rx: Option<Receiver<ControlRequest>>,
     pub(crate) deferred: Vec<(ControlRequest, f64)>,
     /// Requests a tick left to the next one when it ran out of [`EffectcraftApp::control_budget`],

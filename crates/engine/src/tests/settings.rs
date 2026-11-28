@@ -140,6 +140,26 @@ fn ui_scale_is_a_percentage_from_75_to_200() {
     assert_eq!(Prefs::from_json(r#"{"version": 2, "appearance": {"theme": "light"}}"#).appearance.ui_scale, 100);
 }
 
+/// Settings ▸ Previews ▸ Only Cache Active Composition (#4185): on by default, listed live in the
+/// Previews page, and set/get round-trip.
+#[test]
+fn only_cache_active_comp_defaults_on_and_roundtrips() {
+    let p = Prefs::default();
+    assert!(p.previews.only_cache_active_comp);
+    assert_eq!(p.get("previews.onlyCacheActiveComp"), Some(json!(true)));
+    let page = crate::prefs::pages().into_iter().find(|pg| pg.id == "previews").unwrap();
+    let field =
+        crate::prefs::Item::Setting { key: "previews.onlyCacheActiveComp", label: "Only Cache Active Composition", kind: crate::prefs::Kind::Bool, live: true };
+    assert!(page.items.contains(&field), "Settings ▸ Previews offers it");
+    // Older settings files without it get the default.
+    assert!(Prefs::from_json(r#"{"version": 6, "previews": {"cacheFramesWhenIdle": true}}"#).previews.only_cache_active_comp);
+    let mut s = Session::default();
+    assert_eq!(s.execute("prefs.get", json!({"key": "previews.onlyCacheActiveComp"})).unwrap(), json!(true));
+    s.execute("prefs.set", json!({"key": "previews.onlyCacheActiveComp", "value": false})).unwrap();
+    assert!(!s.prefs.previews.only_cache_active_comp);
+    assert_eq!(s.execute("prefs.get", json!({"key": "previews.onlyCacheActiveComp"})).unwrap(), json!(false));
+}
+
 /// Settings ▸ Appearance: new installs stay Dark (Sync with System is opt-in), and settings saved
 /// with a single theme load as a fixed mode showing that theme.
 #[test]

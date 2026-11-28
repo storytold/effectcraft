@@ -115,7 +115,9 @@ impl EffectcraftApp {
         // keep up (#2473).
         let lead = if video { self.sound_frame(fr, wa, wb, plan.map_or(1, |p| p.step)).unwrap_or(cur) } else { cur };
         let ahead = self.prefetch_ahead(ctx, now);
-        let queued = self.frames.inflight();
+        // Other comps' frames are called off while only the active comp caches; one still
+        // finishing must not take this preview's prefetch slots.
+        let queued = if self.ui.only_cache_active_comp { self.frames.inflight_for(cid) } else { self.frames.inflight() };
         let series = self.frame_series(cid, scale);
         // The preview's position orders prefetch and eviction (#595).
         let playhead = plan.filter(|p| p.video).map(|p| frames::Playhead { series, cur: lead, start: p.start, end: p.end, step: p.step, looping: p.looping });
@@ -631,7 +633,8 @@ impl EffectcraftApp {
         let fit = self.frames_that_fit(comp, scale).min(n);
         // One thread each (`Frames::request_background`), so every frame thread takes one.
         let slots = self.frames_parallelism().max(1);
-        let mut queued = self.frames.inflight();
+        let cid = ItemId(series.comp);
+        let mut queued = if self.ui.only_cache_active_comp { self.frames.inflight_for(cid) } else { self.frames.inflight() };
         let mut pending = false;
         for k in 0..fit {
             let f = wa + (cur - wa + k).rem_euclid(n);

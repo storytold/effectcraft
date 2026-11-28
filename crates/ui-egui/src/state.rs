@@ -805,6 +805,9 @@ pub struct UiState {
     pub align_to_selection: bool,
     /// Composition ▸ Preview ▸ Cache Frames When Idle.
     pub cache_when_idle: bool,
+    /// Composition ▸ Preview ▸ Only Cache Active Composition: only the active comp's frames
+    /// cache in the background; switching tabs keeps what is already cached.
+    pub only_cache_active_comp: bool,
     /// Tracker panel ▸ Motion Source chosen without a tracker yet (layer id).
     #[serde(default)]
     pub tracker_source: Option<u64>,
@@ -884,6 +887,7 @@ impl Default for UiState {
             home_templates: false,
             align_to_selection: false,
             cache_when_idle: true,
+            only_cache_active_comp: true,
             tracker_source: None,
             layer_panel: None,
             layer_view: None,

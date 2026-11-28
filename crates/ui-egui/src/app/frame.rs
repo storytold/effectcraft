@@ -197,6 +197,24 @@ impl EffectcraftApp {
         self.close_path(ctx);
     }
 
+    /// Follow a composition tab switch: the new comp's frames come first in the cache, and a
+    /// preview of the old one stops (its plan and range belong to it, #4185).
+    fn sync_active_comp(&mut self) {
+        let active = self.session.active_comp_id();
+        if active == self.last_active_comp {
+            return;
+        }
+        if self.playback.playing && self.last_active_comp.is_some() {
+            // Stop without `stop`'s move of the current time: that would apply the old preview's
+            // start to the new comp.
+            let plan = self.playback.plan.take();
+            self.stop();
+            self.playback.plan = plan;
+        }
+        self.last_active_comp = active;
+        self.frames.focus_comp(active);
+    }
+
     /// The app's only non-paint entry: one tick of background work.
     ///
     /// This runs for every eframe logic callback, including the logic-only ticks of a hidden
@@ -312,6 +330,7 @@ impl EffectcraftApp {
         self.tick_workspace_autosave(ctx);
         let now = self.now;
         prefs_live::tick(self, ctx, now);
+        self.sync_active_comp();
         // Playback advances without a paint (its frames and the audio clock are background work).
         // Idle prefetch keeps its old condition: it only runs once a viewer has drawn.
         if (self.playback.playing || self.last_viewer_scale.is_some())
@@ -777,6 +796,41 @@ impl EffectcraftApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A composition tab switch hands the frame cache to the new comp: the old comp's queued
+    /// background frames are dropped, and a preview of it stops (#4185).
+    #[test]
+    fn switching_comps_moves_the_frame_cache_and_stops_the_old_preview() {
+        struct Idle;
+        impl crate::frames::RemoteFrames for Idle {
+            fn slots(&self) -> usize {
+                0
+            }
+            fn start(&self, _: crate::frames::RemoteJob, _: crate::frames::RemoteDone) {}
+        }
+        let mut s = effectcraft_engine::Session::default();
+        s.execute("comp.new", json!({"name": "A", "width": 32, "height": 18, "duration": 1})).unwrap();
+        let a = s.active_comp_id().unwrap();
+        s.execute("comp.new", json!({"name": "B", "width": 32, "height": 18, "duration": 1})).unwrap();
+        let b = s.active_comp_id().unwrap();
+        let mut app = EffectcraftApp::new(s);
+        // No renderer: the queued frames stay in the queue (the browser's remote has no slot).
+        app.frames.set_remote(Some(std::sync::Arc::new(Idle)));
+        app.sync_active_comp();
+        assert_eq!(app.last_active_comp, Some(b));
+        let opts = app.frame_opts(b, 1.0);
+        app.frames.request_background(&app.render_source(), app.frame_key(b, 0, 1.0), b, effectcraft_engine::time::Tick::ZERO, opts);
+        assert_eq!(app.frames.inflight_for(b), 1);
+        app.session.open_comp(a);
+        app.sync_active_comp();
+        assert_eq!(app.last_active_comp, Some(a));
+        assert_eq!(app.frames.inflight_for(b), 0, "the inactive comp's queued frames are dropped");
+        // A preview of A stops when the user switches to B.
+        app.playback.playing = true;
+        app.session.open_comp(b);
+        app.sync_active_comp();
+        assert!(!app.playback.playing, "switching comps stops the preview");
+    }
 
     #[test]
     fn dismissing_a_status_acknowledges_its_queued_error_behind_another() {
