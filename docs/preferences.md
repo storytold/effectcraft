@@ -318,6 +318,11 @@ from?, newName?}`, `shortcuts.export {preset?, path?}`, `shortcuts.import {path?
   Untitled projects go to the custom folder, or to `EffectCraft Auto-Save` in the config directory.
 - Every project and auto-save write is atomic: a temporary file is written and flushed, then
   renamed over the target, so a crash mid-write leaves the previous file intact.
+- The desktop app watches the open project file (1 s while the window is in front, 5 s otherwise).
+  A save by another process reloads the project into the running session once it has no unsaved
+  changes or active render; otherwise the status line asks for File ▸ Revert. Auto-save keeps
+  writing its recovery copies while such a change is pending: they go to their own files, so a
+  crash still has the local work and the external edit is never overwritten.
 - While the app runs, `session.lock` in the config directory records the open project and its
   latest auto-save. A clean quit removes it. If it is still there at the next launch, the app
   offers to open the latest auto-save (Settings ▸ Startup & Repair can turn this off).

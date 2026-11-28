@@ -20,6 +20,7 @@ mod interchange;
 pub mod menus;
 mod output_guard;
 pub mod preview;
+pub mod project_reload;
 pub mod render_queue;
 pub mod replay;
 pub mod scriptui;
@@ -119,6 +120,12 @@ pub struct Session {
     /// snapshot, so undoing back to the saved state clears the modified mark.
     pub saved_project: Arc<Project>,
     pub path: Option<String>,
+    /// Size + mtime of `path` as last opened/saved by this session. The project watcher uses it
+    /// to tell its own writes from an external edit.
+    pub project_stamp: Option<(u64, u128)>,
+    /// A save whose post-write check failed: the first observation of this path must be reported
+    /// as an external change, never adopted as the baseline.
+    pub project_stamp_unverified: bool,
     pub state: EditorState,
     pub services: Arc<dyn Services>,
     pub footage: Arc<dyn FootageSource>,
@@ -342,6 +349,8 @@ impl Default for Session {
             ime_revision: commands::text_edit::next_ime_revision().unwrap_or(u64::MAX),
             saved_revision: 0,
             path: None,
+            project_stamp: None,
+            project_stamp_unverified: false,
             state: EditorState { snapping: true, view_layout: 1, ..Default::default() },
             services: Arc::new(FsServices),
             footage: Arc::new(NoFootage),

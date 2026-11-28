@@ -42,7 +42,24 @@ fn demo(s: &mut Session, _: &Value) -> Result<Value> {
 
 pub(crate) fn open(s: &mut Session, p: &Value) -> Result<Value> {
     let path = str_p(p, "path").ok_or_else(|| bad("file.open", "missing `path`"))?;
-    let bytes = s.services.read_file(path).map_err(|e| EngineError::Other(format!("cannot read {path}: {e}")))?;
+    // Read the bytes and their stamp as one observation. If another process writes the project
+    // while we read, retry instead of recording that later stamp as the identity of the bytes
+    // we loaded — otherwise the watcher would miss the external edit.
+    let (bytes, stamp) = {
+        let mut attempts = 0;
+        loop {
+            let before = s.services.stamp(path);
+            let bytes = s.services.read_file(path).map_err(|e| EngineError::Other(format!("cannot read {path}: {e}")))?;
+            let after = s.services.stamp(path);
+            if before == after {
+                break (bytes, after);
+            }
+            attempts += 1;
+            if attempts == 3 {
+                return Err(EngineError::Other(format!("{path} changed while opening; try again")));
+            }
+        }
+    };
     let text = String::from_utf8(bytes).map_err(|_| EngineError::Other("not a text project file".into()))?;
     // XML copies (File ▸ Save a Copy As XML…) open like the JSON project.
     let text = if crate::xml_project::is_xml(&text) { crate::xml_project::from_xml(&text).map_err(EngineError::Other)? } else { text };
@@ -53,6 +70,8 @@ pub(crate) fn open(s: &mut Session, p: &Value) -> Result<Value> {
     // relative to the project (#652).
     let refused = crate::doc_path::resolve_footage(&mut proj, Some(path));
     s.replace_project(proj, Some(path.to_string()));
+    // The stamp belongs to the bytes just read, not to whatever the file holds now.
+    s.project_stamp = stamp;
     s.stored_paths.add(&s.project, Some(path));
     s.restore_view(&effectcraft_project::saved_view(&text));
     s.note_project_path(path);
@@ -96,6 +115,16 @@ fn save_to(s: &mut Session, path: &str) -> Result<Value> {
     let json = file_text(s, path)?;
     s.services.write_file(path, json.as_bytes()).map_err(|e| EngineError::Other(format!("cannot write {path}: {e}")))?;
     s.path = Some(path.to_string());
+    // Only trust the stamp if the file still holds exactly what we wrote. If another process
+    // wrote it between our write and this check, leave the stamp unset: the watcher must treat
+    // that newer file as an external edit, not as our already-loaded save.
+    let stamp = s.services.stamp(path);
+    let ours = stamp.is_some_and(|(len, _)| len as usize == json.len())
+        && s.services.read_file(path).map(|bytes| bytes.as_slice() == json.as_bytes()).unwrap_or(false);
+    s.project_stamp = ours.then_some(stamp).flatten();
+    // An unverified write never becomes a baseline. The watcher will report the first stamp it
+    // sees for this path as an external edit, so a later Save cannot silently overwrite it.
+    s.project_stamp_unverified = !ours;
     s.mark_saved();
     s.note_project_path(path);
     s.toast(format!("Saved {path}"));

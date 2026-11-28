@@ -452,6 +452,10 @@ pub struct EffectcraftApp {
     footage_watcher: Option<effectcraft_engine::footage_reload::Watcher>,
     /// The project revision and preference the watched set was last computed for.
     footage_watch_key: Option<(u64, String, bool)>,
+    /// The worker that stamps the open project file ([`Self::tick_project_reload`]).
+    project_watcher: Option<effectcraft_engine::project_reload::Watcher>,
+    /// An external project change held until the session is clean and idle.
+    project_reload_pending: Option<(String, effectcraft_engine::project_reload::Stamp, Option<effectcraft_engine::project_reload::Stamp>)>,
     /// The worker that stamps the LUT files in use ([`Self::tick_lut_files`], #3493).
     lut_watcher: Option<effectcraft_engine::lut_reload::Watcher>,
     /// The LUT generation the frames kept were rendered at ([`effectcraft_engine::lut_reload::generation`]).

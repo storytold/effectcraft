@@ -676,7 +676,12 @@ impl EffectcraftApp {
     fn tick_autosave(&mut self, ctx: &egui::Context) {
         // Monotonic app time: a wall-clock jump must not skip or repeat an auto-save.
         let now = self.now;
-        if let Some(Err(e)) = self.session.autosave_tick(now) {
+        // Auto-saves are recovery copies at their own path, so they keep running while an
+        // external edit is pending: a crash then still has the local work. The guard skips only
+        // a due write whose planned target would be the project file itself; the engine checks
+        // that on the final write plan, so idle ticks do no file-system work.
+        let guard = self.project_reload_pending.is_some();
+        if let Some(Err(e)) = self.session.autosave_tick_guarded(now, guard) {
             self.ui.status = e.to_string();
         }
         if self.session.prefs.auto_save.enabled {
@@ -700,6 +705,7 @@ impl EffectcraftApp {
             ctx.request_repaint_after(std::time::Duration::from_secs(10));
         }
         self.tick_footage_reload(ctx);
+        self.tick_project_reload(ctx);
         self.tick_lut_files(ctx);
     }
 
@@ -749,6 +755,68 @@ impl EffectcraftApp {
         if self.session.revision != before {
             self.footage_watch_key = Some((self.session.revision, self.session.prefs.import.auto_reload_footage.clone(), self.session.disk_cache.is_some()));
             watcher.update(&self.session);
+        }
+    }
+
+    /// The open project's file changed outside this process. Reload it into the same session
+    /// when it is safe, so an agent's CLI/MCP edits show without a restart. The watcher only
+    /// stamps the file; `file.revert` reuses the ordinary open path and `replace_project`.
+    fn tick_project_reload(&mut self, ctx: &egui::Context) {
+        use effectcraft_engine::project_reload;
+        if self.project_watcher.is_none() {
+            let wake = ctx.clone();
+            self.project_watcher = project_reload::Watcher::start(self.session.services.clone(), move || wake.request_repaint());
+        }
+        let Some(watcher) = self.project_watcher.as_mut() else { return };
+        watcher.set_focused(self.focused);
+        watcher.set_watched(self.session.path.clone(), self.session.project_stamp, self.session.project_stamp_unverified);
+        if self.project_reload_pending.is_none()
+            && let Some(change) = watcher.take()
+            && Some(&change.0) == self.session.path.as_ref()
+        {
+            // Read the disk stamp once for this observation and keep it through deferral,
+            // instead of doing file I/O on every frame while a change is held.
+            let disk = self.session.services.stamp(&change.0);
+            self.project_reload_pending = Some((change.0, change.1, disk));
+        }
+        let Some((path, stamp, disk_stamp)) = self.project_reload_pending.clone() else { return };
+        if Some(&path) != self.session.path.as_ref() {
+            self.project_reload_pending = None;
+            return;
+        }
+        if self.session.project_stamp == Some(stamp) {
+            // A write we made ourselves is already in memory; don't reload it back.
+            watcher.acknowledge(Some(stamp));
+            self.project_reload_pending = None;
+            return;
+        }
+        if let Some(known) = self.session.project_stamp
+            && disk_stamp == Some(known)
+        {
+            watcher.acknowledge(self.session.project_stamp);
+            self.project_reload_pending = None;
+            return;
+        }
+        if self.session.is_dirty()
+            || self.session.script_ui.render_host.is_some()
+            || !self.session.script_ui.file_dialogs.is_empty()
+            || self.session.render_job.is_some()
+        {
+            self.ui.status = "Project changed on disk. To keep your changes, use File ▸ Save As ▸ Save a Copy... Then File ▸ Revert loads the disk version; Revert discards unsaved changes.".into();
+            return;
+        }
+        match self.session.execute("file.revert", serde_json::json!({})) {
+            Ok(_) => {
+                self.ui.status = format!("Reloaded {path} changed on disk");
+                watcher.acknowledge(self.session.project_stamp);
+                self.project_reload_pending = None;
+            }
+            Err(e) => {
+                // Keep the failure visible but drop this observation: retry only when the worker
+                // reports a new stamp, not every frame while the file stays malformed.
+                self.ui.status = e.to_string();
+                self.project_reload_pending = None;
+            }
         }
     }
 }
@@ -1008,5 +1076,172 @@ mod tests {
         app.now = 6.1;
         ctx.run_ui(egui::RawInput::default(), |ui| app.draw_toast(ui, ui.max_rect(), 0.0)).textures_delta.clear();
         assert!(app.auto.elements.iter().any(|e| e.id == "toast" && e.label.contains("Failed second file")), "{:?}", app.auto.elements);
+    }
+
+    #[test]
+    fn a_pending_change_equal_to_the_session_stamp_is_acknowledged() {
+        let path = "C:/test/project.ecproj".to_string();
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        app.session.path = Some(path.clone());
+        app.session.project_stamp = Some((100, 1));
+        // The stamp the watcher found is the one this session already holds (its own save).
+        app.project_reload_pending = Some((path, (100, 1), Some((100, 1))));
+        let ctx = egui::Context::default();
+        let before = app.session.revision;
+        app.tick_project_reload(&ctx);
+        assert_eq!(app.session.revision, before, "an own save must not be reloaded");
+        assert!(app.project_reload_pending.is_none());
+    }
+
+    #[test]
+    fn an_external_change_is_held_while_the_session_is_dirty() {
+        let path = "C:/test/project.ecproj".to_string();
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        app.session.path = Some(path.clone());
+        app.session.project_stamp = Some((100, 1));
+        app.session.execute("comp.new", json!({"name":"Gui"})).unwrap();
+        assert!(app.session.is_dirty());
+        app.project_reload_pending = Some((path, (120, 2), None));
+        let ctx = egui::Context::default();
+        app.tick_project_reload(&ctx);
+        assert!(app.project_reload_pending.is_some(), "the change must be held, not discarded");
+        assert!(app.ui.status.contains("Save a Copy"), "{}", app.ui.status);
+        assert!(app.ui.status.contains("discards unsaved changes"), "{}", app.ui.status);
+    }
+
+    /// A clean session with a pending external change at a stamp the session does not hold.
+    fn clean_app_with_a_pending_change() -> (EffectcraftApp, u64) {
+        let path = "C:/test/project.ecproj".to_string();
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        app.session.path = Some(path.clone());
+        app.session.project_stamp = Some((100, 1));
+        app.project_reload_pending = Some((path, (120, 2), None));
+        assert!(!app.session.is_dirty(), "the guard under test must be the only reason to hold");
+        let revision = app.session.revision;
+        (app, revision)
+    }
+
+    fn assert_change_held(app: &EffectcraftApp, revision: u64) {
+        assert_eq!(app.session.revision, revision, "the project was not replaced");
+        assert!(app.project_reload_pending.is_some(), "the change must be held, not discarded");
+        assert!(app.ui.status.contains("Save a Copy"), "{}", app.ui.status);
+    }
+
+    #[test]
+    fn an_external_change_is_held_while_a_script_renders() {
+        let (mut app, revision) = clean_app_with_a_pending_change();
+        app.session.script_ui.render_host = Some(1);
+        app.tick_project_reload(&egui::Context::default());
+        assert_change_held(&app, revision);
+    }
+
+    #[test]
+    fn an_external_change_is_held_while_a_script_file_dialog_is_open() {
+        use effectcraft_engine::scriptui::{FileDialogKind, ScriptFileDialog};
+        let (mut app, revision) = clean_app_with_a_pending_change();
+        app.session.script_ui.file_dialogs.push(ScriptFileDialog {
+            id: 1,
+            host: 1,
+            kind: FileDialogKind::Open,
+            prompt: String::new(),
+            exts: vec![],
+            label: String::new(),
+            any: true,
+            many: false,
+            start: String::new(),
+            shown: false,
+        });
+        app.tick_project_reload(&egui::Context::default());
+        assert_change_held(&app, revision);
+    }
+
+    #[test]
+    fn an_external_change_is_held_while_a_render_job_is_active() {
+        let (mut app, revision) = clean_app_with_a_pending_change();
+        app.session.render_job = Some(effectcraft_engine::render_queue::RenderJob::detached(std::sync::Arc::default()));
+        app.tick_project_reload(&egui::Context::default());
+        assert_change_held(&app, revision);
+    }
+
+    /// Per-frame cost the reload feature adds to the UI tick (#4168 frame-p95 budget). A/B in one
+    /// binary: "before" runs only `tick_autosave` (what main runs; with no pending change the
+    /// guarded tick is the same call), "after" adds `tick_project_reload`. Run with
+    /// `cargo test -p effectcraft-ui-egui --lib frame_tick_cost -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "measurement"]
+    fn frame_tick_cost_of_project_reload() {
+        fn pct(v: &mut [f64], q: f64) -> f64 {
+            v.sort_by(f64::total_cmp);
+            v[((v.len() as f64 * q).ceil() as usize).saturating_sub(1)]
+        }
+        fn report(label: &str, v: &mut [f64]) {
+            let (p50, p95, p99, max) = (pct(v, 0.5), pct(v, 0.95), pct(v, 0.99), pct(v, 1.0));
+            println!("BENCH {label}: p50 {p50:.2} µs | p95 {p95:.2} µs | p99 {p99:.2} µs | max {max:.1} µs");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Bench.ecproj").to_string_lossy().into_owned();
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        app.session.execute("comp.new", json!({"name": "Main"})).unwrap();
+        app.session.execute("file.saveAs", json!({"path": path})).unwrap();
+        app.session.execute("prefs.set", json!({"values": {"autoSave.enabled": true, "autoSave.intervalMinutes": 60}})).unwrap();
+        app.focused = true;
+        let ctx = egui::Context::default();
+        let n = 100_000;
+        let time = |app: &mut EffectcraftApp, reload: bool| -> Vec<f64> {
+            (0..n)
+                .map(|_| {
+                    let t = std::time::Instant::now();
+                    if reload {
+                        app.tick_project_reload(&ctx);
+                    }
+                    app.tick_autosave(&ctx);
+                    t.elapsed().as_secs_f64() * 1e6
+                })
+                .collect()
+        };
+        app.tick_project_reload(&ctx); // start the watcher outside the timed loop
+        report("before (autosave tick only), idle", &mut time(&mut app, false));
+        report("after (reload + autosave tick), idle", &mut time(&mut app, true));
+        // Held change: dirty session, pending external edit at a cached disk stamp.
+        app.session.execute("layer.newNull", json!({"name": "local"})).unwrap();
+        app.project_reload_pending = Some((path.clone(), (1, 1), Some((1, 1))));
+        report("after, change held while dirty", &mut time(&mut app, true));
+        assert!(app.project_reload_pending.is_some());
+    }
+
+    #[test]
+    fn recovery_autosave_keeps_running_while_a_project_change_is_pending() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("Live.ecproj");
+        let path = project.to_string_lossy().into_owned();
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        app.session.execute("comp.new", serde_json::json!({"name": "Main"})).unwrap();
+        app.session.execute("file.saveAs", serde_json::json!({"path": path})).unwrap();
+
+        // Another process saves the project with its own edit.
+        let mut other = effectcraft_engine::Session::default();
+        other.execute("file.open", serde_json::json!({"path": path})).unwrap();
+        other.execute("layer.newNull", serde_json::json!({"name": "external edit"})).unwrap();
+        other.execute("file.save", serde_json::json!({})).unwrap();
+        let external = std::fs::read(&project).unwrap();
+
+        // The desktop session has unsaved work, so the external change is held.
+        app.session.execute("layer.newNull", serde_json::json!({"name": "local edit"})).unwrap();
+        app.project_reload_pending = Some((path.clone(), (external.len() as u64, 1), None));
+        app.session.execute("prefs.set", serde_json::json!({"values": {"autoSave.enabled": true, "autoSave.intervalMinutes": 1}})).unwrap();
+
+        let ctx = egui::Context::default();
+        app.now = 1000.0;
+        app.tick_autosave(&ctx);
+        app.now = 1061.0;
+        app.tick_autosave(&ctx);
+        app.session.autosave_wait().unwrap();
+
+        assert!(app.project_reload_pending.is_some(), "the external change is still held");
+        assert_eq!(std::fs::read(&project).unwrap(), external, "the external project must survive untouched");
+        let recovery = dir.path().join(effectcraft_engine::autosave::AUTOSAVE_FOLDER).join("Live auto-save 1.ecproj");
+        let saved = std::fs::read_to_string(&recovery).expect("the local work has a recovery copy");
+        assert!(saved.contains("local edit"), "the recovery copy holds the unsaved local work");
+        assert!(!saved.contains("external edit"), "the recovery copy is the local session, not the disk file");
     }
 }

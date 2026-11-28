@@ -359,12 +359,22 @@ impl Session {
     /// background thread (the path is returned at once; [`Session::autosave_wait`] waits).
     /// Auto-saves are compact JSON (opened like any project); File ▸ Save writes pretty JSON.
     pub fn autosave_now(&mut self) -> Result<String> {
+        self.autosave_write(false)?.ok_or_else(|| EngineError::Other("auto-save skipped".into()))
+    }
+
+    /// [`Session::autosave_now`]; with `guard_project`, a planned target that aliases the open
+    /// project file is skipped (`Ok(None)`) instead of written, so recovery never overwrites
+    /// it. The check runs on the final [`autosave::WritePlan`], only when a write is due.
+    fn autosave_write(&mut self, guard_project: bool) -> Result<Option<String>> {
         // One write at a time: the previous one must land before its slot rotates.
         self.autosave_wait()?;
         let root = self.default_autosave_root();
         let prefs = self.autosave_prefs();
         let fail = |e: std::io::Error| EngineError::Other(format!("auto-save failed: {e}"));
         let plan = autosave::plan_in(self.file_ops(), &prefs, self.path.as_deref(), root.as_deref(), self.autosave.last_slot).map_err(fail)?;
+        if guard_project && self.path.as_deref().is_some_and(|p| autosave::paths_alias(&plan.path, Path::new(p))) {
+            return Ok(None);
+        }
         let path = plan.path.to_string_lossy().into_owned();
         if self.autosave.background && !cfg!(target_arch = "wasm32") {
             let project = self.project.clone();
@@ -385,7 +395,7 @@ impl Session {
             plan.write(self.file_ops(), json.as_bytes()).map_err(fail)?;
             self.commit_autosave(path.clone(), plan.slot, self.revision);
         }
-        Ok(path)
+        Ok(Some(path))
     }
 
     /// Advance recovery bookkeeping only for a successfully written snapshot.
@@ -416,6 +426,14 @@ impl Session {
     /// Call periodically with wall-clock seconds: auto-saves a dirty project once the interval
     /// has passed since the last auto-save (or since the first call). Returns the written path.
     pub fn autosave_tick(&mut self, now: f64) -> Option<Result<String>> {
+        self.autosave_tick_guarded(now, false)
+    }
+
+    /// [`Session::autosave_tick`]; with `guard_project` a due write whose planned target aliases
+    /// the open project file is skipped. The desktop app sets it while an external edit of the
+    /// project is pending: recovery copies keep being written, the project file never is. No
+    /// file-system check runs unless auto-save is enabled and a write is actually due.
+    pub fn autosave_tick_guarded(&mut self, now: f64, guard_project: bool) -> Option<Result<String>> {
         if self.autosave.pending.as_ref().is_some_and(autosave::PendingWrite::is_finished)
             && let Err(e) = self.autosave_wait()
         {
@@ -439,7 +457,11 @@ impl Session {
         {
             return None;
         }
-        let r = self.autosave_now();
+        let r = match self.autosave_write(guard_project) {
+            Ok(Some(p)) => Ok(p),
+            Ok(None) => return None,
+            Err(e) => Err(e),
+        };
         if let Ok(p) = &r {
             self.toast(format!("Auto-saved {}", Path::new(p).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()));
         }

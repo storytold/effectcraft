@@ -254,6 +254,12 @@ pub struct RenderJob {
 }
 
 impl RenderJob {
+    /// A job record with no local thread or worker, sharing `shared`: lets a host (or a test
+    /// built without an exporter) hold an active job without rendering.
+    pub fn detached(shared: Arc<JobShared>) -> Self {
+        Self { shared, thread: None, remote: None }
+    }
+
     pub fn is_finished(&self) -> bool {
         lock(&self.shared.state).finished
     }
