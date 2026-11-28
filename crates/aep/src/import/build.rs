@@ -538,6 +538,9 @@ fn build_layers(project: &mut Project, cx: &mut Ctx<'_>, defs: &EffectDefinition
     for layer in comp_view.layers() {
         let Some(h) = layer.header() else {
             cx.col.lose_with(LossCategory::DamagedData, || format!("{comp_name}: a layer header is unreadable, layer not imported"));
+            // Its id (the first four bytes) may still be readable: its children then report the
+            // lost link instead of silently losing their parent.
+            skipped.extend(layer.id().map(|id| (id, "a layer whose header is unreadable".to_string())));
             above = None;
             continue;
         };
@@ -1178,9 +1181,13 @@ fn resolve_parents(
             Some(target) => {
                 links.insert(*layer, *target);
             }
+            // An id that names no layer (the high bit set, or a layer since deleted) is a link
+            // After Effects left behind: After Effects 26.5 shows the layer with no parent, and
+            // nothing is lost. A layer that was not imported loses its children's links.
             None => {
-                let why = skipped.get(parent).map_or("a layer that does not exist", |s| s.as_str());
-                col.lose_with(LossCategory::ParentLinks, || format!("{comp_name}: '{name}' has {why} as its parent"));
+                if let Some(why) = skipped.get(parent) {
+                    col.lose_with(LossCategory::ParentLinks, || format!("{comp_name}: '{name}' has {why} as its parent"));
+                }
             }
         }
     }
