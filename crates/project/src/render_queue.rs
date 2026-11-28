@@ -11,7 +11,7 @@
 use effectcraft_time::{FrameRate, Tick};
 use serde::{Deserialize, Serialize};
 
-use crate::{Comp, ItemId};
+use crate::{Comp, ItemId, Layer, LayerId};
 
 /// The default output path template.
 pub const DEFAULT_TEMPLATE: &str = "[compName].[fileExtension]";
@@ -1212,6 +1212,68 @@ impl OpusApplication {
     }
 }
 
+/// Opt-in channels for an OpenEXR export. Layer IDs refer to layers of the exported composition.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ExrSelection {
+    /// The main picture as unprefixed RGBA channels.
+    pub composite: bool,
+    /// Each selected layer as its own RGBA channel group or part.
+    pub layers: Vec<LayerId>,
+    /// Resolve every exportable layer when rendering. Explicit layer IDs are empty in this mode.
+    #[serde(rename = "allLayers", skip_serializing_if = "std::ops::Not::not")]
+    pub all_layers: bool,
+    /// The composition's camera-space depth as a FLOAT Z channel.
+    pub depth: bool,
+    /// Give each selected channel group its own EXR part.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub multipart: bool,
+}
+
+impl Default for ExrSelection {
+    fn default() -> Self {
+        Self { composite: true, layers: Vec::new(), all_layers: false, depth: false, multipart: false }
+    }
+}
+
+impl ExrSelection {
+    /// Layers the isolated export can render into an independent channel group.
+    pub fn can_export_layer(layer: &Layer) -> bool {
+        layer.has_video() && !layer.switches.adjustment && !layer.switches.guide && !layer.environment
+    }
+
+    /// Resolve layer IDs against the current composition so All Layers follows changes to the stack.
+    pub fn layer_ids(&self, comp: &Comp) -> Vec<LayerId> {
+        if self.all_layers { comp.layers.iter().filter(|layer| Self::can_export_layer(layer)).map(|layer| layer.id).collect() } else { self.layers.clone() }
+    }
+
+    /// Check the selection in the composition that owns these layer IDs.
+    pub fn validate(&self, comp: &Comp) -> Result<(), &'static str> {
+        if self.all_layers && !self.layers.is_empty() {
+            return Err("Choose either all OpenEXR layers or specific layer IDs");
+        }
+        let has_layers = if self.all_layers { comp.layers.iter().any(Self::can_export_layer) } else { !self.layers.is_empty() };
+        if !self.composite && !self.depth && !has_layers {
+            return Err("Select at least one OpenEXR channel group");
+        }
+        if self.layers.is_empty() {
+            return Ok(());
+        }
+        if self.layers.len() > comp.layers.len() {
+            return Err("OpenEXR layer selection contains missing or duplicate layers");
+        }
+        let selected: std::collections::HashSet<_> = self.layers.iter().copied().collect();
+        if selected.len() != self.layers.len() {
+            return Err("Select each OpenEXR layer only once");
+        }
+        let count = comp.layers.iter().filter(|layer| selected.contains(&layer.id) && Self::can_export_layer(layer)).count();
+        if count != selected.len() {
+            return Err("OpenEXR layer selection contains a missing layer or a layer that cannot be exported");
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OutputModule {
@@ -1237,6 +1299,9 @@ pub struct OutputModule {
     pub exr_compression: ExrCompression,
     /// OpenEXR sequence: half or 32-bit float samples.
     pub exr_bit_depth: ExrBitDepth,
+    /// Selected composition channels. Missing preserves the original composite-only export.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exr_selection: Option<ExrSelection>,
     pub crop: Crop,
     pub resize: Resize,
     pub audio: AudioOutput,
@@ -1273,6 +1338,7 @@ impl Default for OutputModule {
             prores_profile: ProResProfile::Hq,
             exr_compression: ExrCompression::Zip,
             exr_bit_depth: ExrBitDepth::Float,
+            exr_selection: None,
             crop: Crop::default(),
             resize: Resize::default(),
             audio: AudioOutput::Auto,

@@ -22,6 +22,7 @@ effectcraft-path = { workspace = true }
 effectcraft-text = { workspace = true }
 effectcraft-effects = { workspace = true }
 effectcraft-render = { workspace = true }
+effectcraft-export = { workspace = true }
 effectcraft-segment = { workspace = true }
 effectcraft-track = { workspace = true }
 effectcraft-model = { workspace = true }
@@ -40,9 +41,9 @@ chrono = { workspace = true }
 rayon = { workspace = true }
 image = { workspace = true }
 web-time = { workspace = true }
-exr = { workspace = true }
 
 [dev-dependencies]
+exr = { workspace = true }
 effectcraft-media = { workspace = true }
 
 # Native file identity and SAM 2 inference; browsers keep the built-in engines.

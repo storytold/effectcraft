@@ -7,6 +7,7 @@
 //! it reports progress through [`JobShared`], and [`Session::poll_render`] copies item status /
 //! start time / render time back into the project.
 
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -95,6 +96,9 @@ pub struct ExportResult {
     pub bytes: u64,
     pub seconds: f64,
     pub audio: bool,
+    /// At least one sequence frame was kept by Skip Existing Files.
+    #[serde(skip)]
+    pub reused_frames: bool,
     /// The render log written next to the output, if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub log: Option<String>,
@@ -166,6 +170,8 @@ pub enum ItemUpdate {
         status: RenderStatus,
         seconds: f64,
         output: Option<String>,
+        #[serde(default)]
+        reused_exr_frames: bool,
         /// Where the time went (done items only).
         #[serde(default)]
         timing: Option<RenderTiming>,
@@ -249,8 +255,32 @@ impl JobShared {
 pub struct RenderJob {
     pub shared: Arc<JobShared>,
     thread: Option<std::thread::JoinHandle<()>>,
+    /// Items whose first rendered module is an EXR without the composition's picture.
+    without_composite: HashSet<u64>,
     /// Rendering in a worker ([`crate::offload`]).
     pub remote: Option<crate::offload::RemoteRender>,
+}
+
+fn includes_composite(output: &OutputModule) -> bool {
+    output.format != OutputFormat::ExrSequence || output.exr_selection.as_ref().is_none_or(|selection| selection.composite)
+}
+
+fn validate_post_render_composite(composite: bool, reused_exr_frames: bool, action: PostRenderAction) -> Result<(), &'static str> {
+    if matches!(action, PostRenderAction::ImportAndReplace | PostRenderAction::SetProxy) {
+        if !composite {
+            return Err("Include Composite in the first OpenEXR output to replace composition usage or set a proxy");
+        }
+        if reused_exr_frames {
+            return Err(
+                "The first OpenEXR output reused existing frames. Turn off Skip Existing Files and render again to replace composition usage or set a proxy",
+            );
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_post_render_output(output: &OutputModule, action: PostRenderAction) -> Result<(), &'static str> {
+    validate_post_render_composite(includes_composite(output), false, action)
 }
 
 impl RenderJob {
@@ -397,7 +427,14 @@ async fn run_work(w: Work, shared: &JobShared, notify: &mut dyn FnMut(&JobShared
     for (k, modules) in w.items.iter().enumerate() {
         let Some((item, _)) = modules.first() else { continue };
         if shared.cancel.load(Ordering::Relaxed) {
-            lock(&shared.updates).push(ItemUpdate::Finished { id: item.id, status: RenderStatus::UserStopped, seconds: 0.0, output: None, timing: None });
+            lock(&shared.updates).push(ItemUpdate::Finished {
+                id: item.id,
+                status: RenderStatus::UserStopped,
+                seconds: 0.0,
+                output: None,
+                reused_exr_frames: false,
+                timing: None,
+            });
             continue;
         }
         let t1 = web_time::Instant::now();
@@ -461,11 +498,20 @@ async fn run_work(w: Work, shared: &JobShared, notify: &mut dyn FnMut(&JobShared
         }
         let seconds = t1.elapsed().as_secs_f64();
         let up = match r {
-            Ok(res) => ItemUpdate::Finished { id: item.id, status: RenderStatus::Done, seconds, output: Some(res.path), timing: res.timing },
-            Err(e) if e == CANCELLED => ItemUpdate::Finished { id: item.id, status: RenderStatus::UserStopped, seconds, output: None, timing: None },
+            Ok(res) => ItemUpdate::Finished {
+                id: item.id,
+                status: RenderStatus::Done,
+                seconds,
+                output: Some(res.path),
+                reused_exr_frames: item.output.format == OutputFormat::ExrSequence && res.reused_frames,
+                timing: res.timing,
+            },
+            Err(e) if e == CANCELLED => {
+                ItemUpdate::Finished { id: item.id, status: RenderStatus::UserStopped, seconds, output: None, reused_exr_frames: false, timing: None }
+            }
             Err(e) => {
                 log::warn!("render queue: item {} failed: {e}", item.id);
-                ItemUpdate::Finished { id: item.id, status: RenderStatus::Failed(e), seconds, output: None, timing: None }
+                ItemUpdate::Finished { id: item.id, status: RenderStatus::Failed(e), seconds, output: None, reused_exr_frames: false, timing: None }
             }
         };
         lock(&shared.updates).push(up);
@@ -669,6 +715,7 @@ impl Session {
             });
         }
         let ids: Vec<u64> = items.iter().filter_map(|m| m.first().map(|(i, _)| i.id)).collect();
+        let without_composite = items.iter().filter_map(|m| m.first()).filter(|(i, _)| !includes_composite(&i.output)).map(|(i, _)| i.id).collect();
         if let Some(off) = offload {
             let id = crate::offload::next_id();
             let inbox = Arc::new(crate::offload::Inbox::default());
@@ -681,7 +728,8 @@ impl Session {
             off.start(req, inbox.clone())?;
             let shared = Arc::new(JobShared::default());
             lock(&shared.state).items_total = ids.len();
-            self.render_job = Some(RenderJob { shared, thread: None, remote: Some(crate::offload::RemoteRender { id, inbox, ids: ids.clone() }) });
+            self.render_job =
+                Some(RenderJob { shared, thread: None, without_composite, remote: Some(crate::offload::RemoteRender { id, inbox, ids: ids.clone() }) });
             self.poll_render();
             return Ok(ids);
         }
@@ -700,7 +748,7 @@ impl Session {
         let shared = Arc::new(JobShared::default());
         if wait {
             effectcraft_render::passes::block_on(run_work(work, &shared, &mut |_| {}));
-            self.render_job = Some(RenderJob { shared, thread: None, remote: None });
+            self.render_job = Some(RenderJob { shared, thread: None, without_composite, remote: None });
         } else {
             let sh = shared.clone();
             let thread = std::thread::Builder::new()
@@ -720,6 +768,7 @@ impl Session {
                                     status: RenderStatus::Failed(error.to_string()),
                                     seconds: 0.0,
                                     output: None,
+                                    reused_exr_frames: false,
                                     timing: None,
                                 });
                             }
@@ -728,7 +777,7 @@ impl Session {
                     }
                 })
                 .map_err(|e| e.to_string())?;
-            self.render_job = Some(RenderJob { shared, thread: Some(thread), remote: None });
+            self.render_job = Some(RenderJob { shared, thread: Some(thread), without_composite, remote: None });
         }
         self.poll_render();
         Ok(ids)
@@ -758,6 +807,7 @@ impl Session {
                                 status: RenderStatus::UserStopped,
                                 seconds: 0.0,
                                 output: None,
+                                reused_exr_frames: false,
                                 timing: None,
                             });
                         }
@@ -781,7 +831,7 @@ impl Session {
         let updates = std::mem::take(&mut *lock(&job.shared.updates));
         job.shared.update_reply(&updates);
         let changed = !updates.is_empty();
-        let mut post: Vec<(u64, String)> = vec![];
+        let mut post = vec![];
         if changed {
             let p = Arc::make_mut(&mut self.project);
             for u in &updates {
@@ -794,7 +844,7 @@ impl Session {
                             i.last_timing = None;
                         }
                     }
-                    ItemUpdate::Finished { id, status, seconds, output, timing } => {
+                    ItemUpdate::Finished { id, status, seconds, output, reused_exr_frames, timing } => {
                         if let Some(i) = p.render_queue.iter_mut().find(|i| i.id == *id) {
                             i.status = status.clone();
                             i.render_time = Some(*seconds);
@@ -805,7 +855,7 @@ impl Session {
                             if let (RenderStatus::Done, Some(o)) = (status, output)
                                 && !i.post_render.is_none()
                             {
-                                post.push((*id, o.clone()));
+                                post.push((*id, o.clone(), !job.without_composite.contains(id), *reused_exr_frames));
                             }
                         }
                     }
@@ -842,8 +892,8 @@ impl Session {
             self.events.push(Event::Toast { message: msg, error: failed > 0 });
             completed = Some(job.shared);
         }
-        for (id, path) in post {
-            if let Err(e) = self.post_render_action(id, &path) {
+        for (id, path, composite, reused_exr_frames) in post {
+            if let Err(e) = self.apply_post_render_action(id, &path, Some(composite), reused_exr_frames) {
                 self.events.push(Event::Toast { message: format!("Post-render action: {e}"), error: true });
             }
         }
@@ -859,10 +909,15 @@ impl Session {
     /// Usage swap every layer that used the rendered composition to the new footage (one undo
     /// step).
     pub fn post_render_action(&mut self, id: u64, path: &str) -> Result<Option<ItemId>, String> {
+        self.apply_post_render_action(id, path, None, false)
+    }
+
+    fn apply_post_render_action(&mut self, id: u64, path: &str, rendered_composite: Option<bool>, reused_exr_frames: bool) -> Result<Option<ItemId>, String> {
         let Some(item) = self.project.render_queue.iter().find(|i| i.id == id).cloned() else { return Ok(None) };
         if item.post_render.is_none() {
             return Ok(None);
         }
+        validate_post_render_composite(rendered_composite.unwrap_or_else(|| includes_composite(&item.output)), reused_exr_frames, item.post_render)?;
         // A rendered image sequence's first file brings the sequence.
         let footage = self.probe_footage(path)?;
         if item.post_render == PostRenderAction::SetProxy {

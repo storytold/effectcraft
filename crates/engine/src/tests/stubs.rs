@@ -363,6 +363,46 @@ fn post_render_actions_import_and_set_proxy() {
 }
 
 #[test]
+fn saved_exr_pass_selection_exports_and_skips_incompatible_post_render_actions() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut s, exporter) = rq();
+    let inner = s.active_comp_id().unwrap();
+    let layer = s.execute("layer.newSolid", json!({"color": "#00ff00"})).unwrap()["layer"].clone();
+    s.execute("comp.new", json!({"name": "Outer"})).unwrap();
+    let outer = s.active_comp_id().unwrap();
+    s.execute("layer.addItem", json!({"item": inner.0})).unwrap();
+    let passes = json!({"composite": false, "layers": [layer], "depth": true, "multipart": true});
+    for (name, action) in [("export", PostRenderAction::None), ("replace", PostRenderAction::ImportAndReplace), ("proxy", PostRenderAction::SetProxy)] {
+        let output = dir.path().join(format!("{name}.exr"));
+        s.execute_checked("renderQueue.add", json!({"comp": inner.0, "output": output, "exrSelection": passes})).unwrap();
+        // A project saved by a version that allowed replacement/proxy actions without a composite.
+        Arc::make_mut(&mut s.project).render_queue.last_mut().unwrap().post_render = action;
+    }
+    let all = json!({"composite": true, "layers": [], "depth": false, "allLayers": true});
+    s.execute_checked("renderQueue.add", json!({"comp": inner.0, "output": dir.path().join("all.exr"), "exrSelection": all})).unwrap();
+    s.execute_checked("renderQueue.add", json!({"comp": inner.0, "output": dir.path().join("default.exr")})).unwrap();
+    let path = dir.path().join("passes.ecproj");
+    s.execute_checked("file.saveAs", json!({"path": path})).unwrap();
+    let mut reopened = Session { exporter: Some(exporter.clone()), importer: Some(Arc::new(MockImporter)), ..Default::default() };
+    reopened.execute_checked("file.open", json!({"path": path})).unwrap();
+    let restored: Vec<_> = reopened.project.render_queue.iter().map(|item| json!(item.output.exr_selection)).collect();
+    assert_eq!(restored, [passes.clone(), passes.clone(), passes, all, serde_json::Value::Null]);
+    let items_before = reopened.project.items.len();
+    reopened.drain_events();
+    reopened.execute_checked("renderQueue.render", json!({})).unwrap();
+    assert_eq!(exporter.log.lock().unwrap().len(), 5, "all exports complete");
+    assert_eq!(reopened.project.items.len(), items_before);
+    assert!(matches!(reopened.project.comp(outer).unwrap().layers[0].source, LayerSource::Comp { item } if item == inner));
+    assert!(reopened.project.item(inner).unwrap().proxy.is_none());
+    let warnings: Vec<_> = reopened
+        .drain_events()
+        .into_iter()
+        .filter(|event| matches!(event, Event::Toast { message, error: true } if message.contains("Include Composite")))
+        .collect();
+    assert_eq!(warnings.len(), 2, "warn only for the two skipped actions");
+}
+
+#[test]
 fn templates_save_apply_default_and_persist() {
     let (mut s, _) = rq();
     let t = s.execute("renderQueue.templates", json!({})).unwrap();

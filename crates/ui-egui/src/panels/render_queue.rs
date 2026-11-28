@@ -11,13 +11,16 @@
 //! every setting; entries needing numbers (custom time span and frame rate, crop, resize, bitrate,
 //! key frame interval, Make Template) open a form that runs the same command.
 
+use std::collections::HashSet;
+
 use crate::i18n::{tr, tr_args};
 use effectcraft_engine::project::render_queue::{
-    AlphaMode, AudioFormat, AudioOutput, Channels, ColorDepth, CurrentOrOff, EffectsMode, ExrBitDepth, ExrCompression, FieldRender, OpusApplication,
-    OutputFormat, PostRenderAction, ProResProfile, Pulldown, RESIZE_PRESETS, RenderLog, RenderQuality, RenderQueueItem, RenderStatus, ResizeQuality,
-    SwitchOverride, TimeSpan, WebmVideoCodec,
+    AlphaMode, AudioFormat, AudioOutput, Channels, ColorDepth, CurrentOrOff, EffectsMode, ExrBitDepth, ExrCompression, ExrSelection, FieldRender,
+    OpusApplication, OutputFormat, OutputModule, PostRenderAction, ProResProfile, Pulldown, RESIZE_PRESETS, RenderLog, RenderQuality, RenderQueueItem,
+    RenderStatus, ResizeQuality, SwitchOverride, TimeSpan, WebmVideoCodec,
 };
 use effectcraft_engine::project::render_templates::RenderTemplates;
+use effectcraft_engine::project::{Comp, LayerId};
 use egui::{Align2, Color32, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
 use serde_json::{Value, json};
 
@@ -275,9 +278,13 @@ fn output_menu(it: &RenderQueueItem, available: &[OutputFormat], templates: &Ren
 }
 
 /// OpenEXR options: compression (marked where lossy at the module's bit depth) and bit depth.
-fn exr_menu(o: &effectcraft_engine::project::render_queue::OutputModule, v: &mut Vec<(String, Value)>) {
+fn exr_menu(o: &OutputModule, v: &mut Vec<(String, Value)>) {
     v.push(("-".into(), Value::Null));
+    v.push((tr("EXR Channels…").into(), json!({"form": "exrChannels"})));
     for c in ExrCompression::ALL {
+        if o.exr_selection.as_ref().is_some_and(|s| s.depth) && c.is_lossy(ExrBitDepth::Float) {
+            continue;
+        }
         let d = o.exr_bit_depth;
         let label = if c.is_lossy(d) {
             "EXR Compression: {} (lossy)"
@@ -292,6 +299,151 @@ fn exr_menu(o: &effectcraft_engine::project::render_queue::OutputModule, v: &mut
     for d in ExrBitDepth::ALL {
         v.push((mark(o.exr_bit_depth == d, &tr_args("EXR Bit Depth: {}", &[&(d.label())])), json!({"exrBitDepth": d.name()})));
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ExrLayerScope {
+    None,
+    All,
+    Selected,
+}
+
+#[derive(Clone)]
+struct ExrChannelsDraft {
+    selection: ExrSelection,
+    scope: ExrLayerScope,
+    focus_on_open: bool,
+}
+
+fn exr_layer_checkboxes(ui: &mut egui::Ui, comp: &Comp, layers: &mut Vec<LayerId>) {
+    let selected: HashSet<_> = layers.iter().copied().collect();
+    for (index, layer) in comp.layers.iter().enumerate().filter(|(_, layer)| ExrSelection::can_export_layer(layer)) {
+        let mut enabled = selected.contains(&layer.id);
+        let label = tr_args("Layer {}: {}", &[&index.saturating_add(1), &layer.name]);
+        if ui.push_id(layer.id.0, |ui| widgets::labelled_checkbox(ui, &mut enabled, label)).inner.changed() {
+            if enabled {
+                layers.push(layer.id);
+            } else {
+                layers.retain(|id| *id != layer.id);
+            }
+        }
+    }
+}
+
+/// Edit the full set together so switching from composite to layer-only can be one command.
+fn exr_channels_popup(ui: &mut egui::Ui, id: egui::Id, anchor: &egui::Response, comp: &Comp, output: &OutputModule, open: bool) -> Option<ExrSelection> {
+    let draft_id = id.with("selection");
+    if open {
+        let mut selection = output.exr_selection.clone().unwrap_or_default();
+        let scope = if selection.all_layers {
+            selection.layers.clear();
+            ExrLayerScope::All
+        } else if selection.layers.is_empty() {
+            ExrLayerScope::None
+        } else {
+            let eligible: HashSet<_> = comp.layers.iter().filter(|layer| ExrSelection::can_export_layer(layer)).map(|layer| layer.id).collect();
+            selection.layers.retain(|id| eligible.contains(id));
+            ExrLayerScope::Selected
+        };
+        let focus_on_open = widgets::by_keyboard(ui);
+        ui.data_mut(|d| d.insert_temp(draft_id, ExrChannelsDraft { selection, scope, focus_on_open }));
+        widgets::open_popup(ui, id);
+        // Draw on the next pass so the Enter that opened the popup cannot toggle its first field.
+        ui.ctx().request_repaint();
+        return None;
+    }
+    if !widgets::popup_is_open(ui, id) {
+        return None;
+    }
+    let mut draft = ui.data(|d| d.get_temp::<ExrChannelsDraft>(draft_id))?;
+    let selection = &mut draft.selection;
+    let lossless = !output.exr_compression.is_lossy(ExrBitDepth::Float);
+    let layer_rows = if draft.scope == ExrLayerScope::Selected { comp.layers.len() } else { 0 };
+    let chosen = widgets::popup_list(ui, id, anchor.rect.left_bottom(), Rect::NOTHING, layer_rows.saturating_add(10), 1, |ui| {
+        let composite = widgets::labelled_checkbox(ui, &mut selection.composite, tr("Composite"));
+        if draft.focus_on_open {
+            composite.request_focus();
+        }
+        ui.add_enabled_ui(lossless || selection.depth, |ui| {
+            widgets::labelled_checkbox(ui, &mut selection.depth, tr("Depth (Z)"));
+        });
+        if !lossless {
+            ui.label(tr("Choose lossless 32-bit float compression to include Depth (Z)."));
+        }
+        widgets::labelled_checkbox(ui, &mut selection.multipart, tr("Multipart OpenEXR"))
+            .on_hover_text(tr("Write each selected channel group as a separate part."));
+        ui.label(tr("Layers"));
+        ui.radio_value(&mut draft.scope, ExrLayerScope::None, tr("No Layers"));
+        ui.radio_value(&mut draft.scope, ExrLayerScope::All, tr("All Layers"));
+        ui.radio_value(&mut draft.scope, ExrLayerScope::Selected, tr("Selected Layers"));
+        selection.all_layers = draft.scope == ExrLayerScope::All;
+        if draft.scope == ExrLayerScope::Selected {
+            exr_layer_checkboxes(ui, comp, &mut selection.layers);
+        } else {
+            selection.layers.clear();
+        }
+        ui.separator();
+        let validation =
+            if draft.scope == ExrLayerScope::Selected && selection.layers.is_empty() { Err("Select at least one layer.") } else { selection.validate(comp) };
+        if let Err(message) = validation {
+            ui.label(tr(message));
+        }
+        ui.horizontal(|ui| {
+            let valid = validation.is_ok() && (lossless || !selection.depth);
+            let changed = output.exr_selection.as_ref().map_or_else(|| *selection != ExrSelection::default(), |original| *original != *selection);
+            if ui.add_enabled(valid && changed, egui::Button::new(tr("Apply"))).clicked() {
+                Some(Some(selection.clone()))
+            } else if ui.button(tr("Cancel")).clicked() {
+                Some(None)
+            } else {
+                None
+            }
+        })
+        .inner
+    });
+    if widgets::popup_is_open(ui, id) {
+        draft.focus_on_open = false;
+        ui.data_mut(|d| d.insert_temp(draft_id, draft));
+    } else {
+        if widgets::by_keyboard(ui) {
+            anchor.request_focus();
+        }
+        ui.data_mut(|d| d.remove::<ExrChannelsDraft>(draft_id));
+    }
+    chosen.flatten()
+}
+
+/// Route a chosen drop-down entry: a form to open, a command to run, or (returns true) the EXR Channels popup.
+fn queue_menu_choice(mut params: Value, it: &RenderQueueItem, sub: usize, forms: &mut Vec<(RenderQueueItem, String)>, actions: &mut Vec<Action>) -> bool {
+    match params.get("form").and_then(Value::as_str) {
+        Some("exrChannels") => return true,
+        Some(form) => forms.push((it.clone(), form.to_string())),
+        None => {
+            params["item"] = json!(it.id);
+            actions.push((if sub == 0 { "renderQueue.setRenderSettings" } else { "renderQueue.setOutputModule" }, params));
+        }
+    }
+    false
+}
+
+/// The command that stores the EXR Channels popup's choice for an item, once the popup is applied.
+fn exr_channels_action(
+    app: &EffectcraftApp,
+    ui: &mut egui::Ui,
+    did: egui::Id,
+    anchor: &egui::Response,
+    it: &RenderQueueItem,
+    open: bool,
+    rendering: bool,
+) -> Option<Action> {
+    if rendering || it.output.format != OutputFormat::ExrSequence {
+        return None;
+    }
+    let comp = app.session.project.comp(it.comp)?;
+    let selection = exr_channels_popup(ui, did.with("exrChannels"), anchor, comp, &it.output, open)?;
+    let selection = (selection != ExrSelection::default()).then_some(selection);
+
+    Some(("renderQueue.setOutputModule", json!({"item": it.id, "exrSelection": selection})))
 }
 
 /// HEVC / AV1 options: profile, level, rate control (bitrate or constant quality), key frames.
@@ -1003,17 +1155,15 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
                 widgets::open_popup(ui, did);
             }
             let labels: Vec<String> = menu.iter().map(|(l, _)| l.clone()).collect();
+            let mut open_exr_channels = false;
             if let Some(i) = widgets::popup_menu(ui, did, dd.left_bottom(), &labels, None) {
                 if widgets::by_keyboard(ui) {
                     dd_resp.request_focus();
                 }
-                let mut params = menu[i].1.clone();
-                if let Some(f) = params.get("form").and_then(Value::as_str) {
-                    forms.push((it.clone(), f.to_string()));
-                } else {
-                    params["item"] = json!(it.id);
-                    actions.push((if sub == 0 { "renderQueue.setRenderSettings" } else { "renderQueue.setOutputModule" }, params));
-                }
+                open_exr_channels = queue_menu_choice(menu[i].1.clone(), it, sub, &mut forms, &mut actions);
+            }
+            if sub == 1 {
+                actions.extend(exr_channels_action(app, ui, did, &dd_resp, it, open_exr_channels, rendering));
             }
             app.auto.add(&aid(key), dd, &summary);
             if sub == 0 {

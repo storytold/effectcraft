@@ -191,12 +191,13 @@ fn create_proxy(s: &mut Session, p: &Value) -> Result<Value> {
         it.output.output = "[compName]_proxy.[fileExtension]".into();
     }
     it.output.channels = Channels::Rgba;
+    it.post_render = PostRenderAction::SetProxy;
+    crate::render_queue::validate_post_render_output(&it.output, it.post_render).map_err(|e| bad(C, e))?;
     if let Some(o) = str_p(p, "path").or(str_p(p, "output")) {
         it.output.output = o.to_string();
     } else {
         s.avoid_sources(&mut it);
     }
-    it.post_render = PostRenderAction::SetProxy;
     let id = s.edit("Create Proxy", None, |proj, _| {
         it.id = proj.render_queue.iter().map(|i| i.id).max().unwrap_or(0) + 1;
         let id = it.id;

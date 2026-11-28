@@ -169,6 +169,112 @@ fn a_drop_down_opens_from_the_keyboard_and_gives_the_focus_back() {
     assert_eq!(focused(&h).map(|f| f.0), Some(Role::ComboBox), "choosing an entry gives the focus back to the drop-down");
 }
 
+fn exr_harness(mut s: Session) -> Harness<'static, EffectcraftApp> {
+    s.execute("renderQueue.add", json!({"format": "exr"})).unwrap();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(s));
+    h.state_mut().show_panel(PanelKind::RenderQueue);
+    h.run_steps(4);
+    click(&mut h, "renderQueue.item.1.twirl");
+    h
+}
+
+fn open_exr_channels(h: &mut Harness<'_, EffectcraftApp>) {
+    h.get_by_role_and_label(Role::ComboBox, "Output Module").focus();
+    h.run_steps(3);
+    key(h, Key::Enter, Modifiers::NONE);
+    h.get_by_label("EXR Channels…").focus();
+    h.run_steps(3);
+    key(h, Key::Enter, Modifiers::NONE);
+}
+
+#[test]
+fn exr_channels_can_be_selected_together_from_the_keyboard() {
+    use egui::accesskit::Toggled;
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "EXR", "width": 320, "height": 180})).unwrap();
+    let layer = s.execute("layer.newSolid", json!({"name": "Plate"})).unwrap()["layer"].clone();
+    s.execute("layer.newCamera", json!({"name": "Camera"})).unwrap();
+    let mut h = exr_harness(s);
+    open_exr_channels(&mut h);
+    let checked = |h: &Harness<'_, EffectcraftApp>, name: &str| h.get_by_role_and_label(Role::CheckBox, name).accesskit_node().toggled();
+    assert_eq!(focused(&h), Some((Role::CheckBox, "Composite".to_string())));
+    assert_eq!(checked(&h, "Composite"), Some(Toggled::True));
+    assert_eq!(checked(&h, "Depth (Z)"), Some(Toggled::False));
+    assert_eq!(checked(&h, "Multipart OpenEXR"), Some(Toggled::False));
+    key(&mut h, Key::Space, Modifiers::NONE);
+    key(&mut h, Key::Tab, Modifiers::NONE);
+    assert_eq!(focused(&h), Some((Role::CheckBox, "Depth (Z)".to_string())));
+    key(&mut h, Key::Space, Modifiers::NONE);
+    key(&mut h, Key::Tab, Modifiers::NONE);
+    assert_eq!(focused(&h), Some((Role::CheckBox, "Multipart OpenEXR".to_string())));
+    key(&mut h, Key::Space, Modifiers::NONE);
+    assert_eq!(checked(&h, "Multipart OpenEXR"), Some(Toggled::True));
+    key(&mut h, Key::Tab, Modifiers::NONE);
+    assert_eq!(focused(&h), Some((Role::RadioButton, "No Layers".to_string())));
+    key(&mut h, Key::Tab, Modifiers::NONE);
+    assert_eq!(focused(&h), Some((Role::RadioButton, "All Layers".to_string())));
+    key(&mut h, Key::Tab, Modifiers::NONE);
+    assert_eq!(focused(&h), Some((Role::RadioButton, "Selected Layers".to_string())));
+    key(&mut h, Key::Space, Modifiers::NONE);
+    assert!(h.query_all_by_role(Role::CheckBox).all(|n| !n.accesskit_node().label().unwrap_or_default().ends_with("Camera")));
+    key(&mut h, Key::Tab, Modifiers::NONE);
+    let (role, name) = focused(&h).unwrap();
+    assert_eq!(role, Role::CheckBox);
+    assert!(name.ends_with("Plate"), "{name}");
+    key(&mut h, Key::Space, Modifiers::NONE);
+    assert_eq!(checked(&h, &name), Some(Toggled::True));
+    key(&mut h, Key::Tab, Modifiers::NONE);
+    assert_eq!(focused(&h), Some((Role::Button, "Apply".to_string())));
+    key(&mut h, Key::Enter, Modifiers::NONE);
+    assert_eq!(focused(&h), Some((Role::ComboBox, "Output Module".to_string())));
+    let output = &h.state().session.project.render_queue[0].output;
+    assert_eq!(json!(output.exr_selection), json!({"composite": false, "layers": [layer], "depth": true, "multipart": true}));
+}
+
+#[test]
+fn exr_all_layers_keeps_a_large_stack_compact_and_follows_new_layers() {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "EXR", "width": 64, "height": 64})).unwrap();
+    for n in 0..100 {
+        s.execute("layer.newSolid", json!({"name": format!("EXR plate {n}")})).unwrap();
+    }
+    let mut h = exr_harness(s);
+    open_exr_channels(&mut h);
+    let height = |h: &Harness<'_, EffectcraftApp>| {
+        h.get_by_role_and_label(Role::Button, "Apply").rect().bottom() - h.get_by_role_and_label(Role::CheckBox, "Composite").rect().top()
+    };
+    let no_layers_height = height(&h);
+    h.get_by_role_and_label(Role::RadioButton, "All Layers").focus();
+    h.run_steps(3);
+    key(&mut h, Key::Space, Modifiers::NONE);
+    assert!((height(&h) - no_layers_height).abs() <= 1.0, "All Layers keeps the same compact dialog as No Layers");
+    assert!(
+        h.query_all_by_role(Role::CheckBox).all(|n| {
+            let label = n.accesskit_node().label().unwrap_or_default();
+            !(label.starts_with("Layer ") && label.contains(": EXR plate "))
+        }),
+        "All Layers provides no per-layer checkboxes"
+    );
+    h.get_by_role_and_label(Role::Button, "Apply").focus();
+    h.run_steps(3);
+    key(&mut h, Key::Enter, Modifiers::NONE);
+    let eligible_layers = |h: &Harness<'_, EffectcraftApp>| {
+        let project = &h.state().session.project;
+        let item = &project.render_queue[0];
+        let selection = item.output.exr_selection.as_ref().unwrap();
+        assert!(selection.all_layers && selection.layers.is_empty());
+        selection.layer_ids(project.comp(item.comp).unwrap())
+    };
+    assert_eq!(eligible_layers(&h).len(), 100);
+    let new_layer = h.state_mut().session.execute("layer.newSolid", json!({"name": "Added after queuing"})).unwrap()["layer"].as_u64().unwrap();
+    let layers = eligible_layers(&h);
+    assert_eq!(layers.len(), 101);
+    assert!(layers.iter().any(|id| id.0 == new_layer));
+}
+
 #[test]
 fn the_check_box_and_the_buttons_work_from_the_keyboard() {
     let mut h = harness();

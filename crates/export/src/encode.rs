@@ -514,7 +514,19 @@ pub(crate) async fn movie(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut St
     job.add_time(Stage::Write, t);
     finished?;
     let bytes = job.timed(Stage::Write, || file.finish())?;
-    Ok(Report { path, frames: 0, width: w, height: h, seconds: 0.0, bytes, audio: with_audio, log: None, overflow: vec![], timing: Default::default() })
+    Ok(Report {
+        path,
+        frames: 0,
+        width: w,
+        height: h,
+        seconds: 0.0,
+        bytes,
+        audio: with_audio,
+        reused_frames: false,
+        log: None,
+        overflow: vec![],
+        timing: Default::default(),
+    })
 }
 
 #[cfg(test)]

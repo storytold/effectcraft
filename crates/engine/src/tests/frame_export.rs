@@ -77,6 +77,133 @@ fn proexr_writes_layer_prefixed_channels_and_the_composite() {
     assert!(at("R", 16, 16) < 0.5, "multiplied by 50% blue (linear)");
 }
 
+fn depth_scene() -> (Session, serde_json::Value) {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Passes", "width": 64, "height": 32, "frameRate": 24, "duration": 1})).unwrap();
+    let near = s.execute("layer.newSolid", json!({"name": "Plane.Solid", "color": "#ff0000", "width": 12, "height": 12})).unwrap()["layer"].clone();
+    let far = s.execute("layer.newSolid", json!({"name": "Plane_Solid", "color": [0.0, 0.0, 0.5], "width": 20, "height": 20})).unwrap()["layer"].clone();
+    s.execute("layer.setSwitch", json!({"layers": [near, far], "switch": "threeD", "value": true})).unwrap();
+    s.execute("prop.set", json!({"layer": near, "path": "transform/position", "value": [16, 16, 0]})).unwrap();
+    s.execute("prop.set", json!({"layer": far, "path": "transform/position", "value": [48, 16, 30]})).unwrap();
+    s.execute("layer.newCamera", json!({"position": [32, 16, -90], "poi": [32, 16, 0], "zoom": 90})).unwrap();
+    (s, near)
+}
+
+#[test]
+fn proexr_selection_round_trips_only_selected_groups_and_raw_depth() {
+    use effectcraft_raster::channels3d::BACKGROUND_DEPTH;
+    use exr::prelude::*;
+
+    let (mut s, near) = depth_scene();
+    let dir = out_dir("frame-exr-selection");
+    let path = dir.join("passes.exr");
+    let result =
+        s.execute("comp.saveFrameAsExr", json!({"path": path, "scale": 0.5, "exrSelection": {"composite": false, "layers": [near], "depth": true}})).unwrap();
+    // Both layers sanitize to the same name. Stack order gives the selected one a suffix even
+    // though the other layer's channel group was not selected.
+    assert_eq!(result["channels"], json!(["Plane_Solid 2.R", "Plane_Solid 2.G", "Plane_Solid 2.B", "Plane_Solid 2.A", "Z"]));
+    let img = read().no_deep_data().largest_resolution_level().all_channels().all_layers().all_attributes().from_file(&path).unwrap();
+    assert_eq!(img.layer_data.len(), 1);
+    let layer = &img.layer_data[0];
+    assert_eq!((layer.size.0, layer.size.1), (32, 16));
+    let names: Vec<_> = layer.channel_data.list.iter().map(|c| c.name.to_string()).collect();
+    assert_eq!(names, ["Plane_Solid 2.A", "Plane_Solid 2.B", "Plane_Solid 2.G", "Plane_Solid 2.R", "Z"]);
+    let at = |name: &str, x: usize, y: usize| {
+        let c = layer.channel_data.list.iter().find(|c| c.name.eq(name)).unwrap();
+        match &c.sample_data {
+            FlatSamples::F32(v) => v[y * 32 + x],
+            other => panic!("{name} has wrong sample type: {other:?}"),
+        }
+    };
+    assert!(at("Plane_Solid 2.R", 8, 8) > 0.99);
+    assert_eq!(at("Plane_Solid 2.A", 22, 8), 0.0);
+    let near_z = at("Z", 8, 8);
+    let far_z = at("Z", 22, 8);
+    assert!((near_z - 90.0).abs() < 0.01 && (far_z - near_z - 30.0).abs() < 0.01, "{near_z}, {far_z}");
+    assert_eq!(at("Z", 0, 0), BACKGROUND_DEPTH);
+}
+
+#[test]
+fn proexr_multipart_round_trips_beauty_layer_and_float_depth() {
+    use effectcraft_raster::channels3d::BACKGROUND_DEPTH;
+    use exr::prelude::*;
+
+    let (mut s, near) = depth_scene();
+    let path = out_dir("frame-exr-multipart").join("passes.exr");
+    let result =
+        s.execute("comp.saveFrameAsExr", json!({"path": path, "scale": 0.5, "exrSelection": {"layers": [near], "depth": true, "multipart": true}})).unwrap();
+    let output_names = result["channels"].as_array().unwrap();
+    assert!(output_names.contains(&json!("Beauty.R")) && output_names.contains(&json!("Plane_Solid 2.G")) && output_names.contains(&json!("Depth.Z")));
+    let img = read().no_deep_data().largest_resolution_level().all_channels().all_layers().all_attributes().from_file(&path).unwrap();
+    let parts: Vec<_> = img.layer_data.iter().map(|l| l.attributes.layer_name.as_ref().unwrap().to_string()).collect();
+    assert_eq!(parts, ["Beauty", "Plane_Solid 2", "Depth"]);
+    assert!(img.layer_data.iter().all(|part| part.size == Vec2(32, 16)));
+    let names = |part: usize| img.layer_data[part].channel_data.list.iter().map(|c| c.name.to_string()).collect::<Vec<_>>();
+    assert_eq!(names(0), ["A", "B", "G", "R"]);
+    assert_eq!(names(1), ["A", "B", "G", "R"]);
+    assert_eq!(names(2), ["Z"]);
+    let at = |part: usize, channel: &str, x: usize, y: usize| {
+        let c = img.layer_data[part].channel_data.list.iter().find(|c| c.name.eq(channel)).unwrap();
+        match &c.sample_data {
+            FlatSamples::F32(values) => values[y * 32 + x],
+            other => panic!("expected FLOAT {channel}, got {other:?}"),
+        }
+    };
+    // The unselected far plane stays in Beauty and Z, with no named color part of its own.
+    assert_eq!(at(0, "A", 22, 8), 1.0);
+    assert_eq!(at(1, "A", 22, 8), 0.0);
+    assert!(at(1, "R", 8, 8) > 0.99);
+    assert!((at(2, "Z", 22, 8) - at(2, "Z", 8, 8) - 30.0).abs() < 0.01);
+    assert_eq!(at(2, "Z", 0, 0), BACKGROUND_DEPTH);
+}
+
+#[test]
+fn explicit_exr_layer_pass_uses_its_own_alpha_and_composite_preserves_transparency() {
+    use exr::prelude::*;
+
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Frame", "width": 8, "height": 8})).unwrap();
+    let layer = s.execute("layer.newSolid", json!({"name": "Plate", "color": "#ff0000", "width": 4, "height": 4})).unwrap()["layer"].clone();
+    s.execute("layer.setSwitch", json!({"layers": [layer], "switch": "preserveTransparency", "value": true})).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let explicit = dir.path().join("explicit.exr");
+    let legacy = dir.path().join("legacy.exr");
+    s.execute("comp.saveFrameAsExr", json!({"path": explicit, "exrSelection": {"layers": [layer]}})).unwrap();
+    s.execute("comp.saveFrameAsExr", json!({"path": legacy})).unwrap();
+
+    let alpha = |path: &std::path::Path, name: &str| {
+        let img = read().no_deep_data().largest_resolution_level().all_channels().all_layers().all_attributes().from_file(path).unwrap();
+        let c = img.layer_data[0].channel_data.list.iter().find(|c| c.name.eq(name)).unwrap();
+        match &c.sample_data {
+            FlatSamples::F32(values) => (values[0], values[4 * 8 + 4]),
+            other => panic!("expected FLOAT alpha, got {other:?}"),
+        }
+    };
+    assert_eq!(alpha(&explicit, "Plate.A"), (0.0, 1.0));
+    assert_eq!(alpha(&explicit, "A"), (0.0, 0.0));
+    assert_eq!(alpha(&legacy, "Plate.A"), (0.0, 0.0));
+}
+
+#[test]
+fn proexr_rejects_bad_selections_before_writing() {
+    let mut s = frame();
+    let dir = out_dir("frame-exr-invalid-selection");
+    let path = dir.join("invalid.exr");
+    for selection in [
+        json!(null),
+        json!([true, [], false]),
+        json!({"depth": "yes"}),
+        json!({"multipart": "yes"}),
+        json!({"channels": ["Z"]}),
+        json!({"composite": false}),
+        json!({"layers": [u64::MAX]}),
+    ] {
+        let r = s.execute("comp.saveFrameAsExr", json!({"path": path, "exrSelection": selection}));
+        assert!(r.is_err(), "{selection}");
+        assert!(!path.exists());
+    }
+}
+
 #[test]
 fn proexr_names_a_non_ascii_layer_with_underscores_instead_of_panicking() {
     let mut s = Session::default();

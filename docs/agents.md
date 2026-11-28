@@ -362,6 +362,22 @@ build real projects through these interfaces; they are worked examples of everyt
   lists them.
   PXR24 on float, B44 / B44A on half and DWAA / DWAB are lossy (in the tests every linear sample
   stays within 0.03 + 6 % of its value); B44 / B44A store 32-bit float uncompressed. Half rounds each sample to the nearest half float and holds it to ±65 504.
+  Use `exrSelection: {"composite": true, "layers": [42], "depth": true}` in `renderQueue.add` or
+  `renderQueue.setOutputModule` to include the composite, selected layer IDs and camera-space
+  `Z`. Set `allLayers: true` with an empty or omitted `layers` list to export every eligible
+  layer, including layers added after queuing. The Output Module's **EXR Channels…** menu
+  offers **No Layers**, **All Layers**, and **Selected Layers**. Each layer has its own named
+  RGBA channel group. Explicit layer passes render at Normal and full opacity, with their own
+  alpha even when Preserve Transparency clips the layer in the composite. Masks and track mattes
+  still apply. `Z` stays 32-bit float at either colour
+  depth and requires compression that is lossless for float channels. The render queue defaults to
+  the composite. Set `multipart: true` inside `exrSelection` to write separate scan-line parts
+  for `Beauty`, each selected layer, and `Depth` with `Z`. `comp.saveFrameAsExr` accepts the
+  same selection and defaults to the composite and visible layers. Pre-render and Set Proxy
+  require the composite in the first output module. A saved queue with a pass-only first
+  module can still export its passes, and skips any saved post-render replacement or proxy action.
+  If the first OpenEXR sequence reused frames, turn off **Skip Existing Files** and render again
+  before replacing composition usage or setting a proxy.
   **A render never writes one file twice either:** when two outputs of the job (two items, a
   `renderQueue.duplicate` copy, output modules, segments) name the same file, the whole render is
   refused before anything is written, naming both items. Sequences clash only on frames both

@@ -325,7 +325,19 @@ pub(crate) async fn webm(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut Sta
         file.seek(SeekFrom::End(0)).map_err(io)?;
         file.finish()
     })?;
-    Ok(Report { path, frames: 0, width: w, height: h, seconds: 0.0, bytes, audio: with_audio, log: None, overflow: vec![], timing: Default::default() })
+    Ok(Report {
+        path,
+        frames: 0,
+        width: w,
+        height: h,
+        seconds: 0.0,
+        bytes,
+        audio: with_audio,
+        reused_frames: false,
+        log: None,
+        overflow: vec![],
+        timing: Default::default(),
+    })
 }
 
 // ---------------------------------------------------------------- audio-only outputs
@@ -449,7 +461,19 @@ pub(crate) fn audio_file(job: &Cx, comp: &Comp, aiff: bool, st: &mut State) -> R
         let bytes = file.finish()?;
         Ok((path, bytes))
     })?;
-    Ok(Report { path, frames: 0, width: 0, height: 0, seconds: 0.0, bytes, audio: true, log: None, overflow: vec![], timing: Default::default() })
+    Ok(Report {
+        path,
+        frames: 0,
+        width: 0,
+        height: 0,
+        seconds: 0.0,
+        bytes,
+        audio: true,
+        reused_frames: false,
+        log: None,
+        overflow: vec![],
+        timing: Default::default(),
+    })
 }
 
 #[cfg(test)]

@@ -35,6 +35,7 @@
 
 mod encode;
 pub mod exr_out;
+mod exr_sequence;
 mod hevc_av1;
 mod out;
 mod pipeline;
@@ -185,6 +186,8 @@ pub struct Report {
     pub seconds: f64,
     pub bytes: u64,
     pub audio: bool,
+    /// At least one sequence frame was kept by Skip Existing Files.
+    pub reused_frames: bool,
     /// The render log, when one was written.
     pub log: Option<String>,
     /// Files that went to an overflow folder.
@@ -336,27 +339,43 @@ fn first_frame_number(job: &Job, comp: &Comp) -> i64 {
 async fn sequence(cx: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut State<'_>) -> Result<Report> {
     let f0 = first_frame_number(cx, comp);
     let fmt = cx.output.format;
+    if fmt == OutputFormat::ExrSequence
+        && let Some(selection) = &cx.output.exr_selection
+    {
+        let (bytes, reused_frames) = exr_sequence::write(cx, comp, selection, (w, h), f0, st).await?;
+        return Ok(Report {
+            path: sequence_path(cx.path, f0),
+            frames: 0,
+            width: w,
+            height: h,
+            seconds: 0.0,
+            bytes,
+            audio: false,
+            reused_frames,
+            log: None,
+            overflow: vec![],
+            timing: Default::default(),
+        });
+    }
     let channels = match cx.output.channels {
         Channels::Rgba if !fmt.supports_alpha() => Channels::Rgb,
         c => c,
     };
     let batch = batch_size();
     let mut bytes = 0u64;
+    let mut reused_frames = false;
     let mut i = 0;
     while i < st.total {
         let end = (i + batch).min(st.total);
         let ks: Vec<u64> = (i..end).filter(|k| !(cx.settings.skip_existing && cx.frame_exists(&sequence_path(cx.path, f0 + *k as i64)))).collect();
+        reused_frames |= (ks.len() as u64) < end - i;
         let written: Vec<Result<u64>> = cx
             .frames(comp, ks, |k, img| {
                 let path = sequence_path(cx.path, f0 + k as i64);
                 // Encode in memory first: the storage hook decides where it fits.
                 let mut buf = std::io::Cursor::new(Vec::new());
                 write_still(cx, &mut buf, &img, comp, StillOutput { format: fmt, channels, size: (w, h), quality: cx.output.quality })?;
-                let data = buf.into_inner();
-                let path = cx.place(&path, data.len() as u64);
-                let mut f = cx.create(&path)?;
-                std::io::Write::write_all(&mut f, &data).map_err(io)?;
-                f.finish()
+                publish_sequence_frame(cx, &path, &buf.into_inner())
             })
             .await;
         for r in written {
@@ -373,10 +392,18 @@ async fn sequence(cx: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut State<'_>) 
         seconds: 0.0,
         bytes,
         audio: false,
+        reused_frames,
         log: None,
         overflow: vec![],
         timing: Default::default(),
     })
+}
+
+fn publish_sequence_frame(cx: &Cx<'_>, path: &str, data: &[u8]) -> Result<u64> {
+    let path = cx.place(path, data.len() as u64);
+    let mut file = cx.create(&path)?;
+    std::io::Write::write_all(&mut file, data).map_err(io)?;
+    file.finish()
 }
 
 struct StillOutput {
@@ -396,35 +423,12 @@ fn write_still<W: std::io::Write + std::io::Seek>(cx: &Cx, file: &mut W, img: &I
             // The frame was rendered without the HDR step (`RenderOpts::skip_hdr_step`) and is
             // decoded with the output space's curve, in the output space's primaries.
             let pipe = effectcraft_render::color::Pipe::of(&cx.project.settings);
-            let dec = pipe.output_linear();
-            let lin3 = |c: [f32; 3]| dec.apply(c.map(|v| v.max(0.0)));
-            let mut data = Vec::with_capacity((w * h * 4) as usize);
-            for y in 0..h {
-                for x in 0..w {
-                    let p = if x < img.width && y < img.height { img.data[img.idx(x, y)] } else { [0.0; 4] };
-                    let (c, a) = match channels {
-                        // Alpha is coverage, not encoded colour: written as it is.
-                        Channels::Alpha => ([p[3].clamp(0.0, 1.0); 3], 1.0),
-                        Channels::Rgba => {
-                            let a = p[3].clamp(0.0, 1.0);
-                            let c = if a > 0.0 { lin3([p[0] / a, p[1] / a, p[2] / a]).map(|v| v * a) } else { [0.0; 3] };
-                            (c, a)
-                        }
-                        Channels::Rgb => {
-                            // The background is added to the output-encoded frame as it is, as every other output
-                            // does (`Image::to_rgba8_over`), then decoded with the frame: same colour as a PNG.
-                            let k = 1.0 - p[3].clamp(0.0, 1.0);
-                            (lin3([0, 1, 2].map(|i| p[i] + comp.background[i] * k)), 1.0)
-                        }
-                    };
-                    data.extend_from_slice(&[c[0], c[1], c[2], a]);
-                }
-            }
+            let data = exr_sequence::linear_pixels(img, comp, (w, h), channels, &pipe);
             // Scan lines with the module's compression and sample type (`exr_out`), naming the primaries and
             // white the values are in (the output space's), for Nuke, AE and Blender.
             let om = cx.output;
             let chroma = Some(pipe.output_linear_space().exr_chromaticities());
-            exr_out::write_rgba(file, &data, (w as usize, h as usize), (om.exr_compression, om.exr_bit_depth), chroma)
+            exr_out::write_rgba(file, data.as_flattened(), (w as usize, h as usize), (om.exr_compression, om.exr_bit_depth), chroma)
                 .map_err(|e| ExportError::Encode(e.to_string()))
         }
         OutputFormat::JpegSequence => {
@@ -514,7 +518,19 @@ async fn gif_export(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut State<'_
     job.add_time(pipeline::Stage::EncodeWrite, t);
     finished?;
     let bytes = job.timed(pipeline::Stage::EncodeWrite, || file.finish())?;
-    Ok(Report { path, frames: 0, width: w, height: h, seconds: 0.0, bytes, audio: false, log: None, overflow: vec![], timing: Default::default() })
+    Ok(Report {
+        path,
+        frames: 0,
+        width: w,
+        height: h,
+        seconds: 0.0,
+        bytes,
+        audio: false,
+        reused_frames: false,
+        log: None,
+        overflow: vec![],
+        timing: Default::default(),
+    })
 }
 
 fn validate_gif_dimensions(w: u32, h: u32) -> Result<()> {

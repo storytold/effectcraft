@@ -7,7 +7,7 @@ use std::sync::Mutex;
 use effectcraft_project::render_queue::{
     AlphaMode, Channels, CurrentOrOff, EffectsMode, FrameSample, OutputFormat, OutputModule, RenderLog, RenderTiming, ResizeQuality, SwitchOverride, log_path,
 };
-use effectcraft_project::{BitDepth, Comp, Project};
+use effectcraft_project::{BitDepth, Comp, LayerId, Project};
 use effectcraft_raster::Image;
 use effectcraft_render::{Backend, LayerCache, RenderOpts, Renderer};
 use effectcraft_time::Tick;
@@ -834,13 +834,7 @@ impl<'a> Cx<'a> {
     async fn frame_async_on(&self, comp: &Comp, i: u64, on: crate::JobRenderer) -> Image {
         let t0 = Instant::now();
         let gpu = on == crate::JobRenderer::Gpu && self.job.accel.is_some();
-        let img = match self.job.settings.sample(comp, i) {
-            FrameSample::Progressive(t) => self.render_at(t, on).await,
-            FrameSample::Fields { first, second, upper_first } => {
-                let a = self.render_at(first, on).await;
-                if second == first { a } else { interleave(&a, &self.render_at(second, on).await, upper_first) }
-            }
-        };
+        let img = sample_image(self.job.settings.sample(comp, i), async |t| self.render_at(t, on).await).await;
         if gpu {
             self.gpu_rendered.store(true, std::sync::atomic::Ordering::Relaxed);
         }
@@ -849,6 +843,31 @@ impl<'a> Cx<'a> {
             ft.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push((i, t0.elapsed().as_secs_f64()));
         }
         img
+    }
+
+    pub(crate) async fn exr_layer_frame(&self, comp: &Comp, i: u64, layer: LayerId) -> crate::Result<Image> {
+        let sample = self.job.settings.sample(comp, i);
+        let first = match sample {
+            FrameSample::Progressive(t) | FrameSample::Fields { first: t, .. } => t,
+        };
+        let id = self.job.comp;
+        let isolated = crate::exr_out::isolate_exr_layer(&self.project, id, layer, first)
+            .ok_or_else(|| crate::ExportError::Encode(format!("Cannot isolate composition layer {}", layer.0)))?;
+        let base = self.renderer_on(self.backend());
+        // Solo and opacity change the render context. Keep isolated buffers out of the job's shared cache.
+        let mut renderer = Renderer::new(&isolated.project, base.footage, base.opts);
+        renderer.expr = base.expr;
+        renderer.accel = base.accel;
+        let img = sample_image(sample, async |t| effectcraft_render::passes::comp_frame(&renderer, id, t).await).await;
+        Ok(self.crop_resize(img))
+    }
+
+    /// The auxiliary compositor already resolves visible surfaces in active-camera space. Use a
+    /// CPU renderer so the synchronous pass also works with deferred browser GPU readbacks.
+    pub(crate) fn exr_depth_at(&self, t: Tick) -> Option<effectcraft_raster::AuxChannels> {
+        let mut renderer = self.renderer_on(crate::JobRenderer::Cpu);
+        renderer.accel = None;
+        renderer.comp_aux(self.job.comp, t)
     }
 
     /// Output frame `i` as the H.264 export's 4:2:0 planes at `w`×`h`, rendered and converted
@@ -1126,6 +1145,16 @@ pub(crate) fn describe_choice(c: &Choice) -> String {
         format!("{name} ({})", c.why)
     } else {
         format!("{name} ({}: GPU {}, CPU {})", c.why, ms(c.gpu_ms), ms(c.cpu_ms))
+    }
+}
+
+async fn sample_image(sample: FrameSample, render: impl AsyncFn(Tick) -> Image) -> Image {
+    match sample {
+        FrameSample::Progressive(t) => render(t).await,
+        FrameSample::Fields { first, second, upper_first } => {
+            let a = render(first).await;
+            if second == first { a } else { interleave(&a, &render(second).await, upper_first) }
+        }
     }
 }
 

@@ -180,5 +180,17 @@ pub(crate) async fn webm_av1(job: &Cx<'_>, comp: &Comp, w: u32, h: u32, st: &mut
         file.seek(SeekFrom::End(0)).map_err(io)?;
         file.finish()
     })?;
-    Ok(Report { path, frames: 0, width: w, height: h, seconds: 0.0, bytes, audio: with_audio, log: None, overflow: vec![], timing: Default::default() })
+    Ok(Report {
+        path,
+        frames: 0,
+        width: w,
+        height: h,
+        seconds: 0.0,
+        bytes,
+        audio: with_audio,
+        reused_frames: false,
+        log: None,
+        overflow: vec![],
+        timing: Default::default(),
+    })
 }
