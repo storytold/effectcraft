@@ -18,6 +18,7 @@ mod effects_quickwins;
 mod effects_round2;
 mod effects_round3;
 mod effects_thirdparty;
+mod effects_tile_shift_emboss;
 mod fx_inject;
 mod issue_3087;
 mod lumetri;
