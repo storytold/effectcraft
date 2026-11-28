@@ -69,6 +69,29 @@ fn a_hostile_project_opens_within_the_limits_and_says_what_changed() {
     }
 }
 
+/// A project that claims to be larger than the open limit is refused before it is read: the
+/// command asks the bounded service rather than loading whatever size the file names.
+struct HugeProject;
+
+impl crate::Services for HugeProject {
+    fn read_file(&self, _: &str) -> std::io::Result<Vec<u8>> {
+        panic!("file.open must read a project through read_file_bounded")
+    }
+    fn read_file_bounded(&self, path: &str, max: u64) -> std::io::Result<Vec<u8>> {
+        Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{path} is larger than the {max}-byte limit")))
+    }
+    fn write_file(&self, _: &str, _: &[u8]) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn file_open_refuses_a_project_larger_than_the_read_limit() {
+    let mut s = Session { services: std::sync::Arc::new(HugeProject), ..Default::default() };
+    let e = s.execute("file.open", json!({"path": "Huge.ecproj"})).unwrap_err().to_string();
+    assert!(e.contains("larger than the"), "{e}");
+}
+
 #[test]
 fn a_project_within_the_limits_opens_unchanged() {
     let mut s = Session::default();
