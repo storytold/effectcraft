@@ -174,12 +174,14 @@ fn fetch(ctx: &EffectCtx, times: &[f64]) -> Option<Frames> {
 /// [`fetch`] with the first `effects` effects of the stack only (0: source and masks).
 fn fetch_with(ctx: &EffectCtx, times: &[f64], effects: usize) -> Option<Frames> {
     let host = ctx.env.host?;
-    // Dedupe times (sub-microsecond differences are the same frame).
-    let mut uniq: Vec<i64> = times.iter().map(|t| (t * 1e6).round() as i64).collect();
-    uniq.sort_unstable();
-    uniq.dedup();
+    // Render each distinct time once, at that time. Rounding the times to whole microseconds put
+    // some just before their frame (1/12 s as 83 333 µs is frame 1 of 24 fps footage, not frame
+    // 2) and merged times less than a microsecond apart across a frame boundary (#3396).
+    let mut uniq: Vec<f64> = times.to_vec();
+    uniq.sort_by(f64::total_cmp);
+    uniq.dedup_by_key(|t| t.to_bits());
     // Every effect before this one (the host bounds the count to them).
-    let bufs: Vec<(i64, Option<Buf>)> = uniq.iter().map(|&k| (k, host.self_at(k as f64 / 1e6, effects))).collect();
+    let bufs: Vec<(u64, Option<Buf>)> = uniq.iter().map(|&t| (t.to_bits(), host.self_at(t, effects))).collect();
     let first = bufs.iter().find_map(|(_, b)| b.as_ref())?;
     let scale = first.scale;
     // Union of every frame's extent in layer pixels (offset = where layer (0,0) sits).
@@ -218,11 +220,11 @@ fn fetch_with(ctx: &EffectCtx, times: &[f64], effects: usize) -> Option<Frames> 
         });
         out
     };
-    let placed: Vec<(i64, Image)> = bufs.iter().map(|(k, b)| (*k, b.as_ref().map(place).unwrap_or_else(|| Image::new(w, h)))).collect();
+    let placed: Vec<(u64, Image)> = bufs.iter().map(|(k, b)| (*k, b.as_ref().map(place).unwrap_or_else(|| Image::new(w, h)))).collect();
     let imgs = times
         .iter()
         .map(|t| {
-            let k = (t * 1e6).round() as i64;
+            let k = t.to_bits();
             placed.iter().find(|(q, _)| *q == k).map(|(_, i)| i.clone()).unwrap_or_else(|| Image::new(w, h))
         })
         .collect();
