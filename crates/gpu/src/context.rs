@@ -1728,6 +1728,10 @@ impl GpuContext {
     /// count; if the wait frees none of them, later frames only poll until `dying` drops (a
     /// stopped queue must not re-wait [`crate::readback::TIMEOUT`] on every frame).
     pub fn pool_frame_end(&self) {
+        // CPU fallback still ends frames. Never submit cleanup work to a retired queue.
+        if self.readbacks.check().is_err() {
+            return;
+        }
         let before = self.pool.lock().map(|mut p| p.frame_end()).unwrap_or_default();
         if before > 0 {
             // A work-done callback waits for a submission; an empty one closes the wait.

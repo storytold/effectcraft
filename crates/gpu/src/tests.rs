@@ -1121,6 +1121,10 @@ fn retired_attempt_releases_kept_resources(retire_before: bool) {
     assert_eq!(g.ctx.pool_retained_bytes(), 0, "CPU fallback must not retain working textures");
     drop(earlier);
     assert_eq!(g.ctx.pool_retained_bytes(), 0, "late leases cannot refill a retired pool");
+    let waits = g.ctx.pool_waits();
+    g.ctx.pool_charge_dying(1 << 20);
+    g.ctx.pool_frame_end();
+    assert_eq!(g.ctx.pool_waits(), waits, "CPU fallback must not submit cleanup work to the retired queue");
 }
 
 #[test]
