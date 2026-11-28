@@ -581,6 +581,26 @@ fn defaults_have_no_conflicts_and_match_the_menus() {
     assert!(t.bindables.len() > 500);
 }
 
+/// Layer ▸ Arrange keeps its bracket keys and also answers After Effects' arrow chords:
+/// Cmd/Ctrl+Alt+Up/Down one level, with Shift to the top or bottom. The menus show the brackets.
+#[test]
+fn arrange_has_after_effects_arrow_keys() {
+    let s = Session::default();
+    let t = s.shortcuts();
+    for (to, bracket, arrow) in [
+        ("front", "Cmd+Shift+]", "Cmd+Alt+Shift+ArrowUp"),
+        ("forward", "Cmd+]", "Cmd+Alt+ArrowUp"),
+        ("backward", "Cmd+[", "Cmd+Alt+ArrowDown"),
+        ("back", "Cmd+Shift+[", "Cmd+Alt+Shift+ArrowDown"),
+    ] {
+        let params = json!({"to": to});
+        assert_eq!(t.shortcut_of("layer.arrange", &params), Some(bracket), "{to}");
+        let keys: Vec<&str> = t.bindings().into_iter().filter(|(_, b)| b.command == "layer.arrange" && b.params == params).map(|(k, _)| k).collect();
+        assert_eq!(keys, [bracket, arrow], "{to}");
+    }
+    assert!(t.all_conflicts().is_empty(), "{:?}", t.all_conflicts());
+}
+
 /// Each Fast Previews and Show Channel mode is a command with a default key.
 #[test]
 fn fast_previews_and_show_channel_modes_have_default_keys() {
