@@ -1090,7 +1090,7 @@ impl GpuContext {
                 },
                 _ => self.poll_lock.lock().unwrap_or_else(|e| e.into_inner()),
             };
-            self.device.poll(kind)
+            self.readbacks.run_device(|| self.device.poll(kind))?
         };
         res.map_err(|e| {
             let error = format!("GPU readback poll: {e}");
@@ -1114,7 +1114,13 @@ impl GpuContext {
             let slice = remaining.min(Self::POLL_SLICE);
             let res = {
                 let _guard = self.poll_lock.lock().unwrap_or_else(|e| e.into_inner());
-                self.device.poll(wgpu::PollType::Wait { submission_index: Some(submission_index.clone()), timeout: Some(slice) })
+                match self
+                    .readbacks
+                    .run_device(|| self.device.poll(wgpu::PollType::Wait { submission_index: Some(submission_index.clone()), timeout: Some(slice) }))
+                {
+                    Ok(result) => result,
+                    Err(_) => return,
+                }
             };
             let done = match res {
                 Ok(_) => true,
@@ -1347,7 +1353,8 @@ impl GpuContext {
                     (remaining, std::time::Duration::ZERO, Ok(wgpu::PollStatus::Poll))
                 } else {
                     let slice = remaining.min(Self::POLL_SLICE);
-                    let res = self.device.poll(wgpu::PollType::Wait { submission_index: submission.clone(), timeout: Some(slice) });
+                    let res =
+                        self.readbacks.run_device(|| self.device.poll(wgpu::PollType::Wait { submission_index: submission.clone(), timeout: Some(slice) }))?;
                     (remaining, slice, res)
                 }
             };
@@ -1724,10 +1731,14 @@ impl GpuContext {
     /// count; if the wait frees none of them, later frames only poll until `dying` drops (a
     /// stopped queue must not re-wait [`crate::readback::TIMEOUT`] on every frame).
     pub fn pool_frame_end(&self) {
+        // CPU fallback still ends frames. Skip cleanup once retirement is already known.
+        if self.readbacks.check().is_err() {
+            return;
+        }
         let before = self.pool.lock().map(|mut p| p.frame_end()).unwrap_or_default();
         if before > 0 {
             // A work-done callback waits for a submission; an empty one closes the wait.
-            let index = self.queue.submit([]);
+            let Ok(index) = self.readbacks.run_device(|| self.queue.submit([])) else { return };
             self.poll_wait(index, crate::readback::TIMEOUT);
             if let Ok(mut p) = self.pool.lock() {
                 p.waited(before);
