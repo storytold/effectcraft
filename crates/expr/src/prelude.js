@@ -726,6 +726,22 @@ Layer.prototype = {
   get text() { return this.__group('text'); },
   get cameraOption() { return this.__group('cameraOptions'); },
   get lightOption() { return this.__group('lightOptions'); },
+  get materialOption() { return this.__group('materialOptions'); },
+  // 3D layer attributes, as numbers in degrees or percent: Transform's Orientation and rotations, and
+  // the Material Options. The shadow options are 0 Off, 1 On, 2 Only (a popup's expression value is 1-based).
+  get orientation() { return __v(this.transform.orientation); },
+  get rotationX() { return __v(this.transform.xRotation); },
+  get rotationY() { return __v(this.transform.yRotation); },
+  get rotationZ() { return __v(this.transform.zRotation); },
+  get acceptsLights() { return __v(this.materialOption.acceptsLights) ? 1 : 0; },
+  get acceptsShadows() { return __v(this.materialOption.acceptsShadows) - 1; },
+  get ambient() { return __v(this.materialOption.ambient); },
+  get castsShadows() { return __v(this.materialOption.castsShadows) - 1; },
+  get diffuse() { return __v(this.materialOption.diffuse); },
+  get lightTransmission() { return __v(this.materialOption.lightTransmission); },
+  get metal() { return __v(this.materialOption.metal); },
+  get shininess() { return __v(this.materialOption.specularShininess); },
+  get specular() { return __v(this.materialOption.specularIntensity); },
   get marker() { return new Markers(this.__c, this.__l); },
   effect: function (k) {
     var g = __child(this.__c, this.__l, '', 'effects');
