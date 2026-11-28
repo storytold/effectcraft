@@ -117,10 +117,16 @@ pub fn matte(e: &mut Enc, iso: &GpuImage, matte: &GpuImage, kind: MatteKind) -> 
     out
 }
 
-/// Preserve Transparency: multiply by the alpha below.
-pub fn preserve(e: &mut Enc, iso: &GpuImage, canvas: &GpuImage) -> GpuImage {
-    let out = e.scratch(iso.width, iso.height);
-    e.pixels("preserve", &Params::default(), iso, Some(canvas), &out, None);
+/// Preserve Transparency: `blended` (the layer composited onto `canvas` in `mode`, unquantised)
+/// keeps its colour at the alpha of `canvas` (stencil and silhouette modes as they are),
+/// quantised to `levels`; where `canvas` is transparent it stays as it is.
+pub fn preserve(e: &mut Enc, blended: &GpuImage, canvas: &GpuImage, mode: BlendMode, levels: Option<f32>) -> GpuImage {
+    let mut p = Params::default();
+    p.u[0] = [mode_id(mode), 0, 0, 0];
+    p.f[0] = [levels.unwrap_or(0.0), levels.map_or(0.0, |v| 1.0 / v), 0.0, 0.0];
+    let mut out = e.scratch(blended.width, blended.height);
+    e.pixels("preserve", &p, blended, Some(canvas), &out, None);
+    out.levels = levels;
     out
 }
 

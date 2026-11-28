@@ -2068,3 +2068,51 @@ fn elongated_solids_stay_within_the_pixel_cap_after_rounding() {
     let (s, pw, ph) = solid_size(5000, 5000, 1.0);
     assert!((s - 0.8).abs() < 0.01 && pw * ph <= 16_000_000);
 }
+
+/// Preserve Underlying Transparency keeps the alpha below: an opaque red layer over a 30 %
+/// background comes out red at 30 %, as in After Effects 2026 (a lab render: 77 / 255 over a 30 %
+/// background), not at 51 % (the layer multiplied by the alpha below and then laid over it).
+/// Where nothing lies below, it draws nothing. The same in 2D and with both layers in 3D.
+#[test]
+fn preserve_transparency_keeps_the_alpha_below() {
+    for three_d in [false, true] {
+        let (mut p, cid, comp) = setup();
+        let mut bg = solid(&mut p, &comp, [0.0, 0.0, 1.0], 100, 100);
+        bg.props.prop_mut("transform/position").unwrap().value = Value::Vec3([50.0, 50.0, 0.0]);
+        bg.props.prop_mut("transform/opacity").unwrap().value = Value::Scalar(30.0);
+        let mut pt = solid(&mut p, &comp, [1.0, 0.0, 0.0], 200, 100);
+        pt.preserve_transparency = true;
+        bg.switches.three_d = three_d;
+        pt.switches.three_d = three_d;
+        let c = p.comp_mut(cid).unwrap();
+        // Top first.
+        c.layers.push(pt);
+        c.layers.push(bg);
+        let img = render_frame(&p, cid, Tick::ZERO, 1.0);
+        let px = img.get(50, 50);
+        for (got, want) in px.iter().zip([0.3, 0.0, 0.0, 0.3]) {
+            assert!((got - want).abs() < 1e-4, "3D {three_d}: {px:?} over the background");
+        }
+        assert!(img.get(150, 50)[3] < 1e-6, "3D {three_d}: {:?} where nothing lies below", img.get(150, 50));
+    }
+}
+
+/// With half opacity, Preserve Transparency keeps the colour of the plain composite at the alpha
+/// below (After Effects 2026 lab `pt_stencil_iso`, see `blend_pixel_preserve`): red at 50 % over
+/// blue at 40 % composites to (0.5, 0, 0.2) at 0.7, which at 0.4 is (0.286, 0, 0.114).
+#[test]
+fn preserve_transparency_mixes_by_the_layer_opacity() {
+    let (mut p, cid, comp) = setup();
+    let mut bg = solid(&mut p, &comp, [0.0, 0.0, 1.0], 200, 100);
+    bg.props.prop_mut("transform/opacity").unwrap().value = Value::Scalar(40.0);
+    let mut pt = solid(&mut p, &comp, [1.0, 0.0, 0.0], 200, 100);
+    pt.preserve_transparency = true;
+    pt.props.prop_mut("transform/opacity").unwrap().value = Value::Scalar(50.0);
+    let c = p.comp_mut(cid).unwrap();
+    c.layers.push(pt);
+    c.layers.push(bg);
+    let px = render_frame(&p, cid, Tick::ZERO, 1.0).get(100, 50);
+    for (got, want) in px.iter().zip([0.5 * 0.4 / 0.7, 0.0, 0.2 * 0.4 / 0.7, 0.4]) {
+        assert!((got - want).abs() < 1e-4, "{px:?}");
+    }
+}
