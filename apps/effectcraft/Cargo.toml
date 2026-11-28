@@ -64,3 +64,6 @@ fmv-macos-events = "=0.1.0"
 craft-update = { workspace = true }
 # SetCurrentProcessExplicitAppUserModelID: the Nightly window's own taskbar identity.
 winsafe = { version = "=0.0.29", default-features = false, features = ["user", "shell"] }
+# Screen-pixel sampling for the application-wide color picker. Its own workspace keeps the
+# Win32 calls (the only `unsafe` in the tree) out of EffectCraft's no-unsafe workspace.
+effectcraft-screen-pick = { path = "../../tools/screen-pick" }

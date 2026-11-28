@@ -58,6 +58,7 @@ fn key_navigator(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter,
 /// eyedroppers).
 pub(crate) fn toggle_pick(app: &mut EffectcraftApp, kind: &str, layer: &Layer, prop: &Property) {
     let pick = FxPick { kind: kind.into(), layer: layer.id.0, prop: prop.uid, name: prop.name.clone() };
+    let screen_pick = crate::screen_pick::uses_screen(app, &pick);
     if app.ui.fx_pick.as_ref() == Some(&pick) {
         app.ui.fx_pick = None;
     } else {
@@ -68,6 +69,8 @@ pub(crate) fn toggle_pick(app: &mut EffectcraftApp, kind: &str, layer: &Layer, p
         } else if kind == crate::panels::crypto_pick::KIND {
             let keys = crate::panels::crypto_pick::remove_keys(egui::os::OperatingSystem::from_target_os());
             crate::i18n::tr_args("Click IDs in the Composition panel: Shift adds, {} removes, Esc ends", &[&keys])
+        } else if screen_pick {
+            crate::i18n::tr_args("Click anywhere in EffectCraft to sample {}", &[&prop.name])
         } else {
             format!("Click in the Composition panel to sample {}", prop.name)
         };
@@ -388,7 +391,11 @@ fn value_color(app: &mut EffectcraftApp, ui: &mut egui::Ui, cx: &PropCx, value: 
     let er = Rect::from_center_size(pos2(sr.max.x + 14.0, cy), vec2(18.0, 18.0));
     let active = app.ui.fx_pick.as_ref().is_some_and(|k| k.prop == uid && k.kind == "color");
     if fw::eyedropper_button(ui, er, active, egui::Id::unique(("ec-eye", uid)), &t)
-        .on_hover_text(crate::i18n::tr("Eyedropper: click, then click in the Composition panel"))
+        .on_hover_text(if crate::screen_pick::uses_screen_pick(app, "color", layer.id.0, prop.uid) {
+            crate::i18n::tr("Eyedropper: click, then click anywhere in EffectCraft to sample a color")
+        } else {
+            crate::i18n::tr("Eyedropper: click, then click in the Composition panel")
+        })
         .clicked()
     {
         toggle_pick(app, "color", layer, prop);
@@ -548,6 +555,7 @@ fn value_text(app: &mut EffectcraftApp, ui: &mut egui::Ui, cx: &PropCx, value: &
         let er = Rect::from_center_size(pos2(fr.max.x + 14.0, cy), vec2(18.0, 18.0));
         let active = app.ui.fx_pick.as_ref().is_some_and(|k| k.prop == uid && k.kind == crate::panels::crypto_pick::KIND);
         if fw::eyedropper_button(ui, er, active, egui::Id::unique(("ec-eye", uid)), &t)
+            // Cryptomatte picks IDs from the viewer, not a screen colour: keep its guidance.
             .on_hover_text(crate::i18n::tr("Eyedropper: click, then click in the Composition panel"))
             .clicked()
         {

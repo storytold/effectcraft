@@ -53,8 +53,9 @@ fn fx_pick_session(
         .flatten()
         .filter(|g| effectcraft_engine::effects::find(&g.match_id).is_some_and(|s| s.category == "Keying"))
         .map(|g| g.uid);
-    if pick.kind == "color" && keyer.is_none() {
-        // GPU frames: read the shown frame back for sampling.
+    if pick.kind == "color" && keyer.is_none() && !crate::screen_pick::native_available(&ctx) {
+        // Without a screen sampler, GPU frames must be read back for sampling. The desktop
+        // picker reads the visible pixel instead, so no readback (or swatch) is needed.
         app.viewer_pixels();
     }
     let resp = ui.interact(map.area, egui::Id::unique("viewer-fx-pick"), Sense::click());
@@ -72,6 +73,7 @@ fn fx_pick_session(
         }
         if pick.kind == "color"
             && keyer.is_none()
+            && !crate::screen_pick::native_available(&ctx)
             && let Some(img) = &app.viewer_image
             && let Some(s) = fw::sample_frame(img, crate::panels::viewer_tools::shown_region(&ctx, map.comp), c)
         {
@@ -82,7 +84,7 @@ fn fx_pick_session(
     }
     // No frame to sample yet (it is still rendering, or its readback is pending): the click
     // leaves the eyedropper armed instead of using it up without a colour.
-    let unsampled = pick.kind == "color" && keyer.is_none() && app.viewer_image.is_none();
+    let unsampled = !crate::screen_pick::native_available(&ctx) && pick.kind == "color" && keyer.is_none() && app.viewer_image.is_none();
     if resp.clicked()
         && !unsampled
         && let Some(pos) = resp.interact_pointer_pos()
@@ -124,7 +126,8 @@ fn color_pick_preview(app: &EffectcraftApp, painter: &egui::Painter, map: &crate
     let chip = Rect::from_min_size(map.area.min + vec2(10.0, 10.0), vec2(220.0, 22.0));
     painter.rect_filled(chip, 11.0, Color32::from_black_alpha(180));
     painter.text(chip.center(), Align2::CENTER_CENTER, hint, Tokens::ui(11.5), app.tokens.text);
-    if let Some(pos) = pointer
+    if !crate::screen_pick::native_available(painter.ctx())
+        && let Some(pos) = pointer
         && let Some(sample) = crate::panels::viewer_tools::sample_displayed(app, painter.ctx(), map.to_comp(pos))
     {
         let swatch = Rect::from_min_size(pos + vec2(14.0, 14.0), vec2(26.0, 18.0));
@@ -150,7 +153,9 @@ fn text_color_pick(
         app.ui.text_color_pick = None;
         app.ui.status.clear();
     } else {
-        app.viewer_pixels();
+        if !crate::screen_pick::native_available(&ctx) {
+            app.viewer_pixels();
+        }
         let resp = ui.interact(map.area, egui::Id::unique("viewer-text-color-pick"), Sense::click());
         app.auto.add("viewer.textColorPick", map.area, &pick.field);
         color_pick_preview(app, painter, map, &crate::i18n::tr_args("Click to sample text {}", &[&pick.field]), resp.hover_pos());
@@ -191,7 +196,9 @@ fn popup_eyedropper(app: &mut EffectcraftApp, ui: &mut egui::Ui, painter: &egui:
     // The sampling surface, apart from the picker's button that arms it (`colorPicker.eyedropper`).
     app.auto.add("viewer.colorPickerEyedropper", map.area, "Sample color");
     ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
-    app.viewer_pixels();
+    if !crate::screen_pick::native_available(&ctx) {
+        app.viewer_pixels();
+    }
     color_pick_preview(app, painter, map, crate::i18n::tr("Click to sample color"), crate::color_picker::eyedropper_point(&ctx));
     if let Some(pos) = crate::color_picker::sample_press(&ctx)
         && let Some(s) = crate::panels::viewer_tools::sample_displayed(app, &ctx, map.to_comp(pos))
