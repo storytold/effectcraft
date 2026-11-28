@@ -1266,6 +1266,66 @@ fn diffusion_does_not_lift_a_deep_shadow() {
 }
 
 #[test]
+fn receivers_far_off_a_shadow_map_with_a_huge_focal_are_unshadowed() {
+    // Every texel occludes (depth 10 in front of the receiver at 13.5). A receiver 100 units
+    // off the map's center with a focal length that puts its map coordinate near `f32::MAX`
+    // (finite at `f32::MAX / 400`, infinite at `f32::MAX`) reads only texels outside the map.
+    let texels = vec![10.0f32; 16 * 16];
+    // At focal 1 the reach is two texels: half a texel off the map's left edge (u = −0.5) the
+    // taps still reach into it, and three and a half texels off (u = −3.5) they do not.
+    let m = flat_map(16, 1.0, 1.0);
+    assert!(shade::shadow_factor(&m, &texels, [-8.5, 0.0, 13.5], FACING, 1.0) < 1.0, "the taps reach into the map");
+    assert_eq!(shade::shadow_factor(&m, &texels, [-11.5, 0.0, 13.5], FACING, 1.0), 1.0, "past the reach");
+    for focal in [f32::MAX / 400.0, f32::MAX] {
+        for radius in [1.0, 25.0] {
+            let m = flat_map(16, focal, radius);
+            for p in [[100.0f32, 0.0, 13.5], [0.0, -100.0, 13.5], [-100.0, 100.0, 13.5]] {
+                assert_eq!(shade::shadow_factor(&m, &texels, p, FACING, 1.0), 1.0, "focal {focal} radius {radius} at {p:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn a_surface_far_off_its_light_s_shadow_map_renders_unshadowed() {
+    // A lit surface and a parallel light along the view direction whose 16-texel map holds
+    // casters in front of the whole surface. Moving the map's view 100 units off the surface
+    // with a huge focal length leaves every pixel finite and the same as without the shadow.
+    let mut s = quad_scene(16, 16, &[([0.0, 0.0, 16.0, 16.0], 500.0, [1.0; 4])]);
+    s.materials[0].unlit = false;
+    let light = super::scene::Light {
+        kind: 0,
+        pos: [0.0; 3],
+        dir: [0.0, 0.0, 1.0],
+        color: [1.0; 3],
+        cos_inner: 1.0,
+        cos_outer: 1.0,
+        falloff: 0,
+        radius: 0.0,
+        falloff_distance: 0.0,
+        shadow: 0,
+        shadow_darkness: 1.0,
+        shadow_diffusion: 0.0,
+    };
+    s.lights = vec![light];
+    s.shadows = vec![ShadowMap { view: [[1.0, 0.0, 0.0, -8.0], [0.0, 1.0, 0.0, -8.0], [0.0, 0.0, 1.0, 0.0]], ..flat_map(16, 1.0, 1.0) }];
+    s.shadow_texels = vec![100.0; 16 * 16];
+    let mut unshadowed = s.clone();
+    unshadowed.lights[0].shadow = -1;
+    let unshadowed = raster::render(&unshadowed).color;
+    assert!(unshadowed.iter().all(|c| c[0] > 0.1), "the light reaches the surface");
+    assert_ne!(raster::render(&s).color, unshadowed, "the map shadows the surface");
+    for focal in [f32::MAX / 400.0, f32::MAX] {
+        let mut s = s.clone();
+        s.shadows[0].view[0][3] += 100.0;
+        s.shadows[0].focal = focal;
+        let color = raster::render(&s).color;
+        assert!(color.iter().flatten().all(|v| v.is_finite()), "focal {focal}: every pixel is finite");
+        assert_eq!(color, unshadowed, "focal {focal}");
+    }
+}
+
+#[test]
 fn pcf_varies_within_a_texel() {
     // Nearest-texel PCF snaps the edge to texel boundaries: two receivers 1/20 texel
     // apart get bit-identical factors, which is what stair-steps straight edges.

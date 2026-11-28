@@ -198,6 +198,42 @@ fn gpu_matches_cpu_shadow_catcher() {
 }
 
 #[test]
+fn gpu_matches_cpu_with_receivers_far_off_the_shadow_maps() {
+    // Every shadow map's view moved far off the scene with a focal length that puts the
+    // receivers' map coordinates near `f32::MAX`: both backends shade them unshadowed.
+    let Some(g) = gpu() else { return };
+    let (p, cid) = scene_project();
+    for focal in [f32::MAX / 400.0, f32::MAX] {
+        let mut s = scene(&p, cid);
+        assert!(!s.shadows.is_empty());
+        for m in &mut s.shadows {
+            m.view[0][3] += 1.0e5;
+            m.focal = focal;
+        }
+        let gt = g.raster_3d(&s).expect("gpu raster");
+        assert!(gt.color.iter().flatten().all(|v| v.is_finite()), "focal {focal}: every GPU pixel is finite");
+        compare(&s, &g);
+    }
+    // Every map's view moved 100 units along its x at focal `f32::MAX / 400`: on an
+    // orthographic map some receivers' map coordinates then lie between `f32::MAX / 8` and
+    // `f32::MAX`, finite while 8 times them, the jitter lattice, is not.
+    let mut s = scene(&p, cid);
+    for m in &mut s.shadows {
+        m.view[0][3] += 100.0;
+        m.focal = f32::MAX / 400.0;
+    }
+    let lattice_overflows = s
+        .shadows
+        .iter()
+        .filter(|m| m.ortho)
+        .any(|m| s.vertices.iter().filter_map(|vx| adv::shade::shadow_coord(m, vx.pos)).any(|(u, _, _)| u.is_finite() && !(u * 8.0).is_finite()));
+    assert!(lattice_overflows, "a receiver's map coordinate is finite and its jitter lattice is not");
+    let gt = g.raster_3d(&s).expect("gpu raster");
+    assert!(gt.color.iter().flatten().all(|v| v.is_finite()), "light-space x 100: every GPU pixel is finite");
+    compare(&s, &g);
+}
+
+#[test]
 fn gpu_matches_cpu_wide_penumbrae() {
     // Both lights cast with wide Shadow Diffusion. Penumbrae cover much of the frame, so a
     // backend drift in the PCF (jitter hash, tap grid, receiver-plane compare) would hide
