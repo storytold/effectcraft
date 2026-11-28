@@ -229,7 +229,7 @@ fn material_commands_and_serde() {
     assert_eq!(s.execute("material.revealSource", json!({"layer": m})).unwrap()["item"], item);
     let json = s.project.to_json();
     let back = Project::from_json(&json).unwrap();
-    assert_eq!(&back, &*s.project);
+    assert_eq!(&back, &**s.project);
 }
 
 /// #2917: a 3D model layer keeps its file's materials, so it has no Base Color, Metallic or

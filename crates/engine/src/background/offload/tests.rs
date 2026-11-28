@@ -130,7 +130,7 @@ fn protocol_round_trips() {
         assert!(t.contains("\"kind\":"), "{kind:?}");
         let back: WorkerRequest = serde_json::from_str(&t).unwrap();
         assert_eq!(back.job.kind(), kind);
-        assert_eq!(Project::from_json(&back.project).unwrap(), *s.project);
+        assert_eq!(Project::from_json(&back.project).unwrap(), **s.project);
     }
     let g = s.active_comp().unwrap().layers[0].props.clone();
     for r in [
@@ -288,7 +288,7 @@ fn cancelling_offloaded_jobs() {
     // Render: the queued items become User Stopped.
     s.execute("renderQueue.add", serde_json::json!({"output": "/a.gif"})).unwrap();
     // An earlier run's timing does not stay beside the stopped status (#3724)
-    Arc::make_mut(&mut s.project).render_queue.last_mut().unwrap().last_timing = Some(Default::default());
+    s.project_mut().render_queue.last_mut().unwrap().last_timing = Some(Default::default());
     let ids = s.start_render(false).unwrap();
     assert!(s.is_rendering());
     assert!(s.stop_render());

@@ -169,7 +169,7 @@ fn keyed_instance(timing: [(f64, f64); 2]) -> (Session, effectcraft_project::Ite
     let b = s.execute("layer.newSolid", json!({"name": "B", "color": "#ffffff"})).unwrap()["layer"].as_u64().unwrap();
     s.execute("essential.linkProperty", json!({"control": ctl, "layer": b, "path": "transform/opacity"})).unwrap();
     for (id, (start, stretch)) in [a, b].into_iter().zip(timing) {
-        let l = std::sync::Arc::make_mut(&mut s.project).comp_mut(inner).unwrap().layer_mut(LayerId(id)).unwrap();
+        let l = s.project_mut().comp_mut(inner).unwrap().layer_mut(LayerId(id)).unwrap();
         l.start_time = Tick::from_seconds_f64(start);
         l.stretch = stretch;
     }
@@ -255,7 +255,7 @@ fn one_control_with_targets_of_different_timing_stays_in_step() {
 #[test]
 fn instance_keys_stay_out_of_a_nested_comp_that_preserves_its_frame_rate() {
     let (mut s, scene, inner, [a, _], inst) = keyed_instance([(0.0, 100.0), (0.0, 100.0)]);
-    std::sync::Arc::make_mut(&mut s.project).comp_mut(inner).unwrap().preserve_frame_rate = true;
+    s.project_mut().comp_mut(inner).unwrap().preserve_frame_rate = true;
     // The nested time is floored to the nested comp's frames, so only the instance's value goes in.
     let (v, pr) = rendered(&s, scene, inner, inst, a, 0.25);
     assert!((v - 25.0).abs() < 1e-6, "rendered {v}");
@@ -296,7 +296,7 @@ fn collapsed_instance_merges_text_and_font_overrides() {
 fn instance_keys_stay_out_of_a_layer_that_blends_frames() {
     let (mut s, scene, inner, [a, _], inst) = keyed_instance([(0.0, 100.0), (0.0, 100.0)]);
     {
-        let comp = std::sync::Arc::make_mut(&mut s.project).comp_mut(scene).unwrap();
+        let comp = s.project_mut().comp_mut(scene).unwrap();
         comp.enable_frame_blending = true;
         comp.layer_mut(effectcraft_project::LayerId(inst)).unwrap().switches.frame_blend = effectcraft_project::FrameBlend::FrameMix;
     }
@@ -380,7 +380,7 @@ fn a_collapsed_parent_keeps_its_override_history_for_the_nested_instance() {
     // The Inner target starts late and is stretched: the parent's source-time keys must be moved
     // into this target's own layer time.
     {
-        let layer = std::sync::Arc::make_mut(&mut s.project).comp_mut(inner).unwrap().layer_mut(LayerId(target)).unwrap();
+        let layer = s.project_mut().comp_mut(inner).unwrap().layer_mut(LayerId(target)).unwrap();
         layer.start_time = Tick::from_seconds_f64(0.5);
         layer.stretch = 125.0;
     }

@@ -372,7 +372,7 @@ fn interpretation_targets_follow_the_parameters_then_the_selection() {
         let e = s.execute("file.interpretProxy", params.clone()).unwrap_err().to_string();
         assert!(e.contains("no proxy"), "{params}: {e}");
     }
-    assert_eq!(*s.project, *before);
+    assert_eq!(*s.project, before);
     let r = s.execute("file.interpretFootage", json!({"items": [solid.0, b.0], "loop": 2})).unwrap();
     assert_eq!(r["items"].as_array().map(|a| a.iter().map(|i| i["item"].clone()).collect::<Vec<_>>()), Some(vec![json!(b.0)]), "{r}");
     let ItemKind::Footage(f) = &s.project.item(b).unwrap().kind else { panic!("not footage") };

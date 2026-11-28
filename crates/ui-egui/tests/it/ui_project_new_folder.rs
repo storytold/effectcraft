@@ -192,7 +192,7 @@ fn items_dropped_on_the_new_folder_button_go_into_a_new_folder() {
     key(&mut h, Key::Escape);
     assert_eq!(name(&h, folder).as_deref(), Some("Untitled Folder"));
     h.state_mut().session.execute("edit.undo", json!({})).unwrap();
-    assert_eq!(h.state().session.project, project, "one undo takes back the folder and the move");
+    assert_eq!(*h.state().session.project, project, "one undo takes back the folder and the move");
 
     // An item that is not selected goes alone.
     h.state_mut().session.state.project_selection = vec![b];

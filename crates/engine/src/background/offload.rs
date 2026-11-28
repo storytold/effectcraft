@@ -885,7 +885,8 @@ impl Session {
             // Rendered frames depend on the result (an analysis' group, the segmentation cache);
             // not on a plan summary (`warp.status` only).
             if kind != JobKind::WarpPlan {
-                self.bump();
+                let hooks = self.hooks.clone();
+                hooks.with_cause(craft_command::Cause::Job("offload"), || self.bump());
             }
         }
         changed

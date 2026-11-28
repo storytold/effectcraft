@@ -90,7 +90,7 @@ fn keyframed_levels_show_the_value_at_the_current_time_and_typing_keys_it() {
     // The layer moves 1 s later: its keys sit at comp 1 s and 2 s.
     let cid = s.active_comp_id().unwrap();
     let one = effectcraft_engine::time::Tick::from_seconds_f64(1.0);
-    let layer = std::sync::Arc::make_mut(&mut s.project).comp_mut(cid).unwrap().layer_mut(LayerId(l)).unwrap();
+    let layer = s.project_mut().comp_mut(cid).unwrap().layer_mut(LayerId(l)).unwrap();
     layer.start_time += one;
     layer.in_point += one;
     layer.out_point += one;

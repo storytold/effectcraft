@@ -24,7 +24,7 @@ fn uid(s: &Session, lid: LayerId, path: &str) -> Uid {
 
 fn edit_layer(s: &mut Session, lid: LayerId, f: impl FnOnce(&mut effectcraft_project::Layer)) {
     let cid = s.active_comp_id().unwrap();
-    f(std::sync::Arc::make_mut(&mut s.project).comp_mut(cid).unwrap().layer_mut(lid).unwrap());
+    f(s.project_mut().comp_mut(cid).unwrap().layer_mut(lid).unwrap());
 }
 
 fn add_key(s: &mut Session, lid: LayerId, path: &str, time: Tick, value: serde_json::Value) {

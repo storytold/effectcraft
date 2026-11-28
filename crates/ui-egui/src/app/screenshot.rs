@@ -365,7 +365,7 @@ mod tests {
                 "footage" => {
                     std::fs::write(&path, b"SOURCE FOOTAGE").unwrap();
                     let footage = Footage { path: text.clone(), kind: FootageKind::Still, ..Default::default() };
-                    Arc::make_mut(&mut app.session.project).add_item("clip", effectcraft_engine::color::Label::None, None, ItemKind::Footage(footage));
+                    app.session.project_mut().add_item("clip", effectcraft_engine::color::Label::None, None, ItemKind::Footage(footage));
                     Some(std::fs::read(&path).unwrap())
                 }
                 "project" => {

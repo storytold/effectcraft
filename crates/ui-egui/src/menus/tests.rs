@@ -1078,7 +1078,7 @@ fn the_unlabeled_alpha_question_does_not_replace_an_open_dialog() {
     let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
     let ctx = egui::Context::default();
     let footage = Footage { path: "/m/matte.tga".into(), kind: FootageKind::Still, width: 4, height: 4, has_video: true, ..Default::default() };
-    let item = std::sync::Arc::make_mut(&mut app.session.project).add_item("matte.tga", Default::default(), None, ItemKind::Footage(footage)).0;
+    let item = app.session.project_mut().add_item("matte.tga", Default::default(), None, ItemKind::Footage(footage)).0;
     app.dialog = Some(crate::Dialog::AepLosses);
     super::frontend(&mut app, &ctx, "file.interpretFootage", json!({"item": item, "reason": "unlabeledAlpha"})).unwrap();
     assert_eq!(app.dialog, Some(crate::Dialog::AepLosses), "the waiting dialog stays");
@@ -1109,7 +1109,7 @@ fn the_unlabeled_alpha_question_opens_on_the_imported_footage() {
             ..Default::default()
         })
     };
-    let project = std::sync::Arc::make_mut(&mut app.session.project);
+    let project = app.session.project_mut();
     let before = project.add_item("before.png", Default::default(), None, still("/m/before.png", 1, AlphaMode::Straight));
     let matte = project.add_item("matte.tga", Default::default(), None, still("/m/matte.tga", 4, AlphaMode::Premultiplied));
     app.session.state.project_selection = vec![before];

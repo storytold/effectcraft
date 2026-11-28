@@ -15,6 +15,8 @@ pub enum EngineError {
     Project(#[from] effectcraft_project::ProjectError),
     #[error("{0}")]
     Other(String),
+    #[error(transparent)]
+    Command(#[from] craft_command::CommandError),
     /// Refused because parts would be lost in a conversion; nothing changed. `losses` names them,
     /// `advice` how to go on (`file.importAep` / `file.exportAep` without `allowLosses`).
     #[error("{losses} ({advice})")]

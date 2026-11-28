@@ -59,7 +59,7 @@ fn isolate(s: &Session, cid: ItemId, t: Tick, scale: f64, skip_hdr_step: bool) -
         .collect();
     let mut out = vec![];
     for id in ids {
-        let mut p: Project = (*s.project).clone();
+        let mut p: Project = (**s.project).clone();
         let Some(c) = p.comp_mut(cid) else { continue };
         let mut info = None;
         for l in c.layers.iter_mut() {

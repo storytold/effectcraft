@@ -21,7 +21,7 @@ fn thumbnail_keys_follow_the_content() {
     assert_ne!(s.thumbnail_key(a, Tick::from_seconds_f64(0.5), 192).unwrap(), k0, "another time");
     assert_ne!(s.thumbnail_key(a, Tick::ZERO, 96).unwrap(), k0, "another size");
     // An edit of the comp itself.
-    std::sync::Arc::make_mut(&mut s.project).comp_mut(a).unwrap().background = [0.2, 0.4, 0.6];
+    s.project_mut().comp_mut(a).unwrap().background = [0.2, 0.4, 0.6];
     assert_ne!(key(&s), k0, "an edit of the comp gives a new key");
     // A reload: files may have changed without the project knowing.
     let before = key(&s);

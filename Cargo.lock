@@ -1421,6 +1421,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "craft-command"
+version = "0.1.0"
+source = "git+https://github.com/storytold/craft-libs?rev=81669a0c5c656207abf6df59ea2f93dcca328e24#81669a0c5c656207abf6df59ea2f93dcca328e24"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "craft-doc"
 version = "0.1.0"
 source = "git+https://github.com/storytold/craft-libs?rev=8fa4db64a9bb943520259ea95331a303ba788f21#8fa4db64a9bb943520259ea95331a303ba788f21"
@@ -1582,6 +1591,21 @@ dependencies = [
  "unicode-bidi",
  "windows-registry",
  "writeable",
+]
+
+[[package]]
+name = "craft-ipc"
+version = "0.1.0"
+source = "git+https://github.com/storytold/craft-libs?rev=a346c50303129490218ffc2e8f7e646435bd8efe#a346c50303129490218ffc2e8f7e646435bd8efe"
+dependencies = [
+ "chrono",
+ "getrandom 0.2.17",
+ "interprocess",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2",
+ "widestring",
 ]
 
 [[package]]
@@ -2332,6 +2356,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "doctest-file"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c2db04e74f0a9a93103b50e90b96024c9b2bdca8bce6a632ec71b88736d3d359"
+
+[[package]]
 name = "document-features"
 version = "0.2.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2464,9 +2494,11 @@ version = "0.25.1"
 dependencies = [
  "chrono",
  "cpal",
+ "craft-ipc",
  "craft-update",
  "effectcraft-engine",
  "effectcraft-host",
+ "effectcraft-link",
  "effectcraft-ui-egui",
  "eframe",
  "egui",
@@ -2573,6 +2605,7 @@ name = "effectcraft-engine"
 version = "0.25.1"
 dependencies = [
  "chrono",
+ "craft-command",
  "craft-doc",
  "craft-docpath",
  "effectcraft-aep",
@@ -2754,6 +2787,26 @@ dependencies = [
  "effectcraft-geom",
  "effectcraft-time",
  "proptest",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "effectcraft-link"
+version = "0.25.1"
+dependencies = [
+ "craft-command",
+ "craft-ipc",
+ "effectcraft-engine",
+ "effectcraft-export",
+ "effectcraft-host",
+ "effectcraft-interchange",
+ "effectcraft-media",
+ "effectcraft-project",
+ "effectcraft-render",
+ "effectcraft-time",
+ "egui",
+ "log",
  "serde",
  "serde_json",
 ]
@@ -3033,6 +3086,7 @@ dependencies = [
  "chrono",
  "craft-behavior",
  "craft-host",
+ "craft-ipc",
  "craft-keymap",
  "craft-mime",
  "craft-theme",
@@ -3044,7 +3098,9 @@ dependencies = [
  "effectcraft-geom",
  "effectcraft-gpu",
  "effectcraft-host",
+ "effectcraft-interchange",
  "effectcraft-keyframe",
+ "effectcraft-link",
  "effectcraft-media",
  "effectcraft-path",
  "effectcraft-project",
@@ -4713,6 +4769,19 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "interprocess"
+version = "2.4.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6cb02ffbf25e8ef0f4a95bff054eef75f6d1bf16919474cf2caa63b21997478a"
+dependencies = [
+ "doctest-file",
+ "libc",
+ "recvmsg",
+ "widestring",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6748,6 +6817,12 @@ name = "reborrow"
 version = "0.5.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "03251193000f4bd3b042892be858ee50e8b3719f2b08e5833ac4353724632430"
+
+[[package]]
+name = "recvmsg"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3edd4d5d42c92f0a659926464d4cce56b562761267ecf0f469d85b7de384175"
 
 [[package]]
 name = "redox_syscall"

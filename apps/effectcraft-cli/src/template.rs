@@ -91,7 +91,7 @@ fn preflight(s: &Session, path: &str, values: &Map<String, Value>) -> Result<(),
         effectcraft_engine::project::essential::offset_ids(&mut project, base);
         project.fix_next_id();
         let mut check = Session::new();
-        check.project = project.into();
+        check.set_project(project.into());
         Ok(instantiate(&mut check, source, values, false))
     })
     .map_err(|e| Failure::Error(e.to_string()))?

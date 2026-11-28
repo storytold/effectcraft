@@ -3,8 +3,6 @@
 //! project file are refused with nothing changed, and any other path is written. Save and Save As
 //! write the project's own file and are not among them.
 
-use std::sync::Arc;
-
 use effectcraft_project::{Footage, FootageKind, ItemId, Proxy};
 use serde_json::{Value, json};
 
@@ -19,7 +17,7 @@ fn video(path: String) -> Footage {
 fn give_proxy(f: &mut Fixture, item: ItemId, file: &str) {
     f.write(file, SOURCE);
     let footage = video(f.text(file));
-    Arc::make_mut(&mut f.s.project).item_mut(item).unwrap().proxy = Some(Box::new(Proxy { footage, enabled: true }));
+    f.s.project_mut().item_mut(item).unwrap().proxy = Some(Box::new(Proxy { footage, enabled: true }));
 }
 
 /// A project, saved as `Project.ecproj`, that reads `clip.<ext>` (footage) with `proxy.<ext>` as

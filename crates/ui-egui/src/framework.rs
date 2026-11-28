@@ -110,6 +110,10 @@ impl EffectcraftApp {
     /// The framework's part of `App::logic`, after EffectCraft's own: the root window's close path
     /// ([`crate::panels::unsaved::close_decision`]).
     pub fn close_path(&mut self, ctx: &egui::Context) {
+        // Craft Link: a comp bound to a link owes FilmCraft its result movie, so the link holds the window first.
+        if crate::link_ui::close_step(self, ctx) {
+            return;
+        }
         embed::logic(ctx, || crate::panels::unsaved::close_decision(self));
     }
 }

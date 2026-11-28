@@ -10,7 +10,7 @@
 //! `--control <port>` (or `EFFECTCRAFT_CONTROL_PORT`) starts a localhost JSON-lines control server;
 //! see `effectcraft_ui_egui::control` for the methods. An app started for an agent opens without
 //! taking keyboard focus and skips crash recovery, the Home screen (unless `--home`) and the
-//! startup update check.
+//! startup update check. The Craft Link socket is on for every launch.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 #![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
 
@@ -599,11 +599,11 @@ fn run_desktop(reporter: &crash_report::Shutdown, arguments: &[std::ffi::OsStrin
                 app.hooks.app_action = Some(Box::new(native_menu::app_action));
                 app.hooks.clipboard_text = Some(Box::new(native_menu::clipboard_text));
             }
-            if let Some(port) = control_port {
+            if let Some(_port) = control_port {
                 disable_app_nap();
-                let rx = control_server::start(port, cc.egui_ctx.clone());
-                app = app.with_control(rx);
             }
+            let rx = control_server::start_with(None, control_port, cc.egui_ctx.clone());
+            app = app.with_control(rx);
             log::info!("app created; the window shows after its first frame");
             Ok(Box::new(Desktop {
                 #[cfg(target_os = "macos")]

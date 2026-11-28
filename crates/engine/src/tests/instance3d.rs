@@ -119,7 +119,7 @@ fn instance3d_creates_a_2d_copy_of_the_model() {
     // Serde round-trips the layer parameter.
     let j = serde_json::to_string(&*s.project).unwrap();
     let back: Project = serde_json::from_str(&j).unwrap();
-    assert_eq!(back, *s.project);
+    assert_eq!(back, **s.project);
     // 2D effects can be applied to the copy (the model layer itself takes none): Fill in blue
     // recolours the triangle.
     s.execute("effect.apply", json!({"layer": solid, "effect": "ec.generate.fill"})).unwrap();

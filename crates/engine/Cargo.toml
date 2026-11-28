@@ -41,9 +41,11 @@ rayon = { workspace = true }
 image = { workspace = true }
 web-time = { workspace = true }
 exr = { workspace = true }
+craft-command = { workspace = true }
 
 [dev-dependencies]
 effectcraft-media = { workspace = true }
+craft-command = { workspace = true, features = ["testing"] }
 
 # Native file identity and SAM 2 inference; browsers keep the built-in engines.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]

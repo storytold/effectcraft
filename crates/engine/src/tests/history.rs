@@ -184,7 +184,7 @@ fn modified_mark_follows_undo_and_no_op_edits_record_nothing() {
 fn a_session_restored_with_unsaved_changes_stays_modified() {
     let mut s = Session::default();
     s.execute("comp.new", json!({"name": "H", "width": 64, "height": 64, "duration": 2})).unwrap();
-    let p = (*s.project).clone();
+    let p = (**s.project).clone();
     // The web app reopens the last visit's project, which had unsaved changes.
     s.replace_project(p, None);
     assert!(!s.is_dirty());

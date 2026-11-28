@@ -306,6 +306,11 @@ impl EffectcraftApp {
             self.tick_script_render(ctx);
             return;
         }
+        // Craft Link: epochs, frame snapshot, result render. Returns when it wants the next frame.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(wait) = effectcraft_link::live::tick(&mut self.session) {
+            ctx.request_repaint_after(wait);
+        }
         // Screenshot completion, deadlines and issuance are app-side work: the callback only
         // stores pixels and wakes this viewport.
         self.tick_screenshots(ctx);
