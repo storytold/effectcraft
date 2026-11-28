@@ -69,6 +69,9 @@ impl EffectPlugin for Fake {
     fn padding(&self, _: &PluginParams, _: f64, _: f64, _: [f64; 2], _: u64) -> u32 {
         if self.kind == Kind::Pad { 3 } else { 0 }
     }
+    fn reads_other_times(&self) -> bool {
+        self.kind == Kind::Echo
+    }
     fn render_v2(&self, frame: &mut PluginFrame, params: &PluginParams, _time: f64, host: &dyn PluginHost) -> Result<(), String> {
         match self.kind {
             Kind::Invert => {
@@ -125,6 +128,10 @@ impl Provider for FakeProvider {
                 .map(|(n, kind)| Arc::new(Fake { m: manifest(&format!("org.test.helper.{n}"), vec![amount()]), kind }) as Arc<dyn EffectPlugin>)
                 .collect();
         (v, vec!["fake helper: a warning".into()])
+    }
+    fn time_invariant(&self, effect: &dyn EffectPlugin) -> bool {
+        // echo opts in too, but reads other times, so it stays keyed on time
+        ["org.test.helper.invert", "org.test.helper.echo"].contains(&effect.manifest().id.as_str())
     }
 }
 
@@ -200,6 +207,12 @@ fn run_checks() -> bool {
     let loaded = r["loaded"].as_array().map_or(0, Vec::len);
     all &= check("scan registers the helper's effects", loaded == 6, &r);
     all &= check("helper warnings are reported", r["errors"].to_string().contains("a warning"), &r);
+    all &= check(
+        "only effects that say time_invariant are reused across times",
+        !effectcraft_effects::is_time_dependent("org.test.helper.invert")
+            && ["echo", "pad", "noisy"].iter().all(|n| effectcraft_effects::is_time_dependent(&format!("org.test.helper.{n}"))),
+        (),
+    );
     all &= check(
         "a second scan doesn't start it twice",
         effectcraft_helper_host::scan_paths(std::slice::from_ref(&exe), false)["helpers"].as_array().is_some_and(Vec::is_empty),

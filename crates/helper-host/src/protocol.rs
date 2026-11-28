@@ -119,6 +119,14 @@ pub struct RemoteEffect {
     /// Whether to ask [`Request::Padding`] before every render (otherwise no padding).
     #[serde(default)]
     pub padding: bool,
+    /// Whether the effect's output depends only on its input and parameter values at the
+    /// render's time: it doesn't change with time on its own and reads no other times. The
+    /// render cache may then reuse a static layer's frame across times. Absent means false: the
+    /// layer is keyed on its time (a helper is code the host can't inspect, so a simulation or
+    /// an echo that doesn't say so still renders every frame), as for WebAssembly ABI 2
+    /// plug-ins.
+    #[serde(default)]
+    pub time_invariant: bool,
 }
 
 /// Helper → EffectCraft.
