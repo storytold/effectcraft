@@ -14,6 +14,8 @@
 //! [`layout`] is ScriptUI's automatic layout (orientation, alignChildren / alignment, spacing,
 //! margins, preferredSize), so every frontend places widgets the same way.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -87,6 +89,11 @@ pub struct Widget {
     pub checked: bool,
     /// Drop-down list / list box items.
     pub items: Vec<String>,
+    /// Separator flags captured from the script's original `items` before [`Widget::translate_display`]
+    /// replaces labels, so a translation pack cannot turn a separator into a selectable item or
+    /// turn an option into a separator.
+    #[serde(skip)]
+    pub item_separators: Vec<bool>,
     /// Selected item indices.
     pub selection: Vec<usize>,
     /// `column` (default for windows and panels), `row` (groups) or `stack`.
@@ -382,6 +389,38 @@ impl Widget {
             c.walk(out);
         }
     }
+    /// Whether `items[index]` is a dropdown separator (`"-"` in the script's original items).
+    pub fn is_item_separator(&self, index: usize) -> bool {
+        self.item_separators.get(index).copied().unwrap_or_else(|| self.items.get(index).is_some_and(|item| item == "-"))
+    }
+    /// Replace display labels with exact-match translations, returning whether any label changed.
+    /// Editable text is script data, not a label, so it keeps its value (and so do ids, names and
+    /// event handlers).
+    fn translate_display(&mut self, translations: &BTreeMap<String, String>) -> bool {
+        let mut changed = false;
+        if self.kind != WidgetKind::EditText {
+            changed |= translate_in_place(translations, &mut self.text);
+        }
+        changed |= translate_in_place(translations, &mut self.help_tip);
+        if self.kind == WidgetKind::DropDownList && !self.items.is_empty() {
+            if self.item_separators.is_empty() {
+                self.item_separators = self.items.iter().map(|item| item == "-").collect();
+            }
+            for (item, &is_sep) in self.items.iter_mut().zip(&self.item_separators) {
+                if !is_sep {
+                    changed |= translate_in_place(translations, item);
+                }
+            }
+        } else {
+            for item in &mut self.items {
+                changed |= translate_in_place(translations, item);
+            }
+        }
+        for child in &mut self.children {
+            changed |= child.translate_display(translations);
+        }
+        changed
+    }
     /// A control by id (number or `"#12"`), `properties.name` or text.
     pub fn lookup(&self, key: &Value) -> Option<&Widget> {
         let mut all = vec![];
@@ -417,6 +456,47 @@ pub struct ScriptWindow {
     pub modal: bool,
     /// The window and its controls (`root.bounds` is the content size).
     pub root: Widget,
+}
+
+impl ScriptWindow {
+    /// Replace display strings using an exact-match translation table, returning whether any
+    /// string changed.
+    ///
+    /// Frontends call this on the copy they draw, not on the live script state, so automation
+    /// ids, control names, values, handlers and `EditText` contents stay unchanged.
+    pub fn translate_display(&mut self, translations: &BTreeMap<String, String>) -> bool {
+        let title_changed = translate_in_place(translations, &mut self.title);
+        let root_changed = self.root.translate_display(translations);
+        title_changed || root_changed
+    }
+
+    /// The title a frontend should show: the script's title, translated when the pack has it, or
+    /// the script's file name when it has no title.
+    pub fn display_title(&self, translations: &BTreeMap<String, String>) -> String {
+        if self.title.is_empty() { self.script.clone() } else { translate_exact(translations, &self.title) }
+    }
+}
+
+/// Replace `slot` in place when `translations` maps it to a different non-empty string.
+fn translate_in_place(translations: &BTreeMap<String, String>, slot: &mut String) -> bool {
+    if slot.is_empty() {
+        return false;
+    }
+    if let Some(translated) = translations.get(slot.as_str()).filter(|translated| !translated.is_empty())
+        && translated != slot
+    {
+        *slot = translated.clone();
+        return true;
+    }
+    false
+}
+
+/// Translate a display string when the table has exactly this source string; otherwise keep it.
+fn translate_exact(translations: &BTreeMap<String, String>, source: &str) -> String {
+    if source.is_empty() {
+        return String::new();
+    }
+    translations.get(source).filter(|translated| !translated.is_empty()).cloned().unwrap_or_else(|| source.to_owned())
 }
 
 /// A user (or agent) action on a script window control.
@@ -1157,5 +1237,67 @@ mod tests {
         // Bands left out still count against the work budget (it ends the scan after the first).
         let t = PathSeg::fill_triangles_within(&bow, 48, false, [usize::MAX, 2, usize::MAX, 1]);
         assert!(area(&t) <= 50.0 + 1e-9, "{}", area(&t));
+    }
+
+    #[test]
+    fn translation_pack_replaces_display_text_only() {
+        let mut button = w(WidgetKind::Button, "OK");
+        button.id = 2;
+        button.help_tip = "Confirm".into();
+        let mut edit = w(WidgetKind::EditText, "Draft");
+        edit.id = 3;
+        let mut list = w(WidgetKind::DropDownList, "");
+        list.id = 4;
+        list.items = vec!["Alpha".into(), "Beta".into()];
+        let mut root = w(WidgetKind::Window, "Options");
+        root.id = 1;
+        root.children = vec![button, edit, list];
+        let mut window = ScriptWindow { id: 1, title: "Window Title".into(), script: "panel.jsx".into(), root, ..Default::default() };
+
+        window.translate_display(&BTreeMap::from([
+            ("Window Title".to_string(), "窗口标题".to_string()),
+            ("Options".to_string(), "选项".to_string()),
+            ("OK".to_string(), "确定".to_string()),
+            ("Confirm".to_string(), "确认".to_string()),
+            ("Draft".to_string(), "不应翻译".to_string()),
+            ("Alpha".to_string(), "甲".to_string()),
+            ("Beta".to_string(), "乙".to_string()),
+        ]));
+
+        assert_eq!(window.title, "窗口标题");
+        assert_eq!(window.root.text, "选项");
+        assert_eq!(window.root.find(2).unwrap().text, "确定");
+        assert_eq!(window.root.find(2).unwrap().help_tip, "确认");
+        assert_eq!(window.root.find(3).unwrap().text, "Draft", "edittext holds script data");
+        assert_eq!(window.root.find(4).unwrap().items, ["甲".to_string(), "乙".to_string()]);
+        // Identity, values and handlers are not display strings.
+        assert_eq!(window.script, "panel.jsx");
+        assert_eq!(window.root.find(2).unwrap().id, 2);
+        assert_eq!(translate_exact(&BTreeMap::new(), "Missing"), "Missing");
+    }
+
+    #[test]
+    fn translation_pack_preserves_dropdown_separator_identity() {
+        let mut list = w(WidgetKind::DropDownList, "");
+        list.id = 2;
+        list.items = vec!["None".into(), "-".into(), "Alpha".into()];
+        let mut root = w(WidgetKind::Window, "");
+        root.id = 1;
+        root.children = vec![list];
+        let mut window = ScriptWindow { id: 1, title: "Menu".into(), script: "panel.jsx".into(), root, ..Default::default() };
+
+        assert!(!window.translate_display(&BTreeMap::new()));
+        let changed = window.translate_display(&BTreeMap::from([
+            ("None".to_string(), "-".to_string()),
+            ("-".to_string(), "—".to_string()),
+            ("Alpha".to_string(), "甲".to_string()),
+        ]));
+        assert!(changed);
+
+        let list = window.root.find(2).unwrap();
+        assert_eq!(list.items, ["-".to_string(), "-".to_string(), "甲".to_string()]);
+        assert!(!list.is_item_separator(0), "a translated option must stay selectable");
+        assert!(list.is_item_separator(1), "an original separator must stay a separator");
+        assert!(!list.is_item_separator(2));
     }
 }
