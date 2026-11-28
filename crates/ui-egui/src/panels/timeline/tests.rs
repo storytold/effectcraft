@@ -220,6 +220,39 @@ fn shape_group_inner_contents_is_elided() {
     );
 }
 
+/// UU shows modified shape properties under their owners, alongside the layer's own Position.
+#[test]
+fn uu_reveals_modified_shape_contents_under_their_groups() {
+    let mut session = effectcraft_engine::Session::default();
+    session.execute("comp.new", json!({"width": 1000, "height": 900, "duration": 2})).unwrap();
+    session.execute("layer.newShape", json!({"kind": "rect", "size": [200, 200], "fill": "#ff0000"})).unwrap();
+    let size = "contents/group/contents/rect/size";
+    let color = "contents/group/contents/fill/color";
+    for (path, value) in [(size, json!([500, 800])), (color, json!([0, 1, 0, 1])), ("transform/position", json!([310, 450]))] {
+        session.execute("prop.set", json!({"layer": "#1", "path": path, "value": value})).unwrap();
+    }
+    let mut app = EffectcraftApp::new(session);
+    let ctx = egui::Context::default();
+    let press_u = |app: &mut EffectcraftApp| crate::menus::invoke(app, &ctx, "anim.reveal", json!({"kind": "keyframes"})).unwrap();
+    press_u(&mut app);
+    assert_eq!(labels(&app), ["Shape Layer 1"]);
+    press_u(&mut app);
+    assert_eq!(
+        labels(&app),
+        ["Shape Layer 1", "  >Contents", "    >Rectangle 1", "      >Rectangle Path 1", "        Size", "      >Fill 1", "        Color", "  Position"]
+    );
+    // Pressing U outside the double-press interval hides the reveal.
+    app.last_reveal = Some(("keyframes".into(), -10.0));
+    press_u(&mut app);
+    assert_eq!(labels(&app), ["Shape Layer 1"]);
+
+    // A later single U still lists keyframes as flat rows, even after UU opened their groups.
+    app.session.execute("prop.toggleAnimation", json!({"layer": "#1", "path": size})).unwrap();
+    app.last_reveal = Some(("keyframes".into(), -10.0));
+    press_u(&mut app);
+    assert_eq!(labels(&app), ["Shape Layer 1", "  Size"]);
+}
+
 #[test]
 fn columns_toggle_and_layout() {
     let mut app = app();

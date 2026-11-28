@@ -49,7 +49,7 @@ pub fn reveal(app: &mut EffectcraftApp, kind: &str, now: f64, add: bool) {
         if present {
             kinds.retain(|k| k != kind);
         } else {
-            kinds.retain(|k| k != "props" || !tl.reveal_props.is_empty());
+            kinds.retain(|k| !matches!(k.as_str(), "props" | "shapeContents") || !tl.reveal_props.is_empty());
             kinds.push(kind.to_string());
         }
     } else if present && kinds.len() == 1 {
@@ -444,7 +444,7 @@ pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: V
             Some((k, t)) if k == "keyframes" && now - t < 0.6 => {
                 return run_engine(app, ctx, "anim.reveal", json!({"kind": "modified"}));
             }
-            Some((k, _)) if k == "keyframes" && app.ui.timeline.reveal == ["props"] => {
+            Some((k, _)) if k == "keyframes" && (app.ui.timeline.reveal == ["props"] || app.ui.timeline.reveal == ["props", "shapeContents"]) => {
                 let targets = reveal_targets(app);
                 app.ui.timeline.apply_reveal(&targets, vec![]);
                 return Ok(json!({"revealed": 0}));

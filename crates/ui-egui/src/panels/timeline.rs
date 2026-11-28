@@ -1216,7 +1216,7 @@ fn reveal_rows(app: &EffectcraftApp, l: &Layer, kinds: &[String], rows: &mut Vec
         }
         wanted.extend(picked.iter().copied());
     }
-    revealed_rows(rows, l, &wanted, &shown_groups, &tl.open_groups, tl.full_groups.get(&l.id.0));
+    revealed_rows(rows, l, &wanted, &shown_groups, &tl.open_groups, tl.full_groups.get(&l.id.0), has("shapeContents"));
     if has("waveform")
         && let Some(item) = super::waveform::audio_item(&app.session.project, l)
     {
@@ -1226,9 +1226,9 @@ fn reveal_rows(app: &EffectcraftApp, l: &Layer, kinds: &[String], rows: &mut Vec
 
 /// Rows for the revealed properties `shown` of `l`, in tree order. Those inside an effect show
 /// under the effect and its groups, as in After Effects (Puppet ▸ Mesh 1 ▸ Deform ▸ Puppet
-/// Pin 1 ▸ Position: every pin's Position is told apart, #273); the others (Transform, masks…)
-/// on their own. Groups in `skip` already show with their contents; those in `full` (twirled
-/// open by hand since the reveal) show all of theirs.
+/// Pin 1 ▸ Position: every pin's Position is told apart, #273). UU also keeps the shape Contents
+/// hierarchy. Other properties (Transform, masks…) appear on their own. Groups in `skip` already
+/// show with their contents; those in `full` (twirled open by hand since the reveal) show all of theirs.
 fn revealed_rows(
     rows: &mut Vec<Row>,
     l: &Layer,
@@ -1236,39 +1236,42 @@ fn revealed_rows(
     skip: &[u64],
     open: &std::collections::BTreeSet<u64>,
     full: Option<&std::collections::BTreeSet<u64>>,
+    show_shape_groups: bool,
 ) {
     struct Tree<'a> {
         l: &'a Layer,
         wanted: &'a dyn Fn(&Property) -> bool,
+        matching_groups: std::collections::BTreeSet<u64>,
         skip: &'a [u64],
         open: &'a std::collections::BTreeSet<u64>,
         full: Option<&'a std::collections::BTreeSet<u64>>,
     }
-    fn holds(g: &PropGroup, wanted: &dyn Fn(&Property) -> bool) -> bool {
-        g.children.iter().any(|c| match c {
-            Node::Prop(p) => wanted(p),
-            Node::Group(sg) => holds(sg, wanted),
-        })
-    }
     // A group holding revealed properties (twirled as the user left it), then those inside.
-    fn group(rows: &mut Vec<Row>, t: &Tree<'_>, g: &PropGroup, depth: usize) {
-        if t.skip.contains(&g.uid) || !holds(g, t.wanted) {
+    fn group(rows: &mut Vec<Row>, t: &Tree<'_>, g: &PropGroup, depth: usize, shape_parent: Option<&PropGroup>) {
+        if t.skip.contains(&g.uid) || !t.matching_groups.contains(&g.uid) {
             return;
         }
-        let o = t.open.contains(&g.uid);
-        let fx = matches!(g.kind, GroupKind::Effect { .. }).then_some(g.enabled);
-        rows.push(Row { layer: t.l.id, depth, kind: RowKind::Group { uid: g.uid, name: g.name.clone(), open: o, has_children: true, fx, eye: None } });
-        if !o {
-            return;
-        }
-        if t.full.is_some_and(|f| f.contains(&g.uid)) {
-            push_group(rows, t.l, g, depth + 1, t.open);
-            return;
-        }
+        // A shape group's inner Contents is transparent, just as when twirled open by hand.
+        let child_depth = if g.match_id == "contents" && shape_parent.is_some_and(|p| p.match_id == "group") {
+            depth
+        } else {
+            let open = t.open.contains(&g.uid);
+            let fx = matches!(g.kind, GroupKind::Effect { .. }).then_some(g.enabled);
+            let eye = shape_parent.and_then(|p| eye_of(p, g));
+            rows.push(Row { layer: t.l.id, depth, kind: RowKind::Group { uid: g.uid, name: g.name.clone(), open, has_children: true, fx, eye } });
+            if !open {
+                return;
+            }
+            if t.full.is_some_and(|f| f.contains(&g.uid)) {
+                push_group(rows, t.l, g, depth + 1, t.open);
+                return;
+            }
+            depth + 1
+        };
         for c in &g.children {
             match c {
-                Node::Prop(p) if (t.wanted)(p) => rows.push(Row { layer: t.l.id, depth: depth + 1, kind: RowKind::Prop { uid: p.uid } }),
-                Node::Group(sg) => group(rows, t, sg, depth + 1),
+                Node::Prop(p) if (t.wanted)(p) => rows.push(Row { layer: t.l.id, depth: child_depth, kind: RowKind::Prop { uid: p.uid } }),
+                Node::Group(sg) => group(rows, t, sg, child_depth, shape_parent.map(|_| g)),
                 Node::Prop(_) => {}
             }
         }
@@ -1287,14 +1290,16 @@ fn revealed_rows(
         }
     }
     let wanted = |p: &Property| shown.contains(&p.uid) && prop_visible(p, l);
-    let tree = Tree { l, wanted: &wanted, skip, open, full };
+    let matching_groups = reveal_group_paths(l, show_shape_groups, None, |n| matches!(n, Node::Prop(p) if wanted(p)));
+    let tree = Tree { l, wanted: &wanted, matching_groups, skip, open, full };
     for c in &l.props.children {
         match c {
             Node::Group(fx) if fx.match_id == "effects" => {
                 for e in fx.groups() {
-                    group(rows, &tree, e, 1);
+                    group(rows, &tree, e, 1, None);
                 }
             }
+            Node::Group(g) if show_shape_groups && g.match_id == "contents" => group(rows, &tree, g, 1, Some(&l.props)),
             Node::Group(g) => props(rows, &tree, g),
             Node::Prop(p) if wanted(p) => rows.push(Row { layer: l.id, depth: 1, kind: RowKind::Prop { uid: p.uid } }),
             Node::Prop(_) => {}
@@ -1302,27 +1307,49 @@ fn revealed_rows(
     }
 }
 
-/// Uids of the groups that hold property `uid` of `l`, outermost first.
-fn enclosing_groups(l: &Layer, uid: u64) -> Vec<u64> {
-    let path = l.props.path_of(uid).unwrap_or_default();
-    let mut ids: Vec<u64> = path.split('/').filter_map(|s| s.strip_prefix('@')?.parse().ok()).collect();
-    ids.pop();
-    ids
-}
-
-/// Twirl open the groups holding `props` of `layer` that sit inside effects, so their rows show
-/// (a U reveal, an EE reveal, a puppet pin placed or moved in the viewer).
-pub(crate) fn open_effect_paths(app: &mut EffectcraftApp, layer: u64, props: &[u64]) {
-    let Some(l) = app.session.active_comp().and_then(|c| c.layer(LayerId(layer))) else { return };
-    let Some(fx) = l.effects().map(|g| g.uid) else { return };
-    let mut open = vec![];
-    for p in props {
-        let path = enclosing_groups(l, *p);
-        if path.first() == Some(&fx) {
-            open.extend(path);
+/// Ancestors of matching nodes inside effects and (for UU) shape Contents. When replacing
+/// this layer's previous picks, evict its node IDs in the same walk.
+pub(crate) fn reveal_group_paths(
+    l: &Layer,
+    modified: bool,
+    mut previous: Option<&mut std::collections::BTreeSet<u64>>,
+    picked: impl Fn(&Node) -> bool,
+) -> std::collections::BTreeSet<u64> {
+    let mut groups = std::collections::BTreeSet::new();
+    if let Some(old) = &mut previous {
+        old.remove(&l.props.uid);
+    }
+    for root in &l.props.children {
+        if let Some(old) = &mut previous {
+            old.remove(&root.uid());
+        }
+        let Node::Group(g) = root else { continue };
+        let nested = g.match_id == "effects" || (modified && g.match_id == "contents");
+        if !nested && previous.as_ref().is_none_or(|old| old.is_empty()) {
+            continue;
+        }
+        let mut path = vec![(g, g.children.iter())];
+        while let Some((_, children)) = path.last_mut() {
+            let Some(node) = children.next() else {
+                path.pop();
+                continue;
+            };
+            if let Some(old) = &mut previous {
+                old.remove(&node.uid());
+            }
+            if nested && picked(node) {
+                for (ancestor, _) in path.iter().rev() {
+                    if !groups.insert(ancestor.uid) {
+                        break; // Its ancestors already have a match.
+                    }
+                }
+            }
+            if let Node::Group(child) = node {
+                path.push((child, child.children.iter()));
+            }
         }
     }
-    app.ui.timeline.open_groups.extend(open);
+    groups
 }
 
 /// After a reveal shortcut that picks properties by state (EE expressions): those inside effects
@@ -1331,9 +1358,8 @@ pub(crate) fn open_revealed(app: &mut EffectcraftApp, layers: &[u64], kinds: &[S
     for kind in kinds.iter().filter(|k| matches!(k.as_str(), "animated" | "expressions")) {
         for id in layers {
             let Some(l) = app.session.active_comp().and_then(|c| c.layer(LayerId(*id))) else { continue };
-            let mut found = vec![];
-            collect_props(&l.props, &mut found, &|p| prop_visible(p, l) && reveal_matches(p, &[], kind));
-            open_effect_paths(app, *id, &found);
+            let groups = reveal_group_paths(l, false, None, |n| matches!(n, Node::Prop(p) if prop_visible(p, l) && reveal_matches(p, &[], kind)));
+            app.ui.timeline.open_groups.extend(groups);
         }
     }
 }
@@ -1345,7 +1371,9 @@ pub fn keep_in_view(app: &mut EffectcraftApp, layer: LayerId, prop: u64) {
     if !app.ui.timeline.open_layers.contains(&layer.0) {
         return;
     }
-    open_effect_paths(app, layer.0, &[prop]);
+    if let Some(l) = app.session.active_comp().and_then(|c| c.layer(layer)) {
+        app.ui.timeline.open_groups.extend(reveal_group_paths(l, false, None, |n| n.uid() == prop));
+    }
     let tl = &mut app.ui.timeline;
     if tl.layer_reveal.get(&layer.0).is_some_and(|k| k.iter().any(|k| k == "props")) {
         tl.reveal_props.insert(prop);
