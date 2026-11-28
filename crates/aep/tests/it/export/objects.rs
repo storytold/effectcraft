@@ -916,3 +916,76 @@ fn animated_camera_and_light_options_that_are_not_written_are_reported() {
         }
     }
 }
+
+/// The keys of the option `name` of the first composition's layer `idx` (top first): time,
+/// value, interpolation in / out.
+fn option_keys(bytes: &[u8], idx: usize, group: &str, name: &str) -> Vec<(i64, Vec<f64>, (u8, u8))> {
+    let file = parse(bytes).expect("parse");
+    let view = effectcraft_aep::Project::new(&file).expect("project");
+    let comp = view.all_items().into_iter().find_map(|i| i.comp()).expect("comp");
+    let layer = comp.layers().nth(idx).expect("layer");
+    let Some(effectcraft_aep::PropNode::Group(g)) = layer.properties().and_then(|p| p.get(group)) else { panic!("{group}") };
+    let Some(effectcraft_aep::PropNode::Property(prop)) = g.get(name) else { panic!("{name}") };
+    let code = |i: Option<effectcraft_aep::Interpolation>| match i {
+        Some(effectcraft_aep::Interpolation::Linear) => 1,
+        Some(effectcraft_aep::Interpolation::Bezier) => 2,
+        Some(effectcraft_aep::Interpolation::Hold) => 3,
+        _ => 0,
+    };
+    prop.keys()
+        .unwrap_or_else(|| panic!("{name}: no keys"))
+        .keyframes()
+        .map(|k| (i64::from(k.time_units().expect("time")), k.value().expect("value"), (code(k.interpolation_in()), code(k.interpolation_out()))))
+        .collect()
+}
+
+#[test]
+fn keys_on_camera_and_light_options_are_written() {
+    use effectcraft_keyframe::{Ease, Interp, Value};
+    use effectcraft_project::LightKind;
+    let mut p = Project::default();
+    let c = add_comp(&mut p, "C", 1920, 1080, FrameRate::new(25, 1), 4.0, None);
+    add_layer(&mut p, c, "Cam", LayerSource::Camera, (1920, 1080));
+    add_layer(&mut p, c, "Spot", LayerSource::Light { kind: LightKind::Spot }, (1920, 1080));
+    // Layer 0 is the spot light (added last, on top), 1 the camera.
+    with_layer(&mut p, c, 1, |l| {
+        let mut zoom = vec![key(0.0, Value::Scalar(2666.7)), key(1.0, Value::Scalar(1800.0)), key(2.0, Value::Scalar(3000.0))];
+        zoom[1].in_interp = Interp::Bezier;
+        zoom[1].out_interp = Interp::Bezier;
+        zoom[1].in_ease = vec![Ease { speed: 0.0, influence: 1.0 / 3.0 }];
+        zoom[1].out_ease = vec![Ease { speed: -50.0, influence: 0.75 }];
+        zoom[2].in_interp = Interp::Hold;
+        l.props.prop_mut("cameraOptions/zoom").expect("zoom").keys = zoom;
+        // A linear switch key is held, as After Effects holds them.
+        l.props.prop_mut("cameraOptions/dof").expect("dof").keys = vec![key(0.0, Value::Bool(false)), key(1.0, Value::Bool(true))];
+        l.props.prop_mut("cameraOptions/aperture").expect("aperture").keys = vec![key(0.0, Value::Scalar(25.3)), key(2.0, Value::Scalar(120.0))];
+        l.props.prop_mut("cameraOptions/blurLevel").expect("blur").keys = vec![key(0.0, Value::Scalar(100.0)), key(1.0, Value::Scalar(250.0))];
+    });
+    with_layer(&mut p, c, 0, |l| {
+        l.props.prop_mut("lightOptions/intensity").expect("intensity").keys = vec![key(0.0, Value::Scalar(100.0)), key(1.0, Value::Scalar(180.0))];
+        l.props.prop_mut("lightOptions/color").expect("color").keys =
+            vec![key(0.0, Value::Color([1.0, 1.0, 1.0, 1.0])), key(2.0, Value::Color([1.0, 0.5, 0.2, 1.0]))];
+        l.props.prop_mut("lightOptions/coneAngle").expect("cone").keys = vec![key(0.0, Value::Scalar(90.0)), key(2.0, Value::Scalar(45.0))];
+    });
+    let r = export_all(&p);
+    assert!(r.report.is_lossless(), "{:?}", r.report.losses);
+    let cam = |name: &str| option_keys(&r.bytes, 1, "ADBE Camera Options Group", name);
+    assert_eq!(cam("ADBE Camera Zoom"), [(0, vec![2666.7], (1, 1)), (25_600, vec![1800.0], (2, 2)), (51_200, vec![3000.0], (3, 1))]);
+    assert_eq!(cam("ADBE Camera Depth of Field"), [(0, vec![0.0], (3, 3)), (25_600, vec![1.0], (3, 3))]);
+    assert_eq!(cam("ADBE Camera Aperture"), [(0, vec![25.3], (1, 1)), (51_200, vec![120.0], (1, 1))]);
+    assert_eq!(cam("ADBE Camera Blur Level"), [(0, vec![100.0], (1, 1)), (25_600, vec![250.0], (1, 1))]);
+    let light = |name: &str| option_keys(&r.bytes, 0, "ADBE Light Options Group", name);
+    assert_eq!(light("ADBE Light Intensity"), [(0, vec![100.0], (1, 1)), (25_600, vec![180.0], (1, 1))]);
+    assert_eq!(light("ADBE Light Color"), [(0, vec![255.0; 4], (1, 1)), (51_200, vec![255.0, 255.0, 127.5, 51.0], (1, 1))]);
+    assert_eq!(light("ADBE Light Cone Angle"), [(0, vec![90.0], (1, 1)), (51_200, vec![45.0], (1, 1))]);
+    // The importer reads the keys back (it does not read Depth of Field keys).
+    let back = reimported_layers(&r.bytes);
+    let values = |l: &effectcraft_project::Layer, path: &str| l.props.prop(path).expect(path).keys.iter().map(|k| k.value.clone()).collect::<Vec<_>>();
+    assert_eq!(values(&back[1], "cameraOptions/zoom"), [Value::Scalar(2666.7), Value::Scalar(1800.0), Value::Scalar(3000.0)]);
+    let z = &back[1].props.prop("cameraOptions/zoom").expect("zoom").keys[1];
+    assert_eq!((z.out_ease[0].speed, z.out_ease[0].influence), (-50.0, 0.75));
+    assert_eq!(values(&back[1], "cameraOptions/aperture"), [Value::Scalar(25.3), Value::Scalar(120.0)]);
+    assert_eq!(values(&back[0], "lightOptions/intensity"), [Value::Scalar(100.0), Value::Scalar(180.0)]);
+    assert_eq!(values(&back[0], "lightOptions/coneAngle"), [Value::Scalar(90.0), Value::Scalar(45.0)]);
+    assert_eq!(values(&back[0], "lightOptions/color").len(), 2);
+}
