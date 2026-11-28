@@ -7,6 +7,8 @@ use crate::EffectcraftApp;
 
 /// Effect names, keyed by effect id (#821).
 pub(crate) mod effects;
+/// Hebrew (`he`) menus, panels and effects.
+mod he_data;
 /// Translations for the panels, tooltips and dialogs below the menu bar (see the module docs).
 pub(crate) mod ui;
 use effectcraft_engine::menus::{MenuEntry, MenuNode};
@@ -15,7 +17,7 @@ pub(crate) use ui::catalog_characters;
 pub(crate) use ui::{set_current, tr, tr_args};
 
 /// Every language with a catalog, in the order Settings ▸ General ▸ Language lists them.
-const CATALOG_CODES: [&str; 13] = ["cs", "de", "es", "fr", "pl", "pt-br", "sv", "ru", "uk", "ka", "ja", "zh-hans", "zh-hant"];
+const CATALOG_CODES: [&str; 14] = ["cs", "de", "es", "fr", "pl", "pt-br", "sv", "ru", "uk", "ka", "he", "ja", "zh-hans", "zh-hant"];
 
 /// The active interface language: the stored preference when it names a catalog, otherwise `en`
 /// (English is the source of every label and needs no lookup).
@@ -81,6 +83,21 @@ pub(crate) fn swedish(app: &EffectcraftApp) -> bool {
     language(app) == "sv"
 }
 
+/// The UI is in Hebrew.
+pub(crate) fn hebrew(app: &EffectcraftApp) -> bool {
+    language(app) == "he"
+}
+
+/// Whether `language` reads right-to-left.
+pub(crate) fn is_rtl_language(language: &str) -> bool {
+    language == "he"
+}
+
+/// Whether the current interface language reads right-to-left.
+pub(crate) fn is_rtl() -> bool {
+    is_rtl_language(ui::current())
+}
+
 /// Settings ▸ General ▸ Language ▸ Match System: the operating system's interface language
 /// where EffectCraft has it, else English (#229), as After Effects installs in the system's
 /// language. The browser build follows the locales its page passes in ([`set_system_locales`]).
@@ -131,16 +148,16 @@ fn first_supported(requested: Option<&str>, browser: &[String], drawable: impl F
 }
 
 /// Whether the web build can draw `language`'s interface. It installs no system fonts and its
-/// bundled faces have no CJK or Georgian glyphs, so Match System skips those browser languages
+/// bundled faces have no CJK, Georgian, or Hebrew glyphs, so Match System skips those browser languages
 /// rather than draw boxes; `?lang=` and a language chosen in Settings still select them.
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 fn web_draws(language: &str) -> bool {
-    !matches!(language, "ja" | "zh-hans" | "zh-hant" | "ka")
+    !matches!(language, "ja" | "zh-hans" | "zh-hant" | "ka" | "he")
 }
 
 /// The language EffectCraft shows for a BCP 47 locale (`ja-JP` → `ja`, `zh-Hans-CN` → `zh-hans`,
 /// `zh-TW` → `zh-hant`, `uk-UA` → `uk`, `es-ES` → `es`, `pt-BR` → `pt-br`, `cs-CZ` → `cs`,
-/// `ka-GE` → `ka`, `ru-RU` → `ru`, `de-AT` → `de`, `fr-CA` → `fr`, `sv-SE` → `sv`).
+/// `ka-GE` → `ka`, `he-IL` → `he`, `ru-RU` → `ru`, `de-AT` → `de`, `fr-CA` → `fr`, `sv-SE` → `sv`).
 fn supported(locale: Option<&str>) -> &'static str {
     let Some(locale) = locale else { return "en" };
     let mut parts = locale.split(['-', '_']);
@@ -153,6 +170,7 @@ fn supported(locale: Option<&str>) -> &'static str {
         "cs" => "cs",
         "pl" => "pl",
         "ka" => "ka",
+        "he" | "iw" => "he",
         "ru" => "ru",
         "de" => "de",
         "fr" => "fr",
@@ -183,6 +201,7 @@ const REVEAL_FINDER: &[(&str, &str, &str)] = &[
     ("pt-br", "Mostrar no Explorador", "Mostrar no gerenciador de arquivos"),
     ("fr", "Afficher dans l’Explorateur", "Afficher dans le gestionnaire de fichiers"),
     ("ru", "Показать в Проводнике", "Показать в файловом менеджере"),
+    ("he", "הצגה בסייר הקבצים", "הצגה במנהל הקבצים"),
 ];
 
 pub(crate) fn label<'a>(app: &EffectcraftApp, command: &str, source: &'a str) -> &'a str {
@@ -228,6 +247,7 @@ fn menu_catalog(language: &str) -> Option<&'static [(&'static str, &'static str,
         "pl" => POLISH,
         "ka" => GEORGIAN,
         "sv" => SWEDISH,
+        "he" => he_data::HEBREW_MENUS,
         _ => return None,
     })
 }
@@ -305,6 +325,8 @@ pub(crate) fn entry(app: &EffectcraftApp, e: &MenuEntry, shown: String) -> Strin
         // A colon before the history's (untranslated) action name: "Отменить: Comp1".
         "ru" => Some(("Отменить:", "Нечего отменять", "Повторить:", "Нечего повторять")),
         "sv" => Some(("Ångra", "Det går inte att ångra", "Gör om", "Det går inte att göra om")),
+        // A colon before the history's (untranslated) action name: "בטל: Comp1".
+        "he" => Some(("בטל:", "לא ניתן לבטל", "בצע שוב:", "לא ניתן לבצע שוב")),
         _ => None,
     };
     match e.command.as_str() {
@@ -455,6 +477,17 @@ pub(crate) fn submenu(app: &EffectcraftApp, source: &str, shown: String) -> Stri
                 && let Some(name) = shown.strip_prefix("Assign Shortcut to “").and_then(|s| s.strip_suffix('”'))
             {
                 return format!("Tilldela kortkommando till 3D-vyn ”{name}”");
+            }
+        }
+        "he" => {
+            if source == "Assign Shortcut to Workspace" {
+                if let Some(name) = shown.strip_prefix("Assign Shortcut to “").and_then(|s| s.strip_suffix("” Workspace")) {
+                    return format!("הקצה קיצור מקלדת לסביבת העבודה \"{name}\"");
+                }
+            } else if source == "Assign Shortcut to 3D View"
+                && let Some(name) = shown.strip_prefix("Assign Shortcut to “").and_then(|s| s.strip_suffix('”'))
+            {
+                return format!("הקצה קיצור מקלדת לתצוגת התלת-ממד \"{name}\"");
             }
         }
         _ => {}
@@ -8880,10 +8913,26 @@ mod tests {
     #[test]
     fn web_match_system_skips_languages_without_a_font() {
         let tags = |t: &[&str]| t.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        assert_eq!(super::first_supported(None, &tags(&["ja-JP", "zh-CN", "zh-TW", "ka-GE", "cs"]), super::web_draws), "cs");
+        assert_eq!(super::first_supported(None, &tags(&["ja-JP", "zh-CN", "zh-TW", "ka-GE", "he-IL", "cs"]), super::web_draws), "cs");
         assert_eq!(super::first_supported(None, &tags(&["ka"]), super::web_draws), "en");
+        assert_eq!(super::first_supported(None, &tags(&["he"]), super::web_draws), "en");
         assert_eq!(super::first_supported(Some("ka"), &tags(&["cs"]), super::web_draws), "ka");
+        assert_eq!(super::first_supported(Some("he"), &tags(&["cs"]), super::web_draws), "he");
         assert_eq!(super::first_supported(Some("ja"), &tags(&[]), super::web_draws), "ja");
+    }
+
+    #[test]
+    fn hebrew_flag_and_rtl_follow_language() {
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        assert!(!hebrew(&app));
+        assert!(is_rtl_language("he"));
+        assert!(!is_rtl_language("en"));
+        set_current("he");
+        assert!(is_rtl());
+        set_current("en");
+        assert!(!is_rtl());
+        app.session.execute("prefs.set", json!({"key": "general.language", "value": "he"})).unwrap();
+        assert!(hebrew(&app));
     }
 
     #[test]
@@ -9168,6 +9217,11 @@ mod tests {
             (Some("ka"), "ka"),
             (Some("ka-GE"), "ka"),
             (Some("ka_GE.UTF-8"), "ka"),
+            (Some("he"), "he"),
+            (Some("he-IL"), "he"),
+            (Some("he_IL.UTF-8"), "he"),
+            (Some("iw"), "he"),
+            (Some("iw-IL"), "he"),
             (Some("ru"), "ru"),
             (Some("ru-RU"), "ru"),
             (Some("ru-SK"), "ru"),
@@ -9203,6 +9257,7 @@ mod tests {
             (czech(&app), "cs"),
             (polish(&app), "pl"),
             (georgian(&app), "ka"),
+            (hebrew(&app), "he"),
             (swedish(&app), "sv"),
         ] {
             assert!(!flag, "Match System shows {name} in a test build");
@@ -9242,6 +9297,7 @@ mod tests {
             ("pl", POLISH),
             ("ka", GEORGIAN),
             ("sv", SWEDISH),
+            ("he", he_data::HEBREW_MENUS),
         ] {
             for id in ["file.importAep", "file.exportAep"] {
                 let drawn = effectcraft_engine::menus::entries().into_iter().find(|(_, e)| e.command == id).map(|(_, e)| e.label.clone()).unwrap_or_default();
@@ -9262,6 +9318,7 @@ mod tests {
             ("pl", POLISH),
             ("ka", GEORGIAN),
             ("sv", SWEDISH),
+            ("he", he_data::HEBREW_MENUS),
         ] {
             for (command, en, translated) in catalog {
                 assert_eq!(en.contains("..."), translated.contains("..."), "{code} {command} / {en}: {translated}");

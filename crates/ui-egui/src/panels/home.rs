@@ -228,11 +228,21 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let p = ui.painter().with_clip_rect(rect);
     p.rect_filled(rect, 0.0, t.app_bg);
     let mut actions: Vec<(&str, serde_json::Value)> = vec![];
-    let rail = Rect::from_min_size(rect.min, vec2(RAIL_W.min(rect.width() * 0.4), rect.height()));
-    p.rect_filled(rail, 0.0, t.panel_bg);
-    p.line_segment([rail.right_top(), rail.right_bottom()], Stroke::new(1.0, t.separator));
+    let rail_w = RAIL_W.min(rect.width() * 0.4);
+    let (rail, main) = if crate::i18n::is_rtl() {
+        let rail = Rect::from_min_max(pos2(rect.max.x - rail_w, rect.min.y), rect.max);
+        p.rect_filled(rail, 0.0, t.panel_bg);
+        p.line_segment([rail.left_top(), rail.left_bottom()], Stroke::new(1.0, t.separator));
+        let main = Rect::from_min_max(pos2(rect.min.x + 40.0, rect.min.y + 32.0), pos2(rail.min.x - 40.0, rect.max.y - 16.0));
+        (rail, main)
+    } else {
+        let rail = Rect::from_min_size(rect.min, vec2(rail_w, rect.height()));
+        p.rect_filled(rail, 0.0, t.panel_bg);
+        p.line_segment([rail.right_top(), rail.right_bottom()], Stroke::new(1.0, t.separator));
+        let main = Rect::from_min_max(pos2(rail.max.x + 40.0, rect.min.y + 32.0), pos2(rect.max.x - 40.0, rect.max.y - 16.0));
+        (rail, main)
+    };
     rail_ui(app, ui, &p, rail, &mut actions);
-    let main = Rect::from_min_max(pos2(rail.max.x + 40.0, rect.min.y + 32.0), pos2(rect.max.x - 40.0, rect.max.y - 16.0));
     if app.ui.home_learn {
         super::learn::home_tab(app, ui, main);
     } else if app.ui.home_templates {
@@ -360,9 +370,10 @@ fn home_page(
         ("New from Template", "templates", Icon::Grid),
     ];
     let gap = 12.0;
-    let tw = ((w - gap * 3.0) / 4.0).clamp(120.0, 220.0);
+    let (cols, tw) = quick_start_layout(w, tiles.len(), gap);
     for (k, (label, id, icon)) in tiles.into_iter().enumerate() {
-        let r = Rect::from_min_size(pos2(x0 + k as f32 * (tw + gap), y), vec2(tw, 64.0));
+        let (col, row) = (k % cols, k / cols);
+        let r = Rect::from_min_size(pos2(x0 + col as f32 * (tw + gap), y + row as f32 * (64.0 + gap)), vec2(tw, 64.0));
         let resp = ui.interact(r, egui::Id::unique(("home-tile", id)), Sense::click());
         p.rect_filled(r, 8.0, if resp.hovered() { t.hover } else { t.panel_bg });
         p.rect_stroke(r, 8.0, Stroke::new(1.0, if resp.hovered() { t.accent } else { t.separator }), StrokeKind::Inside);
@@ -380,7 +391,8 @@ fn home_page(
             }
         }
     }
-    y += 64.0 + 36.0;
+    let rows = tiles.len().div_ceil(cols);
+    y += rows as f32 * 64.0 + rows.saturating_sub(1) as f32 * gap + 36.0;
 
     // Recent: heading, filter, clear.
     p.text(pos2(x0, y + 12.0), Align2::LEFT_CENTER, tr("Recent"), Tokens::semibold(17.0), t.tab_text_active);
@@ -495,9 +507,29 @@ fn run_actions(app: &mut EffectcraftApp, ctx: &egui::Context, actions: Vec<(&str
     }
 }
 
+fn quick_start_layout(w: f32, count: usize, gap: f32) -> (usize, f32) {
+    let cols = (((w + gap) / (120.0 + gap)).floor() as usize).clamp(1, count.max(1));
+    let tw = ((w - gap * cols.saturating_sub(1) as f32) / cols as f32).clamp(1.0, 220.0);
+    (cols, tw)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quick_start_tiles_stay_within_narrow_main_width() {
+        let gap = 12.0;
+        let x0 = 40.0;
+        for w in [240.0, 384.0, 600.0, 1000.0] {
+            let (cols, tw) = quick_start_layout(w, 4, gap);
+            for k in 0..4 {
+                let col = k % cols;
+                let max_x = x0 + col as f32 * (tw + gap) + tw;
+                assert!(max_x <= x0 + w + 0.01, "w={w}, cols={cols}, tw={tw}, col={col}: {max_x} > {}", x0 + w);
+            }
+        }
+    }
 
     #[test]
     fn non_ascii_thumbnail_is_rejected_without_panicking() {

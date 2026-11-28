@@ -1313,7 +1313,7 @@ fn interface_language_is_validated_persisted_and_backward_compatible() {
     pl.load_settings();
     assert_eq!(pl.prefs.general.language, "pl");
     assert_eq!(Prefs::from_json(r#"{"general":{"language":"pl"}}"#).general.language, "pl");
-    // Georgian too.
+    // Georgian, too.
     assert!(crate::prefs::LANGUAGES.contains(&("ქართული", "ka")));
     s.execute("prefs.set", json!({"key": "general.language", "value": "ka"})).unwrap();
     let mut ka = Session { config: Some(store.clone()), ..Default::default() };
@@ -1345,6 +1345,23 @@ fn swedish_interface_language_is_validated_and_persisted() {
     sv.load_settings();
     assert_eq!(sv.prefs.general.language, "sv");
     assert_eq!(Prefs::from_json(r#"{"general":{"language":"sv"}}"#).general.language, "sv");
+}
+
+/// Hebrew is stored as `he` rather than a locale or legacy tag, and persists like every other catalog.
+#[test]
+fn hebrew_interface_language_is_validated_and_persisted() {
+    let store = Arc::new(MemoryConfig::default());
+    let mut s = Session { config: Some(store.clone()), ..Default::default() };
+    assert!(crate::prefs::LANGUAGES.contains(&("עברית", "he")));
+    for value in ["he-IL", "he_IL", "HE", "iw"] {
+        assert!(s.execute("prefs.set", json!({"key": "general.language", "value": value})).is_err(), "{value}");
+    }
+    s.execute("prefs.set", json!({"key": "general.language", "value": "he"})).unwrap();
+    assert_eq!(s.execute("prefs.get", json!({"key": "general.language"})).unwrap(), json!("he"));
+    let mut he = Session { config: Some(store), ..Default::default() };
+    he.load_settings();
+    assert_eq!(he.prefs.general.language, "he");
+    assert_eq!(Prefs::from_json(r#"{"general":{"language":"he"}}"#).general.language, "he");
 }
 
 #[test]

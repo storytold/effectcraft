@@ -89,6 +89,8 @@ fn catalog(language: &str) -> Option<&'static Catalog> {
     static TRADITIONAL: Catalog = Catalog { rows: TRADITIONAL_CHINESE, categories: TRADITIONAL_CHINESE_CATEGORIES, index: OnceLock::new() };
     static JAPANESE: Catalog = Catalog { rows: JAPANESE_EFFECTS, categories: JAPANESE_CATEGORIES, index: OnceLock::new() };
     static GEORGIAN_CATALOG: Catalog = Catalog { rows: GEORGIAN, categories: GEORGIAN_CATEGORIES, index: OnceLock::new() };
+    static HEBREW_CATALOG: Catalog =
+        Catalog { rows: super::he_data::HEBREW_EFFECTS, categories: super::he_data::HEBREW_EFFECT_CATEGORIES, index: OnceLock::new() };
     static SWEDISH_CATALOG: Catalog = Catalog { rows: SWEDISH, categories: SWEDISH_CATEGORIES, index: OnceLock::new() };
     static FRENCH_CATALOG: Catalog = Catalog { rows: FRENCH, categories: FRENCH_CATEGORIES, index: OnceLock::new() };
     match language {
@@ -98,6 +100,7 @@ fn catalog(language: &str) -> Option<&'static Catalog> {
         // this one catalog instead of inventing a second mechanism.
         "ja" => Some(&JAPANESE),
         "ka" => Some(&GEORGIAN_CATALOG),
+        "he" => Some(&HEBREW_CATALOG),
         "sv" => Some(&SWEDISH_CATALOG),
         "fr" => Some(&FRENCH_CATALOG),
         _ => None,
@@ -2310,7 +2313,7 @@ mod tests {
     /// The languages whose tables are complete: one row per effect in the registry and one row
     /// per category when they were written. A new effect without a row draws its English name (as
     /// in every language), so it does not block other work; the rows are guarded like [`PARTIAL`]'s.
-    const COMPLETE: &[(&str, &[Row])] = &[("zh-hans", SIMPLIFIED_CHINESE), ("zh-hant", TRADITIONAL_CHINESE)];
+    const COMPLETE: &[(&str, &[Row])] = &[("zh-hans", SIMPLIFIED_CHINESE), ("zh-hant", TRADITIONAL_CHINESE), ("he", crate::i18n::he_data::HEBREW_EFFECTS)];
 
     /// The languages whose tables are being filled in: guarded row by row.
     const PARTIAL: &[(&str, &[Row])] = &[("ja", JAPANESE_EFFECTS), ("ka", GEORGIAN), ("sv", SWEDISH), ("fr", FRENCH)];
@@ -2346,6 +2349,7 @@ mod tests {
             ("zh-hant", TRADITIONAL_CHINESE_CATEGORIES),
             ("ja", JAPANESE_CATEGORIES),
             ("ka", GEORGIAN_CATEGORIES),
+            ("he", crate::i18n::he_data::HEBREW_EFFECT_CATEGORIES),
             ("sv", SWEDISH_CATEGORIES),
             ("fr", FRENCH_CATEGORIES),
         ] {
