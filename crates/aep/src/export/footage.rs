@@ -1,6 +1,6 @@
 //! Footage items (files), built in code per kind ([`FtProtos::build`]) with the layout of the items
 //! After Effects writes when it imports a file of that kind: png still 607, jpeg 605, OpenEXR 604,
-//! TIFF 613, H.264 mp4 606, QuickTime mov 612, WAV 351, png sequence 353, OpenEXR sequence 603,
+//! TIFF 613, H.264 mp4 606, QuickTime mov 612, WAV 351, MP3 (corpus `06_footage_video_audio`), png sequence 353, OpenEXR sequence 603,
 //! jpeg sequence 611, Targa, Photoshop, Illustrator and EPS 650-653. The colour management names
 //! our own sRGB profile (`icc.rs`). The exporter then writes the decoded fields
 //! (`docs/aep-format.md` 3.3, `docs/aep-export.md` R28):
@@ -28,6 +28,7 @@ pub(crate) enum FtKind {
     Exr,
     Mp4,
     Wav,
+    Mp3,
     PngSeq,
     ExrSeq,
     JpegSeq,
@@ -48,6 +49,7 @@ impl FtKind {
             FtKind::Exr => *b"exr ",
             FtKind::Mp4 => *b"mp4 ",
             FtKind::Wav => *b"wav ",
+            FtKind::Mp3 => *b"mp3 ",
             FtKind::PngSeq => *b"pngS",
             FtKind::ExrSeq => *b"exrS",
             FtKind::JpegSeq => *b"jpgS",
@@ -210,6 +212,7 @@ pub(crate) fn plan_footage(name: &str, f: &Footage, col: &mut Collector) -> Opti
         (FootageKind::Sequence, "exr") => FtKind::ExrSeq,
         (FootageKind::Video, "mp4" | "m4v") => FtKind::Mp4,
         (FootageKind::Audio, "wav") => FtKind::Wav,
+        (FootageKind::Audio, "mp3") => FtKind::Mp3,
         _ => {
             col.lose(LossCategory::FootageItems, what(&format!("{:?} footage of type '.{e}' is not exported (no prototype)", f.kind)));
             return None;
@@ -318,8 +321,9 @@ pub(crate) fn plan_footage(name: &str, f: &Footage, col: &mut Collector) -> Opti
                 }
             }
         }
-        FtKind::Wav => {
-            // The sample rate is the denominator (351: 48 000 / 48 000 for 1 s).
+        FtKind::Wav | FtKind::Mp3 => {
+            // The sample rate is the denominator (351: 48 000 / 48 000 for 1 s); After Effects
+            // reads the file's own rate when it opens it.
             let secs = f.duration.seconds();
             let samples = (secs * 48_000.0).round();
             let samples = if samples.is_finite() && samples >= 1.0 && samples < f64::from(u32::MAX) {
@@ -369,12 +373,13 @@ pub(crate) struct FtProtos {
 }
 
 /// Every kind the exporter writes.
-const KINDS: [FtKind; 14] = [
+const KINDS: [FtKind; 15] = [
     FtKind::Png,
     FtKind::Jpeg,
     FtKind::Exr,
     FtKind::Mp4,
     FtKind::Wav,
+    FtKind::Mp3,
     FtKind::PngSeq,
     FtKind::ExrSeq,
     FtKind::JpegSeq,
@@ -423,6 +428,8 @@ fn spec(kind: FtKind) -> KindSpec {
         FtKind::Exr => (*b"oEXR", 0x30, 128, 1, (9750, 0, 1, 1), Clrs::Assigned),
         FtKind::Mp4 => (*b"XCEX", 0x20, 24, 3, (58, 0, 5, 0), Clrs::Video(BT709_DISPLAY)),
         FtKind::Wav => (*b"WAVE", 0x04, 0, 3, (58, 0, 5, 0), Clrs::Assigned),
+        // The MP3 item is the WAV item with its own tag (corpus `06_footage_video_audio`).
+        FtKind::Mp3 => (*b"MP3A", 0x04, 0, 3, (58, 0, 5, 0), Clrs::Assigned),
         FtKind::PngSeq => (*b"png!", 0x20, 24, 3, (322, 0, 1, 1), Clrs::Assigned),
         FtKind::ExrSeq => (*b"oEXR", 0x20, 128, 1, (9750, 0, 1, 1), Clrs::Assigned),
         FtKind::JpegSeq => (*b"ZPEG", 0x20, 24, 3, (58, 0, 5, 0), Clrs::Video(BT709_FULL)),
@@ -515,7 +522,7 @@ fn kind_item(kind: FtKind) -> Vec<Chunk<'static>> {
     if kind.is_sequence() {
         fields.extend([(168, 2u32.to_be_bytes().to_vec()), (184, vec![1]), (186, vec![1, 1])]);
     }
-    if kind == FtKind::Wav {
+    if matches!(kind, FtKind::Wav | FtKind::Mp3) {
         fields.push((160, 48_000f64.to_be_bytes().to_vec()));
     }
     let refs: Vec<(usize, &[u8])> = fields.iter().map(|(at, v)| (*at, v.as_slice())).collect();
