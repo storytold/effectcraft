@@ -150,6 +150,132 @@ fn stroke_draws_along_mask() {
     assert_eq!(run("ec.generate.stroke", &[], src.clone()).img.data, src.data);
 }
 
+/// The Stroke effect's Taper narrows the brush to a point at each end, straight (Linear),
+/// rounded (Convex) or pinched (Concave), on solid strokes and on spaced dabs.
+#[test]
+fn stroke_taper_narrows_each_end_by_shape() {
+    let masks = vec![MaskShape { name: "Mask 1".into(), points: vec![[8.0, 32.0], [56.0, 32.0]], closed: false, inverted: false }];
+    let env = EffectEnv { masks: &masks, ..Default::default() };
+    // Width at x = 14: a quarter of the way along a 24 px start taper.
+    let width_at = |x: usize, set: &[(&str, Value)]| {
+        let mut all = vec![("brushSize", num(12.0)), ("brushHardness", num(100.0)), ("paintStyle", Value::Enum(1))];
+        all.extend(set.iter().cloned());
+        let out = run_env("ec.generate.stroke", &all, Image::new(64, 64), 0.0, env);
+        alpha_sum(&out.img, x, 0, x + 1, 64)
+    };
+    let full = width_at(14, &[]);
+    let start = |shape: u32| width_at(14, &[("strokeTaper/startLength", num(50.0)), ("strokeTaper/startShape", Value::Enum(shape))]);
+    let (linear, convex, concave) = (start(0), start(1), start(2));
+    assert!(concave < linear && linear < convex && convex < full, "concave {concave} < linear {linear} < convex {convex} < full {full}");
+    // The end taper narrows the other end and leaves the start alone.
+    let end = [("strokeTaper/endLength", num(50.0))];
+    assert!(width_at(50, &end) < width_at(50, &[]) * 0.5 && (width_at(14, &end) - full).abs() < 0.5);
+    // Spaced dabs shrink along the taper too.
+    let dabs = |set: &[(&str, Value)]| {
+        let mut all = vec![("brushSize", num(8.0)), ("spacing", num(300.0)), ("paintStyle", Value::Enum(1))];
+        all.extend(set.iter().cloned());
+        alpha_sum(&run_env("ec.generate.stroke", &all, Image::new(64, 64), 0.0, env).img, 0, 0, 64, 64)
+    };
+    assert!(dabs(&[("strokeTaper/startLength", num(100.0))]) < dabs(&[]));
+}
+
+/// A taper shorter than a pixel on a very long stroke is not covered by the body: the slack on
+/// the ends of a stroke's pieces is a fixed fraction of a pixel, not of the piece's length.
+#[test]
+fn stroke_tiny_taper_on_a_long_stroke_is_not_covered() {
+    let masks = vec![MaskShape { name: "Mask 1".into(), points: vec![[8.25, 32.5], [3848.25, 32.5]], closed: false, inverted: false }];
+    let env = EffectEnv { masks: &masks, ..Default::default() };
+    let set = [("brushSize", num(12.0)), ("brushHardness", num(100.0)), ("paintStyle", Value::Enum(1)), ("strokeTaper/startLength", num(0.01))];
+    let out = run_env("ec.generate.stroke", &set, Image::new(3860, 64), 0.0, env);
+    // Pixel centre (8.5, 37.5): 0.25 px into the 0.38 px taper and 5 px off the axis, just
+    // outside the taper's slanted edge (so only antialiased, under half), where the 6 px body
+    // reaching back over the taper would cover it fully.
+    let a = out.img.data[37 * 3860 + 8][3];
+    assert!(a < 0.5, "coverage {a} outside the taper's edge");
+}
+
+/// A soft brush keeps its falloff through a short, steep taper: near the axis, where the
+/// taper is almost full width, the coverage is the body's, without a dip where they meet.
+#[test]
+fn stroke_soft_taper_meets_the_body_without_a_seam() {
+    let masks = vec![MaskShape { name: "Mask 1".into(), points: vec![[8.1, 32.5], [56.1, 32.5]], closed: false, inverted: false }];
+    let env = EffectEnv { masks: &masks, ..Default::default() };
+    let set = [("brushSize", num(12.0)), ("brushHardness", num(50.0)), ("paintStyle", Value::Enum(1)), ("strokeTaper/startLength", num(1.0))];
+    let out = run_env("ec.generate.stroke", &set, Image::new(64, 64), 0.0, env);
+    // The taper runs x 8.1 – 8.58: pixel centre 8.5 is in it, where it is 5 of the body's 6 px.
+    for y in 31..34 {
+        let (taper, body) = (out.img.data[y * 64 + 8][3], out.img.data[y * 64 + 20][3]);
+        assert!(taper >= body - 0.02, "row {y}: {taper} in the taper, {body} on the body");
+    }
+}
+
+/// A sharp corner a pixel past a short start taper keeps the outer side of its bend: what is
+/// drawn there past the corner, away from the tip, is not cut short by the tip's distance.
+#[test]
+fn stroke_corner_near_a_short_taper_keeps_its_outer_bend() {
+    let masks = vec![MaskShape { name: "Mask 1".into(), points: vec![[8.0, 32.0], [9.0, 32.0], [33.0, 73.569]], closed: false, inverted: false }];
+    let env = EffectEnv { masks: &masks, ..Default::default() };
+    let cov = |set: &[(&str, Value)]| {
+        let mut all = vec![("brushSize", num(12.0)), ("brushHardness", num(100.0)), ("paintStyle", Value::Enum(1))];
+        all.extend(set.iter().cloned());
+        run_env("ec.generate.stroke", &all, Image::new(64, 80), 0.0, env).img
+    };
+    let (round, tapered) = (cov(&[]), cov(&[("strokeTaper/startLength", num(1.0))]));
+    // Pixel centre (11.5, 28.5): outside the 60° bend at (9, 32), past the corner.
+    let (r, t) = (round.data[28 * 64 + 11][3], tapered.data[28 * 64 + 11][3]);
+    assert!(r > 0.9 && t > r - 0.05, "{t} tapered, {r} untapered outside the bend");
+}
+
+/// A short taper cuts only its own end of the stroke into pieces: the full-width body stays one
+/// piece, so tapering a long stroke does not multiply the rasterising work along all of it.
+#[test]
+fn stroke_taper_keeps_the_body_whole() {
+    let masks = vec![MaskShape { name: "Mask 1".into(), points: vec![[0.0, 32.0], [3840.0, 32.0]], closed: false, inverted: false }];
+    let env = EffectEnv { masks: &masks, ..Default::default() };
+    let s = crate::find("ec.generate.stroke").unwrap();
+    let mut params = Params { values: s.params.iter().map(|p| (p.id.to_string(), p.default.clone())).collect() };
+    params.values.insert("brushSize".into(), num(200.0));
+    params.values.insert("strokeTaper/startLength".into(), num(1.0));
+    let ctx = EffectCtx { params: &params, time: 0.0, layer_size: [3840.0, 64.0], seed: 3, adjustment: false, env };
+    let b = Buf { img: Image::new(3840, 64), offset: [0.0, 0.0], scale: 1.0 };
+    let (segs, ribbons) = match paint_plan("ec.generate.stroke", &ctx, &b).unwrap().cov {
+        Coverage::Segs { segs, ribbons, .. } => (segs, ribbons),
+        Coverage::Convex(_) => (Vec::new(), Vec::new()),
+    };
+    // The 38 px taper is pieces about a pixel long; the other 3800 px are not.
+    let pieces = segs.len() + ribbons.len();
+    assert!(pieces > 8 && pieces < 100, "{pieces} pieces");
+    assert!(ribbons.iter().any(|s| (s.b[0] - s.a[0]).abs() > 1000.0 && s.ra.min(s.rb) >= 99.0));
+}
+
+/// A taper shorter than the brush radius still comes to a point: the full-width part of the
+/// stroke does not end in a round cap reaching back over it.
+#[test]
+fn stroke_short_taper_comes_to_a_point() {
+    // The same line as two points and as a dense polyline (as a curved mask arrives), whose
+    // corners get round dabs.
+    let line = vec![[8.0, 32.0], [56.0, 32.0]];
+    let dense: Vec<[f64; 2]> = (8..=56).map(|x| [x as f64, 32.0]).collect();
+    // A redundant vertex a pixel from the tip, on pixel centres.
+    let collinear = vec![[8.0, 32.5], [9.0, 32.5], [56.0, 32.5]];
+    for points in [line, dense, collinear] {
+        let n = points.len();
+        let masks = vec![MaskShape { name: "Mask 1".into(), points, closed: false, inverted: false }];
+        let env = EffectEnv { masks: &masks, ..Default::default() };
+        // Coverage before the stroke's start at x = 8, where an untapered brush ends in its round cap.
+        let tip = |set: &[(&str, Value)]| {
+            let mut all = vec![("brushSize", num(12.0)), ("brushHardness", num(100.0)), ("paintStyle", Value::Enum(1))];
+            all.extend(set.iter().cloned());
+            alpha_sum(&run_env("ec.generate.stroke", &all, Image::new(64, 64), 0.0, env).img, 0, 0, 8, 64)
+        };
+        let round = tip(&[]);
+        for shape in 0..3 {
+            let short = tip(&[("strokeTaper/startLength", num(1.0)), ("strokeTaper/startShape", Value::Enum(shape))]);
+            assert!(short < 1.0 && short < round * 0.1, "{n} points, shape {shape}: {short} before the tip, untapered {round}");
+        }
+    }
+}
+
 #[test]
 fn vegas_traces_contours() {
     let mut img = Image::new(64, 64);

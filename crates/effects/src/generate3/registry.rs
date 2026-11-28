@@ -2,7 +2,7 @@ use super::audio::{audio_spectrum, audio_waveform};
 use super::common::{pct, pt, spec};
 use super::fill::{eyedropper_fill, glue_gun, paint_bucket, threads};
 use super::fractal::{FRACTAL_OVERSAMPLE, FRACTAL_PALETTES, FRACTAL_SETS, fractal};
-use super::paths::{scribble, stroke, vegas, write_on};
+use super::paths::{TAPER_SHAPES, scribble, stroke, vegas, write_on};
 use super::raster::{END_CAPS, JOINS};
 use super::{EffectSpec, ParamUi, Value, col, num, p, popup, slider};
 
@@ -90,6 +90,11 @@ pub fn specs() -> Vec<EffectSpec> {
                 p("end", "End", num(100.0), pct()),
                 p("spacing", "Spacing", num(15.0), slider(0.0, 100.0, 0.0, 100.0, 1)),
                 p("paintStyle", "Paint Style", Value::Enum(0), paint_style()),
+                // After Effects' parameters keep their indices: the taper comes after them.
+                p("strokeTaper/startLength", "Start Length", num(0.0), pct()),
+                p("strokeTaper/endLength", "End Length", num(0.0), pct()),
+                p("strokeTaper/startShape", "Start Shape", Value::Enum(0), popup(&TAPER_SHAPES)),
+                p("strokeTaper/endShape", "End Shape", Value::Enum(0), popup(&TAPER_SHAPES)),
             ],
             stroke,
         ),

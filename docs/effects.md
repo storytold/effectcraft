@@ -3,7 +3,7 @@
 <!-- Generated from the effect registry (crates/effects/src/catalog.rs); do not edit by hand.
      Regenerate: UPDATE_DOCS=1 cargo test -p effectcraft-effects --lib effects_doc_is_current -->
 
-EffectCraft ships 308 effects with 2992 parameters in total, grouped into the same categories as the Effects & Presets panel. Every effect is our own implementation, written from public behaviour descriptions and standard image-processing literature. Parameter names, order, popup options, units, defaults and ranges follow the reference application so that projects, expressions and muscle memory carry over.
+EffectCraft ships 308 effects with 2996 parameters in total, grouped into the same categories as the Effects & Presets panel. Every effect is our own implementation, written from public behaviour descriptions and standard image-processing literature. Parameter names, order, popup options, units, defaults and ranges follow the reference application so that projects, expressions and muscle memory carry over.
 
 - **GPU**: 280 effects also run on the GPU compositor with identical results.
 - **32**: 308 effects process 32-bit float (HDR, overbright) pixels without clamping.
@@ -211,7 +211,7 @@ Effects are addressed by id (`ec.<category>.<name>`) or display name in commands
 | Radial Light Burst | `ec.generate.cclightburst` | 6 | GPU | 32 | Implemented |
 | Radio Waves | `ec.generate.radiowaves` | 31 | GPU | 32 | Implemented |
 | Scribble | `ec.generate.scribble` | 25 | GPU | 32 | Implemented |
-| Stroke | `ec.generate.stroke` | 11 | GPU | 32 | Implemented |
+| Stroke | `ec.generate.stroke` | 15 | GPU | 32 | Implemented |
 | Vegas | `ec.generate.vegas` | 26 | GPU | 32 | Implemented |
 | Woven Threads | `ec.generate.ccthreads` | 8 | GPU | 32 | Implemented |
 | Write-on | `ec.generate.writeon` | 10 | GPU | 32 | Implemented |

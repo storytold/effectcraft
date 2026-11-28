@@ -1,4 +1,6 @@
-use super::raster::{Seg, all_masks_px, chaikin, mask_px, over, poly_segs, raster_convex, raster_segs, scan_runs, stroke_outline, trim_poly};
+use super::raster::{
+    Ribbon, Seg, all_masks_px, chaikin, mask_px, over, poly_segs, raster_convex, raster_ribbons, raster_segs, scan_runs, stroke_outline, trim_poly,
+};
 use super::{
     Buf, EffectCtx, Image, IndexedParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator, Params, Plane, gauss_plane, hash1,
     layer_or_self, luminance, poly_length, smoothstep, unpremul,
@@ -18,18 +20,23 @@ pub(crate) fn paint(img: &mut Image, cov: &Plane, color: [f32; 4], opacity: f32,
     });
 }
 
-/// Coverage of a plan-drawn generator: round-capped segments rasterised by `raster_segs`
-/// with `hardness`, or the union of convex polygons (`raster_convex`).
+/// Coverage of a plan-drawn generator: round-capped segments and square-ended ribbons (the
+/// Stroke effect's tapers) rasterised by `raster_segs` / `raster_ribbons` with `hardness` and
+/// max-combined, or the union of convex polygons (`raster_convex`).
 #[derive(Clone, Debug)]
 pub enum Coverage {
-    Segs { segs: Vec<Seg>, hardness: f64 },
+    Segs { segs: Vec<Seg>, ribbons: Vec<Ribbon>, hardness: f64 },
     Convex(Vec<Vec<[f64; 2]>>),
 }
 
 impl Coverage {
     fn raster(&self, w: usize, h: usize) -> Plane {
         match self {
-            Coverage::Segs { segs, hardness } => raster_segs(w, h, segs, *hardness),
+            Coverage::Segs { segs, ribbons, hardness } => {
+                let mut cov = raster_segs(w, h, segs, *hardness);
+                raster_ribbons(&mut cov, ribbons, *hardness);
+                cov
+            }
             Coverage::Convex(polys) => raster_convex(w, h, polys),
         }
     }
@@ -235,7 +242,7 @@ fn scribble_plan(ctx: &EffectCtx, b: &Buf) -> Option<PaintPlan> {
         for part in &parts {
             poly_segs(part, false, r, 1.0, &mut segs);
         }
-        Coverage::Segs { segs, hardness: 0.9 }
+        Coverage::Segs { segs, ribbons: Vec::new(), hardness: 0.9 }
     } else {
         Coverage::Convex(stroke_outline(&parts, r, cap, join, pr.f("edgeOptions/miterLimit").max(1.0)))
     };
@@ -250,6 +257,148 @@ pub(super) fn stroke(ctx: &EffectCtx, mut b: Buf) -> Buf {
     b
 }
 
+/// Items of the Stroke effect's Taper ▸ Start Shape / End Shape popups.
+pub(super) const TAPER_SHAPES: [&str; 3] = ["Linear", "Convex", "Concave"];
+
+/// The Stroke effect's taper: the brush narrows to a point over the first and last part of
+/// the drawn stroke. Lengths are fractions of the drawn length; shapes index [`TAPER_SHAPES`].
+#[derive(Clone, Copy)]
+struct StrokeTaper {
+    start: f64,
+    end: f64,
+    start_shape: u32,
+    end_shape: u32,
+}
+
+impl StrokeTaper {
+    fn is_active(&self) -> bool {
+        self.start > 0.0 || self.end > 0.0
+    }
+
+    /// Ramp from the tip (`u = 0`) to full width (`u = 1`): straight, bulging outwards
+    /// (convex: a quarter circle, full width early and a rounded tip) or bending inwards
+    /// (concave: a parabola, thin near the tip and widening steadily). The concave ramp is not
+    /// the mirrored quarter circle, which rises vertically into full width and leaves a step
+    /// where the taper meets the rest of the stroke.
+    fn ramp(u: f64, shape: u32) -> f64 {
+        let u = u.clamp(0.0, 1.0);
+        match shape {
+            1 => (1.0 - (1.0 - u) * (1.0 - u)).sqrt(),
+            2 => u * u,
+            _ => u,
+        }
+    }
+
+    /// Start and end taper lengths on a drawn stroke `len` long; tapers longer than the stroke
+    /// together share it in proportion.
+    fn lengths(&self, len: f64) -> (f64, f64) {
+        let (ls, le) = (self.start * len, self.end * len);
+        if ls + le > len && ls + le > 0.0 {
+            let f = len / (ls + le);
+            (ls * f, le * f)
+        } else {
+            (ls, le)
+        }
+    }
+
+    /// Brush radius factor (0–1) at distance `s` along a drawn stroke `len` long.
+    fn factor(&self, s: f64, len: f64) -> f64 {
+        let (ls, le) = self.lengths(len);
+        let mut k: f64 = 1.0;
+        if ls > 0.0 && s < ls {
+            k = k.min(Self::ramp(s / ls, self.start_shape));
+        }
+        if le > 0.0 && s > len - le {
+            k = k.min(Self::ramp((len - s) / le, self.end_shape));
+        }
+        k
+    }
+}
+
+/// A polyline stroked with the brush radius `r` narrowed by `taper`, as square-ended ribbons
+/// with round dabs only where the brush keeps a round end: at the polyline's corners and at an
+/// end without a taper. (A round cap at the full-width body would reach back over a short
+/// taper and hide its point.) Only the tapered ends are cut into pieces; the body between them
+/// is one ribbon per polyline edge.
+fn tapered_segs(pts: &[[f64; 2]], r: f64, taper: &StrokeTaper, segs: &mut Vec<Seg>, ribbons: &mut Vec<Ribbon>) {
+    let lens: Vec<f64> = pts.windows(2).map(|w| ((w[1][0] - w[0][0]).powi(2) + (w[1][1] - w[0][1]).powi(2)).sqrt()).collect();
+    let len: f64 = lens.iter().sum();
+    if len <= 0.0 {
+        poly_segs(pts, false, r, 1.0, segs);
+        return;
+    }
+    let (ls, le) = taper.lengths(len);
+    let radius = |s: f64| r * taper.factor(s, len);
+    // Pieces about a pixel long, at least eight per taper but no shorter than a quarter pixel
+    // (finer pieces change nothing visible, and the GPU's f32 slopes lose precision on them),
+    // never more than 100 000 in all.
+    let piece = |zone: f64| (r * 0.5).clamp(0.5, 2.0).min(zone / 8.0).max(0.25).max(len / 100_000.0);
+    // (from, to, piece length or 0 for one full-width ribbon) along the drawn stroke.
+    let zones = [(0.0, ls, piece(ls)), (ls, len - le, 0.0), (len - le, len, piece(le))];
+    let dab = |q: [f64; 2], r: f64| Seg { a: q, b: q, r, v: 1.0 };
+    // `x` limited to the distance from `s` to a tapered tip, so a round corner dab never
+    // reaches back past the point.
+    let tip_room = |s: f64, mut x: f64| {
+        if ls > 0.0 {
+            x = x.min(s);
+        }
+        if le > 0.0 {
+            x = x.min(len - s);
+        }
+        x
+    };
+    // Unit directions of the non-empty edges.
+    let dirs: Vec<Option<[f64; 2]>> = pts.windows(2).zip(&lens).map(|(w, &l)| (l > 0.0).then(|| [(w[1][0] - w[0][0]) / l, (w[1][1] - w[0][1]) / l])).collect();
+    // How far the pieces meeting at a corner at `s` reach past it to close the outer side of
+    // the bend (a miter, for turns up to 60°; sharper corners rely on the corner dab). Not
+    // limited by a tip's distance: on the gentle turns of a curve it is a small fraction of a
+    // pixel, and at a sharp turn the next edge's own square end already reaches further back,
+    // so a limit would only cut a notch into the outer side of the bend.
+    let reach = |s: f64, d0: [f64; 2], d1: [f64; 2]| {
+        let turn = (d0[0] * d1[0] + d0[1] * d1[1]).clamp(-1.0, 1.0).acos().min(std::f64::consts::FRAC_PI_3);
+        radius(s) * (turn * 0.5).tan()
+    };
+    if ls <= 0.0 {
+        segs.push(dab(pts[0], r));
+    }
+    let mut acc = 0.0;
+    for (k, (w, &l)) in pts.windows(2).zip(&lens).enumerate() {
+        let Some(d) = dirs[k] else { continue };
+        let prev = dirs[..k].iter().rev().flatten().next().copied();
+        let next = dirs[k + 1..].iter().flatten().next().copied();
+        let (back, ahead) = (prev.map_or(0.0, |p| reach(acc, p, d)), next.map_or(0.0, |n| reach(acc + l, d, n)));
+        if prev.is_some() {
+            segs.push(dab(w[0], tip_room(acc, radius(acc))));
+        }
+        let at = |s: f64| {
+            let t = ((s - acc) / l).clamp(0.0, 1.0);
+            [w[0][0] + (w[1][0] - w[0][0]) * t, w[0][1] + (w[1][1] - w[0][1]) * t]
+        };
+        for &(z0, z1, step) in &zones {
+            let (a, b) = (z0.max(acc), z1.min(acc + l));
+            if b - a <= 1e-9 {
+                continue;
+            }
+            let n = if step > 0.0 { ((b - a) / step).ceil().max(1.0) as usize } else { 1 };
+            for i in 0..n {
+                let (s0, s1) = (a + (b - a) * i as f64 / n as f64, a + (b - a) * (i + 1) as f64 / n as f64);
+                let (mut p0, mut p1) = (at(s0), at(s1));
+                if s0 <= acc {
+                    p0 = [p0[0] - d[0] * back, p0[1] - d[1] * back];
+                }
+                if s1 >= acc + l {
+                    p1 = [p1[0] + d[0] * ahead, p1[1] + d[1] * ahead];
+                }
+                ribbons.push(Ribbon { a: p0, b: p1, ra: radius(s0), rb: radius(s1) });
+            }
+        }
+        acc += l;
+    }
+    if le <= 0.0 {
+        segs.push(dab(pts[pts.len() - 1], r));
+    }
+}
+
 fn stroke_plan(ctx: &EffectCtx, b: &Buf) -> PaintPlan {
     let pr = ctx.params;
     let all = pr.b("allMasks");
@@ -262,9 +411,16 @@ fn stroke_plan(ctx: &EffectCtx, b: &Buf) -> PaintPlan {
     let end = pr.f("end").clamp(0.0, 100.0) / 100.0;
     let spacing = pr.f("spacing") / 100.0;
     let sequential = pr.b("strokeSequentially");
+    let taper = StrokeTaper {
+        start: pr.f("strokeTaper/startLength").clamp(0.0, 100.0) / 100.0,
+        end: pr.f("strokeTaper/endLength").clamp(0.0, 100.0) / 100.0,
+        start_shape: pr.e("strokeTaper/startShape"),
+        end_shape: pr.e("strokeTaper/endShape"),
+    };
     let lens: Vec<f64> = polys.iter().map(|(p, c, _)| poly_length(p, *c)).collect();
     let total: f64 = lens.iter().sum();
     let mut segs = Vec::new();
+    let mut ribbons = Vec::new();
     let mut acc = 0.0;
     for ((pts, closed, _), &len) in polys.iter().zip(&lens) {
         let (s0, s1) = if all && sequential {
@@ -279,18 +435,22 @@ fn stroke_plan(ctx: &EffectCtx, b: &Buf) -> PaintPlan {
         }
         if spacing <= 0.5 {
             let part = trim_poly(pts, *closed, s0, s1);
-            poly_segs(&part, false, r, 1.0, &mut segs);
+            if taper.is_active() {
+                tapered_segs(&part, r, &taper, &mut segs, &mut ribbons);
+            } else {
+                poly_segs(&part, false, r, 1.0, &mut segs);
+            }
         } else {
             let step = (size * spacing).max(0.5);
             let mut s = s0;
             while s <= s1 + 1e-9 && segs.len() < 200_000 {
                 let (q, _) = crate::util::poly_point_at(pts, *closed, s);
-                segs.push(Seg { a: q, b: q, r, v: 1.0 });
+                segs.push(Seg { a: q, b: q, r: r * taper.factor(s - s0, s1 - s0), v: 1.0 });
                 s += step;
             }
         }
     }
-    PaintPlan { cov: Coverage::Segs { segs, hardness: hard }, color: pr.color("color"), opacity: (pr.f("opacity") / 100.0) as f32, style }
+    PaintPlan { cov: Coverage::Segs { segs, ribbons, hardness: hard }, color: pr.color("color"), opacity: (pr.f("opacity") / 100.0) as f32, style }
 }
 
 // ---------------------------------------------------------------- Vegas
@@ -495,7 +655,7 @@ fn vegas_plan(ctx: &EffectCtx, b: &Buf) -> PaintPlan {
         3 => 2,
         _ => 1,
     };
-    PaintPlan { cov: Coverage::Segs { segs, hardness: hard }, color: pr.color("color"), opacity: 1.0, style }
+    PaintPlan { cov: Coverage::Segs { segs, ribbons: Vec::new(), hardness: hard }, color: pr.color("color"), opacity: 1.0, style }
 }
 
 // ---------------------------------------------------------------- Write-on / Glue Gun
@@ -557,7 +717,7 @@ fn write_on_plan(ctx: &EffectCtx, b: &Buf) -> PaintPlan {
         segs.push(Seg { a: q, b: q, r, v });
     }
     PaintPlan {
-        cov: Coverage::Segs { segs, hardness: pr.f("brushHardness") / 100.0 },
+        cov: Coverage::Segs { segs, ribbons: Vec::new(), hardness: pr.f("brushHardness") / 100.0 },
         color: pr.color("color"),
         opacity: if own_opacity { 1.0 } else { opacity(pr) },
         style: pr.e("paintStyle"),

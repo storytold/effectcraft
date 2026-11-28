@@ -104,7 +104,7 @@ pub use generate::{four_color_jitter, four_color_softening, gen_mode};
 pub use generate2::pattern_kind as cell_pattern_kind;
 pub use generate2::{BoltSeg, Contour, Ghost, RadioPlan, Wave, flare_ghosts, lightning_segments, radio_plan};
 pub use generate3::{
-    Coverage, MarksPlan, PaintPlan, Seg, eyedropper_color, marks_plan, paint_bucket_region, paint_plan, plan_reads_pixels, poly_segs, scribble_style,
+    Coverage, MarksPlan, PaintPlan, Ribbon, Seg, eyedropper_color, marks_plan, paint_bucket_region, paint_plan, plan_reads_pixels, poly_segs, scribble_style,
 };
 pub use noise::{GrainLook, MEDIAN_MAX_RADIUS};
 pub use textfx::{BoltPlan, TextLook, TextPass, bolt_plan, glyph_strokes, text_passes};
@@ -1126,6 +1126,7 @@ pub const PARAM_GROUPS: &[(&str, &str)] = &[
     ("highQualitySettings", "High Quality Settings"),
     ("edgeOptions", "Edge Options"),
     ("strokeOptions", "Stroke Options"),
+    ("strokeTaper", "Taper"),
 ];
 
 /// Display names of nested parameter groups by match id.
