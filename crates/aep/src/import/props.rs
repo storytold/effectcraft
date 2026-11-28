@@ -39,6 +39,9 @@ pub(crate) enum Kind {
     EffectPopup(u32),
     /// An effect checkbox: stored 1.0 when on.
     EffectBool,
+    /// A popup with this many items stored 0-based, as Material Options' Casts Shadows and
+    /// Accepts Shadows (0 Off, 1 On, 2 Only; lab file `material_options`).
+    Enum(u32),
     /// Time Remapping: source seconds, as stored (319, 354).
     TimeRemap,
     /// A one-component value used as stored (shape sizes in pixels, percentages, degrees).
@@ -69,7 +72,7 @@ impl Kind {
     /// sampled as speed 0 / influence 0 (598, handled in [`import_keys`]); popups and checkboxes
     /// have no ease.
     fn ease_decoded(self) -> bool {
-        !matches!(self, Kind::EffectColor | Kind::EffectPopup(_) | Kind::EffectBool)
+        !matches!(self, Kind::EffectColor | Kind::EffectPopup(_) | Kind::EffectBool | Kind::Enum(_))
     }
 
     /// The value as the project stores it; `None` when a needed component is missing or not a
@@ -98,6 +101,14 @@ impl Kind {
                 Value::Enum(i as u32 - 1)
             }
             Kind::EffectBool => Value::Bool(g(0)? != 0.0),
+            Kind::Enum(items) => {
+                let i = g(0)?.round();
+                if i < 0.0 || i >= f64::from(items) {
+                    return None;
+                }
+                // In range 0..items, so the conversion is exact.
+                Value::Enum(i as u32)
+            }
             Kind::TimeRemap | Kind::Number => Value::Scalar(g(0)?),
             Kind::Vec2 => Value::Vec2([g(0)?, g(1)?]),
             Kind::Vec3Percent => Value::Vec3([g(0)?, g(1)?, g(2).unwrap_or(100.0)]),

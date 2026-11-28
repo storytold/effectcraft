@@ -385,7 +385,7 @@ impl Collector {
 /// Parts of a project that the container reader does not decode. They are never imported and, as
 /// the reader cannot see them, never counted either.
 pub const LIMITATIONS: &[&str] = &[
-    "Frame blending, 3D material options, audio levels, guides are not decoded and not imported.",
+    "Frame blending, audio levels, guides are not decoded and not imported.",
     "Mask colour, lock, feather falloff, motion blur and RotoBezier are not decoded: imported masks get the default colour, unlocked, Smooth falloff, motion blur Same As Layer and no RotoBezier.",
     "Text: per-character 3D, text on a path and several style slots of unknown meaning are not decoded (stored values that differ from the default are reported as text layer features).",
     "Footage that is not a solid is linked by its stored path with its stored frame rate and duration; the importer never opens the files (use Reload Footage after the files are found).",
@@ -414,7 +414,7 @@ mod tests {
         let json = serde_json::to_string(&collected()).unwrap();
         assert_eq!(
             json,
-            r#"{"imported":{"folders":0,"compositions":0,"solids":0,"footage":0,"layers":2,"solidLayers":0,"nullLayers":0,"adjustmentLayers":0,"footageLayers":0,"precompLayers":0,"textLayers":0,"keyframes":0,"expressions":0,"masks":0,"trackMattes":0,"markers":0,"timeRemaps":0,"shapeLayers":0,"shapeItems":0,"cameras":0,"lights":0,"textAnimators":0,"effects":0,"placeholderEffects":0,"layerStyles":0},"losses":[{"category":"effects","count":2,"details":["fx 1","fx 2"],"unlisted":0},{"category":"masks","count":1,"details":["mask 1"],"unlisted":0}],"missingFootage":["a.png"],"missingFonts":[],"limitations":["Frame blending, 3D material options, audio levels, guides are not decoded and not imported."],"aeVersion":{"fileVersion":"unknown","savedBy":"unknown","tested":false}}"#
+            r#"{"imported":{"folders":0,"compositions":0,"solids":0,"footage":0,"layers":2,"solidLayers":0,"nullLayers":0,"adjustmentLayers":0,"footageLayers":0,"precompLayers":0,"textLayers":0,"keyframes":0,"expressions":0,"masks":0,"trackMattes":0,"markers":0,"timeRemaps":0,"shapeLayers":0,"shapeItems":0,"cameras":0,"lights":0,"textAnimators":0,"effects":0,"placeholderEffects":0,"layerStyles":0},"losses":[{"category":"effects","count":2,"details":["fx 1","fx 2"],"unlisted":0},{"category":"masks","count":1,"details":["mask 1"],"unlisted":0}],"missingFootage":["a.png"],"missingFonts":[],"limitations":["Frame blending, audio levels, guides are not decoded and not imported."],"aeVersion":{"fileVersion":"unknown","savedBy":"unknown","tested":false}}"#
         );
         let back: ImportReport = serde_json::from_str(&json).unwrap();
         assert_eq!(back, collected());
