@@ -224,6 +224,8 @@ impl Session {
         self.script_ui.project_epoch = self.script_ui.project_epoch.wrapping_add(1);
         p.fix_next_id();
         let lost = upgrade_effects(&mut p);
+        // Source Text overrides saved before they kept a base start from the master as it is.
+        effectcraft_project::essential::init_bases(&mut p);
         // Let go of what the closed project's footage and proxies decoded (frames, decoders,
         // models), and of what the new project's files decoded under an earlier project: the
         // media layer keys them by path, and the files may have changed since (#1070).

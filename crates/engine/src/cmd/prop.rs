@@ -45,14 +45,30 @@ fn with_prop<T>(
     uid: Uid,
     f: impl FnOnce(&mut Property, Tick) -> Result<T>,
 ) -> Result<T> {
+    with_layer_prop(s, label, merge, cid, lid, uid, |l, lt| {
+        let pr = l.props.find_mut(uid).ok_or_else(|| bad("prop", "property vanished"))?;
+        f(pr, lt)
+    })
+}
+
+fn with_layer_prop<T>(
+    s: &mut Session,
+    label: &str,
+    merge: Option<&str>,
+    cid: ItemId,
+    lid: LayerId,
+    uid: Uid,
+    f: impl FnOnce(&mut Layer, Tick) -> Result<T>,
+) -> Result<T> {
     let t = s.time_of(cid);
     let linear = s.prefs.general.default_spatial_linear;
     s.edit(label, merge, |proj, state| {
         let l = layer_mut(proj, cid, lid)?;
         let lt = l.layer_time(t);
-        let pr = l.props.find_mut(uid).ok_or_else(|| bad("prop", "property vanished"))?;
+        let pr = l.props.find(uid).ok_or_else(|| bad("prop", "property vanished"))?;
         let before: Vec<Tick> = pr.keys.iter().map(|k| k.time).collect();
-        let r = f(pr, lt)?;
+        let r = f(l, lt)?;
+        let pr = l.props.find_mut(uid).ok_or_else(|| bad("prop", "property vanished"))?;
         // Settings ▸ General ▸ Default Spatial Interpolation to Linear: new keys of spatial
         // properties get straight motion paths instead of Auto Bezier.
         if linear && pr.spatial {
@@ -636,11 +652,17 @@ fn get(s: &mut Session, p: &Value) -> Result<Value> {
 fn toggle_anim(s: &mut Session, p: &Value) -> Result<Value> {
     let (cid, lid, uid) = prop_ref(s, p, "prop.toggleAnimation")?;
     let on = b_p(p, "value");
-    with_prop(s, "Toggle Animation", merge_p(p), cid, lid, uid, |pr, lt| {
+    let owner = s.project.comp(cid).and_then(|c| c.layer(lid)).and_then(|l| effectcraft_project::essential::text_base_owner(&s.project, l, uid));
+    with_layer_prop(s, "Toggle Animation", merge_p(p), cid, lid, uid, |l, lt| {
+        let pr = l.props.find(uid).ok_or_else(|| bad("prop", "property vanished"))?;
         if pr.static_only {
             return Err(bad("prop.toggleAnimation", "this property can't be animated"));
         }
         let target = on.unwrap_or(pr.keys.is_empty());
+        if !target && let Some(owner) = owner {
+            effectcraft_project::essential::preserve_text_key_base(l, owner, lt);
+        }
+        let pr = l.props.find_mut(uid).ok_or_else(|| bad("prop", "property vanished"))?;
         pr.set_animated(target, lt);
         Ok(json!(target))
     })
