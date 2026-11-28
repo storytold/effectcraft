@@ -725,7 +725,7 @@ function __uiSize(d) {
 
 // ScriptUI mouse events: delivered to `addEventListener` listeners of the control under the
 // pointer and its containers (capture, target, bubble), as the JavaScript Tools Guide documents.
-var __uiMouseKinds = ["mousedown", "mouseup", "mousemove", "mouseover", "mouseout", "click"];
+var __uiMouseKinds = ["mousedown", "mouseup", "mousemove", "mouseover", "mouseout", "click", "wheel", "mousewheel"];
 
 function __uiMouseListeners(c, type, capture) {
   var m = capture ? c.__capture : c.__listeners;
@@ -739,21 +739,23 @@ function __uiMouseWanted(c, inherited) {
   var out = inherited.slice();
   for (const elem of __uiMouseKinds) {
     var t = elem;
-    if (out.indexOf(t) < 0 && (__uiMouseListeners(c, t, false).length || __uiMouseListeners(c, t, true).length)) out.push(t);
+    var hasProp = (t === "wheel" && typeof c.onWheel === "function") || (t === "mousewheel" && typeof c.onMouseWheel === "function");
+    if (out.indexOf(t) < 0 && (hasProp || __uiMouseListeners(c, t, false).length || __uiMouseListeners(c, t, true).length)) out.push(t);
   }
   return out;
 }
 
 // A ScriptUI MouseEvent. `v`: {x, y (relative to the target control), button (0 left, 1 middle,
 // 2 right), buttons (held: 1 left, 2 right, 4 middle), detail (click count), screenX, screenY,
-// altKey, ctrlKey, metaKey, shiftKey}.
+// deltaX, deltaY, deltaMode, wheelDelta (wheel / mousewheel), altKey, ctrlKey, metaKey, shiftKey}.
 function __uiMouseEvent(type, target, v) {
   var num = function (x, d) {
     x = Number(x);
     return Number.isFinite(x) ? x : d;
   };
   var keys = { alt: !!v.altKey, control: !!v.ctrlKey, ctrl: !!v.ctrlKey, meta: !!v.metaKey, shift: !!v.shiftKey };
-  return {
+  var isWheel = type === "wheel" || type === "mousewheel";
+  var e = {
     type: type,
     target: target,
     currentTarget: target,
@@ -764,7 +766,7 @@ function __uiMouseEvent(type, target, v) {
     view: target.window,
     relatedTarget: undefined,
     timeStamp: new Date(),
-    detail: num(v.detail, type === "mousemove" || type === "mouseover" || type === "mouseout" ? 0 : 1),
+    detail: num(v.detail, type === "mousemove" || type === "mouseover" || type === "mouseout" || isWheel ? 0 : 1),
     button: num(v.button, 0),
     buttons: num(v.buttons, 0),
     clientX: num(v.x, 0),
@@ -780,8 +782,17 @@ function __uiMouseEvent(type, target, v) {
     stopPropagation: function () { this.__stopped = true; },
     preventDefault: function () { this.defaultPrevented = true; },
     getModifierState: function (k) { return !!keys[String(k).toLowerCase()]; },
-    toString: function () { return "[object MouseEvent]"; }
+    toString: function () { return isWheel ? "[object WheelEvent]" : "[object MouseEvent]"; }
   };
+  if (isWheel) {
+    var dy = num(v.deltaY, 0);
+    e.deltaX = num(v.deltaX, 0);
+    e.deltaY = dy;
+    e.deltaZ = 0;
+    e.deltaMode = num(v.deltaMode, 0);
+    e.wheelDelta = num(v.wheelDelta, -dy);
+  }
+  return e;
 }
 
 // Deliver a mouse event to `target`: capture listeners from the window down, the target's own
@@ -791,10 +802,19 @@ function __uiMouseFire(target, type, v) {
   // A tree built by add() is shallow; the bound keeps a script's own `parent` cycle harmless.
   for (var p = target; p && path.length < 256; p = p.parent) path.unshift(p);
   var e = __uiMouseEvent(type, target, v);
+  var propFn = function (c) {
+    if (type === "wheel" && typeof c.onWheel === "function") return c.onWheel;
+    if (type === "mousewheel" && typeof c.onMouseWheel === "function") return c.onMouseWheel;
+    return null;
+  };
   var run = function (c, phase, capture) {
     var l = __uiMouseListeners(c, type, capture);
     e.currentTarget = c;
     e.eventPhase = phase;
+    if (!capture) {
+      var fn = propFn(c);
+      if (fn) fn.call(c, e);
+    }
     for (const elem of l) if (typeof elem === "function") elem.call(c, e);
   };
   var n = path.length - 1;

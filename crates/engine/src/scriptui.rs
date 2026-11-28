@@ -434,7 +434,7 @@ pub struct ScriptUiEvent {
 }
 
 /// The ScriptUI mouse events scripts can listen for (`addEventListener`).
-pub const MOUSE_EVENTS: [&str; 6] = ["mousedown", "mouseup", "mousemove", "mouseover", "mouseout", "click"];
+pub const MOUSE_EVENTS: [&str; 8] = ["mousedown", "mouseup", "mousemove", "mouseover", "mouseout", "click", "wheel", "mousewheel"];
 
 /// The [`ScriptUiEvent::kind`] that answers a script's file dialog ([`ScriptFileDialog`]); its
 /// value is `{host, paths: [path…] | null}` and it goes to the script context `host`, not to a
@@ -882,8 +882,8 @@ pub(crate) fn mouse(s: &mut Session, p: &Value) -> Result<Value> {
     const FAR: f64 = 1.0e6;
     let num = |k: &str, lo: f64, hi: f64, d: f64| p.get(k).and_then(Value::as_f64).filter(|v| v.is_finite()).map_or(d, |v| v.clamp(lo, hi));
     let flag = |k: &str| p.get(k).and_then(Value::as_bool).unwrap_or(false);
-    let clicks = if matches!(*ty, "mousemove" | "mouseover" | "mouseout") { 0.0 } else { 1.0 };
-    let value = json!({
+    let clicks = if matches!(*ty, "mousemove" | "mouseover" | "mouseout" | "wheel" | "mousewheel") { 0.0 } else { 1.0 };
+    let mut value = json!({
         "x": num("x", -FAR, FAR, w.bounds[2] / 2.0),
         "y": num("y", -FAR, FAR, w.bounds[3] / 2.0),
         "screenX": num("screenX", -FAR, FAR, 0.0),
@@ -896,6 +896,15 @@ pub(crate) fn mouse(s: &mut Session, p: &Value) -> Result<Value> {
         "metaKey": flag("metaKey"),
         "shiftKey": flag("shiftKey"),
     });
+    if matches!(*ty, "wheel" | "mousewheel")
+        && let Some(o) = value.as_object_mut()
+    {
+        let dy = num("deltaY", -FAR, FAR, 0.0);
+        o.insert("deltaX".into(), json!(num("deltaX", -FAR, FAR, 0.0)));
+        o.insert("deltaY".into(), json!(dy));
+        o.insert("deltaMode".into(), json!(num("deltaMode", 0.0, 2.0, 0.0).round()));
+        o.insert("wheelDelta".into(), json!(num("wheelDelta", -FAR, FAR, -dy)));
+    }
     dispatch(s, ScriptUiEvent { window, widget, kind: (*ty).to_string(), value })
 }
 

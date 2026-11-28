@@ -165,3 +165,54 @@ fn mouse_events_survive_bad_input_and_throwing_listeners() {
     assert!(lines(&r).iter().any(|l| l == "loop ok"), "{r}");
     s.execute("scriptui.close", json!({})).unwrap();
 }
+
+/// #3065, #3827: `wheel` and `mousewheel` events (and `onWheel` / `onMouseWheel` callbacks)
+/// deliver scroll deltas, mode, wheelDelta, pointer position and modifiers with capture / target /
+/// bubble propagation.
+#[test]
+fn wheel_events_reach_listeners_with_deltas_and_bubble() {
+    let mut s = session();
+    let code = r#"
+      var w = new Window("palette", "Wheel");
+      var g = w.add("group", undefined, undefined, { name: "box" });
+      var pad = g.add("group", undefined, undefined, { name: "pad" });
+      pad.preferredSize = [100, 80];
+      var mw = w.add("group", undefined, undefined, { name: "mw" });
+      mw.preferredSize = [40, 40];
+      function log(tag) {
+        return function (e) {
+          writeLn(tag + ":" + e.type + "@" + e.eventPhase + " " + e.clientX + "," + e.clientY +
+            " d=" + e.deltaX + "," + e.deltaY + " m=" + e.deltaMode + " wd=" + e.wheelDelta +
+            (e.ctrlKey ? " ctrl" : "") + " " + e.toString());
+        };
+      }
+      w.addEventListener("wheel", log("win"), true);
+      pad.addEventListener("wheel", log("pad"));
+      g.addEventListener("wheel", log("box"));
+      mw.onMouseWheel = log("prop");
+      mw.addEventListener("mousewheel", log("mw"));
+      w.show();
+    "#;
+    let o = run_code(&mut s, code, "wheel.jsx");
+    assert!(o.error.is_none(), "{:?}", o.error);
+    let win = s.script_ui.windows[0].clone();
+    assert!(win.root.lookup(&json!("pad")).unwrap().mouse.iter().any(|m| m == "wheel"));
+    assert!(win.root.lookup(&json!("mw")).unwrap().mouse.iter().any(|m| m == "mousewheel"));
+    let r = s
+        .execute("scriptui.mouse", json!({"widget": "pad", "type": "wheel", "x": 15, "y": 25, "deltaX": -4, "deltaY": 36, "deltaMode": 1, "ctrlKey": true}))
+        .unwrap();
+    assert_eq!(
+        lines(&r),
+        [
+            "win:wheel@capture 15,25 d=-4,36 m=1 wd=-36 ctrl [object WheelEvent]",
+            "pad:wheel@target 15,25 d=-4,36 m=1 wd=-36 ctrl [object WheelEvent]",
+            "box:wheel@bubble 15,25 d=-4,36 m=1 wd=-36 ctrl [object WheelEvent]",
+        ]
+    );
+    let r = s.execute("scriptui.mouse", json!({"widget": "mw", "type": "mousewheel", "x": 8, "y": 9, "deltaY": -120})).unwrap();
+    assert_eq!(
+        lines(&r),
+        ["prop:mousewheel@target 8,9 d=0,-120 m=0 wd=120 [object WheelEvent]", "mw:mousewheel@target 8,9 d=0,-120 m=0 wd=120 [object WheelEvent]",]
+    );
+    s.execute("scriptui.close", json!({})).unwrap();
+}

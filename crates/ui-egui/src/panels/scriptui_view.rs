@@ -498,7 +498,119 @@ fn mouse_events(ui: &egui::Ui, origin: egui::Pos2, area: Rect, win: u32, root: &
             st.down = None;
         }
     }
+    // Wheel / trackpad scroll and pinch zoom (#3065, #3827).
+    if let Some((w, pos)) = now
+        && w.enabled
+    {
+        collect_wheel_events(&WheelCtx { win, origin, pos, held, mods }, w, &events, acts);
+    }
     ui.data_mut(|d| d.insert_temp(id, st));
+}
+
+struct WheelCtx {
+    win: u32,
+    origin: egui::Pos2,
+    pos: egui::Pos2,
+    held: u8,
+    mods: egui::Modifiers,
+}
+
+/// Collect wheel / trackpad scroll and pinch-zoom events for `w` into `acts`, folding
+/// consecutive same-unit, same-modifier scroll deltas within one frame into a single
+/// `scriptui.mouse` dispatch (#3065, #3827).
+fn collect_wheel_events(cx: &WheelCtx, w: &Widget, events: &[egui::Event], acts: &mut Vec<Act>) {
+    let wants_wheel = w.mouse.iter().any(|m| m == "wheel");
+    let wants_mousewheel = w.mouse.iter().any(|m| m == "mousewheel");
+    if !wants_wheel && !wants_mousewheel {
+        return;
+    }
+    let at = rect_of(cx.origin, w.bounds).min;
+    let mut emit = |dx: f32, dy: f32, mode: u8, mods: egui::Modifiers| {
+        for (want, ty) in [(wants_wheel, "wheel"), (wants_mousewheel, "mousewheel")] {
+            if !want {
+                continue;
+            }
+            acts.push(Act::Mouse(
+                cx.win,
+                w.id,
+                json!({
+                    "type": ty,
+                    "x": cx.pos.x - at.x,
+                    "y": cx.pos.y - at.y,
+                    "screenX": cx.pos.x,
+                    "screenY": cx.pos.y,
+                    "button": 0,
+                    "buttons": cx.held,
+                    "detail": 0,
+                    "deltaX": dx,
+                    "deltaY": dy,
+                    "deltaMode": mode,
+                    "wheelDelta": -dy,
+                    "altKey": mods.alt,
+                    "ctrlKey": mods.ctrl,
+                    "shiftKey": mods.shift,
+                    "metaKey": mods.mac_cmd,
+                }),
+            ));
+        }
+    };
+    let mut scroll_delta = egui::Vec2::ZERO;
+    let mut scroll_key: Option<(u8, egui::Modifiers)> = None;
+    let mut zoom_factor: f32 = 1.0;
+    for e in events {
+        match e {
+            egui::Event::MouseWheel { unit, delta, modifiers, .. } => {
+                let mode = match unit {
+                    egui::MouseWheelUnit::Point => 0,
+                    egui::MouseWheelUnit::Line => 1,
+                    egui::MouseWheelUnit::Page => 2,
+                };
+                let key = (mode, *modifiers);
+                if let Some((prev_mode, prev_mods)) = scroll_key
+                    && (prev_mode, prev_mods) != key
+                    && scroll_delta != egui::Vec2::ZERO
+                {
+                    // egui positive Y is scroll up; Web WheelEvent positive deltaY is scroll down.
+                    emit(-scroll_delta.x, -scroll_delta.y, prev_mode, prev_mods);
+                    scroll_delta = egui::Vec2::ZERO;
+                }
+                scroll_key = Some(key);
+                scroll_delta += *delta;
+            }
+            egui::Event::Zoom(z) if z.is_finite() && *z > 0.0 => {
+                zoom_factor *= *z;
+            }
+            _ => {}
+        }
+    }
+    if let Some((mode, mods)) = scroll_key
+        && scroll_delta != egui::Vec2::ZERO
+    {
+        emit(-scroll_delta.x, -scroll_delta.y, mode, mods);
+    }
+    if (zoom_factor - 1.0).abs() > 1e-4 {
+        // Report trackpad pinch zoom as a ctrlKey wheel event, matching browser conventions (#3827).
+        let dy = -zoom_factor.ln() * 100.0;
+        let mut zmods = cx.mods;
+        zmods.ctrl = true;
+        emit(0.0, dy, 0, zmods);
+    }
+}
+
+/// Whether the pointer is currently over an enabled ScriptUI control inside `panel_rect` that
+/// listens for `wheel` or `mousewheel` events. When true, the docked panel's outer scroll area
+/// yields wheel input to the script control instead of scrolling the dock (#3065, #3827).
+fn pointer_wants_wheel(ui: &egui::Ui, origin: egui::Pos2, area: Rect, root: &Widget, active: bool) -> bool {
+    if !active || !wants_mouse(root, 0) {
+        return false;
+    }
+    let Some(p) = ui.input(|i| i.pointer.latest_pos()) else {
+        return false;
+    };
+    if !area.contains(p) || ui.ctx().layer_id_at(p).is_some_and(|l| l != ui.layer_id()) {
+        return false;
+    }
+    hit_test(root, origin, p, 0).is_some_and(|w| w.enabled && w.mouse.iter().any(|m| m == "wheel" || m == "mousewheel"))
 }
 
 /// Checkboxes and radio buttons sit at the left of their (possibly filled) bounds.
@@ -718,7 +830,10 @@ pub fn panel(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect, id: u32) {
         acts.push(Act::Resize(id, dock));
     }
     let window = vec2(w.root.bounds[2] as f32, w.root.bounds[3] as f32);
-    panel_scroll(ui, ("scriptui-panel", id), rect.size(), window, |ui, r| {
+    let scroll_id = ui.make_persistent_id(("scriptui-panel", id));
+    let scroll_offset = egui::scroll_area::State::load(ui.ctx(), scroll_id).map_or(egui::Vec2::ZERO, |s| s.unclamped_offset());
+    let wheel_taken = pointer_wants_wheel(ui, rect.min - scroll_offset, rect, &w.root, !modal);
+    panel_scroll(ui, ("scriptui-panel", id), rect.size(), window, !wheel_taken, |ui, r| {
         draw_children(app, ui, r.min, id, &w.root, &mut acts);
         mouse_events(ui, r.min, r.intersect(ui.clip_rect()), id, &w.root, !modal, &mut acts);
     });
@@ -729,18 +844,26 @@ pub fn panel(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect, id: u32) {
 
 /// The scroll area a docked ScriptUI panel shows its `window`-sized window in, at most `dock`
 /// big, with the app's scroll style (solid bars, #269). `body` draws the window in the rect it is
-/// given.
+/// given. `allow_wheel` turns off the outer scroll area's wheel handling while the pointer rests
+/// over a ScriptUI control that listens for wheel events (#3065, #3827).
 fn panel_scroll<R>(
     ui: &mut egui::Ui,
     salt: impl std::hash::Hash + std::fmt::Debug,
     dock: egui::Vec2,
     window: egui::Vec2,
+    allow_wheel: bool,
     body: impl FnOnce(&mut egui::Ui, Rect) -> R,
 ) -> egui::scroll_area::ScrollAreaOutput<R> {
-    egui::ScrollArea::both().id_salt(salt).max_width(dock.x).max_height(dock.y).scroll_bar_visibility(panel_bars(dock, window)).show(ui, |ui| {
-        let (r, _) = ui.allocate_exact_size(window, Sense::hover());
-        body(ui, r)
-    })
+    egui::ScrollArea::both()
+        .scroll_source(egui::scroll_area::ScrollSource { mouse_wheel: allow_wheel, ..Default::default() })
+        .id_salt(salt)
+        .max_width(dock.x)
+        .max_height(dock.y)
+        .scroll_bar_visibility(panel_bars(dock, window))
+        .show(ui, |ui| {
+            let (r, _) = ui.allocate_exact_size(window, Sense::hover());
+            body(ui, r)
+        })
 }
 
 /// Whether a docked panel's scroll bars may show: never while its window fits the dock.
@@ -794,7 +917,7 @@ mod tests {
             let input = egui::RawInput { screen_rect: Some(screen), time: Some(f64::from(frame) * 0.1), predicted_dt: 0.1, ..Default::default() };
             let mut out = ctx.run_ui(input, |ui| {
                 let mut panel = ui.new_child(UiBuilder::new().max_rect(Rect::from_min_size(egui::Pos2::ZERO, dock)));
-                let o = panel_scroll(&mut panel, "panel-test", dock, window, |_, _| ());
+                let o = panel_scroll(&mut panel, "panel-test", dock, window, true, |_, _| ());
                 last = (o.inner_rect, o.content_size);
             });
             // Nothing paints these frames, and egui expects their texture uploads to be consumed.
@@ -880,5 +1003,90 @@ mod tests {
             }
         }
         assert!(fill && stroke && text, "fill {fill}, stroke {stroke}, text {text}");
+    }
+
+    /// #3065, #3827: wheel and pinch events over a listening control produce `scriptui.mouse`
+    /// actions with Web-convention deltas and per-event modifiers, and prevent the docked panel's
+    /// outer scroll area from scrolling while keeping its viewport and scrollbars intact.
+    #[test]
+    fn wheel_listener_receives_deltas_and_prevents_dock_scroll() {
+        let mut root = Widget {
+            id: 1,
+            kind: WidgetKind::Panel,
+            enabled: true,
+            visible: true,
+            bounds: [0.0, 0.0, 300.0, 400.0],
+            mouse: vec!["wheel".into()],
+            ..Default::default()
+        };
+        let child = Widget {
+            id: 2,
+            kind: WidgetKind::Group,
+            enabled: true,
+            visible: true,
+            bounds: [10.0, 10.0, 280.0, 380.0],
+            mouse: vec!["wheel".into()],
+            ..Default::default()
+        };
+        root.children.push(child);
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|s| s.spacing.scroll = egui::style::ScrollStyle::solid());
+        let screen = Rect::from_min_size(egui::Pos2::ZERO, vec2(800.0, 600.0));
+        let dock = vec2(300.0, 200.0);
+        let window = vec2(300.0, 400.0);
+        let mut acts = vec![];
+        let mut scroll_offset_after = egui::Vec2::ZERO;
+        let mut viewport_after = Rect::NOTHING;
+        // Frames 0..3 establish layout & solid bars; final frame sends wheel + ctrl-wheel + pinch zoom.
+        for frame in 0..4 {
+            let mut events = vec![egui::Event::PointerMoved(pos2(50.0, 50.0))];
+            if frame == 3 {
+                events.push(egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: vec2(3.0, -24.0),
+                    modifiers: egui::Modifiers::NONE,
+                    phase: egui::TouchPhase::Move,
+                    source: egui::MouseWheelSource::Trackpad,
+                });
+                events.push(egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: vec2(0.0, 12.0),
+                    modifiers: egui::Modifiers::CTRL,
+                    phase: egui::TouchPhase::Move,
+                    source: egui::MouseWheelSource::Trackpad,
+                });
+                events.push(egui::Event::Zoom(1.2));
+            }
+            let input = egui::RawInput { screen_rect: Some(screen), events, time: Some(f64::from(frame) * 0.1), predicted_dt: 0.1, ..Default::default() };
+            let mut out = ctx.run_ui(input, |ui| {
+                let mut panel = ui.new_child(UiBuilder::new().max_rect(Rect::from_min_size(egui::Pos2::ZERO, dock)));
+                let taken = pointer_wants_wheel(&panel, egui::Pos2::ZERO, Rect::from_min_size(egui::Pos2::ZERO, dock), &root, true);
+                let o = panel_scroll(&mut panel, "wheel-test", dock, window, !taken, |ui, r| {
+                    mouse_events(ui, r.min, r.intersect(ui.clip_rect()), 1, &root, true, &mut acts);
+                });
+                scroll_offset_after = o.state.unclamped_offset();
+                viewport_after = o.inner_rect;
+            });
+            out.textures_delta.clear();
+        }
+        assert_eq!(scroll_offset_after, egui::Vec2::ZERO, "dock scroll area should yield wheel to listener");
+        let bar = egui::style::ScrollStyle::solid().allocated_width();
+        assert_eq!(viewport_after.size(), dock - vec2(bar, bar), "scrollbars and dock-sized viewport stay intact when yielding wheel");
+        let wheels: Vec<&Value> = acts
+            .iter()
+            .filter_map(|a| match a {
+                Act::Mouse(1, 2, v) if v["type"] == "wheel" => Some(v),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(wheels.len(), 3, "expected plain wheel, ctrl-wheel, and pinch-zoom wheel: {wheels:?}");
+        assert_eq!(wheels[0]["deltaX"], json!(-3.0));
+        assert_eq!(wheels[0]["deltaY"], json!(24.0));
+        assert_eq!(wheels[0]["deltaMode"], json!(0));
+        assert_eq!(wheels[0]["ctrlKey"], json!(false));
+        assert_eq!(wheels[1]["deltaY"], json!(-12.0));
+        assert_eq!(wheels[1]["ctrlKey"], json!(true));
+        assert_eq!(wheels[2]["ctrlKey"], json!(true));
+        assert!(wheels[2]["deltaY"].as_f64().unwrap_or(0.0) < 0.0, "zoom in should produce negative deltaY");
     }
 }
