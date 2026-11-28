@@ -130,7 +130,7 @@ pub(crate) fn scene(p: &Project, cid: ItemId) -> Scene {
 }
 
 fn compare(s: &Scene, g: &Gpu) {
-    let cpu = adv::raster::render(s);
+    let cpu = adv::rasterize(s).expect("cpu raster");
     let gt = g.raster_3d(s).expect("gpu raster");
     assert_eq!((gt.width, gt.height), (cpu.width, cpu.height));
     let n = cpu.color.len();
@@ -198,6 +198,34 @@ fn gpu_matches_cpu_shadow_catcher() {
 }
 
 #[test]
+fn gpu_matches_cpu_wide_spot_light_shadows() {
+    // A 170° cone is wider than one map covers: the spot light's shadow has six maps, and the
+    // shader picks the face as it does for a point light.
+    let Some(g) = gpu() else { return };
+    let (mut p, cid) = scene_project();
+    set(&mut p.comp_mut(cid).unwrap().layers[1], "lightOptions/coneAngle", Value::Scalar(170.0));
+    let s = scene(&p, cid);
+    assert!(s.lights.iter().any(|l| l.kind == 1 && l.shadow >= 0 && adv::cube_shadow_maps(l)), "the spot light has six maps");
+    compare(&s, &g);
+}
+
+#[test]
+fn gpu_masked_surfaces_cover_fully_where_they_pass_the_cutoff() {
+    // Every material in mask mode with alpha 0.6 at the default cutoff of 0.5: each sample is
+    // either fully covered or empty, as on the CPU.
+    let Some(g) = gpu() else { return };
+    let (p, cid) = scene_project();
+    let mut s = scene(&p, cid);
+    for m in &mut s.materials {
+        (m.alpha_mode, m.base[3], m.opacity, m.shadows_only) = (1, 0.6, 1.0, false);
+    }
+    let gt = g.raster_3d(&s).expect("gpu raster");
+    assert!(gt.color.iter().all(|c| c[3] < 1e-3 || c[3] > 0.999), "masked samples are opaque or empty");
+    assert!(gt.color.iter().filter(|c| c[3] > 0.999).count() > gt.color.len() / 10);
+    compare(&s, &g);
+}
+
+#[test]
 fn gpu_matches_cpu_wide_penumbrae() {
     // Both lights cast with wide Shadow Diffusion. Penumbrae cover much of the frame, so a
     // backend drift in the PCF (jitter hash, tap grid, receiver-plane compare) would hide
@@ -210,11 +238,11 @@ fn gpu_matches_cpu_wide_penumbrae() {
     set(&mut comp.layers[0], "lightOptions/castsShadows", Value::Bool(true));
     set(&mut comp.layers[0], "lightOptions/shadowDiffusion", Value::Scalar(30.0));
     let s = scene(&p, cid);
-    let (cpu, gt) = (adv::raster::render(&s), g.raster_3d(&s).expect("gpu raster"));
+    let (cpu, gt) = (adv::rasterize(&s).expect("cpu raster"), g.raster_3d(&s).expect("gpu raster"));
     for l in p.comp_mut(cid).unwrap().layers.iter_mut().take(2) {
         set(l, "lightOptions/castsShadows", Value::Bool(false));
     }
-    let unshadowed = adv::raster::render(&scene(&p, cid));
+    let unshadowed = adv::rasterize(&scene(&p, cid)).expect("cpu raster");
     let w = cpu.width as usize;
     let luma = |c: &[f32; 4]| (c[0] + c[1] + c[2]) / 3.0;
     // Off a silhouette: the pixel and its four neighbours see one continuous surface.
@@ -241,7 +269,7 @@ fn gpu_raster_perf_smoke() {
     let (p, cid) = scene_project();
     let s = scene(&p, cid);
     let t0 = std::time::Instant::now();
-    let _ = adv::raster::render(&s);
+    let _ = adv::rasterize(&s);
     let cpu = t0.elapsed();
     // First use compiles the pipelines.
     let _ = g.raster_3d(&s);
@@ -328,7 +356,7 @@ fn compare_run(p: &Project, cid: ItemId, g: &Gpu, what: &str) {
     // CPU reference: CPU raster and post.
     let cpu_r = Renderer::new(p, &NoFootage, RenderOpts::default());
     let prep = adv::Prepared::new(&cpu_r, &ctx, &run, out);
-    let (cimg, cdepth) = adv::render_prepared(&prep).expect("cpu drew");
+    let (cimg, cdepth) = adv::render_prepared(&prep).expect("cpu rendered").expect("cpu drew");
     // The GPU: everything on the device.
     let (gimg, gdepth) = g.render_3d(&prep).expect("gpu handled").expect("gpu drew");
     let (share, max) = off_share(&cimg.data, &gimg.data);
@@ -340,7 +368,7 @@ fn compare_run(p: &Project, cid: ItemId, g: &Gpu, what: &str) {
     let mut gr = Renderer::new(p, &NoFootage, RenderOpts { backend: effectcraft_render::Backend::Gpu, ..Default::default() });
     gr.accel = Some(g);
     let prep = adv::Prepared::new(&gr, &ctx, &run, out);
-    let (himg, _) = adv::render_prepared(&prep).expect("cpu post drew");
+    let (himg, _) = adv::render_prepared(&prep).expect("cpu post rendered").expect("cpu post drew");
     let (share, max) = off_share(&himg.data, &gimg.data);
     eprintln!("{what}: gpu post vs cpu post on the gpu raster: {:.4} % beyond 1/255 (max {max:.4})", share * 100.0);
     assert!(share <= 0.001, "{what}: post kernels differ on {:.3} % of pixels", share * 100.0);

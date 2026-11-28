@@ -1,26 +1,27 @@
 //! The Advanced 3D renderer (Composition Settings ▸ 3D Renderer ▸ Advanced 3D).
 //!
 //! A run of 3D layers becomes one [`Scene`] of world-space triangles (models, primitives,
-//! extruded text and shapes, and textured cards for every other layer), lit physically
-//! ([`shade`]) by the comp's lights, an Environment light's image and shadow maps. The scene
-//! is rasterised with a depth buffer on the GPU when an [`crate::Accelerator`] implements
-//! [`crate::Accelerator::raster_3d`], otherwise by the software rasteriser ([`raster`]), at 2×2
-//! supersampling. The resolve (box filter), depth of field (a gather blur by each pixel's
+//! extruded text and shapes, and textured cards for every other layer), lit physically by the
+//! comp's lights, an Environment light's image and shadow maps. The scene is rasterized with a
+//! depth buffer on the GPU when an [`crate::Accelerator`] implements
+//! [`crate::Accelerator::raster_3d`], otherwise by `craft_raster3d`'s software rasterizer
+//! ([`rasterize`]), at 2×2 supersampling. A scene that `craft_raster3d` rejects (a value out of
+//! range, or memory it cannot reserve) is an error from [`render_prepared`]; in a frame the run
+//! then draws nothing, and the reason is logged as a warning. The resolve (box filter), depth of field (a gather blur by each pixel's
 //! circle of confusion, shaped by the camera's iris: [`dof`]) and the conversion back to the working encoding run on the CPU for
 //! both paths, and the result is composited over the layers below the run. An accelerator's
 //! compositor runs all of it on the device: [`Prepared`] for whole runs, [`SplitRun`] for runs
 //! with layers on the 2D compositing path (`draw_run`'s steps as data).
 
 pub mod dof;
-pub mod raster;
 pub mod scene;
 pub mod shade;
 
 use effectcraft_project::Layer;
 use rayon::prelude::*;
 
+pub use craft_raster3d::{Limits, RenderError, Target};
 pub use dof::depth_of_field;
-pub use raster::Target;
 pub use scene::{EnvInfo, Light, Material, Scene, ShadowMap, TexInfo, Vertex};
 
 use super::compose::camera_for;
@@ -32,54 +33,65 @@ pub(crate) fn active(r: &Renderer, ctx: &EvalCtx) -> bool {
     r.collapse3d.map_or(ctx.comp, |c| c.parent.comp).renderer == effectcraft_project::Renderer::Advanced3D
 }
 
+/// The limits a scene renders under. A raster may have up to twice the largest composition
+/// side ([`effectcraft_project::limits::MAX_SIZE`]) on each side; triangles and vertices are
+/// limited only by their `u32` indices, and lights and the work of a render are not limited.
+/// Memory a render cannot reserve gives [`RenderError::OutOfMemory`].
+pub fn limits() -> Limits {
+    let side = u64::from(effectcraft_project::limits::MAX_SIZE) * 2;
+    let mut l = Limits::default();
+    l.max_pixels = side * side;
+    l.max_triangles = u64::from(u32::MAX);
+    l.max_vertices = u64::from(u32::MAX);
+    l.max_lights = usize::MAX;
+    l.max_work = u64::MAX;
+    l
+}
+
+/// Rasterize a scene on the CPU at raster size, under [`limits`].
+pub fn rasterize(s: &Scene) -> Result<Target, RenderError> {
+    craft_raster3d::try_render(s, &limits())
+}
+
+/// Whether `craft_raster3d::try_shadow_maps` gives light `l` six maps from its mark (one per
+/// major axis of the light → point direction) instead of one: a point light, or a spot light
+/// whose outer cone's half angle plus 0.05 radians is over 1.45 radians.
+pub fn cube_shadow_maps(l: &Light) -> bool {
+    l.kind == 2 || (l.kind == 1 && f64::from(l.cos_outer.clamp(-1.0, 1.0).acos()) + 0.05 > 1.45)
+}
+
 /// Box-filter a supersampled target down by `k`: (premultiplied colour, mean depth of the
 /// covered subsamples, ∞ where none).
-pub fn resolve(t: &Target, k: u32) -> (Image, Vec<f32>) {
-    let (w, h) = (t.width / k, t.height / k);
-    let mut img = Image::new(w, h);
-    let mut depth = vec![f32::INFINITY; (w * h) as usize];
-    let n = (k * k) as f32;
-    img.data.par_chunks_mut(w as usize).zip(depth.par_chunks_mut(w as usize)).enumerate().for_each(|(y, (row, drow))| {
-        for x in 0..w as usize {
-            let mut acc = [0.0f32; 4];
-            let (mut dz, mut dn) = (0.0f32, 0.0f32);
-            for j in 0..k as usize {
-                for i in 0..k as usize {
-                    let s = (y * k as usize + j) * t.width as usize + x * k as usize + i;
-                    let c = t.color[s];
-                    for q in 0..4 {
-                        acc[q] += c[q];
-                    }
-                    if t.depth[s].is_finite() {
-                        dz += t.depth[s];
-                        dn += 1.0;
-                    }
-                }
-            }
-            row[x] = acc.map(|v| v / n);
-            if dn > 0.0 {
-                drow[x] = dz / dn;
-            }
-        }
-    });
-    (img, depth)
+pub fn resolve(t: &Target, k: u32) -> Result<(Image, Vec<f32>), RenderError> {
+    let (img, depth) = craft_raster3d::try_resolve(t, k)?;
+    Ok((Image { width: img.width, height: img.height, data: img.data }, depth))
 }
 
 /// Linear → sRGB-encoded premultiplied pixels (the working encoding of non-linear projects).
-pub fn encode(img: &mut Image) {
-    img.data.par_iter_mut().for_each(|p| {
-        let a = p[3];
-        if a > 1e-6 {
-            for c in 0..3 {
-                p[c] = shade::linear_to_srgb(p[c] / a) * a;
-            }
-        }
-    });
+/// A pixel with alpha of 1e-6 or less is left as it is, including the slightly negative
+/// alpha that depth of field leaves at the edge of a blur. On an error the image is left as
+/// it was.
+pub fn encode(img: &mut Image) -> Result<(), RenderError> {
+    // `craft_raster3d` encodes a pixel with alpha of 1e-6 or less unchanged, but rejects one
+    // whose alpha is negative or whose channels are not finite: these are set aside.
+    let kept: Vec<(usize, [f32; 4])> =
+        img.data.par_iter().enumerate().filter(|(_, p)| p[3] <= 1e-6 && (p[3] < 0.0 || !p.iter().all(|c| c.is_finite()))).map(|(i, p)| (i, *p)).collect();
+    for &(i, _) in &kept {
+        img.data[i] = [0.0; 4];
+    }
+    let mut lin = craft_raster3d::Image { width: img.width, height: img.height, data: std::mem::take(&mut img.data) };
+    let encoded = craft_raster3d::try_encode(&mut lin);
+    img.data = lin.data;
+    for (i, p) in kept {
+        img.data[i] = p;
+    }
+    encoded
 }
 
 /// Render a scene on the CPU, resolved: (premultiplied image at output size, depth).
-pub fn render_cpu(s: &Scene) -> (Image, Vec<f32>) {
-    resolve(&raster::render(s), s.ssaa.max(1))
+pub fn render_cpu(s: &Scene) -> Result<(Image, Vec<f32>), RenderError> {
+    let (img, depth) = craft_raster3d::try_render_cpu(s, &limits())?;
+    Ok((Image { width: img.width, height: img.height, data: img.data }, depth))
 }
 
 /// Build the scene of a run (for tests and tools).
@@ -88,8 +100,11 @@ pub fn scene_of(r: &Renderer, ctx: &EvalCtx, run: &[&Layer], out: (u32, u32)) ->
 }
 
 /// Rasterise one scene (GPU when available, else CPU) and resolve it.
-fn raster_resolved(r: &Renderer, s: &Scene) -> (Image, Vec<f32>) {
-    let target = r.active_accel().and_then(|a| a.raster_3d(s)).filter(|t| t.width == s.width && t.height == s.height).unwrap_or_else(|| raster::render(s));
+fn raster_resolved(r: &Renderer, s: &Scene) -> Result<(Image, Vec<f32>), RenderError> {
+    let target = match r.active_accel().and_then(|a| a.raster_3d(s)).filter(|t| t.width == s.width && t.height == s.height) {
+        Some(t) => t,
+        None => rasterize(s)?,
+    };
     resolve(&target, s.ssaa.max(1))
 }
 
@@ -160,15 +175,17 @@ pub type Rendered = Option<(Image, Vec<f32>)>;
 
 /// Render a prepared run on the CPU compositor (each scene rasterised by the accelerator's
 /// [`crate::Accelerator::raster_3d`] when there is one): the reference for
-/// [`crate::Accelerator::render_3d`].
-pub fn render_prepared(p: &Prepared) -> Rendered {
+/// [`crate::Accelerator::render_3d`]. `Ok(None)` when nothing was drawn; an error when
+/// `craft_raster3d` rejects a scene (a value out of range, a raster over [`limits`], or memory
+/// it cannot reserve).
+pub fn render_prepared(p: &Prepared) -> Result<Rendered, RenderError> {
     let (r, n, out) = (p.r, p.samples, p.out);
     let (mut img, depth) = if n <= 1 {
         let s = p.scene(0);
         if s.indices.is_empty() {
-            return None;
+            return Ok(None);
         }
-        raster_resolved(r, &s)
+        raster_resolved(r, &s)?
     } else {
         let mut acc = Image::new(out.0, out.1);
         let mut depth = vec![f32::INFINITY; (out.0 * out.1) as usize];
@@ -180,7 +197,7 @@ pub fn render_prepared(p: &Prepared) -> Rendered {
                 continue;
             }
             any = true;
-            let (img, d) = raster_resolved(r, &s);
+            let (img, d) = raster_resolved(r, &s)?;
             acc.data.par_iter_mut().zip(img.data.par_iter()).for_each(|(a, p)| {
                 for c in 0..4 {
                     a[c] += p[c] * k;
@@ -189,7 +206,7 @@ pub fn render_prepared(p: &Prepared) -> Rendered {
             depth.par_iter_mut().zip(d.par_iter()).for_each(|(a, b)| *a = a.min(*b));
         }
         if !any {
-            return None;
+            return Ok(None);
         }
         (acc, depth)
     };
@@ -197,16 +214,17 @@ pub fn render_prepared(p: &Prepared) -> Rendered {
         img = depth_of_field(&img, &depth, dof, p.scale);
     }
     if !p.linear {
-        encode(&mut img);
+        encode(&mut img)?;
     }
-    Some((img, depth))
+    Ok(Some((img, depth)))
 }
 
 /// Render `layers` as one Advanced 3D scene: premultiplied pixels in the canvas's encoding and
 /// the camera depth of each pixel (∞ where nothing was drawn). With motion blur the scene is
 /// rendered at sub-samples spread over the comp's shutter (angle and phase) and averaged; the
 /// depth is the nearest over the samples. The whole run goes to the accelerator when it
-/// implements [`crate::Accelerator::render_3d`].
+/// implements [`crate::Accelerator::render_3d`]. When [`render_prepared`] returns an error,
+/// the run draws nothing and the error is logged as a warning.
 pub(crate) fn render_layers(r: &Renderer, ctx: &EvalCtx, layers: &[&Layer], out: (u32, u32)) -> Option<(Image, Vec<f32>)> {
     let p = Prepared::new(r, ctx, layers, out);
     if let Some(a) = r.active_accel()
@@ -214,7 +232,10 @@ pub(crate) fn render_layers(r: &Renderer, ctx: &EvalCtx, layers: &[&Layer], out:
     {
         return res;
     }
-    render_prepared(&p)
+    render_prepared(&p).unwrap_or_else(|e| {
+        log::warn!("Advanced 3D: the run was not drawn: {e}");
+        None
+    })
 }
 
 /// The run as one prepared scene for an accelerator's compositor when it can be composited

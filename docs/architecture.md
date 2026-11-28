@@ -215,7 +215,8 @@ Material Options (Accepts Lights/Shadows, Casts Shadows On/Only, Ambient, Diffus
 models and primitives add Base Color, Metallic, Roughness, Emissive. Rasterisation runs at 2×2
 supersampling with a reversed-Z depth buffer; opaque triangles resolve visibility first, the
 transparent ones are sorted back to front and blended. The software rasteriser
-(`adv::raster`) is the reference and the headless/CI path; `effectcraft-gpu` implements
+(the `craft-raster3d` crate, called through `adv::rasterize`) is the reference and the
+headless/CI path; `effectcraft-gpu` implements
 `Accelerator::raster_3d` with a wgpu render pipeline (`advanced3d.wgsl`) that repeats the
 shading step for step, and tests compare the two. Resolve, depth of field (a gather blur by
 each pixel's circle of confusion from the camera's Depth of Field settings) and the conversion

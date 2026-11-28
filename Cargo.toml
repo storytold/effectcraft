@@ -28,6 +28,9 @@ craft-svg = { version = "0.1.0", git = "https://github.com/storytold/craft-libs"
 craft-webp = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "8fa4db64a9bb943520259ea95331a303ba788f21" }
 craft-lottie = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "8fa4db64a9bb943520259ea95331a303ba788f21" }
 craft-mesh = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "8fa4db64a9bb943520259ea95331a303ba788f21", default-features = false, features = ["stl", "obj", "gltf", "fbx"] }
+# craft-raster3d: the rev is a commit on storytold/craft-libs#2985 (which builds on #2923) until
+# both merge; it then moves to a craft-libs main revision.
+craft-raster3d = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "6275beb15cd6a088d1df53217067a3587b30d5e5", default-features = false }
 craft-aep = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "8fa4db64a9bb943520259ea95331a303ba788f21" }
 craft-doc = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "8fa4db64a9bb943520259ea95331a303ba788f21" }
 craft-vectorcraft-format = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "8fa4db64a9bb943520259ea95331a303ba788f21" }

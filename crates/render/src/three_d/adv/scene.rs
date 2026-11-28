@@ -27,205 +27,41 @@ use crate::three_d::compose::camera_for;
 use crate::three_d::light::{LightState, Material as ClassicMaterial};
 use crate::{EvalCtx, Renderer};
 
-/// One vertex in world space.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-#[repr(C)]
-pub struct Vertex {
-    pub pos: [f32; 3],
-    pub normal: [f32; 3],
-    pub uv: [f32; 2],
-    pub tangent: [f32; 4],
-    pub material: u32,
-}
-
-/// A material, resolved for shading.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Material {
-    /// Linear RGBA factor.
-    pub base: [f32; 4],
-    pub metallic: f32,
-    pub roughness: f32,
-    pub emissive: [f32; 3],
-    pub normal_scale: f32,
-    pub occlusion_strength: f32,
-    /// 0 opaque, 1 mask, 2 blend.
-    pub alpha_mode: u32,
-    pub alpha_cutoff: f32,
-    /// Layer opacity (multiplies alpha).
-    pub opacity: f32,
-    /// Texture indices (−1 = none).
-    pub tex_base: i32,
-    pub tex_mr: i32,
-    pub tex_normal: i32,
-    pub tex_occlusion: i32,
-    pub tex_emissive: i32,
-    pub double_sided: bool,
-    pub unlit: bool,
-    pub accepts_lights: bool,
-    pub receives_shadows: bool,
-    /// "Accepts Shadows: Only": draws just the shadows it receives, as black × their amount.
-    pub shadows_only: bool,
-    pub casts_shadows: bool,
-    /// Drawn (false for "Casts Shadows: Only").
-    pub visible: bool,
-    /// Material Options weights (cards: Diffuse, Specular Intensity / 50%, Ambient).
-    pub diffuse_k: f32,
-    pub specular_k: f32,
-    pub ambient_k: f32,
-}
-
-impl Default for Material {
-    fn default() -> Self {
-        Material {
-            base: [1.0; 4],
-            metallic: 0.0,
-            roughness: 0.5,
-            emissive: [0.0; 3],
-            normal_scale: 1.0,
-            occlusion_strength: 1.0,
-            alpha_mode: 0,
-            alpha_cutoff: 0.5,
-            opacity: 1.0,
-            tex_base: -1,
-            tex_mr: -1,
-            tex_normal: -1,
-            tex_occlusion: -1,
-            tex_emissive: -1,
-            double_sided: false,
-            unlit: false,
-            accepts_lights: true,
-            receives_shadows: true,
-            shadows_only: false,
-            casts_shadows: false,
-            visible: true,
-            diffuse_k: 1.0,
-            specular_k: 1.0,
-            ambient_k: 1.0,
-        }
-    }
-}
-
-impl Material {
-    /// Drawn in the transparent (sorted, blended) pass.
-    pub fn transparent(&self) -> bool {
-        self.alpha_mode == 2 || self.opacity < 0.999 || self.shadows_only
-    }
-}
-
-/// A texture in [`Scene::texels`]: linear straight RGBA.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct TexInfo {
-    pub offset: u32,
-    pub width: u32,
-    pub height: u32,
-    /// 0 repeat, 1 clamp, 2 mirror.
-    pub wrap_u: u32,
-    pub wrap_v: u32,
-}
-
-/// A light (ambient lights are summed into [`Scene::ambient`]).
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Light {
-    /// 0 parallel, 1 spot, 2 point.
-    pub kind: u32,
-    pub pos: [f32; 3],
-    /// Direction the light travels.
-    pub dir: [f32; 3],
-    /// Linear colour × intensity.
-    pub color: [f32; 3],
-    pub cos_inner: f32,
-    pub cos_outer: f32,
-    /// 0 none, 1 smooth, 2 inverse square clamped.
-    pub falloff: u32,
-    pub radius: f32,
-    pub falloff_distance: f32,
-    /// First shadow map (point lights use six), −1 = none.
-    pub shadow: i32,
-    pub shadow_darkness: f32,
-    /// Shadow Diffusion (pixels).
-    pub shadow_diffusion: f32,
-}
-
-/// A depth map seen from a light: `view` maps world → light space (+z forward); pixels
-/// `u = focal·x/z + size/2` (perspective) or `focal·x + size/2` (orthographic); texels store
-/// the light-space depth of the nearest caster.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ShadowMap {
-    pub view: [[f32; 4]; 3],
-    pub focal: f32,
-    pub ortho: bool,
-    pub size: u32,
-    pub offset: u32,
-    /// Depth bias in texels (scaled by the texel footprint at the receiver).
-    pub bias: f32,
-    /// Penumbra width (output pixels) requested by Shadow Diffusion; the shader
-    /// converts it to a tap reach via the receiver's texel footprint.
-    pub radius: f32,
-}
-
-/// The environment image: radiance mip levels `radiance..radiance + mips` and an irradiance
-/// map, in [`Scene::textures`].
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct EnvInfo {
-    pub radiance: u32,
-    pub mips: u32,
-    pub irradiance: u32,
-    pub intensity: f32,
-    /// Radians about the vertical axis.
-    pub rotation: f32,
-    /// Unit direction from the scene towards the environment's dominant (radiance-weighted)
-    /// bright region — the direction its shadow is cast from, like a parallel light's
-    /// `to_light`. `[0; 3]` when the image is directionless (uniform, or opposing bright
-    /// regions that cancel) or the light casts no shadow (nothing reads it then): no shadow.
-    pub sun: [f32; 3],
-    /// The image's directional (key) fraction — `|Σ dir·radiance| / Σ radiance` over the
-    /// sphere, 0 for a uniform image and near 1 for a single bright spot. An Environment
-    /// light's shadow occludes only this much of its light: the key lobe is blocked where
-    /// the map says so, the remaining fill keeps shining, so the shadow stays partial the
-    /// way After Effects renders an area-light shadow (a broad environment like the default
-    /// studio shadows softly, a lone bright spot on black almost fully).
-    pub key: f32,
-    /// Shadow map index into [`Scene::shadows`]: 0 marked (assigned by `raster::shadow_maps`),
-    /// -1 casts no shadow. Gated by the light's Cast Shadows.
-    pub shadow: i32,
-    pub shadow_darkness: f32,
-    /// The light's Shadow Diffusion (the penumbra width the shadow map's PCF widens to).
-    pub shadow_diffusion: f32,
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct Scene {
-    /// Raster size (output × `ssaa`).
-    pub width: u32,
-    pub height: u32,
-    pub ssaa: u32,
-    /// World → clip (row-major; reversed depth: ndc z = near / camera z).
-    pub clip: [[f32; 4]; 4],
-    /// World → camera (row-major; camera z = depth for depth of field).
-    pub view: [[f32; 4]; 4],
-    pub eye: [f32; 3],
-    pub cam_fwd: [f32; 3],
-    pub ortho: bool,
-    pub vertices: Vec<Vertex>,
-    /// Triangles: the first `opaque_count` indices are opaque, the rest transparent, sorted
-    /// back to front.
-    pub indices: Vec<u32>,
-    pub opaque_count: u32,
-    pub materials: Vec<Material>,
-    pub textures: Vec<TexInfo>,
-    pub texels: Vec<[f32; 4]>,
-    pub lights: Vec<Light>,
-    pub shadows: Vec<ShadowMap>,
-    pub shadow_texels: Vec<f32>,
-    pub env: Option<EnvInfo>,
-    pub ambient: [f32; 3],
-    /// Shading inputs and outputs are linear (no sRGB conversion needed).
-    pub linear_io: bool,
-}
+pub use craft_raster3d::{EnvInfo, Light, Material, Scene, ShadowMap, TexInfo, Vertex};
 
 /// Row-major f32 copy of a matrix.
 pub fn m32(m: &Mat4) -> [[f32; 4]; 4] {
     m.0.map(|r| r.map(|v| v as f32))
+}
+
+/// A texel in the range `craft_raster3d` renders: a channel that is not finite reads 0, and
+/// alpha is clamped to 0..1.
+pub(crate) fn texel_in_range(p: [f32; 4]) -> [f32; 4] {
+    let p = p.map(|c| if c.is_finite() { c } else { 0.0 });
+    [p[0], p[1], p[2], p[3].clamp(0.0, 1.0)]
+}
+
+/// A material in the range `craft_raster3d` renders: a value that is not finite takes the
+/// default material's, and alpha, opacity, metallic, roughness and occlusion strength are
+/// clamped to 0..1.
+pub(crate) fn material_in_range(m: Material) -> Material {
+    let d = Material::default();
+    let f = |v: f32, or: f32| if v.is_finite() { v } else { or };
+    let unit = |v: f32, or: f32| f(v, or).clamp(0.0, 1.0);
+    Material {
+        base: [f(m.base[0], d.base[0]), f(m.base[1], d.base[1]), f(m.base[2], d.base[2]), unit(m.base[3], d.base[3])],
+        metallic: unit(m.metallic, d.metallic),
+        roughness: unit(m.roughness, d.roughness),
+        emissive: m.emissive.map(|c| f(c, 0.0)),
+        normal_scale: f(m.normal_scale, d.normal_scale),
+        occlusion_strength: unit(m.occlusion_strength, d.occlusion_strength),
+        alpha_cutoff: f(m.alpha_cutoff, d.alpha_cutoff),
+        opacity: unit(m.opacity, d.opacity),
+        diffuse_k: f(m.diffuse_k, d.diffuse_k),
+        specular_k: f(m.specular_k, d.specular_k),
+        ambient_k: f(m.ambient_k, d.ambient_k),
+        ..m
+    }
 }
 
 /// Builds a [`Scene`]: texture uploads deduplicated by source.
@@ -243,7 +79,7 @@ pub(crate) struct Builder {
 impl Builder {
     fn texture_from(&mut self, w: u32, h: u32, wrap: [u32; 2], data: impl Iterator<Item = [f32; 4]>) -> i32 {
         let offset = self.s.texels.len() as u32;
-        self.s.texels.extend(data);
+        self.s.texels.extend(data.map(texel_in_range));
         self.s.textures.push(TexInfo { offset, width: w, height: h, wrap_u: wrap[0], wrap_v: wrap[1] });
         (self.s.textures.len() - 1) as i32
     }
@@ -294,7 +130,7 @@ impl Builder {
     }
 
     fn material(&mut self, m: Material) -> u32 {
-        self.s.materials.push(m);
+        self.s.materials.push(material_in_range(m));
         (self.s.materials.len() - 1) as u32
     }
 
@@ -774,7 +610,7 @@ fn lights(ctx: &EvalCtx, lin: bool) -> (Vec<Light>, [f32; 3], Option<EnvLight>) 
                     falloff: st.falloff,
                     radius: st.radius as f32,
                     falloff_distance: st.falloff_distance as f32,
-                    // Marked; `raster::shadow_maps` assigns the maps.
+                    // Marked; `craft_raster3d::try_shadow_maps` assigns the maps.
                     shadow: if st.casts_shadows { 0 } else { -1 },
                     shadow_darkness: st.shadow_darkness as f32,
                     shadow_diffusion: st.shadow_diffusion as f32,
@@ -932,7 +768,7 @@ pub(crate) fn add_environment(b: &mut Builder, env: &EnvLight, w: u32, h: u32, d
         rotation: env.rot,
         sun,
         key,
-        // Marked; `raster::shadow_maps` assigns the map (a directionless image casts none).
+        // Marked; `craft_raster3d::try_shadow_maps` assigns the map (a directionless image casts none).
         shadow: if env.casts_shadows { 0 } else { -1 },
         shadow_darkness: env.shadow_darkness as f32,
         shadow_diffusion: env.shadow_diffusion as f32,
@@ -1075,6 +911,16 @@ pub(crate) fn motion_blurred(r: &Renderer, ctx: &EvalCtx, layer: &Layer) -> bool
     r.mb_on(ctx, layer)
 }
 
+/// No light or Environment light of `s` casts a shadow.
+fn clear_shadow_marks(s: &mut Scene) {
+    for l in &mut s.lights {
+        l.shadow = -1;
+    }
+    if let Some(e) = &mut s.env {
+        e.shadow = -1;
+    }
+}
+
 /// [`build`] at a motion-blur sub-sample: layers with Motion Blur on, the camera and the lights
 /// are evaluated at `sub`'s time; the other layers stay at `ctx`'s.
 pub(crate) fn build_at(r: &Renderer, ctx: &EvalCtx, sub: Option<&EvalCtx>, run: &[&Layer], out: (u32, u32)) -> Scene {
@@ -1123,15 +969,14 @@ pub(crate) fn build_at(r: &Renderer, ctx: &EvalCtx, sub: Option<&EvalCtx>, run: 
             }
         }
         if r.opts.shadows() {
-            super::raster::shadow_maps(&mut b.s, r.opts.draft);
+            if let Err(e) = craft_raster3d::try_shadow_maps(&mut b.s, r.opts.draft, &super::limits()) {
+                // The scene draws without shadow maps.
+                log::warn!("Advanced 3D: shadows were not drawn: {e}");
+                clear_shadow_marks(&mut b.s);
+            }
         } else {
             // Settings ▸ 3D ▸ Realtime Shadows in Draft off: draft renders skip shadows.
-            for l in &mut b.s.lights {
-                l.shadow = -1;
-            }
-            if let Some(e) = &mut b.s.env {
-                e.shadow = -1;
-            }
+            clear_shadow_marks(&mut b.s);
         }
     }
     // Camera matrices.

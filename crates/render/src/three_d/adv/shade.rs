@@ -1,5 +1,7 @@
-//! Physically based shading for the Advanced 3D renderer (CPU reference; `crates/gpu`'s
-//! `advanced3d.wgsl` repeats it step for step).
+//! Shading math of the Advanced 3D renderer that the scene builder uses: vector helpers, the
+//! sRGB-to-linear curve, the BRDF terms, texture sampling, equirectangular mapping and
+//! shadow-map filtering. Fragments are shaded by `craft_raster3d`, and `crates/gpu`'s
+//! `advanced3d.wgsl` repeats that shading step for step.
 //!
 //! - Direct light: Cook–Torrance microfacet specular with the GGX/Trowbridge–Reitz normal
 //!   distribution, the Smith–Schlick-GGX geometry term (`k = (r + 1)² / 8`) and Schlick's
@@ -8,13 +10,11 @@
 //!   Engine 4"; the glTF 2.0 metallic-roughness model). Light colours are the irradiance on a
 //!   surface facing the light (a white 100% light shows a white diffuse surface at its base
 //!   colour), i.e. π is folded into the light intensity.
-//! - Image-based light: a cosine-convolved irradiance map for diffuse, a box-filtered mip
-//!   chain of the equirectangular environment sampled by roughness for specular, and the
-//!   analytic split-sum environment BRDF fit (Karis 2014, "Physically Based Shading on
-//!   Mobile").
+//! - Image-based light: the analytic split-sum environment BRDF fit (Karis 2014, "Physically
+//!   Based Shading on Mobile").
 //! - Shadows: depth maps per light, percentage-closer filtered.
 
-use super::scene::{EnvInfo, Light, Material, Scene, ShadowMap, TexInfo};
+use super::scene::{ShadowMap, TexInfo};
 
 pub const PI: f32 = std::f32::consts::PI;
 
@@ -36,14 +36,6 @@ fn add(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
     [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
 }
 #[inline]
-fn sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-}
-#[inline]
-fn scale(a: [f32; 3], k: f32) -> [f32; 3] {
-    [a[0] * k, a[1] * k, a[2] * k]
-}
-#[inline]
 fn mix(a: f32, b: f32, t: f32) -> f32 {
     a + (b - a) * t
 }
@@ -52,11 +44,6 @@ fn mix(a: f32, b: f32, t: f32) -> f32 {
 #[inline]
 pub fn srgb_to_linear(c: f32) -> f32 {
     if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
-}
-/// Linear light → sRGB-encoded (over-range values continue the curve).
-#[inline]
-pub fn linear_to_srgb(c: f32) -> f32 {
-    if c <= 0.0031308 { c * 12.92 } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 }
 }
 
 /// GGX / Trowbridge–Reitz normal distribution, `a = roughness²`.
@@ -181,21 +168,6 @@ pub fn equirect_dir(u: f32, v: f32, rot: f32) -> [f32; 3] {
     let phi = (u - 0.5) * 2.0 * PI - rot;
     let th = v * PI;
     [th.sin() * phi.sin(), -th.cos(), th.sin() * phi.cos()]
-}
-
-/// Diffuse (irradiance) and roughness-filtered specular radiance of the environment.
-pub fn env_light(s: &Scene, e: &EnvInfo, n: [f32; 3], r: [f32; 3], rough: f32) -> ([f32; 3], [f32; 3]) {
-    let (u, v) = equirect_uv(n, e.rotation);
-    let irr = s.textures.get(e.irradiance as usize).map_or([0.0; 4], |t| sample(t, &s.texels, u, v));
-    let (u, v) = equirect_uv(r, e.rotation);
-    let lv = rough.clamp(0.0, 1.0) * (e.mips.saturating_sub(1)) as f32;
-    let l0 = lv.floor() as u32;
-    let l1 = (l0 + 1).min(e.mips.saturating_sub(1));
-    let f = lv - l0 as f32;
-    let a = s.textures.get((e.radiance + l0) as usize).map_or([0.0; 4], |t| sample(t, &s.texels, u, v));
-    let b = s.textures.get((e.radiance + l1) as usize).map_or([0.0; 4], |t| sample(t, &s.texels, u, v));
-    let spec = [mix(a[0], b[0], f), mix(a[1], b[1], f), mix(a[2], b[2], f)];
-    (scale([irr[0], irr[1], irr[2]], e.intensity), scale(spec, e.intensity))
 }
 
 /// Light-space position (u, v in shadow-map pixels, depth) of a world point.
@@ -352,233 +324,4 @@ pub fn shadow_factor(m: &ShadowMap, texels: &[f32], p: [f32; 3], ng: [f32; 3], n
         }
     }
     lit / (n * n) as f32
-}
-
-/// The visibility of light `li` at `p` (1 = unshadowed), darkened by Shadow Darkness.
-pub fn light_shadow(s: &Scene, l: &Light, p: [f32; 3], ng: [f32; 3], n_l: f32) -> f32 {
-    if l.shadow < 0 {
-        return 1.0;
-    }
-    let first = l.shadow as usize;
-    let m = if l.kind == 2 {
-        // Point light: the cube face of the major axis of the light → point direction.
-        let d = sub(p, l.pos);
-        let (ax, ay, az) = (d[0].abs(), d[1].abs(), d[2].abs());
-        let face = if ax >= ay && ax >= az {
-            if d[0] > 0.0 { 0 } else { 1 }
-        } else if ay >= az {
-            if d[1] > 0.0 { 2 } else { 3 }
-        } else if d[2] > 0.0 {
-            4
-        } else {
-            5
-        };
-        s.shadows.get(first + face)
-    } else {
-        s.shadows.get(first)
-    };
-    let Some(m) = m else { return 1.0 };
-    let f = shadow_factor(m, &s.shadow_texels, p, ng, n_l);
-    1.0 - l.shadow_darkness * (1.0 - f)
-}
-
-/// The visibility of the Environment light at `p` (1 = unshadowed), darkened by its Shadow
-/// Darkness — but only by the image's key fraction: the shadow map occludes the dominant
-/// (key) lobe, while the environment's fill keeps shining on the shadowed surface, so an
-/// Environment light's shadow stays partial the way After Effects renders an area-light
-/// shadow (a broad environment like the default studio shadows softly, a lone bright spot
-/// on black almost fully). A directionless image (or a non-casting light) has no map
-/// and shades unshadowed.
-pub fn env_shadow(s: &Scene, e: &EnvInfo, p: [f32; 3], ng: [f32; 3], n: [f32; 3]) -> f32 {
-    if e.shadow < 0 || e.sun == [0.0; 3] {
-        return 1.0;
-    }
-    let Some(m) = s.shadows.get(e.shadow as usize) else { return 1.0 };
-    let n_l = dot(n, e.sun).clamp(0.0, 1.0);
-    let f = shadow_factor(m, &s.shadow_texels, p, ng, n_l);
-    1.0 - e.shadow_darkness * e.key * (1.0 - f)
-}
-
-/// Unit direction from `p` to light `l`, and the distance (infinite for a parallel light).
-fn to_light(l: &Light, p: [f32; 3]) -> ([f32; 3], f32) {
-    if l.kind == 0 {
-        return (scale(l.dir, -1.0), f32::INFINITY);
-    }
-    let d = sub(l.pos, p);
-    let len = dot(d, d).sqrt();
-    if len < 1e-6 { ([0.0, 0.0, -1.0], 0.0) } else { (scale(d, 1.0 / len), len) }
-}
-
-/// Distance attenuation × spot cone of a light at `p` (AE falloff modes).
-pub fn attenuation(l: &Light, p: [f32; 3], to_l: [f32; 3], dist: f32) -> f32 {
-    let mut k = match l.falloff {
-        1 if l.kind != 0 => {
-            if dist <= l.radius {
-                1.0
-            } else if l.falloff_distance <= 0.0 {
-                0.0
-            } else {
-                let t = ((dist - l.radius) / l.falloff_distance).clamp(0.0, 1.0);
-                1.0 - t * t * (3.0 - 2.0 * t)
-            }
-        }
-        2 if l.kind != 0 => {
-            if dist <= l.radius || (l.radius <= 0.0 && dist <= 1.0) {
-                1.0
-            } else {
-                (l.radius.max(1.0) / dist).powi(2)
-            }
-        }
-        _ => 1.0,
-    };
-    let _ = p;
-    if l.kind == 1 {
-        let cos_a = dot(scale(to_l, -1.0), l.dir).clamp(-1.0, 1.0);
-        k *= if cos_a >= l.cos_inner {
-            1.0
-        } else if cos_a <= l.cos_outer {
-            0.0
-        } else {
-            // Smoothstep across the feather in angle.
-            let a = cos_a.acos();
-            let (ai, ao) = (l.cos_inner.acos(), l.cos_outer.acos());
-            let t = ((a - ai) / (ao - ai).max(1e-6)).clamp(0.0, 1.0);
-            1.0 - t * t * (3.0 - 2.0 * t)
-        };
-    }
-    k
-}
-
-/// Inputs of one fragment.
-#[derive(Clone, Copy, Debug)]
-pub struct Frag {
-    pub pos: [f32; 3],
-    /// Interpolated (unnormalised) vertex normal.
-    pub normal: [f32; 3],
-    pub uv: [f32; 2],
-    pub tangent: [f32; 4],
-    pub material: u32,
-    pub front: bool,
-}
-
-/// Shade a fragment: premultiplied linear RGBA, or `None` when discarded (alpha test, back
-/// face of a single-sided material).
-pub fn shade(s: &Scene, f: &Frag) -> Option<[f32; 4]> {
-    let m: &Material = s.materials.get(f.material as usize)?;
-    if !f.front && !m.double_sided {
-        return None;
-    }
-    let tex = |i: i32| -> Option<[f32; 4]> { (i >= 0).then(|| s.textures.get(i as usize).map(|t| sample(t, &s.texels, f.uv[0], f.uv[1]))).flatten() };
-    let mut base = m.base;
-    if let Some(t) = tex(m.tex_base) {
-        for k in 0..4 {
-            base[k] *= t[k];
-        }
-    }
-    let alpha = base[3] * m.opacity;
-    if m.alpha_mode == 1 && alpha < m.alpha_cutoff {
-        return None;
-    }
-    if alpha <= 1e-5 && m.alpha_mode != 0 {
-        return None;
-    }
-    let alpha = if m.alpha_mode == 0 { m.opacity } else { alpha };
-    let rgb = [base[0], base[1], base[2]];
-    let mut emissive = m.emissive;
-    if let Some(t) = tex(m.tex_emissive) {
-        emissive = [emissive[0] * t[0], emissive[1] * t[1], emissive[2] * t[2]];
-    }
-    if m.shadows_only {
-        return Some(shadow_only(s, m, f, alpha));
-    }
-    if m.unlit || !m.accepts_lights || (s.lights.is_empty() && s.env.is_none() && s.ambient == [0.0; 3]) {
-        let c = add(rgb, emissive);
-        return Some([c[0] * alpha, c[1] * alpha, c[2] * alpha, alpha]);
-    }
-    let (mut metallic, mut rough) = (m.metallic, m.roughness);
-    if let Some(t) = tex(m.tex_mr) {
-        rough *= t[1];
-        metallic *= t[2];
-    }
-    let mut n = norm(f.normal);
-    if !f.front {
-        n = scale(n, -1.0);
-    }
-    // Shadow lookups follow the geometric surface, not the normal map.
-    let ng = n;
-    if let Some(t) = tex(m.tex_normal) {
-        let tn = [(t[0] * 2.0 - 1.0) * m.normal_scale, (t[1] * 2.0 - 1.0) * m.normal_scale, t[2] * 2.0 - 1.0];
-        let tg = [f.tangent[0], f.tangent[1], f.tangent[2]];
-        // Gram-Schmidt against the shading normal.
-        let tg = norm(sub(tg, scale(n, dot(n, tg))));
-        let sign = if f.front { f.tangent[3] } else { -f.tangent[3] };
-        let bt = scale(cross(n, tg), sign);
-        n = norm(add(add(scale(tg, tn[0]), scale(bt, tn[1])), scale(n, tn[2])));
-    }
-    let ao = match tex(m.tex_occlusion) {
-        Some(t) => 1.0 + m.occlusion_strength * (t[0] - 1.0),
-        None => 1.0,
-    };
-    let v = if s.ortho { scale(s.cam_fwd, -1.0) } else { norm(sub(s.eye, f.pos)) };
-    let mut out = [0.0f32; 3];
-    for l in &s.lights {
-        let (to_l, dist) = to_light(l, f.pos);
-        let k = attenuation(l, f.pos, to_l, dist);
-        if k <= 0.0 {
-            continue;
-        }
-        let n_l = dot(n, to_l);
-        if n_l <= 0.0 {
-            continue;
-        }
-        let sh = if m.receives_shadows { light_shadow(s, l, f.pos, ng, n_l) } else { 1.0 };
-        let b = brdf(BrdfSurface { base: rgb, metallic, roughness: rough, specular: m.specular_k, diffuse: m.diffuse_k }, n, v, to_l);
-        for c in 0..3 {
-            out[c] += b[c] * l.color[c] * k * sh;
-        }
-    }
-    for c in 0..3 {
-        out[c] += s.ambient[c] * rgb[c] * m.ambient_k * ao;
-    }
-    if let Some(e) = &s.env {
-        let n_v = dot(n, v).clamp(1e-4, 1.0);
-        let r = sub(scale(n, 2.0 * dot(n, v)), v);
-        let (irr, spec) = env_light(s, e, n, r, rough);
-        let f0 = [mix(0.04 * m.specular_k, rgb[0], metallic), mix(0.04 * m.specular_k, rgb[1], metallic), mix(0.04 * m.specular_k, rgb[2], metallic)];
-        let (a, b) = env_brdf(n_v, rough);
-        // The Environment light's shadow darkens its own diffuse and specular.
-        let sh = if m.receives_shadows { env_shadow(s, e, f.pos, ng, n) } else { 1.0 };
-        for c in 0..3 {
-            let fs = f0[c] * a + b;
-            out[c] += (irr[c] * rgb[c] * (1.0 - fs) * (1.0 - metallic) * m.diffuse_k + spec[c] * fs) * ao * sh;
-        }
-    }
-    let c = add(out, emissive);
-    Some([c[0] * alpha, c[1] * alpha, c[2] * alpha, alpha])
-}
-
-/// "Accepts Shadows: Only" (classic `compose::shade_texel`): black at the strongest shadow any
-/// light casts on the fragment, nothing where it is unshadowed or takes no lights.
-fn shadow_only(s: &Scene, m: &Material, f: &Frag, alpha: f32) -> [f32; 4] {
-    if m.unlit || !m.accepts_lights {
-        return [0.0; 4];
-    }
-    let n = if f.front { norm(f.normal) } else { scale(norm(f.normal), -1.0) };
-    let mut amount = 0.0f32;
-    for l in &s.lights {
-        let (to_l, dist) = to_light(l, f.pos);
-        if attenuation(l, f.pos, to_l, dist) <= 0.0 {
-            continue;
-        }
-        let n_l = dot(n, to_l);
-        if n_l <= 0.0 {
-            continue;
-        }
-        amount = amount.max(1.0 - light_shadow(s, l, f.pos, n, n_l));
-    }
-    // The Environment light's shadow counts too (it reaches every surface: no falloff).
-    if let Some(e) = &s.env {
-        amount = amount.max(1.0 - env_shadow(s, e, f.pos, n, n));
-    }
-    [0.0, 0.0, 0.0, alpha * amount]
 }

@@ -94,7 +94,7 @@ fn advanced_3d_resolves_in_passes() {
     let (p, cid) = scene_project();
     // One scene rasterised (the CPU compositor's per-scene path).
     let s = scene(&p, cid);
-    let cpu = adv::raster::render(&s);
+    let cpu = adv::rasterize(&s).expect("cpu raster");
     g.frame_begin();
     g.pass_begin();
     let t = g.raster_3d(&s).expect("handled");
@@ -110,7 +110,7 @@ fn advanced_3d_resolves_in_passes() {
     let out = (ctx.comp.width, ctx.comp.height);
     let r = Renderer::new(&p, &NoFootage, RenderOpts::default());
     let prep = adv::Prepared::new(&r, &ctx, &run, out);
-    let (cimg, _) = adv::render_prepared(&prep).expect("cpu drew");
+    let (cimg, _) = adv::render_prepared(&prep).expect("cpu rendered").expect("cpu drew");
     g.frame_begin();
     g.pass_begin();
     assert!(matches!(g.render_3d(&prep), Some(None)) && g.pass_missed(), "nothing drawn yet: a placeholder");

@@ -1,6 +1,6 @@
 // Advanced 3D: rasterised meshes with physically based shading. A step-for-step port of
-// `effectcraft_render::three_d::adv::shade` (Cook–Torrance GGX + Lambert, image-based light
-// from an equirectangular environment, PCF shadow maps); the CPU rasteriser is the reference.
+// `craft_raster3d`'s `shade` (Cook–Torrance GGX + Lambert, image-based light from an
+// equirectangular environment, PCF shadow maps); the CPU rasterizer is the reference.
 
 struct Globals {
     clip: mat4x4<f32>,
@@ -321,12 +321,14 @@ fn shadow_factor(m: u32, p: vec3<f32>, ng: vec3<f32>, n_l: f32) -> f32 {
     return lit / f32(n * n);
 }
 
-fn light_shadow(li: u32, kind: u32, lpos: vec3<f32>, shadow: i32, darkness: f32, p: vec3<f32>, ng: vec3<f32>, n_l: f32) -> f32 {
+// `cube`: the light has six maps from `shadow` (a point light, or a spot light wider than one
+// map; lights[..].l4.y), picked by the major axis of the light → point direction.
+fn light_shadow(li: u32, cube: bool, lpos: vec3<f32>, shadow: i32, darkness: f32, p: vec3<f32>, ng: vec3<f32>, n_l: f32) -> f32 {
     if (shadow < 0) {
         return 1.0;
     }
     var face = 0u;
-    if (kind == 2u) {
+    if (cube) {
         let d = p - lpos;
         let a = abs(d);
         if (a.x >= a.y && a.x >= a.z) {
@@ -341,7 +343,7 @@ fn light_shadow(li: u32, kind: u32, lpos: vec3<f32>, shadow: i32, darkness: f32,
     return 1.0 - darkness * (1.0 - f);
 }
 
-// The Environment light's shadow from its dominant direction (shade::env_shadow). Only the
+// The Environment light's shadow from its dominant direction (craft_raster3d's env_shadow). Only the
 // image's key fraction (g.env_sun.w) of the light is occluded — the fill keeps shining — so
 // the shadow stays partial the way After Effects renders an area-light shadow.
 fn env_shadow(p: vec3<f32>, ng: vec3<f32>, n: vec3<f32>) -> f32 {
@@ -395,7 +397,7 @@ struct FOut {
     @location(1) depth: u32,
 };
 
-// shade::to_light: unit direction to the light (xyz) and its distance (w).
+// craft_raster3d's to_light: unit direction to the light (xyz) and its distance (w).
 fn to_light(kind: u32, lpos: vec3<f32>, ldir: vec3<f32>, pos: vec3<f32>) -> vec4<f32> {
     if (kind == 0u) {
         return vec4<f32>(-ldir, 1e30);
@@ -408,7 +410,7 @@ fn to_light(kind: u32, lpos: vec3<f32>, ldir: vec3<f32>, pos: vec3<f32>) -> vec4
     return vec4<f32>(d / len, len);
 }
 
-// shade::shadow_only: the strongest shadow any light casts on the fragment.
+// craft_raster3d's shadow_only: the strongest shadow any light casts on the fragment.
 fn shadow_only_amount(unlit: bool, normal: vec3<f32>, front: bool, pos: vec3<f32>) -> f32 {
     var amount = 0.0;
     if (unlit) {
@@ -437,7 +439,7 @@ fn shadow_only_amount(unlit: bool, normal: vec3<f32>, front: bool, pos: vec3<f32
         if (n_l <= 0.0) {
             continue;
         }
-        amount = max(amount, 1.0 - light_shadow(li, kind, l0.xyz, i32(l3.w), l4.x, pos, n, n_l));
+        amount = max(amount, 1.0 - light_shadow(li, l4.y > 0.5, l0.xyz, i32(l3.w), l4.x, pos, n, n_l));
     }
     // The Environment light's shadow counts too (it reaches every surface: no falloff).
     if (g.ambient.w > 0.5) {
@@ -471,15 +473,17 @@ fn fs(i: VOut, @builtin(front_facing) front: bool) -> FOut {
         base = base * sample_tex(tex_base, i.uv);
     }
     let opacity = m5.y;
-    var alpha = base.a * opacity;
-    if (alpha_mode == 1u && alpha < m2.w) {
+    // Mask mode tests the material's alpha against the cutoff, and a fragment that passes
+    // keeps only the layer's opacity. Blend mode multiplies the two.
+    if (alpha_mode == 1u && base.a < m2.w) {
         discard;
     }
-    if (alpha <= 1e-5 && alpha_mode != 0u) {
-        discard;
-    }
-    if (alpha_mode == 0u) {
-        alpha = opacity;
+    var alpha = opacity;
+    if (alpha_mode > 1u) {
+        alpha = base.a * opacity;
+        if (alpha <= 1e-5) {
+            discard;
+        }
     }
     let rgb = base.rgb;
     var emissive = m1.xyz;
@@ -559,7 +563,7 @@ fn fs(i: VOut, @builtin(front_facing) front: bool) -> FOut {
         }
         var sh = 1.0;
         if (receives_shadows) {
-            sh = light_shadow(li, kind, l0.xyz, i32(l3.w), l4.x, i.pos, ng, n_l);
+            sh = light_shadow(li, l4.y > 0.5, l0.xyz, i32(l3.w), l4.x, i.pos, ng, n_l);
         }
         let b = brdf(rgb, metallic, rough, spec_k, diff_k, n, v, to_l);
         acc = acc + b * l2.xyz * k * sh;

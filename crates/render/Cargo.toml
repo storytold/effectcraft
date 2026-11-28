@@ -27,6 +27,11 @@ rayon = { workspace = true }
 web-time = { workspace = true }
 serde = { workspace = true }
 log = { workspace = true }
+craft-raster3d = { workspace = true }
+
+# Rows and shadow maps on several threads; wasm32 builds the crate serial.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+craft-raster3d = { workspace = true, features = ["parallel"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

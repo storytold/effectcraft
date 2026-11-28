@@ -1769,6 +1769,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "craft-raster3d"
+version = "0.1.0"
+source = "git+https://github.com/storytold/craft-libs?rev=6275beb15cd6a088d1df53217067a3587b30d5e5#6275beb15cd6a088d1df53217067a3587b30d5e5"
+dependencies = [
+ "rayon",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "craft-raw"
 version = "0.1.0"
 source = "git+https://github.com/storytold/craft-libs?rev=33be35625e252cc4f06aa375b3b428521faea37d#33be35625e252cc4f06aa375b3b428521faea37d"
@@ -2916,6 +2925,7 @@ dependencies = [
 name = "effectcraft-render"
 version = "0.25.1"
 dependencies = [
+ "craft-raster3d",
  "effectcraft-color",
  "effectcraft-effects",
  "effectcraft-geom",

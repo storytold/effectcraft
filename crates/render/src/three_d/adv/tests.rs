@@ -2,7 +2,7 @@ use effectcraft_keyframe::Value;
 use effectcraft_project::{Comp, ItemId, ItemKind, LayerSource, LightKind, PrimitiveKind, Project, Renderer as R3, build};
 use effectcraft_time::{FrameRate, Tick};
 
-use super::scene::{Material, Scene, TexInfo, Vertex, dominant_direction, irradiance_map};
+use super::scene::{Light, Material, Scene, TexInfo, Vertex, dominant_direction, irradiance_map};
 use super::shade::{self, PI};
 use super::*;
 use crate::{NoFootage, RenderOpts, Renderer};
@@ -200,7 +200,7 @@ fn depth_buffer_keeps_the_nearest_surface() {
     let blue = [0.0, 0.0, 1.0, 1.0];
     // Blue is listed first but is farther away.
     let s = quad_scene(40, 30, &[([0.0, 0.0, 30.0, 20.0], 500.0, blue), ([10.0, 10.0, 40.0, 30.0], 100.0, red)]);
-    let t = raster::render(&s);
+    let t = rasterize(&s).unwrap();
     let px = |x: usize, y: usize| t.color[y * 40 + x];
     assert_eq!(px(5, 5), blue);
     assert_eq!(px(15, 15), red, "overlap: the nearer quad wins");
@@ -214,15 +214,130 @@ fn depth_buffer_keeps_the_nearest_surface() {
 fn coverage_is_exact_for_pixel_aligned_quads() {
     // Shared diagonal edges are filled once (top-left rule): exact pixel counts.
     let s = quad_scene(32, 32, &[([4.0, 4.0, 20.0, 12.0], 10.0, [1.0, 1.0, 1.0, 0.5])]);
-    let t = raster::render(&s);
+    let t = rasterize(&s).unwrap();
     let covered = t.color.iter().filter(|c| c[3] > 0.0).count();
     assert_eq!(covered, 16 * 8);
     // Blended once (no double coverage along the diagonal).
     assert!(t.color.iter().all(|c| c[3] == 0.0 || (c[3] - 0.5).abs() < 1e-6));
     // Two transparent layers composite in order.
     let s = quad_scene(8, 8, &[([0.0, 0.0, 8.0, 8.0], 100.0, [1.0, 0.0, 0.0, 0.5]), ([0.0, 0.0, 8.0, 8.0], 50.0, [0.0, 0.0, 1.0, 0.5])]);
-    let c = raster::render(&s).color[0];
+    let c = rasterize(&s).unwrap().color[0];
     assert!((c[0] - 0.25).abs() < 1e-6 && (c[2] - 0.5).abs() < 1e-6 && (c[3] - 0.75).abs() < 1e-6, "{c:?}");
+}
+
+const GREEN: [f32; 4] = [0.0, 1.0, 0.0, 1.0];
+const BLUE: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
+
+/// A blue quad at depth 500 behind two green quads at depth 100 (left and right half), with
+/// the green quads' materials (1 and 2) in mask mode.
+fn masked_pair() -> Scene {
+    let mut s = quad_scene(8, 4, &[([0.0, 0.0, 8.0, 4.0], 500.0, BLUE), ([0.0, 0.0, 4.0, 4.0], 100.0, GREEN), ([4.0, 0.0, 8.0, 4.0], 100.0, GREEN)]);
+    for m in &mut s.materials[1..] {
+        m.alpha_mode = 1;
+    }
+    s
+}
+
+#[test]
+fn masked_surfaces_cover_fully_where_they_pass_the_cutoff() {
+    // Texel alpha 0.6 on the left, 0.4 on the right, against the default cutoff of 0.5.
+    let mut s = masked_pair();
+    s.texels = vec![[1.0, 1.0, 1.0, 0.6], [1.0, 1.0, 1.0, 0.4]];
+    s.textures = vec![TexInfo { offset: 0, width: 1, height: 1, wrap_u: 0, wrap_v: 0 }, TexInfo { offset: 1, width: 1, height: 1, wrap_u: 0, wrap_v: 0 }];
+    s.materials[1].tex_base = 0;
+    s.materials[2].tex_base = 1;
+    let t = rasterize(&s).unwrap();
+    assert_eq!(t.color[8 + 1], GREEN, "a passing texel draws the surface fully opaque");
+    assert_eq!(t.depth[8 + 1], 100.0);
+    assert_eq!(t.color[8 + 6], BLUE, "a failing texel shows the surface behind");
+    assert_eq!(t.depth[8 + 6], 500.0);
+}
+
+#[test]
+fn the_mask_cutoff_is_inclusive_and_ignores_layer_opacity() {
+    // Material alpha equal to the cutoff passes, a zero cutoff included.
+    let mut s = masked_pair();
+    (s.materials[1].base[3], s.materials[1].alpha_cutoff) = (0.5, 0.5);
+    (s.materials[2].base[3], s.materials[2].alpha_cutoff) = (0.0, 0.0);
+    let t = rasterize(&s).unwrap();
+    assert_eq!(t.color[8 + 1], GREEN);
+    assert_eq!(t.color[8 + 6], GREEN);
+    // At half layer opacity, material alpha 0.6 still passes the 0.5 cutoff, and the surface
+    // fades by the layer opacity alone.
+    let mut s = quad_scene(8, 4, &[([0.0, 0.0, 8.0, 4.0], 500.0, BLUE), ([0.0, 0.0, 8.0, 4.0], 100.0, [0.0, 1.0, 0.0, 0.6])]);
+    (s.materials[1].alpha_mode, s.materials[1].opacity) = (1, 0.5);
+    let c = rasterize(&s).unwrap().color[8 + 1];
+    assert!([0.0, 0.5, 0.5, 1.0].iter().zip(c).all(|(a, b)| (a - b).abs() < 1e-6), "{c:?}");
+}
+
+#[test]
+fn masked_casters_shadow_where_they_pass_their_cutoff() {
+    // A parallel light travelling along +z: the quad casts when a texel of its map holds a depth.
+    let casts = |s: &Scene| {
+        let mut s = s.clone();
+        craft_raster3d::try_shadow_maps(&mut s, false, &limits()).unwrap();
+        s.shadow_texels.iter().any(|d| d.is_finite())
+    };
+    let mut s = quad_scene(8, 8, &[([-2.0, -2.0, 2.0, 2.0], 10.0, [1.0, 1.0, 1.0, 0.6])]);
+    (s.materials[0].alpha_mode, s.materials[0].casts_shadows) = (1, true);
+    s.lights = vec![Light {
+        kind: 0,
+        pos: [0.0; 3],
+        dir: [0.0, 0.0, 1.0],
+        color: [1.0; 3],
+        cos_inner: 1.0,
+        cos_outer: 1.0,
+        falloff: 0,
+        radius: 0.0,
+        falloff_distance: 0.0,
+        shadow: 0,
+        shadow_darkness: 1.0,
+        shadow_diffusion: 0.0,
+    }];
+    // Without a texture, the material's own alpha meets the cutoff.
+    s.materials[0].alpha_cutoff = 0.7;
+    assert!(!casts(&s));
+    s.materials[0].alpha_cutoff = 0.6;
+    assert!(casts(&s));
+    // With a texture, the material's cutoff applies, and the layer opacity does not move it.
+    (s.materials[0].base[3], s.materials[0].tex_base) = (1.0, 0);
+    s.texels = vec![[1.0, 1.0, 1.0, 0.6]];
+    s.textures = vec![TexInfo { offset: 0, width: 1, height: 1, wrap_u: 0, wrap_v: 0 }];
+    s.materials[0].alpha_cutoff = 0.7;
+    assert!(!casts(&s));
+    (s.materials[0].alpha_cutoff, s.materials[0].opacity) = (0.5, 0.5);
+    assert!(casts(&s));
+}
+
+#[test]
+fn cube_shadow_maps_names_the_lights_that_get_six_maps() {
+    // The GPU shader picks a cube face for these lights, so the rule must give the map count
+    // craft_raster3d assigns: a point light, and a spot light whose half angle plus 0.05 is
+    // over 1.45 radians.
+    let mut s = quad_scene(8, 8, &[([-2.0, -2.0, 2.0, 2.0], 10.0, [1.0; 4])]);
+    s.materials[0].casts_shadows = true;
+    for (kind, half, cube) in [(0u32, 0.0f64, false), (2, 0.0, true), (1, 0.6, false), (1, 1.39, false), (1, 1.41, true), (1, 1.5, true)] {
+        let c = half.cos() as f32;
+        let l = Light {
+            kind,
+            pos: [0.0, 0.0, -10.0],
+            dir: [0.0, 0.0, 1.0],
+            color: [1.0; 3],
+            cos_inner: c,
+            cos_outer: c,
+            falloff: 0,
+            radius: 0.0,
+            falloff_distance: 0.0,
+            shadow: 0,
+            shadow_darkness: 1.0,
+            shadow_diffusion: 0.0,
+        };
+        assert_eq!(cube_shadow_maps(&l), cube, "kind {kind}, half angle {half}");
+        let mut s = s.clone();
+        s.lights = vec![l];
+        craft_raster3d::try_shadow_maps(&mut s, false, &limits()).unwrap();
+        assert_eq!(s.shadows.len(), if cube { 6 } else { 1 }, "kind {kind}, half angle {half}");
+    }
 }
 
 #[test]
@@ -235,6 +350,61 @@ fn textures_sample_bilinear_with_wrap_modes() {
     assert!((shade::sample(&t, &texels, 1.0, 0.5)[0] - 0.5).abs() < 1e-6);
     let c = TexInfo { wrap_u: 1, ..t };
     assert_eq!(shade::sample(&c, &texels, 1.0, 0.5)[0], 1.0);
+}
+
+#[test]
+fn texels_and_materials_out_of_range_are_brought_into_range() {
+    // A texel that is not finite or has alpha over 1, and a material outside 0..1, would make
+    // the rasterizer reject the whole scene.
+    assert_eq!(scene::texel_in_range([f32::NAN, 0.5, f32::INFINITY, 1.5]), [0.0, 0.5, 0.0, 1.0]);
+    assert_eq!(scene::texel_in_range([0.25, 2.0, -0.5, 0.75]), [0.25, 2.0, -0.5, 0.75]);
+    let m = scene::material_in_range(Material {
+        base: [1.0, f32::NAN, 1.0, 1.0],
+        metallic: 1.5,
+        roughness: f32::NAN,
+        opacity: -0.2,
+        emissive: [f32::INFINITY, 0.0, 0.0],
+        ..Material::default()
+    });
+    assert_eq!((m.base, m.metallic, m.roughness, m.opacity, m.emissive), ([1.0; 4], 1.0, 0.5, 0.0, [0.0; 3]));
+    let mut s = quad_scene(4, 4, &[([0.0, 0.0, 4.0, 4.0], 100.0, [1.0; 4])]);
+    s.materials[0] = scene::material_in_range(Material { metallic: 1.5, roughness: f32::NAN, opacity: 1.2, tex_base: 0, ..s.materials[0] });
+    s.texels = vec![scene::texel_in_range([f32::NAN, 0.5, f32::INFINITY, 1.5])];
+    s.textures = vec![TexInfo { offset: 0, width: 1, height: 1, wrap_u: 0, wrap_v: 0 }];
+    let t = rasterize(&s).unwrap();
+    assert!(t.color.iter().all(|c| *c == [0.0, 0.5, 0.0, 1.0]), "{:?}", t.color[0]);
+}
+
+#[test]
+fn resolve_and_encode_reject_bad_input_and_keep_the_image() {
+    let s = quad_scene(4, 4, &[([0.0, 0.0, 4.0, 4.0], 100.0, [0.5, 0.25, 1.0, 1.0])]);
+    let t = rasterize(&s).unwrap();
+    assert_eq!(resolve(&t, 3).err(), Some(RenderError::BadFactor { k: 3, width: 4, height: 4 }));
+    assert_eq!(resolve(&t, 0).err(), Some(RenderError::BadFactor { k: 0, width: 4, height: 4 }));
+    let (mut img, depth) = resolve(&t, 2).unwrap();
+    assert_eq!((img.width, img.height, depth), (2, 2, vec![100.0; 4]));
+    // The sRGB curve on unpremultiplied color, alpha unchanged.
+    encode(&mut img).unwrap();
+    assert!((img.data[0][0] - 0.735_356_6).abs() < 1e-5 && (img.data[0][2] - 1.0).abs() < 1e-6 && img.data[0][3] == 1.0, "{:?}", img.data[0]);
+    // Alpha of 1e-6 or less (here the slightly negative alpha depth of field leaves) is kept.
+    let edge = [-8.9e-13, 5.8e-10, -1.9e-9, -3.6e-9];
+    let clear = [f32::INFINITY, 0.0, 0.0, 0.0];
+    img.data[1] = edge;
+    img.data[2] = clear;
+    let before = img.data.clone();
+    encode(&mut img).unwrap();
+    assert_eq!((img.data[1], img.data[2]), (edge, clear));
+    assert!(img.data[0][0] > before[0][0], "the other pixels are encoded: {:?}", img.data[0]);
+    img.data = before.clone();
+    img.data[3] = [f32::NAN, 0.0, 0.0, 1.0];
+    assert_eq!(encode(&mut img), Err(RenderError::BadPixel(3)));
+    assert!(img.data.len() == 4 && img.data[..3] == before[..3] && img.data[3][0].is_nan(), "the image is left as it was");
+    let mut short = Image { width: 2, height: 2, data: vec![[0.0; 4]; 3] };
+    assert_eq!(encode(&mut short), Err(RenderError::BadDataLength { expected: 4, found: 3 }));
+    assert_eq!(short.data.len(), 3);
+    let mut bad_index = quad_scene(4, 4, &[([0.0, 0.0, 4.0, 4.0], 100.0, [1.0; 4])]);
+    bad_index.indices[0] = 99;
+    assert_eq!(render_cpu(&bad_index).err(), Some(RenderError::BadIndex { position: 0, index: 99 }));
 }
 
 // ---------------------------------------------------------------- full renderer
@@ -287,6 +457,31 @@ fn lit_cube_renders_with_depth_and_shading() {
     // Classic 3D draws no meshes.
     p.comp_mut(cid).unwrap().renderer = R3::Classic3D;
     assert!(render(&p, cid).data.iter().all(|q| q[3] == 0.0));
+}
+
+#[test]
+fn a_rejected_scene_is_an_error_and_an_empty_run_draws_nothing() {
+    let (mut p, cid) = project(64, 64);
+    add(&mut p, cid, LayerSource::Primitive { kind: PrimitiveKind::Cube }, |l| set(l, "geometryOptions/width", Value::Scalar(30.0)));
+    let r = Renderer::new(&p, &NoFootage, RenderOpts::default());
+    let ctx = EvalCtx {
+        project: &p,
+        comp_id: cid,
+        comp: p.comp(cid).unwrap(),
+        time: Tick::ZERO,
+        expr: None,
+        footage: None,
+        property_overrides: &[],
+        media_overrides: &[],
+        reads: None,
+    };
+    let run: Vec<&effectcraft_project::Layer> = ctx.comp.layers.iter().collect();
+    assert!(matches!(render_prepared(&Prepared::new(&r, &ctx, &run, (64, 64))), Ok(Some(_))), "the cube is drawn");
+    // A raster over `limits().max_pixels` (twice MAX_SIZE on each side) is rejected before any
+    // memory is reserved.
+    let side = effectcraft_project::limits::MAX_SIZE * 2 + 1;
+    assert_eq!(render_prepared(&Prepared::new(&r, &ctx, &run, (side, side))).err(), Some(RenderError::TooLarge(side, side)));
+    assert!(matches!(render_prepared(&Prepared::new(&r, &ctx, &[], (64, 64))), Ok(None)), "an empty run draws nothing");
 }
 
 #[test]
@@ -1167,8 +1362,8 @@ fn stroke_regions_are_rings() {
 
 // ---------------------------------------------------------------- shadow quality
 
-use super::raster::{MAX_SHADOW_TEXELS, shadow_map_size, shadow_point_face_size, shadow_sizes};
 use super::scene::ShadowMap;
+use craft_raster3d::{MAX_SHADOW_TEXELS, shadow_map_size, shadow_point_face_size, shadow_sizes};
 
 /// Geometric normal of a receiver squarely facing a `flat_map` light (which looks along +z).
 const FACING: [f32; 3] = [0.0, 0.0, -1.0];
