@@ -1078,6 +1078,8 @@ fn bench_cmd(args: &Args) -> Result<(), Failure> {
         return bench_roto(args);
     }
     let mut s = effectcraft_host::session();
+    // Projects with helper effects (Particles, ...) time them too.
+    let _ = s.execute("effect.helpers.scan", json!({}));
     match &args.project {
         Some(p) => s.execute("file.open", json!({"path": p})),
         None => s.execute("file.openDemoProject", json!({})),

@@ -17,8 +17,8 @@
 //! * parameters are flattened to `f64`s in declaration order: slider / angle / checkbox (0 or 1)
 //!   / popup (0-based index) take one value, point two (**frame pixels**, already mapped to the
 //!   buffer), colour four (RGBA 0–1); API 2 adds point3 (x, y mapped like a point, z as is),
-//!   layer (one value: the layer id, -1 for none), and text / hidden strings, which take no
-//!   slot and are read with [`PluginParams::text`];
+//!   layer (one value: the layer id, -1 for none), and text / hidden strings and gradients,
+//!   which take no slot and are read with [`PluginParams::text`] (a gradient as JSON);
 //! * `time` is layer time in seconds; `scale` is the buffer's pixels per layer pixel (scale
 //!   pixel distances like blur radii by it);
 //! * rendering must be deterministic (same inputs, same output) and may run on several threads
@@ -33,7 +33,7 @@
 
 use std::sync::{Arc, OnceLock, RwLock};
 
-use effectcraft_keyframe::Value;
+use effectcraft_keyframe::{Gradient, Value};
 use effectcraft_project::ParamUi;
 use serde::{Deserialize, Serialize};
 
@@ -117,6 +117,30 @@ pub enum PluginParamKind {
         #[serde(default)]
         default: String,
     },
+    /// API 2: a colour gradient (colour and opacity stops), shown as a strip that opens the
+    /// Gradient Editor, animatable like a shape's gradient. It takes no slot: the plug-in reads it
+    /// with [`PluginParams::text`] as JSON, `{"colors": [[pos, [r, g, b, a]]…], "opacities":
+    /// [[pos, alpha]…]}` (positions 0–1, straight colour). The default is written as a gradient
+    /// property takes it (`["#ff0000", "#ffffff"]`, `[[pos, colour]…]` or `{colors, opacities}`;
+    /// white to black when left out). Hosts that know it list `"gradient_params"` to helpers.
+    Gradient {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        default: Option<serde_json::Value>,
+    },
+}
+
+/// A gradient parameter's default: white to black when none is given, `None` when it is not a
+/// gradient (too many stops, bad colours, a stop outside 0–1).
+fn gradient_default(d: &Option<serde_json::Value>) -> Option<Gradient> {
+    let Some(j) = d else {
+        return Some(Gradient::default());
+    };
+    match Value::Gradient(Gradient::default()).coerce_json(j)? {
+        Value::Gradient(g) if !g.colors.is_empty() && g.colors.iter().map(|c| c.0).chain(g.opacities.iter().map(|o| o.0)).all(|t| (0.0..=1.0).contains(&t)) => {
+            Some(g)
+        }
+        _ => None,
+    }
 }
 
 fn hundred() -> f64 {
@@ -139,18 +163,25 @@ impl PluginParamKind {
             PluginParamKind::Point { .. } => 2,
             PluginParamKind::Point3 { .. } => 3,
             PluginParamKind::Color { .. } => 4,
-            PluginParamKind::Text { .. } | PluginParamKind::Hidden { .. } => 0,
+            PluginParamKind::Text { .. } | PluginParamKind::Hidden { .. } | PluginParamKind::Gradient { .. } => 0,
             _ => 1,
         }
     }
     /// Whether the parameter holds a string (it flattens to no `f64`s but one entry of
-    /// [`PluginParams::texts`]).
+    /// [`PluginParams::texts`]; a gradient's is its JSON).
     pub fn is_text(&self) -> bool {
-        matches!(self, PluginParamKind::Text { .. } | PluginParamKind::Hidden { .. })
+        matches!(self, PluginParamKind::Text { .. } | PluginParamKind::Hidden { .. } | PluginParamKind::Gradient { .. })
     }
     /// Whether the kind needs plug-in API 2 (WebAssembly plug-ins can't carry it).
     pub fn needs_v2(&self) -> bool {
-        matches!(self, PluginParamKind::Point3 { .. } | PluginParamKind::Layer | PluginParamKind::Text { .. } | PluginParamKind::Hidden { .. })
+        matches!(
+            self,
+            PluginParamKind::Point3 { .. }
+                | PluginParamKind::Layer
+                | PluginParamKind::Text { .. }
+                | PluginParamKind::Hidden { .. }
+                | PluginParamKind::Gradient { .. }
+        )
     }
 }
 
@@ -228,6 +259,16 @@ impl PluginManifest {
             {
                 return Err(format!("plug-in `{}`: the default of `{}` is longer than {MAX_TEXT} bytes", self.id, p.id));
             }
+            if let PluginParamKind::Gradient { default } = &p.kind
+                && gradient_default(default).is_none()
+            {
+                return Err(format!(
+                    "plug-in `{}`: gradient `{}` needs a default of 2 to {} stops at 0–1 (`[\"#ff0000\", \"#ffffff\"]`, `[[pos, colour]…]` or `{{colors, opacities}}`)",
+                    self.id,
+                    p.id,
+                    effectcraft_keyframe::value::MAX_GRADIENT_STOPS
+                ));
+            }
             if let PluginParamKind::Slider { default, min, max, slider_min, slider_max, .. } = &p.kind {
                 let (lo, hi) = (slider_min.unwrap_or(*min), slider_max.unwrap_or(*max));
                 if [*default, *min, *max, lo, hi].iter().any(|v| !v.is_finite()) || min > max || lo > hi || default < min || default > max {
@@ -292,6 +333,66 @@ impl PluginImage {
     }
 }
 
+/// Where the layer of a Layer parameter sits relative to the effect's own layer
+/// ([`PluginHost::layer_transform`]).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LayerTransform {
+    /// A point of the image [`PluginHost::layer_input`] hands over (x, y in its pixel grid:
+    /// pixel (i, j) spans i..i+1 and j..j+1) at depth z (the other layer's own pixels, away from
+    /// the viewer) → this layer's buffer-independent layer pixels (x, y, as a point parameter
+    /// before mapping to the buffer, divided back by the scale) and depth z (away from the
+    /// viewer): rows of an affine 3 × 4 matrix. It carries the other layer's position, anchor
+    /// point, scale, rotation, orientation and parents, and undoes this layer's own transform.
+    pub matrix: [[f64; 4]; 3],
+    /// The other layer's opacity (0–1).
+    pub opacity: f64,
+    /// The other layer's own extent (its pixels 0..width, 0..height) in the same image grid:
+    /// x0, y0, x1, y1. A Bounce floor in Layer Size mode stops at its edges.
+    #[serde(default)]
+    pub rect: [f64; 4],
+}
+
+/// The composition's camera as this layer sees it ([`PluginHost::comp_camera`]).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CompCamera {
+    /// This layer's pixels (x, y, as a point parameter in layer pixels, and z away from the
+    /// viewer) → homogeneous X, Y, W (rows of a 3 × 4 matrix): the point shows at (X / W, Y / W)
+    /// in this layer's pixels, and W is its depth in front of the camera (comp pixels): exact for
+    /// a 2D layer and a 3D layer facing the camera, the anchor's depth across a tilted 3D layer.
+    pub matrix: [[f64; 4]; 3],
+    /// The camera's zoom (comp pixels): a length at depth W shows `zoom / W` times as long.
+    pub zoom: f64,
+    /// It is an active camera layer's, not the comp's default view.
+    pub camera_layer: bool,
+    /// The camera's depth of field when it is on: focus distance (comp pixels from the eye),
+    /// aperture (comp pixels) and Blur Level (1 = 100 %). Older hosts leave it out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dof: Option<[f64; 3]>,
+}
+
+/// A light of the composition as an effect's layer sees it ([`PluginHost::comp_lights`]): a
+/// particle system's Light(s) emitter.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CompLightInfo {
+    /// The light layer's name (a particle system may emit only from lights named "Emitter...").
+    pub name: String,
+    /// 0 parallel, 1 spot, 2 point, 3 ambient.
+    pub kind: u8,
+    /// Position in this layer's pixels (x, y as a point parameter in layer pixels, z away from
+    /// the viewer), and the unit direction it shines (spot and parallel lights).
+    pub pos: [f64; 3],
+    pub dir: [f64; 3],
+    /// Colour (0-1, not multiplied by intensity) and Intensity (1 = 100 %).
+    pub color: [f32; 3],
+    pub intensity: f64,
+    /// Spot cone angle (degrees, the whole cone).
+    pub cone: f64,
+    /// Spot cone feather (0-1 of the half angle, softening inwards from the edge). Older hosts
+    /// leave it out.
+    #[serde(default)]
+    pub feather: f64,
+}
+
 /// Services available during an API 2 render ([`EffectPlugin::render_v2`]).
 pub trait PluginHost {
     /// This effect's input (its layer with masks and the effects above this one) at another
@@ -303,8 +404,32 @@ pub trait PluginHost {
     /// (same size, origin and scale as the frame, centred when the layers differ in size).
     /// `None` when unset or unavailable.
     fn layer_input(&self, param_id: &str, layer_time: f64) -> Option<PluginImage>;
+    /// Where the layer chosen in Layer parameter `param_id` sits at **layer time** `layer_time`
+    /// relative to this layer ([`LayerTransform`]). `None` when unset or unknown.
+    fn layer_transform(&self, _param_id: &str, _layer_time: f64) -> Option<LayerTransform> {
+        None
+    }
+    /// The composition's camera at the current time as this layer sees it ([`CompCamera`]).
+    /// `None` when unknown.
+    fn comp_camera(&self) -> Option<CompCamera> {
+        None
+    }
+    /// The composition's camera at **layer time** `layer_time` (converted to composition time)
+    /// as this layer sees it then (camera motion blur). `None` when unknown.
+    fn comp_camera_at(&self, _layer_time: f64) -> Option<CompCamera> {
+        None
+    }
+    /// The composition's lights switched on at **layer time** `layer_time`, as this layer sees
+    /// them ([`CompLightInfo`]). `None` when unknown.
+    fn comp_lights(&self, _layer_time: f64) -> Option<Vec<CompLightInfo>> {
+        None
+    }
     /// All flattened parameter values (and texts) at another layer time.
     fn params_at(&self, layer_time: f64) -> Option<(Vec<f64>, Vec<String>)>;
+    /// [`crate::EffectHost::params_digest`] of the effect being rendered.
+    fn params_digest(&self) -> Option<u64> {
+        None
+    }
     /// Composition frame rate (30 when unknown).
     fn frame_rate(&self) -> f64;
     /// Layer time of the current render, seconds.
@@ -409,10 +534,27 @@ pub trait EffectPlugin: Send + Sync {
     fn render_v2(&self, frame: &mut PluginFrame, params: &PluginParams, time: f64, _host: &dyn PluginHost) -> Result<(), String> {
         self.render(frame, params, time)
     }
+    /// [`EffectPlugin::render_v2`] that may also say where it drew: `[x0, y0, x1, y1]` in frame
+    /// pixels (end exclusive), the result being transparent outside, where the frame holds
+    /// anything (the host clears or crops it). The default renders with `render_v2`: `None`.
+    fn render_bounded(&self, frame: &mut PluginFrame, params: &PluginParams, time: f64, host: &dyn PluginHost) -> Result<Option<[u32; 4]>, String> {
+        self.render_v2(frame, params, time, host).map(|_| None)
+    }
     /// Whether rendering reads the layer at other times (its neighbouring frames). Default
     /// false; the render cache keys a layer with such an effect on its layer time. WebAssembly
     /// ABI 2 plug-ins return true.
     fn reads_other_times(&self) -> bool {
+        false
+    }
+    /// Whether a failed render leaves the frame untouched on its own, so the host needn't keep a
+    /// copy of it to put back (a frame-sized copy per render). Default false: plug-ins that
+    /// process in place may fail halfway.
+    fn untouched_on_error(&self) -> bool {
+        false
+    }
+    /// Whether the effect makes a new image without reading its input (a generator), so the
+    /// host needn't fill the layer's source first when it comes first in the stack.
+    fn ignores_input(&self) -> bool {
         false
     }
 }
@@ -459,6 +601,11 @@ pub fn plugin(id: &str) -> Option<Arc<dyn EffectPlugin>> {
     SLOTS.iter().filter_map(|s| s.get()).find(|p| p.manifest().id == id).cloned()
 }
 
+/// Whether the registered plug-in `id` ignores its input ([`EffectPlugin::ignores_input`]).
+pub fn ignores_input(id: &str) -> bool {
+    SLOTS.iter().filter_map(|s| s.get()).any(|p| p.manifest().id == id && p.ignores_input())
+}
+
 /// Whether the registered plug-in `id` reads the layer at other times (its neighbouring frames),
 /// so the render cache must key its layer on the layer time.
 pub fn reads_other_times(id: &str) -> bool {
@@ -490,6 +637,8 @@ fn param_spec(p: &PluginParam) -> ParamSpec {
         PluginParamKind::Layer => (Value::Layer(None), ParamUi::Layer),
         PluginParamKind::Text { default } => (Value::Str(default.clone()), ParamUi::Text),
         PluginParamKind::Hidden { default } => (Value::Str(default.clone()), ParamUi::Hidden),
+        // (validated at registration; a default that stopped parsing falls back to white-black)
+        PluginParamKind::Gradient { default } => (Value::Gradient(gradient_default(default).unwrap_or_default()), ParamUi::Gradient),
     };
     ParamSpec { id: leak(&p.id), name: leak(&p.name), default, ui }
 }
@@ -614,14 +763,15 @@ pub fn flatten_params(m: &PluginManifest, params: &Params, offset: [f64; 2], sca
             PluginParamKind::Checkbox { .. } => out.push(if v.map(Value::as_bool).unwrap_or(false) { 1.0 } else { 0.0 }),
             PluginParamKind::Popup { .. } => out.push(v.map(Value::as_enum).unwrap_or(0) as f64),
             PluginParamKind::Layer => out.push(v.and_then(Value::as_layer).map(|l| l as f64).unwrap_or(-1.0)),
-            PluginParamKind::Text { .. } | PluginParamKind::Hidden { .. } => {}
+            PluginParamKind::Text { .. } | PluginParamKind::Hidden { .. } | PluginParamKind::Gradient { .. } => {}
             _ => out.push(v.map(Value::as_f64).unwrap_or(0.0)),
         }
     }
     out
 }
 
-/// The strings of an instance's text / hidden parameters, in declaration order.
+/// The strings of an instance's text / hidden / gradient parameters, in declaration order (a
+/// gradient as its JSON, see [`PluginParamKind::Gradient`]).
 pub fn flatten_texts(m: &PluginManifest, params: &Params) -> Vec<String> {
     m.params
         .iter()
@@ -630,6 +780,13 @@ pub fn flatten_texts(m: &PluginManifest, params: &Params) -> Vec<String> {
                 Some(Value::Str(s)) => s.clone(),
                 _ => default.clone(),
             }),
+            PluginParamKind::Gradient { default } => {
+                let g = match params.get(&p.id) {
+                    Some(Value::Gradient(g)) => g.clone(),
+                    _ => gradient_default(default).unwrap_or_default(),
+                };
+                Some(serde_json::to_string(&g).unwrap_or_default())
+            }
             _ => None,
         })
         .collect()
@@ -650,6 +807,13 @@ impl RenderHost<'_, '_> {
     fn grid(&self) -> Buf {
         Buf { img: crate::Image { width: self.width, height: self.height, data: vec![] }, offset: self.offset, scale: self.scale }
     }
+
+    /// The comp time of layer time `t`: through the layer's stretch where the host knows it,
+    /// else the same distance from the current time.
+    fn comp_time(&self, t: f64) -> Option<f64> {
+        let ctx = self.ctx;
+        Some(ctx.env.host?.comp_time_of(t).unwrap_or(ctx.env.comp_time + (t - ctx.time)))
+    }
 }
 
 impl PluginHost for RenderHost<'_, '_> {
@@ -667,15 +831,64 @@ impl PluginHost for RenderHost<'_, '_> {
             let host = ctx.env.host?;
             // Source / Masks show no effects; the default (Effects & Masks) does.
             let with_effects = !matches!(ctx.params.get(&crate::layer_source_id(param_id)).map(Value::as_enum), Some(0 | 1));
-            host.layer_at(lid, ctx.env.comp_time + (layer_time - ctx.time), with_effects)?
+            host.layer_at(lid, self.comp_time(layer_time)?, with_effects)?
         };
         let img = crate::util::fit_layer(ctx, &self.grid(), &other, false);
         Some(PluginImage { width: img.width, height: img.height, pixels: img.data, origin: self.offset, scale: self.scale })
     }
 
+    fn comp_camera(&self) -> Option<CompCamera> {
+        let sc = self.ctx.env.host?.comp_scene()?;
+        // effect-space pixels, as the frame's points are once divided back by its scale
+        Some(CompCamera { matrix: sc.camera?, zoom: sc.zoom, camera_layer: sc.camera_layer, dof: sc.dof }).filter(|c| c.zoom > 0.0)
+    }
+
+    fn comp_lights(&self, layer_time: f64) -> Option<Vec<CompLightInfo>> {
+        let ctx = self.ctx;
+        Some(ctx.env.host?.comp_lights(self.comp_time(layer_time)?))
+    }
+
+    fn comp_camera_at(&self, layer_time: f64) -> Option<CompCamera> {
+        let ctx = self.ctx;
+        let sc = ctx.env.host?.comp_scene_at(self.comp_time(layer_time)?)?;
+        Some(CompCamera { matrix: sc.camera?, zoom: sc.zoom, camera_layer: sc.camera_layer, dof: sc.dof }).filter(|c| c.zoom > 0.0)
+    }
+
+    fn layer_transform(&self, param_id: &str, layer_time: f64) -> Option<LayerTransform> {
+        let ctx = self.ctx;
+        let lid = ctx.params.get(param_id)?.as_layer()?;
+        let x = ctx.env.host?.layer_transform(lid, self.comp_time(layer_time)?)?;
+        // An image point u (buffer grid) is effect-space p = (u - origin) / scale of this layer,
+        // the other layer's effect-space q = p + d with d its centring offset (`fit_layer`).
+        let inv = 1.0 / self.scale.max(1e-9);
+        let d = [(x.size[0] - ctx.layer_size[0]) * 0.5, (x.size[1] - ctx.layer_size[1]) * 0.5];
+        let m = x.to_self;
+        let matrix = std::array::from_fn(|i| {
+            [m[i][0] * inv, m[i][1] * inv, m[i][2], m[i][0] * (d[0] - self.offset[0] * inv) + m[i][1] * (d[1] - self.offset[1] * inv) + m[i][3]]
+        });
+        // its own pixel q is the image point (q - d) * scale + origin
+        let rect = [
+            -d[0] * self.scale + self.offset[0],
+            -d[1] * self.scale + self.offset[1],
+            (x.size[0] - d[0]) * self.scale + self.offset[0],
+            (x.size[1] - d[1]) * self.scale + self.offset[1],
+        ];
+        Some(LayerTransform { matrix, opacity: x.opacity, rect })
+    }
+
     fn params_at(&self, layer_time: f64) -> Option<(Vec<f64>, Vec<String>)> {
         let p = self.ctx.env.host?.params_at(layer_time)?;
         Some((flatten_params(self.manifest, &p, self.offset, self.scale), flatten_texts(self.manifest, &p)))
+    }
+
+    fn params_digest(&self) -> Option<u64> {
+        // `params_at` flattens points with this render's scale and origin: equal digests must
+        // mean equal flattened values, so they go in too.
+        use std::hash::{Hash, Hasher};
+        let d = self.ctx.env.host?.params_digest()?;
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (d, self.offset.map(f64::to_bits), self.scale.to_bits()).hash(&mut h);
+        Some(h.finish())
     }
 
     fn frame_rate(&self) -> f64 {
@@ -702,7 +915,8 @@ fn run_slot(slot: usize, ctx: &EffectCtx, mut buf: Buf) -> Buf {
     let flat = flatten(m, ctx, &buf);
     let key = ctx_instance_key(ctx);
     let pad = plugin.padding(&PluginParams { manifest: m, flat: &flat, texts: &texts }, ctx.time, buf.scale, ctx.layer_size, key).min(MAX_PADDING);
-    let before = buf.clone();
+    // (what an error gives back: the unpadded input)
+    let before = (pad > 0 || !plugin.untouched_on_error()).then(|| buf.clone());
     // Padding moves the layer origin, which points are measured from.
     let flat = if pad > 0 {
         buf.pad(pad);
@@ -714,13 +928,66 @@ fn run_slot(slot: usize, ctx: &EffectCtx, mut buf: Buf) -> Buf {
     let (width, height, offset, scale) = (buf.img.width, buf.img.height, buf.offset, buf.scale);
     let host = RenderHost { ctx, manifest: m, width, height, offset, scale };
     let mut frame = PluginFrame { width, height, pixels: &mut buf.img.data, scale, origin: offset, layer_size: ctx.layer_size };
-    if let Err(e) = plugin.render_v2(&mut frame, &params, ctx.time, &host) {
-        log::warn!("plug-in `{}`: {e}", m.id);
-        set_plugin_error(&m.id, Some(e));
-        return before;
-    }
+    let bounds = match plugin.render_bounded(&mut frame, &params, ctx.time, &host) {
+        Ok(b) => b,
+        Err(e) => {
+            log::warn!("plug-in `{}`: {e}", m.id);
+            set_plugin_error(&m.id, Some(e));
+            return before.unwrap_or(buf);
+        }
+    };
     if plugin_error(&m.id).is_some() {
         set_plugin_error(&m.id, None);
     }
-    buf
+    match bounds {
+        // The last effect of a layer's own stack keeps only what it drew (less to composite);
+        // otherwise (an adjustment layer's comp below, or effects to follow that may fill the
+        // rest of the layer) the rest is cleared.
+        Some(b) if ctx.env.last && !ctx.adjustment => crop(buf, b),
+        Some(b) => {
+            clear_outside(&mut buf.img, b);
+            buf
+        }
+        None => buf,
+    }
+}
+
+/// `b` clamped to a `w` × `h` image: (x0, y0, x1, y1), empty when x0 == x1 or y0 == y1.
+fn clamp_rect(b: [u32; 4], w: u32, h: u32) -> (usize, usize, usize, usize) {
+    let (x0, y0) = (b[0].min(w), b[1].min(h));
+    (x0 as usize, y0 as usize, b[2].clamp(x0, w) as usize, b[3].clamp(y0, h) as usize)
+}
+
+/// Make everything outside `b` transparent.
+fn clear_outside(img: &mut crate::Image, b: [u32; 4]) {
+    let w = img.width as usize;
+    let (x0, y0, x1, y1) = clamp_rect(b, img.width, img.height);
+    for (y, row) in img.data.chunks_mut(w.max(1)).enumerate() {
+        if (y0..y1).contains(&y) && x0 < x1 {
+            row[..x0].fill([0.0; 4]);
+            row[x1..].fill([0.0; 4]);
+        } else {
+            row.fill([0.0; 4]);
+        }
+    }
+}
+
+/// The part of `buf` inside `b` (a transparent pixel there when `b` is empty); content keeps
+/// its place.
+fn crop(buf: Buf, b: [u32; 4]) -> Buf {
+    let (x0, y0, x1, y1) = clamp_rect(b, buf.img.width, buf.img.height);
+    // The cut starts on the buffer's pixel grid (whole `GRID_ALIGN` steps), which a downscaled
+    // layer resamples along; the pixels between it and `b` stay transparent.
+    let g = crate::GRID_ALIGN as usize;
+    let (cx, cy) = if x0 < x1 && y0 < y1 { (x0 - x0 % g, y0 - y0 % g) } else { (x0, y0) };
+    let (w, h) = ((x1 - cx).max(1), (y1 - cy).max(1));
+    let mut img = crate::Image::new(w as u32, h as u32);
+    if x0 < x1 && y0 < y1 {
+        let sw = buf.img.width as usize;
+        for (y, row) in img.data.chunks_mut(w).skip(y0 - cy).enumerate() {
+            let s = (y0 + y) * sw + x0;
+            row[x0 - cx..x1 - cx].copy_from_slice(&buf.img.data[s..s + (x1 - x0)]);
+        }
+    }
+    Buf { img, offset: [buf.offset[0] - cx as f64, buf.offset[1] - cy as f64], scale: buf.scale }
 }

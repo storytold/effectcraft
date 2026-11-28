@@ -45,6 +45,7 @@ mod ui_fx_editors;
 mod ui_gpu;
 mod ui_gradient_editor;
 mod ui_gradient_handles;
+mod ui_gradient_param;
 mod ui_gradient_value;
 mod ui_graph_fit;
 mod ui_graph_theme;

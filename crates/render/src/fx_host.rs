@@ -34,11 +34,16 @@ impl FxHost<'_, '_, '_> {
 /// composites.
 pub(crate) fn comp_scene(ctx: &EvalCtx, layer: &Layer) -> Option<effectcraft_effects::CompScene> {
     let world = ctx.world_matrix(layer);
-    let (cam, _, _) = ctx.camera();
+    let (cam, _, zoom) = ctx.camera();
     let p = (cam * world).0;
-    let back = ctx.layer_to_comp(layer).0.inverse()?.0;
+    let (to_comp, depth) = ctx.layer_to_comp(layer);
+    let back = to_comp.inverse()?.0;
+    // A 3D layer's own projection cancels on its plane (W = 1 there): scale the matrix by the
+    // anchor's camera-space depth so W reads as depth, as it does for a 2D layer. Scaling a
+    // homogeneous matrix leaves where every point shows unchanged.
+    let k = if layer.is_3d() && depth > 1e-9 { depth } else { 1.0 };
     let rows = [p[0], p[1], p[3]];
-    let camera: [[f64; 4]; 3] = std::array::from_fn(|i| std::array::from_fn(|j| (0..3).map(|k| back[i][k] * rows[k][j]).sum()));
+    let camera: [[f64; 4]; 3] = std::array::from_fn(|i| std::array::from_fn(|j| k * (0..3).map(|m| back[i][m] * rows[m][j]).sum::<f64>()));
     let inv = world.inverse();
     let light = three_d::light::lights_at(ctx).first().and_then(|l| {
         let inv = inv.as_ref()?;
@@ -53,7 +58,8 @@ pub(crate) fn comp_scene(ctx: &EvalCtx, layer: &Layer) -> Option<effectcraft_eff
         Some(effectcraft_effects::CompLight { pos: [pos.x, pos.y, pos.z], dir: [dir.x / len, dir.y / len, dir.z / len], color: l.color, kind })
     });
     let camera_layer = ctx.comp.active_camera(ctx.time).is_some();
-    Some(effectcraft_effects::CompScene { camera: Some(camera), camera_layer, light })
+    let dof = three_d::active_camera(ctx).dof.map(|d| [d.focus, d.aperture, d.blur_level]);
+    Some(effectcraft_effects::CompScene { camera: Some(camera), camera_layer, light, zoom, dof })
 }
 
 /// Nesting limit for effects that render layers (other layers, other times).
@@ -109,6 +115,10 @@ impl EffectHost for FxHost<'_, '_, '_> {
         self.r.read(|| self.r.footage.audio(item, f, st, frames, rate))
     }
 
+    fn comp_time_of(&self, layer_time: f64) -> Option<f64> {
+        layer_time.is_finite().then(|| self.layer.comp_time(Tick::from_seconds_f64(layer_time)).seconds())
+    }
+
     fn self_at(&self, layer_time: f64, effects: usize) -> Option<Buf> {
         if self.r.depth > MAX_FX_DEPTH || self.layer.switches.adjustment {
             return None;
@@ -127,6 +137,31 @@ impl EffectHost for FxHost<'_, '_, '_> {
         let g = self.layer.effects()?.groups().nth(self.index)?;
         let ctx = self.ctx.at(self.layer.comp_time(Tick::from_seconds_f64(layer_time)));
         Some(effectcraft_effects::flatten_params(g, &mut |pr| ctx.value(self.layer, pr)))
+    }
+
+    fn params_digest(&self) -> Option<u64> {
+        fn any_expression(g: &effectcraft_project::PropGroup) -> bool {
+            g.props().any(|p| p.has_expression()) || g.groups().any(any_expression)
+        }
+        /// Feeds formatted text straight into a hasher (no string is built).
+        struct Feed(std::collections::hash_map::DefaultHasher);
+        impl std::fmt::Write for Feed {
+            fn write_str(&mut self, s: &str) -> std::fmt::Result {
+                std::hash::Hasher::write(&mut self.0, s.as_bytes());
+                Ok(())
+            }
+        }
+        fn has_prop(g: &effectcraft_project::PropGroup, uid: u64) -> bool {
+            g.props().any(|p| p.uid == uid) || g.groups().any(|s| has_prop(s, uid))
+        }
+        let g = self.layer.effects()?.groups().nth(self.index)?;
+        // (an Essential Property override of a precomp instance changes values `g` doesn't hold)
+        if any_expression(g) || self.ctx.property_overrides.iter().any(|o| o.layer == self.layer.id && has_prop(g, o.prop)) {
+            return None;
+        }
+        let mut h = Feed(std::collections::hash_map::DefaultHasher::new());
+        std::fmt::Write::write_fmt(&mut h, format_args!("{g:?}")).ok()?;
+        Some(std::hash::Hasher::finish(&h.0))
     }
 
     fn param_at(&self, effect_index: usize, id: &str, layer_time: f64) -> Option<effectcraft_keyframe::Value> {
@@ -150,6 +185,67 @@ impl EffectHost for FxHost<'_, '_, '_> {
 
     fn comp_scene(&self) -> Option<effectcraft_effects::CompScene> {
         Some(comp_scene(self.ctx, self.layer)?.rebased(self.origin))
+    }
+
+    fn comp_lights(&self, comp_time: f64) -> Vec<effectcraft_effects::plugin::CompLightInfo> {
+        if !comp_time.is_finite() {
+            return Vec::new();
+        }
+        let ctx = self.ctx.at(Tick::from_seconds_f64(comp_time));
+        let Some(inv) = ctx.world_matrix(self.layer).inverse() else { return Vec::new() };
+        ctx.comp
+            .layers
+            .iter()
+            .filter(|l| l.is_light() && l.switches.video && l.is_active_at(ctx.time))
+            .filter_map(|l| {
+                let s = three_d::light::LightState::from_layer(&ctx, l)?;
+                let g = l.props.sub("lightOptions")?;
+                let (pos, dir) = (inv.apply(s.pos), inv.apply_vec(s.dir));
+                let len = (dir.x * dir.x + dir.y * dir.y + dir.z * dir.z).sqrt().max(1e-12);
+                let c = ctx.color(l, g, "color");
+                let kind = match s.kind {
+                    effectcraft_project::LightKind::Parallel => 0,
+                    effectcraft_project::LightKind::Spot => 1,
+                    effectcraft_project::LightKind::Point => 2,
+                    _ => 3,
+                };
+                Some(effectcraft_effects::plugin::CompLightInfo {
+                    name: l.name.clone(),
+                    kind,
+                    // effect space, as the camera (rebased onto the effect's origin)
+                    pos: [pos.x - self.origin[0], pos.y - self.origin[1], pos.z],
+                    dir: [dir.x / len, dir.y / len, dir.z / len],
+                    color: [c[0], c[1], c[2]],
+                    intensity: ctx.f(l, g, "intensity", 100.0) / 100.0,
+                    cone: ctx.f(l, g, "coneAngle", 90.0),
+                    feather: s.feather,
+                })
+            })
+            .collect()
+    }
+
+    fn comp_scene_at(&self, comp_time: f64) -> Option<effectcraft_effects::CompScene> {
+        if !comp_time.is_finite() {
+            return None;
+        }
+        let ctx = self.ctx.at(Tick::from_seconds_f64(comp_time));
+        Some(comp_scene(&ctx, self.layer)?.rebased(self.origin))
+    }
+
+    fn layer_transform(&self, id: u64, comp_time: f64) -> Option<effectcraft_effects::LayerXf> {
+        let other = self.ctx.layer(effectcraft_project::LayerId(id))?;
+        if !comp_time.is_finite() {
+            return None;
+        }
+        let ctx = self.ctx.at(Tick::from_seconds_f64(comp_time));
+        // other layer → world → this layer, both at that time
+        let m = (ctx.world_matrix(self.layer).inverse()? * ctx.world_matrix(other)).0;
+        let (size, o) = ctx.effect_bounds(other);
+        // from the other layer's effect space (layer point = q + o) to this layer's effect space
+        // (layer point - self.origin)
+        let shift = [self.origin[0], self.origin[1], 0.0];
+        let to_self = std::array::from_fn(|i| [m[i][0], m[i][1], m[i][2], m[i][0] * o[0] + m[i][1] * o[1] + m[i][3] - shift[i]]);
+        Some(effectcraft_effects::LayerXf { to_self, size, opacity: ctx.opacity(other) })
     }
 
     fn layer_at(&self, id: u64, comp_time: f64, masks_and_effects: bool) -> Option<LayerPixels> {

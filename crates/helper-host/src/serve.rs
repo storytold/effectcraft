@@ -13,7 +13,7 @@ use std::io::{BufRead, Read, Write};
 use std::path::Path;
 use std::sync::Arc;
 
-use effectcraft_effects::plugin::{EffectPlugin, PluginFrame, PluginHost, PluginImage, PluginParams};
+use effectcraft_effects::plugin::{EffectPlugin, PluginFrame, PluginHost, PluginImage, PluginParamKind, PluginParams};
 
 use crate::frames::Exchange;
 use crate::protocol::{ImageRef, MAX_LINE, PROTOCOL_VERSION, RemoteEffect, RenderRequest, Reply, Request, reply_line};
@@ -29,6 +29,10 @@ pub trait Provider {
     fn version(&self) -> String {
         String::new()
     }
+    /// [`Reply::Hello`]'s `processes`: how many processes of this helper may run at once.
+    fn processes(&self) -> Option<u32> {
+        None
+    }
     /// File extensions [`Provider::load`] accepts (`["ofx"]`).
     fn loads(&self) -> Vec<String> {
         vec![]
@@ -38,6 +42,11 @@ pub trait Provider {
     /// Load effects from a file or folder the user picked.
     fn load(&mut self, _path: &str) -> Result<(Vec<Arc<dyn EffectPlugin>>, Vec<String>), String> {
         Err("this helper does not load files".into())
+    }
+    /// Whether `effect` never reads its input frame (it makes a new image): EffectCraft then
+    /// doesn't copy the layer in (`ignores_input`; the frame reads as zeros or stale pixels).
+    fn ignores_input(&self, _effect: &dyn EffectPlugin) -> bool {
+        false
     }
     /// Whether EffectCraft should ask for padding before each render of `effect`.
     fn wants_padding(&self, _effect: &dyn EffectPlugin) -> bool {
@@ -56,7 +65,7 @@ pub fn serve(provider: &mut dyn Provider) -> Result<(), String> {
 
 /// [`serve`] on any reader / writer.
 pub fn serve_io(provider: &mut dyn Provider, input: impl BufRead, output: impl Write) -> Result<(), String> {
-    let mut s = Server { provider, input: Box::new(input), output: Box::new(output), exchange: None, effects: HashMap::new(), depth: 0 };
+    let mut s = Server { provider, input: Box::new(input), output: Box::new(output), exchange: None, effects: HashMap::new(), depth: 0, features: vec![] };
     loop {
         let Some(req) = s.next_request()? else { return Ok(()) };
         if matches!(req, Request::Shutdown) {
@@ -73,6 +82,8 @@ struct Server<'p> {
     exchange: Option<Exchange>,
     effects: HashMap<String, Arc<dyn EffectPlugin>>,
     depth: u32,
+    /// What EffectCraft listed in `hello`: optional callbacks and manifest kinds (`gradient_params`…).
+    features: Vec<String>,
 }
 
 impl Server<'_> {
@@ -101,10 +112,21 @@ impl Server<'_> {
     }
 
     fn describe(&mut self, list: Vec<Arc<dyn EffectPlugin>>, errors: Vec<String>) -> Result<(), String> {
-        let mut effects = vec![];
+        let (mut effects, mut errors) = (vec![], errors);
+        let gradients = self.features.iter().any(|f| f == "gradient_params");
         for e in list {
             let manifest = e.manifest().clone();
-            effects.push(RemoteEffect { padding: self.provider.wants_padding(e.as_ref()), manifest: manifest.clone() });
+            // A host that didn't list `gradient_params` refuses such a manifest: say why here.
+            if !gradients && manifest.params.iter().any(|p| matches!(p.kind, PluginParamKind::Gradient { .. })) {
+                errors.push(format!("{}: needs a newer EffectCraft (gradient parameters)", manifest.id));
+                continue;
+            }
+            effects.push(RemoteEffect {
+                padding: self.provider.wants_padding(e.as_ref()),
+                time_varying: e.reads_other_times(),
+                ignores_input: self.provider.ignores_input(e.as_ref()),
+                manifest: manifest.clone(),
+            });
             self.effects.insert(manifest.id, e);
         }
         self.send(&Reply::Effects { effects, errors })
@@ -113,7 +135,8 @@ impl Server<'_> {
     /// Answer one request (anything but `shutdown`).
     fn handle(&mut self, req: Request) -> Result<(), String> {
         match req {
-            Request::Hello { version, frames } => {
+            Request::Hello { version, frames, features } => {
+                self.features = features;
                 if version != PROTOCOL_VERSION {
                     return self.send(&Reply::Error { message: format!("this helper speaks protocol {PROTOCOL_VERSION}, not {version}") });
                 }
@@ -122,7 +145,7 @@ impl Server<'_> {
                     Err(e) => return self.send(&Reply::Error { message: format!("can't open the frame exchange file: {e}") }),
                 }
                 let (name, helper_version, loads) = (self.provider.name(), self.provider.version(), self.provider.loads());
-                self.send(&Reply::Hello { version: PROTOCOL_VERSION, name, helper_version, loads })
+                self.send(&Reply::Hello { version: PROTOCOL_VERSION, name, helper_version, loads, processes: self.provider.processes() })
             }
             Request::Describe => {
                 let (list, errors) = self.provider.effects();
@@ -141,7 +164,7 @@ impl Server<'_> {
                 self.send(&Reply::Padding { pixels })
             }
             Request::Render(r) => match self.render(&r) {
-                Ok(()) => self.send(&Reply::Done),
+                Ok(()) => self.send(&Reply::Done { bounds: None }),
                 Err(message) => self.send(&Reply::Error { message }),
             },
             Request::Destroy { instance } => {
@@ -149,7 +172,9 @@ impl Server<'_> {
                 Ok(())
             }
             Request::Ping => self.send(&Reply::Pong),
-            Request::Image { .. } | Request::Params { .. } => self.send(&Reply::Error { message: "no callback is waiting for an answer".into() }),
+            Request::Image { .. } | Request::Params { .. } | Request::Transform { .. } | Request::Camera { .. } | Request::Lights { .. } => {
+                self.send(&Reply::Error { message: "no callback is waiting for an answer".into() })
+            }
             Request::Shutdown => Ok(()),
         }
     }
@@ -188,7 +213,7 @@ impl Server<'_> {
         loop {
             let req = self.next_request()?.ok_or("EffectCraft closed the pipe")?;
             match req {
-                Request::Image { .. } | Request::Params { .. } => return Ok(req),
+                Request::Image { .. } | Request::Params { .. } | Request::Transform { .. } | Request::Camera { .. } | Request::Lights { .. } => return Ok(req),
                 Request::Shutdown => return Err("EffectCraft asked the helper to shut down".into()),
                 other => self.handle(other)?,
             }
@@ -219,6 +244,46 @@ impl PluginHost for Callbacks<'_, '_> {
     fn layer_input(&self, param_id: &str, layer_time: f64) -> Option<PluginImage> {
         self.server.try_borrow_mut().ok()?.image(&Reply::LayerInput { param: param_id.to_string(), time: layer_time })
     }
+    fn layer_transform(&self, param_id: &str, layer_time: f64) -> Option<effectcraft_effects::plugin::LayerTransform> {
+        let mut s = self.server.try_borrow_mut().ok()?;
+        if !s.features.iter().any(|f| f == "layer_transform") {
+            return None;
+        }
+        match s.ask(&Reply::LayerTransform { param: param_id.to_string(), time: layer_time }) {
+            Ok(Request::Transform { transform }) => transform,
+            _ => None,
+        }
+    }
+    fn comp_camera(&self) -> Option<effectcraft_effects::plugin::CompCamera> {
+        let mut s = self.server.try_borrow_mut().ok()?;
+        if !s.features.iter().any(|f| f == "comp_camera") {
+            return None;
+        }
+        match s.ask(&Reply::CompCamera { time: None }) {
+            Ok(Request::Camera { camera }) => camera,
+            _ => None,
+        }
+    }
+    fn comp_lights(&self, layer_time: f64) -> Option<Vec<effectcraft_effects::plugin::CompLightInfo>> {
+        let mut s = self.server.try_borrow_mut().ok()?;
+        if !s.features.iter().any(|f| f == "comp_lights") {
+            return None;
+        }
+        match s.ask(&Reply::CompLights { time: layer_time }) {
+            Ok(Request::Lights { lights }) => lights,
+            _ => None,
+        }
+    }
+    fn comp_camera_at(&self, layer_time: f64) -> Option<effectcraft_effects::plugin::CompCamera> {
+        let mut s = self.server.try_borrow_mut().ok()?;
+        if !s.features.iter().any(|f| f == "comp_camera_time") {
+            return None;
+        }
+        match s.ask(&Reply::CompCamera { time: Some(layer_time) }) {
+            Ok(Request::Camera { camera }) => camera,
+            _ => None,
+        }
+    }
     fn params_at(&self, layer_time: f64) -> Option<(Vec<f64>, Vec<String>)> {
         match self.server.try_borrow_mut().ok()?.ask(&Reply::ParamsAt { time: layer_time }) {
             Ok(Request::Params { values }) => values,
@@ -236,5 +301,64 @@ impl PluginHost for Callbacks<'_, '_> {
     }
     fn frame_range(&self) -> Option<(f64, f64)> {
         self.req.frame_range
+    }
+    fn params_digest(&self) -> Option<u64> {
+        self.req.params_digest
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use effectcraft_effects::plugin::{PluginManifest, PluginParam};
+
+    struct Ramp(PluginManifest);
+
+    impl EffectPlugin for Ramp {
+        fn manifest(&self) -> &PluginManifest {
+            &self.0
+        }
+        fn render(&self, _frame: &mut PluginFrame, _params: &PluginParams, _time: f64) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    struct OneRamp;
+
+    impl Provider for OneRamp {
+        fn name(&self) -> String {
+            "Ramps".into()
+        }
+        fn effects(&mut self) -> (Vec<Arc<dyn EffectPlugin>>, Vec<String>) {
+            let ramp = PluginParam { id: "ramp".into(), name: "Ramp".into(), kind: PluginParamKind::Gradient { default: None }, group: String::new() };
+            let m = PluginManifest {
+                api: 2,
+                id: "org.test.ramp".into(),
+                name: "Ramp".into(),
+                category: "Test".into(),
+                version: "1".into(),
+                author: String::new(),
+                description: String::new(),
+                params: vec![ramp],
+            };
+            (vec![Arc::new(Ramp(m))], vec![])
+        }
+    }
+
+    /// The `effects` reply to `describe` after `hello`.
+    fn described(hello: &str) -> String {
+        let mut out = vec![];
+        serve_io(&mut OneRamp, format!("{hello}\n{{\"op\":\"describe\"}}\n").as_bytes(), &mut out).unwrap();
+        String::from_utf8(out).unwrap().lines().find(|l| l.contains(r#""op":"effects""#)).unwrap_or_default().to_string()
+    }
+
+    /// A manifest with a gradient parameter goes only to hosts that listed `gradient_params`
+    /// (older hosts refuse it); the others get an error saying why.
+    #[test]
+    fn gradient_effects_are_described_only_to_hosts_that_take_them() {
+        let old = described(r#"{"op":"hello","version":1,"frames":"no-such-file"}"#);
+        assert!(old.contains(r#""effects":[]"#) && old.contains("needs a newer EffectCraft"), "{old}");
+        let new = described(r#"{"op":"hello","version":1,"frames":"no-such-file","features":["gradient_params"]}"#);
+        assert!(new.contains(r#""id":"org.test.ramp""#) && !new.contains("needs a newer"), "{new}");
     }
 }

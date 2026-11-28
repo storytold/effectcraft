@@ -66,6 +66,148 @@ fn rust_plugins_apply_by_id() {
     assert!(s.execute("effect.list", json!({"filter": "swap red"})).unwrap().as_array().unwrap().len() == 1);
 }
 
+/// Fills the frame with its `ramp` gradient's first colour stop, read from the JSON text.
+struct FirstStop {
+    m: PluginManifest,
+}
+
+impl EffectPlugin for FirstStop {
+    fn manifest(&self) -> &PluginManifest {
+        &self.m
+    }
+    fn render(&self, frame: &mut PluginFrame, params: &PluginParams, _time: f64) -> Result<(), String> {
+        let g: serde_json::Value = serde_json::from_str(params.text("ramp")).map_err(|e| e.to_string())?;
+        if g["opacities"].as_array().is_none_or(Vec::is_empty) {
+            return Err("no opacity stops".into());
+        }
+        let c = &g["colors"][0][1];
+        let c = [0, 1, 2, 3].map(|i| c[i].as_f64().unwrap_or(-1.0) as f32);
+        for p in frame.pixels.iter_mut() {
+            *p = c;
+        }
+        Ok(())
+    }
+}
+
+fn gradient_manifest(id: &str, default: Option<serde_json::Value>) -> PluginManifest {
+    PluginManifest {
+        api: 2,
+        id: id.into(),
+        name: format!("First Stop {id}"),
+        category: "Generate".into(),
+        version: "1".into(),
+        author: String::new(),
+        description: String::new(),
+        params: vec![PluginParam { id: "ramp".into(), name: "Ramp".into(), kind: PluginParamKind::Gradient { default }, group: String::new() }],
+    }
+}
+
+/// A gradient parameter is a gradient property (default, set and keyframed like a shape's) that
+/// reaches the plug-in as JSON; a default that isn't a gradient is refused.
+#[test]
+fn plugins_take_gradient_parameters() {
+    register_plugin(Arc::new(FirstStop { m: gradient_manifest("org.test.firststop", Some(json!(["#ff0000", "#0000ff"]))) })).unwrap();
+    let (mut s, l) = setup();
+    s.execute("effect.apply", json!({"layer": l, "effect": "org.test.firststop"})).unwrap();
+    let p = px(&s);
+    assert!(p[0] > 0.99 && p[1] < 0.01 && p[2] < 0.01, "{p:?}");
+    let v = s.execute("prop.get", json!({"layer": l, "path": "effects/#1/ramp"})).unwrap();
+    assert!(v.to_string().contains("colors"), "{v}");
+    s.execute("prop.set", json!({"layer": l, "path": "effects/#1/ramp", "value": [[0.0, "#00ff00"], [1.0, "#ffffff"]]})).unwrap();
+    let p = px(&s);
+    assert!(p[0] < 0.01 && p[1] > 0.99 && p[2] < 0.01, "{p:?}");
+    // keyframed: a key at 0 s (green) and 1 s (blue), halfway between at 0.5 s
+    s.execute("prop.addKey", json!({"layer": l, "path": "effects/#1/ramp", "time": 0.0, "value": ["#00ff00", "#ffffff"]})).unwrap();
+    s.execute("prop.addKey", json!({"layer": l, "path": "effects/#1/ramp", "time": 1.0, "value": ["#0000ff", "#ffffff"]})).unwrap();
+    let cid = s.active_comp_id().unwrap();
+    let p = s.render(cid, Tick::from_seconds_f64(0.5), Default::default()).get(20, 10);
+    assert!((p[1] - 0.5).abs() < 0.02 && (p[2] - 0.5).abs() < 0.02, "{p:?}");
+    let bad = register_plugin(Arc::new(FirstStop { m: gradient_manifest("org.test.badramp", Some(json!(["#ff0000"]))) })).err();
+    assert!(bad.as_deref().is_some_and(|e| e.contains("gradient `ramp`")), "{bad:?}");
+    // stops outside 0–1 are refused too
+    let out = register_plugin(Arc::new(FirstStop { m: gradient_manifest("org.test.outramp", Some(json!([[-0.5, "#ff0000"], [1.5, "#0000ff"]]))) })).err();
+    assert!(out.as_deref().is_some_and(|e| e.contains("gradient `ramp`")), "{out:?}");
+    // no default: white to black
+    register_plugin(Arc::new(FirstStop { m: gradient_manifest("org.test.plainramp", None) })).unwrap();
+}
+
+/// Records the parameter digest each render sees.
+struct Digests {
+    m: PluginManifest,
+}
+
+static SEEN: std::sync::Mutex<Vec<Option<u64>>> = std::sync::Mutex::new(Vec::new());
+
+impl EffectPlugin for Digests {
+    fn manifest(&self) -> &PluginManifest {
+        &self.m
+    }
+    fn render(&self, _frame: &mut PluginFrame, _params: &PluginParams, _time: f64) -> Result<(), String> {
+        Ok(())
+    }
+    fn render_v2(
+        &self,
+        _frame: &mut PluginFrame,
+        _params: &PluginParams,
+        _time: f64,
+        host: &dyn effectcraft_engine::effects::plugin::PluginHost,
+    ) -> Result<(), String> {
+        SEEN.lock().unwrap().push(host.params_digest());
+        Ok(())
+    }
+    // (every frame renders: no cached frame hides a call)
+    fn reads_other_times(&self) -> bool {
+        true
+    }
+}
+
+/// A plug-in sees a digest of its parameter data: the same on every frame while nothing is
+/// edited, different after an edit, and absent while a parameter has an expression (helpers then
+/// re-read their parameter history).
+#[test]
+fn plugins_see_a_params_digest() {
+    let m = PluginManifest {
+        api: 2,
+        id: "org.test.digest".into(),
+        name: "Digest".into(),
+        category: "Utility".into(),
+        version: "1".into(),
+        author: String::new(),
+        description: String::new(),
+        params: vec![PluginParam {
+            id: "amount".into(),
+            name: "Amount".into(),
+            group: String::new(),
+            kind: PluginParamKind::Slider { default: 1.0, min: 0.0, max: 10.0, slider_min: None, slider_max: None, decimals: 2, integer: false },
+        }],
+    };
+    register_plugin(Arc::new(Digests { m })).unwrap();
+    let (mut s, l) = setup();
+    s.execute("effect.apply", json!({"layer": l, "effect": "org.test.digest"})).unwrap();
+    let cid = s.active_comp_id().unwrap();
+    let at = |s: &Session, t: f64| {
+        let n = SEEN.lock().unwrap().len();
+        s.render(cid, Tick::from_seconds_f64(t), Default::default());
+        let seen = SEEN.lock().unwrap();
+        assert!(seen.len() > n, "the render at {t} called the plug-in");
+        *seen.last().unwrap()
+    };
+    let first = at(&s, 0.0);
+    assert!(first.is_some());
+    assert_eq!(at(&s, 0.5), first, "the same digest while nothing is edited");
+    s.execute("prop.set", json!({"layer": l, "path": "effects/#1/amount", "value": 2.0})).unwrap();
+    let edited = at(&s, 0.6);
+    assert!(edited.is_some() && edited != first);
+    assert_eq!(at(&s, 0.7), edited);
+    // At another render scale `params_at` flattens points differently: so does the digest.
+    let n = SEEN.lock().unwrap().len();
+    s.render(cid, Tick::from_seconds_f64(0.7), effectcraft_engine::render::RenderOpts { scale: 0.5, ..Default::default() });
+    let half = *SEEN.lock().unwrap().get(n).expect("the half-resolution render called the plug-in");
+    assert!(half.is_some() && half != edited, "{half:?} vs {edited:?}");
+    s.execute("prop.setExpression", json!({"layer": l, "path": "effects/#1/amount", "expression": "time"})).unwrap();
+    assert_eq!(at(&s, 0.8), None);
+}
+
 /// Build the example plug-in (skipped when the wasm32 target isn't installed).
 fn build_example() -> Option<std::path::PathBuf> {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/plugins/posterize-bands");
@@ -437,4 +579,185 @@ fn abi_v2_plugins_render_with_real_neighbour_frames() {
     let p = s.render(outer, Tick::ZERO, Default::default()).get(20, 10);
     assert!((p[0] - 0.25).abs() < 0.01, "the next frame's red, with no previous frame: {p:?}");
     assert!((p[1] - 2.0 / 8.0).abs() < 0.01, "only the next frame is valid: {p:?}");
+}
+
+/// Records the comp camera it is handed.
+struct CameraProbe {
+    m: PluginManifest,
+    seen: Arc<std::sync::Mutex<Option<effectcraft_engine::effects::plugin::CompCamera>>>,
+}
+
+impl EffectPlugin for CameraProbe {
+    fn manifest(&self) -> &PluginManifest {
+        &self.m
+    }
+    fn render(&self, _frame: &mut PluginFrame, _params: &PluginParams, _time: f64) -> Result<(), String> {
+        Ok(())
+    }
+    fn render_v2(
+        &self,
+        _frame: &mut PluginFrame,
+        _params: &PluginParams,
+        _time: f64,
+        host: &dyn effectcraft_engine::effects::plugin::PluginHost,
+    ) -> Result<(), String> {
+        *self.seen.lock().unwrap() = host.comp_camera();
+        Ok(())
+    }
+}
+
+/// `comp_camera`'s W is the depth in front of the camera (what `zoom / W` scales by), for a 2D
+/// layer and a 3D one alike: a 3D layer's own projection would otherwise leave W = 1 on it.
+#[test]
+fn comp_camera_w_is_the_depth_for_2d_and_3d_layers() {
+    let seen = Arc::new(std::sync::Mutex::new(None));
+    let m = PluginManifest {
+        api: 2,
+        id: "org.test.cameraprobe".into(),
+        name: "Camera Probe".into(),
+        category: "Test Plug-ins".into(),
+        version: "1".into(),
+        author: String::new(),
+        description: String::new(),
+        params: vec![],
+    };
+    register_plugin(Arc::new(CameraProbe { m, seen: seen.clone() })).unwrap();
+    let (mut s, l) = setup();
+    s.execute("effect.apply", json!({"layer": l, "effect": "org.test.cameraprobe"})).unwrap();
+    // W and where the layer centre (20, 10) shows, in the layer's pixels
+    let mut n = 0;
+    let mut look = |s: &Session| {
+        n += 1;
+        let cid = s.active_comp_id().unwrap();
+        let _ = s.render(cid, Tick::ZERO, Default::default());
+        let c = seen.lock().unwrap().take().unwrap_or_else(|| panic!("no camera handed over (step {n})"));
+        let at = |r: [f64; 4]| r[0] * 20.0 + r[1] * 10.0 + r[3];
+        let w = at(c.matrix[2]);
+        (w, c.zoom, at(c.matrix[0]) / w, at(c.matrix[1]) / w)
+    };
+    let (w, zoom, x, y) = look(&s);
+    assert!(zoom > 0.0 && (w - zoom).abs() < 1e-6 * zoom, "2D: the default camera is zoom away: {w} vs {zoom}");
+    assert!((x - 20.0).abs() < 1e-6 && (y - 10.0).abs() < 1e-6, "{x}, {y}");
+    s.execute("layer.setSwitch", json!({"layers": [l], "switch": "threeD", "value": true})).unwrap();
+    let (w, _, x, y) = look(&s);
+    assert!((w - zoom).abs() < 1e-6 * zoom, "3D at z = 0: {w} vs {zoom}");
+    assert!((x - 20.0).abs() < 1e-6 && (y - 10.0).abs() < 1e-6, "{x}, {y}");
+    s.execute("prop.set", json!({"layer": l, "path": "transform/position", "value": [20.0, 10.0, zoom]})).unwrap();
+    let (w, _, x, y) = look(&s);
+    assert!((w - 2.0 * zoom).abs() < 1e-6 * zoom, "3D, one zoom further back: {w} vs {}", 2.0 * zoom);
+    assert!((x - 20.0).abs() < 1e-6 && (y - 10.0).abs() < 1e-6, "{x}, {y}");
+}
+
+/// A generator: ignores its input, scribbles green over the whole frame, draws a red square at
+/// x 10..14, y 5..9 and says only that square is its result. Notes the first pixel it was given.
+struct Dot {
+    m: PluginManifest,
+}
+
+static DOT_SAW: std::sync::Mutex<Vec<[f32; 4]>> = std::sync::Mutex::new(vec![]);
+
+impl EffectPlugin for Dot {
+    fn manifest(&self) -> &PluginManifest {
+        &self.m
+    }
+    fn render(&self, _: &mut PluginFrame, _: &PluginParams, _: f64) -> Result<(), String> {
+        Err("needs render_bounded".into())
+    }
+    fn ignores_input(&self) -> bool {
+        true
+    }
+    fn render_bounded(
+        &self,
+        frame: &mut PluginFrame,
+        _: &PluginParams,
+        _: f64,
+        _: &dyn effectcraft_engine::effects::plugin::PluginHost,
+    ) -> Result<Option<[u32; 4]>, String> {
+        DOT_SAW.lock().unwrap().push(frame.pixels[0]);
+        let w = frame.width as usize;
+        for (i, p) in frame.pixels.iter_mut().enumerate() {
+            let (x, y) = (i % w, i / w);
+            *p = if (10..14).contains(&x) && (5..9).contains(&y) { [1.0, 0.0, 0.0, 1.0] } else { [0.0, 1.0, 0.0, 1.0] };
+        }
+        Ok(Some([10, 5, 14, 9]))
+    }
+}
+
+fn manifest(id: &str, name: &str) -> PluginManifest {
+    PluginManifest {
+        api: 2,
+        id: id.into(),
+        name: name.into(),
+        category: "Generate".into(),
+        version: "1".into(),
+        author: String::new(),
+        description: String::new(),
+        params: vec![PluginParam { id: "on".into(), name: "On".into(), kind: PluginParamKind::Checkbox { default: true }, group: String::new() }],
+    }
+}
+
+/// A generator plug-in that says where it drew: alone on a solid it gets a blank buffer (the
+/// solid isn't filled for it) and only its square shows; with an effect after it the rest is
+/// cleared before that effect runs; after another effect it sees the solid.
+#[test]
+fn bounded_generators_keep_only_what_they_drew() {
+    register_plugin(Arc::new(Dot { m: manifest("org.test.dot", "Dot") })).unwrap();
+    register_plugin(Arc::new(Swap { m: manifest("org.test.swap2", "Swap Again") })).unwrap();
+    let cid_px = |s: &Session, x: i64, y: i64| s.render(s.active_comp_id().unwrap(), Tick::ZERO, Default::default()).get(x, y);
+    let saw = || *DOT_SAW.lock().unwrap().last().unwrap();
+
+    let (mut s, l) = setup();
+    s.execute("effect.apply", json!({"layer": l, "effect": "org.test.dot"})).unwrap();
+    assert_eq!(cid_px(&s, 11, 6), [1.0, 0.0, 0.0, 1.0], "its square");
+    assert_eq!(cid_px(&s, 20, 15), [0.0; 4], "nothing outside it");
+    assert_eq!(cid_px(&s, 5, 6), [0.0; 4], "nor beside it, where the grid-aligned cut starts");
+    assert_eq!(saw(), [0.0; 4], "a blank buffer, not the orange solid");
+
+    // an effect after it sees the square on transparency
+    s.execute("effect.apply", json!({"layer": l, "effect": "org.test.swap2"})).unwrap();
+    assert_eq!(cid_px(&s, 11, 6), [0.0, 0.0, 1.0, 1.0], "its square, swapped");
+    assert_eq!(cid_px(&s, 20, 15), [0.0; 4], "cleared outside it");
+
+    // CC Composite after it reads the original layer, so the solid is filled for it
+    let (mut s, l) = setup();
+    s.execute("effect.apply", json!({"layer": l, "effect": "org.test.dot"})).unwrap();
+    s.execute("effect.apply", json!({"layer": l, "effect": "ec.channel.cccomposite"})).unwrap();
+    let _ = cid_px(&s, 0, 0);
+    assert_eq!(saw()[3], 1.0, "the solid CC Composite needs, not a blank buffer: {:?}", saw());
+
+    // after another effect it gets the layer as that effect left it
+    let (mut s, l) = setup();
+    s.execute("effect.apply", json!({"layer": l, "effect": "org.test.swap2"})).unwrap();
+    s.execute("effect.apply", json!({"layer": l, "effect": "org.test.dot"})).unwrap();
+    assert_eq!(cid_px(&s, 20, 15), [0.0; 4]);
+    let p = saw();
+    assert!(p[2] > 0.99 && (p[1] - 0.5).abs() < 0.01 && p[3] == 1.0, "the swapped solid: {p:?}");
+}
+
+/// A generator (it ignores its input) that always fails.
+struct Broken {
+    m: PluginManifest,
+}
+
+impl EffectPlugin for Broken {
+    fn manifest(&self) -> &PluginManifest {
+        &self.m
+    }
+    fn render(&self, _: &mut PluginFrame, _: &PluginParams, _: f64) -> Result<(), String> {
+        Err("broken".into())
+    }
+    fn ignores_input(&self) -> bool {
+        true
+    }
+}
+
+/// A failing generator first on a solid passes the solid through, as any failed effect passes
+/// its input, although the solid isn't filled for a generator that works.
+#[test]
+fn a_failed_generator_shows_the_solid() {
+    register_plugin(Arc::new(Broken { m: manifest("org.test.broken", "Broken") })).unwrap();
+    let (mut s, l) = setup();
+    s.execute("effect.apply", json!({"layer": l, "effect": "org.test.broken"})).unwrap();
+    let p = px(&s);
+    assert!(p[0] > 0.99 && (p[1] - 0.5).abs() < 0.01 && p[2] < 0.01 && p[3] == 1.0, "the orange solid: {p:?}");
 }

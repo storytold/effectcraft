@@ -39,6 +39,13 @@ pub fn set_render_timeout(t: Duration) {
     RENDER_TIMEOUT_MS.store(u64::try_from(t.as_millis()).unwrap_or(u64::MAX), std::sync::atomic::Ordering::Relaxed);
 }
 
+/// The most processes of one helper that run at once (`EFFECTCRAFT_HELPER_PROCESSES`; the
+/// helper may allow fewer, [`Reply::Hello`]).
+pub fn max_processes() -> usize {
+    static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *N.get_or_init(|| std::env::var("EFFECTCRAFT_HELPER_PROCESSES").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(4).max(1))
+}
+
 /// Timeout for one render step, `EFFECTCRAFT_HELPER_TIMEOUT` seconds (default 120: heavy
 /// plug-ins take a while on their first frame).
 fn render_timeout() -> Duration {
@@ -71,6 +78,15 @@ enum Line {
     Closed,
 }
 
+/// Where an image of `len` bytes goes in the exchange file: at `top`, or just above the image
+/// being read (`reading`) when it would overlap it.
+fn place(top: u64, len: u64, reading: Option<&std::ops::Range<u64>>) -> u64 {
+    match reading {
+        Some(r) if top < r.end && top.saturating_add(len) > r.start => r.end.div_ceil(64).saturating_mul(64),
+        _ => top,
+    }
+}
+
 /// A running helper process.
 struct Conn {
     child: Child,
@@ -83,6 +99,9 @@ struct Conn {
     exchange: Exchange,
     /// The first free byte of the exchange file (images are stacked, see [`Helper::render`]).
     top: u64,
+    /// A finished render is reading its result back after letting the helper go: the bytes of
+    /// its image, which [`Conn::alloc`] skips until it is done.
+    reading: Option<std::ops::Range<u64>>,
     last_used: Instant,
     generation: u64,
 }
@@ -127,10 +146,12 @@ impl Conn {
 
     /// Reserve room for an image of `width × height` at the top of the exchange file.
     fn alloc(&mut self, width: u32, height: u32, origin: [f64; 2], scale: f64) -> Result<ImageRef, String> {
-        let at = ImageRef { offset: self.top, width, height, origin, scale };
+        let mut at = ImageRef { offset: self.top, width, height, origin, scale };
         let bytes = at.bytes().ok_or_else(|| format!("image {width}×{height} is too large for a helper"))?;
         // Keep images 64-byte aligned for helpers that map the file.
-        self.top = self.top.checked_add(bytes.div_ceil(64).saturating_mul(64)).ok_or("frame exchange file too large")?;
+        let len = bytes.div_ceil(64).saturating_mul(64);
+        at.offset = place(self.top, len, self.reading.as_ref());
+        self.top = at.offset.checked_add(len).ok_or("frame exchange file too large")?;
         Ok(at)
     }
 
@@ -184,6 +205,8 @@ pub struct HelperStatus {
     pub effects: usize,
     pub restarts: usize,
     pub last_error: Option<String>,
+    /// How many processes the helper allows at once ([`Reply::Hello`]; 0 or 1: one).
+    pub processes: u32,
 }
 
 /// One helper program and, while it runs, its process.
@@ -193,25 +216,43 @@ pub struct Helper {
     conn: Mutex<Option<Conn>>,
     turn: Mutex<Turn>,
     turn_cv: Condvar,
-    /// Paths loaded with [`Helper::load`], loaded again after a restart.
-    loaded: Mutex<Vec<String>>,
+    /// Paths loaded with [`Helper::load`], loaded again after a restart (shared with the lanes).
+    loaded: Arc<Mutex<Vec<String>>>,
     restarts: Mutex<Vec<Instant>>,
     generation: Mutex<u64>,
+    /// Handles to the exchange file for reading a result back outside the turn, with the
+    /// generation of the process whose file it is.
+    reader: Mutex<Option<(u64, Exchange)>>,
+    /// More processes of the same program, for a helper that allows them ([`Helper::lane_for`]),
+    /// started when first needed; this one is lane 0. Empty in a lane itself.
+    lanes: Mutex<Vec<Arc<Helper>>>,
+    /// The lane each effect instance renders on.
+    routes: Mutex<std::collections::HashMap<u64, usize>>,
+    /// An extra process: it lists the effects on its first start too.
+    lane: bool,
 }
 
 impl Helper {
-    /// Start a helper and list its effects.
-    pub fn start(program: &Path) -> Result<(Arc<Helper>, Vec<RemoteEffect>, Vec<String>), String> {
-        let h = Arc::new(Helper {
+    fn new(program: &Path, loaded: Arc<Mutex<Vec<String>>>, lane: bool) -> Helper {
+        Helper {
             program: program.to_path_buf(),
             info: Mutex::new(HelperStatus { program: program.to_path_buf(), ..Default::default() }),
             conn: Mutex::new(None),
             turn: Mutex::new(Turn::default()),
             turn_cv: Condvar::new(),
-            loaded: Mutex::new(vec![]),
+            loaded,
             restarts: Mutex::new(vec![]),
             generation: Mutex::new(0),
-        });
+            reader: Mutex::new(None),
+            lanes: Mutex::new(vec![]),
+            routes: Mutex::new(Default::default()),
+            lane,
+        }
+    }
+
+    /// Start a helper and list its effects.
+    pub fn start(program: &Path) -> Result<(Arc<Helper>, Vec<RemoteEffect>, Vec<String>), String> {
+        let h = Arc::new(Helper::new(program, Default::default(), false));
         let (effects, errors) = {
             let _turn = h.take_turn()?;
             // A helper that crashes while listing its effects (one bad plug-in) is given a
@@ -265,9 +306,16 @@ impl Helper {
         let r = self.with_conn(|c| c.call(&Request::Load { path: path.to_string() }, load_timeout()));
         match r {
             Ok(Reply::Effects { effects, errors }) => {
-                let mut l = lock(&self.loaded);
-                if !l.iter().any(|p| p == path) {
-                    l.push(path.to_string());
+                {
+                    let mut l = lock(&self.loaded);
+                    if !l.iter().any(|p| p == path) {
+                        l.push(path.to_string());
+                    }
+                }
+                // (lanes load it when they start again; `loaded` is released first: a lane
+                // starting holds its connection and waits for it, and `stop` waits for that)
+                for lane in lock(&self.lanes).iter() {
+                    lane.stop();
                 }
                 Ok((effects, errors))
             }
@@ -277,11 +325,46 @@ impl Helper {
         }
     }
 
-    /// Stop the process (it starts again when next needed).
+    /// Stop the process and its lanes (they start again when next needed).
     pub fn stop(&self) {
         if let Some(c) = lock(&self.conn).take() {
             c.stop();
         }
+        *lock(&self.reader) = None;
+        for l in lock(&self.lanes).iter() {
+            l.stop();
+        }
+    }
+
+    /// The process that renders effect `instance`: for a helper that allows several processes,
+    /// instances are spread over up to [`max_processes`] of them as they first render, and stay
+    /// there. A thread already rendering through one of them (a nested render) stays on it, so
+    /// no two threads ever wait for each other's process.
+    fn lane_for(self: &Arc<Self>, instance: u64) -> Arc<Helper> {
+        let n = (lock(&self.info).processes as usize).min(max_processes());
+        if n <= 1 {
+            return self.clone();
+        }
+        let mut lanes = lock(&self.lanes);
+        let me = Some(std::thread::current().id());
+        if lock(&self.turn).owner == me {
+            return self.clone();
+        }
+        if let Some(l) = lanes.iter().find(|l| lock(&l.turn).owner == me) {
+            return l.clone();
+        }
+        let i = {
+            let mut r = lock(&self.routes);
+            let next = r.len() % n;
+            *r.entry(instance).or_insert(next)
+        };
+        if i == 0 {
+            return self.clone();
+        }
+        while lanes.len() < i {
+            lanes.push(Arc::new(Helper::new(&self.program, self.loaded.clone(), true)));
+        }
+        lanes[i - 1].clone()
     }
 
     fn take_turn(&self) -> Result<TurnGuard<'_>, String> {
@@ -472,12 +555,28 @@ impl Helper {
             *g = g.saturating_add(1);
             *g
         };
-        let mut c = Conn { child, input, written, rx, exchange, top: 0, last_used: Instant::now(), generation };
+        let mut c = Conn { child, input, written, rx, exchange, top: 0, reading: None, last_used: Instant::now(), generation };
         let frames = c.exchange.path().to_string_lossy().into_owned();
-        match c.call(&Request::Hello { version: PROTOCOL_VERSION, frames }, load_timeout()) {
-            Ok(Reply::Hello { version, name, helper_version, loads }) if version == PROTOCOL_VERSION => {
+        match c.call(
+            &Request::Hello {
+                version: PROTOCOL_VERSION,
+                frames,
+                // `gradient_params`: manifests may declare `gradient` parameters; `frame_bounds`: it
+                // honours `ignores_input` and the `bounds` of `done`
+                features: vec![
+                    "layer_transform".into(),
+                    "comp_camera".into(),
+                    "comp_camera_time".into(),
+                    "comp_lights".into(),
+                    "gradient_params".into(),
+                    "frame_bounds".into(),
+                ],
+            },
+            load_timeout(),
+        ) {
+            Ok(Reply::Hello { version, name, helper_version, loads, processes }) if version == PROTOCOL_VERSION => {
                 let mut i = lock(&self.info);
-                (i.name, i.version, i.loads) = (name, helper_version, loads);
+                (i.name, i.version, i.loads, i.processes) = (name, helper_version, loads, processes.unwrap_or(1));
             }
             Ok(Reply::Hello { version, .. }) => {
                 c.stop();
@@ -499,7 +598,7 @@ impl Helper {
         c.exchange.unlink();
         // After a restart the new process knows no effects yet: list them again (the first
         // start lists them in `Helper::start`), then load what the user loaded before.
-        if generation > 1 && !matches!(c.call(&Request::Describe, load_timeout()), Ok(Reply::Effects { .. })) {
+        if (generation > 1 || self.lane) && !matches!(c.call(&Request::Describe, load_timeout()), Ok(Reply::Effects { .. })) {
             c.stop();
             return Err("the restarted helper could not list its effects".into());
         }
@@ -525,15 +624,38 @@ impl Helper {
     /// Render one frame through the helper. Images live on a stack in the exchange file: the
     /// frame first, then whatever the helper asks for, freed again when the render ends (nested
     /// renders stack above).
-    fn render(&self, effect: &str, frame: &mut PluginFrame, params: &PluginParams, time: f64, host: &dyn PluginHost) -> Result<(), Failure> {
-        let _turn = self.take_turn().map_err(Failure::Refused)?;
+    /// Render `effect` on `frame` in place. `ignores_input`: the effect makes a new image, so the
+    /// frame isn't copied into the exchange file first.
+    #[allow(clippy::too_many_arguments)]
+    fn render(
+        &self,
+        effect: &str,
+        frame: &mut PluginFrame,
+        params: &PluginParams,
+        time: f64,
+        host: &dyn PluginHost,
+        ignores_input: bool,
+        clear: bool,
+    ) -> Result<Option<[u32; 4]>, Failure> {
+        // What the request needs from the host is gathered before taking the helper (the
+        // parameter digest hashes the instance's whole parameter data).
+        let (instance, frame_rate, frame_range, params_digest) = (host.instance_key(), host.frame_rate(), host.frame_range(), host.params_digest());
+        let (flat, texts) = (params.flat.to_vec(), params.texts.to_vec());
+        let turn = self.take_turn().map_err(Failure::Refused)?;
+        let top_level = lock(&self.turn).depth == 1;
         // The generation of the process this render runs on: taken inside `with_conn`, which
         // may start the process (after a crash or `stop`), so it is never that of a dead one.
         let (at, base, started) = self.with_conn(|c| {
+            // (a render not nested in another starts at the bottom: `alloc` steps over a result
+            // being read, so the file holds about two frames however renders overlap)
+            if top_level {
+                c.top = 0;
+            }
             let base = c.top;
             let at = c.alloc(frame.width, frame.height, frame.origin, frame.scale).map_err(Failure::Refused)?;
             // Nothing is sent yet, so the helper is fine (a full disk, say): not its fault.
-            if let Err(e) = c.exchange.write(&at, frame.pixels) {
+            let put = if ignores_input { c.exchange.reserve(&at) } else { c.exchange.write(&at, frame.pixels) };
+            if let Err(e) = put {
                 c.top = base;
                 return Err(Failure::Refused(e));
             }
@@ -541,16 +663,42 @@ impl Helper {
         })?;
         let req = Request::Render(RenderRequest {
             effect: effect.to_string(),
-            instance: host.instance_key(),
+            instance,
             time,
             frame: at,
             layer_size: frame.layer_size,
-            flat: params.flat.to_vec(),
-            texts: params.texts.to_vec(),
-            frame_rate: host.frame_rate(),
-            frame_range: host.frame_range(),
+            flat,
+            texts,
+            frame_rate,
+            frame_range,
+            params_digest,
         });
-        let result = self.converse(req, frame, &at, host, started);
+        let done = self.converse(req, host, started);
+        let mut read = |x: &mut Exchange, bounds: Option<[u32; 4]>| {
+            match bounds {
+                None => x.read_into(&at, frame.pixels),
+                Some(b) => x.read_bounds_into(&at, frame.pixels, b, clear),
+            }
+            .map(|_| bounds)
+        };
+        // A top-level render reads its result back after letting the helper go, so the next
+        // render runs meanwhile (above it in the file, which keeps at most two frames: one read
+        // at a time; more measured no faster).
+        if let Ok(bounds) = done
+            && top_level
+            && let Some(mut x) = self.reader(started, &at)
+        {
+            drop(turn);
+            let r = read(&mut x, bounds);
+            *lock(&self.reader) = Some((started, x));
+            if let Some(c) = lock(&self.conn).as_mut()
+                && c.generation == started
+            {
+                c.reading = None;
+            }
+            return r.map_err(Failure::Broken);
+        }
+        let result = done.and_then(|bounds| self.with_running(started, |c| read(&mut c.exchange, bounds).map_err(Failure::Broken)));
         // Free this render's images (if the same process is still running).
         if let Some(c) = lock(&self.conn).as_mut()
             && c.generation == started
@@ -560,18 +708,37 @@ impl Helper {
         result
     }
 
-    fn converse(&self, req: Request, frame: &mut PluginFrame, at: &ImageRef, host: &dyn PluginHost, started: u64) -> Result<(), Failure> {
+    /// Handles for reading process `started`'s exchange file outside the turn, marking it read
+    /// ([`Conn::reading`]); `None` while another result is being read (or the process stopped).
+    fn reader(&self, started: u64, at: &ImageRef) -> Option<Exchange> {
+        let range = at.offset..at.offset.saturating_add(at.bytes()?);
+        let mut g = lock(&self.conn);
+        let c = g.as_mut().filter(|c| c.generation == started && c.reading.is_none())?;
+        let x = match lock(&self.reader).take() {
+            Some((g, x)) if g == started => x,
+            _ => c.exchange.reader().ok()?,
+        };
+        c.reading = Some(range);
+        Some(x)
+    }
+
+    /// Talk the render through to the helper's `done` (its bounds, if any).
+    fn converse(&self, req: Request, host: &dyn PluginHost, started: u64) -> Result<Option<[u32; 4]>, Failure> {
         let mut next = req;
         loop {
             let reply = self.with_running(started, |c| c.call(&next, render_timeout()))?;
             next = match reply {
-                Reply::Done => return self.with_running(started, |c| c.exchange.read_into(at, frame.pixels).map_err(Failure::Broken)),
+                Reply::Done { bounds } => return Ok(bounds),
                 Reply::Error { message } => return Err(Failure::Refused(message)),
                 // Host callbacks run without holding the process, so they may render through
                 // this helper again (on this thread: the turn is re-entered).
                 Reply::InputAt { time } => self.send_image(host.input_at(time), started)?,
                 Reply::LayerInput { param, time } => self.send_image(host.layer_input(&param, time), started)?,
                 Reply::ParamsAt { time } => Request::Params { values: host.params_at(time) },
+                Reply::LayerTransform { param, time } => Request::Transform { transform: host.layer_transform(&param, time) },
+                Reply::CompCamera { time: None } => Request::Camera { camera: host.comp_camera() },
+                Reply::CompCamera { time: Some(t) } => Request::Camera { camera: host.comp_camera_at(t) },
+                Reply::CompLights { time } => Request::Lights { lights: host.comp_lights(time) },
                 other => return Err(Failure::Broken(format!("unexpected reply during a render: {other:?}"))),
             };
         }
@@ -610,11 +777,13 @@ pub struct HelperEffect {
     helper: Arc<Helper>,
     manifest: PluginManifest,
     padding: bool,
+    time_varying: bool,
+    ignores_input: bool,
 }
 
 impl HelperEffect {
     pub fn new(helper: Arc<Helper>, remote: RemoteEffect) -> HelperEffect {
-        HelperEffect { helper, manifest: remote.manifest, padding: remote.padding }
+        HelperEffect { helper, manifest: remote.manifest, padding: remote.padding, time_varying: remote.time_varying, ignores_input: remote.ignores_input }
     }
 }
 
@@ -652,11 +821,25 @@ impl EffectPlugin for HelperEffect {
         format!("helper: {}", self.helper.program.display())
     }
 
+    fn reads_other_times(&self) -> bool {
+        self.time_varying
+    }
+
+    // A render writes the frame only once the helper is done, reading its result back (only a
+    // read that fails halfway leaves part of it written).
+    fn untouched_on_error(&self) -> bool {
+        true
+    }
+
+    fn ignores_input(&self) -> bool {
+        self.ignores_input
+    }
+
     fn padding(&self, params: &PluginParams, time: f64, scale: f64, layer_size: [f64; 2], instance_key: u64) -> u32 {
         if !self.padding || blocklist::is_blocked(&self.manifest.id) {
             return 0;
         }
-        match self.helper.padding(&self.manifest.id, params, time, scale, layer_size, instance_key) {
+        match self.helper.lane_for(instance_key).padding(&self.manifest.id, params, time, scale, layer_size, instance_key) {
             Ok(p) => p,
             Err(e) => {
                 log::warn!("helper effect `{}`: padding: {e}", self.manifest.id);
@@ -666,6 +849,18 @@ impl EffectPlugin for HelperEffect {
     }
 
     fn render_v2(&self, frame: &mut PluginFrame, params: &PluginParams, time: f64, host: &dyn PluginHost) -> Result<(), String> {
+        self.render_with(frame, params, time, host, true).map(|_| ())
+    }
+
+    fn render_bounded(&self, frame: &mut PluginFrame, params: &PluginParams, time: f64, host: &dyn PluginHost) -> Result<Option<[u32; 4]>, String> {
+        self.render_with(frame, params, time, host, false)
+    }
+}
+
+impl HelperEffect {
+    /// Render through the instance's helper process; `clear`: make the frame transparent outside
+    /// the bounds the helper gives (else only say what they are).
+    fn render_with(&self, frame: &mut PluginFrame, params: &PluginParams, time: f64, host: &dyn PluginHost, clear: bool) -> Result<Option<[u32; 4]>, String> {
         let id = &self.manifest.id;
         if blocklist::is_blocked(id) {
             return Err(format!(
@@ -674,13 +869,36 @@ impl EffectPlugin for HelperEffect {
                 blocklist::CRASH_LIMIT
             ));
         }
-        match self.helper.render(id, frame, params, time, host) {
-            Ok(()) => Ok(()),
+        match self.helper.lane_for(host.instance_key()).render(id, frame, params, time, host, self.ignores_input, clear) {
+            Ok(b) => Ok(b),
             Err(Failure::Refused(e)) => Err(e),
             Err(Failure::Broken(e)) => {
                 blocklist::note_crash(id);
                 Err(format!("{}: the effect helper failed: {e}", self.manifest.name))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::place;
+
+    /// Top-level renders that each start while the previous result is read back alternate
+    /// between two frame slots instead of climbing the file.
+    #[test]
+    fn overlapping_readbacks_stay_in_two_slots() {
+        let f = 1920 * 1080 * 16;
+        let mut reading = None;
+        let mut ends = vec![];
+        for _ in 0..6 {
+            let at = place(0, f, reading.as_ref());
+            ends.push(at + f);
+            reading = Some(at..at + f);
+        }
+        assert_eq!(ends, [f, 2 * f, f, 2 * f, f, 2 * f]);
+        // (an image that fits below the one being read stays there; one that doesn't goes above)
+        assert_eq!(place(0, 64, Some(&(128..256))), 0);
+        assert_eq!(place(100, 64, Some(&(128..250))), 256);
     }
 }

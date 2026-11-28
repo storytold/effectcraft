@@ -81,6 +81,12 @@ pub struct RenderRequest {
     /// The layer's source range in layer-time seconds, when it has one.
     #[serde(default)]
     pub frame_range: Option<(f64, f64)>,
+    /// A digest of the instance's parameter data, absent when a parameter has an expression
+    /// ([`effectcraft_effects::EffectHost::params_digest`]): the same digest as the instance's
+    /// last render means every parameter has the same value at every time as then, so a
+    /// simulation can skip re-reading its history with `params_at`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub params_digest: Option<u64>,
 }
 
 /// EffectCraft → helper.
@@ -88,7 +94,17 @@ pub struct RenderRequest {
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Request {
     /// First message: the protocol version and the frame exchange file to open (read + write).
-    Hello { version: u32, frames: String },
+    /// `features` lists optional callbacks this host answers (`"layer_transform"`:
+    /// [`Reply::LayerTransform`]), optional manifest kinds it accepts (`"gradient_params"`:
+    /// `gradient` parameters, sent as JSON among the texts) and `"frame_bounds"` (it honours
+    /// [`RemoteEffect::ignores_input`] and the `bounds` of [`Reply::Done`]); hosts without the
+    /// field have none.
+    Hello {
+        version: u32,
+        frames: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        features: Vec<String>,
+    },
     /// List the effects the helper offers → [`Reply::Effects`].
     Describe,
     /// Load more effects from a file or folder the user picked → [`Reply::Effects`] (only the
@@ -103,6 +119,12 @@ pub enum Request {
     Image { image: Option<ImageRef> },
     /// The answer to [`Reply::ParamsAt`]: flattened values and texts, or `None`.
     Params { values: Option<(Vec<f64>, Vec<String>)> },
+    /// The answer to [`Reply::LayerTransform`], or `None`.
+    Transform { transform: Option<effectcraft_effects::plugin::LayerTransform> },
+    /// The answer to [`Reply::CompCamera`], or `None`.
+    Camera { camera: Option<effectcraft_effects::plugin::CompCamera> },
+    /// The answer to [`Reply::CompLights`], or `None`.
+    Lights { lights: Option<Vec<effectcraft_effects::plugin::CompLightInfo>> },
     /// The effect instance is gone; the helper may free what it keeps for it. No reply.
     Destroy { instance: u64 },
     /// Heartbeat → [`Reply::Pong`].
@@ -119,6 +141,17 @@ pub struct RemoteEffect {
     /// Whether to ask [`Request::Padding`] before every render (otherwise no padding).
     #[serde(default)]
     pub padding: bool,
+    /// Whether the effect changes with time on its own or reads other times (a simulation, an
+    /// echo): the render cache then keys its layer on the layer time, so a static layer still
+    /// renders every frame. Absent means false, as before; hosts without the field ignore it.
+    #[serde(default)]
+    pub time_varying: bool,
+    /// Whether the effect never reads its input frame (it makes a new image, as a particle
+    /// system does): EffectCraft then doesn't copy the layer into the exchange file, so the
+    /// helper must write every pixel it returns (the whole frame, or everything inside the
+    /// `bounds` of [`Reply::Done`]). Absent means false; hosts without the field always copy.
+    #[serde(default)]
+    pub ignores_input: bool,
 }
 
 /// Helper → EffectCraft.
@@ -134,6 +167,11 @@ pub enum Reply {
         helper_version: String,
         #[serde(default)]
         loads: Vec<String>,
+        /// How many processes of the helper EffectCraft may run at once (absent: one). Each
+        /// effect instance renders on one of them, but any may get it (a nested render stays on
+        /// the process its thread holds), so a process may keep per-instance state only as a cache.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        processes: Option<u32>,
     },
     Effects {
         effects: Vec<RemoteEffect>,
@@ -156,8 +194,33 @@ pub enum Reply {
     ParamsAt {
         time: f64,
     },
-    /// The render finished; the result is in the request's frame.
-    Done,
+    /// During a render: where the layer chosen in a layer parameter sits at a layer time,
+    /// relative to the effect's layer (only when the host listed `"layer_transform"` in
+    /// [`Request::Hello`]) → [`Request::Transform`].
+    LayerTransform {
+        param: String,
+        time: f64,
+    },
+    /// During a render: the composition's camera as the effect's layer sees it (only when the
+    /// host listed `"comp_camera"` in [`Request::Hello`]) → [`Request::Camera`]; at another
+    /// layer time `time` when the host also listed `"comp_camera_time"` (camera motion blur).
+    CompCamera {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        time: Option<f64>,
+    },
+    /// During a render: the composition's lights at a layer time as the effect's layer sees them
+    /// (only when the host listed `"comp_lights"` in [`Request::Hello`]) → [`Request::Lights`].
+    CompLights {
+        time: f64,
+    },
+    /// The render finished; the result is in the request's frame. `bounds` (`[x0, y0, x1, y1]`,
+    /// pixels of that frame, end exclusive): only that rectangle was written and the result is
+    /// transparent outside it, so EffectCraft reads back just the rectangle. Absent: the whole
+    /// frame (hosts without the field always read it all).
+    Done {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bounds: Option<[u32; 4]>,
+    },
     /// The request failed (the helper keeps running).
     Error {
         message: String,
@@ -196,6 +259,67 @@ mod tests {
         assert_eq!(parse_reply(&format!("loading...{line}")).unwrap().unwrap(), r);
         assert!(parse_reply("plug-in chatter").is_none());
         assert!(parse_reply("@ec-helper {nope").unwrap().is_err());
+    }
+
+    /// `features` and the layer transform callback are optional: an older host's hello still
+    /// parses, and a helper that never asks is unaffected.
+    #[test]
+    fn hello_features_and_layer_transform() {
+        let old: Request = serde_json::from_str(r#"{"op":"hello","version":1,"frames":"f"}"#).unwrap();
+        assert_eq!(old, Request::Hello { version: 1, frames: "f".into(), features: vec![] });
+        let new = Request::Hello { version: 1, frames: "f".into(), features: vec!["layer_transform".into()] };
+        assert_eq!(serde_json::from_str::<Request>(&request_line(&new).unwrap()).unwrap(), new);
+        // `done` with or without bounds; an effect without `ignores_input` copies its input
+        let done = parse_reply(r#"@ec-helper {"op":"done"}"#).unwrap().unwrap();
+        assert_eq!(done, Reply::Done { bounds: None });
+        let b = Reply::Done { bounds: Some([1, 2, 30, 40]) };
+        assert_eq!(parse_reply(&reply_line(&b).unwrap()).unwrap().unwrap(), b);
+        let e: RemoteEffect = serde_json::from_str(r#"{"manifest":{"api":2,"id":"a.b","name":"B","category":"C"}}"#).unwrap();
+        assert!(!e.ignores_input && !e.time_varying);
+        let r = Reply::LayerTransform { param: "emitter_layer".into(), time: 0.5 };
+        assert_eq!(parse_reply(&reply_line(&r).unwrap()).unwrap().unwrap(), r);
+        let c = Request::Camera {
+            camera: Some(effectcraft_effects::plugin::CompCamera {
+                matrix: [[1.0, 0.0, 960.0, 0.0], [0.0, 1.0, 540.0, 0.0], [0.0, 0.0, 1.0, 2666.0]],
+                zoom: 2666.0,
+                camera_layer: true,
+                dof: Some([2666.0, 200.0, 1.0]),
+            }),
+        };
+        assert_eq!(serde_json::from_str::<Request>(&request_line(&c).unwrap()).unwrap(), c);
+        // a camera without depth of field leaves `dof` out, and older hosts' replies still parse
+        let off = r#"{"op":"camera","camera":{"matrix":[[1,0,0,0],[0,1,0,0],[0,0,1,1]],"zoom":1.0,"camera_layer":false}}"#;
+        let Request::Camera { camera: Some(cam) } = serde_json::from_str::<Request>(off).unwrap() else { panic!("camera") };
+        assert_eq!(cam.dof, None);
+        assert!(!request_line(&Request::Camera { camera: Some(cam) }).unwrap().contains("dof"));
+        assert_eq!(parse_reply(&reply_line(&Reply::CompCamera { time: None }).unwrap()).unwrap().unwrap(), Reply::CompCamera { time: None });
+        // an older helper's plain request still parses
+        assert_eq!(serde_json::from_str::<Reply>(r#"{"op":"comp_camera"}"#).unwrap(), Reply::CompCamera { time: None });
+        let at = Reply::CompCamera { time: Some(0.25) };
+        assert_eq!(parse_reply(&reply_line(&at).unwrap()).unwrap().unwrap(), at);
+        let l = Reply::CompLights { time: 0.5 };
+        assert_eq!(parse_reply(&reply_line(&l).unwrap()).unwrap().unwrap(), l);
+        let lights = Request::Lights {
+            lights: Some(vec![effectcraft_effects::plugin::CompLightInfo {
+                name: "Emitter".into(),
+                kind: 2,
+                pos: [600.0, 540.0, 0.0],
+                dir: [0.0, 0.0, 1.0],
+                color: [1.0, 0.0, 0.0],
+                intensity: 1.0,
+                cone: 90.0,
+                feather: 0.5,
+            }]),
+        };
+        assert_eq!(serde_json::from_str::<Request>(&request_line(&lights).unwrap()).unwrap(), lights);
+        let t = Request::Transform {
+            transform: Some(effectcraft_effects::plugin::LayerTransform {
+                matrix: [[1.0, 0.0, 0.0, 2.0], [0.0, 1.0, 0.0, 3.0], [0.0, 0.0, 1.0, 0.0]],
+                opacity: 0.5,
+                rect: [0.0, 0.0, 400.0, 200.0],
+            }),
+        };
+        assert_eq!(serde_json::from_str::<Request>(&request_line(&t).unwrap()).unwrap(), t);
     }
 
     #[test]
