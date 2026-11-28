@@ -329,8 +329,8 @@ fn transform_row(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter,
             if linkable {
                 // Constrain Proportions toggle, left of the values.
                 let lr = Rect::from_center_size(pos2(x - 12.0, cy), vec2(12.0, 12.0));
-                let resp = ui.interact(lr, egui::Id::unique(("props-link", uid)), Sense::click()).on_hover_text(tr("Constrain Proportions"));
-                icons::paint(p, lr, Icon::Link, if linked { t.accent } else { t.text_faint });
+                let resp = ui.interact(lr, egui::Id::unique(("props-link", uid)), Sense::click()).on_hover_text(icons::link_tooltip("Constrain Proportions", linked));
+                icons::paint(p, lr, icons::link_icon(linked), if linked { t.accent } else { t.text_faint });
                 app.auto.add(&format!("{base}.constrain"), lr, "Constrain Proportions");
                 if resp.clicked() && !app.ui.timeline.unlinked.remove(&uid) {
                     app.ui.timeline.unlinked.insert(uid);

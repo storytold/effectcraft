@@ -107,6 +107,8 @@ pub enum Icon {
     Minus,
     Close,
     Link,
+    /// A split link: the same capsule broken into two halves with a centre gap (#3878).
+    LinkBroken,
     MountainSmall,
     MountainLarge,
     Fullscreen,
@@ -239,6 +241,18 @@ const SPEAKER: Pieces = &[&[(2.0, 6.0), (5.5, 6.0), (5.5, 10.0), (2.0, 10.0)], &
 const SPARKLE: Pieces = &[&[(8.0, 1.5), (9.784, 8.0), (8.0, 14.5), (6.216, 8.0)], &[(1.5, 8.0), (8.0, 6.216), (14.5, 8.0), (8.0, 9.784)]];
 #[cfg(test)]
 const CONCAVE: [Pieces; 3] = [SELECTION_ARROW, SPEAKER, SPARKLE];
+
+/// Icon for a link toggle (Constrain Proportions / Link Channels): closed capsule when linked,
+/// split capsule when unlinked (#3878).
+pub fn link_icon(linked: bool) -> Icon {
+    if linked { Icon::Link } else { Icon::LinkBroken }
+}
+
+/// Tooltip for a link toggle: preserves the translated base label (e.g. `"Constrain Proportions"`
+/// across all locale catalogs) while showing the current linked/unlinked state (#3878).
+pub fn link_tooltip(label: &str, linked: bool) -> String {
+    format!("{}: {}", crate::i18n::tr(label), crate::i18n::tr(if linked { "linked" } else { "unlinked" }))
+}
 
 /// Paint `icon` centred in `rect`.
 pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
@@ -649,6 +663,17 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             pen.line(&[(8.0, 5.0), (10.5, 5.0)]);
             pen.line(&[(8.0, 11.0), (10.5, 11.0)]);
         }
+        LinkBroken => {
+            // Same capsule as `Link`, split into two halves with a ~16 % centre gap
+            // (2.6 units across x = 6.7..9.3 out of the 16-unit grid) so linked and unlinked
+            // states differ by silhouette, not tint alone (#3878).
+            pen.arc(4.8, 8.0, 3.0, 90.0, 270.0);
+            pen.line(&[(4.8, 5.0), (6.7, 5.0)]);
+            pen.line(&[(4.8, 11.0), (6.7, 11.0)]);
+            pen.arc(11.2, 8.0, 3.0, -90.0, 90.0);
+            pen.line(&[(9.3, 5.0), (11.2, 5.0)]);
+            pen.line(&[(9.3, 11.0), (11.2, 11.0)]);
+        }
         MountainSmall => pen.fill(&[(4.0, 12.0), (8.0, 7.0), (12.0, 12.0)]),
         MountainLarge => {
             pen.fill(&[(1.0, 13.0), (7.0, 4.0), (13.0, 13.0)]);
@@ -849,5 +874,46 @@ mod tests {
                 assert!(p.stroke.width <= 0.5 && p.stroke.color == egui::epaint::ColorMode::Solid(fill), "{:?}", p.stroke);
             }
         }
+    }
+
+    /// #3878: `Icon::LinkBroken` splits the capsule cleanly across the vertical centreline, so
+    /// linked and unlinked states have distinct silhouettes rather than differing only in tint.
+    #[test]
+    fn link_broken_has_centre_gap_while_link_bridges_centre() {
+        let ctx = egui::Context::default();
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(16.0, 16.0));
+        let capture = |icon: super::Icon| {
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+                let mut painter = ui.painter().clone();
+                painter.set_clip_rect(rect);
+                super::paint(&painter, rect, icon, egui::Color32::WHITE);
+            });
+            out.textures_delta.clear();
+            out.shapes.into_iter().map(|c| c.shape).collect::<Vec<_>>()
+        };
+        let crosses_x = |shapes: &[egui::Shape], x: f32| {
+            shapes.iter().any(|s| {
+                let b = s.visual_bounding_rect();
+                b.min.x <= x && b.max.x >= x
+            })
+        };
+        let linked = capture(super::Icon::Link);
+        let broken = capture(super::Icon::LinkBroken);
+        assert!(!linked.is_empty() && !broken.is_empty());
+        assert!(crosses_x(&linked, 8.0), "Icon::Link should bridge the centreline x=8");
+        assert!(!crosses_x(&broken, 8.0), "Icon::LinkBroken should leave a centre gap around x=8");
+    }
+
+    #[test]
+    fn link_tooltip_preserves_translated_base_label() {
+        crate::i18n::set_current("zh-hans");
+        let linked = super::link_tooltip("Constrain Proportions", true);
+        let unlinked = super::link_tooltip("Constrain Proportions", false);
+        crate::i18n::set_current("en");
+        assert!(linked.starts_with("约束比例:"), "got {linked}");
+        assert!(unlinked.starts_with("约束比例:"), "got {unlinked}");
+        assert_ne!(linked, unlinked);
+        assert_eq!(super::link_tooltip("Constrain Proportions", true), "Constrain Proportions: linked");
+        assert_eq!(super::link_tooltip("Constrain Proportions", false), "Constrain Proportions: unlinked");
     }
 }
