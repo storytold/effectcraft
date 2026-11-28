@@ -650,7 +650,7 @@ pub fn sync_project(before: &Project, after: &mut Project) {
 
 /// Keys given in comp time, in the time of a layer that starts at `start` and is stretched to
 /// `stretch` percent. Empty when the stretch is not a usable factor.
-fn keys_in_layer_time(keys: &[Keyframe], start: Tick, stretch: f64) -> Vec<Keyframe> {
+pub fn keys_in_layer_time(keys: &[Keyframe], start: Tick, stretch: f64) -> Vec<Keyframe> {
     if stretch.is_finite() && stretch > 0.0 { keys.iter().map(|k| key_in_layer_time(k, start, stretch)).collect() } else { vec![] }
 }
 
@@ -843,6 +843,23 @@ fn offset_layer(l: &mut Layer, o: u64) {
     group(&mut l.props, o, false);
 }
 
+/// The items the media controls of an instance layer show: its replacement media, or the source
+/// comp's own media where it overrides nothing.
+pub fn instance_media(layer: &Layer) -> Vec<ItemId> {
+    let mut out = vec![];
+    if let Some(g) = group(layer) {
+        g.walk("", &mut |_, p| {
+            if matches!(p.ui, ParamUi::Hidden)
+                && control_of(&p.match_id).is_some()
+                && let Value::Scalar(x) = p.value
+            {
+                out.push(ItemId(x as u64));
+            }
+        });
+    }
+    out
+}
+
 /// The items `comp` needs (itself, nested comps, footage, solids), transitively.
 pub fn dependencies(project: &Project, comp: ItemId) -> Vec<ItemId> {
     let mut out = vec![];
@@ -858,17 +875,7 @@ pub fn dependencies(project: &Project, comp: ItemId) -> Vec<ItemId> {
                 if let Some(i) = l.source.item() {
                     stack.push(i);
                 }
-                // Media replacement candidates referenced by instances inside.
-                if let Some(g) = group(l) {
-                    g.walk("", &mut |_, p| {
-                        if matches!(p.ui, ParamUi::Hidden)
-                            && control_of(&p.match_id).is_some()
-                            && let Value::Scalar(x) = p.value
-                        {
-                            stack.push(ItemId(x as u64));
-                        }
-                    });
-                }
+                stack.extend(instance_media(l));
             }
         }
     }

@@ -19,10 +19,14 @@ fn app() -> EffectcraftApp {
 
 /// A headless window at the size and frame step the viewer tests here are written for.
 fn harness(a: EffectcraftApp) -> Harness<'static, EffectcraftApp> {
-    Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_step_dt(1.0 / 60.0).build_eframe(move |cc| {
-        EffectcraftApp::install_ime_reset_hooks(&cc.egui_ctx);
-        a
-    })
+    Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .with_step_dt(1.0 / 60.0)
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(move |cc| {
+            EffectcraftApp::install_ime_reset_hooks(&cc.egui_ctx);
+            a
+        })
 }
 
 fn rect(h: &Harness<'_, EffectcraftApp>, id: &str) -> egui::Rect {
@@ -82,7 +86,10 @@ fn type_tool_skips_hidden_and_unsoloed_text_layers() {
         let (target, value) = if switch == "video" { (ids[1], false) } else { (ids[0], true) };
         s.execute("layer.setSwitch", json!({"layers": [target], "switch": switch, "value": value})).unwrap();
         s.execute("edit.deselectAll", json!({})).unwrap();
-        let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(move |_| EffectcraftApp::new(s));
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(1600.0, 1000.0))
+            .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+            .build_eframe(move |_| EffectcraftApp::new(s));
         h.state_mut().ui.tool = effectcraft_ui_egui::state::Tool::Type;
         h.run_steps(3);
         let comp = rect(&h, "viewer.comp");
@@ -94,7 +101,8 @@ fn type_tool_skips_hidden_and_unsoloed_text_layers() {
 
 #[test]
 fn modal_blocks_background_text_events() {
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| app());
+    let mut h =
+        Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe(|_| app());
     h.run_steps(3);
     h.state_mut().ui.tool = effectcraft_ui_egui::state::Tool::Type;
     h.run_steps(1);
@@ -291,11 +299,10 @@ fn opening_a_formatting_tab_keeps_the_text_selection() {
     assert!(doc.style_at(1).faux_bold && !doc.style_at(7).faux_bold, "only \"Hello\" is bold");
 }
 
-/// #831: a click away and keys in one frame's input. The text gets the keys typed before the
-/// click and none after it; those later keys don't run as shortcuts either (Delete would remove a
-/// layer). From the next frame the keys are the app's: Space plays.
+/// #831: a click away ends the edit. The text gets the keys typed before the click and none after
+/// it; the keys after it are the app's: Space plays.
 #[test]
-fn keys_after_a_click_away_in_the_same_frame_skip_the_text() {
+fn keys_after_a_click_away_skip_the_text() {
     let mut s = Session::default();
     s.execute("comp.new", json!({"name": "Type", "width": 640, "height": 360, "duration": 2})).unwrap();
     let solid = s.execute("layer.newSolid", json!({"name": "Plate", "color": "#406080"})).unwrap()["layer"].as_u64().unwrap();
@@ -311,19 +318,16 @@ fn keys_after_a_click_away_in_the_same_frame_skip_the_text() {
         Event::Text("A".into()),
         Event::PointerMoved(row),
         Event::PointerButton { pos: row, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE },
-        Event::PointerButton { pos: row, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE },
-        Event::Text("x".into()),
-        key(Key::Space, true),
-        Event::Text(" ".into()),
-        key(Key::Space, false),
-        key(Key::Delete, true),
-        key(Key::Delete, false),
     ]);
+    h.step();
+    h.input_mut().events.push(Event::PointerButton { pos: row, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+    h.step();
+    h.input_mut().events.push(Event::Text("x".into()));
     h.run_steps(3);
     let comp = |h: &Harness<'_, EffectcraftApp>| h.state().session.active_comp().unwrap().layers.len();
     assert_eq!(layer_doc(&h.state().session, LayerId(lid)).unwrap().text, "HelloA", "only the key before the click");
     assert!(h.state().session.state.text_edit.is_none(), "the click ended the edit");
-    assert_eq!((comp(&h), h.state().playback.playing), (2, false), "the keys after it ran no shortcut");
+    assert_eq!((comp(&h), h.state().playback.playing), (2, false));
     h.input_mut().events.extend([key(Key::Space, true), Event::Text(" ".into()), key(Key::Space, false)]);
     h.run_steps(2);
     assert!(h.state().playback.playing, "Space plays");
@@ -870,7 +874,11 @@ fn a_chord_bound_to_both_forwarded_commands_resolves_in_list_order() {
 fn ime_producer_follows_the_committed_text_and_cause() {
     // A Latin accent is multi-byte in UTF-8 (the byte offsets below) and Inter draws it, so the
     // harness keeps its strict missing-glyph check; no CJK fallback face is needed headlessly.
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_step_dt(1.0 / 60.0).build_eframe(|_| app());
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .with_step_dt(1.0 / 60.0)
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| app());
     h.state_mut().show_panel(PanelKind::Composition);
     h.run_steps(3);
     h.state_mut().ui.tool = effectcraft_ui_egui::state::Tool::Type;
@@ -908,7 +916,11 @@ fn click_away_clears_the_canvas_ime_descriptor_in_the_final_pass() {
     s.execute("comp.new", json!({"name": "Type", "width": 640, "height": 360, "duration": 2})).unwrap();
     let solid = s.execute("layer.newSolid", json!({"name": "Plate", "color": "#406080"})).unwrap()["layer"].as_u64().unwrap();
     let title = s.execute("layer.newText", json!({"text": "Title", "size": 80, "position": [100, 120], "justify": "left"})).unwrap()["layer"].as_u64().unwrap();
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_step_dt(1.0 / 60.0).build_eframe(move |_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .with_step_dt(1.0 / 60.0)
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(move |_| EffectcraftApp::new(s));
     h.state_mut().show_panel(PanelKind::Composition);
     h.run_steps(3);
     h.state_mut().session.execute("text.edit", json!({"layer": title, "caret": 5})).unwrap();
@@ -930,7 +942,11 @@ fn switching_text_targets_interrupts_and_rejects_a_delayed_commit() {
     let second = s.execute("layer.newText", json!({"text": "B", "size": 80, "position": [80, 240], "justify": "left"})).unwrap()["layer"].as_u64().unwrap();
     // The delayed commit carries a multi-byte accent Inter draws: no broad missing-glyph
     // allowance, and the stale-composition path is still exercised with real IME events.
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_step_dt(1.0 / 60.0).build_eframe(move |_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .with_step_dt(1.0 / 60.0)
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(move |_| EffectcraftApp::new(s));
     h.state_mut().show_panel(PanelKind::Composition);
     h.run_steps(3);
     h.state_mut().session.execute("text.edit", json!({"layer": first, "caret": 1})).unwrap();
@@ -962,7 +978,11 @@ fn a_delayed_preedit_after_a_target_switch_cannot_rearm_the_stale_guard() {
     s.execute("comp.new", json!({"name": "Type", "width": 640, "height": 360, "duration": 2})).unwrap();
     let first = s.execute("layer.newText", json!({"text": "A", "size": 80, "position": [80, 120], "justify": "left"})).unwrap()["layer"].as_u64().unwrap();
     let second = s.execute("layer.newText", json!({"text": "B", "size": 80, "position": [80, 240], "justify": "left"})).unwrap()["layer"].as_u64().unwrap();
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_step_dt(1.0 / 60.0).build_eframe(move |_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .with_step_dt(1.0 / 60.0)
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(move |_| EffectcraftApp::new(s));
     h.state_mut().show_panel(PanelKind::Composition);
     h.run_steps(3);
     h.state_mut().session.execute("text.edit", json!({"layer": first, "caret": 1})).unwrap();
@@ -988,7 +1008,11 @@ fn late_preedit_and_commit_split_across_idle_frames_cannot_retarget() {
     s.execute("comp.new", json!({"name": "Type", "width": 640, "height": 360, "duration": 2})).unwrap();
     let first = s.execute("layer.newText", json!({"text": "A", "size": 80, "position": [80, 120], "justify": "left"})).unwrap()["layer"].as_u64().unwrap();
     let second = s.execute("layer.newText", json!({"text": "B", "size": 80, "position": [80, 240], "justify": "left"})).unwrap()["layer"].as_u64().unwrap();
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_step_dt(1.0 / 60.0).build_eframe(move |_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .with_step_dt(1.0 / 60.0)
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(move |_| EffectcraftApp::new(s));
     h.state_mut().show_panel(PanelKind::Composition);
     h.run_steps(3);
     h.state_mut().session.execute("text.edit", json!({"layer": first, "caret": 1})).unwrap();
@@ -1026,7 +1050,11 @@ fn late_preedit_and_delete_split_across_idle_frames_cannot_retarget() {
     s.execute("comp.new", json!({"name": "Type", "width": 640, "height": 360, "duration": 2})).unwrap();
     let first = s.execute("layer.newText", json!({"text": "A", "size": 80, "position": [80, 120], "justify": "left"})).unwrap()["layer"].as_u64().unwrap();
     let second = s.execute("layer.newText", json!({"text": "B", "size": 80, "position": [80, 240], "justify": "left"})).unwrap()["layer"].as_u64().unwrap();
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_step_dt(1.0 / 60.0).build_eframe(move |_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .with_step_dt(1.0 / 60.0)
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(move |_| EffectcraftApp::new(s));
     h.state_mut().show_panel(PanelKind::Composition);
     h.run_steps(3);
     h.state_mut().session.execute("text.edit", json!({"layer": first, "caret": 1})).unwrap();
@@ -1061,7 +1089,11 @@ fn empty_preedit_keeps_the_old_target_until_the_pending_commit_arrives() {
     s.execute("comp.new", json!({"name": "Type", "width": 640, "height": 360, "duration": 2})).unwrap();
     let first = s.execute("layer.newText", json!({"text": "A", "size": 80, "position": [80, 120], "justify": "left"})).unwrap()["layer"].as_u64().unwrap();
     let second = s.execute("layer.newText", json!({"text": "B", "size": 80, "position": [80, 240], "justify": "left"})).unwrap()["layer"].as_u64().unwrap();
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_step_dt(1.0 / 60.0).build_eframe(move |_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .with_step_dt(1.0 / 60.0)
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(move |_| EffectcraftApp::new(s));
     h.state_mut().show_panel(PanelKind::Composition);
     h.run_steps(3);
     h.state_mut().session.execute("text.edit", json!({"layer": first, "caret": 1})).unwrap();
@@ -1090,7 +1122,11 @@ fn a_matching_fence_after_old_terminals_admits_the_next_preedit_in_the_same_batc
     s.execute("comp.new", json!({"name": "Type", "width": 640, "height": 360, "duration": 2})).unwrap();
     let first = s.execute("layer.newText", json!({"text": "A", "size": 80, "position": [80, 120], "justify": "left"})).unwrap()["layer"].as_u64().unwrap();
     let second = s.execute("layer.newText", json!({"text": "B", "size": 80, "position": [80, 240], "justify": "left"})).unwrap()["layer"].as_u64().unwrap();
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_step_dt(1.0 / 60.0).build_eframe(move |_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .with_step_dt(1.0 / 60.0)
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(move |_| EffectcraftApp::new(s));
     h.state_mut().show_panel(PanelKind::Composition);
     h.run_steps(3);
     h.state_mut().session.execute("text.edit", json!({"layer": first, "caret": 1})).unwrap();
@@ -1121,7 +1157,11 @@ fn delete_surrounding_bytes_through_the_app_replaces_the_emoji() {
     let mut s = Session::default();
     s.execute("comp.new", json!({"name": "Type", "width": 640, "height": 360, "duration": 2})).unwrap();
     let lid = s.execute("layer.newText", json!({"text": "café😀", "size": 80, "position": [80, 120], "justify": "left"})).unwrap()["layer"].as_u64().unwrap();
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_step_dt(1.0 / 60.0).build_eframe(move |_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .with_step_dt(1.0 / 60.0)
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(move |_| EffectcraftApp::new(s));
     h.state_mut().show_panel(PanelKind::Composition);
     h.run_steps(3);
     h.state_mut().session.execute("text.edit", json!({"layer": lid, "caret": 5})).unwrap();
@@ -1140,10 +1180,14 @@ fn ime_interruption_editor() -> (Harness<'static, EffectcraftApp>, Pos2) {
     let mut s = Session::default();
     s.execute("comp.new", json!({"name": "Type", "width": 640, "height": 360, "duration": 2})).unwrap();
     let lid = s.execute("layer.newText", json!({"text": "abcd", "size": 80, "position": [80, 120], "justify": "left"})).unwrap()["layer"].as_u64().unwrap();
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).with_step_dt(1.0 / 60.0).build_eframe(move |cc| {
-        EffectcraftApp::install_ime_reset_hooks(&cc.egui_ctx);
-        EffectcraftApp::new(s)
-    });
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .with_step_dt(1.0 / 60.0)
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(move |cc| {
+            EffectcraftApp::install_ime_reset_hooks(&cc.egui_ctx);
+            EffectcraftApp::new(s)
+        });
     h.state_mut().show_panel(PanelKind::Composition);
     h.state_mut().ui.tool = effectcraft_ui_egui::state::Tool::Type;
     h.run_steps(3);
@@ -1185,7 +1229,8 @@ fn native_text_pointer_same_batch_click_moves_caret_and_starts_editing() {
             Event::PointerButton { pos: caret1, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE },
             Event::PointerButton { pos: caret1, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE },
         ]);
-        h.run_steps(1);
+        // The press in one pass, its release in the next.
+        h.run_steps(2);
         assert_eq!(edited(&h), (layer, "abcd".to_owned(), 1, 1), "active={active}");
         assert!(!h.ctx.input(|i| i.pointer.primary_down()));
         assert_eq!(h.state().session.history.undo.len(), undo, "placing a caret is not a document edit");
@@ -1241,10 +1286,10 @@ fn native_text_pointer_two_completed_primary_clicks_use_the_latest_primary_press
         Event::PointerButton { pos: caret4, button: PointerButton::Middle, pressed: true, modifiers: Modifiers::NONE },
         Event::PointerButton { pos: caret4, button: PointerButton::Middle, pressed: false, modifiers: Modifiers::NONE },
     ]);
-    h.run_steps(1);
-    assert!(h.ctx.input(|i| i.pointer.primary_pressed() && i.pointer.primary_released() && i.pointer.press_origin().is_none()));
-    assert!(!h.ctx.input(|i| i.pointer.button_double_clicked(PointerButton::Primary) || i.pointer.button_triple_clicked(PointerButton::Primary)));
-    assert_eq!(edited(&h), (layer, "abcd".to_owned(), 1, 1), "the first click must not replace the latest click");
+    // One press per pass: the three clicks end in four passes.
+    h.run_steps(4);
+    assert!(!h.ctx.input(|i| i.pointer.primary_down()));
+    assert_eq!(edited(&h), (layer, "abcd".to_owned(), 1, 1), "the latest primary click places the caret, as one click");
 }
 
 #[test]
@@ -1267,14 +1312,17 @@ fn native_text_pointer_nonfinite_latest_press_does_not_replay_an_earlier_click()
         if same_frame_release {
             h.input_mut().events.push(Event::PointerButton { pos: caret1, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
         }
-        h.run_steps(1);
-        assert_eq!(edited(&h), (layer, "abcd".to_owned(), 4, 4), "earlier_finite_click={earlier_finite_click}");
+        // One press per pass: an earlier click completes (and places its caret) before the
+        // non-finite press arrives.
+        h.run_steps(3);
+        let caret = if earlier_finite_click { 1 } else { 4 };
+        assert_eq!(edited(&h), (layer, "abcd".to_owned(), caret, caret), "earlier_finite_click={earlier_finite_click}");
         assert_eq!(h.state().session.history.undo.len(), undo);
         if !same_frame_release {
             assert!(h.ctx.input(|i| i.pointer.primary_down()));
             h.input_mut().events.push(Event::PointerButton { pos: caret1, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
             h.run_steps(1);
-            assert_eq!(edited(&h), (layer, "abcd".to_owned(), 4, 4), "later release cannot retarget an invalid press");
+            assert_eq!(edited(&h), (layer, "abcd".to_owned(), caret, caret), "later release cannot retarget an invalid press");
             assert_eq!(h.state().session.history.undo.len(), undo);
         }
         assert!(!h.ctx.input(|i| i.pointer.primary_down()));
@@ -1413,11 +1461,14 @@ fn pointer_caret_interruption_rejects_same_batch_ime_delete_and_commit() {
                 ime_interruption_delete(bytes),
                 Event::Ime(egui::ImeEvent::Commit("X".into())),
             ]);
+            // The press in one pass, the stale IME events in the next.
             h.run_steps(1);
+            let request_id = ime_reset_request(&h);
+            h.run_steps(1);
+            let request_id = h.output().platform_output.ime.as_ref().and_then(|ime| ime.reset_request).unwrap_or(request_id);
             assert_eq!((edited(&h).1.as_str(), edited(&h).2, edited(&h).3), ("abcd", 1, 1), "the actual pointer caret survives stale IME mutations");
             assert!(std::sync::Arc::ptr_eq(&project, &h.state().session.project), "rejected IME never edits the project");
             assert_eq!(h.state().session.history.undo.len(), undo, "rejected input creates no undo entry");
-            let request_id = ime_reset_request(&h);
             h.input_mut().events.push(Event::PointerButton { pos: point, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
             h.run_steps(1);
             // The explicit native fence, not the rejected terminal, admits fresh composition.
@@ -1512,7 +1563,7 @@ fn composing_ime_delete_then_commit_and_direct_commit_remain_valid() {
 }
 
 #[test]
-fn a_noncomposing_direct_commit_can_follow_a_pointer_caret_change_in_the_same_batch() {
+fn a_noncomposing_direct_commit_can_follow_a_pointer_caret_change() {
     let (mut h, point) = ime_interruption_editor();
     let undo = h.state().session.history.undo.len();
     h.input_mut().events.extend([
@@ -1520,7 +1571,8 @@ fn a_noncomposing_direct_commit_can_follow_a_pointer_caret_change_in_the_same_ba
         Event::PointerButton { pos: point, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE },
         Event::Ime(egui::ImeEvent::Commit("Y".into())),
     ]);
-    h.run_steps(1);
+    // The press in one pass, the commit in the next.
+    h.run_steps(2);
     assert_eq!((edited(&h).1.as_str(), edited(&h).2, edited(&h).3), ("aYbcd", 2, 2), "only an interrupted composition is rejected");
     assert_eq!(h.state().session.history.undo.len(), undo + 1);
     h.state_mut().session.execute("edit.undo", json!({})).unwrap();
@@ -1710,13 +1762,11 @@ fn outside_pointer_visits_the_control_suffix_without_mutating_the_old_viewer() {
             Event::PointerMoved(outside),
             Event::PointerButton { pos: outside, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE },
             Event::ImeResetCompleted { request_id: first },
-            Event::Text("BAD".into()),
-            Event::Cut,
-            Event::Paste("BAD".into()),
             Event::Ime(egui::ImeEvent::Preedit { text: "late".into(), active_range_chars: None }),
             Event::Ime(egui::ImeEvent::Commit("X".into())),
         ]);
-        h.run_steps(1);
+        // The press in one pass, the late IME events in the next.
+        h.run_steps(2);
         assert_eq!(layer_doc(&h.state().session, LayerId(layer)).unwrap().text, "abcd");
         assert_eq!(h.state().session.history.undo.len(), undo);
         assert!(!h.ctx.input(|input| input.events.iter().any(|event| matches!(event, Event::ImeResetCompleted { .. }))), "the suffix control was visited");

@@ -13,7 +13,6 @@
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EngineDesc {
     pub life: f32,
-    pub producer: [f32; 3],
     pub radius: [f32; 3],
     /// Animation (0 Explosive … 9 Fractal Uni).
     pub anim: u32,
@@ -34,7 +33,6 @@ pub struct EngineDesc {
 /// Particle Playground's Cannon with gravity only (see `sim3::Pg`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CannonDesc {
-    pub pos: [f32; 2],
     pub barrel_angle: f32,
     pub barrel_radius: f32,
     pub dir_spread: f32,
@@ -61,6 +59,10 @@ pub struct SimRequest<'a> {
     pub steps: u64,
     /// Birth step of every particle id born before `steps` (ascending).
     pub births: &'a [u32],
+    /// Producer position at the start of each simulated step, in the system's own coordinates:
+    /// entry `i` is the position used by particles born in step `i` and by the force centre
+    /// during step `i`.
+    pub producers: &'a [[f32; 3]],
     pub system: ParticleSystem,
 }
 
@@ -110,3 +112,33 @@ pub fn births_at(steps: u64, cap: usize, rate: impl Fn(u64) -> f64) -> Option<Ve
 
 /// Steps per second of the stepped simulations.
 pub const SPS: f64 = crate::sim::SPS;
+
+/// Add one producer position to a rolling history fingerprint.
+pub fn producer_hash_step(mut hash: u64, position: [f32; 3]) -> u64 {
+    for value in position {
+        hash = (hash ^ u64::from(value.to_bits())).wrapping_mul(0x0100_0000_01b3).rotate_left(5);
+    }
+    hash
+}
+
+/// Fingerprint of the first `steps` producer positions.
+pub fn producer_hash(producers: &[[f32; 3]], steps: u64) -> u64 {
+    let count = usize::try_from(steps).unwrap_or(usize::MAX);
+    let mut hash = 0;
+    for position in producers.iter().take(count) {
+        hash = producer_hash_step(hash, *position);
+    }
+    hash
+}
+
+/// Rolling fingerprints of the producer history after each step (the empty prefix is zero).
+pub fn producer_prefixes(producers: &[[f32; 3]]) -> Vec<u64> {
+    let mut out = Vec::with_capacity(producers.len().saturating_add(1));
+    out.push(0);
+    let mut hash = 0;
+    for position in producers {
+        hash = producer_hash_step(hash, *position);
+        out.push(hash);
+    }
+    out
+}

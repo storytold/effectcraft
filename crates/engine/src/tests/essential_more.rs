@@ -306,8 +306,8 @@ fn instance_keys_stay_out_of_a_layer_that_blends_frames() {
     assert!(pr.keys.is_empty());
 }
 
-/// An override from a collapsed parent reaches the nested instance as a value only: the keys the
-/// nested instance property carries itself must not be copied onto its own target.
+/// A static override from a collapsed parent reaches the nested instance as a value only: the
+/// keys the nested instance property carries itself must not be copied onto its own target.
 #[test]
 fn collapsed_parent_override_replaces_the_nested_instance_keys() {
     let mut s = Session::default();
@@ -337,4 +337,110 @@ fn collapsed_parent_override_replaces_the_nested_instance_keys() {
     assert_eq!(over.len(), 1);
     assert!((over[0].value.as_f64() - 80.0).abs() < 1e-6, "value {:?}", over[0].value);
     assert!(over[0].keys.is_empty(), "the nested instance's own keys are stale");
+}
+
+/// Top → Mid → Inner, with a keyed Essential override on the Top instance. The Inner target is
+/// `target`; the Mid instance is `nested`. `time_remap` makes the nested source time differ from
+/// the Mid instance's layer time.
+fn collapsed_parent_scene(time_remap: bool) -> (Session, effectcraft_project::ItemId, effectcraft_project::ItemId, u64, u64, u64) {
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Inner", "width": 32, "height": 32, "frameRate": 30, "duration": 4})).unwrap();
+    let target = s.execute("layer.newSolid", json!({"name": "A", "color": "#ffffff"})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("essential.addProperty", json!({"layer": target, "path": "transform/opacity"})).unwrap();
+    s.execute("comp.new", json!({"name": "Mid", "width": 32, "height": 32, "frameRate": 30, "duration": 4})).unwrap();
+    let mid = s.active_comp_id().unwrap();
+    let inner = s.project.find_by_name("Inner").unwrap().id;
+    let nested = s.execute("layer.addItem", json!({"item": inner.0, "time": 0.0})).unwrap()["layer"].as_u64().unwrap();
+    let nested_path = s.execute("essential.instance", json!({"layer": nested})).unwrap()["controls"][0]["path"].as_str().unwrap().to_string();
+    s.execute("prop.addKey", json!({"layer": nested, "path": nested_path, "time": 0.0, "value": 0.0})).unwrap();
+    s.execute("prop.addKey", json!({"layer": nested, "path": nested_path, "time": 1.0, "value": 100.0})).unwrap();
+    let ctl = s.execute("essential.addProperty", json!({"layer": nested, "path": nested_path})).unwrap()["controls"][0].as_u64().unwrap();
+    s.execute("layer.setSwitch", json!({"layers": [nested], "switch": "collapse", "value": true})).unwrap();
+    if time_remap {
+        s.execute("layer.enableTimeRemap", json!({"layers": [nested]})).unwrap();
+    }
+    s.execute("comp.new", json!({"name": "Top", "width": 32, "height": 32, "frameRate": 30, "duration": 4})).unwrap();
+    let top = s.active_comp_id().unwrap();
+    let inst = s.execute("layer.addItem", json!({"item": mid.0, "time": 0.0})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.setSwitch", json!({"layers": [inst], "switch": "collapse", "value": true})).unwrap();
+    let controls = s.execute("essential.instance", json!({"layer": inst})).unwrap()["controls"].clone();
+    let top_path = controls.as_array().unwrap().iter().find(|c| c["control"].as_u64() == Some(ctl)).unwrap()["path"].as_str().unwrap().to_string();
+    s.execute("prop.addKey", json!({"layer": inst, "path": top_path, "time": 0.0, "value": 10.0})).unwrap();
+    s.execute("prop.addKey", json!({"layer": inst, "path": top_path, "time": 1.0, "value": 90.0})).unwrap();
+    (s, top, inner, target, nested, inst)
+}
+
+/// A keyed override from a collapsed parent replaces the nested instance's own history with the
+/// parent's, so the nested target can still sample the producer at its birth times.
+#[test]
+fn a_collapsed_parent_keeps_its_override_history_for_the_nested_instance() {
+    use effectcraft_project::LayerId;
+
+    let (mut s, top, inner, target, nested, inst) = collapsed_parent_scene(false);
+    // The Inner target starts late and is stretched: the parent's source-time keys must be moved
+    // into this target's own layer time.
+    {
+        let layer = std::sync::Arc::make_mut(&mut s.project).comp_mut(inner).unwrap().layer_mut(LayerId(target)).unwrap();
+        layer.start_time = Tick::from_seconds_f64(0.5);
+        layer.stretch = 125.0;
+    }
+
+    let r = effectcraft_render::Renderer::new(&s.project, &*s.footage, crate::render::RenderOpts::default());
+    let ctx = effectcraft_render::EvalCtx::new(&s.project, top, s.project.comp(top).unwrap(), Tick::from_seconds_f64(0.25));
+    let layer = ctx.comp.layer(LayerId(inst)).unwrap();
+    let collapsed = r.collapsed(&ctx, layer).expect("the instance collapses");
+    let (_, nctx) = r.collapse_into(&ctx, layer, &collapsed, 1.0).expect("a nested context");
+    let nl = nctx.comp.layer(LayerId(nested)).unwrap();
+    let over = effectcraft_render::essential_overrides(&nctx, nl);
+    assert_eq!(over.len(), 1);
+    assert!((over[0].value.as_f64() - 30.0).abs() < 1e-6, "value {:?}", over[0].value);
+    assert_eq!(over[0].keys.len(), 2, "the parent's history reaches the nested target");
+    assert_eq!(over[0].keys[0].value, KV::Scalar(10.0));
+    assert_eq!(over[0].keys[1].value, KV::Scalar(90.0));
+
+    // The flattened path puts source times 0 and 1 at -0.4 and 0.4 in the target's layer time.
+    let flat = essential::with_overrides(&s.project, inner, &over).unwrap();
+    let flat_target = flat.comp(inner).unwrap().layer(LayerId(target)).unwrap();
+    let flat_prop = flat_target.props.prop("transform/opacity").unwrap();
+    assert_eq!(flat_prop.keys[0].time, Tick::from_seconds_f64(-0.4));
+    assert_eq!(flat_prop.keys[1].time, Tick::from_seconds_f64(0.4));
+
+    // The collapsed path reads the same values at those exact target-layer times.
+    let nested_collapsed = r.collapsed(&nctx, nl).expect("the nested instance collapses");
+    let (_, target_ctx) = r.collapse_into(&nctx, nl, &nested_collapsed, 1.0).expect("the target context");
+    let target_layer = target_ctx.comp.layer(LayerId(target)).unwrap();
+    let target_prop = target_layer.props.prop("transform/opacity").unwrap();
+    assert_eq!(target_ctx.value_at_layer_time(target_layer, target_prop, Tick::from_seconds_f64(-0.4)), KV::Scalar(10.0));
+    assert_eq!(target_ctx.value_at_layer_time(target_layer, target_prop, Tick::from_seconds_f64(0.4)), KV::Scalar(90.0));
+}
+
+/// A remapped nested source has a different time domain, so its inherited history stays out just
+/// as it does on the flattened path. Both paths use the same current value.
+#[test]
+fn a_remapped_nested_instance_drops_inherited_history_consistently() {
+    use effectcraft_project::LayerId;
+
+    let (s, top, inner, target, nested, inst) = collapsed_parent_scene(true);
+    let r = effectcraft_render::Renderer::new(&s.project, &*s.footage, crate::render::RenderOpts::default());
+    let ctx = effectcraft_render::EvalCtx::new(&s.project, top, s.project.comp(top).unwrap(), Tick::from_seconds_f64(0.25));
+    let layer = ctx.comp.layer(LayerId(inst)).unwrap();
+    let collapsed = r.collapsed(&ctx, layer).expect("the instance collapses");
+    let (_, nctx) = r.collapse_into(&ctx, layer, &collapsed, 1.0).expect("a nested context");
+    let nl = nctx.comp.layer(LayerId(nested)).unwrap();
+    let over = effectcraft_render::essential_overrides(&nctx, nl);
+    assert_eq!(over.len(), 1);
+    assert!(over[0].keys.is_empty(), "the remapped source has no usable inherited history");
+
+    let flat = essential::with_overrides(&s.project, inner, &over).unwrap();
+    let flat_target = flat.comp(inner).unwrap().layer(LayerId(target)).unwrap();
+    let flat_prop = flat_target.props.prop("transform/opacity").unwrap();
+    let flat_ctx = effectcraft_render::EvalCtx::new(&flat, inner, flat.comp(inner).unwrap(), Tick::from_seconds_f64(0.25));
+    let flat_value = flat_ctx.value(flat_target, flat_prop);
+
+    let nested_collapsed = r.collapsed(&nctx, nl).expect("the nested instance collapses");
+    let (_, target_ctx) = r.collapse_into(&nctx, nl, &nested_collapsed, 1.0).expect("the target context");
+    let target_layer = target_ctx.comp.layer(LayerId(target)).unwrap();
+    let target_prop = target_layer.props.prop("transform/opacity").unwrap();
+    let collapsed_value = target_ctx.value(target_layer, target_prop);
+    assert_eq!(collapsed_value, flat_value);
 }

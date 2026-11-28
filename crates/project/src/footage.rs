@@ -49,6 +49,10 @@ impl FieldOrder {
 /// by this list.
 pub const VIDEO_EXTENSIONS: &[&str] = &["mp4", "m4v", "mov", "mkv", "webm", "mxf", "avi"];
 
+/// The largest PhotoCraft bundle that is read for import, in bytes. The engine's
+/// `Services::read_pcraft` and `effectcraft_media`'s file reader both use it.
+pub const PCRAFT_MAX_INPUT: u64 = 512 << 20;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AlphaMode {
     #[default]

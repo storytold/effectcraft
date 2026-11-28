@@ -96,3 +96,6 @@ use `effectcraft_helper_host::serve::serve` with a `Provider` that lists `Effect
 `crates/helper-host/tests/it/main.rs` is a complete example and the protocol test that runs
 in `cargo xtask ci`. An unofficial OpenFX helper built this way lives in its own repository,
 [ec-extension-ofx](https://github.com/glumbis/ec-extension-ofx).
+
+Hardware video encoding through a helper is specified, as a proposal, in
+[video-helper-protocol.md](video-helper-protocol.md) ([RFC-0031](https://github.com/storytold/craft-contrib/blob/main/rfcs/0031-hardware-video-helper.md)).

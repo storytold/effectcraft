@@ -22,6 +22,7 @@ fn doc_text(app: &EffectcraftApp, lid: LayerId) -> String {
 
 fn feed(app: &mut EffectcraftApp, events: Vec<egui::Event>) {
     let ctx = egui::Context::default();
+    crate::framework::install_headless(&ctx);
     let raw = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(320.0, 180.0))), events, ..Default::default() };
     let mut out = ctx.run_ui(raw, |ui| keyboard(app, ui, egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(320.0, 180.0))));
     out.textures_delta.clear();
@@ -44,6 +45,7 @@ fn ending_an_edit_from_another_panel_clears_the_preedit() {
     let (mut app, lid) = editor("abc", 0, 0);
     let session = app.session.state.text_edit.as_ref().map_or(1, |e| e.session);
     let ctx = egui::Context::default();
+    crate::framework::install_headless(&ctx);
     let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
         let viewport = ui.ctx().viewport_id();
         let preedit = Preedit { owner: ImeOwner { layer: lid, session }, text: "x".into() };
@@ -143,9 +145,9 @@ impl ImePass {
 }
 
 /// One native floating window holding the Timeline's group and then the Viewer's.
-fn two_group_window() -> craft_ui::docking::Floating<PanelKind> {
-    let groups = vec![craft_ui::docking::Group::new(vec![PanelKind::Timeline], 0), craft_ui::docking::Group::new(vec![PanelKind::Viewer(1)], 0)];
-    craft_ui::docking::Floating::stack(groups, [0.0, 0.0, 320.0, 360.0]).expect("two groups make a window")
+fn two_group_window() -> craft_behavior::dock::Floating<PanelKind> {
+    let groups = vec![craft_behavior::dock::Group::new(vec![PanelKind::Timeline], 0), craft_behavior::dock::Group::new(vec![PanelKind::Viewer(1)], 0)];
+    craft_behavior::dock::Floating::stack(1, groups, egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(320.0, 360.0))).expect("two groups make a window")
 }
 
 impl ImePass {
@@ -155,7 +157,7 @@ impl ImePass {
     fn window(
         &mut self,
         app: &mut EffectcraftApp,
-        window: &craft_ui::docking::Floating<PanelKind>,
+        window: &craft_behavior::dock::Floating<PanelKind>,
         events: Vec<egui::Event>,
         viewer_first: bool,
         every: bool,
@@ -167,7 +169,7 @@ impl ImePass {
         let raw = egui::RawInput { viewport_id: viewport, viewports, screen_rect: Some(rect), events, ..Default::default() };
         let mut preedit = None;
         let mut out = ctx.run_ui(raw, |ui| {
-            let mut ime = crate::dock_ui::NativeIme::new(std::slice::from_ref(window), &[]);
+            let mut ime = crate::dock_ui::NativeIme::new(std::slice::from_ref(window), &[(PanelKind::Timeline, viewport)], &[]);
             let order = if viewer_first { [true, false] } else { [false, true] };
             for viewer in order {
                 if ime.begin_body(viewport) {
@@ -196,7 +198,7 @@ impl ImePass {
 #[test]
 fn native_window_with_a_group_before_the_viewer_keeps_the_composition() {
     let window = two_group_window();
-    let viewport = craft_ui::docking::DockArea::<PanelKind>::window_viewport(crate::dock_ui::area_id(), window.id);
+    let viewport = egui::ViewportId::from_hash_of(("native panel window", window.id));
     let preview = || egui::Event::Ime(egui::ImeEvent::Preedit { text: "é".into(), active_range_chars: None });
     for viewer_first in [false, true] {
         let (mut app, _) = editor("abcd", 4, 4);
@@ -221,12 +223,12 @@ fn native_window_with_a_group_before_the_viewer_keeps_the_composition() {
     assert_eq!(preedit, None);
     // A window that drew fewer bodies than its layout counts publishes after every body in
     // its next pass.
-    let mut ime = crate::dock_ui::NativeIme::new(std::slice::from_ref(&window), &[]);
+    let mut ime = crate::dock_ui::NativeIme::new(std::slice::from_ref(&window), &[(PanelKind::Timeline, viewport)], &[]);
     ime.begin_body(viewport);
     assert!(!ime.publishes(viewport, false));
     let unpublished = ime.unpublished();
     assert_eq!(unpublished, vec![viewport]);
-    let mut ime = crate::dock_ui::NativeIme::new(std::slice::from_ref(&window), &unpublished);
+    let mut ime = crate::dock_ui::NativeIme::new(std::slice::from_ref(&window), &[(PanelKind::Timeline, viewport)], &unpublished);
     ime.begin_body(viewport);
     assert!(ime.publishes(viewport, false));
 }
@@ -243,6 +245,7 @@ fn discarded_custom_request_then_home_rearms_the_identical_caret() {
     app.ui.tool = Tool::Type;
     app.ui.focused = PanelKind::Composition;
     let ctx = egui::Context::default();
+    crate::framework::install_headless(&ctx);
     install_hooks(&ctx);
     let mut frame = eframe::Frame::_new_kittest();
     let raw = || egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 800.0))), ..Default::default() };
@@ -313,6 +316,18 @@ fn discarded_custom_request_then_home_rearms_the_identical_caret() {
     });
     output.textures_delta.clear();
     assert_eq!(doc_text(&app, lid), "aがbcd");
+}
+
+#[test]
+fn a_retired_reset_request_is_asked_again() {
+    let (mut app, _) = editor("abcd", 4, 4);
+    let mut pass = ImePass::new(egui::ViewportId::ROOT);
+    let preview = || egui::Event::Ime(egui::ImeEvent::Preedit { text: "é".into(), active_range_chars: None });
+    pass.frame(&mut app, vec![preview()], true, false);
+    app.session.execute("text.setSelection", json!({"caret": 1})).unwrap();
+    let first = pass.frame(&mut app, vec![], true, false).unwrap().reset_request.unwrap();
+    let again = pass.frame(&mut app, vec![egui::Event::ImeResetRetired { request_id: first }], true, false).unwrap().reset_request;
+    assert!(again.is_some_and(|id| id != first), "a retired request is replaced by a new one");
 }
 
 #[test]
@@ -752,6 +767,7 @@ fn fonts_and_device_loss_all_exit_finalizers_suspend_without_allocating() {
     app.ui.focused = PanelKind::Composition;
     app.show_panel(PanelKind::Composition);
     let ctx = egui::Context::default();
+    crate::framework::install_headless(&ctx);
     install_hooks(&ctx);
     let frame = eframe::Frame::_new_kittest();
     let preview = || egui::Event::Ime(egui::ImeEvent::Preedit { text: "é".into(), active_range_chars: None });
@@ -768,19 +784,13 @@ fn fonts_and_device_loss_all_exit_finalizers_suspend_without_allocating() {
         .reset_request
         .expect("one request for the caret interruption");
 
-    // A real font-install pass draws nothing, but `draw` still reaches the finalizer.
+    // A font install asks egui for a discard pass in the same frame. The install pass draws nothing, and its
+    // all-exit finalizer retires the waiting guard without allocating; the discard pass draws with the fonts and
+    // publishes the one deferred request.
     app.styled = false;
     let fonts = draw_app_pass(&mut app, &ctx, &frame, vec![]);
-    assert!(!app.is_ready(), "the font-install pass cannot draw");
-    assert!(fonts.platform_output.ime.is_none(), "no custom descriptor is published");
-    let guard = ctx.data(|d| d.get_temp::<ResetGuard>(reset_id(egui::ViewportId::ROOT))).expect("the waiting guard");
-    assert!(guard.suspended && guard.request.is_none(), "the all-exit finalizer retired it without allocating");
-    let second = draw_app_pass(&mut app, &ctx, &frame, vec![])
-        .platform_output
-        .ime
-        .expect("returning to a drawing pass publishes the custom descriptor")
-        .reset_request
-        .expect("the deferred request");
+    assert!(app.is_ready(), "the discard pass after the font install draws");
+    let second = fonts.platform_output.ime.expect("the drawing discard pass publishes the custom descriptor").reset_request.expect("the deferred request");
     assert_ne!(first, second);
 
     // The device-loss early return is the other all-exit path. Preset the close bookkeeping

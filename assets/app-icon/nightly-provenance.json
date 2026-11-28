@@ -1,0 +1,66 @@
+{
+  "title": "EffectCraft nightly deep-background icons",
+  "author": "@skylartaylor",
+  "license": "MIT OR Apache-2.0",
+  "source_commit": "a12c11ee0245f46807ce3ddb62e0fee294760c8a",
+  "inputs": [
+    {
+      "path": "assets/app-icon/hicolor/256x256/apps/ai.storyteller.effectcraft.png",
+      "sha256": "186a1d869a4602ec86cd03f6e5e288ebbd328e0c3d8a17c205329829392f9add",
+      "purpose": "Windows/Linux native 256 master"
+    },
+    {
+      "path": "assets/app-icon/effectcraft-1024.png",
+      "sha256": "2f1eec28b8b2ae8397a5c3517a74d1771fdd521fdc9d673918be35834fd935ae",
+      "purpose": "native padded Mac 1024 master; not upscaled from 256"
+    },
+    {
+      "path": "assets/app-icon/effectcraft-macos-512.png",
+      "sha256": "e121c1c2d9a811a95f20d1f6a296c9df77c67fd8f3ff9263415bb890b0795fcd",
+      "purpose": "native padded Mac 512 master (runtime Dock icon)"
+    }
+  ],
+  "method": {
+    "kind": "original code-generated derivative of the project-owned icon",
+    "original_palette": {
+      "ink": "#0b0b0c",
+      "paper": "#efe9dc",
+      "background": "#e0368f"
+    },
+    "nightly_background": "#5e2443",
+    "transform": "Solve the background's weight per pixel from the colour's distance off the neutral ink/paper axis, then add only that weight times the background difference. Alpha, padding and the neutral foreground/detail RGBA are preserved. ICO/ICNS frames are scaled from the same recoloured masters (lanczos) and packed as PNG frames. No crescent, letter or badge.",
+    "generator": "inline Python (zlib PNG decode/encode, ffmpeg lanczos scaling, struct-packed ICO/ICNS)"
+  },
+  "outputs": {
+    "assets/app-icon/effectcraft-nightly.png": "0e904f9fa925ea32ab7dd7d65e9614007a145af8c3aba8e6c3dd3fc2975d4c79",
+    "assets/app-icon/effectcraft-nightly-1024.png": "29a6733d058b646f9e41057bd943ffe6f88bf134a4b62b91f49fda3013762707",
+    "assets/app-icon/effectcraft-nightly-macos-512.png": "c6539a3b0ad1c1e9b3da12af6e8d0fc80aadfd179531af3aa534e4113902e99d",
+    "assets/app-icon/effectcraft-nightly.ico": "bea4d2fc82774e1e4d1d56450a87bc86a0970dced2f326644f479b534e11cf09",
+    "assets/app-icon/effectcraft-nightly.icns": "80ddae503db8ffefaf8041494e04fdfdd7bd271e2e1e30b00d2dcd93c263af60"
+  },
+  "ico_frame_sizes": [
+    16,
+    20,
+    24,
+    32,
+    40,
+    48,
+    64,
+    128,
+    256
+  ],
+  "icns_png_slots": {
+    "icp4": 16,
+    "icp5": 32,
+    "ic11": 32,
+    "icp6": 64,
+    "ic12": 64,
+    "ic07": 128,
+    "ic08": 256,
+    "ic13": 256,
+    "ic09": 512,
+    "ic14": 512,
+    "ic10": 1024
+  },
+  "validation": "Input/output hashes, PNG dimensions and exact ICO/ICNS member sizes checked locally; foreground and alpha compared pixel-for-pixel against the source masters. Native Explorer/Finder/iconutil/app-package qualification is unrun (needs Windows and macOS)."
+}

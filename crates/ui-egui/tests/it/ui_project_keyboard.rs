@@ -23,7 +23,10 @@ fn harness() -> (Harness<'static, EffectcraftApp>, ItemId, ItemId, ItemId) {
     s.execute("project.move", json!({"items": [comp.0], "folder": folder.0})).unwrap();
     s.execute("project.move", json!({"items": [solid.0], "folder": null})).unwrap();
     s.execute("project.select", json!({"items": []})).unwrap();
-    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 1000.0)).build_eframe(|_| EffectcraftApp::new(s));
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1600.0, 1000.0))
+        .with_context_setup(effectcraft_ui_egui::framework::install_headless)
+        .build_eframe(|_| EffectcraftApp::new(s));
     h.run_steps(3);
     (h, folder, comp, solid)
 }

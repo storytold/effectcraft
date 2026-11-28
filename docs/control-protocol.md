@@ -156,8 +156,7 @@ frames and can be assigned through `shortcuts.set`.
 | `ui.screenshot` | `{path?, panel?, id?}` | `{path, width, height}`: a PNG of the window, or cropped to one panel or element. The panel or element rectangle is resolved when the capture is issued (after the UI settles), so it follows a panel that moved; a panel or id that is not on screen is retried and then reported, never replaced by a whole-window shot. |
 
 Element ids are stable, for example `tools.Selection`, `panel.Timeline`, `panel.tab.EffectControls`,
-`panel.tab.Timeline.<comp>` (one Timeline tab per open comp; `panel.tab.Timeline` is the shown
-one), `panel.tab.Viewer(<n>)` and `viewers.<n>` (View ▸ New Viewer's other Composition viewers;
+`panel.tab.Viewer(<n>)` and `viewers.<n>` (View ▸ New Viewer's other Composition viewers;
 `viewers.0` is the Composition panel while another viewer is active), `header.workspace.Animation`, `project.item.<id>` (a double-click opens the item, Enter
 renames it), `viewer.comp`, `viewer.handle.<layer>.<i>`,
 `timeline.layer.<id>.bar`, `timeline.layer.<id>.nestedMarker.<i>` (a precomp's comp markers), `timeline.layer.<id>.twirl`, `timeline.layer.<id>.row` (click selects,
@@ -197,6 +196,16 @@ step; `ui.set {viewer: {res}}` sets the active comp's, and `ui.inspect` reports 
 shape paths by uid), `keys.setSpatialTangents` (motion-path handles) and `keys.transform` (Graph
 Editor transform box, timeline Alt-drag scaling).
 
+Camera tools: the Tools bar's Orbit, Pan and Dolly slots hold After Effects' variants
+(`tools.Orbit|OrbitScene|OrbitTarget`, `tools.PanCamera|PanTarget`,
+`tools.Dolly|DollyToCursor|DollyTarget`; flyout rows `tools.select.<tool>`). `tool.orbit`,
+`tool.panCamera` and `tool.dolly` (1, 2, 3) select the variant the slot last showed, `tool.camera`
+(C) cycles the three slots, and `tool.<tool>` (e.g. `tool.OrbitScene`) selects one directly. A drag
+runs `camera.orbit` / `camera.pan` / `camera.dolly` with the tool's `mode` and the press point as
+`cursor`; the result's `pivot` is the world point used, sent back as `point` for the rest of the drag
+(null when the tool works about the camera's point of interest: the POI variants, and `camera.dolly`
+without `mode`).
+
 The MCP server's bridge mode (`effectcraft-cli mcp --bridge 9877`) is a thin client of this protocol;
 see [agents.md](agents.md).
 
@@ -231,12 +240,14 @@ takes a name, or as `{"Viewer":42}` and `{"ScriptPanel":77}` for viewers and Scr
   floating window holding Info. `Open` and `OpenAt` are refused: panels open through the panel
   commands (`window.panel`, `ui.panel.show`), which run the viewer and ScriptUI lifecycles.
   Closing runs them too. Pointer gestures dispatch through this command.
-- craft-ui's commands: `window.panel.move`, `.float`, `.dock`, `.activate`, `.close`,
-  `.closeGroup`, `.closeOthers`, `.minimize`, `.iconic`, `.window` and `.layout`, with the params
-  of craft-ui's `DockCommand` (`docs/ui-docking.md` in craft-libs). `window.panel.<Panel>`
+- The panel commands `window.panel.move {panel, anchor, zone?, before?, group?}`,
+  `.float {panel, x?, y?, width?, height?, group?, column?}`,
+  `.dock {panel, anchor?, zone?, before?, group?, column?, side?}`, `.activate`, `.close`,
+  `.closeGroup`, `.closeOthers`, `.minimize {minimized?}`, `.iconic {iconic?}`,
+  `.window {native?}` (as `window.panelWindow`) and `.layout {action}`. `window.panel.<Panel>`
   (`window.panel.Align`) opens and shows that panel. `window.panel.activate` on a closed panel
   reopens it where it was.
-- `ui.dock {operation, panel, …}` or `ui.dock {action}`: craft-ui's `ui.dock` operations
+- `ui.dock {operation, panel, …}` or `ui.dock {action}`: the operations
   (`open`, `close`, `activate`, `float {rect}`, `moveFloating {rect}`,
   `move {target, zone?, before?}`, `setStackOpen {open}`, `resizeStack {height}`,
   `resizeSplit {path, size}`; `rect` is `[x, y, width, height]`). It returns
@@ -260,13 +271,13 @@ windows stay in the main window. Keys pressed in a floating window that none of 
 run the main window's shortcuts, and files dropped on one import as on the main window. While a
 modal dialog is open, floating windows take no input.
 
-The automation ids of the docking chrome are `panel.tab.<Panel>`, `panel.drag.<Panel>` (a
-group's drag bar), `panel.tabs.more.<Panel>`, `panel.menu.<Panel>` (≡), `panel.header.<Panel>`
-(a stacked panel's open and close button), `panel.tab.<Panel>.lock` (viewer lock),
-`panel.tab.Timeline.<comp>` and `panel.tab.Timeline.close` (the Timeline's comp tabs),
-`panel.float.<n>.move`, `.close`, `.resize` and `.resize.<Edge>` for floating window `n`,
-`dock.gutter.<path>` for dividers (`a`/`b` per split level; a stack's gap below entry `i` adds
-`s<i>`) and `dock.corner.<outer>.<inner>` where two dividers meet.
+The automation ids of the docking chrome are `panel.tab.<Panel>`, `panel.tab.Timeline.<comp>`
+(the Timeline's comp tabs), `panel.drag.<Panel>` (a group's drag bar), `panel.menu.<Panel>` (≡),
+`panel.tab.<Panel>.lock` (viewer lock), `panel.float.<n>.move`, `.resize` and `.resize.<Edge>`
+for floating window `n`, `dock.gutter.<path>` for split dividers (`a`/`b` per split level),
+`dock.gutter.group.<Panel>` below a dock column's group and `dock.column.<Panel>` at a dock
+column's inner edge. The other parts (a tab's close button, "Close <tab>", and the tab
+overflow button, "More tabs") are found by their accessible names.
 
 Saved workspaces (`workspaces.json`, version 2) hold craft-ui `Workspace`s: the layout, the
 closed panels with where each goes back, the lock, and each floating window's desktop place. A
