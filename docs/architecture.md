@@ -511,6 +511,45 @@ curve at 2.4). Every OpenEXR file (sequences and ProEXR) names those primaries a
 `chromaticities` attribute (`ColorSpace::exr_chromaticities`; Rec. 709 / sRGB primaries for the default
 and for unmanaged projects, Rec. 2100 PQ and HLG as BT.2020, the ACES spaces with the ACES white). Unmanaged projects and Rec. 2100 PQ / HLG outputs never get the HDR step.
 
+<a id="project-ocio-config"></a>**Project OCIO config** (`crates/engine/src/settings/ocio_project.rs`). Project Settings ▸ Color ▸
+OCIO Config (`file.projectSettings {ocioConfig}`, saved as `ocio_config`, left out of files without
+one) names the `.ocio` file of an OCIO-managed project; none is the built-in ACES config. A relative path
+is taken from the project file's folder, as footage paths are (`doc_path`): when it is chosen, and
+when a project or New Project template that stores one is opened. It is then kept as the absolute
+path, so Save As to another folder still names the same file. An unsaved project has no folder, so
+a relative path is refused there until the project is saved (an absolute one works); a relative
+Default OCIO Config is never stored on a new project (with `OCIO` set, the variable's config still applies), with a notice. Sending the stored value back unchanged (the Project Settings form sends every field) keeps it as it is. A stored path the stored-path rules refuse
+(another computer's share, a URL) is kept but not read. A config is only read when the session's
+file services can see it: an agent confined to its automation roots (`--automation-read-root`)
+gets the built-in config for a config elsewhere, and while confined `ocioConfig` must be an
+absolute path inside the roots. A confined session also checks every file the config's FileTransforms
+could open (each search-path candidate of every FileTransform however deeply nested, before any is touched; a `..` in one counts as outside; the config text checked is the text loaded)
+and doesn't load a config that reaches outside the roots, saying which file. (The OCIO effects'
+own config and LUT parameters are not covered by this.) The active
+config is, in order: the `OCIO` environment variable (read once by the host into
+`Session::ocio_env`), the project's config, the built-in one. The variable overrides the project's
+choice without changing it, and the choice can't be changed while it is set, as Nuke's user guide
+describes ("Nuke always uses the configuration file specified there", with the project's config
+controls disabled; [Nuke 8.0, Using OCIO Config Files](https://learn.foundry.com/nuke/8.0/content/user_guide/configuring_nuke/using_ocio_config_files.html);
+later versions' pages don't restate it). It applies to OCIO-managed projects only (Color Engine
+OCIO), and new projects use the OCIO engine when it is set. Settings ▸ Project ▸ Default OCIO Config
+only seeds new projects. The config's `scene_linear` role (else `compositing_linear`, else
+`reference`) sets the working space, identified by its numbers: test colours go through the config
+from that space to its `aces_interchange` role (ACES2065-1 by OpenColorIO's definition) and are
+compared with each working space's own conversion, so ACES configs that name their spaces
+differently resolve alike. Only ACEScg and ACES2065-1 are accepted (the OCIO engine's working
+spaces); a config without `aces_interchange`, or whose `scene_linear` is another space (linear
+Rec. 709 in Blender's configs) is refused with the reason. A config that can't be read never stops a
+project opening: the built-in config stands in, and the open result and a notice say so. When
+the `OCIO` variable's config can't be used (unreadable or refused), every project has the same
+problem, so a session shows that notice once; each command result still reports it (`ocio.error`,
+`ocioNotice`, `notes`). Opening
+never rewrites a project's colour settings; a saved working space that differs from the active
+config's is reported. **Not applied yet:** the config's displays, views, view transforms, looks,
+input colour spaces and ACES output transforms are listed in the result's `ocio` object
+(`applied: false`) but the viewer and renders still use the built-in display pipeline and footage the
+built-in colour profiles, so an ACES 1.3 and an ACES 2.0 config render the same today.
+
 **Frame blending**: footage and precomp layers whose source time falls between source frames
 (rate conform, stretch, remap) blend the two neighbouring frames, by cross-fade (Frame Mix) or by
 hierarchical block-matching optical flow and a bidirectional warp (Pixel Motion,

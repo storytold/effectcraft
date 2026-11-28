@@ -241,6 +241,11 @@ pub struct ProjectSettings {
     /// working space (as in After Effects).
     #[serde(default = "gamma_22")]
     pub working_gamma: f64,
+    /// Color ▸ OCIO Config: the `.ocio` file an OCIO-managed project works with. `None` = the
+    /// built-in config. The `OCIO` environment variable overrides it without changing it (see
+    /// `effectcraft_engine::ocio_project`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ocio_config: Option<String>,
 }
 
 fn gamma_22() -> f64 {
@@ -270,6 +275,7 @@ impl Default for ProjectSettings {
             hdr: HdrMode::Clip,
             output_space: None,
             working_gamma: 2.2,
+            ocio_config: None,
         }
     }
 }

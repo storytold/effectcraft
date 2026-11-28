@@ -517,6 +517,8 @@ fn run_desktop(reporter: &crash_report::Shutdown, arguments: &[std::ffi::OsStrin
                 session.config = Some(std::sync::Arc::new(effectcraft_engine::config::DirConfig::new(dir)));
             }
             session.load_settings();
+            // The untitled project gets Settings ▸ Project ▸ Default OCIO Config (or $OCIO's).
+            session.seed_launch_project_color();
             // Fit the window to its monitor, or put it back where it was (still hidden).
             let saved_window = session.config.as_deref().and_then(window::load);
             let opened = cc.winit_window().map(|w| window::restore(w, saved_window));

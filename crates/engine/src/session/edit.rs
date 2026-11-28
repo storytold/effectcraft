@@ -207,6 +207,8 @@ impl Session {
         }
         self.render_job = None;
         self.stored_paths = Default::default();
+        // Set again by an open that refuses the new project's config path.
+        self.ocio_refused = None;
         self.stop_track();
         self.track_job = None;
         self.stop_mask_track();

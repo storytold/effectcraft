@@ -18,10 +18,12 @@ pub enum FieldKind {
         speed: f64,
     },
     Text(String),
-    /// A file path with a Browse… button (the host's open dialog, these extensions).
+    /// A file path with a Browse… button (the host's open dialog, these extensions), and a Clear
+    /// button when `clear`.
     Path {
         value: String,
         exts: Vec<String>,
+        clear: bool,
     },
     /// A file to write, with a Browse… button (the host's save dialog).
     SavePath(String),
@@ -51,7 +53,19 @@ impl Field {
         Field { key: key.into(), label: label.into(), kind: FieldKind::Text(value.into()) }
     }
     pub fn path(key: &str, label: &str, value: &str, exts: &[&str]) -> Field {
-        Field { key: key.into(), label: label.into(), kind: FieldKind::Path { value: value.into(), exts: exts.iter().map(|e| e.to_string()).collect() } }
+        Field {
+            key: key.into(),
+            label: label.into(),
+            kind: FieldKind::Path { value: value.into(), exts: exts.iter().map(|e| e.to_string()).collect(), clear: false },
+        }
+    }
+    /// [`Field::path`] with a Clear button (an empty path is sent as "").
+    pub fn clearable_path(key: &str, label: &str, value: &str, exts: &[&str]) -> Field {
+        let mut f = Field::path(key, label, value, exts);
+        if let FieldKind::Path { clear, .. } = &mut f.kind {
+            *clear = true;
+        }
+        f
     }
     pub fn save_path(key: &str, label: &str, value: &str) -> Field {
         Field { key: key.into(), label: label.into(), kind: FieldKind::SavePath(value.into()) }
@@ -347,103 +361,142 @@ fn project_settings_form(s: &effectcraft_engine::Session) -> (String, Vec<Field>
         Some(a) => tr_args("GPU Acceleration ({})", &[&a.name()]),
         None => tr("GPU Acceleration (no GPU: software)").to_string(),
     };
+    let env = s.ocio_env.as_deref();
+    let studio = s.prefs.project.default_ocio_config.as_str();
+    let ocio = effectcraft_engine::ocio_project::active(env, st, Some(studio));
+    let engine_ocio_label = if ocio.path.is_some() { "OCIO (config file below)" } else { "OCIO (built-in ACES config)" };
     let depth = match st.bit_depth.label() {
         l if l.starts_with("16") => 1,
         l if l.starts_with("32") => 2,
         _ => 0,
     };
-    (
-        "Project Settings".into(),
-        vec![
-            Field::choice(
-                "bitDepth",
-                "Depth",
-                &[("8 bits per channel", json!(8)), ("16 bits per channel", json!(16)), ("32 bits per channel (float)", json!(32))],
-                depth,
-            ),
-            Field::choice(
-                "timeDisplay",
-                "Time display style",
-                &[
-                    ("Timecode", json!("timecode")),
-                    ("Frames", json!("frames")),
-                    ("Feet + Frames (35mm)", json!("feet35")),
-                    ("Feet + Frames (16mm)", json!("feet16")),
-                ],
-                {
-                    use effectcraft_engine::project::TimeDisplayStyle as T;
-                    match st.time_display {
-                        T::Timecode => 0,
-                        T::Frames => 1,
-                        T::Feet35 => 2,
-                        T::Feet16 => 3,
-                    }
-                },
-            ),
-            // Time Display Style ▸ Frames ▸ Frame Count (also numbers Feet + Frames).
-            Field::choice("frameStart", "Frame count", &[("Start at 0", json!(0)), ("Start at 1", json!(1))], usize::from(st.frame_start == 1)),
-            Field::choice(
-                "colorEngine",
-                "Color engine",
-                &[("Adobe-style built-in", json!("adobe")), ("OCIO (built-in ACES config)", json!("ocio"))],
-                usize::from(st.color_engine == effectcraft_engine::project::ColorEngine::Ocio),
-            ),
-            Field::choice(
-                "workingSpace",
-                "Working space",
-                &[
-                    ("None", json!("none")),
-                    ("sRGB IEC61966-2.1", json!("srgb")),
-                    ("HDTV (Rec. 709)", json!("rec709")),
-                    ("Rec. 2020", json!("rec2020")),
-                    ("Display P3", json!("p3")),
-                    ("ACEScg", json!("acescg")),
-                    ("ACES2065-1", json!("aces2065")),
-                ],
-                st.working_space.map_or(0, |c| 1 + effectcraft_engine::project::ColorSpace::WORKING.iter().position(|x| *x == c).unwrap_or(0)),
-            ),
-            // With Working Space None (After Effects' Working Gamma, 2.2 or 2.4).
-            Field::choice("workingGamma", "Working gamma", &[("2.2", json!(2.2)), ("2.4", json!(2.4))], usize::from(st.working_gamma_24())),
-            Field::bool("linearize", "Linearize working space", st.linearize),
-            Field::bool("blendLinear", "Blend colors using 1.0 gamma", st.blend_linear),
-            Field::choice(
-                "hdr",
-                "HDR on SDR displays and outputs",
-                &[("Clip", json!("clip")), ("Compand", json!("compand")), ("Tone map", json!("toneMap"))],
-                st.hdr as usize,
-            ),
-            Field::choice(
-                "outputSpace",
-                "Output color space",
-                &[
-                    ("sRGB IEC61966-2.1 (default)", json!("default")),
-                    ("HDTV (Rec. 709)", json!("rec709")),
-                    ("Rec. 2020", json!("rec2020")),
-                    ("Display P3", json!("p3")),
-                    ("Rec. 2100 PQ (HDR)", json!("rec2100pq")),
-                    ("Rec. 2100 HLG (HDR)", json!("rec2100hlg")),
-                ],
-                {
-                    use effectcraft_engine::project::ColorSpace as C;
-                    match st.output_space {
-                        Some(C::Rec709) => 1,
-                        Some(C::Rec2020) => 2,
-                        Some(C::DisplayP3) => 3,
-                        Some(C::Rec2100Pq) => 4,
-                        Some(C::Rec2100Hlg) => 5,
-                        _ => 0,
-                    }
-                },
-            ),
-            // Video Rendering and Effects ▸ Use.
-            Field::choice(
-                "renderer",
-                "Video rendering and effects",
-                &[(gpu_label.as_str(), json!("gpu")), ("Software Rendering", json!("software"))],
-                usize::from(!st.gpu_acceleration),
-            ),
-        ],
-    )
+    let mut fields = vec![
+        Field::choice(
+            "bitDepth",
+            "Depth",
+            &[("8 bits per channel", json!(8)), ("16 bits per channel", json!(16)), ("32 bits per channel (float)", json!(32))],
+            depth,
+        ),
+        Field::choice(
+            "timeDisplay",
+            "Time display style",
+            &[
+                ("Timecode", json!("timecode")),
+                ("Frames", json!("frames")),
+                ("Feet + Frames (35mm)", json!("feet35")),
+                ("Feet + Frames (16mm)", json!("feet16")),
+            ],
+            {
+                use effectcraft_engine::project::TimeDisplayStyle as T;
+                match st.time_display {
+                    T::Timecode => 0,
+                    T::Frames => 1,
+                    T::Feet35 => 2,
+                    T::Feet16 => 3,
+                }
+            },
+        ),
+        // Time Display Style ▸ Frames ▸ Frame Count (also numbers Feet + Frames).
+        Field::choice("frameStart", "Frame count", &[("Start at 0", json!(0)), ("Start at 1", json!(1))], usize::from(st.frame_start == 1)),
+        Field::choice(
+            "colorEngine",
+            "Color engine",
+            &[("Adobe-style built-in", json!("adobe")), (engine_ocio_label, json!("ocio"))],
+            usize::from(st.color_engine == effectcraft_engine::project::ColorEngine::Ocio),
+        ),
+    ];
+    // Color ▸ OCIO Config: locked while the OCIO environment variable chooses it.
+    if ocio.source != effectcraft_engine::ocio_project::Source::Env {
+        fields.push(Field::clearable_path("ocioConfig", "OCIO config", st.ocio_config.as_deref().unwrap_or(""), &["ocio"]));
+    }
+    fields.push(Field::note("ocioConfigStatus", &ocio_config_note(s)));
+    fields.extend([
+        Field::choice(
+            "workingSpace",
+            "Working space",
+            &[
+                ("None", json!("none")),
+                ("sRGB IEC61966-2.1", json!("srgb")),
+                ("HDTV (Rec. 709)", json!("rec709")),
+                ("Rec. 2020", json!("rec2020")),
+                ("Display P3", json!("p3")),
+                ("ACEScg", json!("acescg")),
+                ("ACES2065-1", json!("aces2065")),
+            ],
+            st.working_space.map_or(0, |c| 1 + effectcraft_engine::project::ColorSpace::WORKING.iter().position(|x| *x == c).unwrap_or(0)),
+        ),
+        // With Working Space None (After Effects' Working Gamma, 2.2 or 2.4).
+        Field::choice("workingGamma", "Working gamma", &[("2.2", json!(2.2)), ("2.4", json!(2.4))], usize::from(st.working_gamma_24())),
+        Field::bool("linearize", "Linearize working space", st.linearize),
+        Field::bool("blendLinear", "Blend colors using 1.0 gamma", st.blend_linear),
+        Field::choice(
+            "hdr",
+            "HDR on SDR displays and outputs",
+            &[("Clip", json!("clip")), ("Compand", json!("compand")), ("Tone map", json!("toneMap"))],
+            st.hdr as usize,
+        ),
+        Field::choice(
+            "outputSpace",
+            "Output color space",
+            &[
+                ("sRGB IEC61966-2.1 (default)", json!("default")),
+                ("HDTV (Rec. 709)", json!("rec709")),
+                ("Rec. 2020", json!("rec2020")),
+                ("Display P3", json!("p3")),
+                ("Rec. 2100 PQ (HDR)", json!("rec2100pq")),
+                ("Rec. 2100 HLG (HDR)", json!("rec2100hlg")),
+            ],
+            {
+                use effectcraft_engine::project::ColorSpace as C;
+                match st.output_space {
+                    Some(C::Rec709) => 1,
+                    Some(C::Rec2020) => 2,
+                    Some(C::DisplayP3) => 3,
+                    Some(C::Rec2100Pq) => 4,
+                    Some(C::Rec2100Hlg) => 5,
+                    _ => 0,
+                }
+            },
+        ),
+        // Video Rendering and Effects ▸ Use.
+        Field::choice(
+            "renderer",
+            "Video rendering and effects",
+            &[(gpu_label.as_str(), json!("gpu")), ("Software Rendering", json!("software"))],
+            usize::from(!st.gpu_acceleration),
+        ),
+    ]);
+    ("Project Settings".into(), fields)
+}
+
+/// Project Settings ▸ OCIO config: which config is active, where it comes from, what it sets,
+/// and that the rest of it is not applied yet.
+fn ocio_config_note(s: &effectcraft_engine::Session) -> String {
+    let status = s.ocio_status();
+    let path = status["path"].as_str().unwrap_or("");
+    let mut out = match status["source"].as_str() {
+        Some("env") => tr_args("Active config: {} (set by the OCIO environment variable, which overrides the project's choice).", &[&path]),
+        Some("studioDefault") => tr_args("Active config: {} (the project's, from the studio default).", &[&path]),
+        Some("project") => tr_args("Active config: {} (the project's).", &[&path]),
+        _ => tr("Active config: the built-in ACES config.").to_string(),
+    };
+    if status["inUse"] == false {
+        out.push(' ');
+        out.push_str(tr("It applies when the color engine is OCIO."));
+    }
+    if let Some(e) = status["error"].as_str() {
+        out.push(' ');
+        out.push_str(&tr_args("Can't read it ({}): the built-in ACES config is used instead.", &[&e]));
+    } else if let Some(e) = status["workingSpaceError"].as_str() {
+        out.push(' ');
+        out.push_str(&tr_args("It can't set the working space: {}.", &[&e]));
+    }
+    if path.is_empty() {
+        return out;
+    }
+    out.push(' ');
+    out.push_str(tr("Only its scene_linear working space is used; its displays, views, looks and output transforms are not applied yet."));
+    out
 }
 
 /// The Export Adobe Premiere Pro Project dialog's title and fields.
@@ -868,7 +921,7 @@ pub fn open_form(app: &mut EffectcraftApp, id: &str, p: &Value) -> bool {
 fn form_grid(ui: &mut egui::Ui, f: &mut Form, regs: &mut Vec<(String, egui::Rect, String)>, browse: &mut Option<usize>, focused: &mut bool) {
     egui::Grid::new("form-grid").num_columns(2).spacing([14.0, 10.0]).show(ui, |ui| {
         for (i, fl) in f.fields.iter_mut().enumerate() {
-            ui.label(tr(&fl.label));
+            let label = ui.label(tr(&fl.label));
             let r = match &mut fl.kind {
                 FieldKind::Number { value, speed } => {
                     let dec = if *speed < 0.01 { 5 } else { 3 };
@@ -887,13 +940,22 @@ fn form_grid(ui: &mut egui::Ui, f: &mut Form, regs: &mut Vec<(String, egui::Rect
                     }
                     r.rect
                 }
-                FieldKind::Path { value, .. } => {
+                FieldKind::Path { value, clear, .. } => {
                     ui.horizontal(|ui| {
-                        let r = ui.add(egui::TextEdit::singleline(value).desired_width(150.0)).rect;
+                        let width = if *clear { 110.0 } else { 150.0 };
+                        let r = ui.add(egui::TextEdit::singleline(value).desired_width(width)).labelled_by(label.id).rect;
                         let b = ui.button(tr("Browse…"));
                         regs.push((format!("form.field.{}.browse", fl.key), b.rect, "Browse…".into()));
                         if b.clicked() {
                             *browse = Some(i);
+                        }
+                        if *clear {
+                            // Empties the field; the command applies it on OK.
+                            let c = ui.add_enabled(!value.is_empty(), egui::Button::new(tr("Clear")));
+                            regs.push((format!("form.field.{}.clear", fl.key), c.rect, "Clear".into()));
+                            if c.clicked() {
+                                value.clear();
+                            }
                         }
                         r
                     })
@@ -987,7 +1049,7 @@ pub fn show_form(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
         app.auto.add(&id, r, &l);
     }
     if let Some(i) = browse
-        && let Some(FieldKind::Path { value, exts }) = f.fields.get_mut(i).map(|f| &mut f.kind)
+        && let Some(FieldKind::Path { value, exts, .. }) = f.fields.get_mut(i).map(|f| &mut f.kind)
     {
         let exts: Vec<&str> = exts.iter().map(String::as_str).collect();
         match app.hooks.pick_files.as_ref() {
@@ -1130,6 +1192,59 @@ mod tests {
             options.as_slice(),
             &[("GPU Acceleration (no GPU: software)".to_string(), json!("gpu")), ("Software Rendering".to_string(), json!("software"))]
         );
+    }
+
+    /// Project Settings ▸ OCIO config: a path with Clear, or, while the OCIO environment variable
+    /// chooses the config, no field to send at all (the command would refuse it).
+    #[test]
+    fn ocio_config_row_is_locked_by_the_environment_variable() {
+        crate::i18n::set_current("en");
+        let mut s = effectcraft_engine::Session::default();
+        let (_, fields) = project_settings_form(&s);
+        assert!(fields.iter().any(|f| f.key == "ocioConfig" && matches!(f.kind, FieldKind::Path { clear: true, .. })));
+        s.ocio_env = Some("/studio/config.ocio".into());
+        let (_, fields) = project_settings_form(&s);
+        assert!(fields.iter().all(|f| f.key != "ocioConfig"));
+        let note = fields.iter().find_map(|f| match &f.kind {
+            FieldKind::Note(t) if f.key == "ocioConfigStatus" => Some(t.clone()),
+            _ => None,
+        });
+        assert!(note.is_some_and(|n| n.contains("/studio/config.ocio") && n.contains("environment variable")));
+    }
+
+    /// The Clear button is reached with Tab and pressed with Space, like the other buttons.
+    #[test]
+    fn a_clearable_path_clears_from_the_keyboard() {
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx, &app.tokens, crate::i18n::language(&app));
+        app.dialog_state.form = Form {
+            title: "Project Settings".into(),
+            command: "file.projectSettings".into(),
+            base: json!({}),
+            fields: vec![Field::clearable_path("ocioConfig", "OCIO config", "/studio/config.ocio", &["ocio"])],
+        };
+        app.dialog = Some(Dialog::Form);
+        let key = |key: egui::Key| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() };
+        let frame = |app: &mut EffectcraftApp, events: Vec<egui::Event>| {
+            let raw = egui::RawInput { events, ..Default::default() };
+            ctx.run_ui(raw, |ui| {
+                app.auto.begin_frame();
+                crate::panels::dialogs::show(app, ui.ctx());
+            })
+            .textures_delta
+            .clear();
+        };
+        frame(&mut app, vec![]);
+        // The path, Browse…, then Clear.
+        for _ in 0..3 {
+            frame(&mut app, vec![key(egui::Key::Tab)]);
+        }
+        assert_eq!(app.dialog_state.form.params()["ocioConfig"], "/studio/config.ocio", "nothing typed into the path");
+        frame(&mut app, vec![key(egui::Key::Space)]);
+        frame(&mut app, vec![]);
+        assert_eq!(app.dialog_state.form.params()["ocioConfig"], "");
+        assert!(app.dialog.is_some(), "Clear only empties the field; OK applies it");
     }
 
     #[test]
