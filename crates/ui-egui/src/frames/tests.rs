@@ -467,6 +467,12 @@ fn shutdown_waits_for_the_frames_rendering_and_drops_the_queued_ones() {
             Some(Arc::new(Image::new(4, 4)))
         }
     }
+    struct Release(Arc<Slow>);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            self.0.release.store(true, Ordering::SeqCst);
+        }
+    }
     let mut s = Session::default();
     let cid = ItemId(s.execute("comp.new", json!({"name": "A", "width": 8, "height": 8, "duration": 10})).unwrap()["comp"].as_u64().unwrap());
     let clip = Footage {
@@ -491,6 +497,7 @@ fn shutdown_waits_for_the_frames_rendering_and_drops_the_queued_ones() {
         disk: None,
     };
     let f = Frames::default();
+    let _release = Release(footage.clone());
     let content = f.content_of(&s.project, s.revision, cid);
     let key = |frame| FrameKey { revision: s.revision, content, comp: cid.0, frame, scale: 1000, view: 0, opts: 0 };
     for frame in 0..64 {
