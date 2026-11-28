@@ -1,6 +1,7 @@
 //! ProRes `colr` atom (#2801): it describes the frames the render path made, read back with
 //! FilmCraft's demuxer and, when installed, ffprobe as an external oracle. A PQ or HLG render
-//! read back into a managed project has the colours it was rendered from (#2849).
+//! read back into a managed project has the colours it was rendered from (#2849), with HLG's
+//! Tone Map HDR to SDR off.
 
 use std::path::Path;
 use std::process::Command;
@@ -10,7 +11,7 @@ use effectcraft_color::Label;
 use effectcraft_export::render_queue::{Channels, OutputFormat, OutputModule, RenderSettings, TimeSpan, sequence_path};
 use effectcraft_export::{Job, export};
 use effectcraft_media::MediaPool;
-use effectcraft_project::{ColorSpace, Comp, ItemKind, LayerSource, Project, Solid, build};
+use effectcraft_project::{ColorSpace, Comp, Footage, ItemKind, LayerSource, Project, Solid, build};
 use effectcraft_render::{FootageSource, NoFootage};
 use effectcraft_time::{FrameRate, Tick};
 
@@ -127,7 +128,10 @@ fn prores_colr_describes_the_frames() {
 }
 
 /// #2849: a PQ or HLG render, imported into a project with an sRGB working space, gets the
-/// Rec. 2100 profile its `colr` atom names and shows the solid it was rendered from.
+/// Rec. 2100 profile its `colr` atom names and shows the solid it was rendered from. An HLG render
+/// puts the working space's white at the BT.2408 reference white (75%), so it reads back with
+/// Interpret Footage ▸ Tone Map HDR to SDR off. HLG imports with it on, for phone footage, which
+/// maps HLG 100% to white: the solid reads back darker then, as an SDR display shows its signal.
 #[test]
 fn hdr_renders_reimport_with_their_colours() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/test-out/export/prores_hdr_reimport");
@@ -139,20 +143,29 @@ fn hdr_renders_reimport_with_their_colours() {
         let movie = dir.join(format!("{name}.mov"));
         render(row, &movie);
 
-        let footage = effectcraft_media::probe(&movie).expect("probe");
-        let profile = footage.color_profile;
-        let mut p = Project::default();
-        p.settings.working_space = SRGB;
-        let mut comp = Comp::new(64, 48, FrameRate::new(10, 1), Tick::from_seconds_f64(0.1));
-        let fid = p.add_item(name, Label::SeaFoam, None, ItemKind::Footage(footage));
-        comp.layers.push(build::layer(&mut p, &comp, name, LayerSource::Footage { item: fid }, (64, 48), None));
-        let comp = p.add_item("Reimport", Label::Sandstone, None, ItemKind::Comp(comp.into()));
-        let pattern = dir.join(format!("{name}_[#####].png")).to_string_lossy().to_string();
-        run(&p, comp, &MediaPool::new(), &OutputModule::for_format(OutputFormat::PngSequence), Path::new(&pattern));
-
-        let png = image::open(sequence_path(&pattern, 0)).expect("png").to_rgb8();
-        let got = png.get_pixel(32, 24).0.map(i32::from);
-        assert!(got.iter().zip(want).all(|(g, w)| (g - w).abs() <= 2), "{name}: centre {got:?}, want {want:?} (profile {profile:?})");
+        let imported = effectcraft_media::probe(&movie).expect("probe");
+        let profile = imported.color_profile;
         assert_eq!(profile, Some(space), "{name}: profile");
+        assert_eq!(imported.tone_map_hdr, space == ColorSpace::Rec2100Hlg, "{name}: Tone Map HDR to SDR");
+        let reimport = |footage: Footage, tag: &str| {
+            let mut p = Project::default();
+            p.settings.working_space = SRGB;
+            let mut comp = Comp::new(64, 48, FrameRate::new(10, 1), Tick::from_seconds_f64(0.1));
+            let fid = p.add_item(name, Label::SeaFoam, None, ItemKind::Footage(footage));
+            comp.layers.push(build::layer(&mut p, &comp, name, LayerSource::Footage { item: fid }, (64, 48), None));
+            let comp = p.add_item("Reimport", Label::Sandstone, None, ItemKind::Comp(comp.into()));
+            let pattern = dir.join(format!("{name}{tag}_[#####].png")).to_string_lossy().to_string();
+            run(&p, comp, &MediaPool::new(), &OutputModule::for_format(OutputFormat::PngSequence), Path::new(&pattern));
+            image::open(sequence_path(&pattern, 0)).expect("png").to_rgb8().get_pixel(32, 24).0.map(i32::from)
+        };
+        let got = reimport(Footage { tone_map_hdr: false, ..imported.clone() }, "");
+        assert!(got.iter().zip(want).all(|(g, w)| (g - w).abs() <= 2), "{name}: centre {got:?}, want {want:?} (profile {profile:?})");
+        if imported.tone_map_hdr {
+            // The solid's HLG signal (0.529, 0.260, 0.403) as an SDR display shows it: the BT.2100
+            // OOTF for 100 cd/m² in double precision gives 130, 41, 86.
+            let got = reimport(imported, "_tone_mapped");
+            let model = [130, 41, 86];
+            assert!(got.iter().zip(model).all(|(g, m)| (g - m).abs() <= 2), "{name} tone mapped: centre {got:?}, the model gives {model:?}");
+        }
     }
 }

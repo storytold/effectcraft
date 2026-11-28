@@ -336,7 +336,8 @@ build real projects through these interfaces; they are worked examples of everyt
   length). See [footage.md](footage.md).
 * **Colour of footage**: `file.interpretFootage {"items":[id], "preserveRgb":true}` is Interpret
   Footage ▸ Preserve RGB: the file's values unconverted (float EXRs stay linear), for a
-  per-layer OCIO conversion or data passes.
+  per-layer OCIO conversion or data passes. `"toneMapHdr"` is Tone Map HDR to SDR: Rec. 2100 HLG
+  footage (phone HDR video; on when it imports) shown as an SDR display shows it.
 * **OCIO effects**: with Configuration ▸ Custom, `configFile` is a `.ocio` path or the config's
   text; `effect.warning {layer, effect}` says what Effect Controls warns about (a config it
   can't read, a colour space it lacks, transforms that pass colours through) or `null`.

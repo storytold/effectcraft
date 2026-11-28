@@ -203,7 +203,8 @@ fn store_q(p: vec2<i32>, v: vec4<f32>, levels: f32, inv: f32) {
 }
 
 // Colour conversion on straight colour (render::color::convert).
-// u[0] = (decode curve, has matrix, encode curve); f[0..3] = matrix rows.
+// u[0] = (decode curve, has matrix, encode curve, has HLG OOTF); f[0..3] = matrix rows;
+// f[3].x = the OOTF's system gamma.
 @compute @workgroup_size(16, 16)
 fn convert(@builtin(global_invocation_id) gid: vec3<u32>) {
     let dims = out_dims();
@@ -221,6 +222,9 @@ fn convert(@builtin(global_invocation_id) gid: vec3<u32>) {
     let dc = P.u[0].x;
     if (dc != 0u) {
         c = vec3<f32>(curve_decode(dc, c.x), curve_decode(dc, c.y), curve_decode(dc, c.z));
+    }
+    if (P.u[0].w != 0u) {
+        c = hlg_ootf(c, P.f[3].x);
     }
     if (P.u[0].y != 0u) {
         let m0 = P.f[0].xyz;

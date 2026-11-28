@@ -408,6 +408,17 @@ fn interpret_commands_accept_their_keys_when_checked() {
     assert_eq!(px.start_timecode, Some(25));
     s.execute_checked("file.interpretProxy", json!({"item": mov.0, "overrideStart": false})).unwrap();
     assert_eq!(s.project.item(mov).unwrap().proxy.as_ref().unwrap().footage.start_timecode, None);
+    s.execute_checked("file.interpretProxy", json!({"item": mov.0, "colorProfile": "rec2100hlg", "toneMapHdr": true})).unwrap();
+    let px = s.project.item(mov).unwrap().proxy.clone().unwrap().footage;
+    assert!(px.tone_map_hdr && px.color_profile == Some(effectcraft_color::ColorSpace::Rec2100Hlg), "{px:?}");
+    s.execute_checked("file.interpretFootage", json!({"item": mov.0, "colorProfile": "rec2100pq", "toneMapHdr": true})).unwrap();
+    let f = match &s.project.item(mov).unwrap().kind {
+        ItemKind::Footage(f) => f.clone(),
+        _ => panic!("not footage"),
+    };
+    assert!(f.tone_map_hdr && f.color_profile == Some(effectcraft_color::ColorSpace::Rec2100Pq), "{f:?}");
+    let err = s.execute_checked("file.interpretFootage", json!({"item": mov.0, "colorProfile": "rec2101"})).unwrap_err().to_string();
+    assert!(err.contains("rec2100hlg"), "{err}");
     s.execute_checked("file.interpretProxy", json!({"item": b.0, "guessAlpha": true})).unwrap();
     assert_eq!(s.project.item(b).unwrap().proxy.as_ref().unwrap().footage.alpha, AlphaMode::Premultiplied);
     s.execute_checked("file.interpretProxy", json!({"item": b.0, "premulColor": [1.0, 0.0, 0.0]})).unwrap();
@@ -518,6 +529,19 @@ fn guess_alpha_invert_and_linear_light() {
     s.execute("file.rememberInterpretation", json!({"item": h.0})).unwrap();
     s.execute("file.applyInterpretation", json!({"items": [w.0]})).unwrap();
     assert!(foot(&s, w).preserve_rgb);
+    // Color ▸ Tone Map HDR to SDR is set, reported and carried by Apply Interpretation, both ways.
+    let out = s.execute("file.interpretFootage", json!({"item": h.0, "toneMapHdr": true})).unwrap();
+    assert_eq!(out["items"][0]["toneMapHdr"], true);
+    assert_eq!(s.execute("item.metadata", json!({"item": h.0})).unwrap()["item"]["toneMapHdr"], true);
+    assert!(!foot(&s, w).tone_map_hdr);
+    s.execute("file.rememberInterpretation", json!({"item": h.0})).unwrap();
+    s.execute("file.applyInterpretation", json!({"items": [w.0]})).unwrap();
+    assert!(foot(&s, w).tone_map_hdr);
+    let out = s.execute("file.interpretFootage", json!({"item": h.0, "toneMapHdr": false})).unwrap();
+    assert_eq!(out["items"][0]["toneMapHdr"], false);
+    s.execute("file.rememberInterpretation", json!({"item": h.0})).unwrap();
+    s.execute("file.applyInterpretation", json!({"items": [w.0]})).unwrap();
+    assert!(!foot(&s, w).tone_map_hdr);
 }
 
 /// Color ▸ Cineon Settings: Logarithmic Conversion turns a DPX file's log code values into the

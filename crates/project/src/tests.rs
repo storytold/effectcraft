@@ -391,6 +391,29 @@ fn cineon_settings_convert_log_code_values() {
     assert_eq!(serde_json::from_value::<Footage>(plain).unwrap().cineon, CineonSettings::default());
 }
 
+/// Tone Map HDR to SDR applies to Rec. 2100 HLG footage only, and not under Preserve RGB. It is
+/// saved only when on, and footage saved without it (every project from before it existed)
+/// reads as off.
+#[test]
+fn tone_map_hdr_is_hlg_only_and_off_in_older_projects() {
+    use crate::{ColorSpace, Footage};
+    let hlg = Footage { path: "/m/clip.mov".into(), color_profile: Some(ColorSpace::Rec2100Hlg), tone_map_hdr: true, ..Default::default() };
+    assert!(hlg.tone_map_hdr_applies());
+    assert!(!Footage { tone_map_hdr: false, ..hlg.clone() }.tone_map_hdr_applies());
+    assert!(!Footage { preserve_rgb: true, ..hlg.clone() }.tone_map_hdr_applies());
+    for other in [None, Some(ColorSpace::Rec2100Pq), Some(ColorSpace::Rec2020), Some(ColorSpace::Srgb)] {
+        assert!(!Footage { color_profile: other, ..hlg.clone() }.tone_map_hdr_applies(), "{other:?}");
+    }
+    let saved = serde_json::to_value(&hlg).unwrap();
+    assert_eq!(saved["tone_map_hdr"], true, "{saved}");
+    assert!(serde_json::from_value::<Footage>(saved.clone()).unwrap().tone_map_hdr_applies());
+    let mut old = saved;
+    old.as_object_mut().unwrap().remove("tone_map_hdr");
+    let old: Footage = serde_json::from_value(old).unwrap();
+    assert!(!old.tone_map_hdr && old.color_profile == Some(ColorSpace::Rec2100Hlg));
+    assert!(serde_json::to_value(&old).unwrap().get("tone_map_hdr").is_none());
+}
+
 /// A Wiggle Paths 100 000 groups deep gets Spatial Phase on a 2 MiB stack.
 #[test]
 fn upgrading_deeply_nested_shape_groups_fits_a_small_stack() {

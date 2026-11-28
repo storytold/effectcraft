@@ -289,6 +289,11 @@ fn interpret_footage_form(s: &effectcraft_engine::Session, proxy: bool, base: &m
         Field::bool("preserveRgb", "Preserve RGB", f.preserve_rgb),
         Field::bool("linearLight", "Interpret As Linear Light", f.linear_light),
     ];
+    // Color ▸ Tone Map HDR to SDR, after the profile it applies to (Rec. 2100 HLG footage).
+    if f.color_profile == Some(effectcraft_engine::project::ColorSpace::Rec2100Hlg) {
+        let at = fields.iter().position(|x| x.key == "colorProfile").map_or(fields.len(), |i| i + 1);
+        fields.insert(at, Field::bool("toneMapHdr", "Tone Map HDR to SDR", f.tone_map_hdr));
+    }
     // Color ▸ Cineon Settings (DPX and Cineon files). The converted points show in the
     // footage's Units, and `pointUnits` reads them back in those units when Units changes.
     if f.is_cineon_file() {
@@ -698,32 +703,9 @@ pub fn open_form(app: &mut EffectcraftApp, id: &str, p: &Value) -> bool {
                 ),
             ],
         ),
-        "file.interpretFootage" | "file.interpretProxy"
-            if !has(
-                p,
-                &[
-                    "frameRate",
-                    "alpha",
-                    "loop",
-                    "pixelAspect",
-                    "colorProfile",
-                    "fields",
-                    "invertAlpha",
-                    "matteColor",
-                    "linearLight",
-                    "startFrame",
-                    "logConversion",
-                    "cineonUnits",
-                    "pointUnits",
-                    "convertedBlack",
-                    "convertedWhite",
-                    "tenBitBlack",
-                    "tenBitWhite",
-                    "currentGamma",
-                    "highlightRolloff",
-                ],
-            ) =>
-        {
+        // Any setting given applies without the dialog (the dialog would send its own value for
+        // it); naming only the footage opens it.
+        "file.interpretFootage" | "file.interpretProxy" if p.as_object().is_none_or(|m| m.keys().all(|k| k == "items" || k == "item")) => {
             let proxy = id == "file.interpretProxy";
             let Some(form) = interpret_footage_form(s, proxy, &mut base) else { return false };
             form
@@ -1286,6 +1268,60 @@ mod tests {
         assert!(std::fs::read_to_string(&path).unwrap().contains("<xmeml"));
     }
 
+    /// Interpret Footage parameters given explicitly apply without the dialog, through both
+    /// commands, and keep the values given: the dialog would send its own fields' values for
+    /// them (Tone Map HDR to SDR on for HLG footage that has it on, Preserve RGB off, the matte
+    /// colour, Start Timecode). Naming only the footage opens the dialog.
+    #[test]
+    fn interpretation_menu_applies_explicit_parameters_without_a_dialog() {
+        use effectcraft_engine::project::{ColorSpace, Footage, FootageKind, ItemKind, Proxy};
+        for command in ["file.interpretFootage", "file.interpretProxy"] {
+            let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+            let footage = Footage {
+                path: "/m/clip.mov".into(),
+                kind: FootageKind::Video,
+                width: 4,
+                height: 4,
+                has_video: true,
+                duration: effectcraft_engine::time::Tick::from_seconds_f64(1.0),
+                color_profile: Some(ColorSpace::Rec2100Hlg),
+                tone_map_hdr: true,
+                ..Default::default()
+            };
+            let project = std::sync::Arc::make_mut(&mut app.session.project);
+            let item = project.add_item("clip.mov", Default::default(), None, ItemKind::Footage(footage.clone()));
+            project.item_mut(item).unwrap().proxy = Some(Box::new(Proxy { footage, enabled: true }));
+            app.session.state.project_selection = vec![item];
+            let ctx = egui::Context::default();
+            for params in [
+                json!({"toneMapHdr": false}),
+                json!({"preserveRgb": true}),
+                json!({"premulColor": [1.0, 0.0, 0.0]}),
+                json!({"overrideStart": false}),
+                json!({"startTimecode": 25}),
+                json!({"guessAlpha": true}),
+            ] {
+                crate::menus::invoke(&mut app, &ctx, command, params.clone()).unwrap();
+                assert!(app.dialog.is_none(), "{command}: {params}");
+            }
+            let it = app.session.project.item(item).unwrap();
+            let footage = if command == "file.interpretProxy" {
+                &it.proxy.as_ref().unwrap().footage
+            } else {
+                let ItemKind::Footage(footage) = &it.kind else { panic!("not footage") };
+                footage
+            };
+            assert!(!footage.tone_map_hdr && footage.preserve_rgb, "{command}: {footage:?}");
+            assert_eq!((footage.premul_color, footage.start_timecode), ([1.0, 0.0, 0.0], Some(25)), "{command}");
+            // Naming only the footage opens the dialog, with either key.
+            for params in [json!({"items": [item.0]}), json!({"item": item.0})] {
+                app.dialog = None;
+                crate::menus::invoke(&mut app, &ctx, command, params.clone()).unwrap();
+                assert!(matches!(app.dialog, Some(Dialog::Form)), "{command}: {params}");
+            }
+        }
+    }
+
     #[test]
     fn interpretation_menu_applies_explicit_cineon_parameters_without_a_dialog() {
         use effectcraft_engine::project::{Footage, FootageKind, ItemKind, Proxy};
@@ -1461,6 +1497,58 @@ mod tests {
         let Some(FieldKind::Note(text)) = note else { panic!("no sequence note: {note:?}") };
         assert!(text.contains("2 missing frames (3–4)") && text.contains("the previous frame is held"), "{text}");
         assert!(!text.contains("color bars"), "{text}");
+    }
+
+    /// Interpret Footage ▸ Color shows Tone Map HDR to SDR for Rec. 2100 HLG footage only, with
+    /// an automation id, and OK sets it through `file.interpretFootage`.
+    #[test]
+    fn interpret_footage_shows_tone_map_hdr_for_hlg() {
+        use effectcraft_engine::project::{ColorSpace, Footage, FootageKind, ItemKind};
+        let mut app = EffectcraftApp::new(effectcraft_engine::Session::default());
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx, &app.tokens, crate::i18n::language(&app));
+        let clip = |profile: Option<ColorSpace>| {
+            ItemKind::Footage(Footage {
+                path: "/m/clip.mov".into(),
+                kind: FootageKind::Video,
+                width: 4,
+                height: 4,
+                has_video: true,
+                color_profile: profile,
+                tone_map_hdr: profile == Some(ColorSpace::Rec2100Hlg),
+                ..Default::default()
+            })
+        };
+        let project = std::sync::Arc::make_mut(&mut app.session.project);
+        let hlg = project.add_item("hlg.mov", Default::default(), None, clip(Some(ColorSpace::Rec2100Hlg)));
+        let pq = project.add_item("pq.mov", Default::default(), None, clip(Some(ColorSpace::Rec2100Pq)));
+        let keys = |app: &EffectcraftApp| app.dialog_state.form.fields.iter().map(|f| f.key.clone()).collect::<Vec<_>>();
+        app.session.state.project_selection = vec![pq];
+        assert!(open_form(&mut app, "file.interpretFootage", &json!({})));
+        assert!(!keys(&app).iter().any(|k| k == "toneMapHdr"), "{:?}", keys(&app));
+        app.session.state.project_selection = vec![hlg];
+        assert!(open_form(&mut app, "file.interpretFootage", &json!({})));
+        let k = keys(&app);
+        let at = k.iter().position(|k| k == "toneMapHdr").unwrap_or_else(|| panic!("no toneMapHdr: {k:?}"));
+        assert_eq!(k[at - 1], "colorProfile", "{k:?}");
+        assert!(matches!(app.dialog_state.form.fields[at].kind, FieldKind::Bool(true)));
+        ctx.run_ui(Default::default(), |ui| {
+            app.auto.begin_frame();
+            crate::panels::dialogs::show(&mut app, ui.ctx());
+        })
+        .textures_delta
+        .clear();
+        assert!(app.auto.find("form.field.toneMapHdr").is_some());
+        // Unticked, OK turns it off.
+        app.dialog_state.form.fields[at].kind = FieldKind::Bool(false);
+        let params = app.dialog_state.form.params();
+        assert_eq!(params["toneMapHdr"], false, "{params}");
+        app.session.execute("file.interpretFootage", params).unwrap();
+        let Some(ItemKind::Footage(f)) = app.session.project.item(hlg).map(|i| &i.kind) else { panic!("not footage") };
+        assert!(!f.tone_map_hdr && f.color_profile == Some(ColorSpace::Rec2100Hlg));
+        // Opened again, the box shows it off.
+        assert!(open_form(&mut app, "file.interpretFootage", &json!({})));
+        assert!(matches!(app.dialog_state.form.fields[at].kind, FieldKind::Bool(false)), "{:?}", keys(&app));
     }
 
     /// Interpret Footage shows Cineon Settings for DPX footage only. The converted points show in

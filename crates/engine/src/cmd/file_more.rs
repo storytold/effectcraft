@@ -679,6 +679,8 @@ pub(crate) struct Interpretation {
     linear: Option<bool>,
     /// Color ▸ Preserve RGB.
     preserve_rgb: Option<bool>,
+    /// Color ▸ Tone Map HDR to SDR (HLG footage).
+    tone_map_hdr: Option<bool>,
     /// Start Timecode.
     start: Option<StartTimecode>,
     /// Cineon Settings (DPX and Cineon footage).
@@ -878,12 +880,13 @@ impl Interpretation {
             Some("auto" | "none" | "") => Some(None),
             Some(c) => match effectcraft_project::ColorSpace::parse(c) {
                 Some(cs) => Some(Some(cs)),
-                None => return Err(bad(cmd, format!("colorProfile: srgb|rec709|rec2020|p3|auto, not `{c}`"))),
+                None => return Err(bad(cmd, format!("colorProfile: srgb|rec709|rec2020|p3|acescg|aces2065|rec2100pq|rec2100hlg|auto, not `{c}`"))),
             },
             None => None,
         };
         it.linear = super::b_p(p, "linearLight");
         it.preserve_rgb = super::b_p(p, "preserveRgb");
+        it.tone_map_hdr = super::b_p(p, "toneMapHdr");
         // Start Timecode: Use Source File Timecode (`overrideStart: false`), or Override Start
         // (timecode or a frame number).
         let start_err = || bad(cmd, "startTimecode: timecode (0:00:41:20) or a frame number, 0 to 1e9");
@@ -975,6 +978,9 @@ impl Interpretation {
         if let Some(v) = self.preserve_rgb {
             f.preserve_rgb = v;
         }
+        if let Some(v) = self.tone_map_hdr {
+            f.tone_map_hdr = v;
+        }
         // Checked before the edit (`Interpretation::check`).
         if let Ok(Some(c)) = self.cineon.settings_for(f, "file.interpretFootage") {
             f.cineon = c;
@@ -1064,7 +1070,7 @@ fn interpret(s: &mut Session, p: &Value) -> Result<Value> {
             Some(ItemKind::Footage(f)) => Some(json!({
                 "item": i.0, "alpha": format!("{:?}", f.alpha), "matteColor": f.premul_color, "invertAlpha": f.invert_alpha,
                 "fields": f.fields.label(), "pixelAspect": f.pixel_aspect, "loop": f.loop_count, "frameRate": f.frame_rate.as_f64(),
-                "linearLight": f.linear_light, "preserveRgb": f.preserve_rgb, "startTimecode": f.timecode(0), "overrideStart": f.start_timecode.is_some(),
+                "linearLight": f.linear_light, "preserveRgb": f.preserve_rgb, "toneMapHdr": f.tone_map_hdr, "startTimecode": f.timecode(0), "overrideStart": f.start_timecode.is_some(),
                 "frames": f.sequence_frames(), "cineon": cineon_json(f),
             })),
             _ => None,
@@ -1095,6 +1101,7 @@ fn apply_interpretation(s: &mut Session, p: &Value) -> Result<Value> {
                 f.invert_alpha = src.invert_alpha;
                 f.linear_light = src.linear_light;
                 f.preserve_rgb = src.preserve_rgb;
+                f.tone_map_hdr = src.tone_map_hdr;
                 f.color_profile = src.color_profile;
                 if f.is_cineon_file() && src.is_cineon_file() {
                     f.cineon = src.cineon;
@@ -1342,7 +1349,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Main...",
             ["File", "Interpret Footage"],
             Some("Cmd+Alt+G"),
-            "{items?|item?, frameRate?: fps|\"file\", alpha?: straight|premultiplied|ignore|guess, guessAlpha?, matteColor?|premulColor?, invertAlpha?, loop?, pixelAspect?, fields?: off|upper|lower, colorProfile?: srgb|rec709|rec2020|p3|auto, linearLight?, preserveRgb? (the file's values unconverted), overrideStart?: bool (false: Use Source File Timecode), startTimecode?: timecode|frame (Override Start), logConversion? (Cineon Settings of DPX and Cineon files), cineonUnits?: 10bit|8bit|float, convertedBlack?, convertedWhite?, pointUnits?: 10bit|8bit|float (the units of convertedBlack and convertedWhite; default cineonUnits, else the footage's Units), tenBitBlack?, tenBitWhite? (0..1023), currentGamma? (0.1..10), highlightRolloff? (0..100)}",
+            "{items?|item?, frameRate?: fps|\"file\", alpha?: straight|premultiplied|ignore|guess, guessAlpha?, matteColor?|premulColor?, invertAlpha?, loop?, pixelAspect?, fields?: off|upper|lower, colorProfile?: srgb|rec709|rec2020|p3|acescg|aces2065|rec2100pq|rec2100hlg|auto, linearLight?, preserveRgb? (the file's values unconverted), toneMapHdr? (Tone Map HDR to SDR: Rec. 2100 HLG footage shown as on an SDR display when the output is SDR; on for HLG imports), overrideStart?: bool (false: Use Source File Timecode), startTimecode?: timecode|frame (Override Start), logConversion? (Cineon Settings of DPX and Cineon files), cineonUnits?: 10bit|8bit|float, convertedBlack?, convertedWhite?, pointUnits?: 10bit|8bit|float (the units of convertedBlack and convertedWhite; default cineonUnits, else the footage's Units), tenBitBlack?, tenBitWhite? (0..1023), currentGamma? (0.1..10), highlightRolloff? (0..100)}",
             has_footage_selection,
             interpret
         ),
