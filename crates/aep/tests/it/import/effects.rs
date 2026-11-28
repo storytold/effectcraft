@@ -69,12 +69,38 @@ fn the_table_names_tint_gradient_ramp_and_exposure() {
         ("ADBE Glo2", "ec.stylize.glow"),
         ("ADBE Easy Levels2", "ec.color.levels"),
         ("ADBE Timewarp", "ec.time.timewarp"),
+        ("ADBE Lens Flare", "ec.generate.lensflare"),
     ] {
         assert!(t.contains(&want), "{want:?}");
     }
-    assert_eq!(t.len(), 67);
+    // Lens Flare comes from the import-only table.
+    assert_eq!(t.len(), 68);
     for (_, id) in t {
         assert!(effectcraft_effects::find(id).is_some(), "{id}");
+    }
+}
+
+/// The import-only rows (no corpus case yet, layout from projects saved by After Effects 2026): every target exists in
+/// the EffectCraft effect with the kind the conversion needs, and a popup's items are EffectCraft's.
+#[test]
+fn import_only_rows_match_effectcraft() {
+    use effectcraft_aep::effect_map::{Conv, IMPORT_ONLY};
+    use effectcraft_project::ParamUi;
+    for row in IMPORT_ONLY {
+        let spec = effectcraft_effects::find(row.effect).unwrap_or_else(|| panic!("{}", row.effect));
+        let group = effectcraft_effects::instantiate(spec, &mut effectcraft_project::build::Ids(&mut 1), "fx", [1920.0, 1080.0]);
+        for p in row.params {
+            let prop = group.prop(p.target).unwrap_or_else(|| panic!("{}: {}", row.effect, p.target));
+            match (p.conv, &prop.ui) {
+                (Conv::Popup { items, default }, ParamUi::Popup { options }) => {
+                    assert_eq!(items.iter().map(|s| s.to_string()).collect::<Vec<_>>(), *options, "{}", p.target);
+                    assert!(default >= 1 && default as usize <= items.len());
+                }
+                (Conv::Popup { .. }, ui) => panic!("{}: {ui:?}", p.target),
+                (Conv::Point, _) => assert!(matches!(prop.value, Value::Vec2(_)), "{}", p.target),
+                (_, _) => assert!(matches!(prop.value, Value::Scalar(_)), "{}", p.target),
+            }
+        }
     }
 }
 
@@ -309,4 +335,36 @@ fn a_switched_off_effect_arrives_switched_off() {
     let fx = c.layers[0].props.sub("effects").expect("effects");
     let on: Vec<bool> = fx.children.iter().filter_map(|n| if let effectcraft_project::Node::Group(g) = n { Some(g.enabled) } else { None }).collect();
     assert_eq!(on, [false, true]);
+}
+
+/// Replaces every `from` in `bytes` with `to` of the same length (a chunk keeps its size).
+fn rename(mut bytes: Vec<u8>, from: &str, to: &str) -> Vec<u8> {
+    assert_eq!(from.len(), to.len(), "{to}");
+    let mut n = 0;
+    while let Some(at) = bytes.windows(from.len()).position(|w| w == from.as_bytes()) {
+        bytes.splice(at..at + from.len(), to.bytes());
+        n += 1;
+    }
+    assert!(n > 0, "{from} not in the file");
+    bytes
+}
+
+/// A project saved by After Effects in Japanese names a popup's items in Japanese
+/// (made-up names here): the stored position still picks the item, as in an English save, instead
+/// of the parameter falling back to its default ("the popup items do not match EffectCraft's").
+#[test]
+fn popups_of_a_project_saved_in_another_language() {
+    use effectcraft_aep::import::{ImportOptions, import};
+    let source = fixture!("377-fx-ramp-shape-radial.aep");
+    let bytes = rename(source.clone(), "Linear Ramp|Radial Ramp", "項目甲  |項目乙  ");
+    let none = |_: &str| false;
+    let mut project = Project::default();
+    let r = import(&mut project, &bytes, &ImportOptions::new(&none)).unwrap();
+    assert!(r.report.is_lossless(), "{:?}", r.report.losses);
+    let fx = effects(layer(&project, &r, "L"));
+    assert_eq!(value(fx[0], "shape"), Value::Enum(1));
+    // An item count that differs from After Effects' cannot be placed: still reported.
+    let bytes = rename(source, "Linear Ramp|Radial Ramp", "項目甲|項目乙|丙");
+    let report = analyze(&bytes, &|_| false).unwrap();
+    assert!(!report.is_lossless());
 }

@@ -81,13 +81,17 @@ pub struct ImportOptions<'a> {
     /// When not, a setting EffectCraft has no counterpart for is no loss (nothing is changed), so it
     /// is not reported.
     pub settings: bool,
+    /// The folder the `.aep` is in now, when it is a file. Footage missing at its stored path is
+    /// looked for there by the end of that path (`clip.mp4`, then `footage/clip.mp4`, …), as After
+    /// Effects finds the footage of a project moved together with it.
+    pub project_folder: Option<&'a str>,
 }
 
 impl<'a> ImportOptions<'a> {
     /// Losses refused, every font taken as installed, folder `After Effects Project`, the file's
     /// settings taken over.
     pub fn new(exists: &'a dyn Fn(&str) -> bool) -> Self {
-        Self { allow_losses: false, exists, has_font: &any_font, folder_name: "After Effects Project", settings: true }
+        Self { allow_losses: false, exists, has_font: &any_font, folder_name: "After Effects Project", settings: true, project_folder: None }
     }
 }
 

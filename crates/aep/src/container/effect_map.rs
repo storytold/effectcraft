@@ -1144,6 +1144,34 @@ pub const EFFECTS: &[EffectMap] = &[
     fx("ADBE Point Control", "ec.control.point", &[pm(1, K::Point, "point", Conv::Point)]),
 ];
 
+/// Lens Flare's Lens Type (EffectCraft's order, which the stored position follows: a saved Lens
+/// Flare set to 35mm Prime stores 2 with 3 items).
+pub const LENS_TYPE: &[&str] = &["50-300mm Zoom", "35mm Prime", "105mm Prime"];
+
+/// Effects the importer reads that the exporter does not write yet: writing needs a prototype
+/// instance in `aep-export/template/effects.aep`, made with After Effects. The layout comes from
+/// projects saved by After Effects 2026 (parameter types, valid maxima and defaults as stored), not
+/// from the corpus.
+pub const IMPORT_ONLY: &[EffectMap] = &[
+    // Lens Flare: 1 Flare Center, 2 Flare Brightness (float, maximum 300), 3 Lens Type (its match
+    // name ends in -0004), 4 Blend With Original (fixed, maximum 100).
+    fx(
+        "ADBE Lens Flare",
+        "ec.generate.lensflare",
+        &[
+            pm(1, K::Point, "flareCenter", Conv::Point),
+            pm(2, K::FloatSlider, "flareBrightness", Conv::Plain { valid_max: 300.0 }),
+            pm(3, K::Popup, "lensType", Conv::Popup { default: 1, items: LENS_TYPE }),
+            pm(4, K::FixedSlider, "blendWithOriginal", Conv::Plain { valid_max: 100.0 }),
+        ],
+    ),
+];
+
+/// The importer's row of an After Effects match name: [`EFFECTS`], then [`IMPORT_ONLY`].
+pub fn import_row(match_name: &str) -> Option<&'static EffectMap> {
+    EFFECTS.iter().chain(IMPORT_ONLY).find(|m| m.match_name == match_name)
+}
+
 /// Exposure's three sliders, by their valid maximum in the file (389).
 pub const EXPOSURE: Conv = Conv::Plain { valid_max: 100.0 };
 pub const OFFSET: Conv = Conv::Plain { valid_max: 2.0 };
