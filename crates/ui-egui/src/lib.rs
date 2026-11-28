@@ -407,6 +407,8 @@ pub struct EffectcraftApp {
     /// Texture of the last CPU frame shown in the viewer, the key it came from and the factor it
     /// was averaged down by for the magnification (`panels::viewer::minify_factor`).
     pub(crate) viewer_tex: Option<(egui::TextureHandle, FrameKey, usize)>,
+    pub(crate) onion_gpu: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<FrameKey, Option<(Vec<u8>, [usize; 2])>>>>,
+    pub(crate) onion_tex: std::collections::HashMap<(i64, bool), (egui::TextureHandle, u64)>,
     /// The frames the other (passive) Composition viewers show, by viewer id.
     pub(crate) passive_tex: std::collections::HashMap<u32, (FrameKey, panels::viewers::PassiveTexture)>,
     /// The last GPU frame shown: its egui texture id (registered with egui-wgpu), key and texture.

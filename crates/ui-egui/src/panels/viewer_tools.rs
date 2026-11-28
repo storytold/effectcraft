@@ -344,6 +344,13 @@ pub(crate) fn shown_region(ctx: &egui::Context, comp: [f32; 2]) -> [f64; 4] {
     texture_roi(ctx).unwrap_or([0.0, 0.0, comp[0] as f64, comp[1] as f64])
 }
 
+fn onion_click(app: &mut EffectcraftApp, clicked: bool) {
+    if clicked {
+        let on = app.session.state.viewer.onion.enabled;
+        let _ = app.session.execute("view.onionSkin", json!({"value": !on}));
+    }
+}
+
 /// Show Snapshot: the stored snapshot is on screen (button or F5 held).
 pub(crate) fn showing_snapshot(app: &EffectcraftApp, ctx: &egui::Context) -> bool {
     let f5 = ctx.input(|i| i.key_down(egui::Key::F5)) && !crate::framework::widget_has_keyboard(ctx);
@@ -852,6 +859,9 @@ fn bottom_bar_contents(app: &mut EffectcraftApp, ui: &mut egui::Ui, bar: Rect, z
     if let Some(i) = popup(app, ui, "vw-fast-pop", fr, &items, "fastPreviewsItem") {
         let _ = app.session.execute("view.fastPreviewMode", json!({"mode": FastPreviews::ALL[i].id()}));
     }
+    let onion_on = app.session.state.viewer.onion.enabled;
+    let (clicked, _) = tog(ui, &mut app.auto, &mut x, Icon::FrameBlend, onion_on, "onionSkin", "Onion Skin");
+    onion_click(app, clicked);
     if tog(ui, &mut app.auto, &mut x, Icon::Checker, app.ui.viewer.transparency_grid, "transparency", "Toggle Transparency Grid").0 {
         app.ui.viewer.transparency_grid = !app.ui.viewer.transparency_grid;
     }

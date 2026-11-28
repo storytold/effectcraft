@@ -85,6 +85,8 @@ pub struct Hooks {
     /// Runs on the worker thread right before the GPU compositor is built (desktop). Tests hold
     /// it to look at the interface while the compositor is still being prepared, or make it
     /// panic to check that a failing build never reaches the UI thread.
+    /// Keep GPU viewer frames on the GPU as the browser does (tests exercise that path on the desktop).
+    pub keep_gpu_frames: bool,
     pub before_gpu_build: Option<Box<dyn FnOnce() + Send>>,
 }
 

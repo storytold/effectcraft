@@ -1048,9 +1048,68 @@ pub fn show_info(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
     }
 }
 
+fn onion_options(app: &mut EffectcraftApp, ui: &mut egui::Ui) {
+    ui.add_space(8.0);
+    let mut o = app.session.state.viewer.onion.clone();
+    let before = o.clone();
+    let r = crate::widgets::labelled_checkbox(ui, &mut o.enabled, tr("Onion skin"));
+    app.auto.add_response("onion.enabled", &r, "Onion skin");
+    let counts = [
+        ("onion.before", "Frames before", &mut o.before, effectcraft_engine::onion::MAX_GHOSTS_PER_SIDE),
+        ("onion.after", "Frames after", &mut o.after, effectcraft_engine::onion::MAX_GHOSTS_PER_SIDE),
+        ("onion.step", "Step (frames)", &mut o.step, effectcraft_engine::onion::MAX_STEP),
+    ];
+    for (id, label, v, max) in counts {
+        let r = ui
+            .horizontal(|ui| {
+                ui.label(tr(label));
+                ui.add(egui::DragValue::new(v).range(0..=max))
+            })
+            .inner;
+        app.auto.add_response(id, &r, label);
+    }
+    for (id, label, c) in [("onion.tintBefore", "Tint before", &mut o.tint_before), ("onion.tintAfter", "Tint after", &mut o.tint_after)] {
+        let r = ui
+            .horizontal(|ui| {
+                ui.label(tr(label));
+                ui.color_edit_button_srgb(c)
+            })
+            .inner;
+        app.auto.add_response(id, &r, label);
+    }
+    for (id, label, v) in [
+        ("onion.tintAmount", "Tint amount", &mut o.tint_amount),
+        ("onion.opacity", "Opacity", &mut o.opacity),
+        ("onion.falloff", "Opacity falloff", &mut o.falloff),
+    ] {
+        let r = ui
+            .horizontal(|ui| {
+                ui.label(tr(label));
+                ui.add(egui::Slider::new(v, 0.0..=1.0))
+            })
+            .inner;
+        app.auto.add_response(id, &r, label);
+    }
+    let r = crate::widgets::labelled_checkbox(ui, &mut o.under, tr("Ghosts below the frame"));
+    app.auto.add_response("onion.under", &r, "Ghosts below the frame");
+    if o != before {
+        let p = serde_json::json!({
+            "value": o.enabled, "before": o.before, "after": o.after, "step": o.step,
+            "tintBefore": hex(o.tint_before), "tintAfter": hex(o.tint_after),
+            "tintAmount": o.tint_amount, "opacity": o.opacity, "falloff": o.falloff,
+            "placement": if o.under { "under" } else { "over" },
+        });
+        let _ = app.session.execute("view.onionSkin", p);
+    }
+}
+
+fn hex(c: [u8; 3]) -> String {
+    format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2])
+}
+
 pub fn show_view_options(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
     let mut close = false;
-    super::dialogs::modal(ctx, "View Options", vec2(360.0, 330.0), t, |ui| {
+    super::dialogs::modal(ctx, "View Options", vec2(360.0, 560.0), t, |ui| {
         let v = &mut app.ui.viewer;
         crate::widgets::labelled_checkbox(ui, &mut v.show_layer_controls, tr("Layer controls"));
         crate::widgets::labelled_checkbox(ui, &mut v.show_masks, tr("Masks"));
@@ -1059,6 +1118,7 @@ pub fn show_view_options(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Toke
         crate::widgets::labelled_checkbox(ui, &mut v.grid, tr("Grid"));
         crate::widgets::labelled_checkbox(ui, &mut v.safe_margins, tr("Title/action safe"));
         crate::widgets::labelled_checkbox(ui, &mut v.transparency_grid, tr("Transparency grid"));
+        onion_options(app, ui);
         ui.add_space(12.0);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui.add(egui::Button::new(egui::RichText::new(tr("   OK   ")).color(Color32::WHITE)).fill(t.accent)).clicked() {

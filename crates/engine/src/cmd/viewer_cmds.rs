@@ -79,6 +79,8 @@ pub struct ViewOptions {
     pub simulation: Simulation,
     /// The profile View ▸ Simulate Output ▸ Custom... uses.
     pub custom_simulation: Simulation,
+    /// View ▸ Onion Skin: ghosts of the neighbouring frames in the viewer.
+    pub onion: crate::onion::OnionSkin,
 }
 
 impl Default for ViewOptions {
@@ -92,6 +94,7 @@ impl Default for ViewOptions {
             display_color_management: true,
             simulation: Simulation::default(),
             custom_simulation: Simulation { profile: SimProfile::Linear, preserve_rgb: true },
+            onion: Default::default(),
         }
     }
 }
@@ -136,6 +139,73 @@ fn channel(s: &mut Session, p: &Value) -> Result<Value> {
         s.state.viewer.colorized = v;
     }
     Ok(json!({"channel": c.id(), "colorized": s.state.viewer.colorized}))
+}
+
+fn onion_skin(s: &mut Session, p: &Value) -> Result<Value> {
+    let mut o = s.state.viewer.onion.clone();
+    let mut flag = None;
+    for k in ["value", "enabled"] {
+        match p.get(k) {
+            None | Some(Value::Null) => {}
+            Some(Value::Bool(b)) => flag = flag.or(Some(*b)),
+            Some(_) => return Err(bad("view.onionSkin", format!("`{k}` must be true or false"))),
+        }
+    }
+    o.enabled = flag.unwrap_or(!o.enabled);
+    let count = |k: &str| -> Result<Option<u32>> {
+        match p.get(k) {
+            None | Some(Value::Null) => Ok(None),
+            Some(v) => {
+                v.as_u64().map(|n| Some(n.min(u64::from(u32::MAX)) as u32)).ok_or_else(|| bad("view.onionSkin", format!("`{k}` must be a whole number >= 0")))
+            }
+        }
+    };
+    let unit = |k: &str| -> Result<Option<f32>> {
+        match p.get(k) {
+            None | Some(Value::Null) => Ok(None),
+            Some(v) => match v.as_f64() {
+                Some(n) if n.is_finite() => Ok(Some(n.clamp(0.0, 1.0) as f32)),
+                _ => Err(bad("view.onionSkin", format!("`{k}` must be a number from 0 to 1"))),
+            },
+        }
+    };
+    let tint = |k: &str| -> Result<Option<[u8; 3]>> {
+        let Some(h) = str_p(p, k) else { return Ok(None) };
+        let c = crate::color::Rgba::from_hex(h).ok_or_else(|| bad("view.onionSkin", format!("`{k}` must be a #rrggbb colour")))?;
+        Ok(Some([c.r, c.g, c.b].map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8)))
+    };
+    if let Some(n) = count("before")? {
+        o.before = n;
+    }
+    if let Some(n) = count("after")? {
+        o.after = n;
+    }
+    if let Some(n) = count("step")? {
+        o.step = n;
+    }
+    if let Some(c) = tint("tintBefore")? {
+        o.tint_before = c;
+    }
+    if let Some(c) = tint("tintAfter")? {
+        o.tint_after = c;
+    }
+    if let Some(v) = unit("tintAmount")? {
+        o.tint_amount = v;
+    }
+    if let Some(v) = unit("opacity")? {
+        o.opacity = v;
+    }
+    if let Some(v) = unit("falloff")? {
+        o.falloff = v;
+    }
+    match str_p(p, "placement") {
+        None => {}
+        Some("over") => o.under = false,
+        Some("under") => o.under = true,
+        Some(x) => return Err(bad("view.onionSkin", format!("unknown placement `{x}` (over|under)"))),
+    }
+    s.state.viewer.onion = o.clamped();
+    Ok(json!(s.state.viewer.onion))
 }
 
 fn exposure(s: &mut Session, p: &Value) -> Result<Value> {
@@ -531,6 +601,15 @@ pub fn specs() -> Vec<CommandSpec> {
         ),
         cmd!("view.channel", "Show Channel", [], None, "{channel: rgb|red|green|blue|alpha|rgbStraight, colorized?, toggle?}", always, channel),
         cmd!("view.exposure", "Adjust Exposure", [], None, "{stops? | delta?}", always, exposure),
+        cmd!(
+            "view.onionSkin",
+            "Onion Skin",
+            ["View"],
+            None,
+            "{value?: on/off (default toggle), before?, after? (ghost frames, 0..8), step? (frames between ghosts), tintBefore?, tintAfter? (#rrggbb), tintAmount?, opacity?, falloff? (0..1: each farther ghost keeps 1-falloff of the one before), placement?: over|under} → the options",
+            has_comp,
+            onion_skin
+        ),
         cmd!("view.resetExposure", "Reset Exposure", [], None, "{}", always, reset_exposure),
         cmd!("view.takeSnapshot", "Take Snapshot", [], Some("Shift+F5"), "{comp?, scale?: 0.05..1}", has_comp, take_snapshot),
         cmd!("view.showSnapshot", "Show Snapshot", [], None, "{value?}", has_snapshot, show_snapshot),

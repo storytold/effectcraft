@@ -398,6 +398,7 @@ fn phase_frame(app: &mut EffectcraftApp, v: &mut Vw<'_>) {
     let frame = comp.frame_rate.frame_at(time);
     let key = app.frame_key(cid, frame, scale);
     app.request_frame_urgent(cid, frame, scale);
+    onion::request(app, cid, comp, frame, scale);
     // The frame on screen. While a drag or a property scrub is rendering, the exact key changes
     // with every edit and its render is still in flight; the newest completed revision of the
     // same frame keeps the picture following the pointer instead of freezing until it stops.
@@ -434,7 +435,9 @@ fn phase_guides(app: &mut EffectcraftApp, ectx: &EvalCtx, v: &mut Vw<'_>) {
     let painter = v.painter.clone();
     let comp = v.comp;
     // The frame (or snapshot) through Show Channel and exposure; ROI frames cover the region.
+    onion::draw(app, &ctx, &painter, comp_rect, cid, comp, true);
     vt::draw_frame(app, &ctx, &painter, comp_rect, cid, ectx);
+    onion::draw(app, &ctx, &painter, comp_rect, cid, comp, false);
     if app.ui.viewer.extended.is_some() {
         // The comp frame outlined over the extended render.
         painter.rect_stroke(comp_rect, 0.0, Stroke::new(1.0, Color32::from_gray(150)), StrokeKind::Outside);
@@ -2135,6 +2138,7 @@ pub(crate) use crate::widgets::hex_rgb;
 mod frame;
 mod geometry;
 mod gesture;
+mod onion;
 mod shapes;
 mod tools;
 mod view;

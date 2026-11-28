@@ -229,7 +229,7 @@ impl EffectcraftApp {
             draft: self.ui.viewer.fast_preview || draft,
             view: self.session.view_camera(comp),
             roi,
-            backend: effectcraft_engine::render::Backend::Auto,
+            backend: if self.hooks.keep_gpu_frames { effectcraft_engine::render::Backend::Gpu } else { effectcraft_engine::render::Backend::Auto },
             nested_switches: self.session.prefs.general.switches_affect_nested_comps,
             draft_shadows: self.session.prefs.three_d.realtime_shadows,
             // 32 bpc: half-float frames without the HDR step; the display pass applies it after

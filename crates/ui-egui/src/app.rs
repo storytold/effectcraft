@@ -78,6 +78,8 @@ impl EffectcraftApp {
             toast: None,
             error_toasts: Default::default(),
             viewer_tex: None,
+            onion_gpu: Default::default(),
+            onion_tex: Default::default(),
             passive_tex: std::collections::HashMap::new(),
             viewer_native: None,
             viewer_shown: None,
