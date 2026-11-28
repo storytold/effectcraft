@@ -1,6 +1,6 @@
 # UI parity
 
-> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-10-18 · **Change:** minor (accessibility row, second slice: Info, Flowchart, Script Console and the 3D Camera Tracker block named and keyboard-operable, #1335; earlier changes: accessibility row: an AccessKit audit and a contrast test, three more panels named and keyboard-operable, #1335; shape group Contents row elided; path-editing layer bounds #1220; closed issue references re-audited against `upstream/main` 470ea7a3) · **Target:** Adobe After Effects 2026
+> **Last reviewed:** 2026-10-12 · **Last updated:** 2026-11-28 · **Change:** minor (RFC-0052 Headless section, all unknown; earlier: accessibility row, second slice: Info, Flowchart, Script Console and the 3D Camera Tracker block named and keyboard-operable, #1335; earlier changes: accessibility row: an AccessKit audit and a contrast test, three more panels named and keyboard-operable, #1335; shape group Contents row elided; path-editing layer bounds #1220; closed issue references re-audited against `upstream/main` 470ea7a3) · **Target:** Adobe After Effects 2026
 
 How closely EffectCraft's interaction matches After Effects: tools, handles, snapping, nudging,
 modifier keys, shortcuts, drag behaviour, numeric entry, panels, context menus and feel. Evidence
@@ -39,6 +39,14 @@ tool. Path points, Bézier handles and the path’s free-transform controls rema
 Layer transform tools and ordinary layer selection restore the box. Headless `ui_viewer` tests
 cover shape paths and masks, corner-vertex dragging and undo, and layers without visible paths.
 
+## Headless (RFC-0052)
+
+**Headless ([RFC-0052](https://github.com/storytold/craft-contrib/blob/main/rfcs/0052-headless-reach.md)): 0 yes, 0 no (window 0, os 0, engine-gap 0), 0 partial, all unknown.**
+
+This page is an area scorecard, not an itemized menu or command checklist, so no area can be marked `yes` yet. [RFC-0052](https://github.com/storytold/craft-contrib/blob/main/rfcs/0052-headless-reach.md) fills `yes` only from the engine command registry that `effectcraft-cli` and the MCP server load, and only once a row cites a command id (LightCraft's `cmd:<id>` check is the model). Desktop-only command ids do not count. The effects registry is already reachable through `effectcraft-cli` and MCP; that is not the same as a per-item headless column.
+
+When an itemized checklist exists, a checked row that isn't fully reachable says `no (<reach>)` or `partial (<reach>)`, where the reach is `window` (needs the desktop window, a dialog or the pointer), `os` (needs an OS or online service the engine doesn't wrap) or `engine-gap` (could be a command, isn't one yet). A `partial` row's notes say which part a headless client can do. Until then every area stays `unknown`.
+
 ## Estimate
 
 **≈ 60–110 h**: the open interaction issues above (25–45 h, about 0.2–0.5 h each with a scripted
@@ -49,6 +57,7 @@ Effects running; most of the rest parallelises.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-28 | minor | Headless (RFC-0052) section: all areas unknown, with marking rules, until an itemized checklist cites command ids |
 | 2026-11-15 | minor | Edit ▸ Duplicate (Ctrl/⌘+D) copies the selected Render Queue item while that panel has focus (#3668) |
 | 2026-10-18 | minor | A shape group's inner Contents (After Effects' elided Vectors group) draws no row: the group's path, fill/stroke and Transform list directly under the group |
 | 2026-10-13 | minor | Accessibility row, second slice: Info, Flowchart, Script Console and the 3D Camera Tracker block named and keyboard-operable (#1335); no screen reader tested |
