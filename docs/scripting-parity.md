@@ -43,6 +43,7 @@ performance benchmark 4–8 h.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-11-22 | minor | Scripting: `addComp` keeps the requested name, as After Effects does (#3757); `comp.new` still numbers a taken name unless a caller passes `unique: false` |
 | 2026-10-16 | minor | Expression object model row names `propertyGroup()` and a group's `propertyIndex` (#1619) |
 | 2026-10-12 | minor | Estimate no longer counts `#include` / `#target` (#759, `tests_include.rs`); the table row was already current |
 | 2026-10-10 | major | First expressions and scripting checklist |
