@@ -295,6 +295,73 @@ fn falloff_inverse_square_clamped() {
     assert_eq!(ls.attenuation(vec3(250.0, 0.0, 0.0)), 0.0);
 }
 
+/// A light's state from a light layer set up by `edit`.
+fn light_state(kind: LightKind, edit: impl FnOnce(&mut Layer)) -> LightState {
+    let (mut p, _, comp) = setup();
+    let mut l = light(&mut p, &comp, kind, [0.0, 0.0, -500.0]);
+    edit(&mut l);
+    LightState::from_layer(&crate::EvalCtx::new(&Project::default(), ItemId(0), &Comp::new(W, H, FrameRate::FPS_30, Tick::ZERO), Tick::ZERO), &l).unwrap()
+}
+
+#[test]
+fn spot_feather_falls_off_over_the_cosine_of_the_angle() {
+    // Lab c3d l16 (After Effects 26.5): a spot 500 px in front of a plane, cone 60, feather 50:
+    // full to 15 degrees, none from 30, and at 21.9 degrees 0.684 of the light (a smoothstep over
+    // the angle itself gives 0.56). l18, feather 100: 0.873 at 14.1 degrees.
+    let at = |feather: f64, deg: f64| {
+        let ls = light_state(LightKind::Spot, |l| {
+            set(l, "transform/poi", Value::Vec3([0.0, 0.0, 0.0]));
+            set(l, "lightOptions/coneAngle", Value::Scalar(60.0));
+            set(l, "lightOptions/coneFeather", Value::Scalar(feather));
+        });
+        ls.attenuation(vec3(500.0 * deg.to_radians().tan(), 0.0, 0.0))
+    };
+    assert!((at(50.0, 14.0) - 1.0).abs() < 1e-9);
+    assert!((at(50.0, 21.9) - 0.684).abs() < 0.01, "{}", at(50.0, 21.9));
+    assert!((at(50.0, 26.6) - 0.193).abs() < 0.01, "{}", at(50.0, 26.6));
+    assert_eq!(at(50.0, 31.0), 0.0);
+    assert!((at(100.0, 14.1) - 0.873).abs() < 0.01, "{}", at(100.0, 14.1));
+}
+
+#[test]
+fn a_very_narrow_spot_still_feathers_over_its_own_cone() {
+    // Feather 100 %: at 99 % of the half-angle the smoothstep leaves about 0.12 % of the light.
+    // A floor on the interval wider than the cone used to leave far more (cone 0.004 degrees);
+    // below about 1e-6 degrees every f64 cosine in the cone is 1, so it went all or nothing
+    // (cone 1e-7 degrees).
+    for cone in [0.004, 1e-7] {
+        let ls = light_state(LightKind::Spot, |l| {
+            set(l, "transform/poi", Value::Vec3([0.0, 0.0, 0.0]));
+            set(l, "lightOptions/coneAngle", Value::Scalar(cone));
+            set(l, "lightOptions/coneFeather", Value::Scalar(100.0));
+        });
+        let k = ls.attenuation(vec3(500.0 * (cone / 2.0 * 0.99).to_radians().tan(), 0.0, 0.0));
+        assert!((k - 0.00117).abs() < 0.0002, "cone {cone}: {k}");
+        assert!((ls.attenuation(vec3(0.0, 0.0, 0.0)) - 1.0).abs() < 1e-9);
+    }
+}
+
+#[test]
+fn specular_shininess_is_the_exponent() {
+    // Lab c3d l10 / l11 (After Effects 26.5): a parallel light 60 degrees off the normal, the
+    // viewer on the normal (half vector 30 degrees off), Specular 100 %, Metal 0 %, Diffuse 0 %:
+    // 124 / 255 at Shininess 5 % (0.866^5) and 1 / 255 at 40 %.
+    let ls = light_state(LightKind::Parallel, |l| {
+        let d = 60f64.to_radians();
+        set(l, "transform/position", Value::Vec3([1000.0 * d.sin(), 0.0, -1000.0 * d.cos()]));
+        set(l, "transform/poi", Value::Vec3([0.0, 0.0, 0.0]));
+    });
+    let spec = |shininess: f32| {
+        let mat = Material { diffuse: 0.0, specular: 1.0, shininess, metal: 0.0, ..Material::default() };
+        let n = vec3(0.0, 0.0, -1.0);
+        super::light::shade([0.5; 3], vec3(0.0, 0.0, 0.0), n, n, &mat, std::slice::from_ref(&ls), &|_, _| [1.0; 3]).0[0]
+    };
+    assert!((spec(0.05) - 124.0 / 255.0).abs() < 1.0 / 255.0, "{}", spec(0.05));
+    // 0.866^40 = 0.00317: present, not zero.
+    let want = (3f32.sqrt() / 2.0).powi(40);
+    assert!((spec(0.40) - want).abs() < 0.001, "{} != {want}", spec(0.40));
+}
+
 // ---------------------------------------------------------------- shadows
 
 #[test]

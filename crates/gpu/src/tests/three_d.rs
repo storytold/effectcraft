@@ -137,6 +137,24 @@ fn lights_specular_transmission_and_shadows() {
 }
 
 #[test]
+fn narrow_spot_feather() {
+    // A 0.2 degree spot 30 000 px away lights a disc about 105 px wide on the plane. Its feather
+    // spans cosines from 1 down to 1 - 1.52e-6, only about 25 f32 steps, so neighbouring pixels
+    // round to the same cosine and the falloff comes out in steps. The shader works with 1 - cos
+    // (half the squared distance between the unit vectors), which keeps its precision there.
+    for depth in [BitDepth::Bpc8, BitDepth::Bpc32] {
+        let mut s = scene(depth);
+        let bg = s.solid([0.1, 0.12, 0.2], W, H);
+        s.push(bg);
+        let a = three_d(s.solid([0.9, 0.9, 0.9], 140, 90), [80.0, 50.0, 0.0], 0.0);
+        s.push(a);
+        camera(&mut s, [80.0, 50.0, -250.0], None);
+        light(&mut s, LightKind::Spot, [80.0, 50.0, -30000.0], &[("coneAngle", n(0.2)), ("coneFeather", n(100.0)), ("intensity", n(100.0))]);
+        check(&format!("narrow spot {depth:?}"), compare_at(&s, opts(), Tick::ZERO), 0.0);
+    }
+}
+
+#[test]
 fn wide_shadow_diffusion() {
     // #2444: a wide penumbra takes more than the 3 × 3 kernel's samples; both sides pick the
     // same count.
