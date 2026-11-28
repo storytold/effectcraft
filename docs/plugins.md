@@ -377,6 +377,26 @@ ABI 1 modules load and render unchanged; ABI 2 modules add `ec_render2` and the 
 frames. Within a version the contract above does not change; additions (new parameter types,
 new optional exports) bump the version.
 
+## Plug-in host (craft-abi 1)
+
+The desktop app also runs plug-ins in the shared craft-abi 1 format, next to the effect plug-ins above.
+A package is a WebAssembly module with a `craft.manifest` section. Its permissions are denied until
+the user accepts them in the prompt. The host lives in `crates/plugins` (see its README) on top of
+`craft-plugin-host` from craft-libs.
+
+* **Where:** packages install into `<config dir>/Plug-ins-host`. `<config dir>/Plug-ins` still loads
+  through `effect.plugins.load`.
+* **What a package adds:** commands (`plugin.<id>.<name>`, listed under the Plugins menu and in
+  the command palette), `before`, `after` and `change` hooks on commands, panels in floating windows,
+  effects in the effect registry and readers for still-image file types EffectCraft does not know.
+* **Manage them:** the `plugin.app.effectcraft.*` commands install, grant, enable, disable, remove
+  and revoke. A plug-in can neither list nor run these.
+* **Reload:** disable and enable swap one version for another without a restart. An effect keeps its
+  registry slot, so a reload does not leak a spec.
+* **Faults:** a command that traps restores the project, the undo stacks and the command journal to
+  what they were before the call. Files a command wrote stay.
+* **Old modules:** `ec_` modules run through the same host and obey the same limits.
+
 ## Plug-in Library
 
 Settings ▸ Plug-in Library (also Effect ▸ Plug-in Library…) lists WebAssembly effect plug-ins

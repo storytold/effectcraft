@@ -3,6 +3,23 @@ use super::invoke::invoke;
 use super::shortcuts::shortcut_text;
 use super::{EffectcraftApp, MenuEntry, MenuNode, Value, json};
 
+/// The "Plugins" menu: the commands that plug-ins and the plug-in host put under it. Absent when none do.
+fn plugins_menu(app: &mut EffectcraftApp, ui: &mut egui::Ui, clicked: &mut Option<(String, Value)>) {
+    let rows: Vec<_> = app.session.dynamic_menu_rows().into_iter().filter(|(_, _, path)| path.first().is_some_and(|top| top == "Plugins")).collect();
+    if rows.is_empty() {
+        return;
+    }
+    ui.menu_button(crate::i18n::tr("Plugins"), |ui| {
+        for (id, label, _) in rows {
+            let enabled = app.session.is_enabled(&id);
+            if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
+                *clicked = Some((id, Value::Null));
+                ui.close();
+            }
+        }
+    });
+}
+
 /// The id under which [`menu_bar`] remembers which of its menus was open at the end of the last
 /// frame (its title's open look, and the hover that switches between the titles).
 fn open_menu_id() -> egui::Id {
@@ -100,6 +117,7 @@ pub fn menu_bar(app: &mut EffectcraftApp, ui: &mut egui::Ui) {
                 app.auto.add(&format!("menu.{label}"), response.rect, label);
                 drawn += 1;
             }
+            plugins_menu(app, ui, &mut clicked);
         });
     });
     crate::menu_keys::handle(&ctx, &nav);

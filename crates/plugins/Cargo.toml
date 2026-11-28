@@ -1,0 +1,33 @@
+[package]
+name = "effectcraft-plugins"
+description = "EffectCraft side of the plug-in host (craft-abi 1): Services over a Session, install flow, plug-in manager"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+craft-command = { workspace = true }
+craft-ipc = { workspace = true }
+craft-plugin-abi = { workspace = true }
+craft-plugin-host = { workspace = true, features = ["wasmi", "deterministic", "link", "legacy-v1"] }
+craft-plugin-ui = { workspace = true, features = ["host"] }
+bytemuck = { workspace = true }
+effectcraft-effects = { workspace = true }
+effectcraft-engine = { workspace = true }
+effectcraft-media = { workspace = true }
+effectcraft-project = { workspace = true }
+egui = { workspace = true }
+getrandom = "0.3"
+log = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+effectcraft-link = { workspace = true }
+effectcraft-time = { workspace = true }
+effectcraft-raster = { workspace = true }
+wat = "1.262.0"

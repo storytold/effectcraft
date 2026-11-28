@@ -23,4 +23,11 @@ pub enum EngineError {
     Refused { losses: String, advice: &'static str },
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+impl From<craft_plugin_host::invoke::CallError> for EngineError {
+    fn from(e: craft_plugin_host::invoke::CallError) -> Self {
+        EngineError::Other(format!("plug-in: {e}"))
+    }
+}
+
 pub type Result<T> = std::result::Result<T, EngineError>;

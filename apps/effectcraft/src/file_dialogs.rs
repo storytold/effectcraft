@@ -156,6 +156,18 @@ pub fn install_pickers(app: &mut EffectcraftApp, ctx: &egui::Context) -> Receive
     rx
 }
 
+/// The Plug-ins panel's picker for a plug-in `.wasm`, through [`guarded`]. A dialog that can't
+/// open is logged and answers with no file.
+pub fn pick_plugin() -> Option<std::path::PathBuf> {
+    match guarded("Open plug-in", || rfd::FileDialog::new().add_filter("EffectCraft plug-in", &["wasm"]).pick_file()) {
+        Ok(path) => path,
+        Err(why) => {
+            log::warn!("{why}");
+            None
+        }
+    }
+}
+
 /// An error message box, through [`guarded`] (one that can't open is logged).
 pub fn message(title: &str, description: String) {
     let shown = guarded("message", || rfd::MessageDialog::new().set_level(rfd::MessageLevel::Error).set_title(title).set_description(description).show());

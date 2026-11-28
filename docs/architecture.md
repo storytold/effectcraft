@@ -12,7 +12,7 @@ Dependencies only point downward (or along the few same-layer edges listed below
 layers` enforces this, and fails the build if a crate below L5 depends on egui, eframe, winit, rfd,
 cpal or muda. Everything in L0 to L4, the egui UI and the web app also build for
 `wasm32-unknown-unknown` (`cargo xtask wasm`); see [web.md](web.md). L5 is `ui-egui`,
-`automation` and `link`. `link` is not in that wasm check.
+`automation`, `link`, and `plugins`. `link` and `plugins` are not in that wasm check.
 
 | Layer | Crate (`effectcraft-…`) | Responsibility |
 |---|---|---|
@@ -48,6 +48,7 @@ cpal or muda. Everything in L0 to L4, the egui UI and the web app also build for
 | L5 | `ui-egui` | The desktop interface: docking, panels, viewer, timeline, graph editor, dialogs, control channel |
 | L5 | `automation` | The MCP server, headless or bridged to the running app |
 | L5 | `link` | EffectCraft side of Craft Link. It depends on `craft-ipc` and `craft-command` from craft-libs. It is not in the wasm check because `craft-ipc` uses local sockets and std threads. Live link: `frames` serves bulk frames with `Renderer::comp_frame` on an `Arc<Project>` snapshot, `track` counts epochs, `live` ties both and the background result render to the UI thread (`live::tick` once per frame) |
+| L5 | `plugins` | EffectCraft side of the suite plug-in host (craft-abi 1): `Services` over a `Session`, the install flow, the manager view. It depends on `craft-plugin-host`, `craft-plugin-ui` and `craft-plugin-abi` from craft-libs. Not in the wasm check: the host lifecycle is native only |
 | L6 | apps `effectcraft`, `effectcraft-cli`, `effectcraft-web` | Desktop app; command-line tool (render, exec, get/set, MCP); the browser app (wasm32, [web.md](web.md)) |
 
 Allowed same-layer edges: `path → keyframe, raster`, `text → path`, `pdf → svg, text`, `effects → project, text, path, track`,

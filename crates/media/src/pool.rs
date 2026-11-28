@@ -554,68 +554,7 @@ impl Sources {
 /// A movie/audio source by path ([`Opened`]), opened by the first caller while the others wait
 /// for it (`None`: failed to open; not retried until `forget`), with the file's identity as
 /// opened.
-type SourceSlot = Arc<Source>;
-
-#[derive(Default)]
-struct Source {
-    opened: OnceLock<(Option<Opened>, ReadFile)>,
-    #[cfg(not(target_arch = "wasm32"))]
-    dispatch: Mutex<Dispatch>,
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-type DecodeJob = Box<dyn FnOnce() + Send>;
-
-#[cfg(not(target_arch = "wasm32"))]
-#[derive(Default)]
-struct Dispatch {
-    active: bool,
-    pending: VecDeque<DecodeJob>,
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-impl Source {
-    fn enqueue(self: &Arc<Self>, workers: &'static rayon::ThreadPool, job: DecodeJob) {
-        let mut dispatch = lock(&self.dispatch);
-        if dispatch.active {
-            dispatch.pending.push_back(job);
-            return;
-        }
-        dispatch.active = true;
-        drop(dispatch);
-        self.start(workers, job);
-    }
-
-    fn start(self: &Arc<Self>, workers: &'static rayon::ThreadPool, job: DecodeJob) {
-        let source = self.clone();
-        workers.spawn_fifo(move || {
-            // Release on errors and unwinding too. Never hold the dispatch lock during a decode.
-            let _permit = DecodePermit { source, workers };
-            job();
-        });
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-struct DecodePermit {
-    source: SourceSlot,
-    workers: &'static rayon::ThreadPool,
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-impl Drop for DecodePermit {
-    fn drop(&mut self) {
-        let mut dispatch = lock(&self.source.dispatch);
-        let next = dispatch.pending.pop_front();
-        if next.is_none() {
-            dispatch.active = false;
-        }
-        drop(dispatch);
-        if let Some(job) = next {
-            self.source.start(self.workers, job);
-        }
-    }
-}
+type SourceSlot = Arc<OnceLock<(Option<Opened>, ReadFile)>>;
 
 /// An opened movie/audio source, the turn its picture is shown with and the order its decoded
 /// audio channels arrive in.
@@ -629,7 +568,7 @@ struct Opened {
 impl Opened {
     /// `src` with what its container says: `header` is an MP4/MOV's ftyp and moov (or the whole
     /// file), `file` the file for other containers' AAC configuration.
-    fn new(src: MediaSource, header: Option<&[u8]>, file: Option<&dyn craft_media::ByteSource>) -> Opened {
+    fn new(src: MediaSource, header: Option<&[u8]>, file: Option<&dyn filmcraft_media::ByteReader>) -> Opened {
         let turn = header.map_or(Orientation::NoTransforms, crate::probe::video_turn);
         Opened { order: channel_order(&src, header, file), src, turn }
     }
@@ -637,7 +576,7 @@ impl Opened {
 
 /// The order `src`'s audio channels decode in; multichannel AAC's by its configuration, where
 /// the container's header shows it ([`crate::aac::config`]).
-fn channel_order(src: &MediaSource, header: Option<&[u8]>, file: Option<&dyn craft_media::ByteSource>) -> Order {
+fn channel_order(src: &MediaSource, header: Option<&[u8]>, file: Option<&dyn filmcraft_media::ByteReader>) -> Order {
     match src.primary_audio() {
         Some((_, channels, codec)) if codec.contains("AAC") && channels > 2 => {
             crate::aac::config(header, file).map_or(Order::Aac, |asc| crate::downmix::aac_order(&asc))
@@ -1259,11 +1198,7 @@ impl Inner {
     /// Each call notes the file as read (see [`crate::reads`]), with its identity as opened.
     fn opened(&self, path: &Arc<str>) -> Option<Opened> {
         let slot = lock(&self.sources).slot(path);
-        self.opened_in(path, &slot)
-    }
-
-    fn opened_in(&self, path: &Arc<str>, slot: &SourceSlot) -> Option<Opened> {
-        let (opened, file) = slot.opened.get_or_init(|| self.open(path));
+        let (opened, file) = slot.get_or_init(|| self.open(path));
         reads::note(file.clone());
         opened.clone()
     }
@@ -1285,7 +1220,7 @@ impl Inner {
             let opened = bytes.and_then(|bytes| {
                 let name = std::path::Path::new(&**path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
                 let src = crate::stream::open_bytes(&name, bytes.clone())?;
-                Ok(Opened::new(src, Some(&bytes), Some(&bytes)))
+                Ok(Opened::new(src, Some(&bytes), Some(&filmcraft_media::reader::MemReader(bytes.clone()))))
             });
             (opened, read)
         });
@@ -1699,10 +1634,6 @@ impl Inner {
     /// (wasm32) or this is one of them. With the files the decode read (see [`crate::reads`]):
     /// collected on the thread that decodes, not noted anywhere (the caller notes them).
     fn run_decode(self: &Arc<Self>, loc: &Loc, footage: &Footage) -> (Result<Pixels>, ReadFiles) {
-        // A codec can yield to Rayon while holding its source's decoder mutex. Keep later
-        // roots for that source OUT of the work-stealing pool until this root finishes (#4074).
-        // Carry the slot too: forget/reopen must not pair an old permit with a new decoder.
-        let source = loc.media_t.map(|_| lock(&self.sources).slot(&loc.key.path));
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(threads) = decode_threads()
             && threads.current_thread_index().is_none()
@@ -1711,20 +1642,14 @@ impl Inner {
             let (me, at, f) = (self.clone(), loc.clone(), footage.clone());
             // The request's cancel flag and decoding hints go with it (#329).
             let hints = filmcraft_media::cancel::Context::current();
-            let slot = source.clone();
-            let job = Box::new(move || {
+            threads.spawn(move || {
                 #[cfg(not(test))]
-                let decoded = reads::captured(|| hints.run(|| me.decode_source(&at, &f, slot.as_ref())));
+                let decoded = reads::captured(|| hints.run(|| me.decode_source(&at, &f)));
                 // (the decodes counted on that thread are this thread's)
                 #[cfg(test)]
-                let decoded = crate::exr_channels::counting(|| reads::captured(|| hints.run(|| me.decode_source(&at, &f, slot.as_ref()))));
+                let decoded = crate::exr_channels::counting(|| reads::captured(|| hints.run(|| me.decode_source(&at, &f))));
                 let _ = tx.send(decoded);
             });
-            if let Some(source) = &source {
-                source.enqueue(threads, job);
-            } else {
-                threads.spawn(job);
-            }
             // A plain block: this thread runs nothing else meanwhile.
             return match rx.recv() {
                 #[cfg(not(test))]
@@ -1743,14 +1668,11 @@ impl Inner {
             };
         }
         let _decoding = Decoding::new();
-        reads::captured(|| self.decode_source(loc, footage, source.as_ref()))
+        reads::captured(|| self.decode_source(loc, footage))
     }
 
     /// Decode the picture `loc` names: a still whole, a movie frame at its size.
-    fn decode_source(&self, loc: &Loc, footage: &Footage, source: Option<&SourceSlot>) -> Result<Pixels> {
-        if filmcraft_media::cancel::cancelled() {
-            return Err(MediaError::Cancelled);
-        }
+    fn decode_source(&self, loc: &Loc, footage: &Footage) -> Result<Pixels> {
         self.decodes.fetch_add(1, Ordering::Relaxed);
         #[cfg(test)]
         {
@@ -1762,7 +1684,7 @@ impl Inner {
         }
         match loc.media_t {
             None => self.decode_still(loc, footage).map(|img| Pixels::F32(Arc::new(img))),
-            Some(_) => self.decode_media(loc, footage, source),
+            Some(_) => self.decode_media(loc, footage),
         }
     }
 
@@ -1800,6 +1722,9 @@ impl Inner {
         if let Some(img) = crate::layered::decode(path, &bytes, footage, op)? {
             return Ok(img);
         }
+        if let Some(img) = crate::foreign::decode(path, &bytes, op)? {
+            return Ok(img);
+        }
         // (an OpenEXR compression the decoder lacks came out transparent or as a missing
         // channel error)
         if path.to_ascii_lowercase().ends_with(".exr")
@@ -1826,7 +1751,7 @@ impl Inner {
         }
     }
 
-    fn decode_media(&self, loc: &Loc, footage: &Footage, source: Option<&SourceSlot>) -> Result<Pixels> {
+    fn decode_media(&self, loc: &Loc, footage: &Footage) -> Result<Pixels> {
         let op = AlphaOp::of(footage, loc.float);
         let path = &loc.key.path;
         let f32 = |img| Pixels::F32(Arc::new(img));
@@ -1838,8 +1763,7 @@ impl Inner {
                 Ok(f32(dynamic_to_image(frame, op)))
             }
             Some(mt) => {
-                let opened = source.map_or_else(|| self.opened(path), |slot| self.opened_in(path, slot));
-                let Opened { src, turn, .. } = opened.ok_or_else(|| MediaError::Io(format!("{path}: cannot open")))?;
+                let Opened { src, turn, .. } = self.opened(path).ok_or_else(|| MediaError::Io(format!("{path}: cannot open")))?;
                 // A movie shown turned a quarter (a phone held upright): the footage's size and
                 // the render's are the turned picture's, the decoded frame's are the file's.
                 let side = |(w, h): (u32, u32)| if crate::probe::swaps_sides(turn) { (h, w) } else { (w, h) };
@@ -2108,30 +2032,10 @@ fn describe_problem(codec: &str, e: &MediaError) -> String {
         MediaError::Cancelled => "the decode was called off",
     };
     let mut unsupported = matches!(e, MediaError::Unsupported(_));
-    loop {
-        if let Some(rest) = ["decode error: ", "unsupported media: ", "unsupported video: ", "malformed video: ", "unsupported: ", "I/O error: "]
-            .iter()
-            .find_map(|p| detail.strip_prefix(p))
-        {
-            unsupported |= detail.starts_with("unsupported");
-            detail = rest;
-        } else if !codec.is_empty()
-            && let Some(rest) = detail.strip_prefix(codec).and_then(|s| s.strip_prefix(": "))
-        {
-            detail = rest;
-        } else {
-            break;
-        }
+    while let Some(rest) = ["decode error: ", "unsupported media: ", "unsupported: ", "I/O error: "].iter().find_map(|p| detail.strip_prefix(p)) {
+        unsupported |= detail.starts_with("unsupported");
+        detail = rest;
     }
-    // Present the stream's chroma sampling, not the shared decoder's H.264 syntax-field number.
-    let detail = if codec == "H.264" {
-        [("chroma_format_idc 0 ", "monochrome "), ("chroma_format_idc 2 ", "4:2:2 chroma "), ("chroma_format_idc 3 ", "4:4:4 chroma ")]
-            .into_iter()
-            .find_map(|(syntax, label)| detail.strip_prefix(syntax).map(|rest| format!("{label}{rest}")))
-            .unwrap_or_else(|| detail.to_owned())
-    } else {
-        detail.to_owned()
-    };
     let what = if codec.is_empty() { "This video" } else { codec };
     if unsupported { format!("{what} isn't supported by the built-in decoder: {detail}") } else { format!("{what} can't be decoded: {detail}") }
 }
@@ -2422,34 +2326,6 @@ mod tests {
         assert_eq!(c.bytes, (16 * 16 * 16 + 64) + (16 * 16 * 4 + 64));
     }
 
-    /// The shared decoder's real messages read without their wrappers or the H.264 syntax-field
-    /// number, and stay "unsupported" or "can't be decoded" as the decoder said.
-    #[test]
-    fn describe_problem_unwraps_shared_decoder_errors() {
-        let unsupported = |s: &str| MediaError::Unsupported(s.into());
-        assert_eq!(
-            describe_problem("H.264", &unsupported("H.264: unsupported: chroma_format_idc 2 (only 4:2:0 is implemented)")),
-            "H.264 isn't supported by the built-in decoder: 4:2:2 chroma (only 4:2:0 is implemented)"
-        );
-        assert_eq!(
-            describe_problem("H.264", &unsupported("H.264: chroma_format_idc 0 stream")),
-            "H.264 isn't supported by the built-in decoder: monochrome stream"
-        );
-        assert_eq!(describe_problem("H.264", &unsupported("chroma_format_idc 3 stream")), "H.264 isn't supported by the built-in decoder: 4:4:4 chroma stream");
-        // The relabel is H.264's own field: another codec keeps the text.
-        assert_eq!(
-            describe_problem("HEVC", &unsupported("chroma_format_idc 2 stream")),
-            "HEVC isn't supported by the built-in decoder: chroma_format_idc 2 stream"
-        );
-        // A wrapped "unsupported" inside a decode error still counts as unsupported.
-        assert_eq!(
-            describe_problem("VP9", &MediaError::Decode("decode error: unsupported video: VP9: profile 3".into())),
-            "VP9 isn't supported by the built-in decoder: profile 3"
-        );
-        assert_eq!(describe_problem("VP9", &MediaError::Decode("malformed video: VP9: bad frame header".into())), "VP9 can't be decoded: bad frame header");
-        assert_eq!(describe_problem("", &MediaError::Decode("malformed video: truncated".into())), "This video can't be decoded: truncated");
-    }
-
     /// #482: an OpenEXR file with HTJ2K compression (which the decoder lacks) says so on import
     /// and when its frame is read, instead of "no non-deep rgb channels" or a transparent frame.
     #[test]
@@ -2614,70 +2490,6 @@ mod tests {
                 Box::new(move || (size, Inner::frame_at(&pool.inner, &f, Tick::ZERO, true, size, FloatCurve::Srgb))) as Job<_>
             })
             .collect()
-    }
-
-    /// #4074: nested codec work may steal another root. A queued same-source root must not
-    /// re-enter its locked decoder, and an independent source must still make progress.
-    #[cfg(not(target_arch = "wasm32"))]
-    #[test]
-    fn movie_dispatch_does_not_reenter_a_locked_source() {
-        let workers: &'static _ = Box::leak(Box::new(rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap()));
-        let codec = Arc::new(rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap());
-        let source = SourceSlot::default();
-        let decoder = Arc::new(Mutex::new(()));
-        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
-        let (release_tx, release_rx) = std::sync::mpsc::channel();
-        let (done_tx, done_rx) = std::sync::mpsc::channel();
-        let first_decoder = decoder.clone();
-        source.enqueue(
-            workers,
-            Box::new(move || {
-                let _decoder = lock(&first_decoder);
-                codec.install(move || {
-                    entered_tx.send(()).unwrap();
-                    release_rx.recv().unwrap();
-                });
-            }),
-        );
-        entered_rx.recv_timeout(std::time::Duration::from_secs(20)).unwrap();
-        source.enqueue(
-            workers,
-            Box::new(move || {
-                let _decoder = lock(&decoder);
-                done_tx.send(()).unwrap();
-            }),
-        );
-        let other = SourceSlot::default();
-        let (other_tx, other_rx) = std::sync::mpsc::channel();
-        other.enqueue(workers, Box::new(move || other_tx.send(()).unwrap()));
-        let independent = other_rx.recv_timeout(std::time::Duration::from_secs(2));
-        // Always release the codec, including on regression failure. The timeout bounds a
-        // deadlock; no decode duration or throughput is being asserted.
-        release_tx.send(()).unwrap();
-        assert!(independent.is_ok(), "another source must finish while this codec is parked");
-        done_rx.recv_timeout(std::time::Duration::from_secs(20)).unwrap();
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    #[test]
-    fn movie_dispatch_releases_queued_work_after_a_panic() {
-        let workers: &'static _ = Box::leak(Box::new(rayon::ThreadPoolBuilder::new().num_threads(1).panic_handler(|_| {}).build().unwrap()));
-        let source = SourceSlot::default();
-        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
-        let (release_tx, release_rx) = std::sync::mpsc::channel();
-        source.enqueue(
-            workers,
-            Box::new(move || {
-                entered_tx.send(()).unwrap();
-                release_rx.recv().unwrap();
-                panic!("a codec failed");
-            }),
-        );
-        entered_rx.recv_timeout(std::time::Duration::from_secs(20)).unwrap();
-        let (done_tx, done_rx) = std::sync::mpsc::channel();
-        source.enqueue(workers, Box::new(move || done_tx.send(()).unwrap()));
-        release_tx.send(()).unwrap();
-        done_rx.recv_timeout(std::time::Duration::from_secs(20)).unwrap();
     }
 
     /// #3269: requests for a frame being decoded wait for that decode and take its picture, also

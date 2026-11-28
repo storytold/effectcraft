@@ -33,11 +33,15 @@ craft-doc = { version = "0.1.0", git = "https://github.com/storytold/craft-libs"
 craft-vectorcraft-format = { version = "0.1.0", git = "https://github.com/storytold/craft-libs", rev = "8fa4db64a9bb943520259ea95331a303ba788f21" }
 # craft-update: app-specific pretend versions apply to startup and manual checks.
 craft-update = { git = "https://github.com/storytold/craft-libs", version = "=0.1.0", rev = "8fa4db64a9bb943520259ea95331a303ba788f21", features = ["ui"] }
-# Craft Link. These two crates are in craft-libs pull requests that are still open: craft-command
-# (#431) and craft-ipc (#433). They are independent crates, so each pins its own PR head. Move both
-# to the merged commit.
+# Craft Link and the plug-in host. craft-command (#431) and craft-ipc (#433) are independent crates
+# and pin their own PR heads. The plug-in crates (craft-plugin-abi #432, craft-plugin-host #454/#613,
+# craft-plugin-ui #615) share one rev. Move all of them to the merged commits.
 craft-command = { git = "https://github.com/storytold/craft-libs", rev = "81669a0c5c656207abf6df59ea2f93dcca328e24", version = "=0.1.0" }
 craft-ipc = { git = "https://github.com/storytold/craft-libs", rev = "a346c50303129490218ffc2e8f7e646435bd8efe", version = "=0.1.0" }
+# The plug-in host lifecycle is native only.
+craft-plugin-host = { git = "https://github.com/storytold/craft-libs", rev = "0800de6e8a3c1947f52650cf81906d54b0b89061", version = "=0.1.0", default-features = false }
+craft-plugin-abi = { git = "https://github.com/storytold/craft-libs", rev = "0800de6e8a3c1947f52650cf81906d54b0b89061", version = "=0.1.0" }
+craft-plugin-ui = { git = "https://github.com/storytold/craft-libs", rev = "0800de6e8a3c1947f52650cf81906d54b0b89061", version = "=0.1.0" }
 # internal
 effectcraft-time = { path = "crates/time" }
 effectcraft-geom = { path = "crates/geom" }
@@ -56,6 +60,7 @@ effectcraft-render = { path = "crates/render" }
 effectcraft-gpu = { path = "crates/gpu" }
 effectcraft-media = { path = "crates/media" }
 effectcraft-link = { path = "crates/link" }
+effectcraft-plugins = { path = "crates/plugins" }
 effectcraft-export = { path = "crates/export" }
 effectcraft-expr = { path = "crates/expr" }
 effectcraft-lottie = { path = "crates/lottie" }
