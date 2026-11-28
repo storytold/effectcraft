@@ -1822,6 +1822,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "craft-texture"
+version = "0.1.0"
+source = "git+https://github.com/storytold/craft-libs?rev=8fa4db64a9bb943520259ea95331a303ba788f21#8fa4db64a9bb943520259ea95331a303ba788f21"
+dependencies = [
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "craft-tga"
 version = "0.1.0"
 source = "git+https://github.com/storytold/craft-libs?rev=33be35625e252cc4f06aa375b3b428521faea37d#33be35625e252cc4f06aa375b3b428521faea37d"
@@ -2916,6 +2924,7 @@ dependencies = [
 name = "effectcraft-render"
 version = "0.25.1"
 dependencies = [
+ "craft-texture",
  "effectcraft-color",
  "effectcraft-effects",
  "effectcraft-geom",

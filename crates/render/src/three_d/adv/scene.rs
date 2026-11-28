@@ -15,13 +15,13 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use craft_texture::srgb_to_linear;
 use effectcraft_effects::Buf;
 use effectcraft_geom::{Mat4, Vec3, vec3};
 use effectcraft_model::{self as model, Primitive};
 use effectcraft_project::{ItemKind, Layer, LayerSource, LightKind, PrimitiveKind, Property};
 use effectcraft_time::Tick;
 
-use super::shade::srgb_to_linear;
 use crate::three_d::camera::{CameraState, NEAR};
 use crate::three_d::compose::camera_for;
 use crate::three_d::light::{LightState, Material as ClassicMaterial};
