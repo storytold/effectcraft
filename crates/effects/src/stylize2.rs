@@ -813,6 +813,49 @@ mod tests {
     }
 
     #[test]
+    fn a_second_motion_tile_on_an_adjustment_keeps_the_first_ones_growth() {
+        // After Effects, adjustment layer: Motion Tile at Output Width 550 % then one at Output
+        // Height 550 % tiles the whole widened band into a grid. The second must not cut the
+        // buffer back to the comp's width, which left the sides empty once scaled down.
+        let s = crate::find("ec.stylize.motiontile").unwrap();
+        let tile = |vals: &[(&str, Value)], b: Buf| {
+            let mut params = Params { values: s.params.iter().map(|p| (p.id.to_string(), p.default.clone())).collect() };
+            params.values.insert("tileCenter".into(), Value::Vec2([5.0, 4.0]));
+            params.values.insert("mirrorEdges".into(), Value::Bool(true));
+            for (k, v) in vals {
+                params.values.insert(k.to_string(), v.clone());
+            }
+            let ctx = EffectCtx { params: &params, time: 0.0, layer_size: [10.0, 8.0], seed: 1, adjustment: true, env: Default::default() };
+            crate::apply(s, &ctx, b)
+        };
+        let wide = tile(&[("outputWidth", num(300.0))], Buf { img: ramp(10, 8), offset: [0.0, 0.0], scale: 1.0 });
+        assert_eq!((wide.img.width, wide.img.height, wide.offset), (30, 8, [10.0, 0.0]));
+        let grid = tile(&[("outputHeight", num(300.0))], wide.clone());
+        assert_eq!((grid.img.width, grid.img.height, grid.offset), (30, 24, [10.0, 8.0]));
+        // Its middle row of tiles is the widened band, mirrored copies at the sides included.
+        for x in 0..30 {
+            for y in 0..8 {
+                let (a, b) = (grid.img.get(x, y + 8), wide.img.get(x, y));
+                for c in 0..4 {
+                    assert!((a[c] - b[c]).abs() < 1e-5, "x={x},y={y} channel {c}: {a:?} vs {b:?}");
+                }
+            }
+        }
+        // A full-size chain stays within the effect pixel budget (four times the 10 560 x 1 080
+        // band): the kept part of the band shrinks evenly, the second tile's own frame does not.
+        let params = Params { values: [("outputWidth", num(100.0)), ("outputHeight", num(550.0))].into_iter().map(|(k, v)| (k.to_string(), v)).collect() };
+        let ctx = EffectCtx { params: &params, time: 0.0, layer_size: [1920.0, 1080.0], seed: 1, adjustment: true, env: Default::default() };
+        let (w, h, off) = crate::motion_tile_frame(&ctx, [4320.0, 0.0], (10560, 1080), 1.0);
+        assert_eq!((w, h, off), (7680, 5940, [2880.0, 2430.0]));
+        // A band wider than a frame may be, though small enough for the budget: the kept part
+        // shrinks to 16 384 pixels and the new tile still grows the height.
+        let params = Params { values: [("outputWidth", num(100.0)), ("outputHeight", num(300.0))].into_iter().map(|(k, v)| (k.to_string(), v)).collect() };
+        let ctx = EffectCtx { params: &params, time: 0.0, layer_size: [1000.0, 100.0], seed: 1, adjustment: true, env: Default::default() };
+        let (w, h, _) = crate::motion_tile_frame(&ctx, [8000.0, 0.0], (16500, 100), 1.0);
+        assert!(w > 16000 && w <= 16384 && h == 300, "{w} x {h}");
+    }
+
+    #[test]
     fn motion_tile_mirror_folds_stay_opaque() {
         // A fold that lands exactly on a pixel centre samples the source's geometric edge, where
         // the plain bilinear tap reaches half a texel into the transparent outside — a faint
