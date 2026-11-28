@@ -1062,12 +1062,13 @@ pub const EFFECTS: &[EffectMap] = &[
     fx("ADBE HDR ToneMap", "ec.utility.hdrcompression", &[pm(1, K::FloatSlider, "amount", Conv::Plain { valid_max: 100.0 })]),
     // Echo (`echo-*`): Echo Time in seconds (valid -30 000..30 000), Number Of Echoes an integer
     // (valid 0..30 000), Starting Intensity 0..1, Decay (valid 0..100, slider 0..1), Echo
-    // Operator. EffectCraft's Echo uses at most 255 echoes and a Decay up to 1.
+    // Operator. EffectCraft's Echo uses an Echo Time within 30 s, at most 255 echoes and a Decay up
+    // to 1.
     fx(
         "ADBE Echo",
         "ec.time.echo",
         &[
-            pm(1, K::FloatSlider, "echoTime", Conv::Plain { valid_max: 30000.0 }),
+            pm_limited(1, K::FloatSlider, "echoTime", Conv::Plain { valid_max: 30000.0 }, -30.0, 30.0),
             pm_limited(2, K::IntSlider, "numberOfEchoes", Conv::Plain { valid_max: 30000.0 }, 0.0, 255.0),
             pm(3, K::FloatSlider, "startingIntensity", Conv::Plain { valid_max: 1.0 }),
             pm_limited(4, K::FloatSlider, "decay", Conv::Plain { valid_max: 100.0 }, 0.0, 1.0),
@@ -1142,6 +1143,57 @@ pub const EFFECTS: &[EffectMap] = &[
     fx("ADBE Checkbox Control", "ec.control.checkbox", &[pm(1, K::Checkbox, "checkbox", Conv::Checkbox)]),
     fx("ADBE Color Control", "ec.control.color", &[pm(1, K::Color, "color", Conv::Color)]),
     fx("ADBE Point Control", "ec.control.point", &[pm(1, K::Point, "point", Conv::Point)]),
+    // Batch of 2026-11-18 (After Effects 26.5 projects: every effect at its defaults, and every
+    // parameter changed with the values scripting reads back).
+    // Bulge: radii valid to 8 000 pixels, 6 Antialiasing (not in EffectCraft's effect), 7 Pinning.
+    fx(
+        "ADBE Bulge",
+        "ec.distort.bulge",
+        &[
+            pm_limited(1, K::FixedSlider, "hradius", Conv::Plain { valid_max: 8000.0 }, 0.0, 4000.0),
+            pm_limited(2, K::FixedSlider, "vradius", Conv::Plain { valid_max: 8000.0 }, 0.0, 4000.0),
+            pm(3, K::Point, "center", Conv::Point),
+            pm(4, K::FixedSlider, "height", Conv::Plain { valid_max: 4.0 }),
+            pm_limited(5, K::FixedSlider, "taperRadius", Conv::Plain { valid_max: 8000.0 }, 0.0, 100.0),
+            pm(7, K::Checkbox, "pinAllEdges", Conv::Checkbox),
+        ],
+    ),
+    // Twirl: Twirl Radius a percent (valid 100).
+    fx(
+        "ADBE Twirl",
+        "ec.distort.twirl",
+        &[pm(1, K::Angle, "angle", Conv::Angle), pm(2, K::FixedSlider, "radius", Conv::Plain { valid_max: 100.0 }), pm(3, K::Point, "center", Conv::Point)],
+    ),
+    // Spherize: Radius in pixels (valid 2 500).
+    fx("ADBE Spherize", "ec.distort.spherize", &[pm(1, K::FixedSlider, "radius", Conv::Plain { valid_max: 2500.0 }), pm(2, K::Point, "center", Conv::Point)]),
+    // Mosaic: integer block counts (valid 4 000), 3 Sharp Colors.
+    fx(
+        "ADBE Mosaic",
+        "ec.stylize.mosaic",
+        &[
+            pm(1, K::IntSlider, "horizontal", Conv::Plain { valid_max: 4000.0 }),
+            pm(2, K::IntSlider, "vertical", Conv::Plain { valid_max: 4000.0 }),
+            pm(3, K::Checkbox, "sharpColors", Conv::Checkbox),
+        ],
+    ),
+    // Posterize: Level a float slider (valid 2..255).
+    fx("ADBE Posterize", "ec.stylize.posterize", &[pm(1, K::FloatSlider, "level", Conv::Plain { valid_max: 255.0 })]),
+    // Threshold: Level a 0..1 fraction of EffectCraft's 0..255 (float, valid -30 000..30 000).
+    fx("ADBE Threshold2", "ec.stylize.threshold", &[pm_limited(1, K::FloatSlider, "level", Conv::Factor { valid_max: 30000.0, factor: 255.0 }, 0.0, 255.0)]),
+    // Find Edges: 1 Invert, Blend With Original a 0..1 fraction.
+    fx(
+        "ADBE Find Edges",
+        "ec.stylize.findedges",
+        &[pm(1, K::Checkbox, "invert", Conv::Checkbox), pm(2, K::FixedSlider, "blend", Conv::Percent { valid_max: 1.0 })],
+    ),
+    // Mirror: the Reflection Center defaults to the layer's right edge in After Effects.
+    fx("ADBE Mirror", "ec.distort.mirror", &[pm(1, K::Point, "center", Conv::Point), pm(2, K::Angle, "angle", Conv::Angle)]),
+    // Vibrance: float sliders, valid -100..100.
+    fx(
+        "ADBE Vibrance",
+        "ec.color.vibrance",
+        &[pm(1, K::FloatSlider, "vibrance", Conv::Plain { valid_max: 100.0 }), pm(2, K::FloatSlider, "saturation", Conv::Plain { valid_max: 100.0 })],
+    ),
 ];
 
 /// Exposure's three sliders, by their valid maximum in the file (389).
