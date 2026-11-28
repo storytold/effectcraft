@@ -554,8 +554,9 @@ fn pointwise(e: &mut Enc, id: &str, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
             p.f[0][0] = 1.0 - f("blend") as f32 / 100.0;
         }
         "ec.generate.fill" => {
-            // Fill Mask / All Masks render on the CPU.
-            if effectcraft_effects::fill_uses_masks(ctx) {
+            // Fill Mask / All Masks render on the CPU (All Masks also without masks, where it
+            // fills nothing).
+            if effectcraft_effects::fill_uses_masks(ctx) || ctx.params.b("allMasks") {
                 return None;
             }
             p.u[0] = [7, ctx.params.b("invert") as u32, 0, 0];
