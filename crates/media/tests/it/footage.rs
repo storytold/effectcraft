@@ -218,6 +218,82 @@ fn reference_frame_in(src: &Path, n: usize, matrix: &str) -> Image {
     load_png(&p)
 }
 
+/// Centred bilinear reference for a known opaque, 8-bit YUV420 source only.
+/// Keep RGB, alpha and high-depth sources on `reference_frame_in`: forcing those through
+/// this carrier is not identity-preserving. Reconstruct chroma after ffmpeg's autorotation,
+/// before the matrix conversion; a combined 420-to-RGB path can use a different vertical
+/// kernel despite the bilinear flags. The hand-vector test below calibrates this exact path.
+fn reference_centred_yuv420_frame_in(src: &Path, n: usize, matrix: &str) -> Image {
+    let stem = src.file_stem().expect("stem").to_string_lossy().to_string();
+    // Version and matrix must distinguish this from cached combined-path references.
+    let name = format!("ref_centred_yuv420p8_v1_{stem}_{matrix}_{n}.png");
+    let vf = format!(
+        "select='eq(n\\,{n})',scale=in_color_matrix={matrix}:out_color_matrix={matrix}:in_range=auto:out_range=tv:in_h_chr_pos=128:in_v_chr_pos=128:flags=bilinear+accurate_rnd+full_chroma_int,format=yuv444p,scale=in_color_matrix={matrix}:in_range=tv:out_range=pc:flags=bilinear+accurate_rnd+full_chroma_int,format=rgba"
+    );
+    let p = ffmpeg_fixture(&name, &["-i", src.to_str().expect("utf8"), "-vf", &vf, "-fps_mode", "passthrough", "-frames:v", "1"]).expect("ffmpeg");
+    load_png(&p)
+}
+
+#[test]
+fn centred_yuv420_reference_matches_independent_hand_vectors() {
+    if !have_ffmpeg() {
+        return;
+    }
+    // Chroma sample centres are at 2*q + 1/2. Interpolate on that coordinate grid,
+    // independently of the application's converter, including all endpoint pixels.
+    let sample = |plane: &[u8], w: usize, h: usize, x: usize, y: usize| {
+        let u = (x as f64 - 0.5) / 2.0;
+        let v = (y as f64 - 0.5) / 2.0;
+        let x0 = u.floor() as isize;
+        let y0 = v.floor() as isize;
+        let (tx, ty) = (u - x0 as f64, v - y0 as f64);
+        let mut value = 0.0;
+        for (dy, wy) in [(0, 1.0 - ty), (1, ty)] {
+            for (dx, wx) in [(0, 1.0 - tx), (1, tx)] {
+                let xx = (x0 + dx).clamp(0, w as isize - 1) as usize;
+                let yy = (y0 + dy).clamp(0, h as isize - 1) as usize;
+                value += f64::from(plane[yy * w + xx]) * wx * wy;
+            }
+        }
+        value
+    };
+    std::fs::create_dir_all(fixtures()).expect("mkdir");
+    for (w, h) in [(18usize, 32usize), (32, 18), (64, 48)] {
+        let (cw, ch) = (w / 2, h / 2);
+        let cb: Vec<u8> = (0..ch).flat_map(|y| (0..cw).map(move |x| (128 + 12 * (((x + 3 * y) % 5) as i32 - 2)) as u8)).collect();
+        let cr: Vec<u8> = (0..ch).flat_map(|y| (0..cw).map(move |x| (128 + 8 * (((3 * x + 2 * y) % 7) as i32 - 3)) as u8)).collect();
+        let path = fixtures().join(format!("hand_centred_yuv420p8_v1_{w}x{h}.y4m"));
+        let mut bytes = format!("YUV4MPEG2 W{w} H{h} F1:1 Ip A1:1 C420jpeg XCOLORRANGE=LIMITED\nFRAME\n").into_bytes();
+        bytes.extend(std::iter::repeat_n(128, w * h));
+        bytes.extend_from_slice(&cb);
+        bytes.extend_from_slice(&cr);
+        let tmp = path.with_file_name(format!("tmp-hand-{}-{w}x{h}.y4m", std::process::id()));
+        std::fs::write(&tmp, bytes).expect("write hand vector");
+        if std::fs::rename(&tmp, &path).is_err() {
+            let _ = std::fs::remove_file(&tmp);
+            assert!(path.exists(), "publish hand vector");
+        }
+        let actual = reference_centred_yuv420_frame_in(&path, 0, "bt709");
+        assert_eq!((actual.width as usize, actual.height as usize), (w, h));
+        for y in 0..h {
+            for x in 0..w {
+                let yy = (128.0 - 16.0) / 219.0;
+                let u = (sample(&cb, cw, ch, x, y) - 128.0) / 224.0;
+                let v = (sample(&cr, cw, ch, x, y) - 128.0) / 224.0;
+                let expected = [yy + 1.5748 * v, yy - 0.1873242729306488 * u - 0.46812427293064884 * v, yy + 1.8556 * u];
+                let got = actual.data[y * w + x];
+                for k in 0..3 {
+                    assert!(
+                        (f64::from(got[k]) - expected[k].clamp(0.0, 1.0)).abs() < 2.0 / 255.0,
+                        "centred reference {w}x{h} at {x},{y}, channel {k}: {got:?} vs {expected:?}"
+                    );
+                }
+                assert_eq!(got[3], 1.0, "opaque reference alpha");
+            }
+        }
+    }
+}
+
 /// A PNG as a premultiplied image (straight alpha in the file).
 fn load_png(p: &Path) -> Image {
     let img = image::open(p).expect("png").to_rgba8();
@@ -1620,25 +1696,51 @@ fn rotated_mp4_matches_reference_orientation() {
     if h264_encoder() != Some("libx264") {
         return;
     }
-    let Some(p) = try_ffmpeg_fixture(
-        "h264_rotate_90.mp4",
-        &["-f", "lavfi", "-i", "testsrc2=size=320x180:rate=24:duration=0.5", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-metadata:s:v:0", "rotate=90"],
+    // Original lavfi pixels and an authored quarter-turn track matrix. FFmpeg builds differ
+    // in whether rotate metadata survives encode/remux; use the existing matrix fixture writer.
+    let Some(base) = try_ffmpeg_fixture(
+        "h264_rotate_source.mp4",
+        &["-f", "lavfi", "-i", "testsrc2=size=320x180:rate=24:duration=0.5", "-c:v", "libx264", "-pix_fmt", "yuv420p"],
     ) else {
         return;
     };
+    let p = fixtures().join("h264_authored_matrix_90.mp4");
+    if !p.exists() {
+        let bytes = turned_mp4(&base, [0, 0x1_0000, -0x1_0000, 0]);
+        let tmp = p.with_file_name(format!("tmp-rotation-{}.mp4", std::process::id()));
+        std::fs::write(&tmp, bytes.as_ref()).expect("write rotated fixture");
+        if std::fs::rename(&tmp, &p).is_err() {
+            let _ = std::fs::remove_file(&tmp);
+            assert!(p.exists(), "publish rotated fixture");
+        }
+    }
     let f = probe(&p).expect("probe rotated mp4");
     assert_eq!((f.width, f.height), (180, 320), "90-degree rotated mp4 swaps width and height");
     let pool = MediaPool::new();
     let img = pool.frame_at(&f, Tick::ZERO).expect("rotated frame");
     assert_eq!((img.width, img.height), (180, 320));
-    assert!(psnr(&img, &reference_frame(&p, 0)) > 35.0, "rotated frame pixels match ffmpeg auto-rotated reference");
+    // This authored fixture is opaque 8-bit YUV420; retain full post-turn RGBA parity.
+    assert!(psnr(&img, &reference_centred_yuv420_frame_in(&p, 0, "bt709")) > 35.0, "rotated frame pixels match ffmpeg auto-rotated reference");
 }
 
 #[test]
 fn webm_alpha_falls_back_to_filmcraft_preserving_alpha() {
-    let Some(p) = try_ffmpeg_fixture(
-        "vp9_alpha_fallback.webm",
-        &["-f", "lavfi", "-i", "format=rgba,geq=r='255':g='0':b='0':a='255*X/W':s=128x64:r=24", "-t", "0.25", "-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p"],
+    // Original synthetic red/alpha ramp. Size and rate belong to the source, not geq.
+    // VP9 is already a required oracle encoder for vp9_webm: invalid filters must fail too.
+    let Some(p) = ffmpeg_fixture(
+        "vp9_alpha_ramp.webm",
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "color=red:s=128x64:r=24,format=rgba,geq=r='255':g='0':b='0':a='255*X/W'",
+            "-t",
+            "0.25",
+            "-c:v",
+            "libvpx-vp9",
+            "-pix_fmt",
+            "yuva420p",
+        ],
     ) else {
         return;
     };
