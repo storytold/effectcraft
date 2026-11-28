@@ -14,7 +14,7 @@ use egui_kittest::Harness;
 fn the_per_tick_hook_runs_on_a_logic_tick_and_the_per_frame_hook_does_not() {
     let ticks = Rc::new(Cell::new(0u32));
     let frames = Rc::new(Cell::new(0u32));
-    let mut h = Harness::builder().with_size(egui::vec2(800.0, 600.0)).build_eframe({
+    let mut h = Harness::builder().with_size(egui::vec2(800.0, 600.0)).with_context_setup(effectcraft_ui_egui::framework::install_headless).build_eframe({
         let (ticks, frames) = (Rc::clone(&ticks), Rc::clone(&frames));
         move |_| {
             let mut app = EffectcraftApp::new(Session::default());
