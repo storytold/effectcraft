@@ -126,6 +126,13 @@ const LIGHT_BYTES: usize = 6 * 16;
 /// Composite a prepared Classic 3D run over `canvas`. `None` when it cannot run here (the
 /// caller draws it on the CPU).
 pub(crate) fn draw_run(e: &mut Enc, run: &Run3d, canvas: &GpuImage) -> Option<GpuImage> {
+    draw_run_with(e, run, canvas, &HashMap::new())
+}
+
+/// [`draw_run`] with planes whose pixels are already on the device: a plane without pixels
+/// (prepared from a shape, `Renderer::prepare_3d_run_with`) is drawn from `resident`'s texture of
+/// its layer. `None` also when such a plane has no texture there.
+pub(crate) fn draw_run_with(e: &mut Enc, run: &Run3d, canvas: &GpuImage, resident: &HashMap<u32, GpuImage>) -> Option<GpuImage> {
     // FXC (DirectX 12) may fail to build the kernel (#613): the caller renders the run on the CPU.
     if !e.g.has_kernel("classic3d") {
         return None;
@@ -144,7 +151,11 @@ pub(crate) fn draw_run(e: &mut Enc, run: &Run3d, canvas: &GpuImage) -> Option<Gp
     // here when the plane has it.
     let mut texs: Vec<(GpuImage, [f64; 2])> = Vec::with_capacity(run.planes.len());
     for p in &run.planes {
-        let up = e.g.upload_buf(&p.buf)?;
+        let up = match resident.get(&p.layer_id) {
+            Some(t) if p.buf.img.data.is_empty() && (t.width, t.height) == (p.buf.img.width, p.buf.img.height) => t.clone(),
+            _ if p.buf.img.data.is_empty() => return None,
+            _ => e.g.upload_buf(&p.buf)?,
+        };
         match &p.dof {
             Some(d) => {
                 let pad = d.pad as f64;

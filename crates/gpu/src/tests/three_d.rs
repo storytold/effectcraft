@@ -362,3 +362,105 @@ fn classic_3d_runs_render_on_the_cpu_without_the_kernel() {
         check(&format!("classic 3D without its kernel {depth:?}"), Some(d), 0.0);
     }
 }
+
+/// [`crossing`] with Gaussian Blur (large enough to run on the GPU) and Tint on its 3D planes.
+fn blurred_crossing(depth: BitDepth) -> Scene {
+    let mut s = crossing(depth, BlendMode::Normal);
+    let mut planes: Vec<Layer> = s.p.comp(s.cid).unwrap().layers.iter().filter(|l| l.switches.three_d).cloned().collect();
+    for (i, l) in planes.iter_mut().enumerate() {
+        s.effect(l, "ec.blur.gaussian", &[("blurriness", n(20.0 + 5.0 * i as f64))]);
+        s.effect(l, "ec.color.tint", &[]);
+    }
+    for l in planes {
+        if let Some(slot) = s.p.comp_mut(s.cid).unwrap().layers.find_mut(|x| x.id == l.id) {
+            *slot = l;
+        }
+    }
+    s
+}
+
+/// With a layer cache, the resident 3D results are kept: the same frame drawn again reuses them
+/// (the planes' inputs don't upload again), a changed effect parameter shows at once, and a
+/// cleared cache (File ▸ Reload Footage) makes them again; every frame matches the CPU.
+#[test]
+fn resident_three_d_results_follow_the_layer_cache() {
+    let Some(g) = gpu() else { return };
+    if !g.context().has_kernel("classic3d") {
+        return;
+    }
+    let mut s = blurred_crossing(BitDepth::Bpc32);
+    let cache = effectcraft_render::LayerCache::default();
+    let frame = |s: &Scene, label: &str| {
+        let mut r = Renderer::new(&s.p, &Pattern, RenderOpts { backend: Backend::Gpu, ..opts() });
+        r.accel = Some(g);
+        r.cache = Some(&cache);
+        let before = g.ctx.transfer_stats().uploads;
+        let img = g.render(&r, s.cid, Tick::ZERO).expect("the GPU renders the frame");
+        let uploads = g.ctx.transfer_stats().uploads - before;
+        let cpu = Renderer::new(&s.p, &Pattern, RenderOpts { backend: Backend::Cpu, ..opts() }).comp_frame_cpu(s.cid, Tick::ZERO);
+        check(label, Some(diff(&cpu, &img, tolerance(BitDepth::Bpc32))), 0.005);
+        (img, uploads)
+    };
+    let (_, first) = frame(&s, "first frame");
+    let (shown, again) = frame(&s, "the same frame again");
+    assert!(again < first, "the kept results are reused ({again} uploads, {first} the first time)");
+
+    // A changed effect parameter: new pixels, not the kept ones.
+    let top = s.p.comp(s.cid).unwrap().layers.iter().find(|l| l.switches.three_d).map(|l| l.id).unwrap();
+    if let Some(l) = s.p.comp_mut(s.cid).unwrap().layers.find_mut(|l| l.id == top) {
+        set(l, "effects/#1/blurriness", n(60.0));
+    }
+    let (changed, _) = frame(&s, "a changed parameter");
+    assert!(diff(&shown, &changed, 1e-3).over > 0, "the changed blur shows");
+
+    // A cleared cache: nothing kept before it is reused.
+    let (_, _) = frame(&s, "kept again");
+    let hits = g.ctx.fx_result_hits();
+    let (_, _) = frame(&s, "kept once more");
+    assert!(g.ctx.fx_result_hits() > hits, "an unchanged frame reuses the kept results");
+    cache.clear();
+    let hits = g.ctx.fx_result_hits();
+    let (_, _) = frame(&s, "after a clear");
+    assert_eq!(g.ctx.fx_result_hits(), hits, "nothing kept before the clear is reused");
+}
+
+/// 3D planes with effect stacks: the stacks run resident on the GPU and their results go into
+/// the Classic 3D atlas without a readback (as many readbacks as without the effects), and the
+/// frame matches the CPU, also with an effect that grows the layer (Gaussian Blur), shadows,
+/// and a 3D track matte whose own effects keep the CPU path.
+#[test]
+fn three_d_effect_stacks_stay_on_the_gpu() {
+    for depth in [BitDepth::Bpc8, BitDepth::Bpc32] {
+        let mut s = blurred_crossing(depth);
+        let Some(g) = gpu() else { return };
+        // Readbacks of a frame: the same scene without the effects is the reference.
+        let readbacks = |s: &Scene| {
+            let before = g.ctx.transfer_stats().readbacks;
+            let d = compare_at(s, opts(), Tick::ZERO);
+            (d, g.ctx.transfer_stats().readbacks - before)
+        };
+        let (_, plain) = readbacks(&crossing(depth, BlendMode::Normal));
+        let (d, with_fx) = readbacks(&s);
+        check(&format!("3d effect stacks {depth:?}"), d, 0.005);
+        if g.context().has_kernel("classic3d") {
+            assert_eq!(with_fx, plain, "{depth:?}: the effect stacks add no readbacks");
+        }
+
+        // Shadows, and a 3D track matte (with an effect of its own) on the top plane.
+        for l in &mut s.p.comp_mut(s.cid).unwrap().layers {
+            if l.switches.three_d {
+                set(l, "materialOptions/castsShadows", Value::Enum(1));
+            }
+        }
+        light(&mut s, LightKind::Point, [60.0, 10.0, -120.0], &[("castsShadows", Value::Bool(true))]);
+        let top = s.p.comp(s.cid).unwrap().layers.iter().find(|l| l.switches.three_d).map(|l| l.id).unwrap();
+        let mut m = three_d(s.solid([0.8, 0.8, 0.8], 70, 50), [80.0, 50.0, -5.0], 10.0);
+        s.effect(&mut m, "ec.blur.gaussian", &[("blurriness", n(24.0))]);
+        m.switches.video = false;
+        let mid = s.push(m);
+        if let Some(l) = s.p.comp_mut(s.cid).unwrap().layers.find_mut(|l| l.id == top) {
+            l.track_matte = Some(TrackMatte { layer: mid, kind: MatteKind::Alpha });
+        }
+        check(&format!("3d effect stacks, shadows and a matte {depth:?}"), compare_at(&s, opts(), Tick::ZERO), 0.005);
+    }
+}

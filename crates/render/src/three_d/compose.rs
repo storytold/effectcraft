@@ -240,9 +240,20 @@ fn mb_samples(r: &Renderer, ctx: &EvalCtx, layer: &Layer) -> usize {
     }
 }
 
+/// Processed layer buffers an accelerator holds on the device, by layer: their size, offset
+/// and scale (blending space), without pixels. A Classic 3D run prepared with them
+/// ([`Renderer::prepare_3d_run_with`]) takes each plane's geometry from the shape and leaves the
+/// pixels to the accelerator, instead of rendering the layer's effects on the CPU.
+pub type PlaneShapes = std::collections::HashMap<effectcraft_project::LayerId, Arc<Buf>>;
+
 /// Prepare a layer (buffer, geometry, material). `None` when it shows nothing.
 pub(crate) fn prepare<'a>(r: &Renderer, ctx: &EvalCtx<'_>, layer: &'a Layer, order: usize, out: (u32, u32), in_run: bool) -> Option<Item<'a>> {
-    let buf = r.blend_layer_buf(ctx, layer)?;
+    // (only the run's own planes: a shadow caster outside the run is drawn from its pixels)
+    let shape = r.fx_planes.filter(|_| in_run).and_then(|m| m.get(&layer.id));
+    let buf = match shape {
+        Some(b) => b.clone(),
+        None => r.blend_layer_buf(ctx, layer)?,
+    };
     prepare_with(r, ctx, layer, order, out, in_run, PlaneInput { buf, local: Mat4::IDENTITY })
 }
 

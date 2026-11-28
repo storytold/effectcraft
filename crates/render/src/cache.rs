@@ -46,6 +46,8 @@ pub struct LayerCache {
     virtual_id: Mutex<Option<SharedVirtualFileId>>,
     /// While set, inserts are dropped (see [`LayerCache::set_gate`]).
     gate: Mutex<Option<Arc<std::sync::atomic::AtomicBool>>>,
+    /// How many times the cache was cleared ([`LayerCache::clears`]).
+    clears: std::sync::atomic::AtomicU64,
 }
 
 struct Entry {
@@ -181,6 +183,7 @@ impl LayerCache {
             store: Mutex::new(None),
             virtual_id: Mutex::new(None),
             gate: Mutex::new(None),
+            clears: Default::default(),
         }
     }
 
@@ -428,6 +431,14 @@ impl LayerCache {
             g.order.clear();
             g.bytes = 0;
         }
+        self.clears.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// How many times the cache was cleared ([`LayerCache::clear`]: File ▸ Reload Footage, a
+    /// purge, a settings change): an accelerator that keeps results of its own under this cache's
+    /// keys keys them with it too, so nothing made before a clear is reused after it.
+    pub fn clears(&self) -> u64 {
+        self.clears.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn stats(&self) -> CacheStats {

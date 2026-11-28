@@ -697,6 +697,8 @@ pub struct GpuContext {
     uploads: Mutex<Uploads>,
     /// Uploaded footage pictures, shared by the layers that show them (see [`crate::upload`]).
     pictures: Mutex<crate::upload::Pictures>,
+    /// Effect results kept between frames (see [`crate::upload::FxResults`]).
+    fx_results: Mutex<crate::upload::FxResults>,
     /// Reused staging buffers of large uploads (see [`crate::upload::Staging`]).
     upload_staging: crate::upload::Staging,
     upload_budget: std::sync::atomic::AtomicUsize,
@@ -1024,6 +1026,7 @@ impl GpuContext {
             dummy_buf,
             uploads: Mutex::new(Uploads::default()),
             pictures: Default::default(),
+            fx_results: Default::default(),
             upload_staging: Default::default(),
             upload_budget: std::sync::atomic::AtomicUsize::new(memcap.upload_budget()),
             upload_full_warned: Default::default(),
@@ -1606,6 +1609,7 @@ impl GpuContext {
             dummy_buf: self.dummy_buf.clone(),
             uploads: Mutex::new(Uploads::default()),
             pictures: Default::default(),
+            fx_results: Default::default(),
             upload_staging: Default::default(),
             upload_budget: std::sync::atomic::AtomicUsize::new(self.upload_budget()),
             upload_full_warned: Default::default(),
@@ -1821,6 +1825,24 @@ impl GpuContext {
         Some(tex)
     }
 
+    /// The effect result kept under `key` (see [`crate::upload::FxResults`]).
+    pub(crate) fn fx_result(&self, key: u64) -> Option<crate::upload::FxHit> {
+        self.fx_results.lock().ok()?.get(key)
+    }
+
+    /// Effect results reused so far (tests).
+    #[cfg(test)]
+    pub(crate) fn fx_result_hits(&self) -> u64 {
+        self.fx_results.lock().map(|r| r.hits).unwrap_or_default()
+    }
+
+    /// Keep an effect result under `key`, within a quarter of the upload budget.
+    pub(crate) fn keep_fx_result(&self, key: u64, result: crate::upload::FxHit) {
+        if let Ok(mut r) = self.fx_results.lock() {
+            r.insert(key, result, self.upload_budget() / 4);
+        }
+    }
+
     /// Entries in the footage picture cache.
     #[cfg(test)]
     pub(crate) fn picture_entries(&self) -> usize {
@@ -1838,6 +1860,9 @@ impl GpuContext {
     pub fn trim_uploads(&self) {
         if let Ok(mut p) = self.pictures.lock() {
             p.clear();
+        }
+        if let Ok(mut r) = self.fx_results.lock() {
+            r.clear();
         }
         self.upload_staging.clear();
     }
@@ -1905,6 +1930,9 @@ impl GpuContext {
         }
         if let Ok(mut p) = self.pictures.lock() {
             p.clear();
+        }
+        if let Ok(mut r) = self.fx_results.lock() {
+            r.clear();
         }
         self.upload_staging.clear();
         if let Ok(mut p) = self.pool.lock() {

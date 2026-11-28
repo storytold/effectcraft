@@ -101,6 +101,10 @@ pub struct Renderer<'a> {
     pub(crate) inherited: Option<(Quality, bool)>,
     /// Classic 3D depth of field is left to an accelerator ([`three_d::Plane3d::dof`]).
     pub(crate) defer_dof: bool,
+    /// Classic 3D layers whose effect stack an accelerator already ran (its result stays on
+    /// the device): the processed buffer's geometry, without pixels, by layer
+    /// ([`Renderer::prepare_3d_run_with`]).
+    pub(crate) fx_planes: Option<&'a three_d::PlaneShapes>,
     /// This renderer draws into the top-level frame's canvas (the top comp, or a collapsed
     /// precomp drawn straight into it): the region of interest's offset applies.
     top: bool,
