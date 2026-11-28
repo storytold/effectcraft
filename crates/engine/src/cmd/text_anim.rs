@@ -391,6 +391,27 @@ fn list_presets(_: &mut Session, _: &Value) -> Result<Value> {
     Ok(Value::Array(presets().iter().map(|p| json!({"id": p.get("id"), "name": p.get("name"), "description": p.get("description")})).collect()))
 }
 
+/// The layer's Source Text document at `t`; `None` when it is not a text layer.
+fn layer_text_doc(layer: &Layer, t: Tick) -> Option<effectcraft_keyframe::TextDoc> {
+    match layer.props.prop("text/sourceText")?.value_at(layer.layer_time(t)) {
+        KV::Text(doc) => Some(*doc),
+        _ => None,
+    }
+}
+
+/// The variable axes `text.animatorFontAxes` accepts for `doc`: the face of its first laid-out
+/// glyph, else the family/style face. Shared with the timeline menus, which list exactly these.
+pub fn font_axes_for(doc: &effectcraft_keyframe::TextDoc) -> Vec<effectcraft_text::variable::FontAxis> {
+    let face = effectcraft_text::layout_doc(doc).glyphs.first().map(|g| g.face).unwrap_or_else(|| effectcraft_text::resolve(&doc.font, &doc.style).face);
+    effectcraft_text::variable::font_axes(face)
+}
+
+/// [`font_axes_for`] for the layer's Source Text at the session time. The timeline's "Animate:" and
+/// "Add:" menus list exactly this set, so an offered axis always works (#3964).
+pub fn font_axes_now(s: &Session, layer: &Layer) -> Vec<effectcraft_text::variable::FontAxis> {
+    layer_text_doc(layer, s.time()).map(|d| font_axes_for(&d)).unwrap_or_default()
+}
+
 /// Animation ▸ Animate Text ▸ Variable Font Axes: the axes of the layer's font, or (with `axis`)
 /// a new animator — or a property on `animator` — that offsets that axis (user units, weighted
 /// by the selectors, added to the axis default).
@@ -398,11 +419,10 @@ fn font_axes(s: &mut Session, p: &Value) -> Result<Value> {
     const C: &str = "text.animatorFontAxes";
     let (cid, lid) = layer_p(s, p, C)?;
     let layer = s.project.comp(cid).and_then(|c| c.layer(lid)).cloned().ok_or_else(|| bad(C, "no layer"))?;
-    let Some(KV::Text(doc)) = layer.props.prop("text/sourceText").map(|pr| pr.value_at(layer.layer_time(s.time()))) else {
+    let Some(doc) = layer_text_doc(&layer, s.time()) else {
         return Err(bad(C, "not a text layer"));
     };
-    let face = effectcraft_text::layout_doc(&doc).glyphs.first().map(|g| g.face).unwrap_or_else(|| effectcraft_text::resolve(&doc.font, &doc.style).face);
-    let axes = effectcraft_text::variable::font_axes(face);
+    let axes = font_axes_for(&doc);
     let list = || json!(axes.iter().map(|a| json!({"tag": a.tag, "name": a.name, "min": a.min, "default": a.default, "max": a.max})).collect::<Vec<_>>());
     let Some(want) = str_p(p, "axis") else { return Ok(json!({"font": doc.font, "axes": list()})) };
     if axes.is_empty() {
