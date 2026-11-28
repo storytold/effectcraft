@@ -882,16 +882,29 @@ impl<'a> Renderer<'a> {
             })
             .filter(|(_, _, s)| !effectcraft_effects::audio_fx::is_audio_effect(s.id))
             .collect();
+        // Compositing Options ▸ Effect Opacity of each, 0..1 (1 without the property).
+        let opacity: Vec<f64> = stack
+            .iter()
+            .map(|(_, g, _)| g.prop(effectcraft_effects::EFFECT_OPACITY).map_or(1.0, |p| effectcraft_effects::effect_opacity(ctx.value(layer, p).as_f64())))
+            .collect();
         let accel = self.active_accel();
         let mut k = 0;
         while k < stack.len() {
             let (i, g, spec) = stack[k];
-            // A run of GPU effects goes to the accelerator in one go.
+            let op = opacity.get(k).copied().unwrap_or(1.0);
+            // A run of GPU effects goes to the accelerator in one go; an effect at a partial
+            // Effect Opacity runs on the CPU, which blends it with its input.
             if let Some(a) = accel
                 && spec.gpu
                 && a.supports_effect(spec.id)
+                && op >= 1.0
             {
-                let run: Vec<_> = stack[k..].iter().take_while(|(_, _, s)| s.gpu && a.supports_effect(s.id)).collect();
+                let run: Vec<_> = stack[k..]
+                    .iter()
+                    .zip(&opacity[k..])
+                    .take_while(|((_, _, s), op)| s.gpu && a.supports_effect(s.id) && **op >= 1.0)
+                    .map(|(e, _)| e)
+                    .collect();
                 let params: Vec<Params> = run.iter().map(|(_, g, _)| self.effect_params(ctx, layer, g)).collect();
                 let hosts: Vec<_> = run.iter().map(|(i, _, _)| FxHost { index: *i, ..host }).collect();
                 let steps: Vec<FxStep> = run
@@ -921,13 +934,21 @@ impl<'a> Renderer<'a> {
                 }
             }
             k += 1;
+            // At 0 % the effect leaves its input as it is.
+            if op <= 0.0 {
+                continue;
+            }
             let params = self.effect_params(ctx, layer, g);
             let host = FxHost { index: i, ..host };
             let env = EffectEnv { host: Some(&host), effect_index: i, ..env };
             let ectx = EffectCtx { params: &params, time: lt.seconds(), layer_size, seed: g.uid as u32, adjustment, env };
             let t0 = web_time::Instant::now();
             target.cpu(&mut |buf| {
+                let input = (op < 1.0).then(|| buf.clone());
                 let mut buf = effectcraft_effects::apply(spec, &ectx, buf);
+                if let Some(input) = input {
+                    buf = effectcraft_effects::blend_with_input(&input, buf, op);
+                }
                 // 8/16 bpc effects write integer pixels.
                 self.pipe.quantize(&mut buf.img);
                 buf

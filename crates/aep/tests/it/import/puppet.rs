@@ -169,3 +169,15 @@ fn a_puppet_whose_mesh_tree_is_not_found_is_reported() {
         l[0]
     );
 }
+
+#[test]
+fn a_puppets_effect_opacity_is_imported() {
+    let bytes = bytes_with_effect(PUPPET, |t| {
+        let options = group(vec![("ADBE Effect Mask Opacity", record(t, 37.0))]);
+        sspc(1, Some(group(vec![("ADBE FreePin3 Mesh Group", group(vec![]))])), vec![("ADBE Effect Built In Params", options)])
+    });
+    let (g, r) = import_bytes(&bytes, effectcraft_effects::puppet::ID);
+    let g = g.expect("an EffectCraft Puppet");
+    assert_eq!(g.prop(effectcraft_effects::EFFECT_OPACITY).map(|p| p.value.clone()), Some(effectcraft_keyframe::Value::Scalar(37.0)));
+    assert_eq!(losses(&r, LossCategory::Effects, PUPPET), Vec::<String>::new());
+}
