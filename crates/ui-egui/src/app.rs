@@ -69,6 +69,7 @@ impl EffectcraftApp {
             synthetic_in_flight: false,
             synthetic_in_flight_events: vec![],
             last_viewer_scale: None,
+            last_active_comp: None,
             control_rx: None,
             deferred: vec![],
             control_backlog: vec![],

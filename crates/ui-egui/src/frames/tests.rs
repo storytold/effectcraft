@@ -669,6 +669,9 @@ fn prefetch_renders_the_frames_the_playhead_reaches_first() {
     let mut f = Frames::default();
     f.set_remote(Some(Arc::new(Idle)));
     let src = idle_source();
+    // This checks the playhead's order, not Only Cache Active Composition (see
+    // `a_playing_preview_drops_the_other_comps_frames`).
+    f.set_only_cache_active_comp(false);
     for frame in [40, 30, 20, 5, 12, 11] {
         f.request(&src, key(1, frame, 0), ItemId(1), Tick::ZERO, RenderOpts::default());
     }
@@ -683,6 +686,122 @@ fn prefetch_renders_the_frames_the_playhead_reaches_first() {
     }
     assert_eq!(order, [(1, 11), (1, 12), (1, 20), (1, 30), (1, 40), (2, 1)]);
     assert_eq!(f.inflight(), 6, "frame 5, behind the playhead, is no longer in flight");
+}
+
+/// #4185: switching composition tabs drops the inactive comp's queued background frames and
+/// calls off the one rendering, while the frames it already cached stay.
+#[test]
+fn switching_comps_drops_and_calls_off_the_inactive_comps_frames() {
+    let mut f = Frames::default();
+    f.set_remote(Some(Arc::new(Idle)));
+    let src = idle_source();
+    let (a, b) = (ItemId(1), ItemId(2));
+    f.focus_comp(Some(a));
+    for frame in 0..3 {
+        f.request_background(&src, FrameKey { comp: 1, ..key(1, frame, 0) }, a, Tick::ZERO, RenderOpts::default());
+    }
+    f.request(&src, FrameKey { comp: 1, ..key(1, 4, 0) }, a, Tick::ZERO, RenderOpts::default());
+    // One of them is already rendering.
+    let cancel = Arc::new(AtomicBool::new(false));
+    let running = FrameKey { comp: 1, ..key(1, 5, 0) };
+    f.queue.lock().unwrap().running_cancels.push(RunningCancel { key: running, cancel: cancel.clone(), urgent: false, background: true });
+    f.focus_comp(Some(b));
+    assert!(f.queue.lock().unwrap().jobs.is_empty(), "the inactive comp's queued frames are dropped");
+    assert_eq!(f.inflight(), 0, "and forgotten in flight");
+    assert!(cancel.load(Ordering::Relaxed), "the inactive comp's running background frame is called off");
+    // The frames it had cached stay.
+    insert(&f, key(1, 7, 0));
+    f.focus_comp(Some(a));
+    f.focus_comp(Some(b));
+    assert!(f.is_cached(&key(1, 7, 0)), "switching tabs keeps the cache of the tab left behind");
+    // Off, the queued frames of the other comps are kept.
+    f.set_only_cache_active_comp(false);
+    f.focus_comp(Some(a));
+    f.request_background(&src, FrameKey { comp: 1, ..key(1, 9, 0) }, a, Tick::ZERO, RenderOpts::default());
+    f.focus_comp(Some(b));
+    assert_eq!(f.inflight(), 1);
+    // Turning the setting on drops them now.
+    f.set_only_cache_active_comp(true);
+    assert!(f.queue.lock().unwrap().jobs.is_empty());
+    assert_eq!(f.inflight(), 0);
+}
+
+/// #4185: the active comp's frames render before an inactive tab's, even a background frame
+/// against the other comp's prefetch, and prefetch before idle caching.
+#[test]
+fn the_active_comps_frames_render_before_an_inactive_comps() {
+    let mut f = Frames::default();
+    f.set_remote(Some(Arc::new(Idle)));
+    let src = idle_source();
+    f.focus_comp(Some(ItemId(2)));
+    f.request(&src, FrameKey { comp: 1, ..key(1, 1, 0) }, ItemId(1), Tick::ZERO, RenderOpts::default());
+    f.request_background(&src, FrameKey { comp: 2, ..key(1, 2, 0) }, ItemId(2), Tick::ZERO, RenderOpts::default());
+    f.request(&src, FrameKey { comp: 1, ..key(1, 3, 0) }, ItemId(1), Tick::ZERO, RenderOpts::default());
+    f.request_background(&src, FrameKey { comp: 1, ..key(1, 4, 0) }, ItemId(1), Tick::ZERO, RenderOpts::default());
+    let mut q = f.queue.lock().unwrap();
+    let mut order = vec![];
+    while let Some(i) = q.best() {
+        order.push((q.jobs[i].key.comp, q.jobs[i].key.frame));
+        q.jobs.swap_remove(i);
+    }
+    assert_eq!(order, [(2, 2), (1, 1), (1, 3), (1, 4)], "the active comp first, then prefetch before idle caching");
+}
+
+/// #4185: once the viewer asks for a queued or running background frame, it is no longer
+/// background work, so playback does not call it off.
+#[test]
+fn a_viewer_request_takes_a_background_frame_out_of_the_background() {
+    let mut f = Frames::default();
+    f.set_remote(Some(Arc::new(Idle)));
+    let src = idle_source();
+    f.focus_comp(Some(ItemId(1)));
+    // Queued by Cache Frames When Idle, then the viewer asks for it.
+    let queued = FrameKey { comp: 1, ..key(1, 3, 0) };
+    f.request_background(&src, queued, ItemId(1), Tick::ZERO, RenderOpts::default());
+    f.request_urgent(&src, queued, ItemId(1), Tick::ZERO, RenderOpts::default());
+    {
+        let q = f.queue.lock().unwrap();
+        let j = q.jobs.iter().find(|j| j.key == queued).expect("still queued");
+        assert!(j.urgent && !j.background, "the viewer's frame is not background work");
+    }
+    // A frame already rendering as background, then the viewer asks for it: playback does not
+    // call it off.
+    let running = FrameKey { comp: 1, ..key(1, 5, 0) };
+    let cancel = Arc::new(AtomicBool::new(false));
+    {
+        let mut q = f.queue.lock().unwrap();
+        q.running.insert(running);
+        q.running_cancels.push(RunningCancel { key: running, cancel: cancel.clone(), urgent: false, background: true });
+    }
+    f.inflight.lock().unwrap().insert(running);
+    f.request_urgent(&src, running, ItemId(1), Tick::ZERO, RenderOpts::default());
+    {
+        let q = f.queue.lock().unwrap();
+        let r = q.running_cancels.iter().find(|r| r.key == running).expect("still rendering");
+        assert!(r.urgent && !r.background, "the viewer's frame is not background work");
+    }
+    assert!(f.urgent_pending(), "the viewer waits for the promoted frame");
+    f.set_playhead(Some(playhead(0, false)));
+    assert!(!cancel.load(Ordering::Relaxed), "playback does not call off the frame the viewer asked for");
+}
+
+/// #4185: starting a preview drops the other comps' frames and Cache Frames When Idle's, so the
+/// lanes render only the active comp's prefetch.
+#[test]
+fn a_playing_preview_drops_the_other_comps_frames() {
+    let mut f = Frames::default();
+    f.set_remote(Some(Arc::new(Idle)));
+    let src = idle_source();
+    f.focus_comp(Some(ItemId(1)));
+    f.request(&src, FrameKey { comp: 1, ..key(1, 1, 0) }, ItemId(1), Tick::ZERO, RenderOpts::default());
+    f.request_background(&src, FrameKey { comp: 1, ..key(1, 2, 0) }, ItemId(1), Tick::ZERO, RenderOpts::default());
+    f.request(&src, FrameKey { comp: 2, ..key(1, 3, 0) }, ItemId(2), Tick::ZERO, RenderOpts::default());
+    f.set_playhead(Some(playhead(0, false)));
+    let q = f.queue.lock().unwrap();
+    let queued: Vec<_> = q.jobs.iter().map(|j| (j.key.comp, j.key.frame, j.background)).collect();
+    assert_eq!(queued, [(1, 1, false)]);
+    drop(q);
+    assert_eq!((f.inflight_for(ItemId(1)), f.inflight_for(ItemId(2))), (1, 0));
 }
 
 /// A decoder that works in parallel, as the renderer does, in a comp that shows it.

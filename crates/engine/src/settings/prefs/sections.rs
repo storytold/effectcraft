@@ -103,6 +103,10 @@ page!(Previews {
     adaptive_playback: bool = false,
     show_internal_wireframes: bool = false,
     cache_frames_when_idle: bool = true,
+    /// Only Cache Active Composition: Cache Frames When Idle and prefetch render the active
+    /// composition's frames. Switching tabs keeps the frames already cached, but drops and calls
+    /// off the previous tab's queued background frames. Off: every open composition keeps caching.
+    only_cache_active_comp: bool = true,
     fast_previews: bool = false,
     /// `faster` or `moreAccurate`.
     zoom_quality: String = "moreAccurate".into(),

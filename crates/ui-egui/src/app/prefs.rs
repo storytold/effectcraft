@@ -21,6 +21,9 @@ impl EffectcraftApp {
         // writes the zoom factor; egui's own Ctrl+= / Ctrl+- / Ctrl+0 zoom is off under the runtime
         // (Ctrl+0 is Window ▸ Project).
         self.ui.cache_when_idle = p.previews.cache_frames_when_idle;
+        self.ui.only_cache_active_comp = p.previews.only_cache_active_comp;
+        // Turning it on now also drops and calls off the other comps' frames already queued.
+        self.frames.set_only_cache_active_comp(p.previews.only_cache_active_comp);
         self.ui.viewer.fast_preview = p.previews.fast_previews;
         // No limit of its own below the common budget on the desktop, the browser's cap there:
         // the memory accountant keeps it (#3298).

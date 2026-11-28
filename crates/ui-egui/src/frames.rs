@@ -1070,8 +1070,8 @@ impl Frames {
         self.closing.store(true, Ordering::SeqCst);
         if let Ok(mut q) = self.queue.lock() {
             q.jobs.clear();
-            for (_, cancel) in &q.urgent_cancels {
-                cancel.store(true, Ordering::Relaxed);
+            for r in &q.running_cancels {
+                r.cancel.store(true, Ordering::Relaxed);
             }
         }
         let end = std::time::Instant::now() + limit;
@@ -1552,13 +1552,15 @@ impl Frames {
         if let Some(p) = playhead
             && let Ok(mut inf) = self.inflight.lock()
         {
-            q.jobs.retain(|j| {
-                let gone = !j.urgent && j.key.same_series(&p.series) && p.ahead(&j.key).is_none();
-                if gone {
-                    inf.remove(&j.key);
-                }
-                !gone
-            });
+            // While a preview plays, only its comp's prefetch (and the viewer's frame) matters:
+            // another comp's frames, or Cache Frames When Idle's, would take its lanes (#4185).
+            let only = q.only_cache_active_comp;
+            drop_jobs(
+                &mut q,
+                &mut inf,
+                |j| !j.urgent && ((j.key.same_series(&p.series) && p.ahead(&j.key).is_none()) || (only && (j.background || j.key.comp != p.series.comp))),
+                |r| only && (r.background || r.key.comp != p.series.comp),
+            );
         }
         // A lane more may composite: one that stopped at the limit starts again.
         #[cfg(not(target_arch = "wasm32"))]
@@ -1576,6 +1578,34 @@ impl Frames {
                 self.start_pool();
             }
         }
+    }
+
+    /// The active composition changed: its frames come first (see [`Queue::best_of`]). With
+    /// Settings ▸ Previews ▸ Only Cache Active Composition on, the other comps' queued frames
+    /// are dropped and their running background frames called off; frames already cached stay.
+    pub fn focus_comp(&self, comp: Option<ItemId>) {
+        let (Ok(mut q), Ok(mut inf)) = (self.queue.lock(), self.inflight.lock()) else { return };
+        q.active_comp = comp.map(|c| c.0);
+        if q.only_cache_active_comp {
+            let active = q.active_comp;
+            drop_jobs(&mut q, &mut inf, |j| !j.urgent && Some(j.key.comp) != active, |r| r.background && Some(r.key.comp) != active);
+        }
+    }
+
+    /// Settings ▸ Previews ▸ Only Cache Active Composition: turning it on drops and calls off the
+    /// frames of the other comps that are queued or rendering now.
+    pub fn set_only_cache_active_comp(&self, enabled: bool) {
+        let (Ok(mut q), Ok(mut inf)) = (self.queue.lock(), self.inflight.lock()) else { return };
+        q.only_cache_active_comp = enabled;
+        if enabled {
+            let active = q.active_comp;
+            drop_jobs(&mut q, &mut inf, |j| !j.urgent && Some(j.key.comp) != active, |r| r.background && Some(r.key.comp) != active);
+        }
+    }
+
+    /// Frames of `comp` queued or rendering (see [`Frames::inflight`]).
+    pub fn inflight_for(&self, comp: ItemId) -> usize {
+        self.inflight.lock().map(|s| s.iter().filter(|k| k.comp == comp.0).count()).unwrap_or(0)
     }
 
     /// Start up to `n` idle lanes on the queued jobs (see [`Queue::idle_lanes`]).
@@ -1626,7 +1656,9 @@ impl Frames {
 
     /// An urgent (viewer) frame is queued or rendering.
     pub fn urgent_pending(&self) -> bool {
-        self.queue.lock().map(|q| q.urgent_running > 0 || q.jobs.iter().any(|j| j.urgent)).unwrap_or(false)
+        // A background frame the viewer asked for while it rendered is urgent through its
+        // running record (see `request_with`), not `urgent_running`.
+        self.queue.lock().map(|q| q.urgent_running > 0 || q.jobs.iter().any(|j| j.urgent) || q.running_cancels.iter().any(|r| r.urgent)).unwrap_or(false)
     }
 
     fn request_with(&self, src: &RenderSource, key: FrameKey, comp: ItemId, t: Tick, opts: RenderOpts, want: Want) {
@@ -1670,14 +1702,22 @@ impl Frames {
             });
             for j in q.jobs.iter_mut() {
                 j.urgent = j.key == key;
+                if j.key == key {
+                    // The viewer waits for it now: it is no longer background work.
+                    j.background = false;
+                }
             }
             // The comp's viewer frames of other times that are rendering are called off too: a
             // movie seeking for each of them held the decoder the frame under the pointer
             // waited for, so it came seconds after the pointer stopped (#329). Another revision
             // of the same frame (a live edit) finishes, as the viewer shows it meanwhile.
-            for (k, cancel) in &q.urgent_cancels {
-                if k.comp == key.comp && k.frame != key.frame {
-                    cancel.store(true, Ordering::Relaxed);
+            for r in &mut q.running_cancels {
+                if r.key == key {
+                    // Already rendering: keep it from being called off as background work.
+                    r.urgent = true;
+                    r.background = false;
+                } else if r.urgent && r.key.comp == key.comp && r.key.frame != key.frame {
+                    r.cancel.store(true, Ordering::Relaxed);
                 }
             }
         }
@@ -1959,8 +1999,8 @@ impl Worker {
             q.running.insert(job.key);
             if job.urgent {
                 q.urgent_running += 1;
-                q.urgent_cancels.push((job.key, job.cancel.clone()));
             }
+            q.running_cancels.push(RunningCancel { key: job.key, cancel: job.cancel.clone(), urgent: job.urgent, background: job.background });
             (job, slot)
         };
         let t0 = web_time::Instant::now();
@@ -2063,9 +2103,9 @@ impl Worker {
             q.running.remove(&key);
             if urgent {
                 q.urgent_running = q.urgent_running.saturating_sub(1);
-                if let Some(i) = q.urgent_cancels.iter().position(|(k, _)| *k == key) {
-                    q.urgent_cancels.swap_remove(i);
-                }
+            }
+            if let Some(i) = q.running_cancels.iter().position(|r| r.key == key) {
+                q.running_cancels.swap_remove(i);
             }
         }
         if let Some(ctx) = &self.ctx {
@@ -2289,14 +2329,26 @@ impl Job {
     }
 }
 
-#[derive(Default)]
+/// A running job and how to call it off (see [`Frames::focus_comp`] and [`Frames::set_playhead`]).
+struct RunningCancel {
+    key: FrameKey,
+    cancel: Arc<AtomicBool>,
+    urgent: bool,
+    background: bool,
+}
+
 struct Queue {
     jobs: Vec<Job>,
     running: HashSet<FrameKey>,
     urgent_running: usize,
-    /// The running viewer (urgent) frames and how to call them off.
-    urgent_cancels: Vec<(FrameKey, Arc<AtomicBool>)>,
+    /// The running jobs and how to call them off.
+    running_cancels: Vec<RunningCancel>,
     seq: u64,
+    /// The composition whose frames render first (see [`Frames::focus_comp`]).
+    active_comp: Option<u64>,
+    /// Settings ▸ Previews ▸ Only Cache Active Composition: the other comps' queued frames are
+    /// dropped and their running background frames called off.
+    only_cache_active_comp: bool,
     /// The playing preview, if any: its prefetch renders nearest first.
     playhead: Option<Playhead>,
     /// How many lanes there are, and the ones not rendering. A lane is one thread that renders
@@ -2328,6 +2380,48 @@ struct Queue {
     /// Tests: as if there were a GPU compositor (no adapter is there).
     #[cfg(test)]
     fake_gpu: bool,
+}
+
+impl Default for Queue {
+    fn default() -> Self {
+        Queue {
+            jobs: Vec::new(),
+            running: HashSet::new(),
+            urgent_running: 0,
+            running_cancels: Vec::new(),
+            seq: 0,
+            active_comp: None,
+            only_cache_active_comp: true,
+            playhead: None,
+            lanes: 0,
+            idle_lanes: Vec::new(),
+            gpu_lanes: 0,
+            gpu_limit: 0,
+            gpu_stalled_at: 0,
+            ui_last: None,
+            ui_smooth_since: None,
+            #[cfg(test)]
+            fake_gpu: false,
+        }
+    }
+}
+
+/// Drop the queued jobs `gone` accepts (forgetting them in flight unless they run) and call off
+/// the running jobs `cancel` accepts.
+fn drop_jobs(q: &mut Queue, inflight: &mut HashSet<FrameKey>, gone: impl Fn(&Job) -> bool, cancel: impl Fn(&RunningCancel) -> bool) {
+    let running = &q.running;
+    q.jobs.retain(|j| {
+        let drop = gone(j);
+        if drop && !running.contains(&j.key) {
+            inflight.remove(&j.key);
+        }
+        !drop
+    });
+    for r in &q.running_cancels {
+        if cancel(r) {
+            r.cancel.store(true, Ordering::Relaxed);
+        }
+    }
 }
 
 impl Queue {
@@ -2396,9 +2490,10 @@ impl Queue {
     }
 
     /// The job that matters most: urgent first (newest), then, while a preview plays, the
-    /// prefetch frame it reaches first, then prefetch in request order. In request order alone,
-    /// frames asked for again after an eviction (the ones right ahead of the playhead) waited
-    /// behind every frame further ahead (#595).
+    /// prefetch frame it reaches first, then the active comp's frames (an inactive tab must not
+    /// hold them up, #4185), then prefetch before Cache Frames When Idle, then request order. In
+    /// request order alone, frames asked for again after an eviction (the ones right ahead of the
+    /// playhead) waited behind every frame further ahead (#595).
     fn best(&self) -> Option<usize> {
         self.best_of(|_| true)
     }
@@ -2406,13 +2501,21 @@ impl Queue {
     /// [`Queue::best`] among the jobs `of` accepts.
     fn best_of(&self, of: impl Fn(&Job) -> bool) -> Option<usize> {
         let p = self.playhead.as_ref();
+        let active = self.active_comp;
         self.jobs
             .iter()
             .enumerate()
             .filter(|(_, j)| of(j))
             .max_by_key(|(_, j)| {
                 let near = if j.urgent { None } else { p.and_then(|p| p.ahead(&j.key)) };
-                (j.urgent, near.is_some(), near.map_or(0, |d| -d), if j.urgent { j.seq as i64 } else { -(j.seq as i64) })
+                (
+                    j.urgent,
+                    near.is_some(),
+                    active == Some(j.key.comp),
+                    !j.background,
+                    near.map_or(0, |d| -d),
+                    if j.urgent { j.seq as i64 } else { -(j.seq as i64) },
+                )
             })
             .map(|(i, _)| i)
     }
