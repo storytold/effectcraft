@@ -1,0 +1,8 @@
+asset:        quick-effects-search-applied.png
+title:        Effect applied from Quick Effects Search
+author:       ashrafalix29
+source:       original work (screenshot of EffectCraft 0.25.1 via the control channel's ui.screenshot)
+license:      MIT OR Apache-2.0
+license-file:
+added:        2026-11-27 by ashrafalix29
+notes:        Screenshot of EffectCraft after pressing Enter in Quick Effects Search: Bilateral Blur was applied to the selected layer and Effect Controls shows its parameters.

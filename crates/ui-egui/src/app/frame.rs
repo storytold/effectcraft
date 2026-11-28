@@ -532,6 +532,7 @@ impl EffectcraftApp {
         }
         panels::precomp::mini_flowchart(self, &ctx);
         panels::home::capture_thumbnail(self);
+        panels::quick_effects::show(self, &ctx);
         panels::dialogs::show(self, &ctx);
         updates_ui::show(self, &ctx);
         panels::scriptui_view::sync_panels(self);

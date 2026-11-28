@@ -84,6 +84,9 @@ pub struct Prefs {
     pub recent_fonts: Vec<String>,
     /// Effects & Presets: the starred effects' ids, in the order starred.
     pub effects_favorites: Vec<String>,
+    /// Quick Effects Search palette's last screen position, shared by all projects.
+    #[serde(default)]
+    pub quick_effects_pos: Option<[f32; 2]>,
     /// Preview panel: every shortcut's options.
     pub preview: crate::preview::PreviewSettings,
     /// View ▸ Simulate Output ▸ My Custom RGB.
@@ -126,6 +129,7 @@ impl Default for Prefs {
             recent_scripts: vec![],
             recent_fonts: vec![],
             effects_favorites: vec![],
+            quick_effects_pos: None,
             preview: crate::preview::PreviewSettings::default(),
             custom_rgb: crate::viewer::CustomRgb::default(),
             comp_presets: vec![],

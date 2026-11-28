@@ -82,6 +82,9 @@ Screenshots of EffectCraft itself, rendered headlessly, showing only procedurall
 | `docs/images/effectcraft-graph-editor.png` | EffectCraft contributors | Original work: screenshot of EffectCraft (EffectCraft Graph Editor) | MIT OR Apache-2.0 |
 | `docs/images/effectcraft-effects.png` | EffectCraft contributors | Original work: screenshot of EffectCraft (EffectCraft effects) | MIT OR Apache-2.0 |
 | `docs/images/effectcraft-render-queue.png` | EffectCraft contributors | Original work: screenshot of EffectCraft (EffectCraft Render Queue panel with the demo compositions queued for H.264 and ProRes export) | MIT OR Apache-2.0 |
+| `docs/images/quick-effects-search-empty.png` | ashrafalix29 | Original work: screenshot of EffectCraft (Quick Effects Search, empty query) | MIT OR Apache-2.0 |
+| `docs/images/quick-effects-search-results.png` | ashrafalix29 | Original work: screenshot of EffectCraft (Quick Effects Search, `blur` results) | MIT OR Apache-2.0 |
+| `docs/images/quick-effects-search-applied.png` | ashrafalix29 | Original work: screenshot of EffectCraft (effect applied from Quick Effects Search, shown in Effect Controls) | MIT OR Apache-2.0 |
 
 ## Code-drawn assets (original work, MIT OR Apache-2.0)
 

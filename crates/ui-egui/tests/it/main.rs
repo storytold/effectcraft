@@ -76,6 +76,7 @@ mod ui_project_duplicate;
 mod ui_project_keyboard;
 mod ui_project_new_folder;
 mod ui_project_rows;
+mod ui_quick_effects;
 mod ui_quick_offset;
 mod ui_ram_preview;
 mod ui_render_queue;

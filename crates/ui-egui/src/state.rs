@@ -789,6 +789,9 @@ pub struct UiState {
     /// Effects & Presets: recently applied effect ids, most recent first.
     #[serde(default)]
     pub effects_recent: Vec<String>,
+    /// Quick Effects Search palette: open state, query and last position.
+    #[serde(default)]
+    pub quick_effects: crate::panels::quick_effects::State,
     /// Effects & Presets contents-menu view options.
     #[serde(default)]
     pub effects_view: EffectsView,
@@ -877,6 +880,7 @@ impl Default for UiState {
             fx_curve_pencil: BTreeSet::new(),
             fx_levels_channel: BTreeMap::new(),
             effects_recent: Vec::new(),
+            quick_effects: crate::panels::quick_effects::State::default(),
             effects_view: EffectsView::default(),
             snapping: true,
             start_screen: false,
