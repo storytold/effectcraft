@@ -759,7 +759,7 @@ fn each_pick_is_one_step_and_clicks_that_change_nothing_are_none() {
     let mut m = Model::new(&h, f.comp);
     let ctr = |cx: usize, cy: usize| [cx as f64 * 37.0 + 18.5, cy as f64 * 29.0 + 14.5];
     let pl = f.plate;
-    let ctrl_only = Modifiers { ctrl: true, ..Modifiers::NONE };
+    let remove_modifier = if MAC { Modifiers::ALT } else { Modifiers { ctrl: true, ..Modifiers::NONE } };
     use Step::*;
     let steps = [
         Arm(pl),
@@ -771,7 +771,7 @@ fn each_pick_is_one_step_and_clicks_that_change_nothing_are_none() {
         Pick(ctr(4, 2), Modifiers::SHIFT, "c4_2"),   // add
         Pick(ctr(4, 2), Modifiers::COMMAND, "c4_2"), // Ctrl (as `command`) removes
         Pick(ctr(5, 5), Modifiers::SHIFT, "c5_5"),   // add
-        Pick(ctr(5, 5), ctrl_only, "c5_5"),          // Ctrl alone removes too
+        Pick(ctr(5, 5), remove_modifier, "c5_5"),          // Option on Mac, Ctrl elsewhere
         Pick(ctr(3, 3), Modifiers::NONE, "c3_3"),    // replace with what it already is: no step
         PickEmpty,                                   // off the layer: no step
         Pick(ctr(2, 1), Modifiers::NONE, "c2_1"),    // replace
