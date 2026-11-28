@@ -455,11 +455,14 @@ fn shutdown_waits_for_the_frames_rendering_and_drops_the_queued_ones() {
     struct Slow {
         started: AtomicUsize,
         finished: AtomicUsize,
+        release: std::sync::atomic::AtomicBool,
     }
     impl FootageSource for Slow {
         fn frame(&self, _: ItemId, _: &Footage, _: Tick) -> Option<Arc<Image>> {
             self.started.fetch_add(1, Ordering::SeqCst);
-            std::thread::sleep(std::time::Duration::from_millis(300));
+            while !self.release.load(Ordering::SeqCst) {
+                std::thread::yield_now();
+            }
             self.finished.fetch_add(1, Ordering::SeqCst);
             Some(Arc::new(Image::new(4, 4)))
         }
@@ -500,6 +503,8 @@ fn shutdown_waits_for_the_frames_rendering_and_drops_the_queued_ones() {
         std::thread::sleep(std::time::Duration::from_millis(2));
     }
     assert!(footage.started.load(Ordering::SeqCst) > 0, "a frame started rendering");
+    assert!(!f.shutdown(std::time::Duration::ZERO), "an active render prevents shutdown");
+    footage.release.store(true, Ordering::SeqCst);
     assert!(f.shutdown(std::time::Duration::from_secs(10)), "the workers stopped in time");
     let started = footage.started.load(Ordering::SeqCst);
     assert_eq!(footage.finished.load(Ordering::SeqCst), started, "no frame is still rendering once shutdown returns");
