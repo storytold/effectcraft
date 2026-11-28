@@ -197,7 +197,30 @@ fn sort_entries(entries: &mut [Entry]) {
     entries.sort_by_cached_key(|e| (!e.is_dir, e.name.to_lowercase()));
 }
 
-const IMAGE: &[&str] = &["png", "jpg", "jpeg", "tif", "tiff", "exr", "bmp", "webp", "psd", "psb", "pcraft", "svg", "tga", "dpx", "cin", "hdr", "vectorcraft"];
+const IMAGE: &[&str] = &[
+    "png",
+    "jpg",
+    "jpeg",
+    "tif",
+    "tiff",
+    "exr",
+    "bmp",
+    "webp",
+    "psd",
+    "psb",
+    "pcraft",
+    "svg",
+    "tga",
+    "dpx",
+    "cin",
+    "hdr",
+    "vectorcraft",
+    "pdf",
+    "ai",
+    "eps",
+    "epsf",
+    "epsi",
+];
 const AUDIO: &[&str] = &["wav", "aif", "aiff", "mp3", "m4a", "aac", "flac", "ogg", "opus"];
 const DATA: &[&str] = &["json", "csv", "tsv", "mgjson"];
 const MODEL: &[&str] = &["gltf", "glb", "obj", "stl", "fbx"];
@@ -438,6 +461,32 @@ mod tests {
             assert_eq!(kind_of(&format!("/clips/A.{}", ext.to_uppercase())), Some("video"), "{ext}");
         }
         assert_eq!(kind_of("/clips/capture.avi"), Some("video"));
+    }
+
+    /// PDF, Illustrator and EPS files import as vector footage, so they list as images and stay
+    /// under Media only, in a folder on disk and in the virtual tree.
+    #[test]
+    fn vector_documents_list_as_images() {
+        for ext in effectcraft_pdf::EXTENSIONS {
+            assert_eq!(kind_of(&format!("/art/logo.{ext}")), Some("image"), "{ext}");
+            assert_eq!(kind_of(&format!("/art/LOGO.{}", ext.to_uppercase())), Some("image"), "{ext}");
+        }
+        let names = ["Brochure.PDF", "logo.Ai", "mark.eps", "plate.EPSF", "preview.epsi", "readme.txt"];
+        let dir = std::env::temp_dir().join(format!("ec-mb-vector-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut tree = VirtualTree::default();
+        for name in names {
+            std::fs::write(dir.join(name), b"x").unwrap();
+            tree.add_file(&format!("/Folders/Art/{name}"), &format!("/art/{name}"), 1, None);
+        }
+        let media = list(&dir.to_string_lossy(), true).unwrap();
+        assert_eq!(media.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(), &names[..5]);
+        assert!(media.iter().all(|e| e.kind == Some("image")), "{media:?}");
+        let media = tree.list("/Folders/Art", true).unwrap();
+        assert_eq!(media.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(), &names[..5]);
+        assert!(media.iter().all(|e| e.kind == Some("image")), "{media:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

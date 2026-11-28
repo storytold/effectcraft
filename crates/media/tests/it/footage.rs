@@ -681,6 +681,17 @@ fn mxf_and_avi_are_importable() {
     }
 }
 
+/// Every extension the vector reader takes (PDF, Illustrator, EPS, EPSF, EPSI) is importable,
+/// whatever its case.
+#[test]
+fn vector_documents_are_importable() {
+    for ext in effectcraft_pdf::EXTENSIONS {
+        for name in [format!("art.{ext}"), format!("ART.{}", ext.to_uppercase())] {
+            assert!(effectcraft_media::is_importable(&Path::new("/media").join(&name)), "{name}");
+        }
+    }
+}
+
 #[test]
 fn mxf_mpeg2_with_pcm_audio() {
     let Some(p) = mpeg2_mxf() else { return };

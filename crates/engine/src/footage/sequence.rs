@@ -99,7 +99,8 @@ fn extension(path: &str) -> String {
 
 /// Stills that can form a sequence (not layered or vector documents, which import as comps).
 fn sequenceable(path: &str) -> bool {
-    crate::media_browser::kind_of(path) == Some("image") && !matches!(extension(path).as_str(), "svg" | "psd" | "psb" | "pcraft" | "vectorcraft")
+    crate::media_browser::kind_of(path) == Some("image")
+        && !matches!(extension(path).as_str(), "svg" | "psd" | "psb" | "pcraft" | "pdf" | "ai" | "eps" | "epsf" | "epsi" | "vectorcraft")
 }
 
 /// The run a still belongs to: (folder, name prefix, extension); alphabetical runs ignore the
@@ -341,6 +342,45 @@ mod tests {
         assert_eq!(a, [Source::Sequence { files: strs(&["/s/a_0001.png", "/s/a_0002.png", "/s/a_0010.png", "/s/b_1.png", "/s/c.png"]), alphabetical: true }]);
         assert_eq!(a[0].name(), "a_0001.png");
         assert_eq!(sequences(&t, &strs(&["/s/a_0001.png", "/s/c.png"]), false).len(), 1);
+    }
+
+    /// A folder's PDF, Illustrator and EPS files import one by one, numbered or not, beside the
+    /// sequences of its numbered stills; picked ones never form a sequence either.
+    #[test]
+    fn vector_documents_import_from_folders_as_single_files() {
+        let t = Table(vec![
+            "/v/art_0001.ai",
+            "/v/art_0002.ai",
+            "/v/Logo.PDF",
+            "/v/mark_1.eps",
+            "/v/mark_2.eps",
+            "/v/plate_1.epsf",
+            "/v/plate_2.epsf",
+            "/v/prev_1.EPSI",
+            "/v/prev_2.EPSI",
+            "/v/notes.txt",
+            "/v/p_0001.png",
+            "/v/p_0002.png",
+        ]);
+        let file = |p: &str| Source::File(p.into());
+        for alphabetical in [false, true] {
+            let opts = SequenceOptions { sequence: true, folders: true, alphabetical };
+            let want = [
+                file("/v/art_0001.ai"),
+                file("/v/art_0002.ai"),
+                file("/v/Logo.PDF"),
+                file("/v/mark_1.eps"),
+                file("/v/mark_2.eps"),
+                Source::Sequence { files: strs(&["/v/p_0001.png", "/v/p_0002.png"]), alphabetical },
+                file("/v/plate_1.epsf"),
+                file("/v/plate_2.epsf"),
+                file("/v/prev_1.EPSI"),
+                file("/v/prev_2.EPSI"),
+            ];
+            assert_eq!(group(&t, &strs(&["/v"]), opts), want, "alphabetical: {alphabetical}");
+            let picked = ["/v/art_0001.ai", "/v/art_0002.ai", "/v/mark_1.eps", "/v/plate_2.epsf", "/v/prev_1.EPSI"];
+            assert_eq!(group(&t, &strs(&picked), opts), picked.iter().map(|p| file(p)).collect::<Vec<_>>(), "alphabetical: {alphabetical}");
+        }
     }
 
     /// VectorCraft documents list as media in the Media Browser and import from a folder, each on

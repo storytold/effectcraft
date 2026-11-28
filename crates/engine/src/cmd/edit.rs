@@ -920,10 +920,7 @@ fn original_path(s: &Session) -> Option<String> {
 /// following links) whose name, and the name it links to, have a media extension the footage
 /// importer takes. Anything else (a folder or app bundle, a script, a shortcut) is refused.
 pub(crate) fn openable_original(path: &str) -> std::result::Result<(), String> {
-    let media = |p: &std::path::Path| {
-        let ext = p.extension().and_then(std::ffi::OsStr::to_str).map(str::to_ascii_lowercase).unwrap_or_default();
-        crate::media_browser::kind_of(&p.to_string_lossy()).is_some_and(|k| k != "project") || matches!(ext.as_str(), "pdf" | "ai" | "eps")
-    };
+    let media = |p: &std::path::Path| crate::media_browser::kind_of(&p.to_string_lossy()).is_some_and(|k| k != "project");
     let name = std::path::Path::new(path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| path.to_string());
     let real = std::fs::canonicalize(path).map_err(|e| format!("cannot open “{name}”: {e}"))?;
     if !real.is_file() {
@@ -1122,6 +1119,23 @@ mod tests {
         let r = s.execute("edit.editOriginal", json!({})).unwrap();
         assert_eq!(r["url"], url.as_str());
         assert!(s.drain_events().iter().any(|e| matches!(e, crate::Event::OpenUrl(u) if *u == url)));
+    }
+
+    /// PDF, Illustrator and EPS footage opens in its own app, whatever the extension's case; a
+    /// project file or a folder with such a name does not.
+    #[test]
+    fn edit_original_opens_vector_documents() {
+        let d = tmp("edit-original-vectors");
+        let files = ["page.pdf", "Logo.AI", "mark.Eps", "plate.epsf", "Preview.EPSI", "comp.ecproj"];
+        for f in files {
+            std::fs::write(d.join(f), b"").unwrap();
+        }
+        std::fs::create_dir_all(d.join("folder.epsf")).unwrap();
+        let ok = |f: &str| super::openable_original(&d.join(f).to_string_lossy()).is_ok();
+        for f in &files[..5] {
+            assert!(ok(f), "{f}");
+        }
+        assert!(!ok("comp.ecproj") && !ok("folder.epsf") && !ok("missing.epsi"));
     }
 
     /// Only regular media files reach the system opener.

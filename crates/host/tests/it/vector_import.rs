@@ -335,6 +335,27 @@ fn eps_footage_imports() {
     assert!(img.get(10, 10)[0] > 0.99 && img.get(30, 10)[2] > 0.99, "{:?} {:?}", img.get(10, 10), img.get(30, 10));
 }
 
+/// Importing a folder brings in each of its EPS, EPSF and EPSI files as its own footage item,
+/// numbered or not, without asking how to interpret their alpha (vector footage is straight).
+#[test]
+fn a_folder_of_eps_files_imports_each_file() {
+    let eps = b"%!PS-Adobe-3.0 EPSF-3.0\n%%BoundingBox: 0 0 40 20\n1 0 0 setrgbcolor 0 0 20 20 rectfill\n%%EOF\n";
+    let dir = std::path::PathBuf::from(tmp("eps-folder"));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    for name in ["mark.eps", "plate_1.epsf", "plate_2.epsf", "Preview.EPSI"] {
+        std::fs::write(dir.join(name), eps).unwrap();
+    }
+    std::fs::write(dir.join("notes.txt"), b"x").unwrap();
+    let mut s = effectcraft_host::session();
+    assert_eq!(s.prefs.unlabeled_alpha(false), None, "Ask User");
+    let r = s.execute_checked("file.import", json!({"paths": [dir.to_string_lossy()]})).unwrap();
+    assert_eq!(r["errors"], json!([]), "{r}");
+    assert_eq!(r["items"].as_array().map(Vec::len), Some(4), "{r}");
+    assert_eq!(r["unlabeledAlpha"], json!([]), "{r}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 /// A two-page PDF: page 2 has text in a non-embedded standard font inside a page-wide clip.
 fn two_page_pdf() -> Vec<u8> {
     effectcraft_pdf::write::pdf(
