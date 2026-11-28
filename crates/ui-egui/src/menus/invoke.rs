@@ -176,6 +176,21 @@ pub(super) fn no_params(p: &Value) -> bool {
     p.as_object().is_none_or(|m| m.is_empty())
 }
 
+/// Add to Render Queue without parameters while the Project panel has focus queues the comps
+/// selected there, all of them, rather than the active comp (#3726).
+fn selected_comps(app: &EffectcraftApp, params: Value) -> Value {
+    if !no_params(&params) || app.ui.focused != PanelKind::Project {
+        return params;
+    }
+    let s = &app.session;
+    let comps: Vec<u64> = s.state.project_selection.iter().filter(|i| s.project.comp(**i).is_some()).map(|i| i.0).collect();
+    match comps[..] {
+        [] => params,
+        [comp] => json!({"comp": comp}),
+        _ => json!({"comps": comps}),
+    }
+}
+
 /// `{"comp": id}` and nothing else: Composition Settings opens on that comp instead of
 /// applying no settings to it.
 fn only_comp(p: &Value) -> Option<effectcraft_engine::project::ItemId> {
@@ -275,9 +290,9 @@ pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: V
         return invoke(app, ctx, "project.delete", json!({}));
     }
     if id == "edit.clear" && params.as_object().is_some_and(|p| p.is_empty()) && app.ui.focused == PanelKind::RenderQueue {
-        let selected = ctx.data(|d| d.get_temp::<(Vec<u64>, Option<u64>)>(egui::Id::unique("rq-ui"))).and_then(|(_, id)| id);
-        return match selected {
-            Some(item) => run_engine(app, ctx, "renderQueue.remove", json!({"item": item})),
+        let selected = crate::panels::render_queue::Selection::read(ctx).items();
+        return match selected.first() {
+            Some(_) => run_engine(app, ctx, "renderQueue.remove", json!({"items": selected})),
             None => Err("select a Render Queue item first".into()),
         };
     }
@@ -716,6 +731,7 @@ pub fn invoke(app: &mut EffectcraftApp, ctx: &egui::Context, id: &str, params: V
                 return app.session.execute(id, p).map_err(|e| e.to_string());
             }
             if id == "renderQueue.add" {
+                let params = selected_comps(app, params);
                 let r = app.session.execute(id, params).map_err(|e| e.to_string());
                 match &r {
                     Ok(_) => app.show_panel(PanelKind::RenderQueue),

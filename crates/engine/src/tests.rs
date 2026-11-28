@@ -51,6 +51,7 @@ mod project_release;
 mod proxy;
 mod quick_offset;
 mod render_overwrite;
+mod render_queue_bulk;
 mod replace_source;
 mod rig3d;
 pub(crate) mod roto;
