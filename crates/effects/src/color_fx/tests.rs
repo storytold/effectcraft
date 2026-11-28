@@ -467,6 +467,54 @@ fn fill_opacity_is_the_layers_opacity_as_in_after_effects() {
     assert_eq!(half.get(0, 0), [0.0, 0.125, 0.25, 0.25]);
 }
 
+/// #3925: an input phase of exactly 1 wrapped round to the first stop, so every ramp preset
+/// turned its brightest input black. The top of the input range is the end of the cycle.
+#[test]
+fn colorama_ramp_presets_keep_their_brightest_input() {
+    let white = [1.0, 1.0, 1.0, 1.0];
+    let preset = |i: u32, c| px("ec.color.colorama", &[("outputCycle/usePresetPalette", Value::Enum(i))], c);
+    // Ramp Grayscale, Fire, Ice, Ramp Red, Ramp Green, Ramp Blue: white gets the last stop.
+    for (i, want) in [(1, [1.0, 1.0, 1.0]), (2, [1.0, 1.0, 1.0]), (3, [1.0, 1.0, 1.0]), (4, [1.0, 0.0, 0.0]), (5, [0.0, 1.0, 0.0]), (6, [0.0, 0.0, 1.0])] {
+        let o = preset(i, white);
+        assert!(close(o, [want[0], want[1], want[2], 1.0], 1e-3), "{}: {o:?}", COLORAMA_PRESETS[i as usize]);
+        // And with the palette posterized.
+        let o = px("ec.color.colorama", &[("outputCycle/usePresetPalette", Value::Enum(i)), ("outputCycle/interpolatePalette", Value::Bool(false))], white);
+        assert!(close(o, [want[0], want[1], want[2], 1.0], 1e-3), "{} posterized: {o:?}", COLORAMA_PRESETS[i as usize]);
+    }
+    // Ramp Grayscale leaves greys as they are, up to and including white.
+    for v in [0.0, 0.25, 0.5, 0.99, 0.9995, 1.0] {
+        let o = preset(1, [v, v, v, 1.0]);
+        assert!(close(o, [v, v, v, 1.0], 1e-3), "{v}: {o:?}");
+    }
+    // Fire climbs to white without a step at the top.
+    let (a, b) = (preset(2, [0.99, 0.99, 0.99, 1.0]), preset(2, white));
+    assert!(close(a, b, 0.07) && b[2] >= a[2], "{a:?} {b:?}");
+    // More than one cycle: white ends the last one, on the last stop, posterized or not. A grey
+    // on the boundary between two cycles starts the next one.
+    for cycles in [2.0, 3.0, 7.0] {
+        for smooth in [true, false] {
+            let o = px(
+                "ec.color.colorama",
+                &[
+                    ("outputCycle/usePresetPalette", Value::Enum(1)),
+                    ("outputCycle/cycles", num(cycles)),
+                    ("outputCycle/interpolatePalette", Value::Bool(smooth)),
+                ],
+                white,
+            );
+            assert!(close(o, white, 1e-3), "{cycles} cycles, interpolate {smooth}: {o:?}");
+        }
+    }
+    let two = |v: f32| px("ec.color.colorama", &[("outputCycle/usePresetPalette", Value::Enum(1)), ("outputCycle/cycles", num(2.0))], [v, v, v, 1.0]);
+    assert!(close(two(0.5), [0.0, 0.0, 0.0, 1.0], 1e-3), "{:?}", two(0.5));
+    assert!(close(two(0.25), [0.5, 0.5, 0.5, 1.0], 1e-3) && close(two(0.75), [0.5, 0.5, 0.5, 1.0], 1e-3), "{:?} {:?}", two(0.25), two(0.75));
+    // A part cycle stops part of the way round.
+    let part = px("ec.color.colorama", &[("outputCycle/usePresetPalette", Value::Enum(1)), ("outputCycle/cycles", num(1.5))], white);
+    assert!(close(part, [0.5, 0.5, 0.5, 1.0], 1e-3), "{part:?}");
+    // Hue Cycle still comes back round to red.
+    assert!(close(preset(0, white), [1.0, 0.0, 0.0, 1.0], 0.01), "{:?}", preset(0, white));
+}
+
 #[test]
 fn colorama_palettes_modify_selection_masking_and_add_phase() {
     let grey = [0.5, 0.5, 0.5, 1.0];
