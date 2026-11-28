@@ -143,11 +143,108 @@ fn draw_3d<'a>(e: &mut Enc, r: &Renderer<'a>, ctx: &EvalCtx<'a>, run: &[&'a Laye
         }
         return Some(());
     }
-    match r.prepare_3d_run(ctx, run, (canvas.width, canvas.height)).and_then(|prep| crate::classic3d::draw_run(e, &prep, canvas)) {
+    let out = (canvas.width, canvas.height);
+    let drawn = match resident_planes(e, r, ctx, run) {
+        Some((shapes, textures)) if !shapes.is_empty() => {
+            r.prepare_3d_run_with(ctx, run, out, &shapes).and_then(|prep| crate::classic3d::draw_run_with(e, &prep, canvas, &textures))
+        }
+        _ => r.prepare_3d_run(ctx, run, out).and_then(|prep| crate::classic3d::draw_run(e, &prep, canvas)),
+    };
+    match drawn {
         Some(img) => *canvas = img,
         None => on_cpu(e, canvas, |img| r.draw_3d_run(ctx, run, img))?,
     }
     Some(())
+}
+
+/// The effect stacks of a Classic 3D run's layers, run resident on the GPU as
+/// [`draw_resident_fx`] runs a 2D layer's: the results stay on the device and go into the
+/// run's atlas (`classic3d::draw_run_with`), where the CPU path would read each result back
+/// and upload it again. Returns the shapes the CPU prepares the planes from and the textures by
+/// layer id. A result is kept on the device under the layer cache's key, so a layer unchanged
+/// since the last frame, or the same frame drawn again, reuses it (one key per layer and frame,
+/// as the CPU path's layer cache). The CPU work (keys, sources, masks) runs across the layers in
+/// parallel, as the CPU path's `gather` does; the uploads and kernels are recorded in order.
+/// Layers that keep the usual path: no effects, layer styles, collapsed precomps,
+/// per-character 3D text and track mattes of other layers (those read the layer's pixels on the
+/// CPU). `None`: the GPU failed (the run draws the usual way).
+fn resident_planes(
+    e: &mut Enc,
+    r: &Renderer,
+    ctx: &EvalCtx,
+    run: &[&Layer],
+) -> Option<(effectcraft_render::three_d::PlaneShapes, std::collections::HashMap<u32, GpuImage>)> {
+    use rayon::prelude::*;
+    let pipe = r.pipe();
+    let eligible = |layer: &Layer| {
+        layer.switches.effects
+            && layer.effects().is_some_and(|f| !f.children.is_empty())
+            && r.quality(layer) != Quality::Wireframe
+            && r.layer_opacity(ctx, layer) > 0.0
+            && !styles::active(ctx, layer)
+            && r.collapsed(ctx, layer).is_none()
+            && !effectcraft_render::text::per_char_3d(ctx, layer)
+            && !ctx.comp.layers.iter().any(|m| m.track_matte.is_some_and(|tm| tm.layer == layer.id))
+    };
+    // The key of the result: the layer cache's key of the processed pixels and the colour
+    // conversion applied to them.
+    let key = |layer: &Layer| {
+        r.content_buf_key(ctx, layer).map(|k| {
+            let k = effectcraft_render::cache::derive(k, pipe.to_blend().is_some() as u64);
+            effectcraft_render::cache::derive(k, pipe.levels.map_or(0, |l| u64::from(l.to_bits())))
+        })
+    };
+    let keyed: Vec<(&Layer, Option<u64>)> = run.par_iter().copied().filter(|l| eligible(l)).map(|l| (l, key(l))).collect();
+    let mut shapes = effectcraft_render::three_d::PlaneShapes::new();
+    let mut textures = std::collections::HashMap::new();
+    let mut keep = |layer: &Layer, img: GpuImage, offset: [f64; 2], scale: f64| {
+        let shape = Buf { img: Image { width: img.width, height: img.height, data: Vec::new() }, offset, scale };
+        shapes.insert(layer.id, Arc::new(shape));
+        textures.insert(layer.id.0 as u32, img);
+    };
+    // The same frame drawn again (or an unchanged layer): the result kept on the device.
+    let mut todo = Vec::with_capacity(keyed.len());
+    for (layer, k) in keyed {
+        match k.and_then(|k| e.g.fx_result(k)) {
+            Some((img, offset, scale)) => keep(layer, img, offset, scale),
+            None => todo.push((layer, k)),
+        }
+    }
+    // The effect inputs: the decoded footage picture (shared with every layer that shows it),
+    // else the layer's source through its masks, rasterised as the CPU's plane is.
+    enum Input {
+        Picture(effectcraft_render::FootagePicture),
+        Buf(Arc<Buf>),
+    }
+    let inputs: Vec<Option<Input>> = todo
+        .par_iter()
+        .map(|(layer, _)| match picture(r, ctx, layer) {
+            Some(p) => Some(Input::Picture(p)),
+            None => r.frame_layer_input(ctx, layer).map(Input::Buf),
+        })
+        .collect();
+    for ((layer, k), input) in todo.into_iter().zip(inputs) {
+        let (src, offset, scale) = match input {
+            Some(Input::Picture(p)) if !p.img.is_empty() => (e.g.upload_picture(&p.img)?, p.effect_offset, p.scale),
+            Some(Input::Buf(b)) if !b.img.is_empty() => (e.g.upload_buf(&b)?, b.offset, b.scale),
+            _ => continue,
+        };
+        let mut fx = crate::effects::GpuFx::new(e, src, offset, scale, pipe.levels);
+        let origin = r.run_layer_effects_on(ctx, layer, &mut fx);
+        let (mut img, offset, scale) = fx.finish()?;
+        let offset = [offset[0] - origin[0] * scale, offset[1] - origin[1] * scale];
+        if img.width == 0 || img.height == 0 {
+            continue;
+        }
+        if let Some(c) = pipe.to_blend() {
+            img = ops::convert(e, &img, &c);
+        }
+        if let Some(k) = k {
+            e.g.keep_fx_result(k, img.clone(), offset, scale);
+        }
+        keep(layer, img, offset, scale);
+    }
+    Some((shapes, textures))
 }
 
 /// `three_d::adv::draw_run`'s split path on the GPU canvas: the plain layers as one scene over

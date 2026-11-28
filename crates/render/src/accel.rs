@@ -327,6 +327,17 @@ impl<'a> Renderer<'a> {
         three_d::compose::gpu_run(self, ctx, run, out)
     }
 
+    /// [`Self::prepare_3d_run`] with the layers of `shapes` already processed on the
+    /// accelerator: their planes take the shape's geometry (size, offset, scale) and carry no
+    /// pixels ([`three_d::Plane3d::buf`] is empty), so the accelerator draws them from the
+    /// result it holds. The caller keeps a layer out of `shapes` when it is another layer's track
+    /// matte, is collapsed, or draws as several planes (per-character 3D text): those planes
+    /// read the layer's pixels here.
+    pub fn prepare_3d_run_with(&self, ctx: &EvalCtx<'a>, run: &[&Layer], out: (u32, u32), shapes: &three_d::PlaneShapes) -> Option<three_d::Run3d> {
+        let r = Renderer { fx_planes: Some(shapes), ..*self };
+        three_d::compose::gpu_run(&r, ctx, run, out)
+    }
+
     /// A run of consecutive 3D layers of an Advanced 3D comp prepared for an accelerator's
     /// compositor ([`three_d::adv::Prepared`]): rendered as one scene and composited (Normal,
     /// premultiplied over) onto the canvas. `None` = not an Advanced 3D comp, or a layer needs the

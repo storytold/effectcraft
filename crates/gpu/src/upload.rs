@@ -262,3 +262,55 @@ mod tests {
         assert_eq!(padded_row(1), Some(256));
     }
 }
+
+struct FxResult {
+    tex: GpuImage,
+    offset: [f64; 2],
+    scale: f64,
+    bytes: usize,
+    last_use: u64,
+}
+
+/// Effect results kept on the device (`walk`'s resident Classic 3D planes), by the layer cache's
+/// key of the processed pixels and the colour conversion: the same frame drawn again (a paused
+/// viewer, a re-render after an edit to another layer) reuses the texture instead of running the
+/// layer's effects again, as the CPU path reuses its layer cache. The least recently used
+/// results go over the budget; the newest is always kept.
+#[derive(Default)]
+pub(crate) struct FxResults {
+    map: HashMap<u64, FxResult>,
+    bytes: usize,
+    clock: u64,
+}
+
+impl FxResults {
+    /// The result kept under `key`: (texture, offset, scale).
+    pub(crate) fn get(&mut self, key: u64) -> Option<(GpuImage, [f64; 2], f64)> {
+        self.clock += 1;
+        let now = self.clock;
+        let e = self.map.get_mut(&key)?;
+        e.last_use = now;
+        Some((e.tex.clone(), e.offset, e.scale))
+    }
+
+    /// Keep `tex` under `key`, then drop the least recently used results over `budget` bytes.
+    pub(crate) fn insert(&mut self, key: u64, tex: GpuImage, offset: [f64; 2], scale: f64, budget: usize) {
+        let bytes = (tex.width as usize).saturating_mul(tex.height as usize).saturating_mul(16);
+        self.clock += 1;
+        if let Some(old) = self.map.insert(key, FxResult { tex, offset, scale, bytes, last_use: self.clock }) {
+            self.bytes = self.bytes.saturating_sub(old.bytes);
+        }
+        self.bytes = self.bytes.saturating_add(bytes);
+        while self.bytes > budget {
+            let Some(k) = self.map.iter().filter(|(k, _)| **k != key).min_by_key(|(_, e)| e.last_use).map(|(k, _)| *k) else { break };
+            if let Some(e) = self.map.remove(&k) {
+                self.bytes = self.bytes.saturating_sub(e.bytes);
+            }
+        }
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.map.clear();
+        self.bytes = 0;
+    }
+}

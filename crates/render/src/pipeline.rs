@@ -190,6 +190,7 @@ impl<'a> Renderer<'a> {
             collapse3d: None,
             inherited: None,
             defer_dof: false,
+            fx_planes: None,
             top: true,
             through: [None; MAX_THROUGH],
             through_lost: false,
@@ -326,6 +327,7 @@ impl<'a> Renderer<'a> {
             opacity_mul: 1.0,
             collapse3d: None,
             defer_dof: false,
+            fx_planes: None,
             top: false,
             through: [None; MAX_THROUGH],
             through_lost: false,
@@ -474,6 +476,17 @@ impl<'a> Renderer<'a> {
         let before = ctx.at(prev);
         let now = self.clipped_key(ctx, layer, cache::layer_key(ctx, layer, scale, draft, blur));
         now.is_some() && now == self.clipped_key(&before, layer, cache::layer_key(&before, layer, scale, draft, blur))
+    }
+
+    /// The layer cache's key of the layer's processed pixels (source → masks → effects) at the
+    /// context time, as [`Self::content_buf`] keeps them: an accelerator that keeps an effect
+    /// result on the device can reuse it under this key (the same frame drawn again). `None`
+    /// without a layer cache, or when the pixels can't be keyed.
+    pub fn content_buf_key(&self, ctx: &EvalCtx, layer: &Layer) -> Option<u64> {
+        let key = self.cache.and_then(|_| cache::layer_key(ctx, layer, self.raster_scale(ctx, layer), self.opts.draft, self.mb_on(ctx, layer)));
+        let key = self.content_key(ctx, layer, self.clipped_key(ctx, layer, key));
+        // (a footage layer read in part is never kept under a whole layer's key, #3271)
+        key.filter(|_| !self.reads_footage_rows(ctx, layer))
     }
 
     /// Rasterisation scale of a layer's source: the output scale, or — for text and shape layers,
@@ -1555,6 +1568,14 @@ impl<'a> Renderer<'a> {
     pub fn layer_input(&self, ctx: &EvalCtx, layer: &Layer, effects: usize) -> Option<Arc<Buf>> {
         // The Layer panel, analysis tools and effect inputs read the whole layer, not the viewport.
         Renderer { whole_raster: true, ..*self }.whole_layer_input(ctx, layer, effects)
+    }
+
+    /// [`Self::layer_input`] before the first effect, rasterised as this render draws the layer
+    /// in its frame: a 3D text or shape layer only where the frame shows it (#1388), as
+    /// [`Self::content_buf`] reads it. What an accelerator runs a 3D plane's effect stack on, so
+    /// the result matches the CPU's plane.
+    pub fn frame_layer_input(&self, ctx: &EvalCtx, layer: &Layer) -> Option<Arc<Buf>> {
+        self.whole_layer_input(ctx, layer, 0)
     }
 
     fn whole_layer_input(&self, ctx: &EvalCtx, layer: &Layer, effects: usize) -> Option<Arc<Buf>> {
