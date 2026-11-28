@@ -1,4 +1,4 @@
-use super::create::{color_p, pixel_aspect_p};
+use super::create::{color_opt_p, pixel_aspect_p};
 use super::{
     EngineError, ItemKind, KV, LayerId, LayerSource, PropGroup, Result, Session, Tick, Value, bad, has_layers, json, layer_mut, layer_p, layers_p, limits,
     str_p, unlocked,
@@ -166,7 +166,7 @@ pub(super) fn layer_settings(s: &mut Session, p: &Value) -> Result<Value> {
         Some(LayerSource::Light { .. }) => return s.execute("layer.lightSettings", with_layer(p, lid)),
         _ => {}
     }
-    let color = color_p(p, "color");
+    let color = color_opt_p(p, "color", "layer.settings")?;
     let w = p.get("width").and_then(Value::as_u64).map(limits::size);
     let h = p.get("height").and_then(Value::as_u64).map(limits::size);
     let pixel_aspect = pixel_aspect_p(p)?;

@@ -1772,6 +1772,18 @@ FootageSource.prototype = {
   __info: function () { return this.__item.__info(); },
   get isStill() { return !!this.__info().isStill; },
   get color() { return this.__info().color; },
+  // SolidSource.color sets the solid's colour (#3756); a channel that is not a finite number
+  // is refused, as After Effects does. File sources have no colour.
+  set color(v) {
+    if (this.__info().kind !== "solid") throw __err("mainSource.color: the source is not a solid");
+    if (!(v instanceof Array) || v.length < 3) throw __err("color must be an array [r, g, b]");
+    var c = [];
+    for (var i = 0; i < 3; i++) {
+      if (typeof v[i] !== "number" || !isFinite(v[i])) throw __err("color[" + i + "] is not a valid float");
+      c.push(v[i]);
+    }
+    __call("file.replaceWithSolid", { item: this.__item.__id, color: c });
+  },
   get file() { var i = this.__info(); return i.kind !== "solid" && i.file ? new File(i.file) : null; },
   get missingFootagePath() { var i = this.__info(); return i.footageMissing ? i.file : ""; },
   get loop() { return this.__info().loop; },

@@ -9,6 +9,7 @@ use effectcraft_project::{AlphaMode, CineonSettings, CineonUnits, Comp, Footage,
 use effectcraft_time::{FrameRate, Tick};
 use serde_json::{Value, json};
 
+use super::layer::color_opt_p;
 use super::{CommandSpec, always, b_p, bad, f_p, has_comp, has_project_selection, str_p};
 use crate::sequence::SequenceOptions;
 use crate::{EngineError, Result, Session, cmd, query};
@@ -169,24 +170,19 @@ fn import_placeholder(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"item": id.0}))
 }
 
-fn solid_from(p: &Value, s: &Session) -> Solid {
+fn solid_from(p: &Value, s: &Session, cmd: &str) -> Result<Solid> {
     let (cw, ch) = s.active_comp().map(|c| (c.width, c.height)).unwrap_or((1920, 1080));
-    let color = match p.get("color") {
-        Some(Value::String(h)) => effectcraft_color::Rgba::from_hex(h).map(|c| [c.r, c.g, c.b]),
-        Some(Value::Array(a)) => Some([0, 1, 2].map(|i| a.get(i).and_then(Value::as_f64).unwrap_or(0.0) as f32)),
-        _ => None,
-    }
-    .unwrap_or([0.5, 0.5, 0.5]);
-    Solid {
+    let color = color_opt_p(p, "color", cmd)?.unwrap_or([0.5, 0.5, 0.5]);
+    Ok(Solid {
         color,
         width: p.get("width").and_then(Value::as_u64).map(limits::size).unwrap_or(cw).max(1),
         height: p.get("height").and_then(Value::as_u64).map(limits::size).unwrap_or(ch).max(1),
         pixel_aspect: 1.0,
-    }
+    })
 }
 
 fn import_solid(s: &mut Session, p: &Value) -> Result<Value> {
-    let so = solid_from(p, s);
+    let so = solid_from(p, s, "file.importSolid")?;
     let name = str_p(p, "name").unwrap_or("Solid").to_string();
     let id = s.edit("Import Solid", None, |proj, st| {
         let folder = proj.folder_named("Solids").unwrap_or_else(|| proj.add_item("Solids", Label::Yellow, None, ItemKind::Folder));
@@ -1214,12 +1210,17 @@ fn replace_with_placeholder(s: &mut Session, p: &Value) -> Result<Value> {
 
 fn replace_with_solid(s: &mut Session, p: &Value) -> Result<Value> {
     let item = *items_p(s, p).first().ok_or_else(|| bad("file.replaceWithSolid", "select footage"))?;
-    let mut so = solid_from(p, s);
+    let mut so = solid_from(p, s, "file.replaceWithSolid")?;
     if let Some((w, h)) = s.project.item(item).and_then(|x| x.dimensions())
         && p.get("width").is_none()
     {
         so.width = w.max(1);
         so.height = h.max(1);
+    }
+    // A solid keeps its pixel aspect when only its colour is replaced (#3756): the scripting
+    // SolidSource.color setter goes through this command, and solid_from has no pixelAspect.
+    if let Some(ItemKind::Solid(old)) = s.project.item(item).map(|x| &x.kind) {
+        so.pixel_aspect = old.pixel_aspect;
     }
     s.edit("Replace Footage", None, |proj, _| {
         let it = proj.item_mut(item).ok_or_else(|| bad("file.replaceWithSolid", "no such item"))?;

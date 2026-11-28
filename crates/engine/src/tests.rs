@@ -10,6 +10,7 @@ mod blender;
 mod camera_track;
 mod codec_options;
 mod color_view;
+mod colour_params;
 mod crypto_pick;
 mod delete_keys;
 mod disk_cache;

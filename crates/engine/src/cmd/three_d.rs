@@ -11,7 +11,7 @@ use effectcraft_render::three_d::camera::{self, PRESETS, Rig, View3D, ViewCam, V
 use effectcraft_time::Tick;
 use serde_json::{Value, json};
 
-use super::layer::{color_p, insert_layer};
+use super::layer::{color_opt_p, insert_layer};
 use super::model3d::{report_switch, use_advanced_3d};
 use super::{CommandSpec, b_p, bad, comp_id, f_p, has_comp, layer_mut, layer_p, merge_p, str_p, time_p};
 use crate::{EngineError, Result, Session, cmd, query};
@@ -176,7 +176,7 @@ fn light_kind_p(p: &Value, k: &str) -> Option<LightKind> {
 }
 
 fn apply_light(l: &mut Layer, p: &Value, t: Tick, cmd: &str) -> Result<()> {
-    if let Some(c) = color_p(p, "color") {
+    if let Some(c) = color_opt_p(p, "color", cmd)? {
         set_at(l, "lightOptions/color", t, KV::Color([c[0] as f64, c[1] as f64, c[2] as f64, 1.0]));
     }
     for k in ["intensity", "coneAngle", "coneFeather", "radius", "falloffDistance", "shadowDarkness", "shadowDiffusion"] {
