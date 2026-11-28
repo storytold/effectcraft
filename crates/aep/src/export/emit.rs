@@ -677,6 +677,9 @@ const GROUP_ORDER: [&str; 13] = [
     "ADBE Group End",
 ];
 
+/// The `tdsb` of a combined Position whose dimensions are separated.
+const SEPARATED_POSITION: u32 = 0x803;
+
 /// Inserts the properties of `lp` into the layer's Transform group, in the order the file uses.
 fn put_properties(cx: &Cx<'_>, layr: &mut Chunk<'static>, lp: &LayerPlan, cp: &CompPlan) -> R<()> {
     if lp.props.is_empty() {
@@ -720,6 +723,15 @@ fn put_properties(cx: &Cx<'_>, layr: &mut Chunk<'static>, lp: &LayerPlan, cp: &C
         if n == b"ADBE Group End" { usize::MAX } else { GROUP_ORDER.iter().position(|g| g.as_bytes() == n).unwrap_or(GROUP_ORDER.len()) }
     };
     pairs.sort_by_key(|(n, _)| rank(n));
+    // A separated Position: After Effects 2026 stores `tdsb` 0x803 in the combined record (the
+    // separated bit 0x800 over the default state 3) and the value in X, Y and Z Position.
+    if lp.props.iter().any(|p| PropKind::SEPARATED.contains(&p.kind))
+        && let Some((_, entry)) = pairs.iter_mut().find(|(n, _)| n == b"ADBE Position")
+        && let Some(tdbs) = entry.get_mut(1)
+    {
+        let tdsb = child_data(tdbs, b"tdsb")?;
+        put_u32(tdsb, 0, SEPARATED_POSITION)?;
+    }
     gk.extend(header);
     gk.extend(pairs.into_iter().flat_map(|(_, v)| v));
     Ok(())
