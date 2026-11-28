@@ -281,7 +281,7 @@ fn plugin_loading_reports_bad_modules_and_survives_failing_renders() {
     let files = [
         ("a-good.wasm", wat_plugin("org.test.host.good", 1, "i32.const 0").into_bytes()),
         ("b-garbage.wasm", b"\0asm\x01\0\0\0garbage".to_vec()),
-        ("c-v3.wasm", wat_plugin("org.test.host.v3", 3, "i32.const 0").into_bytes()),
+        ("c-v4.wasm", wat_plugin("org.test.host.v4", 4, "i32.const 0").into_bytes()),
         ("d-empty.wasm", vec![]),
         ("e-trap.wasm", wat_plugin("org.test.host.trap", 1, "unreachable").into_bytes()),
         ("notes.txt", b"not a plug-in".to_vec()),
@@ -296,7 +296,7 @@ fn plugin_loading_reports_bad_modules_and_survives_failing_renders() {
     let errs: Vec<String> = r["errors"].as_array().unwrap().iter().map(|e| e["path"].as_str().unwrap().to_string()).collect();
     assert_eq!(errs.len(), 3, "{r}");
     assert!(errs.iter().all(|p| !p.ends_with(".txt")));
-    assert!(r["errors"].to_string().contains("ABI 3"), "{r}");
+    assert!(r["errors"].to_string().contains("ABI 4"), "{r}");
     // A single file: errors come back as command errors; loading twice is refused.
     let good = dir.join("a-good.wasm").to_string_lossy().to_string();
     assert!(s.execute("effect.plugins.load", json!({"path": good})).unwrap_err().to_string().contains("already registered"));
@@ -437,4 +437,60 @@ fn abi_v2_plugins_render_with_real_neighbour_frames() {
     let p = s.render(outer, Tick::ZERO, Default::default()).get(20, 10);
     assert!((p[0] - 0.25).abs() < 0.01, "the next frame's red, with no previous frame: {p:?}");
     assert!((p[1] - 2.0 / 8.0).abs() < 0.01, "only the next frame is valid: {p:?}");
+}
+
+/// An ABI 3 plug-in (WebAssembly text) that paints its whole buffer opaque white with `ec_render`
+/// and, with `pad`, asks for that many pixels on every side through `ec_pad`.
+fn wat_padding_plugin(id: &str, pad: Option<i32>) -> String {
+    let fill = "(local $i i32) (local $end i32)
+    local.get 0 local.get 1 local.get 2 i32.mul i32.const 16 i32.mul i32.add local.set $end
+    local.get 0 local.set $i
+    block $done
+      loop $l
+        local.get $i local.get $end i32.ge_u br_if $done
+        local.get $i f32.const 1 f32.store
+        local.get $i f32.const 1 f32.store offset=4
+        local.get $i f32.const 1 f32.store offset=8
+        local.get $i f32.const 1 f32.store offset=12
+        local.get $i i32.const 16 i32.add local.set $i
+        br $l
+      end
+    end
+    i32.const 0";
+    let module = wat_plugin(id, 3, fill);
+    match pad {
+        Some(n) => module.replace(
+            "(func (export \"ec_render\")",
+            &format!("(func (export \"ec_pad\") (param i32 i32 f64 f64) (result i32) i32.const {n})\n  (func (export \"ec_render\")"),
+        ),
+        None => module,
+    }
+}
+
+/// An ABI 3 plug-in's padding reaches the comp through the renderer: around a 20 × 10 solid
+/// (x 10 to 30 in a 40 × 20 comp) a plug-in that paints its buffer white with 4 pixels of
+/// padding is white 2 pixels past the solid's edge, where the same plug-in without `ec_pad` stops.
+#[test]
+fn abi_3_padding_draws_past_the_layer_edge() {
+    let mut s = effectcraft_host::session();
+    let dir = tempfile::TempDir::new().unwrap();
+    for (id, pad) in [("org.test.host.padded", Some(4)), ("org.test.host.unpadded", None)] {
+        let path = dir.path().join(format!("{id}.wasm"));
+        std::fs::write(&path, wat_padding_plugin(id, pad)).unwrap();
+        let r = s.execute("effect.plugins.load", json!({"path": path.to_string_lossy()})).unwrap();
+        assert_eq!(r["loaded"][0]["id"], id, "{r}");
+    }
+    let mut paint = |effect: &str| {
+        let comp = s.execute("comp.new", json!({"name": effect, "width": 40, "height": 20, "duration": 1})).unwrap()["comp"].as_u64().unwrap();
+        let solid = s.execute("layer.newSolid", json!({"color": [1.0, 0.0, 0.0], "width": 20, "height": 10})).unwrap()["layer"].as_u64().unwrap();
+        s.execute("effect.apply", json!({"layer": solid, "effect": effect})).unwrap();
+        s.render(effectcraft_engine::project::ItemId(comp), Tick::ZERO, Default::default())
+    };
+    let padded = paint("org.test.host.padded");
+    let unpadded = paint("org.test.host.unpadded");
+    let white = |p: [f32; 4]| p.iter().all(|c| (c - 1.0).abs() < 1e-3);
+    assert!(white(padded.get(20, 10)) && white(unpadded.get(20, 10)), "both paint the solid itself");
+    assert!(white(padded.get(8, 10)), "inside the padding: {:?}", padded.get(8, 10));
+    assert!(!white(unpadded.get(8, 10)), "without ec_pad the effect stops at the edge: {:?}", unpadded.get(8, 10));
+    assert!(!white(padded.get(4, 10)), "past the padding: {:?}", padded.get(4, 10));
 }

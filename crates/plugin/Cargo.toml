@@ -1,6 +1,6 @@
 [package]
 name = "effectcraft-plugin"
-description = "EffectCraft effect plug-ins: loads sandboxed WebAssembly effect modules (WebAssembly ABI v1 and v2) into the effect registry"
+description = "EffectCraft effect plug-ins: loads sandboxed WebAssembly effect modules (WebAssembly ABI v1 to v3) into the effect registry"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,10 +12,11 @@ workspace = true
 [features]
 # The WebAssembly runtime (wasmi, a pure-Rust interpreter). Hosts enable it on native; without
 # it `load_wasm` reports that WebAssembly plug-ins are unavailable.
-wasm = ["dep:wasmi"]
+wasm = ["dep:wasmi", "dep:log"]
 
 [dependencies]
 effectcraft-effects = { workspace = true }
+log = { workspace = true, optional = true }
 serde_json = { workspace = true }
 wasmi = { workspace = true, optional = true }
 
