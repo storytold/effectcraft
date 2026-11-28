@@ -23,7 +23,8 @@ const MAX_SECONDS: i64 = 3 * 3600;
 /// Deepest folder nesting that is exported.
 const MAX_FOLDER_DEPTH: usize = 64;
 
-/// The five Transform properties that are exported, in the file's canonical order.
+/// The Transform properties that are exported: the five of every layer, in the file's canonical
+/// order, and the three rotations of a 3D layer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PropKind {
     Anchor,
@@ -31,10 +32,26 @@ pub(crate) enum PropKind {
     Scale,
     Rotation,
     Opacity,
+    /// X Rotation of a 3D layer: a record like Rotation's (`rot3d` lab sample).
+    RotationX,
+    /// Y Rotation of a 3D layer: a record like Rotation's.
+    RotationY,
+    /// Orientation of a 3D layer: an `otst` (aep-format.md 3.5, keyed Orientation).
+    Orientation,
 }
 
 impl PropKind {
     pub const ALL: [PropKind; 5] = [PropKind::Anchor, PropKind::Position, PropKind::Scale, PropKind::Rotation, PropKind::Opacity];
+    /// The rotations written for a 3D layer, a camera or a light.
+    pub const THREE_D: [PropKind; 3] = [PropKind::Orientation, PropKind::RotationX, PropKind::RotationY];
+
+    /// The kind whose record prototype this kind's is: X and Y Rotation are stored like Rotation.
+    pub fn prototype(self) -> PropKind {
+        match self {
+            PropKind::RotationX | PropKind::RotationY => PropKind::Rotation,
+            other => other,
+        }
+    }
 
     /// The match name in the file.
     pub fn match_name(self) -> &'static str {
@@ -44,6 +61,9 @@ impl PropKind {
             PropKind::Scale => "ADBE Scale",
             PropKind::Rotation => "ADBE Rotate Z",
             PropKind::Opacity => "ADBE Opacity",
+            PropKind::RotationX => "ADBE Rotate X",
+            PropKind::RotationY => "ADBE Rotate Y",
+            PropKind::Orientation => "ADBE Orientation",
         }
     }
 
@@ -55,14 +75,17 @@ impl PropKind {
             PropKind::Scale => "scale",
             PropKind::Rotation => "rotation",
             PropKind::Opacity => "opacity",
+            PropKind::RotationX => "rotationX",
+            PropKind::RotationY => "rotationY",
+            PropKind::Orientation => "orientation",
         }
     }
 
     /// Components stored in a value.
     pub fn dims(self) -> usize {
         match self {
-            PropKind::Anchor | PropKind::Position | PropKind::Scale => 3,
-            PropKind::Rotation | PropKind::Opacity => 1,
+            PropKind::Anchor | PropKind::Position | PropKind::Scale | PropKind::Orientation => 3,
+            PropKind::Rotation | PropKind::Opacity | PropKind::RotationX | PropKind::RotationY => 1,
         }
     }
 
@@ -926,6 +949,17 @@ fn plan_transform(layer: &Layer, src: &LayerSrc, comp: &Comp, source_size: (u32,
                 props.push(pp);
             }
         }
+        // A 3D layer's X / Y Rotation and Orientation (a camera and a light are 3D).
+        let three_d = layer.switches.three_d || cam_light;
+        if three_d {
+            for kind in PropKind::THREE_D {
+                let Some(p) = tr.get(kind.id()) else { continue };
+                if let Some(pp) = plan_prop(kind, None, p, at, cp, col) {
+                    col.exported.properties += 1;
+                    props.push(pp);
+                }
+            }
+        }
         // A camera's or light's block holds After Effects' own Position and point of interest:
         // a value at EffectCraft's default is written too.
         if cam_light {
@@ -942,7 +976,7 @@ fn plan_transform(layer: &Layer, src: &LayerSrc, comp: &Comp, source_size: (u32,
         }
         for node in &tr.children {
             let id = node.match_id();
-            if PropKind::ALL.iter().any(|k| k.id() == id) || (cam_light && id == "poi") {
+            if PropKind::ALL.iter().any(|k| k.id() == id) || (cam_light && id == "poi") || (three_d && PropKind::THREE_D.iter().any(|k| k.id() == id)) {
                 continue;
             }
             if let Some(p) = node.as_prop()
@@ -1089,7 +1123,7 @@ fn plan_layer(cx: &PlanCx<'_>, at: CompAt<'_>, cp: &CompPlan, layer: &Layer, col
         col.lose(LossCategory::LayerSwitches, what(&format!("{what_lost} is not written; layer")));
     }
     // The 3D switch is written (`ldta@38` bit 0x04, 015); a 3D layer's material options are not
-    // (reported below when changed), and its X / Y rotation and orientation are reported too.
+    // (reported below when changed). Its X / Y Rotation and Orientation are written (`plan_transform`).
     let per_char_3d = matches!(layer.props.prop("text/perChar3d").map(|p| &p.value), Some(effectcraft_keyframe::Value::Bool(true)));
     if layer.switches.three_d && matches!(src, LayerSrc::Text(_)) && per_char_3d {
         col.lose(LossCategory::ThreeD, what("per-character 3D of the text layer is not written; 3D layer"));
@@ -1289,8 +1323,9 @@ fn plan_prop(kind: PropKind, label: Option<&str>, p: &Property, at: PropAt<'_>, 
         PropKind::Anchor => vec![0.5, 0.5, 0.0],
         PropKind::Position => vec![f64::from(comp.width) / 2.0, f64::from(comp.height) / 2.0, 0.0],
         PropKind::Scale => vec![1.0, 1.0, 1.0],
-        PropKind::Rotation => vec![0.0],
+        PropKind::Rotation | PropKind::RotationX | PropKind::RotationY => vec![0.0],
         PropKind::Opacity => vec![1.0],
+        PropKind::Orientation => vec![0.0, 0.0, 0.0],
     };
     // The project's value in the stored unit.
     let to_file = |c: &[f64], what: &str, col: &mut Collector| -> Vec<f64> {
@@ -1365,7 +1400,8 @@ fn plan_prop(kind: PropKind, label: Option<&str>, p: &Property, at: PropAt<'_>, 
         };
         let in_i = side(k.in_interp);
         let out_i = side(k.out_interp);
-        let slots = if kind.spatial() || dims == 1 { 1 } else { dims };
+        // Orientation keys have one ease, as spatial keys do.
+        let slots = if kind.spatial() || dims == 1 || kind == PropKind::Orientation { 1 } else { dims };
         let ease_of = |eases: &[Ease], i: usize| -> EaseSlot {
             let e = key_ease(eases, i);
             // An Anchor Point stored as a fraction of the source has its spatial speed in pixels

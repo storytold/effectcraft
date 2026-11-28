@@ -916,3 +916,60 @@ fn animated_camera_and_light_options_that_are_not_written_are_reported() {
         }
     }
 }
+
+/// A 3D layer's X / Y Rotation and Orientation are written, static and keyed (lab sample
+/// `rot3d`: X / Y Rotation in records like Rotation's, Orientation in an `otst`), and come back.
+#[test]
+fn a_3d_layers_x_y_rotation_and_orientation_are_written() {
+    use effectcraft_keyframe::{Interp, Keyframe, Value};
+    use effectcraft_time::{TICKS_PER_SECOND, Tick};
+    let (mut p, c) = two_solids();
+    with_layer(&mut p, c, 0, |l| l.switches.three_d = true);
+    with_props(
+        &mut p,
+        c,
+        0,
+        &[
+            ("transform/rotationX", Value::Scalar(30.0)),
+            ("transform/rotationY", Value::Scalar(-45.0)),
+            ("transform/orientation", Value::Vec3([10.0, 20.0, 30.0])),
+        ],
+    );
+    with_layer(&mut p, c, 1, |l| {
+        l.switches.three_d = true;
+        let one = Tick(TICKS_PER_SECOND);
+        let rx = l.props.prop_mut("transform/rotationX").expect("X Rotation");
+        rx.keys = vec![Keyframe::new(Tick::ZERO, Value::Scalar(0.0)), Keyframe::new(one, Value::Scalar(90.0))];
+        let o = l.props.prop_mut("transform/orientation").expect("Orientation");
+        o.keys = vec![Keyframe::new(Tick::ZERO, Value::Vec3([0.0; 3])), Keyframe::new(one, Value::Vec3([0.0, 90.0, 0.0]))];
+    });
+    let out = export_all(&p);
+    assert!(out.report.is_lossless(), "{:?}", out.report.losses);
+    let back = reimported_layers(&out.bytes);
+    let s = &back[0];
+    assert_eq!(
+        (value(s, "transform/rotationX"), value(s, "transform/rotationY"), value(s, "transform/orientation")),
+        (Value::Scalar(30.0), Value::Scalar(-45.0), Value::Vec3([10.0, 20.0, 30.0]))
+    );
+    let keys = |l: &effectcraft_project::Layer, path: &str| -> Vec<(Tick, Value, Interp)> {
+        l.props.prop(path).expect(path).keys.iter().map(|k| (k.time, k.value.clone(), k.out_interp)).collect()
+    };
+    let one = Tick(TICKS_PER_SECOND);
+    assert_eq!(keys(&back[1], "transform/rotationX"), vec![(Tick::ZERO, Value::Scalar(0.0), Interp::Linear), (one, Value::Scalar(90.0), Interp::Linear)]);
+    assert_eq!(
+        keys(&back[1], "transform/orientation"),
+        vec![(Tick::ZERO, Value::Vec3([0.0; 3]), Interp::Linear), (one, Value::Vec3([0.0, 90.0, 0.0]), Interp::Linear)]
+    );
+}
+
+/// On a 2D layer the rotations do nothing in After Effects: they are not written, and a set
+/// Orientation stays reported as before.
+#[test]
+fn a_2d_layers_orientation_is_not_written() {
+    use effectcraft_keyframe::Value;
+    let (mut p, c) = two_solids();
+    with_props(&mut p, c, 0, &[("transform/orientation", Value::Vec3([10.0, 0.0, 0.0]))]);
+    let out = export_all(&p);
+    assert!(out.report.losses.iter().any(|l| l.category == LossCategory::TransformProperties), "{:?}", out.report.losses);
+    assert_eq!(value(&reimported_layers(&out.bytes)[0], "transform/orientation"), Value::Vec3([0.0; 3]));
+}
