@@ -851,11 +851,10 @@ impl<'a> Cx<'a> {
         img
     }
 
-    /// Output frame `i` as the H.264 export's 4:2:0 planes at `w`×`h`, rendered and converted
-    /// by the accelerator ([`effectcraft_render::Accelerator::comp_frame_yuv420`]). Only for
-    /// frames that need nothing done after the render (progressive, at the project's depth, no
-    /// crop or resize, rendered at exactly `w`×`h`). `None`: render it with [`Cx::frame`].
-    fn yuv420_frame(&self, comp: &Comp, i: u64, w: u32, h: u32, on: crate::JobRenderer) -> Option<Vec<u8>> {
+    /// The time of output frame `i` when an accelerator may hand it back as 4:2:0 planes
+    /// ([`Cx::yuv420_frame`]): nothing is done to it after the render. `None`: it renders and
+    /// converts as usual.
+    fn yuv420_direct(&self, comp: &Comp, i: u64, w: u32, h: u32) -> Option<Tick> {
         if self.deferred() {
             return None;
         }
@@ -872,6 +871,15 @@ impl<'a> Cx<'a> {
         if om.resize.enabled || (size(comp.width), size(comp.height)) != (w, h) || om.crop.edges(w, h, scale) != (0, 0, 0, 0) {
             return None;
         }
+        Some(t)
+    }
+
+    /// Output frame `i` as the H.264 export's 4:2:0 planes at `w`×`h`, rendered and converted
+    /// by the accelerator ([`effectcraft_render::Accelerator::comp_frame_yuv420`]). Only for
+    /// frames that need nothing done after the render (progressive, at the project's depth, no
+    /// crop or resize, rendered at exactly `w`×`h`). `None`: render it with [`Cx::frame`].
+    fn yuv420_frame(&self, comp: &Comp, i: u64, w: u32, h: u32, on: crate::JobRenderer) -> Option<Vec<u8>> {
+        let t = self.yuv420_direct(comp, i, w, h)?;
         let t0 = Instant::now();
         let r = self.renderer_on(on);
         let a = r.active_accel()?;
@@ -891,6 +899,11 @@ impl<'a> Cx<'a> {
 
     /// Output frames `ks` for the H.264 encoder: the accelerator's planes
     /// ([`Cx::yuv420_frame`]) where it can, otherwise `fallback` of the frame rendered as usual.
+    ///
+    /// A CPU frame the accelerator would have handed back as planes is converted (`fallback`)
+    /// as part of its render, not after it (#3725): the job's compositor is chosen on the time
+    /// of the render ([`Cx::probe`]), and the GPU's includes that conversion. Timed without
+    /// it, the CPU won 4K H.264 jobs that the GPU finished in half the time.
     pub(crate) fn h264_frames<T: Send>(
         &self,
         comp: &Comp,
@@ -900,14 +913,30 @@ impl<'a> Cx<'a> {
         planes: impl Fn(Vec<u8>) -> T + Sync + Send,
         fallback: impl Fn(u64, Image) -> T + Sync + Send,
     ) -> Vec<T> {
+        enum Frame<T> {
+            Planes(Vec<u8>),
+            Converted(T),
+            Rendered(Image),
+        }
         // As in `frames`: once the GPU has stopped for good, the rest render in parallel.
         let t = Instant::now();
         let out = self.render_frames(
             ks,
-            |k, on| self.yuv420_frame(comp, k, w, h, on).ok_or_else(|| self.frame_on(comp, k, on)),
-            |k, r| match r {
-                Ok(p) => planes(p),
-                Err(img) => fallback(k, img),
+            |k, on| {
+                if let Some(p) = self.yuv420_frame(comp, k, w, h, on) {
+                    return Frame::Planes(p);
+                }
+                let img = self.frame_on(comp, k, on);
+                if on == crate::JobRenderer::Cpu && self.yuv420_direct(comp, k, w, h).is_some() {
+                    Frame::Converted(fallback(k, img))
+                } else {
+                    Frame::Rendered(img)
+                }
+            },
+            |k, f| match f {
+                Frame::Planes(p) => planes(p),
+                Frame::Converted(t) => t,
+                Frame::Rendered(img) => fallback(k, img),
             },
         );
         self.phases.add(Stage::Render, t);
@@ -1502,6 +1531,80 @@ mod tests {
             assert!(later.iter().all(|on| *on == crate::JobRenderer::Gpu));
             assert_eq!(Cx::new(&job).backend(), crate::JobRenderer::Gpu, "the next output module follows");
         }
+    }
+
+    /// Hands back 4:2:0 planes of the right size after 2 ms, as a GPU that converts itself.
+    struct PlanesAccel;
+    impl effectcraft_render::Accelerator for PlanesAccel {
+        fn name(&self) -> String {
+            "planes".into()
+        }
+        fn comp_frame(&self, _r: &Renderer, _comp: effectcraft_project::ItemId, _t: Tick) -> Option<Image> {
+            None
+        }
+        fn comp_frame_yuv420(&self, r: &Renderer, comp: effectcraft_project::ItemId, _t: Tick, _bg: [f32; 3]) -> Option<Vec<u8>> {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            let c = r.project.comp(comp)?;
+            let (w, h) = (c.width as usize, c.height as usize);
+            Some(vec![0; w * h + 2 * w.div_ceil(2) * h.div_ceil(2)])
+        }
+        fn supports_effect(&self, _id: &str) -> bool {
+            false
+        }
+        fn effects(&self, _chain: &[effectcraft_render::FxStep], _buf: &effectcraft_effects::Buf, _levels: Option<f32>) -> Option<effectcraft_effects::Buf> {
+            None
+        }
+    }
+
+    /// #3725: an H.264 job's GPU frames come back as converted planes, its CPU frames were
+    /// converted after the timed render. The CPU then won jobs the GPU finished twice as fast.
+    #[test]
+    fn an_h264_job_times_the_cpu_frames_with_their_conversion() {
+        if std::env::var_os(RENDERER_ENV).is_some() {
+            return;
+        }
+        use effectcraft_project::render_queue::{OutputFormat, OutputModule, RenderSettings};
+        let (settings, output) = (RenderSettings::default(), OutputModule::for_format(OutputFormat::H264));
+        let mut p = Project::default();
+        p.settings.gpu_acceleration = true;
+        let comp = Comp::new(16, 8, effectcraft_time::FrameRate::FPS_25, Tick::from_seconds_f64(1.0));
+        let cid = p.add_item("Comp", effectcraft_color::Label::Sandstone, None, effectcraft_project::ItemKind::Comp(comp.into()));
+        let accel = PlanesAccel;
+        let job = Job {
+            project: &p,
+            footage: &effectcraft_render::NoFootage,
+            expr: None,
+            accel: Some(&accel),
+            comp: cid,
+            settings: &settings,
+            output: &output,
+            path: "/h/movie.mp4",
+            sink: None,
+            nested_switches: true,
+            options: Default::default(),
+        };
+        let cx = Cx::new(&job);
+        let c = cx.comp().unwrap();
+        // Converting a CPU frame costs 200 ms here: 25 ms a frame even with all eight measured
+        // frames at once, against the GPU's 2 ms for planes that need no conversion.
+        let converted = AtomicUsize::new(0);
+        let frames = cx.h264_frames(
+            c,
+            (0..25).collect(),
+            16,
+            8,
+            |_| "planes",
+            |_, _| {
+                converted.fetch_add(1, Ordering::SeqCst);
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                "converted"
+            },
+        );
+        let choice = cx.choice().unwrap();
+        assert_eq!(choice.why, "measured on the first frames");
+        assert_eq!(choice.renderer, crate::JobRenderer::Gpu, "GPU {:?} ms, CPU {:?} ms", choice.gpu_ms, choice.cpu_ms);
+        assert_eq!(frames, vec!["planes"; 25], "every frame is the GPU's");
+        assert!(converted.load(Ordering::SeqCst) <= 1 + PROBE_CPU_FRAMES, "only the measured CPU frames were converted");
     }
 
     #[test]
