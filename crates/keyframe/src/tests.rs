@@ -346,6 +346,66 @@ fn straight_auto_bezier_path_is_exact() {
     assert_eq!(segment_value(&keys, 0, s(1.0), true), Value::Vec2([80.0, 50.0]));
 }
 
+/// #4087: a temporal ease that overshoots must keep moving past the end keyframe on a curved
+/// motion path. The straight chord already extrapolates (`p0 + (p3 - p0) * f`); the curved
+/// path's arc-length walk clamped at the path's end, so its overshoot silently disappeared.
+#[test]
+fn spatial_overshoot_follows_the_end_tangent() {
+    let mut a = Keyframe::new(s(0.0), Value::Vec2([0.0, 0.0]));
+    let mut b = Keyframe::new(s(1.0), Value::Vec2([100.0, 0.0]));
+    for k in [&mut a, &mut b] {
+        k.spatial_auto = false;
+        k.in_interp = Interp::Bezier;
+        k.out_interp = Interp::Bezier;
+    }
+    a.spatial_in = [0.0; 3];
+    a.spatial_out = [0.0, -50.0, 0.0];
+    b.spatial_in = [0.0, -50.0, 0.0];
+    b.spatial_out = [0.0; 3];
+    a.in_ease = vec![Ease { speed: 0.0, influence: 1.0 / 3.0 }];
+    a.out_ease = vec![Ease { speed: 300.0, influence: 0.5 }];
+    b.in_ease = vec![Ease { speed: 0.0, influence: 0.5 }];
+    b.out_ease = vec![Ease { speed: 0.0, influence: 1.0 / 3.0 }];
+    let keys = vec![a, b];
+    let len = spatial_segment_length(&keys, 0);
+    let f = ease_progress(300.0 / len, 0.5, 0.0, 0.5, 0.8);
+    assert!(f > 1.0, "the ease has to overshoot for this test to mean anything: {f}");
+    let p = evaluate(&keys, s(0.8), true).unwrap().as_vec2();
+    // The path leaves the last key along 3 * (p3 - p2) = (0, 150), so the overshoot is straight up.
+    let dist = (f - 1.0) * len;
+    assert!((p[0] - 100.0).abs() < 1e-6, "moved off the end tangent: {p:?}");
+    assert!((p[1] - dist).abs() < 1e-6, "stopped at the keyframe instead of overshooting by {dist}: {p:?}");
+}
+
+/// #4087: the same continuation before the first keyframe, where an ease undershoots.
+#[test]
+fn spatial_undershoot_follows_the_start_tangent() {
+    let mut a = Keyframe::new(s(0.0), Value::Vec2([0.0, 0.0]));
+    let mut b = Keyframe::new(s(1.0), Value::Vec2([100.0, 0.0]));
+    for k in [&mut a, &mut b] {
+        k.spatial_auto = false;
+        k.in_interp = Interp::Bezier;
+        k.out_interp = Interp::Bezier;
+    }
+    a.spatial_in = [0.0; 3];
+    a.spatial_out = [0.0, -50.0, 0.0];
+    b.spatial_in = [0.0, -50.0, 0.0];
+    b.spatial_out = [0.0; 3];
+    a.in_ease = vec![Ease { speed: 0.0, influence: 1.0 / 3.0 }];
+    a.out_ease = vec![Ease { speed: -300.0, influence: 0.5 }];
+    b.in_ease = vec![Ease { speed: 0.0, influence: 0.5 }];
+    b.out_ease = vec![Ease { speed: 0.0, influence: 1.0 / 3.0 }];
+    let keys = vec![a, b];
+    let len = spatial_segment_length(&keys, 0);
+    let f = ease_progress(-300.0 / len, 0.5, 0.0, 0.5, 0.2);
+    assert!(f < 0.0, "the ease has to undershoot for this test to mean anything: {f}");
+    let p = evaluate(&keys, s(0.2), true).unwrap().as_vec2();
+    // The path leaves the first key along 3 * (p1 - p0) = (0, -150); going backwards moves up.
+    let dist = f * len;
+    assert!(p[0].abs() < 1e-6, "moved off the start tangent: {p:?}");
+    assert!((p[1] + dist).abs() < 1e-6, "stopped at the keyframe instead of undershooting by {}: {p:?}", -dist);
+}
+
 /// #880: a motion path whose arc length overflows (huge coordinates, as the Position field
 /// accepts) or is NaN evaluates without panicking: scrubbing over it crashed the app.
 #[test]

@@ -285,6 +285,10 @@ impl SpatialSeg {
     fn point(p: &[[f64; 3]; 4], u: f64) -> [f64; 3] {
         [bez(p[0][0], p[1][0], p[2][0], p[3][0], u), bez(p[0][1], p[1][1], p[2][1], p[3][1], u), bez(p[0][2], p[1][2], p[2][2], p[3][2], u)]
     }
+    /// Derivative of [`SpatialSeg::point`]: the path's tangent at `u`.
+    fn point_d(p: &[[f64; 3]; 4], u: f64) -> [f64; 3] {
+        [bez_d(p[0][0], p[1][0], p[2][0], p[3][0], u), bez_d(p[0][1], p[1][1], p[2][1], p[3][1], u), bez_d(p[0][2], p[1][2], p[2][2], p[3][2], u)]
+    }
     /// |dB/du|.
     fn tangent_len(p: &[[f64; 3]; 4], u: f64) -> f64 {
         (0..3).map(|k| bez_d(p[0][k], p[1][k], p[2][k], p[3][k], u).powi(2)).sum::<f64>().sqrt()
@@ -297,15 +301,23 @@ impl SpatialSeg {
     fn length(&self) -> f64 {
         *self.table.last().unwrap_or(&0.0)
     }
-    /// The point at arc length `s`. The table cell's linear guess is refined with Newton steps
-    /// on the true arc length, so the position (and the speed graph, its derivative) is smooth
-    /// along curved paths instead of piecewise linear per cell (#456).
+    /// The point at arc length `s`. Inside the path the table cell's linear guess is refined with
+    /// Newton steps on the true arc length, so the position (and the speed graph, its derivative)
+    /// is smooth along curved paths instead of piecewise linear per cell (#456). Past either end
+    /// the path continues along that end's tangent, so a temporal ease that overshoots keeps
+    /// moving instead of stopping at the keyframe (#4087).
     fn at_length(&self, s: f64) -> [f64; 3] {
         let len = self.length();
         // A path whose length overflowed (huge coordinates) or is NaN has no arc-length table to
         // walk: `clamp` would panic on a NaN bound.
         if !(len > 0.0 && len.is_finite()) {
             return self.p[0];
+        }
+        if s > len {
+            return self.extrapolate(1.0, s - len);
+        }
+        if s < 0.0 {
+            return self.extrapolate(0.0, s);
         }
         let s = s.clamp(0.0, len);
         let i = self.table.partition_point(|&v| v < s).clamp(1, ARC_N);
@@ -324,6 +336,19 @@ impl SpatialSeg {
             }
         }
         Self::point(&self.p, u)
+    }
+
+    /// The point `dist` along the tangent at `u` (0 or 1) from the path end there; `dist` is
+    /// negative before the start. A degenerate tangent has no direction to continue along, so the
+    /// end point itself is returned.
+    fn extrapolate(&self, u: f64, dist: f64) -> [f64; 3] {
+        let base = Self::point(&self.p, u);
+        let d = Self::point_d(&self.p, u);
+        let m = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+        if m <= 1e-12 || m.is_nan() {
+            return base;
+        }
+        [base[0] + d[0] / m * dist, base[1] + d[1] / m * dist, base[2] + d[2] / m * dist]
     }
 }
 
