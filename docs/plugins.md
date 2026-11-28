@@ -216,6 +216,14 @@ Every plug-in describes itself with a JSON manifest:
   `color` (`default` RGBA 0–1). Parameter ids are letters, digits and `_`, unique; at most 256
   parameters; a slider needs `min ≤ default ≤ max` (and `sliderMin ≤ sliderMax`); the manifest
   is at most 1 MiB.
+* `group` (optional, any parameter): a twirl-down group path such as `"Shimmer"` or
+  `"Advanced/Edges"`. Effect Controls and the timeline show the parameter inside those groups,
+  named as written. The group's match id is its letters, digits and `_` (`"Ray Color"` →
+  `RayColor`; a non-ASCII character becomes `u` and its hex code), so the parameter's path is
+  `effects/#1/Advanced/Edges/edgeWidth`. Two groups under one parent can't share a match id
+  (`"Ray Color"` and `"RayColor"`). A path has at most 8 levels and 256 bytes. Parameters still arrive in declaration order, and a project
+  saved before a parameter moved into a group keeps its value (the property moves into the
+  group when the project opens).
 
 ### WebAssembly ABI
 
@@ -349,9 +357,9 @@ effects can be registered.
   `PluginParams::layer`), `text` (a string field) and `hidden` (a string that is not shown, for
   opaque plug-in data). `text` / `hidden` take no slot in `flat`; their strings are in
   `PluginParams::texts`, one per such parameter in declaration order, read with
-  `PluginParams::text(id)`. `slider` gains `"integer": true` (shown with 0 decimals) and every
-  parameter an optional `"group"` path (`"Advanced/Edges"`; informational). WebAssembly modules
-  can't use `point3`, `layer`, `text` or `hidden`.
+  `PluginParams::text(id)`. `slider` gains `"integer": true` (shown with 0 decimals). Every
+  parameter of any plug-in can carry a `"group"` path (see [The manifest](#the-manifest)).
+  WebAssembly modules can't use `point3`, `layer`, `text` or `hidden`.
 * **`PluginFrame`** also carries `origin` (buffer pixels of layer pixel (0, 0); padding shifts it)
   and `layer_size` (layer pixels).
 * **`EffectPlugin::padding(params, time, scale, layer_size, instance_key) -> u32`** asks for that

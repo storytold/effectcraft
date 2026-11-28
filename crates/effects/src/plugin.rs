@@ -53,6 +53,9 @@ pub const MAX_PLUGINS: usize = 1024;
 
 /// The most transparent pixels a plug-in may ask [`EffectPlugin::padding`] to add per side.
 const MAX_PADDING: u32 = 4096;
+/// The deepest and longest a parameter's `group` path may be.
+const MAX_GROUP_DEPTH: usize = 8;
+const MAX_GROUP_LEN: usize = 256;
 
 /// A plug-in parameter's kind, default and range.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -160,8 +163,9 @@ pub struct PluginParam {
     /// Stable id (the property's match name; letters, digits, `_`).
     pub id: String,
     pub name: String,
-    /// API 2: the group / page path the parameter belongs to (`Advanced/Edges`). Hosts may
-    /// ignore it.
+    /// The twirl-down group path the parameter belongs to (`Advanced/Edges`); empty for none.
+    /// Each segment is shown as written; its letters, digits and `_` form the group's match id
+    /// ([`param_key`]).
     #[serde(default)]
     pub group: String,
     #[serde(flatten)]
@@ -209,9 +213,29 @@ impl PluginManifest {
             return Err(format!("plug-in `{}` has {} parameters (at most {max_params})", self.id, self.params.len()));
         }
         let mut seen = std::collections::HashSet::new();
+        // Each group's match-id path and its name: two names for one path would merge their groups.
+        let mut groups = std::collections::HashMap::new();
         for p in &self.params {
             if p.id.is_empty() || !p.id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') || !seen.insert(p.id.as_str()) {
                 return Err(format!("plug-in `{}`: bad or duplicate parameter id `{}`", self.id, p.id));
+            }
+            // Groups nest recursively (instantiation, upgrades, the panels): keep them shallow.
+            if p.group.len() > MAX_GROUP_LEN || group_segments(&p.group).count() > MAX_GROUP_DEPTH {
+                return Err(format!(
+                    "plug-in `{}`: the group of `{}` is longer than {MAX_GROUP_LEN} bytes or deeper than {MAX_GROUP_DEPTH} levels",
+                    self.id, p.id
+                ));
+            }
+            // Only after the size check: every prefix of the group is kept.
+            let mut at = String::new();
+            for (m, name) in group_segments(&p.group) {
+                at.push_str(&m);
+                at.push('/');
+                if let Some(other) = groups.insert(at.clone(), name)
+                    && other != name
+                {
+                    return Err(format!("plug-in `{}`: groups `{other}` and `{name}` have the same match id `{m}`", self.id));
+                }
             }
             if let PluginParamKind::Popup { options, default } = &p.kind
                 && (options.is_empty() || *default as usize >= options.len())
@@ -469,6 +493,71 @@ fn leak(s: &str) -> &'static str {
     Box::leak(s.to_string().into_boxed_str())
 }
 
+/// The segments of a plug-in group path as (match id, display name): `"Advanced/Ray Color"` →
+/// `("Advanced", "Advanced"), ("RayColor", "Ray Color")`. Other ASCII characters are dropped and
+/// non-ASCII ones kept as `u<hex>` (`"Цвет"` → `u426u432u435u442`), so names in any script stay
+/// distinct. Empty segments are skipped.
+fn group_segments(group: &str) -> impl Iterator<Item = (String, &str)> {
+    group.split('/').map(str::trim).filter(|s| !s.is_empty()).map(|s| {
+        let mut m = String::new();
+        for c in s.chars() {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                m.push(c);
+            } else if !c.is_ascii() {
+                m.push_str(&format!("u{:x}", u32::from(c)));
+            }
+        }
+        (if m.is_empty() { "group".to_string() } else { m }, s)
+    })
+}
+
+/// The parameter's spec id: its `id`, under `group/…/` match ids when it declares a group, so it
+/// nests in twirl-down groups like built-in effects' grouped parameters.
+pub fn param_key(p: &PluginParam) -> std::borrow::Cow<'_, str> {
+    let mut key = String::new();
+    for (m, _) in group_segments(&p.group) {
+        key.push_str(&m);
+        key.push('/');
+    }
+    if key.is_empty() {
+        p.id.as_str().into()
+    } else {
+        key.push_str(&p.id);
+        key.into()
+    }
+}
+
+/// The display name of the twirl-down group at match-id path `path` (`Advanced/RayColor`) of
+/// plug-in effect `effect`, as its manifest writes it. The whole path is matched, so groups with
+/// the same match id under different parents keep their own names. `None` for other effects and
+/// groups.
+pub fn group_display_name(effect: &str, path: &str) -> Option<String> {
+    let p = plugin(effect)?;
+    p.manifest().params.iter().find_map(|q| {
+        let mut at = String::new();
+        group_segments(&q.group).find_map(|(m, n)| {
+            if !at.is_empty() {
+                at.push('/');
+            }
+            at.push_str(&m);
+            (at == path).then(|| n.to_string())
+        })
+    })
+}
+
+/// A parameter's value: under its spec id, or under its bare id in an instance saved before the
+/// parameter moved into a group (and not upgraded because the plug-in was not loaded then).
+fn param_value<'p>(params: &'p Params, p: &PluginParam) -> Option<&'p Value> {
+    params.get(&param_key(p)).or_else(|| params.get(&p.id))
+}
+
+/// The key `p` is stored under in `params`, as [`param_value`] reads it: its group path, or the
+/// bare id of an instance saved before the parameter was grouped (and not upgraded yet).
+fn stored_key(params: &Params, p: &PluginParam) -> String {
+    let key = param_key(p);
+    if params.get(&key).is_none() && params.get(&p.id).is_some() { p.id.clone() } else { key.into_owned() }
+}
+
 fn param_spec(p: &PluginParam) -> ParamSpec {
     let (default, ui) = match &p.kind {
         PluginParamKind::Slider { default, min, max, slider_min, slider_max, decimals, integer } => (
@@ -491,7 +580,7 @@ fn param_spec(p: &PluginParam) -> ParamSpec {
         PluginParamKind::Text { default } => (Value::Str(default.clone()), ParamUi::Text),
         PluginParamKind::Hidden { default } => (Value::Str(default.clone()), ParamUi::Hidden),
     };
-    ParamSpec { id: leak(&p.id), name: leak(&p.name), default, ui }
+    ParamSpec { id: leak(&param_key(p)), name: leak(&p.name), default, ui }
 }
 
 /// Register a plug-in effect: it appears in Effects & Presets under its category and is
@@ -596,7 +685,7 @@ pub fn flatten_params(m: &PluginManifest, params: &Params, offset: [f64; 2], sca
     let to_px = |q: [f64; 2]| (q[0] * scale + offset[0], q[1] * scale + offset[1]);
     let mut out = Vec::with_capacity(m.flat_len());
     for p in &m.params {
-        let v = params.get(&p.id);
+        let v = param_value(params, p);
         match &p.kind {
             PluginParamKind::Point { .. } => {
                 let (x, y) = to_px(v.map(Value::as_vec2).unwrap_or([0.0; 2]));
@@ -626,7 +715,7 @@ pub fn flatten_texts(m: &PluginManifest, params: &Params) -> Vec<String> {
     m.params
         .iter()
         .filter_map(|p| match &p.kind {
-            PluginParamKind::Text { default } | PluginParamKind::Hidden { default } => Some(match params.get(&p.id) {
+            PluginParamKind::Text { default } | PluginParamKind::Hidden { default } => Some(match param_value(params, p) {
                 Some(Value::Str(s)) => s.clone(),
                 _ => default.clone(),
             }),
@@ -660,6 +749,10 @@ impl PluginHost for RenderHost<'_, '_> {
 
     fn layer_input(&self, param_id: &str, layer_time: f64) -> Option<PluginImage> {
         let ctx = self.ctx;
+        // The plug-in names its own parameter id; a grouped parameter is stored under its key
+        // (or its bare id, saved before it was grouped), and its source companion next to it.
+        let key = self.manifest.params.iter().find(|p| p.id == param_id).map(|p| stored_key(ctx.params, p))?;
+        let param_id: &str = &key;
         let lid = ctx.params.get(param_id)?.as_layer()?;
         let other = if (layer_time - ctx.time).abs() < 1e-9 {
             ctx.layer_param(param_id, true)?
@@ -723,4 +816,29 @@ fn run_slot(slot: usize, ctx: &EffectCtx, mut buf: Buf) -> Buf {
         set_plugin_error(&m.id, None);
     }
     buf
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A grouped parameter is found under its group path, or under its bare id in an instance
+    /// saved before it was grouped.
+    #[test]
+    fn stored_key_falls_back_to_the_bare_id() {
+        let p = PluginParam { id: "floor".into(), name: "Floor".into(), kind: PluginParamKind::Layer, group: "Physics/Bounce".into() };
+        let with = |k: &str| Params { values: [(k.to_string(), Value::Scalar(1.0))].into_iter().collect() };
+        assert_eq!(stored_key(&with("Physics/Bounce/floor"), &p), "Physics/Bounce/floor");
+        assert_eq!(stored_key(&with("floor"), &p), "floor");
+        assert_eq!(stored_key(&with("other"), &p), "Physics/Bounce/floor");
+    }
+
+    /// Group names in other scripts get distinct match ids (not all `group`).
+    #[test]
+    fn non_ascii_group_names_stay_distinct() {
+        let p = |group: &str| PluginParam { id: "x".into(), name: "X".into(), kind: PluginParamKind::Checkbox { default: false }, group: group.into() };
+        assert_eq!(param_key(&p("Цвет")), "u426u432u435u442/x");
+        assert_ne!(param_key(&p("Цвет")), param_key(&p("Свет")));
+        assert_eq!(param_key(&p("Ray Color/Edges")), "RayColor/Edges/x");
+    }
 }

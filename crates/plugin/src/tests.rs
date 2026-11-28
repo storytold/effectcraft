@@ -249,6 +249,13 @@ fn manifest_parameter_schemas_are_validated() {
         (r#"{"id":"s","name":"S","type":"slider","default":1,"min":0,"max":4,"sliderMin":3,"sliderMax":2}"#, "slider"),
         (r#"{"id":"s","name":"S","type":"wobble"}"#, "manifest JSON"),
         (r#"{"id":"s","name":"S","type":"slider"}"#, "manifest JSON"),
+        (r#"{"id":"c","name":"C","type":"checkbox","group":"a/b/c/d/e/f/g/h/i"}"#, "deeper than 8"),
+        (r#"{"id":"a","name":"A","type":"checkbox","group":"X/Ray Color"},{"id":"b","name":"B","type":"checkbox","group":"X/RayColor"}"#, "same match id"),
+        // The size check comes first (no prefixes are collected for an oversized group).
+        (
+            r#"{"id":"a","name":"A","type":"checkbox","group":"X/Ray Color"},{"id":"b","name":"B","type":"checkbox","group":"X/RayColor/c/d/e/f/g/h/i"}"#,
+            "deeper than 8",
+        ),
     ];
     for (params, want) in bad {
         let m = module_with(&p(params), "");
@@ -485,4 +492,65 @@ fn abi_v2_without_a_host_gets_zeroed_neighbours() {
     assert!(!effectcraft_effects::plugin::reads_other_times("org.test.neighbours.v1"));
     assert!(!effectcraft_effects::is_time_dependent("org.test.neighbours.v1"));
     assert!(gain.id.starts_with("org.test."));
+}
+
+#[test]
+fn grouped_parameters_nest_in_twirl_down_groups() {
+    // `gain` sits in "Look", `on` in "Look/Ray Color" (match id `RayColor`), `tint` ungrouped.
+    let manifest = gain_manifest("org.test.groups")
+        .replace(r#""name":"Gain","#, r#""name":"Gain","group":"Look","#)
+        .replace(r#""name":"Lift","#, r#""name":"Lift","group":" Look / Ray Color ","#);
+    let spec = load_wasm(module_with(&manifest, "").as_bytes(), "groups.wat").unwrap();
+    let ids: Vec<&str> = spec.params.iter().map(|p| p.id).collect();
+    assert_eq!(ids, ["Look/gain", "Look/RayColor/on", "tint"]);
+    let mut next = 1;
+    let g = effectcraft_effects::instantiate(spec, &mut Ids(&mut next), spec.name, [4.0, 2.0]);
+    let look = g.sub("Look").unwrap();
+    assert_eq!(look.name, "Look");
+    assert!(look.get("gain").is_some());
+    let ray = look.sub("RayColor").unwrap();
+    assert_eq!(ray.name, "Ray Color", "the display name is the plug-in's own");
+    assert!(ray.get("on").is_some() && g.get("tint").is_some());
+    // Values reach the plug-in from their nested keys.
+    let mut params = effectcraft_effects::flatten_params(&g, &mut |p| p.value.clone());
+    assert!(params.get("Look/gain").is_some());
+    params.values.insert("Look/gain".into(), effectcraft_keyframe::Value::Scalar(0.5));
+    params.values.insert("Look/RayColor/on".into(), effectcraft_keyframe::Value::Bool(true));
+    let ctx = EffectCtx { params: &params, time: 0.0, layer_size: [4.0, 2.0], seed: 1, adjustment: false, env: EffectEnv::default() };
+    let buf = Buf { img: Image::filled(4, 2, [0.8, 0.6, 0.2, 1.0]), offset: [0.0; 2], scale: 1.0 };
+    assert_eq!((spec.render)(&ctx, buf).img.get(0, 0), [0.4, 0.3, 1.1, 1.0]);
+    // An instance saved before the parameters were grouped still renders with its values, and
+    // upgrading it moves them into the groups.
+    let flat = gain_module("org.test.groups.old", "");
+    let mut saved = effectcraft_effects::instantiate(load_wasm(flat.as_bytes(), "old.wat").unwrap(), &mut Ids(&mut next), "Old", [4.0, 2.0]);
+    assert!(saved.get("gain").is_some());
+    let mut params = effectcraft_effects::flatten_params(&saved, &mut |p| p.value.clone());
+    params.values.insert("gain".into(), effectcraft_keyframe::Value::Scalar(0.5));
+    let ctx = EffectCtx { params: &params, time: 0.0, layer_size: [4.0, 2.0], seed: 1, adjustment: false, env: EffectEnv::default() };
+    let buf = Buf { img: Image::filled(4, 2, [0.8, 0.6, 0.2, 1.0]), offset: [0.0; 2], scale: 1.0 };
+    assert_eq!((spec.render)(&ctx, buf).img.get(0, 0), [0.4, 0.3, 0.1, 1.0]);
+    assert!(effectcraft_effects::migrate::upgrade_instance(spec, &mut saved, &mut Ids(&mut next), [4.0, 2.0]));
+    assert!(saved.get("gain").is_none() && saved.sub("Look").unwrap().get("gain").is_some());
+    assert_eq!(saved.sub("Look").unwrap().sub("RayColor").unwrap().name, "Ray Color");
+}
+
+#[test]
+fn groups_with_one_match_id_under_different_parents_keep_their_own_names() {
+    // `A/Ray Color` and `B/RayColor` both end in match id `RayColor`.
+    let manifest = gain_manifest("org.test.groups.paths")
+        .replace(r#""name":"Gain","#, r#""name":"Gain","group":"A/Ray Color","#)
+        .replace(r#""name":"Lift","#, r#""name":"Lift","group":"B/RayColor","#);
+    let spec = load_wasm(module_with(&manifest, "").as_bytes(), "paths.wat").unwrap();
+    let mut next = 1;
+    let mut g = effectcraft_effects::instantiate(spec, &mut Ids(&mut next), spec.name, [4.0, 2.0]);
+    let names = |g: &effectcraft_project::PropGroup| ["A", "B"].map(|a| g.sub(a).unwrap().sub("RayColor").unwrap().name.clone());
+    assert_eq!(names(&g), ["Ray Color", "RayColor"]);
+    // Refreshing the names on upgrade keeps them apart too.
+    effectcraft_effects::migrate::upgrade_instance(spec, &mut g, &mut Ids(&mut next), [4.0, 2.0]);
+    assert_eq!(names(&g), ["Ray Color", "RayColor"]);
+    // A name saved before the plug-in renamed its group follows the plug-in, even when the new
+    // name is the match id itself.
+    g.sub_mut("B").unwrap().sub_mut("RayColor").unwrap().name = "Ray Color".into();
+    effectcraft_effects::migrate::upgrade_instance(spec, &mut g, &mut Ids(&mut next), [4.0, 2.0]);
+    assert_eq!(names(&g), ["Ray Color", "RayColor"]);
 }

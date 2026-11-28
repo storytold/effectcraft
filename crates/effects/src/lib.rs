@@ -919,7 +919,7 @@ pub fn instantiate(spec: &EffectSpec, ids: &mut Ids, instance_name: &str, layer_
         }
         // (the channels an effect reads: not animatable, as in After Effects)
         pr.static_only = channel3d::selects_channels(spec.id, ps.id);
-        match path.and_then(|path| nested_group(&mut g, ids, path)) {
+        match path.and_then(|path| nested_group(spec, &mut g, ids, path)) {
             Some(sub) => sub.children.push(pr.into()),
             None => g.children.push(pr.into()),
         }
@@ -931,7 +931,7 @@ pub fn instantiate(spec: &EffectSpec, ids: &mut Ids, instance_name: &str, layer_
         if matches!(ps.ui, ParamUi::Layer) && !spec.params.iter().any(|q| q.id == sid) {
             let mut src = Property::new(ids.alloc(), &layer_source_id(leaf), &format!("{} Source", ps.name), Value::Enum(2)).with_ui(ParamUi::Hidden);
             src.hold_only = true;
-            match path.and_then(|path| nested_group(&mut g, ids, path)) {
+            match path.and_then(|path| nested_group(spec, &mut g, ids, path)) {
                 Some(sub) => sub.children.push(src.into()),
                 None => g.children.push(src.into()),
             }
@@ -1128,8 +1128,13 @@ pub const PARAM_GROUPS: &[(&str, &str)] = &[
     ("strokeOptions", "Stroke Options"),
 ];
 
-/// Display names of nested parameter groups by match id.
-fn group_name(m: &str) -> &str {
+/// Display name of the nested parameter group at match-id path `path` (`borders/autoScale`) of
+/// `spec`: a plug-in's own (from its manifest), else by its match id from the tables.
+fn group_name(spec: &EffectSpec, path: &str) -> String {
+    if let Some(n) = plugin::group_display_name(spec.id, path) {
+        return n;
+    }
+    let m = path.rsplit('/').next().unwrap_or(path);
     warp_stab::GROUPS
         .iter()
         .chain(roto::GROUPS)
@@ -1137,24 +1142,22 @@ fn group_name(m: &str) -> &str {
         .chain(keylight::GROUPS)
         .chain(PARAM_GROUPS)
         .find(|(id, _)| *id == m)
-        .map(|(_, n)| *n)
-        .unwrap_or(m)
+        .map_or(m, |(_, n)| *n)
+        .to_string()
 }
 
 /// The nested group at `path` (`borders/autoScale`) under `g`, created on first use.
-fn nested_group<'a>(g: &'a mut PropGroup, ids: &mut Ids, path: &str) -> Option<&'a mut PropGroup> {
-    let (first, rest) = match path.split_once('/') {
-        Some((a, b)) => (a, Some(b)),
-        None => (path, None),
-    };
-    if g.sub(first).is_none() {
-        g.children.push(ids.group(first, group_name(first)).into());
+fn nested_group<'a>(spec: &EffectSpec, mut g: &'a mut PropGroup, ids: &mut Ids, path: &str) -> Option<&'a mut PropGroup> {
+    let mut end = 0;
+    for seg in path.split('/') {
+        end += seg.len();
+        if g.sub(seg).is_none() {
+            g.children.push(ids.group(seg, &group_name(spec, &path[..end])).into());
+        }
+        g = g.sub_mut(seg)?;
+        end += 1;
     }
-    let sub = g.sub_mut(first)?;
-    match rest {
-        Some(r) => nested_group(sub, ids, r),
-        None => Some(sub),
-    }
+    Some(g)
 }
 
 /// Effects the GPU compositor (`effectcraft-gpu`) implements with the CPU effect's semantics
