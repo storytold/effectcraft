@@ -165,7 +165,8 @@ fn camera_shake_deblur(ctx: &EffectCtx, mut b: Buf) -> Buf {
         let l = Plane::luma(&img);
         neigh.push((img, l));
     }
-    if neigh.is_empty() {
+    // A declined neighbour makes the whole sample unsafe: pass the input through.
+    if host.unsafe_time_sample() || neigh.is_empty() {
         return b;
     }
     let cur_l = Plane::luma(&b.img);
@@ -386,5 +387,48 @@ mod tests {
         let s1 = run_fx("ec.blur.camerashakedeblur", &[base[0].clone(), base[1].clone()], blurry.clone(), 1.0 / 30.0, env);
         let s2 = run_fx("ec.blur.camerashakedeblur", &[base[0].clone(), base[1].clone(), ("strength", num(200.0))], blurry.clone(), 1.0 / 30.0, env);
         assert!(dist(&s2.img) > dist(&s1.img) * 1.05, "{} vs {}", dist(&s2.img), dist(&s1.img));
+    }
+
+    /// A host whose frame 2 cannot be rendered safely: it declines that neighbour and flags the
+    /// render unsafe, while frame 0 (a sharp neighbour) is still served.
+    struct PartlyUnsafe {
+        flagged: std::sync::atomic::AtomicBool,
+    }
+    impl EffectHost for PartlyUnsafe {
+        fn layer(&self, _: u64, _: bool) -> Option<LayerPixels> {
+            None
+        }
+        fn audio(&self, _: u64, _: f64, _: usize, _: u32) -> Option<Vec<f32>> {
+            None
+        }
+        fn self_at(&self, t: f64, _: usize) -> Option<Buf> {
+            let f = (t * 30.0).round() as i64;
+            if f == 2 {
+                self.flagged.store(true, std::sync::atomic::Ordering::Relaxed);
+                return None;
+            }
+            Some(Buf { img: frame(f), offset: [0.0; 2], scale: 1.0 })
+        }
+        fn unsafe_time_sample(&self) -> bool {
+            self.flagged.load(std::sync::atomic::Ordering::Relaxed)
+        }
+    }
+
+    /// #4001: a neighbour sample the host cannot render safely flags the whole render. Camera-Shake
+    /// Deblur must then pass its input through, not substitute the sharp neighbours it collected
+    /// before the decline.
+    #[test]
+    fn camera_shake_deblur_declines_when_a_neighbour_sample_is_unsafe() {
+        let host = PartlyUnsafe { flagged: std::sync::atomic::AtomicBool::new(false) };
+        let env = EffectEnv { host: Some(&host), frame_rate: 30.0, ..Default::default() };
+        let blurry = frame(1);
+        let out = run_fx(
+            "ec.blur.camerashakedeblur",
+            &[("patchSize", num(16.0)), ("searchRange", num(3.0)), ("blurDuration", num(1.0))],
+            blurry.clone(),
+            1.0 / 30.0,
+            env,
+        );
+        assert!(out.img.data == blurry.data, "an unsafe neighbour sample must pass the input through");
     }
 }

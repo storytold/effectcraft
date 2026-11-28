@@ -521,7 +521,8 @@ fn rolling_shutter(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let fps = ctx.fps();
     let prev = host.self_at(ctx.time - 1.0 / fps, ctx.env.effect_index).map(|nb| same_grid(nb, &b));
     let next = host.self_at(ctx.time + 1.0 / fps, ctx.env.effect_index).map(|nb| same_grid(nb, &b));
-    if prev.is_none() && next.is_none() {
+    // A declined neighbour makes the sample unsafe: pass the input through.
+    if host.unsafe_time_sample() || (prev.is_none() && next.is_none()) {
         return b;
     }
     let per_row = ctx.params.e("advanced/method") == 0;

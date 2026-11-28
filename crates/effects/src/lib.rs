@@ -543,6 +543,14 @@ pub trait EffectHost: Sync {
     fn self_at(&self, _layer_time: f64, _effects: usize) -> Option<Buf> {
         None
     }
+    /// Whether a [`self_at`](EffectHost::self_at) call during this render had to decline because the
+    /// frame could not be answered safely (an adjustment layer whose composite below cannot be
+    /// reproduced). A time effect that samples several times must then decline as a whole and pass
+    /// its input through, rather than treat the declined sample as a transparent frame
+    /// ([`self_at`](EffectHost::self_at) returns `None` for it either way).
+    fn unsafe_time_sample(&self) -> bool {
+        false
+    }
     /// Layer `id` of the same composition at comp time `comp_time` (seconds), like
     /// [`EffectHost::layer`] but at another time.
     fn layer_at(&self, _id: u64, _comp_time: f64, _masks_and_effects: bool) -> Option<LayerPixels> {

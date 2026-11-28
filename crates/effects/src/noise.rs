@@ -554,7 +554,8 @@ fn remove_grain(ctx: &EffectCtx, mut b: Buf) -> Buf {
         let k = (pr.get("temporalFiltering/amount").map(Value::as_f64).unwrap_or(100.0) / 100.0).clamp(0.0, 1.0) as f32;
         let sens = pr.get("temporalFiltering/motionSensitivity").map(Value::as_f64).unwrap_or(0.5).clamp(0.0, 1.0) as f32;
         let thr = 0.02 + (1.0 - sens) * 0.2;
-        if prev.is_some() || next.is_some() {
+        let unsafe_sample = host.is_some_and(|h| h.unsafe_time_sample());
+        if (prev.is_some() || next.is_some()) && !unsafe_sample {
             b.img.data.par_iter_mut().enumerate().for_each(|(i, px)| {
                 let mut acc = *px;
                 let mut n = 1.0;
