@@ -48,6 +48,7 @@ pub fn param_shown(effect: &str, param: &str, value: &dyn Fn(&str) -> Option<eff
             }
             None => true,
         },
+        crate::rounded_corners::ID => crate::rounded_corners::shown(param, b("individualCorners")),
         "ec.sim.carddance" | "ec.transition.cardwipe" => crate::card3d::shown(param, &e).unwrap_or(true),
         "ec.sim.shatter" => match param {
             "shape/customShatterMap" | "shape/whiteTilesFixed" => e("shape/pattern") == 5,

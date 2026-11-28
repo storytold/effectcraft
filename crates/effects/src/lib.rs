@@ -57,6 +57,7 @@ pub mod plugin;
 pub mod psim;
 pub mod puppet;
 pub mod roto;
+mod rounded_corners;
 mod sim;
 mod sim2;
 mod sim3;
@@ -455,7 +456,9 @@ pub fn adjustment_crop(offset: [f64; 2], canvas_offset: [f64; 2], size: (u32, u3
 /// skips the renderer's cover of the whole layer rectangle (#1205).
 /// Drop Shadow also pads by its distance and softness on both CPU and GPU: covering the
 /// layer rectangle first only inflates working images on highly scaled text and shapes (#3357).
-pub const SKIPS_COVER: &[&str] = &["ec.blur.gaussian", "ec.blur.fastbox", "ec.stylize.glow", "ec.distort.turbulentdisplace", "ec.perspective.dropshadow"];
+/// Rounded Corners only makes existing pixels more transparent, so it needs no cover either.
+pub const SKIPS_COVER: &[&str] =
+    &["ec.blur.gaussian", "ec.blur.fastbox", "ec.stylize.glow", "ec.distort.turbulentdisplace", "ec.perspective.dropshadow", rounded_corners::ID];
 
 /// The grid phase [`Buf::align`] keeps and the step [`cover_pad`] grows in: covers the levels
 /// of the resampling pyramid used for downscaled layers.
@@ -746,6 +749,7 @@ pub fn registry() -> &'static [EffectSpec] {
         v.extend(face_track::specs());
         v.extend(roto::specs());
         v.extend(object_matte::specs());
+        v.extend(rounded_corners::specs());
         v.sort_by(|a, b| a.category.cmp(b.category).then(a.name.cmp(b.name)));
         for s in v.iter_mut() {
             if GPU_EFFECTS.contains(&s.id) {
