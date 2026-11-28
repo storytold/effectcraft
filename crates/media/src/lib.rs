@@ -38,7 +38,25 @@ mod wav_markers;
 mod webp_anim;
 
 /// Video decoder counters (time in decoders, samples decoded, seeks, cache hits), for benchmarks.
-pub use filmcraft_codecs::{GopStats, gop_stats};
+pub use filmcraft_codecs::GopStats;
+
+/// The FilmCraft and shared (`craft_source`) decoder counters together.
+pub fn gop_stats() -> GopStats {
+    let film = filmcraft_codecs::gop_stats();
+    let craft = craft_source::stats::snapshot();
+    GopStats {
+        hits: film.hits + craft.hits,
+        misses: film.misses + craft.misses,
+        seeks: film.seeks + craft.seeks,
+        decoded: film.decoded + craft.decoded,
+        evicted: film.evicted + craft.evicted,
+        decode_ns: film.decode_ns + craft.decode_ns,
+        skipped: film.skipped + craft.skipped,
+        draft: film.draft + craft.draft,
+        frames: film.frames + craft.frames,
+    }
+}
+
 pub use pool::{DEFAULT_BUDGET, MediaPool, PoolStats};
 pub use probe::{DEFAULT_SEQUENCE_RATE, probe, probe_bytes, probe_model, probe_noting};
 

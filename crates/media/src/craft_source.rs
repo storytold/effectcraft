@@ -58,7 +58,10 @@ mod standalone_flac;
 const MAX_WORKERS: usize = 8;
 
 /// Maximum decoded frames retained in the per-source GOP window cache.
-const MAX_CACHED_FRAMES: usize = 32;
+const MAX_CACHED_FRAMES: usize = 256;
+/// Maximum decoded bytes retained in the per-source GOP window cache. A typical 1080p GOP fits;
+/// the cap bounds 4K or alpha-heavy sources.
+const MAX_CACHED_BYTES: usize = 384 << 20;
 
 /// Maximum audio lookahead packets inspected when initializing `craft_audio::TrackDecoder`.
 const AUDIO_LOOKAHEAD: usize = 8;
@@ -78,6 +81,78 @@ const ISOBMFF_IDENTITY_MATRIX: [i32; 9] = [0x10000, 0, 0, 0, 0x10000, 0, 0, 0, 0
 
 fn worker_cap() -> usize {
     std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(1, MAX_WORKERS)
+}
+
+/// Process-wide counters for the shared decoder routes, added to the FilmCraft counters by
+/// [`crate::gop_stats`].
+pub(crate) mod stats {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use filmcraft_codecs::GopStats;
+
+    static HITS: AtomicU64 = AtomicU64::new(0);
+    static MISSES: AtomicU64 = AtomicU64::new(0);
+    static SEEKS: AtomicU64 = AtomicU64::new(0);
+    static DECODED: AtomicU64 = AtomicU64::new(0);
+    static EVICTED: AtomicU64 = AtomicU64::new(0);
+    static DECODE_NS: AtomicU64 = AtomicU64::new(0);
+    static DRAFT: AtomicU64 = AtomicU64::new(0);
+    static FRAMES: AtomicU64 = AtomicU64::new(0);
+
+    pub(crate) fn hit() {
+        HITS.fetch_add(1, Ordering::Relaxed);
+    }
+    pub(crate) fn miss() {
+        MISSES.fetch_add(1, Ordering::Relaxed);
+    }
+    pub(crate) fn seek() {
+        SEEKS.fetch_add(1, Ordering::Relaxed);
+    }
+    pub(crate) fn decoded(n: u64) {
+        DECODED.fetch_add(n, Ordering::Relaxed);
+    }
+    pub(crate) fn evicted(n: u64) {
+        EVICTED.fetch_add(n, Ordering::Relaxed);
+    }
+    pub(crate) fn draft(n: u64) {
+        DRAFT.fetch_add(n, Ordering::Relaxed);
+    }
+    pub(crate) fn frames(n: u64) {
+        FRAMES.fetch_add(n, Ordering::Relaxed);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) type Timer = std::time::Instant;
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) type Timer = ();
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn timer() -> Timer {
+        std::time::Instant::now()
+    }
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn timer() -> Timer {}
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn add_decode_time(start: Timer) {
+        DECODE_NS.fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn add_decode_time(_: Timer) {}
+
+    pub(crate) fn snapshot() -> GopStats {
+        GopStats {
+            hits: HITS.load(Ordering::Relaxed),
+            misses: MISSES.load(Ordering::Relaxed),
+            seeks: SEEKS.load(Ordering::Relaxed),
+            decoded: DECODED.load(Ordering::Relaxed),
+            evicted: EVICTED.load(Ordering::Relaxed),
+            decode_ns: DECODE_NS.load(Ordering::Relaxed),
+            skipped: 0,
+            draft: DRAFT.load(Ordering::Relaxed),
+            frames: FRAMES.load(Ordering::Relaxed),
+        }
+    }
 }
 
 fn prores_has_alpha(packet_size: u32, read: impl FnOnce() -> Option<Vec<u8>>) -> Option<bool> {
@@ -916,6 +991,12 @@ fn simple_mp4_apv_profile(file: &Mp4File, track: &isobmff::Track) -> Option<craf
 }
 
 fn open_isobmff(name: &str, source: SharedBytes) -> Option<Result<SharedSource>> {
+    open_isobmff_with_workers(name, source, worker_cap())
+}
+
+/// [`open_isobmff`] with an explicit decoder worker cap. Tests use it to force the
+/// frame-threaded path; production always passes [`worker_cap`].
+fn open_isobmff_with_workers(name: &str, source: SharedBytes, workers: usize) -> Option<Result<SharedSource>> {
     let file = isobmff::open(source.clone()).ok()?;
     let video_idx = file.tracks.iter().position(|t| t.kind == isobmff::TrackKind::Video && !t.samples.is_empty() && !t.entries.is_empty() && t.timescale > 0);
     let audio_candidates: Vec<(usize, usize, CodecParams, u64)> = file
@@ -983,7 +1064,7 @@ fn open_isobmff(name: &str, source: SharedBytes) -> Option<Result<SharedSource>>
             let bitrate = video_track.entries.first().and_then(|e| e.bitrate).map(|b| u64::from(b.avg_bitrate)).filter(|&b| b > 0);
             (video_params.codec.name().to_string(), String::new(), bitrate)
         };
-        let video_decoder = match TrackDecoder::with_options(&video_params, TrackDecoderOptions { threads: Some(worker_cap()), draft: false }) {
+        let video_decoder = match TrackDecoder::with_options(&video_params, TrackDecoderOptions { threads: Some(workers), draft: false }) {
             Ok(d) => d,
             Err(e) => return Some(Err(MediaError::Decode(e.to_string()))),
         };
@@ -1631,8 +1712,24 @@ fn open_mpeg(name: &str, fmt: mpegts::Format, source: SharedBytes) -> Option<Res
 }
 struct CachedFrame {
     pts: i64,
+    /// Whether this picture was decoded in draft mode, as the decoder reports it. Reference
+    /// pictures stay full-quality even when the decoder is in draft mode.
     draft: bool,
     frame: Arc<VideoFrame>,
+}
+
+impl CachedFrame {
+    /// Whether this picture can answer a request: a draft request accepts a full-quality
+    /// picture too, but a full-quality request never accepts a draft one.
+    fn serves(&self, want_draft: bool) -> bool {
+        want_draft || !self.draft
+    }
+}
+
+/// The cached picture at `pts` that best answers a request: a full-quality one if there is
+/// one, otherwise a draft one when the request accepts it.
+fn cached_picture(decoded: &[CachedFrame], pts: i64, want_draft: bool) -> Option<&CachedFrame> {
+    decoded.iter().find(|c| c.pts == pts && !c.draft).or_else(|| decoded.iter().find(|c| c.pts == pts && want_draft))
 }
 
 enum VideoState {
@@ -1642,7 +1739,16 @@ enum VideoState {
 
 impl VideoState {
     fn packet(decoder: TrackDecoder) -> Mutex<Self> {
-        Mutex::new(Self::Packet(PacketVideoState { decoder, next_decode_idx: 0, gop_start_idx: 0, flushed: false, decoded: Vec::new() }))
+        Mutex::new(Self::Packet(PacketVideoState {
+            decoder,
+            next_decode_idx: 0,
+            gop_start_idx: 0,
+            emitted_max_pts: None,
+            draft_change: None,
+            flushed: false,
+            decoded: Vec::new(),
+            cached_bytes: 0,
+        }))
     }
 }
 
@@ -1650,8 +1756,38 @@ struct PacketVideoState {
     decoder: TrackDecoder,
     next_decode_idx: usize,
     gop_start_idx: usize,
+    /// Highest presentation timestamp the decoder has emitted, in track units. Pictures with
+    /// later timestamps may still be in flight inside a frame-threaded decoder.
+    emitted_max_pts: Option<i64>,
+    /// The sample index at which the decoder last changed draft mode, and the new mode.
+    /// Pictures fed before it may still be in flight in the old mode, even if the request that
+    /// changed the mode returned early (cancelled or failed).
+    draft_change: Option<(usize, bool)>,
     flushed: bool,
     decoded: Vec<CachedFrame>,
+    /// Decoded bytes held in `decoded`, kept beside the vector so the eviction loop updates
+    /// the total without re-measuring every cached frame.
+    cached_bytes: usize,
+}
+
+/// Run one ProRes packet's bands on the dedicated decode pool when it exists. That pool runs
+/// codec parallel work and never lets a worker wait for a picture, so band jobs cannot be
+/// starved by frame jobs holding the `VideoState` lock this decode holds (#4028). Without the
+/// pool, decode serially on this thread.
+#[cfg(not(target_arch = "wasm32"))]
+fn decode_prores_pooled<R>(decode: impl FnOnce(&prores::DecodeOptions) -> R + Send) -> R
+where
+    R: Send,
+{
+    match crate::pool::decode_threads() {
+        Some(pool) => pool.install(|| decode(&prores::DecodeOptions { threads: true, ..Default::default() })),
+        None => decode(&prores::DecodeOptions { threads: false, ..Default::default() }),
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn decode_prores_pooled<R>(decode: impl FnOnce(&prores::DecodeOptions) -> R) -> R {
+    decode(&prores::DecodeOptions { threads: false, ..Default::default() })
 }
 
 fn decode_track_packet(
@@ -1659,17 +1795,16 @@ fn decode_track_packet(
     is_isobmff: bool,
     packet: &[u8],
     pts: i64,
-    decode_prores: impl FnOnce(&[u8], &prores::DecodeOptions) -> prores::Result<prores::Frame>,
+    decode_prores: impl FnOnce(&[u8], &prores::DecodeOptions) -> prores::Result<prores::Frame> + Send,
 ) -> std::result::Result<Vec<DecodedVideoFrame>, VideoError> {
     if !is_isobmff || decoder.codec() != CodecId::ProRes {
         return decoder.decode(packet, pts);
     }
-    // The caller holds this source's VideoState lock. Do not let a ProRes band
-    // job yield to another request for the same source on the decode Rayon pool.
-    // ProRes packets carry a complete picture: TrackDecoder's ProRes arm adds
-    // the PTS to this same conversion and has no draft, reset or reorder work.
-    let options = prores::DecodeOptions { threads: false, ..Default::default() };
-    let mut frame = DecodedVideoFrame::try_from(decode_prores(packet, &options)?)?;
+    // ProRes packets carry a complete picture: TrackDecoder's ProRes arm adds the PTS to this
+    // same conversion and has no draft, reset or reorder work. The bands run on the decode pool
+    // so their workers are never global-pool threads that a frame job waits on.
+    let decoded = decode_prores_pooled(|options| decode_prores(packet, options))?;
+    let mut frame = DecodedVideoFrame::try_from(decoded)?;
     frame.pts = Some(pts);
     Ok(vec![frame])
 }
@@ -1745,7 +1880,10 @@ fn apv_cache_fits_pair(a: usize, b: usize) -> bool {
 impl ApvFrameCache {
     fn get(&self, pts: i64) -> Option<Arc<VideoFrame>> {
         let entries = self.entries.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        entries.iter().find(|entry| entry.pts == pts).map(|entry| entry.frame.clone())
+        entries.iter().find(|entry| entry.pts == pts).map(|entry| {
+            stats::hit();
+            entry.frame.clone()
+        })
     }
 
     fn get_or_decode(&self, pts: i64, decode: impl FnOnce() -> Result<VideoFrame>) -> Result<Arc<VideoFrame>> {
@@ -1758,12 +1896,19 @@ impl ApvFrameCache {
         if let Some(frame) = self.get(pts) {
             return Ok(frame);
         }
+        stats::miss();
+        let started = stats::timer();
         let frame = Arc::new(decode()?);
+        stats::add_decode_time(started);
+        stats::decoded(1);
+        stats::frames(1);
         let mut entries = self.entries.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if entries.len() == 2 {
             entries.remove(0);
+            stats::evicted(1);
         }
         if entries.first().is_some_and(|other| !apv_cache_fits_pair(other.frame.byte_size(), frame.byte_size())) {
+            stats::evicted(entries.len() as u64);
             entries.clear();
         }
         // Like Film, keep the current frame even if it alone exceeds the cache ceiling.
@@ -1824,7 +1969,6 @@ impl MediaSource for CraftMediaSource {
             return self.apv_frame(track, video_idx, cache, req.time);
         }
         let (target_idx, target_pts) = self.file.target_sample(video_idx, req.time).ok_or_else(|| MediaError::Decode("no video samples".into()))?;
-        let want_draft = req.scale < 0.99;
 
         let mut state = video_mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let state = match &mut *state {
@@ -1834,9 +1978,15 @@ impl MediaSource for CraftMediaSource {
                 return raw.frame(file, &*self.source, video_idx, target_idx);
             }
         };
-        if let Some(hit) = state.decoded.iter().find(|c| c.pts == target_pts && c.draft == want_draft) {
+        // Only these codecs change what they output in draft mode; the others would just
+        // reset and clear their cache for the same full-quality picture.
+        let supports_draft = matches!(state.decoder.codec(), CodecId::H264 | CodecId::Hevc | CodecId::Vp9 | CodecId::Av1);
+        let want_draft = req.scale < 0.99 && supports_draft;
+        if let Some(hit) = cached_picture(&state.decoded, target_pts, want_draft) {
+            stats::hit();
             return Ok(hit.frame.clone());
         }
+        stats::miss();
 
         // A scan cannot identify AVI keyframes, but each nonempty ProRes chunk is
         // an independent picture. Do not read an earlier, possibly damaged chunk.
@@ -1845,20 +1995,39 @@ impl MediaSource for CraftMediaSource {
         let draft_changed = state.decoder.draft() != want_draft;
         if draft_changed {
             state.decoder.set_draft(want_draft);
+            state.draft_change = Some((state.next_decode_idx, want_draft));
         }
-        // Backward seek, jump to a later GOP, or draft/full-quality mode switch: reset decoder to
-        // the target sync sample so full-quality frames never reuse draft-decoded references.
-        if draft_changed || target_idx < state.next_decode_idx || sync_idx > state.gop_start_idx {
+        // A target at or before the highest emitted PTS was already decoded: its frame is no
+        // longer cached, so this is a backward seek. A target whose GOP starts before the
+        // decoder's current one is also behind it. A target in a later GOP whose keyframe has
+        // not been fed is a forward jump. A target the decoder has already been fed but not yet
+        // emitted is still in flight (a frame-threaded decoder holds pictures ahead of its
+        // output): keep feeding it instead of resetting.
+        let target_passed = state.emitted_max_pts.is_some_and(|max| target_pts <= max);
+        let before_gop = sync_idx < state.gop_start_idx;
+        let jump_ahead = sync_idx > state.gop_start_idx && sync_idx >= state.next_decode_idx;
+        // A full-quality request for a picture fed before the last switch to full may still be in
+        // flight as draft: restart so it is decoded at full quality. Use the recorded switch, not
+        // `draft_changed`: the request that changed the mode may have returned early (cancelled or
+        // failed) and left those draft pictures in flight. A draft request accepts them.
+        let mode_changed_in_flight =
+            !want_draft && target_idx < state.next_decode_idx && state.draft_change.is_some_and(|(from, draft)| !draft && target_idx < from);
+        if mode_changed_in_flight || target_passed || before_gop || jump_ahead {
+            stats::seek();
+            stats::evicted(state.decoded.len() as u64);
             state.decoder.reset().map_err(video_decode_error)?;
             state.decoded.clear();
+            state.cached_bytes = 0;
             state.next_decode_idx = sync_idx;
             state.gop_start_idx = sync_idx;
+            state.emitted_max_pts = None;
+            state.draft_change = None;
             state.flushed = false;
         }
 
         let sample_count = self.file.sample_count(video_idx);
         let is_isobmff = matches!(&self.file, ContainerFile::Isobmff(_));
-        while !state.decoded.iter().any(|c| c.pts >= target_pts && c.draft == want_draft) {
+        while !state.decoded.iter().any(|c| c.pts >= target_pts && c.serves(want_draft)) {
             if cancelled() {
                 return Err(MediaError::Cancelled);
             }
@@ -1866,29 +2035,34 @@ impl MediaSource for CraftMediaSource {
                 let idx = state.next_decode_idx;
                 let pts = self.file.sample_pts(video_idx, idx);
                 let pkt = self.file.read_sample(&*self.source, video_idx, idx)?;
+                let started = stats::timer();
                 let frames = decode_track_packet(&mut state.decoder, is_isobmff, &pkt, pts, prores::decode_frame_with).map_err(video_decode_error)?;
+                stats::add_decode_time(started);
+                stats::decoded(1);
                 state.next_decode_idx = idx + 1;
-                push_decoded(&mut state.decoded, frames, want_draft, self.presentation, &self.file, video_idx)?;
+                push_decoded(state, frames, target_pts, want_draft, self.presentation, &self.file, video_idx)?;
             } else if !state.flushed {
+                let started = stats::timer();
                 let frames = state.decoder.flush().map_err(video_decode_error)?;
+                stats::add_decode_time(started);
                 state.flushed = true;
-                push_decoded(&mut state.decoded, frames, want_draft, self.presentation, &self.file, video_idx)?;
+                push_decoded(state, frames, target_pts, want_draft, self.presentation, &self.file, video_idx)?;
                 break;
             } else {
                 break;
             }
         }
 
-        if let Some(exact) = state.decoded.iter().find(|c| c.pts == target_pts && c.draft == want_draft) {
+        if let Some(exact) = cached_picture(&state.decoded, target_pts, want_draft) {
             return Ok(exact.frame.clone());
         }
         // Fallback: latest decoded frame at or before target_pts, or earliest available.
         let best = state
             .decoded
             .iter()
-            .filter(|c| c.draft == want_draft && c.pts <= target_pts)
+            .filter(|c| c.serves(want_draft) && c.pts <= target_pts)
             .max_by_key(|c| c.pts)
-            .or_else(|| state.decoded.iter().find(|c| c.draft == want_draft))
+            .or_else(|| state.decoded.iter().find(|c| c.serves(want_draft)))
             .ok_or_else(|| MediaError::Decode("video decoder produced no frame".into()))?;
         Ok(best.frame.clone())
     }
@@ -2325,24 +2499,44 @@ fn decode_audio_range(
 }
 
 fn push_decoded(
-    cache: &mut Vec<CachedFrame>,
+    state: &mut PacketVideoState,
     frames: Vec<DecodedVideoFrame>,
-    draft: bool,
+    target_pts: i64,
+    want_draft: bool,
     presentation: FramePresentation,
     file: &ContainerFile,
     track_idx: usize,
 ) -> Result<()> {
     for vf in frames {
+        let picture_draft = vf.draft;
         let pts = vf.pts.unwrap_or(0);
         let pts_tick = file.pts_to_tick(track_idx, pts);
         let frame = Arc::new(to_craft_frame(vf, presentation, pts_tick)?);
-        cache.push(CachedFrame { pts, draft, frame });
+        state.emitted_max_pts = Some(state.emitted_max_pts.map_or(pts, |max| max.max(pts)));
+        stats::frames(1);
+        if picture_draft {
+            stats::draft(1);
+        }
+        state.cached_bytes = state.cached_bytes.saturating_add(frame.byte_size());
+        state.decoded.push(CachedFrame { pts, draft: picture_draft, frame });
     }
-    if cache.len() > MAX_CACHED_FRAMES {
-        let excess = cache.len() - MAX_CACHED_FRAMES;
-        cache.drain(..excess);
-    }
+    let evicted = trim_decoded(&mut state.decoded, &mut state.cached_bytes, MAX_CACHED_FRAMES, MAX_CACHED_BYTES, target_pts, want_draft);
+    stats::evicted(evicted);
     Ok(())
+}
+
+/// Evict decoded pictures over `max_frames` or `max_bytes`, never the picture that answers the
+/// request. A frame-threaded decoder or a flush can return a batch larger than the byte limit;
+/// evicting from the front would otherwise drop the requested picture before it is selected.
+fn trim_decoded(decoded: &mut Vec<CachedFrame>, cached_bytes: &mut usize, max_frames: usize, max_bytes: usize, target_pts: i64, want_draft: bool) -> u64 {
+    let mut evicted = 0;
+    while decoded.len() > max_frames || (*cached_bytes > max_bytes && decoded.len() > 1) {
+        let Some(index) = decoded.iter().position(|c| !(c.pts == target_pts && c.serves(want_draft))) else { break };
+        let removed = decoded.remove(index);
+        *cached_bytes = cached_bytes.saturating_sub(removed.frame.byte_size());
+        evicted += 1;
+    }
+    evicted
 }
 
 #[cfg(test)]
@@ -2975,6 +3169,20 @@ mod tests {
         let offsets = track.samples.iter().map(|s| s.offset).collect::<Vec<_>>();
         let params = track.codec_params();
         OpusFixture { bytes, file: ContainerFile::Matroska(Box::new(file)), offsets, params, delay: OPUS_CODEC_DELAY_NS as u64 }
+    }
+
+    #[test]
+    fn trim_decoded_keeps_the_requested_picture_over_the_byte_limit() {
+        let frame = |pts| CachedFrame { pts, draft: false, frame: Arc::new(VideoFrame::rgba8(2, 2, vec![0; 16]).expect("frame")) };
+        let mut decoded = vec![frame(0), frame(1), frame(2), frame(3)];
+        let mut bytes: usize = decoded.iter().map(|c| c.frame.byte_size()).sum();
+        assert_eq!(bytes, 64);
+        // One decoder batch larger than the cap, with the requested picture first.
+        let evicted = trim_decoded(&mut decoded, &mut bytes, 256, 32, 0, false);
+        assert_eq!(evicted, 2);
+        assert_eq!(decoded.iter().map(|c| c.pts).collect::<Vec<_>>(), vec![0, 3]);
+        assert_eq!(bytes, 32);
+        assert!(decoded.iter().any(|c| c.pts == 0), "the requested picture stays cached");
     }
 
     #[test]
@@ -4120,7 +4328,7 @@ mod tests {
     }
 
     #[test]
-    fn shared_prores_mov_uses_serial_packets_with_edited_frame_and_alpha_parity() {
+    fn shared_prores_mov_uses_the_decode_pool_with_edited_frame_and_alpha_parity() {
         use isobmff::{Brand, Edit, Mp4Writer, SampleEntry, TrackConfig, WriteSample, WriterOptions};
 
         let mut encoder = prores::Encoder::new(prores::Profile::P4444, 64, 48);
@@ -4152,15 +4360,23 @@ mod tests {
         assert!(source.info().video.as_ref().expect("video").has_alpha);
 
         let mut decoder = TrackDecoder::new(&params).expect("ProRes decoder");
-        let mut passed_serial_options = false;
+        #[cfg(not(target_arch = "wasm32"))]
+        let has_pool = crate::pool::decode_threads().is_some();
+        #[cfg(target_arch = "wasm32")]
+        let has_pool = false;
+        let mut passed_pool_options = false;
         let selected = decode_track_packet(&mut decoder, true, &packets[1], 40, |packet, options| {
-            assert!(!options.threads);
+            assert_eq!(options.threads, has_pool, "the ISO-BMFF helper must use the decode pool when it exists");
+            if has_pool {
+                let name = std::thread::current().name().unwrap_or_default().to_string();
+                assert!(name.starts_with("ec-decode-"), "ProRes bands ran on {name}");
+            }
             assert!(options.bit_depth.is_none());
-            passed_serial_options = true;
+            passed_pool_options = true;
             prores::decode_frame_with(packet, options)
         })
-        .expect("serial packet");
-        assert!(passed_serial_options, "the ISO-BMFF helper must select explicit serial decoding");
+        .expect("pooled packet");
+        assert!(passed_pool_options, "the ISO-BMFF helper must select the decode pool");
         assert_eq!(selected[0].pts, Some(40));
 
         // Seek late, then backwards, then forwards. The original parallel TrackDecoder is an
@@ -4184,6 +4400,10 @@ mod tests {
             assert_eq!(alpha, expected_alpha);
             assert!(alpha[0] > 0 && alpha[0] < 4_095);
         }
+        // ProRes has no draft mode: a reduced-size request reuses the full-quality frame.
+        let full = source.video_frame(FrameRequest::full(Tick::from_units(60, 1_000))).expect("full ProRes frame");
+        let scaled = source.video_frame(FrameRequest { time: Tick::from_units(60, 1_000), scale: 0.25 }).expect("reduced-size ProRes frame");
+        assert!(Arc::ptr_eq(&full, &scaled), "a reduced-size ProRes request must not reset for draft");
 
         let regular_error = decoder.decode(&[], 0).expect_err("empty ProRes packet").to_string();
         let locked_error = decode_track_packet(&mut decoder, true, &[], 0, prores::decode_frame_with).expect_err("empty ProRes packet").to_string();
@@ -4718,6 +4938,224 @@ mod tests {
         assert_eq!(ts_container.pts_to_tick(0, 90_000), Tick::ZERO);
         let ts_src = open_bytes("test.ts", Arc::from(ts_bytes)).expect("recognized ts").expect("opened ts");
         assert_eq!(ts_src.info().container, "MPEG-2 TS");
+    }
+
+    struct H264Movie {
+        bytes: Arc<[u8]>,
+        keyframes: Vec<(u64, usize)>,
+        /// Presentation indices of the non-reference B pictures, which draft mode changes.
+        b_frames: Vec<usize>,
+    }
+
+    /// A small H.264 MP4 whose frames differ in luma, with one IDR every `keyint` frames and
+    /// `bframes` reordered pictures between references.
+    fn generated_h264_movie(frames: usize, keyint: u32, bframes: u8) -> H264Movie {
+        use craft_video::h264::{Encoder, EncoderConfig, FrameType, PacketFormat, Profile, YuvFrame};
+        use isobmff::{AvcConfig, Brand, Mp4Writer, SampleEntry, TrackConfig, WriteSample, WriterOptions};
+
+        const W: u32 = 320;
+        const H: u32 = 240;
+        let mut config = EncoderConfig::new(W, H, 25, 1);
+        config.profile = Profile::Main;
+        config.format = PacketFormat::LengthPrefixed;
+        config.aud = false;
+        config.bframes = bframes;
+        config.keyint = keyint;
+        config.scenecut = false;
+        config.threads = 1;
+        let mut encoder = Encoder::new(config).expect("H.264 encoder");
+        let uv = vec![128u8; (W * H / 4) as usize];
+        let mut packets = Vec::new();
+        for k in 0..frames {
+            let y = vec![32 + (k % 200) as u8; (W * H) as usize];
+            let picture = YuvFrame { y: &y, u: &uv, v: &uv, y_stride: W as usize, uv_stride: (W / 2) as usize };
+            packets.extend(encoder.encode(&picture, k as i64).expect("encode picture"));
+        }
+        packets.extend(encoder.flush());
+        assert_eq!(packets.len(), frames, "one access unit per frame");
+        let avcc = AvcConfig::parse(&encoder.avcc()).expect("avcC");
+        let mut writer = Mp4Writer::new(std::io::Cursor::new(Vec::new()), WriterOptions::new(Brand::Mp4)).expect("MP4 writer");
+        let track = writer.add_track(TrackConfig::new(SampleEntry::avc(avcc, W as u16, H as u16), 25)).expect("picture track");
+        for (dts, packet) in packets.iter().enumerate() {
+            // Samples are written in decoding order; the composition offset puts each picture
+            // at its presentation time (negative for B-frames, as ctts version 1 allows).
+            let offset = i32::try_from(packet.pts - dts as i64).expect("composition offset");
+            writer.write_sample(track, WriteSample { data: &packet.data, duration: 1, composition_offset: offset, is_sync: packet.keyframe }).expect("sample");
+        }
+        let bytes: Arc<[u8]> = writer.finish().expect("MP4 finish").into_inner().into();
+        let parsed = isobmff::open(bytes.as_ref()).expect("MP4 demux");
+        let keyframes = parsed.tracks[0].samples.iter().filter(|sample| sample.is_sync).map(|sample| (sample.offset, sample.size as usize)).collect();
+        let b_frames = packets.iter().filter(|packet| packet.frame_type == FrameType::B).map(|packet| packet.pts as usize).collect();
+        H264Movie { bytes, keyframes, b_frames }
+    }
+
+    /// The fixture bytes, counting reads of each keyframe sample.
+    struct CountingKeyReads {
+        bytes: Arc<[u8]>,
+        keyframes: Vec<(u64, usize)>,
+        reads: Vec<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl ByteSource for CountingKeyReads {
+        fn len(&self) -> u64 {
+            self.bytes.len()
+        }
+        fn read_at(&self, offset: u64, buf: &mut [u8]) -> std::io::Result<()> {
+            if let Some(i) = self.keyframes.iter().position(|&(start, size)| start == offset && size == buf.len()) {
+                self.reads[i].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            self.bytes.read_at(offset, buf)
+        }
+    }
+
+    #[test]
+    fn sequential_h264_playback_keeps_the_running_decoder() {
+        use std::sync::atomic::Ordering;
+
+        let movie = generated_h264_movie(40, 40, 0);
+        assert_eq!(movie.keyframes.len(), 1, "the fixture starts with one GOP");
+        let source = Arc::new(CountingKeyReads { bytes: movie.bytes, keyframes: movie.keyframes, reads: vec![std::sync::atomic::AtomicUsize::new(0)] });
+        let media = open_isobmff_with_workers("sequential.mp4", source.clone(), 8).expect("shared route").expect("opens");
+        source.reads[0].store(0, Ordering::Relaxed);
+        for k in 0..40 {
+            let time = Tick::from_units(k, 25);
+            let frame = media.video_frame(FrameRequest::full(time)).expect("frame");
+            assert_eq!(frame.pts, time, "frame {k}");
+        }
+        assert_eq!(source.reads[0].load(Ordering::Relaxed), 1, "sequential playback re-read the keyframe");
+        // The cache now covers the whole short GOP: the backward seek is a cache hit.
+        let back = media.video_frame(FrameRequest::full(Tick::ZERO)).expect("backward seek");
+        assert_eq!(back.pts, Tick::ZERO);
+        assert_eq!(source.reads[0].load(Ordering::Relaxed), 1, "a cached backward seek re-read the keyframe");
+    }
+
+    #[test]
+    fn sequential_h264_playback_with_b_frames_keeps_the_running_decoder() {
+        use std::sync::atomic::Ordering;
+
+        let movie = generated_h264_movie(48, 48, 2);
+        assert_eq!(movie.keyframes.len(), 1, "the fixture starts with one GOP");
+        let source = Arc::new(CountingKeyReads { bytes: movie.bytes, keyframes: movie.keyframes, reads: vec![std::sync::atomic::AtomicUsize::new(0)] });
+        let media = open_isobmff_with_workers("b-frames.mp4", source.clone(), 8).expect("shared route").expect("opens");
+        source.reads[0].store(0, Ordering::Relaxed);
+        for k in 0..48 {
+            let time = Tick::from_units(k, 25);
+            let frame = media.video_frame(FrameRequest::full(time)).expect("frame");
+            assert_eq!(frame.pts, time, "frame {k}");
+        }
+        assert_eq!(source.reads[0].load(Ordering::Relaxed), 1, "sequential playback re-read the keyframe");
+    }
+
+    #[test]
+    fn h264_gop_jumps_still_reset_to_the_target_keyframe() {
+        use std::sync::atomic::Ordering;
+
+        let movie = generated_h264_movie(40, 20, 0);
+        assert_eq!(movie.keyframes.len(), 2, "the fixture has two GOPs");
+        let source = Arc::new(CountingKeyReads {
+            bytes: movie.bytes,
+            keyframes: movie.keyframes,
+            reads: vec![std::sync::atomic::AtomicUsize::new(0), std::sync::atomic::AtomicUsize::new(0)],
+        });
+        let media = open_isobmff_with_workers("gop.mp4", source.clone(), 8).expect("shared route").expect("opens");
+        for read in &source.reads {
+            read.store(0, Ordering::Relaxed);
+        }
+        // Jump straight into the second GOP: only its keyframe is read.
+        let second = media.video_frame(FrameRequest::full(Tick::from_units(30, 25))).expect("second GOP");
+        assert_eq!(second.pts, Tick::from_units(30, 25));
+        assert_eq!((source.reads[0].load(Ordering::Relaxed), source.reads[1].load(Ordering::Relaxed)), (0, 1), "the jump starts at the second GOP");
+        // Seek back across the GOP boundary: reset to the first keyframe.
+        let first = media.video_frame(FrameRequest::full(Tick::ZERO)).expect("back to the first GOP");
+        assert_eq!(first.pts, Tick::ZERO);
+        assert_eq!((source.reads[0].load(Ordering::Relaxed), source.reads[1].load(Ordering::Relaxed)), (1, 1), "the backward seek re-read the first keyframe");
+    }
+
+    #[test]
+    fn draft_switch_does_not_reset_for_a_frame_not_yet_fed() {
+        use std::sync::atomic::Ordering;
+
+        let movie = generated_h264_movie(40, 40, 2);
+        assert!(movie.b_frames.contains(&38), "the target is a non-reference B picture");
+        let source = Arc::new(CountingKeyReads { bytes: movie.bytes, keyframes: movie.keyframes, reads: vec![std::sync::atomic::AtomicUsize::new(0)] });
+        let media = open_isobmff_with_workers("draft.mp4", source.clone(), 8).expect("shared route").expect("opens");
+        source.reads[0].store(0, Ordering::Relaxed);
+        let full = media.video_frame(FrameRequest::full(Tick::ZERO)).expect("full frame 0");
+        assert_eq!(full.pts, Tick::ZERO);
+        // A reduced-size request far ahead switches draft mode without resetting: the target
+        // was not fed yet, and draft only changes non-reference pictures.
+        let draft = media.video_frame(FrameRequest { time: Tick::from_units(38, 25), scale: 0.25 }).expect("draft frame 38");
+        assert_eq!(draft.pts, Tick::from_units(38, 25));
+        assert_eq!(source.reads[0].load(Ordering::Relaxed), 1, "the draft switch re-read the keyframe");
+        // The same non-reference frame at full quality was fed in draft mode: reset and re-decode.
+        let full = media.video_frame(FrameRequest::full(Tick::from_units(38, 25))).expect("full frame 38");
+        assert_eq!(full.pts, Tick::from_units(38, 25));
+        assert_eq!(source.reads[0].load(Ordering::Relaxed), 2, "a full request for a fed draft frame resets");
+    }
+
+    #[test]
+    fn full_quality_request_rejects_a_draft_picture_left_in_flight() {
+        use std::sync::atomic::Ordering;
+
+        let movie = generated_h264_movie(96, 96, 2);
+        assert_eq!(movie.keyframes.len(), 1, "the fixture starts with one GOP");
+        let in_flight = *movie.b_frames.iter().find(|&&i| (31..40).contains(&i)).expect("an in-flight B picture");
+        let source = Arc::new(CountingKeyReads { bytes: movie.bytes, keyframes: movie.keyframes, reads: vec![std::sync::atomic::AtomicUsize::new(0)] });
+        let media = open_isobmff_with_workers("draft-in-flight.mp4", source.clone(), 8).expect("shared route").expect("opens");
+        source.reads[0].store(0, Ordering::Relaxed);
+        // Switch to draft for a frame that is not fed yet: the decoder keeps running.
+        let draft = media.video_frame(FrameRequest { time: Tick::from_units(30, 25), scale: 0.25 }).expect("draft frame 30");
+        assert_eq!(draft.pts, Tick::from_units(30, 25));
+        assert_eq!(source.reads[0].load(Ordering::Relaxed), 1, "the draft switch re-read the keyframe");
+        // Switch back to full for a later frame that is not fed yet. The B pictures submitted
+        // while draft was on are still in flight and come out after the switch.
+        let full = media.video_frame(FrameRequest::full(Tick::from_units(80, 25))).expect("full frame 80");
+        assert_eq!(full.pts, Tick::from_units(80, 25));
+        assert_eq!(source.reads[0].load(Ordering::Relaxed), 1, "the full switch re-read the keyframe");
+        // A full-quality request for one of those in-flight B pictures must not accept the draft
+        // copy: it restarts at the keyframe and decodes it at full quality.
+        let full = media.video_frame(FrameRequest::full(Tick::from_units(in_flight as i64, 25))).expect("full B picture");
+        assert_eq!(full.pts, Tick::from_units(in_flight as i64, 25));
+        assert_eq!(source.reads[0].load(Ordering::Relaxed), 2, "a full request accepted a cached draft picture");
+    }
+
+    #[test]
+    fn cancelled_mode_switch_does_not_hide_in_flight_draft_pictures() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let movie = generated_h264_movie(96, 96, 2);
+        let in_flight = *movie.b_frames.iter().find(|&&i| (31..40).contains(&i)).expect("an in-flight B picture");
+        let source = Arc::new(CountingKeyReads { bytes: movie.bytes, keyframes: movie.keyframes, reads: vec![std::sync::atomic::AtomicUsize::new(0)] });
+        let media = open_isobmff_with_workers("cancelled-switch.mp4", source.clone(), 8).expect("shared route").expect("opens");
+        source.reads[0].store(0, Ordering::Relaxed);
+        // Leave draft pictures in flight.
+        let draft = media.video_frame(FrameRequest { time: Tick::from_units(30, 25), scale: 0.25 }).expect("draft frame 30");
+        assert_eq!(draft.pts, Tick::from_units(30, 25));
+        assert_eq!(source.reads[0].load(Ordering::Relaxed), 1, "the draft switch re-read the keyframe");
+        // A full-quality request changes the decoder mode, then is cancelled before feeding any
+        // packet. The draft pictures submitted before the switch are still in flight.
+        let cancel = Arc::new(AtomicBool::new(true));
+        let cancelled = craft_media_source::cancel::with_cancel(&cancel, || media.video_frame(FrameRequest::full(Tick::from_units(80, 25))));
+        assert!(matches!(cancelled, Err(craft_media_source::MediaError::Cancelled)), "{cancelled:?}");
+        assert_eq!(source.reads[0].load(Ordering::Relaxed), 1, "the cancelled request read nothing");
+        // The full request must restart for the in-flight draft picture instead of falling back to
+        // an earlier full-quality frame.
+        let full = media.video_frame(FrameRequest::full(Tick::from_units(in_flight as i64, 25))).expect("full B picture");
+        assert_eq!(full.pts, Tick::from_units(in_flight as i64, 25));
+        assert_eq!(source.reads[0].load(Ordering::Relaxed), 2, "the full request reused an in-flight draft picture");
+    }
+
+    #[test]
+    fn shared_decoder_stats_reach_the_public_counters() {
+        let before = crate::gop_stats();
+        let movie = generated_h264_movie(2, 2, 0);
+        let source = crate::stream::open_bytes("stats.mp4", movie.bytes).expect("shared route");
+        assert!(matches!(source, crate::stream::MediaSource::Craft(_)), "the stats fixture must use the shared route");
+        let _ = source.video_frame(effectcraft_time::Tick::ZERO, 1.0).expect("frame");
+        let after = crate::gop_stats();
+        assert!(after.decoded > before.decoded, "shared samples are counted");
+        assert!(after.frames > before.frames, "shared output is counted");
+        assert!(after.misses > before.misses, "the first shared read is a miss");
     }
 
     fn generated_two_frame_ts() -> Vec<u8> {

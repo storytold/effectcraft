@@ -2862,6 +2862,20 @@ mod tests {
         assert!(started.elapsed() < WAIT_LIMIT);
     }
 
+    /// #4195: the shared decoders poll `craft_media_source::cancel`; `cancellable` must install
+    /// that context too (FilmCraft re-exports the same flag, so this guards the aliasing).
+    #[test]
+    fn cancellable_sets_the_shared_decoder_cancel_context() {
+        let pool = MediaPool::new();
+        let cancel = Arc::new(AtomicBool::new(true));
+        let (mut film, mut craft) = (false, false);
+        pool.cancellable(&cancel, &mut || {
+            film = filmcraft_media::cancel::cancelled();
+            craft = craft_media_source::cancel::cancelled();
+        });
+        assert!(film && craft, "both names see the request's flag");
+    }
+
     /// #3269: a whole still kept for a second size is kept within its own cap, and not after
     /// the frame cache has moved on.
     #[test]
