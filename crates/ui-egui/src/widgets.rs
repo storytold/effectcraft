@@ -368,7 +368,7 @@ pub fn text_fit(p: &egui::Painter, pos: egui::Pos2, align: Align2, text: &str, f
     rect
 }
 
-/// Rounded search field with a magnifier icon.
+/// Rounded search field with a magnifier icon and a trailing clear button when non-empty.
 pub fn search_field(ui: &mut Ui, rect: Rect, text: &mut String, hint: &str, t: &Tokens) -> Response {
     field(ui, rect, text, hint, t, true)
 }
@@ -379,8 +379,8 @@ pub fn text_field(ui: &mut Ui, rect: Rect, text: &mut String, hint: &str, t: &To
 }
 
 /// The shared body of [`text_field`] and [`search_field`]: paints the rounded field (and, for
-/// `search`, a magnifier), places a single-line `TextEdit` on `text` filling the inner rect,
-/// and returns its response.
+/// `search`, a magnifier and a trailing clear button while `text` is non-empty), places a
+/// single-line `TextEdit` on `text` filling the inner rect, and returns its response.
 fn field(ui: &mut Ui, rect: Rect, text: &mut String, hint: &str, t: &Tokens, search: bool) -> Response {
     let h = rect.height();
     ui.painter().rect_filled(rect, h / 2.0, t.field_bg);
@@ -388,9 +388,12 @@ fn field(ui: &mut Ui, rect: Rect, text: &mut String, hint: &str, t: &Tokens, sea
     if search {
         icons::paint(ui.painter(), Rect::from_center_size(pos2(rect.min.x + 12.0, rect.center().y), vec2(12.0, 12.0)), Icon::Search, t.text_dim);
     }
-    let inner = Rect::from_min_max(pos2(rect.min.x + if search { 22.0 } else { 9.0 }, rect.min.y + 1.0), pos2(rect.max.x - 8.0, rect.max.y - 1.0));
+    let show_clear = search && !text.is_empty() && rect.width() >= 48.0;
+    let left_pad = if search { 22.0 } else { 9.0 };
+    let right_pad = if show_clear { 22.0 } else { 8.0 };
+    let inner = Rect::from_min_max(pos2(rect.min.x + left_pad, rect.min.y + 1.0), pos2((rect.max.x - right_pad).max(rect.min.x + left_pad), rect.max.y - 1.0));
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(inner));
-    let resp = child.add(
+    let mut resp = child.add(
         egui::TextEdit::singleline(text)
             .hint_text(hint)
             .frame(egui::Frame::NONE)
@@ -402,6 +405,32 @@ fn field(ui: &mut Ui, rect: Rect, text: &mut String, hint: &str, t: &Tokens, sea
     );
     // The hint is the field's visible name (the caller can give it a better one).
     crate::a11y::name(&resp, hint);
+
+    if show_clear {
+        let clear_rect = Rect::from_center_size(pos2(rect.max.x - 11.0, rect.center().y), vec2(18.0, (h - 2.0).max(12.0)));
+        let clear_id = resp.id.with("clear");
+        let clear_label = crate::i18n::tr("Clear");
+        let clear_resp = ui.interact(clear_rect, clear_id, Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+        clear_resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), clear_label));
+        crate::a11y::role(&clear_resp, egui::accesskit::Role::Button);
+        crate::a11y::name(&clear_resp, clear_label);
+        if clear_resp.hovered() {
+            ui.painter().circle_filled(clear_rect.center(), 7.5, t.hover);
+        }
+        icons::paint(
+            ui.painter(),
+            Rect::from_center_size(clear_rect.center(), vec2(10.0, 10.0)),
+            Icon::Close,
+            if clear_resp.hovered() { t.text } else { t.text_dim },
+        );
+        focus_outline(ui, &clear_resp, t);
+        if clear_resp.clicked() {
+            text.clear();
+            resp.mark_changed();
+            resp.request_focus();
+        }
+        clear_resp.on_hover_text(clear_label);
+    }
     resp
 }
 
@@ -1452,5 +1481,39 @@ mod tests {
             let r = got.expect("the field was drawn");
             assert!((r.center().y - field.center().y).abs() < 0.5 && r.height() >= h - 2.5, "{h}: {r:?} in {field:?}");
         }
+    }
+
+    #[test]
+    fn search_field_clear_button_clears_text_and_is_absent_when_empty() {
+        let ctx = egui::Context::default();
+        let t = Tokens::for_kind(Default::default());
+        let rect = Rect::from_min_size(pos2(20.0, 40.0), vec2(220.0, 26.0));
+        let click_pos = pos2(rect.max.x - 11.0, rect.center().y);
+
+        // Empty search field: clicking the right edge does not create or trigger a clear button.
+        let mut empty = String::new();
+        let mut changed = false;
+        let run_frame = |ctx: &egui::Context, text: &mut String, events: Vec<egui::Event>, changed: &mut bool| {
+            let mut out = ctx.run_ui(egui::RawInput { events, ..Default::default() }, |ui| {
+                let r = search_field(ui, rect, text, "Search effects and presets", &t);
+                *changed = r.changed();
+            });
+            out.textures_delta.clear();
+        };
+        run_frame(&ctx, &mut empty, vec![], &mut changed);
+        assert!(!changed);
+
+        // Non-empty search field: clicking the trailing clear button empties `text` and marks changed.
+        let mut query = String::from("blur");
+        run_frame(&ctx, &mut query, vec![], &mut changed);
+        assert_eq!(query, "blur");
+        let events = vec![
+            egui::Event::PointerMoved(click_pos),
+            egui::Event::PointerButton { pos: click_pos, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() },
+            egui::Event::PointerButton { pos: click_pos, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() },
+        ];
+        run_frame(&ctx, &mut query, events, &mut changed);
+        assert!(query.is_empty(), "clicking the trailing × clears the search query");
+        assert!(changed, "clearing marks the search response as changed");
     }
 }
