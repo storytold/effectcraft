@@ -1679,6 +1679,8 @@ CompItem.prototype.constructor = CompItem;
   def("shutterAngle", function () { return this.__info().shutterAngle; }, function (v) { this.__settings({ shutterAngle: __num(v) }); });
   def("shutterPhase", function () { return this.__info().shutterPhase; }, function (v) { this.__settings({ shutterPhase: __num(v) }); });
   def("motionBlurSamplesPerFrame", function () { return this.__info().motionBlurSamplesPerFrame; }, function (v) { this.__settings({ motionBlurSamples: __num(v) }); });
+  // The Adaptive Sample Limit of Composition Settings ▸ Advanced (16 to 256; a value outside, a negative one too, is clamped here).
+  def("motionBlurAdaptiveSampleLimit", function () { return this.__info().motionBlurAdaptiveSampleLimit; }, function (v) { this.__settings({ adaptiveSampleLimit: Math.min(256, Math.max(16, Math.round(__num(v, "motionBlurAdaptiveSampleLimit")))) }); });
   def("preserveNestedFrameRate", function () { return this.__info().preserveNestedFrameRate; }, function (v) { this.__settings({ preserveFrameRate: !!v }); });
   def("preserveNestedResolution", function () { return this.__info().preserveNestedResolution; }, function (v) { this.__settings({ preserveResolution: !!v }); });
   def("renderer", function () { return this.__info().renderer; }, function (v) {
