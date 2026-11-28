@@ -1656,7 +1656,9 @@ impl Frames {
 
     /// An urgent (viewer) frame is queued or rendering.
     pub fn urgent_pending(&self) -> bool {
-        self.queue.lock().map(|q| q.urgent_running > 0 || q.jobs.iter().any(|j| j.urgent)).unwrap_or(false)
+        // A background frame the viewer asked for while it rendered is urgent through its
+        // running record (see `request_with`), not `urgent_running`.
+        self.queue.lock().map(|q| q.urgent_running > 0 || q.jobs.iter().any(|j| j.urgent) || q.running_cancels.iter().any(|r| r.urgent)).unwrap_or(false)
     }
 
     fn request_with(&self, src: &RenderSource, key: FrameKey, comp: ItemId, t: Tick, opts: RenderOpts, want: Want) {

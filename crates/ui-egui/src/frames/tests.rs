@@ -780,6 +780,7 @@ fn a_viewer_request_takes_a_background_frame_out_of_the_background() {
         let r = q.running_cancels.iter().find(|r| r.key == running).expect("still rendering");
         assert!(r.urgent && !r.background, "the viewer's frame is not background work");
     }
+    assert!(f.urgent_pending(), "the viewer waits for the promoted frame");
     f.set_playhead(Some(playhead(0, false)));
     assert!(!cancel.load(Ordering::Relaxed), "playback does not call off the frame the viewer asked for");
 }
