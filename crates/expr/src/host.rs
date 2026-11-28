@@ -301,10 +301,25 @@ fn find_child<'g>(g: &'g PropGroup, key: &Key) -> Option<&'g Node> {
                 // An effect by its After Effects match name, an imported placeholder's effect id
                 // (`effect("Pseudo/0.25")`; its match id is one path segment, `Pseudo_0_25`).
                 .or_else(|| g.children.iter().find(|n| matches!(n.as_group().map(|g| &g.kind), Some(GroupKind::Effect { effect }) if effect == name)))
+                // A placeholder's parameter by its After Effects match name, `<effect>-NNNN`
+                // (`effect("Settings")("Pseudo/0.25-0001")`): kept as `param<NNNN>` when that match
+                // name is no path segment.
+                .or_else(|| placeholder_param(g, name))
                 // Last, so a legacy name never shadows a current one.
                 .or_else(|| legacy_effect_child(g, &c))
         }
     }
+}
+
+/// The parameter `param<N>` of placeholder effect `g` for the match name `<effect id>-NNNN`.
+fn placeholder_param<'g>(g: &'g PropGroup, name: &str) -> Option<&'g Node> {
+    let GroupKind::Effect { effect } = &g.kind else { return None };
+    let digits = name.strip_prefix(effect.as_str())?.strip_prefix('-')?;
+    if digits.is_empty() || digits.len() > 8 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let id = format!("param{}", digits.parse::<u32>().ok()?);
+    g.children.iter().find(|n| n.match_id() == id)
 }
 
 /// A parameter of an effect instance addressed by a name it had when the project was saved
