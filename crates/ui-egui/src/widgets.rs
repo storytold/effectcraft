@@ -102,11 +102,14 @@ pub fn hot_number_step_at(
                 .lock_focus(true),
         );
         let tab = r.has_focus().then(|| ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab).then_some(i.modifiers.shift))).flatten();
+        let touched_id = editing_id.with("touched");
+        let touched = r.changed() || ui.data(|d| d.get_temp::<bool>(touched_id)).unwrap_or(false);
         let (mut out, mut step) = (None, None);
         if r.lost_focus() || tab.is_some() {
             // Typed arithmetic reads too (`960/2`), a leading `*`, `/` or `+` applied to the value
             // shown (#3195).
-            if !ui.input(|i| i.key_pressed(egui::Key::Escape))
+            if touched
+                && !ui.input(|i| i.key_pressed(egui::Key::Escape))
                 && let Some(typed) = crate::num_math::read(buf.trim().trim_end_matches(suffix), true)
             {
                 let v = match typed {
@@ -115,7 +118,10 @@ pub fn hot_number_step_at(
                 };
                 out = v.map(|v| v.clamp(range.0, range.1));
             }
-            ui.data_mut(|d| d.remove::<String>(editing_id));
+            ui.data_mut(|d| {
+                d.remove::<String>(editing_id);
+                d.remove::<bool>(touched_id);
+            });
             if let Some(back) = tab {
                 r.surrender_focus();
                 let (key, pass) = (tab_order_id(ui), ui.ctx().cumulative_pass_nr());
@@ -123,7 +129,10 @@ pub fn hot_number_step_at(
             }
         } else {
             keep_focus(ui.ctx(), &r, &buf);
-            ui.data_mut(|d| d.insert_temp(editing_id, buf));
+            ui.data_mut(|d| {
+                d.insert_temp(editing_id, buf);
+                d.insert_temp(touched_id, touched);
+            });
         }
         return (er, out, out.is_some(), step);
     }

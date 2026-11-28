@@ -423,6 +423,36 @@ fn upgrading_deeply_nested_shape_groups_fits_a_small_stack() {
     assert_eq!(ids, ["size", "detail", "points", "speed", "correlation", "phase", "spatialPhase", "seed"]);
 }
 
+/// #3042: a stroke saved with the unbounded Pixels Taper lengths gets the nonnegative editor on
+/// load; values, keyframes and expressions stay, and a second pass changes nothing.
+#[test]
+fn upgrading_a_legacy_taper_bounds_its_lengths() {
+    let mut next = 1;
+    let mut stroke = build::shape_stroke(&mut Ids(&mut next), [1.0, 0.0, 0.0, 1.0], 10.0);
+    let taper = stroke.sub_mut("taper").unwrap();
+    for (m, v) in [("startLength", 40.0), ("endLength", -50.0)] {
+        let p = taper.get_mut(m).unwrap();
+        p.ui = crate::ParamUi::Pixels;
+        p.value = crate::Value::Scalar(v);
+    }
+    let keys = vec![Keyframe::new(Tick::ZERO, Value::Scalar(-5.0)), Keyframe::new(Tick::from_seconds_f64(1.0), Value::Scalar(70.0))];
+    taper.get_mut("endLength").unwrap().keys = keys.clone();
+    taper.get_mut("startLength").unwrap().expr = Some(crate::Expression { text: "time * 10".into(), enabled: true });
+    let mut contents = crate::PropGroup::new(Ids(&mut next).alloc(), "contents", "Contents").with(stroke);
+
+    assert!(build::upgrade_shape_contents(&mut Ids(&mut next), &mut contents));
+    let taper = contents.sub("stroke").unwrap().sub("taper").unwrap();
+    for m in ["startLength", "endLength"] {
+        let crate::ParamUi::Slider { min, .. } = taper.get(m).unwrap().ui else { panic!("{m} is a bounded number now") };
+        assert_eq!(min, 0.0, "{m}");
+    }
+    assert_eq!(taper.get("startLength").unwrap().value.as_f64(), 40.0);
+    assert_eq!(taper.get("endLength").unwrap().value.as_f64(), -50.0, "the saved value is left alone");
+    assert_eq!(taper.get("startLength").unwrap().expr.as_ref().map(|e| e.text.as_str()), Some("time * 10"));
+    assert_eq!(taper.get("endLength").unwrap().keys, keys, "keyframes are left alone");
+    assert!(!build::upgrade_shape_contents(&mut Ids(&mut next), &mut contents), "idempotent");
+}
+
 /// Music in a precomp is heard, and so not silent, when a layer of a comp nesting it picks the
 /// precomp layer (an Audio Waveform drawing the precomp's mix).
 #[test]
