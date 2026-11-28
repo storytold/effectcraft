@@ -53,11 +53,13 @@ pub fn warp_q(e: &mut Enc, dst: &GpuImage, src: &GpuImage, m: &Mat3, opts: WarpO
         return dst.clone();
     }
     let Some(inv0) = m.inverse() else { return dst.clone() };
-    // Minification: pick a pre-filtered level so sampling doesn't alias.
+    // Minification: a bilinear layer shrunk on either of its own axes averages a box under each
+    // pixel (`raster::box_footprint`); other filters pick a pre-filtered level so they don't alias.
     let scale = m.mean_scale();
     let mut img = src.clone();
     let mut inv = inv0;
-    if scale < 0.5 && m.is_affine() {
+    let footprint = if m.is_affine() && sampling == Sampling::Bilinear { effectcraft_raster::box_footprint(m) } else { None };
+    if footprint.is_none() && scale < 0.5 && m.is_affine() {
         let mut s = scale * 2.0;
         let mut f = 0.5;
         img = half(e, src);
@@ -77,7 +79,7 @@ pub fn warp_q(e: &mut Enc, dst: &GpuImage, src: &GpuImage, m: &Mat3, opts: WarpO
     let (y0, y1) = (area.y0.max(0.0) as u32, area.y1.min(dst.height as f64) as u32);
     let mut p = Params::default();
     let clear = matches!(mode, BlendMode::StencilAlpha | BlendMode::StencilLuma);
-    let flags = u32::from(accumulate.is_some()) | if clear && accumulate.is_none() { 2 } else { 0 };
+    let flags = u32::from(accumulate.is_some()) | if clear && accumulate.is_none() { 2 } else { 0 } | if footprint.is_some() { 4 } else { 0 };
     p.u[0] = [mode_id(mode), sampling_id(sampling), seed, flags];
     let r = rows(&inv);
     p.f[0] = r[0];
@@ -85,6 +87,8 @@ pub fn warp_q(e: &mut Enc, dst: &GpuImage, src: &GpuImage, m: &Mat3, opts: WarpO
     p.f[2] = r[2];
     p.f[3] = [opacity, accumulate.unwrap_or(1.0), levels.unwrap_or(0.0), levels.map_or(0.0, |v| 1.0 / v)];
     p.f[4] = [x0 as f32, y0 as f32, x1 as f32, y1 as f32];
+    let (hx, hy) = footprint.unwrap_or((0.5, 0.5));
+    p.f[5] = [hx as f32, hy as f32, hx.max(1.0) as f32, hy.max(1.0) as f32];
     let mut out = e.scratch(dst.width, dst.height);
     e.pixels("warp_blend", &p, &img, Some(dst), &out, None);
     out.levels = levels;

@@ -22,7 +22,7 @@ pub use blur::{
     gaussian_is_exact, radial_blur, radial_blur_spin_degrees, radial_blur_zoom_scale,
 };
 pub use channels3d::AuxChannels;
-pub use warp::{Sampling, WarpOpts, accumulate_warp, composite_warp, composite_warp_changed, composite_warp_reference, resample};
+pub use warp::{Sampling, WarpOpts, accumulate_warp, box_footprint, composite_warp, composite_warp_changed, composite_warp_reference, resample};
 
 pub type Px = [f32; 4];
 
