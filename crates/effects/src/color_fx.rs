@@ -344,15 +344,22 @@ pub fn exposure_settings(ctx: &EffectCtx) -> [(f32, f32, f32); 3] {
 /// `kernels.wgsl` repeats it as a literal; the GPU test `shader_constants_match_the_cpu` checks it.
 pub const EXPOSURE_LINEAR_GAMMA: f32 = 2.2;
 
+/// Whether Exposure works on the pixels as they are: Bypass Linear Light Conversion is on, or
+/// the working space is already linear (Linearize Working Space). After Effects 2026 in a
+/// linearized 32 bpc project: Exposure +2 turns a linear (1, 0.6, 0.2) into (4, 2.4, 0.8), with
+/// Bypass on and off alike; the effect's own 2.2 conversion on top gave (4, 1.3, 0.12).
+pub fn exposure_bypass(ctx: &EffectCtx) -> bool {
+    ctx.params.b("bypassLinearLight") || ctx.env.working_linear
+}
+
 /// Exposure: per channel, `(value · 2^exposure + offset)^(1 / gamma)`, in linear light unless
-/// Bypass Linear Light Conversion is on. The conversion is the effect's own pure 2.2 power curve
-/// (see [`EXPOSURE_LINEAR_GAMMA`]), applied whatever the project's working space, also when it
-/// is already linear (Linearize Working Space), as before. Negative values (32 bpc, or a
-/// negative Offset) go through the curves mirrored, so a negative Offset darkens smoothly past
-/// black and the default settings leave every value unchanged.
+/// [`exposure_bypass`]. The conversion is the effect's own pure 2.2 power curve (see
+/// [`EXPOSURE_LINEAR_GAMMA`]), whatever the project's working space. Negative values (32 bpc,
+/// or a negative Offset) go through the curves mirrored, so a negative Offset darkens smoothly
+/// past black and the default settings leave every value unchanged.
 fn exposure(ctx: &EffectCtx, mut b: Buf) -> Buf {
     let s = exposure_settings(ctx);
-    let bypass = ctx.params.b("bypassLinearLight");
+    let bypass = exposure_bypass(ctx);
     b.img.map_straight(|c| {
         [0, 1, 2].map(|i| {
             let (e, off, g) = s[i];
