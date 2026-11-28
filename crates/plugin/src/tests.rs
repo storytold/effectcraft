@@ -486,3 +486,51 @@ fn abi_v2_without_a_host_gets_zeroed_neighbours() {
     assert!(!effectcraft_effects::is_time_dependent("org.test.neighbours.v1"));
     assert!(gain.id.starts_with("org.test."));
 }
+
+#[test]
+fn wasm_plugin_receives_layer_mask_paths_via_ec_set_masks() {
+    let manifest = r#"{"api":1,"id":"org.test.maskpaths","name":"Mask Paths","category":"Test Plug-ins","version":"1","params":[]}"#;
+    let len = manifest.len();
+    let escaped = manifest.replace('\\', "\\\\").replace('"', "\\\"");
+    let wat = format!(
+        r#"(module
+  (memory (export "memory") 2)
+  (data (i32.const 16) "{escaped}")
+  (global $mptr (mut i32) (i32.const 0))
+  (global $mlen (mut i32) (i32.const 0))
+  (func (export "ec_api_version") (result i32) i32.const 1)
+  (func (export "ec_manifest_ptr") (result i32) i32.const 16)
+  (func (export "ec_manifest_len") (result i32) i32.const {len})
+  (func (export "ec_alloc") (param i32) (result i32) i32.const 1024)
+  (func (export "ec_set_masks") (param $ptr i32) (param $n i32)
+    local.get $ptr global.set $mptr
+    local.get $n global.set $mlen)
+  (func (export "ec_render")
+    (param $px i32) (param $w i32) (param $h i32) (param $params i32) (param $np i32)
+    (param $t f64) (param $scale f64) (result i32)
+    global.get $mlen i32.const 10 i32.ge_s
+    (if (then
+      ;; R = mask_count, G = closed, B = inverted, A = first vertex x
+      local.get $px
+      global.get $mptr f64.load f32.demote_f64 f32.store
+      local.get $px
+      global.get $mptr f64.load offset=8 f32.demote_f64 f32.store offset=4
+      local.get $px
+      global.get $mptr f64.load offset=16 f32.demote_f64 f32.store offset=8
+      local.get $px
+      global.get $mptr f64.load offset=32 f32.demote_f64 f32.store offset=12))
+    i32.const 0))"#
+    );
+    let spec = load_wasm(wat.as_bytes(), "maskpaths.wat").unwrap();
+    let mut next_id = 1;
+    let g = effectcraft_effects::instantiate(spec, &mut Ids(&mut next_id), spec.name, [100.0, 100.0]);
+    let params = effectcraft_effects::flatten_params(&g, &mut |p| p.value.clone());
+    let masks =
+        [effectcraft_effects::MaskShape { name: "Mask 1".into(), points: vec![[10.0, 20.0], [50.0, 20.0], [50.0, 60.0]], closed: true, inverted: true }];
+    let env = EffectEnv { masks: &masks, ..EffectEnv::default() };
+    let ctx = EffectCtx { params: &params, time: 0.0, layer_size: [100.0, 100.0], seed: 1, adjustment: true, env };
+    let buf = Buf { img: Image::filled(2, 1, [0.0, 0.0, 0.0, 1.0]), offset: [4.0, 6.0], scale: 0.5 };
+    let out = (spec.render)(&ctx, buf).img;
+    // x0 = 10.0 * 0.5 + 4.0 = 9.0
+    assert_eq!(out.get(0, 0), [1.0, 1.0, 1.0, 9.0]);
+}

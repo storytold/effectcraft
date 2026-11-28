@@ -322,6 +322,46 @@ pub trait PluginHost {
     fn frame_range(&self) -> Option<(f64, f64)> {
         None
     }
+    /// The layer's enabled masks at the current time, flattened to polylines in buffer pixels
+    /// (`point * scale + offset`, matching point parameters), including masks whose mode is
+    /// `None` so path-driven plug-ins can use them without the renderer clipping the layer.
+    fn mask_paths(&self) -> Vec<crate::MaskShape> {
+        Vec::new()
+    }
+}
+
+/// Pack `masks` (already in buffer pixels) into the flat `f64` array passed to a WebAssembly
+/// plug-in's optional `ec_set_masks(ptr, len)`:
+/// `[mask_count, (closed_0_or_1, inverted_0_or_1, point_count, x0, y0, x1, y1, …), …]`.
+pub fn flatten_mask_paths(masks: &[crate::MaskShape]) -> Vec<f64> {
+    const MAX_MASKS: usize = 256;
+    const MAX_VERTICES: usize = 65_536;
+    let mut valid = Vec::new();
+    let mut total_pts = 0usize;
+    for m in masks.iter().take(MAX_MASKS) {
+        let pts: Vec<[f64; 2]> =
+            m.points.iter().copied().filter(|p| p[0].is_finite() && p[1].is_finite()).take(MAX_VERTICES.saturating_sub(total_pts)).collect();
+        if pts.len() < 2 {
+            continue;
+        }
+        total_pts += pts.len();
+        valid.push((m.closed, m.inverted, pts));
+        if total_pts >= MAX_VERTICES {
+            break;
+        }
+    }
+    let mut out = Vec::with_capacity(1 + valid.len() * 3 + total_pts * 2);
+    out.push(valid.len() as f64);
+    for (closed, inverted, pts) in valid {
+        out.push(if closed { 1.0 } else { 0.0 });
+        out.push(if inverted { 1.0 } else { 0.0 });
+        out.push(pts.len() as f64);
+        for [x, y] in pts {
+            out.push(x);
+            out.push(y);
+        }
+    }
+    out
 }
 
 /// The [`PluginHost::instance_key`] of the effect `ctx` renders: its instance seed (stable per
@@ -692,6 +732,22 @@ impl PluginHost for RenderHost<'_, '_> {
 
     fn frame_range(&self) -> Option<(f64, f64)> {
         self.ctx.env.layer_span
+    }
+
+    fn mask_paths(&self) -> Vec<crate::MaskShape> {
+        let (ox, oy) = (self.offset[0], self.offset[1]);
+        let scale = self.scale;
+        self.ctx
+            .env
+            .masks
+            .iter()
+            .map(|m| crate::MaskShape {
+                name: m.name.clone(),
+                points: m.points.iter().map(|p| [p[0] * scale + ox, p[1] * scale + oy]).collect(),
+                closed: m.closed,
+                inverted: m.inverted,
+            })
+            .collect()
     }
 }
 

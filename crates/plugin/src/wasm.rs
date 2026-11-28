@@ -5,7 +5,7 @@ use std::sync::Mutex;
 use wasmi::{Config, Engine, Instance, Linker, Memory, Module, Store, StoreLimits, StoreLimitsBuilder, TypedFunc, WasmParams, WasmResults};
 
 use crate::{EffectPlugin, MIN_WASM_API_VERSION, PluginFrame, PluginManifest, PluginParams, WASM_API_VERSION};
-use effectcraft_effects::plugin::{PluginHost, PluginImage};
+use effectcraft_effects::plugin::{PluginHost, PluginImage, flatten_mask_paths};
 
 /// Instruction budget per frame: a fixed allowance plus some per pixel. Generous for per-pixel
 /// work, but a runaway loop stops instead of hanging the render.
@@ -22,6 +22,11 @@ const MAX_MANIFEST: i32 = 1 << 20;
 type RenderFn = TypedFunc<(i32, i32, i32, i32, i32, f64, f64), i32>;
 /// ABI 2: the same call plus the previous and next frame buffers and their layer times.
 type Render2Fn = TypedFunc<(i32, i32, i32, i32, i32, f64, f64, i32, f64, i32, f64, i32), i32>;
+/// Optional mask-path ingestion hook: `ec_set_masks(masks_ptr, masks_len)`.
+/// When exported, the host appends the layer's flattened mask polylines (`f64` values in buffer
+/// pixels; see [`flatten_mask_paths`]) to the arena allocation and calls `ec_set_masks` right
+/// before `ec_render` / `ec_render2`.
+type SetMasksFn = TypedFunc<(i32, i32), ()>;
 
 enum Renderer {
     V1(RenderFn),
@@ -34,6 +39,7 @@ struct Inst {
     memory: Memory,
     alloc: TypedFunc<i32, i32>,
     render: Renderer,
+    set_masks: Option<SetMasksFn>,
 }
 
 /// An instance whose ABI version (and so its render export) is not selected yet.
@@ -50,14 +56,15 @@ impl Pending {
         self.instance.get_typed_func::<P, R>(&self.store, name).map_err(|_| missing(name))
     }
 
-    /// Select the render export for `abi`.
+    /// Select the render export for `abi` (and the optional `ec_set_masks` hook).
     fn finish(self, abi: u32) -> Result<Inst, String> {
         let render = match abi {
             1 => Renderer::V1(self.instance.get_typed_func::<_, i32>(&self.store, "ec_render").map_err(|_| missing("ec_render"))?),
             2 => Renderer::V2(self.instance.get_typed_func::<_, i32>(&self.store, "ec_render2").map_err(|_| missing("ec_render2"))?),
             v => return Err(unsupported(v as i32)),
         };
-        Ok(Inst { store: self.store, memory: self.memory, alloc: self.alloc, render })
+        let set_masks = self.instance.get_typed_func::<(i32, i32), ()>(&self.store, "ec_set_masks").ok();
+        Ok(Inst { store: self.store, memory: self.memory, alloc: self.alloc, render, set_masks })
     }
 }
 
@@ -110,6 +117,8 @@ pub struct WasmPlugin {
     source: String,
     /// The WebAssembly ABI the module implements (`ec_api_version`).
     abi: u32,
+    /// Whether the module exports the optional `ec_set_masks(ptr, len)` hook.
+    has_set_masks: bool,
     engine: Engine,
     module: Module,
     /// Idle instances.
@@ -142,7 +151,8 @@ impl WasmPlugin {
             return Err(format!("parameter `{}`: WebAssembly plug-ins use plug-in API 1 parameter types (no point3, layer, text or hidden)", p.id));
         }
         let inst = pending.finish(abi)?;
-        Ok(WasmPlugin { manifest, source: source.to_string(), abi, engine, module, pool: Mutex::new(vec![inst]) })
+        let has_set_masks = inst.set_masks.is_some();
+        Ok(WasmPlugin { manifest, source: source.to_string(), abi, has_set_masks, engine, module, pool: Mutex::new(vec![inst]) })
     }
 
     /// An idle instance, or a fresh one when the pool is empty.
@@ -160,24 +170,34 @@ impl WasmPlugin {
         }
     }
 
-    /// ABI 1: parameters, then the pixels; `ec_render`.
-    fn render_v1(&self, frame: &mut PluginFrame, params: &PluginParams, time: f64) -> Result<(), String> {
+    /// ABI 1: parameters, then the pixels (and optional mask paths); `ec_render`.
+    fn render_v1(&self, frame: &mut PluginFrame, params: &PluginParams, time: f64, masks: &[f64]) -> Result<(), String> {
         let n = frame.pixels.len();
         let params_bytes = params.flat.len() * 8;
-        let total = params_bytes + n * 16;
+        let frame_bytes = n * 16;
+        let mut inst = self.take()?;
+        let masks_slice = if inst.set_masks.is_some() { masks } else { &[] };
+        let masks_bytes = masks_slice.len() * 8;
+        let total = params_bytes + frame_bytes + masks_bytes;
         if total > i32::MAX as usize {
             return Err("frame too large for a 32-bit plug-in".into());
         }
-        let mut inst = self.take()?;
         inst.store.set_fuel(FUEL_BASE + FUEL_PER_PIXEL * n as u64).map_err(err)?;
         let base = inst.alloc.call(&mut inst.store, total as i32).map_err(err)? as u32 as usize;
-        // Parameters, then pixels (little-endian, as WebAssembly memory is).
+        // Parameters, then pixels (little-endian, as WebAssembly memory is), then optional masks.
         let mut buf: Vec<u8> = Vec::with_capacity(total);
         for v in params.flat {
             buf.extend_from_slice(&v.to_le_bytes());
         }
         push_pixels(&mut buf, frame.pixels);
+        for v in masks_slice {
+            buf.extend_from_slice(&v.to_le_bytes());
+        }
         inst.memory.write(&mut inst.store, base, &buf).map_err(|e| format!("ec_alloc returned a buffer out of bounds: {e}"))?;
+        if let Some(ref set_masks) = inst.set_masks {
+            let masks_ptr = (base + params_bytes + frame_bytes) as i32;
+            set_masks.call(&mut inst.store, (masks_ptr, masks_slice.len() as i32)).map_err(|e| format!("ec_set_masks trapped: {e}"))?;
+        }
         let px_ptr = (base + params_bytes) as i32;
         let r = match &inst.render {
             Renderer::V1(f) => f
@@ -187,8 +207,8 @@ impl WasmPlugin {
         };
         let r = match r {
             Ok(0) => {
-                inst.memory.read(&inst.store, base + params_bytes, &mut buf[params_bytes..]).map_err(err)?;
-                read_pixels(&buf[params_bytes..], frame.pixels);
+                inst.memory.read(&inst.store, base + params_bytes, &mut buf[params_bytes..params_bytes + frame_bytes]).map_err(err)?;
+                read_pixels(&buf[params_bytes..params_bytes + frame_bytes], frame.pixels);
                 Ok(())
             }
             Ok(code) => Err(format!("ec_render returned error {code}")),
@@ -210,11 +230,15 @@ impl WasmPlugin {
         time: f64,
         prev: Option<(f64, &PluginImage)>,
         next: Option<(f64, &PluginImage)>,
+        masks: &[f64],
     ) -> Result<(), String> {
         let n = frame.pixels.len();
         let params_bytes = params.flat.len() * 8;
         let frame_bytes = n * 16;
-        let total = params_bytes + frame_bytes * 3;
+        let mut inst = self.take()?;
+        let masks_slice = if inst.set_masks.is_some() { masks } else { &[] };
+        let masks_bytes = masks_slice.len() * 8;
+        let total = params_bytes + frame_bytes * 3 + masks_bytes;
         if total > i32::MAX as usize {
             return Err("frame too large for a 32-bit plug-in".into());
         }
@@ -222,7 +246,6 @@ impl WasmPlugin {
         let next_px = next.map(|(t, img)| (t, img.on_grid(frame.width, frame.height, frame.origin, frame.scale)));
         let prev = prev_px.as_ref().filter(|(_, px)| px.len() == n);
         let next = next_px.as_ref().filter(|(_, px)| px.len() == n);
-        let mut inst = self.take()?;
         inst.store.set_fuel(FUEL_BASE + FUEL_PER_PIXEL * (n as u64 * 3)).map_err(err)?;
         let base = inst.alloc.call(&mut inst.store, total as i32).map_err(err)? as u32 as usize;
         let mut buf: Vec<u8> = Vec::with_capacity(total);
@@ -232,7 +255,14 @@ impl WasmPlugin {
         push_pixels(&mut buf, frame.pixels);
         push_neighbour(&mut buf, prev, frame_bytes);
         push_neighbour(&mut buf, next, frame_bytes);
+        for v in masks_slice {
+            buf.extend_from_slice(&v.to_le_bytes());
+        }
         inst.memory.write(&mut inst.store, base, &buf).map_err(|e| format!("ec_alloc returned a buffer out of bounds: {e}"))?;
+        if let Some(ref set_masks) = inst.set_masks {
+            let masks_ptr = (base + params_bytes + frame_bytes * 3) as i32;
+            set_masks.call(&mut inst.store, (masks_ptr, masks_slice.len() as i32)).map_err(|e| format!("ec_set_masks trapped: {e}"))?;
+        }
         let px_ptr = (base + params_bytes) as i32;
         let prev_ptr = (base + params_bytes + frame_bytes) as i32;
         let next_ptr = (base + params_bytes + frame_bytes * 2) as i32;
@@ -332,19 +362,21 @@ impl EffectPlugin for WasmPlugin {
     }
 
     fn render(&self, frame: &mut PluginFrame, params: &PluginParams, time: f64) -> Result<(), String> {
-        if self.abi == 1 { self.render_v1(frame, params, time) } else { self.render_v2(frame, params, time, None, None) }
+        let empty = [0.0f64];
+        if self.abi == 1 { self.render_v1(frame, params, time, &empty) } else { self.render_v2(frame, params, time, None, None, &empty) }
     }
 
     fn render_v2(&self, frame: &mut PluginFrame, params: &PluginParams, time: f64, host: &dyn PluginHost) -> Result<(), String> {
+        let masks = if self.has_set_masks { flatten_mask_paths(&host.mask_paths()) } else { Vec::new() };
         if self.abi == 1 {
-            return self.render_v1(frame, params, time);
+            return self.render_v1(frame, params, time, &masks);
         }
         let (prev_time, next_time) = neighbour_times(time, host.frame_rate());
         let prev = host.input_at(prev_time);
         let next = host.input_at(next_time);
         let prev = prev.as_ref().map(|img| (prev_time, img));
         let next = next.as_ref().map(|img| (next_time, img));
-        self.render_v2(frame, params, time, prev, next)
+        self.render_v2(frame, params, time, prev, next, &masks)
     }
 }
 
