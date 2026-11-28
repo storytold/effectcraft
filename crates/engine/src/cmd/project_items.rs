@@ -253,6 +253,9 @@ fn duplicate(s: &mut Session, p: &Value) -> Result<Value> {
                     l.props.walk_mut(&mut |property| {
                         let remap = |value: &mut effectcraft_keyframe::Value| {
                             if let effectcraft_keyframe::Value::Layer(Some(id)) = value {
+                                if *id == effectcraft_project::NO_LAYER {
+                                    return;
+                                }
                                 *value = effectcraft_keyframe::Value::Layer(map.get(&effectcraft_project::LayerId(*id)).map(|id| id.0));
                             }
                         };
