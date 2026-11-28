@@ -71,6 +71,22 @@ pub enum ExportError {
     Unsupported(String),
 }
 
+impl ExportError {
+    /// This error, also naming an output file the failed export could not remove (`why`:
+    /// `"<path>: <error>"`). The variant stays; a cancel becomes the removal's i/o error, as a
+    /// cancel whose files cannot be removed did not finish cleanly.
+    fn with_unremoved(self, why: &str) -> Self {
+        match self {
+            ExportError::Cancelled => ExportError::Io(format!("cannot remove cancelled output {why}")),
+            ExportError::Io(e) => ExportError::Io(format!("{e}; cannot remove partial output {why}")),
+            ExportError::Encode(e) => ExportError::Encode(format!("{e}; cannot remove partial output {why}")),
+            ExportError::Unsupported(e) => ExportError::Unsupported(format!("{e}; cannot remove partial output {why}")),
+            // Fails before any file is opened.
+            ExportError::NoComp => ExportError::NoComp,
+        }
+    }
+}
+
 pub type Result<T> = std::result::Result<T, ExportError>;
 
 fn io(e: impl std::fmt::Display) -> ExportError {
@@ -227,7 +243,10 @@ pub async fn export_async(job: &Job<'_>, progress: &mut dyn FnMut(&Progress) -> 
     let cx = Cx::new(job);
     // A job of a Render Queue run leaves the pooled working textures warm for the next one.
     let render = RenderEnd(job.accel.filter(|_| job.options.caches.is_none()));
+    // (dropped before `render`: an export that panics leaves none of the files it opened)
+    let mut outputs = RemoveOutputs(Some(&cx));
     let mut r = export_with(&cx, progress, t0).await;
+    outputs.0 = None;
     drop(render);
     let wall = t0.elapsed().as_secs_f64();
     // (what a failed export got done: its render log carries the line too, with the compositor)
@@ -239,8 +258,14 @@ pub async fn export_async(job: &Job<'_>, progress: &mut dyn FnMut(&Progress) -> 
         log::info!(target: "effectcraft_export", "{}: {}", cx.job.options.label, t.summary_of_unfinished(how));
         unfinished = Some(t);
     }
-    if matches!(r, Err(ExportError::Cancelled)) {
-        cx.remove_cancelled_outputs()?;
+    // A cancelled or failed export leaves none of the files it opened: a file at the output
+    // path means a finished render. Removed before the log is written, which is not a render.
+    let cancelled = matches!(r, Err(ExportError::Cancelled));
+    r = r.map_err(|e| match cx.remove_written_outputs() {
+        None => e,
+        Some(why) => e.with_unremoved(&why),
+    });
+    if cancelled {
         return r;
     }
     let timing = r.as_ref().ok().map(|rep| cx.timing(wall, rep.frames));
@@ -264,6 +289,21 @@ impl Drop for RenderEnd<'_> {
     fn drop(&mut self) {
         if let Some(a) = self.0 {
             a.render_end();
+        }
+    }
+}
+
+/// Removes the files an export opened when dropped armed: when the export panics, or its
+/// future is dropped before it finished (a browser worker aborting it). Disarmed once
+/// `export_with` returns; `export_async` handles its result itself.
+struct RemoveOutputs<'a, 'b>(Option<&'a Cx<'b>>);
+
+impl Drop for RemoveOutputs<'_, '_> {
+    fn drop(&mut self) {
+        if let Some(cx) = self.0
+            && let Some(why) = cx.remove_written_outputs()
+        {
+            log::warn!(target: "effectcraft_export", "{}: cannot remove partial output {why}", cx.job.options.label);
         }
     }
 }
