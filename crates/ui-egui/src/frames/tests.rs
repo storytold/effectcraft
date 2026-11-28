@@ -747,6 +747,43 @@ fn the_active_comps_frames_render_before_an_inactive_comps() {
     assert_eq!(order, [(2, 2), (1, 1), (1, 3), (1, 4)], "the active comp first, then prefetch before idle caching");
 }
 
+/// #4185: once the viewer asks for a queued or running background frame, it is no longer
+/// background work, so playback does not call it off.
+#[test]
+fn a_viewer_request_takes_a_background_frame_out_of_the_background() {
+    let mut f = Frames::default();
+    f.set_remote(Some(Arc::new(Idle)));
+    let src = idle_source();
+    f.focus_comp(Some(ItemId(1)));
+    // Queued by Cache Frames When Idle, then the viewer asks for it.
+    let queued = FrameKey { comp: 1, ..key(1, 3, 0) };
+    f.request_background(&src, queued, ItemId(1), Tick::ZERO, RenderOpts::default());
+    f.request_urgent(&src, queued, ItemId(1), Tick::ZERO, RenderOpts::default());
+    {
+        let q = f.queue.lock().unwrap();
+        let j = q.jobs.iter().find(|j| j.key == queued).expect("still queued");
+        assert!(j.urgent && !j.background, "the viewer's frame is not background work");
+    }
+    // A frame already rendering as background, then the viewer asks for it: playback does not
+    // call it off.
+    let running = FrameKey { comp: 1, ..key(1, 5, 0) };
+    let cancel = Arc::new(AtomicBool::new(false));
+    {
+        let mut q = f.queue.lock().unwrap();
+        q.running.insert(running);
+        q.running_cancels.push(RunningCancel { key: running, cancel: cancel.clone(), urgent: false, background: true });
+    }
+    f.inflight.lock().unwrap().insert(running);
+    f.request_urgent(&src, running, ItemId(1), Tick::ZERO, RenderOpts::default());
+    {
+        let q = f.queue.lock().unwrap();
+        let r = q.running_cancels.iter().find(|r| r.key == running).expect("still rendering");
+        assert!(r.urgent && !r.background, "the viewer's frame is not background work");
+    }
+    f.set_playhead(Some(playhead(0, false)));
+    assert!(!cancel.load(Ordering::Relaxed), "playback does not call off the frame the viewer asked for");
+}
+
 /// #4185: starting a preview drops the other comps' frames and Cache Frames When Idle's, so the
 /// lanes render only the active comp's prefetch.
 #[test]

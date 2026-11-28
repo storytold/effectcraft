@@ -199,7 +199,7 @@ impl EffectcraftApp {
 
     /// Follow a composition tab switch: the new comp's frames come first in the cache, and a
     /// preview of the old one stops (its plan and range belong to it, #4185).
-    fn sync_active_comp(&mut self) {
+    pub(super) fn sync_active_comp(&mut self) {
         let active = self.session.active_comp_id();
         if active == self.last_active_comp {
             return;
@@ -830,6 +830,25 @@ mod tests {
         app.session.open_comp(b);
         app.sync_active_comp();
         assert!(!app.playback.playing, "switching comps stops the preview");
+    }
+
+    /// A preview started right after a composition switch (a control batch that opens it and
+    /// plays) belongs to the new comp and is not stopped by the next tick (#4185).
+    #[test]
+    fn a_preview_started_after_a_comp_switch_is_not_stopped_by_the_next_tick() {
+        let mut s = effectcraft_engine::Session::default();
+        s.execute("comp.new", json!({"name": "A", "width": 32, "height": 18, "duration": 1})).unwrap();
+        let a = s.active_comp_id().unwrap();
+        s.execute("comp.new", json!({"name": "B", "width": 32, "height": 18, "duration": 1})).unwrap();
+        let b = s.active_comp_id().unwrap();
+        let mut app = EffectcraftApp::new(s);
+        app.sync_active_comp();
+        assert_eq!(app.last_active_comp, Some(b));
+        // One control batch opens A and starts its preview before the next tick.
+        app.session.open_comp(a);
+        app.play(0.0);
+        app.sync_active_comp();
+        assert!(app.playback.playing, "the new comp's preview belongs to it");
     }
 
     #[test]

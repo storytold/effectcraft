@@ -1700,13 +1700,21 @@ impl Frames {
             });
             for j in q.jobs.iter_mut() {
                 j.urgent = j.key == key;
+                if j.key == key {
+                    // The viewer waits for it now: it is no longer background work.
+                    j.background = false;
+                }
             }
             // The comp's viewer frames of other times that are rendering are called off too: a
             // movie seeking for each of them held the decoder the frame under the pointer
             // waited for, so it came seconds after the pointer stopped (#329). Another revision
             // of the same frame (a live edit) finishes, as the viewer shows it meanwhile.
-            for r in &q.running_cancels {
-                if r.urgent && r.key.comp == key.comp && r.key.frame != key.frame {
+            for r in &mut q.running_cancels {
+                if r.key == key {
+                    // Already rendering: keep it from being called off as background work.
+                    r.urgent = true;
+                    r.background = false;
+                } else if r.urgent && r.key.comp == key.comp && r.key.frame != key.frame {
                     r.cancel.store(true, Ordering::Relaxed);
                 }
             }

@@ -11,6 +11,9 @@ impl EffectcraftApp {
     /// Start the preview of a Preview panel shortcut (its range, play-from, rate, skip,
     /// resolution, loop, caching, full screen and include options).
     pub fn play_with(&mut self, now: f64, sc: effectcraft_engine::preview::PreviewShortcut) {
+        // A comp switch since the last tick (a control batch that opens it and plays) must be
+        // followed before this preview starts, or the next tick takes it for the old comp's.
+        self.sync_active_comp();
         let Some(c) = self.session.active_comp_arc() else { return };
         let preset = self.session.prefs.preview.get(sc).clone();
         let plan = effectcraft_engine::preview::plan(&preset, &c, self.session.time());
