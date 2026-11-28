@@ -414,6 +414,9 @@ fn render(ctx: &EffectCtx, buf: Buf) -> Buf {
     let refine = (ctx.params.get("refinement").map(Value::as_f64).unwrap_or(20.0) / 10.0).round().clamp(0.0, 10.0) as usize;
     // Triangles of every mesh in pixel space: (rest px, deformed px, depth).
     let mut tris: Vec<([[f64; 2]; 3], [[f64; 2]; 3], f64)> = vec![];
+    // Per-triangle rest-space edge neighbours, so the rasterizer can tell two adjacent triangles
+    // of one surface from two distinct overlapping parts.
+    let mut local_neighbors: Vec<Vec<usize>> = vec![];
     let px = |q: [f64; 2]| [q[0] * buf.scale + buf.offset[0], q[1] * buf.scale + buf.offset[1]];
     for m in &meshes {
         let mesh = mesh_for(&buf, m);
@@ -422,22 +425,51 @@ fn render(ctx: &EffectCtx, buf: Buf) -> Buf {
         }
         let def = solve(&mesh, &m.pins, refine);
         let dep = depths(&mesh, &m.pins);
+        let base = tris.len();
         for (k, t) in mesh.tris.iter().enumerate() {
             let r = [px(mesh.verts[t[0]]), px(mesh.verts[t[1]]), px(mesh.verts[t[2]])];
             let d = [px(def[t[0]]), px(def[t[1]]), px(def[t[2]])];
             tris.push((r, d, dep[k]));
         }
+        while local_neighbors.len() < tris.len() {
+            local_neighbors.push(Vec::new());
+        }
+        let mut edges: std::collections::HashMap<(usize, usize), Vec<usize>> = std::collections::HashMap::new();
+        for (k, t) in mesh.tris.iter().enumerate() {
+            for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+                let key = if a < b { (a, b) } else { (b, a) };
+                edges.entry(key).or_default().push(base + k);
+            }
+        }
+        for list in edges.values() {
+            if let [a, b] = list[..] {
+                local_neighbors[a].push(b);
+                local_neighbors[b].push(a);
+            }
+        }
     }
     if tris.is_empty() {
         return buf;
     }
-    // Stable sort: back to front.
-    tris.sort_by(|a, b| a.2.total_cmp(&b.2));
-    rasterize(&buf, &tris)
+    // Stable sort back to front, carrying the neighbours through the same permutation.
+    let mut order: Vec<usize> = (0..tris.len()).collect();
+    order.sort_by(|a, b| tris[*a].2.total_cmp(&tris[*b].2));
+    let mut position = vec![0usize; order.len()];
+    let mut sorted = Vec::with_capacity(order.len());
+    for (new, &old) in order.iter().enumerate() {
+        position[old] = new;
+        sorted.push(tris[old]);
+    }
+    let neighbors: Vec<Vec<usize>> = order.iter().map(|&old| local_neighbors[old].iter().map(|&j| position[j]).collect()).collect();
+    rasterize(&buf, &sorted, &neighbors)
 }
 
-/// Texture-map `buf` through triangles (rest px → deformed px), back to front.
-fn rasterize(buf: &Buf, tris: &[([[f64; 2]; 3], [[f64; 2]; 3], f64)]) -> Buf {
+/// Texture-map `buf` through triangles (rest px → deformed px), back to front. A triangle that
+/// samples transparency leaves what is behind it alone, so a part's Expansion margin cannot hide
+/// an opaque part underneath (#3705); a partly transparent one blends over it. `neighbors` lists
+/// the triangles that share a rest-space edge with each triangle, so two adjacent triangles of one
+/// surface are not counted twice while distinct overlapping parts still blend.
+fn rasterize(buf: &Buf, tris: &[([[f64; 2]; 3], [[f64; 2]; 3], f64)], neighbors: &[Vec<usize>]) -> Buf {
     let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
     for (_, d, _) in tris {
         for p in d {
@@ -454,7 +486,37 @@ fn rasterize(buf: &Buf, tris: &[([[f64; 2]; 3], [[f64; 2]; 3], f64)]) -> Buf {
     let mut out = Image::new(w, h);
     // Triangle y-ranges for row bucketing.
     let ranges: Vec<(f64, f64)> = tris.iter().map(|(_, d, _)| (d[0][1].min(d[1][1]).min(d[2][1]), d[0][1].max(d[1][1]).max(d[2][1]))).collect();
+    // Bounding boxes, so a subsample only tests the triangles that can cover it.
+    let boxes: Vec<(f64, f64, f64, f64)> = tris
+        .iter()
+        .map(|(_, d, _)| {
+            let xs = [d[0][0], d[1][0], d[2][0]];
+            let ys = [d[0][1], d[1][1], d[2][1]];
+            (
+                xs.iter().copied().fold(f64::INFINITY, f64::min),
+                xs.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+                ys.iter().copied().fold(f64::INFINITY, f64::min),
+                ys.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+            )
+        })
+        .collect();
+    // Per-row candidates in ascending depth, so the fallback walks only triangles whose y-range
+    // can cover the row, front to back.
+    let mut row_tris: Vec<Vec<usize>> = vec![Vec::new(); h as usize];
+    for (k, (_, d, _)) in tris.iter().enumerate() {
+        let ya = d[0][1].min(d[1][1]).min(d[2][1]);
+        let yb = d[0][1].max(d[1][1]).max(d[2][1]);
+        let first = (ya.floor() as i64 - oy).max(0) as u32;
+        let last = ((yb.ceil() as i64 - oy + 1).max(0) as u32).min(h);
+        for row in first..last {
+            row_tris[row as usize].push(k);
+        }
+    }
     const SUB: [[f64; 2]; 4] = [[0.25, 0.25], [0.75, 0.25], [0.25, 0.75], [0.75, 0.75]];
+    /// A sample at or above this alpha is opaque and keeps the pixel to itself.
+    const OPAQUE: f32 = 1.0 - 1e-6;
+    /// A sample below this alpha counts as transparency and lets the triangles behind show.
+    const TRANSPARENT: f32 = 1e-6;
     out.rows_mut().for_each(|(row, line)| {
         let y = (oy + row as i64) as f64;
         let n = line.len();
@@ -485,19 +547,67 @@ fn rasterize(buf: &Buf, tris: &[([[f64; 2]; 3], [[f64; 2]; 3], f64)]) -> Buf {
                 }
             }
         }
+        // Reused across the row's pixels: only the contents change per pixel and subsample.
+        let mut accepted: Vec<usize> = Vec::new();
         for (i, px) in line.iter_mut().enumerate() {
             let c = cover[i].count_ones();
             let Some(k) = center[i].or(any[i]) else { continue };
             if c == 0 && center[i].is_none() {
                 continue;
             }
+            let cov = if center[i].is_some() && c == 4 { 1.0 } else { c.max(1) as f32 / 4.0 };
             let (r, d, _) = &tris[k];
             let p = [(ox + i as i64) as f64 + 0.5, y + 0.5];
             let Some(l) = bary(d[0], d[1], d[2], p) else { continue };
             let src = [l[0] * r[0][0] + l[1] * r[1][0] + l[2] * r[2][0], l[0] * r[0][1] + l[1] * r[1][1] + l[2] * r[2][1]];
             let s = buf.img.sample_bilinear(src[0], src[1]);
-            let cov = if center[i].is_some() && c == 4 { 1.0 } else { c.max(1) as f32 / 4.0 };
-            *px = [s[0] * cov, s[1] * cov, s[2] * cov, s[3] * cov];
+            if s[3] >= OPAQUE {
+                *px = [s[0] * cov, s[1] * cov, s[2] * cov, s[3] * cov];
+                continue;
+            }
+            // The front-most triangle samples transparency here (an Expansion margin past the
+            // layer's content), so the parts behind it would be hidden. Each subsample composites
+            // the row's candidates front to back: transparency lets the rear show, a shared mesh
+            // edge samples the same surface once, and distinct overlapping parts blend (#3705).
+            let x = (ox + i as i64) as f64;
+            let mut sum = [0.0f32; 4];
+            for o in SUB {
+                let q = [x + o[0], y + o[1]];
+                let mut acc = [0.0f32; 4];
+                accepted.clear();
+                for &k in row_tris[row].iter().rev() {
+                    let (bx0, bx1, by0, by1) = boxes[k];
+                    if q[0] < bx0 || q[0] > bx1 || q[1] < by0 || q[1] > by1 {
+                        continue;
+                    }
+                    let (r, d, _) = &tris[k];
+                    let Some(l) = bary(d[0], d[1], d[2], q) else { continue };
+                    if l.iter().any(|v| *v < -1e-9) {
+                        continue;
+                    }
+                    let src = [l[0] * r[0][0] + l[1] * r[1][0] + l[2] * r[2][0], l[0] * r[0][1] + l[1] * r[1][1] + l[2] * r[2][1]];
+                    let t = buf.img.sample_bilinear(src[0], src[1]);
+                    if t[3] <= TRANSPARENT {
+                        continue;
+                    }
+                    // Sharing a rest-space edge with any accepted triangle makes a candidate part
+                    // of the same continuous surface: keep the front sample, count it once.
+                    if accepted.iter().any(|&owner| neighbors[owner].contains(&k)) {
+                        continue;
+                    }
+                    if accepted.is_empty() {
+                        acc = t;
+                    } else {
+                        let over = 1.0 - acc[3];
+                        acc = [acc[0] + t[0] * over, acc[1] + t[1] * over, acc[2] + t[2] * over, acc[3] + t[3] * over];
+                    }
+                    accepted.push(k);
+                }
+                if !accepted.is_empty() {
+                    sum = [sum[0] + acc[0], sum[1] + acc[1], sum[2] + acc[2], sum[3] + acc[3]];
+                }
+            }
+            *px = [sum[0] * 0.25, sum[1] * 0.25, sum[2] * 0.25, sum[3] * 0.25];
         }
     });
     Buf { img: out, offset: [buf.offset[0] - ox as f64, buf.offset[1] - oy as f64], scale: buf.scale }
