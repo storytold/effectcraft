@@ -53,6 +53,35 @@ fn split_layers_go_above_or_below_the_original() {
 }
 
 #[test]
+fn split_layer_leaves_locked_layers_unchanged() {
+    let mut s = session();
+    let locked = solid(&mut s, "#ff0000");
+    let unlocked = solid(&mut s, "#00ff00");
+    s.execute("time.set", json!({"time": 1.0})).unwrap();
+    s.execute("layer.setSwitch", json!({"layers": [locked], "switch": "locked", "value": true})).unwrap();
+    let before = layer(&s, locked);
+    let steps = s.history.undo.len();
+    let error = s.execute("edit.splitLayer", json!({"layers": [locked]})).unwrap_err().to_string();
+    assert!(error.contains("edit.splitLayer") && error.contains("locked"), "{error}");
+    assert_eq!(s.active_comp().unwrap().layers.len(), 2, "an all-locked split adds no layer");
+    assert_eq!(layer(&s, locked).out_point, before.out_point);
+    assert_eq!(s.history.undo.len(), steps);
+
+    // With no explicit `layers`, the selected layers follow the same rule. The reply contains
+    // only the new part of the unlocked layer, never another copy of the locked one.
+    s.execute("layer.select", json!({"layers": [locked, unlocked]})).unwrap();
+    let made = s.execute("edit.splitLayer", json!({})).unwrap();
+    let ids = made.as_array().unwrap();
+    assert_eq!(ids.len(), 1, "{made}");
+    let created = ids[0].as_u64().unwrap();
+    assert_ne!(created, locked);
+    assert_eq!(s.active_comp().unwrap().layers.len(), 3);
+    assert_eq!(layer(&s, locked).out_point, before.out_point, "the locked layer was not split");
+    assert_eq!(layer(&s, unlocked).out_point, s.time(), "the unlocked original ends at the split");
+    assert_eq!(layer(&s, created).in_point, s.time(), "the unlocked new part starts at the split");
+}
+
+#[test]
 fn new_masks_cycle_colours_only_when_asked() {
     let mut s = session();
     let a = solid(&mut s, "#ff0000");

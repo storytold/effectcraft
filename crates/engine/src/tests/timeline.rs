@@ -1471,6 +1471,71 @@ fn go_to_time_accepts_a_float_frame_from_the_dialog() {
     assert_eq!(r["frame"], json!(7));
 }
 
+fn locked_timing_pair() -> (Session, u64, u64) {
+    let (mut s, locked) = setup();
+    let unlocked = s.execute("layer.newSolid", json!({"color": "#ff0000", "width": 100, "height": 100})).unwrap()["layer"].as_u64().unwrap();
+    s.execute("layer.timing", json!({"layers": [locked, unlocked], "start": 0.5, "in": 0.5, "out": 3.0})).unwrap();
+    s.execute("time.set", json!({"time": 2.0})).unwrap();
+    s.execute("layer.setSwitch", json!({"layers": [locked], "switch": "locked", "value": true})).unwrap();
+    (s, locked, unlocked)
+}
+
+fn layer_times(s: &Session, layer: u64) -> (effectcraft_time::Tick, effectcraft_time::Tick, effectcraft_time::Tick) {
+    let l = s.active_comp().unwrap().layer(effectcraft_project::LayerId(layer)).unwrap();
+    (l.start_time, l.in_point, l.out_point)
+}
+
+#[test]
+fn layer_timing_never_changes_a_locked_layer() {
+    let cases = [
+        json!({"delta": 1.0}),
+        json!({"start": 1.0}),
+        json!({"in": 1.0}),
+        json!({"out": 2.5}),
+        json!({"inDelta": 1.0}),
+        json!({"outDelta": -1.0}),
+        json!({"op": "moveInToTime"}),
+        json!({"op": "moveOutToTime"}),
+        json!({"op": "moveInToStart"}),
+        json!({"op": "moveOutToEnd"}),
+        json!({"op": "trimInToTime"}),
+        json!({"op": "trimOutToTime"}),
+    ];
+    for case in cases {
+        let (mut s, locked, unlocked) = locked_timing_pair();
+        let before_locked = layer_times(&s, locked);
+        let before_unlocked = layer_times(&s, unlocked);
+        let steps = s.history.undo.len();
+        let mut only_locked = json!({"layers": [locked]});
+        only_locked.as_object_mut().unwrap().extend(case.as_object().unwrap().clone());
+        let error = s.execute("layer.timing", only_locked).unwrap_err().to_string();
+        assert!(error.contains("layer.timing") && error.contains("locked"), "{case}: {error}");
+        assert_eq!(layer_times(&s, locked), before_locked, "all locked, {case}");
+        assert_eq!(s.history.undo.len(), steps, "all locked adds no edit, {case}");
+
+        let mut mixed = json!({"layers": [locked, unlocked]});
+        mixed.as_object_mut().unwrap().extend(case.as_object().unwrap().clone());
+        s.execute("layer.timing", mixed).unwrap();
+        assert_eq!(layer_times(&s, locked), before_locked, "mixed leaves the locked layer, {case}");
+        assert_ne!(layer_times(&s, unlocked), before_unlocked, "mixed edits the unlocked layer, {case}");
+        assert_eq!(s.history.undo.len(), steps + 1, "the unlocked edit is still one step, {case}");
+    }
+}
+
+#[test]
+fn a_merged_timing_drag_skips_the_locked_layer() {
+    let (mut s, locked, unlocked) = locked_timing_pair();
+    let before_locked = layer_times(&s, locked);
+    let before_unlocked = layer_times(&s, unlocked);
+    let steps = s.history.undo.len();
+    for _ in 0..3 {
+        s.execute("layer.timing", json!({"layers": [locked, unlocked], "inDelta": 0.1, "merge": "locked-trim"})).unwrap();
+    }
+    assert_eq!(layer_times(&s, locked), before_locked);
+    assert!(layer_times(&s, unlocked).1 > before_unlocked.1);
+    assert_eq!(s.history.undo.len(), steps + 1, "the whole drag is one undo step");
+}
+
 /// Dragging a trim edge with several layers selected trims every selected layer by the same
 /// amount from its own in/out point (as in AE), clamped to the comp and to one frame of layer;
 /// a whole merged drag is one undo step.

@@ -676,6 +676,7 @@ fn paste_svg(s: &mut Session, p: &Value) -> Result<Value> {
 
 fn split(s: &mut Session, p: &Value) -> Result<Value> {
     let (cid, ids) = layers_p(s, p)?;
+    let ids = super::unlocked(s, cid, ids, "edit.splitLayer")?;
     let t = s.time();
     // Settings ▸ General ▸ Create Split Layers Above Original Layer.
     let above = s.prefs.general.create_split_layers_above;
