@@ -1616,8 +1616,7 @@ fn kept_frames_render_the_same() {
             |s, c, l| timing(s, c, l[1], 20, 28, 40),
             Keep::Part,
         ),
-        // (Echo on an adjustment layer doesn't read other times yet, `FxHost::self_at`;
-        // when it does, an edit under it reaches frames after the edit.)
+        // An edit under a backward-looking adjustment Echo reaches frames after the edit.
         (
             "echo adjustment nudge",
             |s, _, l| {

@@ -451,13 +451,13 @@ impl<'a> Renderer<'a> {
         let matte = layer.track_matte.is_some_and(|tm| tm.layer != layer.id && ctx.comp.layer(tm.layer).is_some());
         if layer.blend_mode == BlendMode::Normal && !matte && !layer.preserve_transparency {
             if let Some((sub, nctx)) = self.collapse_into(ctx, layer, collapsed, opacity) {
-                sub.draw_comp(&nctx, canvas, blank);
+                sub.draw_comp(&nctx, canvas, blank, 0);
             }
             return Region::Empty;
         }
         let Some((sub, nctx)) = self.collapse_into(ctx, layer, collapsed, 1.0) else { return Region::Empty };
         let mut iso = Image::new(canvas.width, canvas.height);
-        sub.draw_comp(&nctx, &mut iso, true);
+        sub.draw_comp(&nctx, &mut iso, true, 0);
         self.composite_iso(ctx, layer, iso, canvas, opacity);
         Region::Full
     }
@@ -709,7 +709,7 @@ impl<'a> Renderer<'a> {
             return canvas;
         }
         let ctx = self.ctx(comp_id, comp, t);
-        self.draw_comp(&ctx, &mut canvas, true);
+        self.draw_comp(&ctx, &mut canvas, true, 0);
         // The canvas is already quantised after every layer; only re-encoding changes it.
         if let Some(c) = self.pipe.from_blend() {
             color::convert(&mut canvas, &c);
@@ -734,9 +734,10 @@ impl<'a> Renderer<'a> {
 
     /// Draw a comp's layers (bottom to top) into `canvas` (blending space).
     /// `blank`: the canvas is fully transparent (lets the first layer skip re-quantising).
-    fn draw_comp(&self, ctx: &EvalCtx<'a>, canvas: &mut Image, mut blank: bool) {
+    /// `skip`: omit this many entries at the top of the stack.
+    fn draw_comp(&self, ctx: &EvalCtx<'a>, canvas: &mut Image, mut blank: bool, skip: usize) {
         // Bottom-to-top, with runs of consecutive 3D layers depth-sorted (farthest first).
-        let visible = self.visible_layers(ctx);
+        let visible = self.visible_layers_from(ctx, skip);
         let mut i = 0;
         while i < visible.len() {
             if visible[i].is_3d() {
@@ -760,6 +761,30 @@ impl<'a> Renderer<'a> {
                 blank = false;
             }
         }
+    }
+
+    /// The adjustment stack's input to effect `limit` at a sampled comp time. Composite the
+    /// layers below into transparent pixels, in the same viewport as the live adjustment.
+    pub(crate) fn adjustment_input(&self, ctx: &EvalCtx<'a>, layer: &Layer, limit: usize) -> Option<Buf> {
+        // A collapsed instance draws straight into a parent's canvas. Replaying the nested
+        // comp alone would lose that backdrop and use the wrong canvas geometry.
+        if self.outer.is_some() || !ctx.comp.covers(ctx.time) {
+            return None;
+        }
+        let skip = ctx.comp.index_of(layer.id)?;
+        let scale = self.opts.scale;
+        let (w, h) = frame_size(ctx.comp.width, ctx.comp.height, scale);
+        let (x, y, w, h) = self.roi_offset().unwrap_or((0.0, 0.0, w, h));
+        let mut img = Image::new(w, h);
+        // The GPU can ask for a sample while encoding the outer stack. Keep the sampled draw
+        // and its prefix on the CPU, without losing this comp's guide/ROI settings.
+        let sub = Renderer { depth: self.depth + 1, accel: None, defer_dof: false, ..*self };
+        sub.draw_comp(ctx, &mut img, true, skip);
+        if let Some(c) = sub.pipe.from_blend() {
+            color::convert(&mut img, &c);
+        }
+        let below = Buf { img, offset: [-x, -y], scale };
+        Some(if limit == 0 { below } else { sub.apply_effects_timed(ctx, layer, below, true, limit, None) })
     }
 
     /// Evaluate an effect instance's parameters.
@@ -857,10 +882,18 @@ impl<'a> Renderer<'a> {
                 buf
             });
         }
-        let host = FxHost { r: self, ctx, layer, origin, index: 0, original: original.as_ref() };
+        let host = |index, effect: &str| FxHost {
+            r: self,
+            ctx,
+            layer,
+            origin,
+            index,
+            original: original.as_ref(),
+            echo_source: super::fx_host::EchoSource::for_effect(layer, effect, adjustment),
+        };
         let env = EffectEnv {
             masks: &mask_shapes,
-            host: Some(&host),
+            host: None,
             comp_time: ctx.time.seconds(),
             frame_rate: ctx.comp.frame_rate.as_f64(),
             effect_index: 0,
@@ -893,7 +926,7 @@ impl<'a> Renderer<'a> {
             {
                 let run: Vec<_> = stack[k..].iter().take_while(|(_, _, s)| s.gpu && a.supports_effect(s.id)).collect();
                 let params: Vec<Params> = run.iter().map(|(_, g, _)| self.effect_params(ctx, layer, g)).collect();
-                let hosts: Vec<_> = run.iter().map(|(i, _, _)| FxHost { index: *i, ..host }).collect();
+                let hosts: Vec<_> = run.iter().map(|(i, _, s)| host(*i, s.id)).collect();
                 let steps: Vec<FxStep> = run
                     .iter()
                     .zip(&params)
@@ -922,7 +955,7 @@ impl<'a> Renderer<'a> {
             }
             k += 1;
             let params = self.effect_params(ctx, layer, g);
-            let host = FxHost { index: i, ..host };
+            let host = host(i, spec.id);
             let env = EffectEnv { host: Some(&host), effect_index: i, ..env };
             let ectx = EffectCtx { params: &params, time: lt.seconds(), layer_size, seed: g.uid as u32, adjustment, env };
             let t0 = web_time::Instant::now();

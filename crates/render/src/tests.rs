@@ -462,7 +462,7 @@ fn particle_world_reads_a_hold_cut_at_its_exact_layer_time_under_any_stretch() {
         let l = &c.layers[0];
         let ctx = crate::eval::EvalCtx::new(&p, cid, c, Tick::ZERO);
         let renderer = Renderer::new(&p, &NoFootage, RenderOpts::default());
-        let host = FxHost { r: &renderer, ctx: &ctx, layer: l, origin: [0.0; 2], index: Default::default(), original: None };
+        let host = FxHost { r: &renderer, ctx: &ctx, layer: l, origin: [0.0; 2], index: Default::default(), echo_source: Default::default(), original: None };
         let rate = |t: f64| host.param_at(0, "birthRate", t).unwrap().as_f64();
         assert_eq!((rate(0.5 - 1.0 / 60.0), rate(0.5)), (3.0, 0.0), "stretch {stretch} %");
         assert!(!host.param_is_static(0, "birthRate"));
@@ -1416,7 +1416,7 @@ fn self_inputs_share_source_semantics_across_effects_and_times() {
     let c = p.comp(cid).unwrap();
     let ctx = crate::eval::EvalCtx::new(&p, cid, c, Tick::ZERO);
     let renderer = Renderer::new(&p, &NoFootage, RenderOpts::default());
-    let host = FxHost { r: &renderer, ctx: &ctx, layer: &l, origin: [0.0; 2], index: Default::default(), original: None };
+    let host = FxHost { r: &renderer, ctx: &ctx, layer: &l, origin: [0.0; 2], index: Default::default(), echo_source: Default::default(), original: None };
     assert_eq!(host.layer(l.id.0, false).unwrap().buf.img.get(150, 50)[3], 1.0);
     assert_eq!(host.layer_masks(l.id.0).unwrap().buf.img.get(150, 50)[3], 0.0);
     assert_eq!(host.layer_at(l.id.0, 0.5, false).unwrap().buf.img.get(150, 50)[3], 1.0);
@@ -1454,7 +1454,8 @@ fn timed_source_reads_preserve_other_layer_masks() {
     p.comp_mut(cid).unwrap().layers = vec![owner.clone(), other.clone()].into();
     let ctx = crate::EvalCtx::new(&p, cid, p.comp(cid).unwrap(), Tick::ZERO);
     let renderer = crate::Renderer::new(&p, &crate::NoFootage, crate::RenderOpts::default());
-    let host = crate::FxHost { r: &renderer, ctx: &ctx, layer: &owner, origin: [0.0; 2], index: Default::default(), original: None };
+    let host =
+        crate::FxHost { r: &renderer, ctx: &ctx, layer: &owner, origin: [0.0; 2], index: Default::default(), echo_source: Default::default(), original: None };
     // Current Source and timed Source had different contracts before this fix. Keep
     // the existing timed read (used by Clone/Time effects) masked for other layers.
     assert_eq!(host.layer(other.id.0, false).unwrap().buf.img.get(150, 50)[3], 1.0);

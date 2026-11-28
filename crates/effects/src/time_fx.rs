@@ -179,17 +179,49 @@ fn fetch_with(ctx: &EffectCtx, times: &[f64], effects: usize) -> Option<Frames> 
     uniq.sort_unstable();
     uniq.dedup();
     // Every effect before this one (the host bounds the count to them).
-    let bufs: Vec<(i64, Option<Buf>)> = uniq.iter().map(|&k| (k, host.self_at(k as f64 / 1e6, effects))).collect();
+    let mut bufs: Vec<(i64, Option<Buf>)> = uniq.iter().map(|&k| (k, host.self_at(k as f64 / 1e6, effects))).collect();
     let first = bufs.iter().find_map(|(_, b)| b.as_ref())?;
-    let scale = first.scale;
+    let mut scale = first.scale;
+    let mut shifted = false;
+    let mut input_area = 0.0f64;
     // Union of every frame's extent in layer pixels (offset = where layer (0,0) sits).
     let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
-    for b in bufs.iter().filter_map(|(_, b)| b.as_ref()) {
+    for (time, b) in &mut bufs {
+        let Some(b) = b else { continue };
+        if let Some([dx, dy]) = host.time_sample_shift(*time as f64 / 1e6) {
+            b.rebase([-dx, -dy]);
+            shifted = true;
+        }
         let k = scale / b.scale.max(1e-9);
+        input_area = input_area.max(b.img.width as f64 * b.img.height as f64 * k * k);
         x0 = x0.min(-b.offset[0] * k);
         y0 = y0.min(-b.offset[1] * k);
         x1 = x1.max((b.img.width as f64 - b.offset[0]) * k);
         y1 = y1.max((b.img.height as f64 - b.offset[1]) * k);
+    }
+    // A translated shape may have a key far off the canvas. Keep the ordinary union
+    // (including offscreen pixels for later effects) while it fits. For an oversized
+    // union keep the composition's visible part, reducing resolution if even that exceeds
+    // the working pixel budget across the aligned samples.
+    let budget = (16_777_216.0 / times.len().max(1) as f64).max(input_area);
+    let width = x1.ceil() - x0.floor();
+    let height = y1.ceil() - y0.floor();
+    if shifted
+        && (width > 16384.0 || height > 16384.0 || width * height > budget)
+        && let Some(view) = host.time_sample_view()
+    {
+        x0 = x0.max(view.x0 * scale);
+        y0 = y0.max(view.y0 * scale);
+        x1 = x1.min(view.x1 * scale);
+        y1 = y1.min(view.y1 * scale);
+        let w = (x1 - x0).max(1.0);
+        let h = (y1 - y0).max(1.0);
+        let k = (budget / (w * h)).sqrt().min(16382.0 / w.max(h)).min(1.0);
+        scale *= k;
+        x0 *= k;
+        y0 *= k;
+        x1 *= k;
+        y1 *= k;
     }
     let (x0, y0) = (x0.floor(), y0.floor());
     let w = ((x1.ceil() - x0) as u32).clamp(1, 16384);
@@ -201,9 +233,15 @@ fn fetch_with(ctx: &EffectCtx, times: &[f64], effects: usize) -> Option<Frames> 
         }
         let k = b.scale / scale;
         let same_scale = (k - 1.0).abs() < 1e-9;
-        let dx = b.offset[0] + x0;
-        let dy = b.offset[1] + y0;
+        // For positioned samples the output-grid origin must be in source pixels too.
+        let offset_scale = if shifted { k } else { 1.0 };
+        let dx = b.offset[0] + x0 * offset_scale;
+        let dy = b.offset[1] + y0 * offset_scale;
         let mut out = Image::new(w, h);
+        // A sample wholly outside a clipped grid contributes transparent pixels.
+        if dx >= b.img.width as f64 + 1.0 || dy >= b.img.height as f64 + 1.0 || dx + w as f64 * k < -1.0 || dy + h as f64 * k < -1.0 {
+            return out;
+        }
         let ow = w as usize;
         out.data.par_chunks_mut(ow).enumerate().for_each(|(y, row)| {
             for (x, px) in row.iter_mut().enumerate() {

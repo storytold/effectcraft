@@ -55,6 +55,23 @@ fn gpu_adjustment_chains_match_the_cpu() {
 }
 
 #[test]
+fn adjustment_echo_matches_the_cpu_with_a_moving_backdrop() {
+    let mut s = Scene::new(BitDepth::Bpc8);
+    let mut square = s.solid([1.0; 3], 6, 6);
+    square.props.prop_mut("transform/position").unwrap().keys = vec![
+        effectcraft_keyframe::Keyframe::new(Tick::ZERO, crate::tests::v3(10.0, 30.0)),
+        effectcraft_keyframe::Keyframe::new(Tick::from_seconds_f64(2.0), crate::tests::v3(90.0, 30.0)),
+    ];
+    s.push(square);
+    let mut adj = s.solid([1.0; 3], 97, 61);
+    adj.switches.adjustment = true;
+    s.effect(&mut adj, "ec.generate.fill", &[]);
+    s.effect(&mut adj, "ec.time.echo", &[("echoTime", n(-0.25)), ("numberOfEchoes", n(4.0)), ("echoOperator", Value::Enum(3))]);
+    s.push(adj);
+    check("adjustment Echo", compare_at(&s, opts(), Tick::from_seconds_f64(1.5)), 0.0);
+}
+
+#[test]
 fn mixed_adjustment_chains_fall_back_per_effect() {
     let mut stack = gpu_stack();
     stack.insert(1, ("ec.distort.rollingshutterrepair", vec![]));

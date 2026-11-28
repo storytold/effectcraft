@@ -67,6 +67,93 @@ fn echo_blends_neighbouring_frames() {
     assert!((a - want).abs() < 0.01, "{a} vs {want}");
 }
 
+/// Echo reads the comp below the adjustment at each sample time and runs the preceding Fill
+/// on that sample. An upper layer visible only in the past must leave no trail.
+#[test]
+fn adjustment_echo_samples_the_lower_stack() {
+    let (mut p, cid, comp) = super::setup();
+    let mut square = super::solid(&mut p, &comp, [1.0; 3], 8, 8);
+    square.props.prop_mut("transform/position").unwrap().keys =
+        vec![Keyframe::new(Tick::ZERO, Value::Vec3([20.0, 50.0, 0.0])), Keyframe::new(Tick::from_seconds_f64(2.0), Value::Vec3([180.0, 50.0, 0.0]))];
+    let mut upper = super::solid(&mut p, &comp, [1.0; 3], 8, 8);
+    upper.props.prop_mut("transform/position").unwrap().value = Value::Vec3([100.0, 20.0, 0.0]);
+    upper.out_point = Tick::from_seconds_f64(1.0);
+    let mut adjustment = super::solid(&mut p, &comp, [1.0; 3], 200, 100);
+    adjustment.switches.adjustment = true;
+    adjustment.in_point = Tick::from_seconds_f64(1.0);
+    for (id, vals) in [
+        ("ec.generate.fill", vec![]),
+        ("ec.time.echo", vec![("echoTime", Value::Scalar(-0.25)), ("numberOfEchoes", Value::Scalar(4.0)), ("echoOperator", Value::Enum(3))]),
+    ] {
+        let spec = effectcraft_effects::find(id).unwrap();
+        let mut g = effectcraft_effects::instantiate(spec, &mut Ids(&mut p.next_id), spec.name, [200.0, 100.0]);
+        for (k, v) in vals {
+            g.prop_mut(k).unwrap().value = v;
+        }
+        adjustment.props.sub_mut("effects").unwrap().children.push(g.into());
+    }
+    adjustment.props.prop_mut("effects/#1/color").unwrap().keys = vec![
+        Keyframe::new(Tick::ZERO, Value::Color([0.0, 0.0, 1.0, 1.0])).hold(),
+        Keyframe::new(Tick::from_seconds_f64(1.0), Value::Color([1.0, 0.0, 0.0, 1.0])),
+    ];
+    p.comp_mut(cid).unwrap().layers = vec![upper, adjustment, square].into();
+
+    let img = render(&p, cid, 1.5, None);
+    for x in [140, 120, 100, 80, 60] {
+        let px = img.get(x, 50);
+        let want = if x < 100 { [0.0, 0.0, 1.0, 1.0] } else { [1.0, 0.0, 0.0, 1.0] };
+        assert_eq!(px, want, "square at {x}");
+        assert!(img.get(x - 8, 50)[3] < 0.01, "gap next to {x}");
+    }
+    assert!(img.get(100, 20)[3] < 0.01, "echo of upper layer");
+    let roi = crate::RenderOpts { roi: Some([50.0, 40.0, 100.0, 20.0]), scale: 0.5, ..Default::default() };
+    let crop = crate::Renderer::new(&p, &crate::NoFootage, roi).comp_frame(cid, Tick::from_seconds_f64(1.5));
+    for x in [140, 120, 100, 80, 60] {
+        assert_eq!(crop.get((x - 50) / 2, 5), img.get(x, 50), "cropped square at {x}");
+    }
+}
+
+#[test]
+fn shape_echo_follows_layer_position_including_before_the_first_key() {
+    let (mut p, cid, comp) = super::setup();
+    let mut layer = build::layer(&mut p, &comp, "Square", LayerSource::Shape, (200, 100), None);
+    let mut ids = Ids(&mut p.next_id);
+    let rect = build::shape_rect(&mut ids, [6.0; 2], [0.0; 2], 0.0);
+    let fill = build::shape_fill(&mut ids, [1.0; 4]);
+    layer.props.sub_mut("contents").unwrap().children.extend([rect.into(), fill.into()]);
+    // Keep the later segment straight when the first key is moved far offscreen.
+    layer.props.prop_mut("transform/position").unwrap().keys = [(0.0, 20.0), (1.0, 100.0), (2.0, 180.0)]
+        .map(|(t, x)| Keyframe { spatial_auto: false, ..Keyframe::new(Tick::from_seconds_f64(t), Value::Vec3([x, 50.0, 0.0])) })
+        .to_vec();
+    let spec = effectcraft_effects::find("ec.time.echo").unwrap();
+    let mut echo = effectcraft_effects::instantiate(spec, &mut ids, spec.name, [200.0, 100.0]);
+    for (name, value) in [
+        ("echoTime", Value::Scalar(-0.25)),
+        ("numberOfEchoes", Value::Scalar(4.0)),
+        ("startingIntensity", Value::Scalar(0.5)),
+        ("echoOperator", Value::Enum(3)),
+    ] {
+        echo.prop_mut(name).unwrap().value = value;
+    }
+    layer.props.sub_mut("effects").unwrap().children.push(echo.into());
+    p.comp_mut(cid).unwrap().layers.push(layer);
+    let cache = crate::LayerCache::default();
+    let start = render(&p, cid, 0.125, Some(&cache));
+    assert!(start.get(20, 50)[3] > 0.9, "four pre-start samples overlap at the first position");
+    assert!((start.get(30, 50)[3] - 0.5).abs() < 0.01, "the leading square has moved away");
+    let late = render(&p, cid, 1.5, Some(&cache));
+    for x in [60, 80, 100, 120, 140] {
+        assert!((late.get(x, 50)[3] - 0.5).abs() < 0.01, "separated echo at {x}");
+    }
+    // The current position at 1.5 is unchanged, but the oldest copy moves.
+    p.comp_mut(cid).unwrap().layers[0].props.prop_mut("transform/position").unwrap().keys[0].value = Value::Vec3([40.0, 50.0, 0.0]);
+    let edited = render(&p, cid, 1.5, Some(&cache));
+    assert!(edited.get(70, 50)[3] > 0.49 && edited.get(60, 50)[3] < 0.01);
+    // An offscreen sample must not push the current square off the bounded output grid.
+    p.comp_mut(cid).unwrap().layers[0].props.prop_mut("transform/position").unwrap().keys[0].value = Value::Vec3([-1.0e6, -1.0e6, 0.0]);
+    assert!(render(&p, cid, 1.5, Some(&cache)).get(140, 50)[3] > 0.49);
+}
+
 /// Time effects see the effects applied before them, as After Effects renders them (SceneYard
 /// "Task Preparation UI": Echo after CC Particle Systems II echoed the black solid under the
 /// fireworks and blacked out the white page). Fill (red) then Echo: the echoes are red.

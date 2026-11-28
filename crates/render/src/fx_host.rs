@@ -1,5 +1,26 @@
 use super::frames::frame_blend_mode;
 use super::{Arc, Buf, EffectHost, EvalCtx, FrameBlend, ItemKind, Layer, LayerPixels, LayerSource, Params, Renderer, Tick, three_d};
+use effectcraft_geom::{Rect, vec2};
+
+#[derive(Clone, Copy, Default, PartialEq)]
+pub(crate) enum EchoSource {
+    #[default]
+    Layer,
+    Backdrop,
+    PositionedShape,
+}
+
+impl EchoSource {
+    pub(crate) fn for_effect(layer: &Layer, effect: &str, adjustment: bool) -> Self {
+        if adjustment && effectcraft_project::reads_backdrop_at_other_times(effect) {
+            Self::Backdrop
+        } else if effect == "ec.time.echo" && matches!(layer.source, LayerSource::Shape) && !layer.is_3d() && !layer.switches.adjustment {
+            Self::PositionedShape
+        } else {
+            Self::Layer
+        }
+    }
+}
 
 /// Layer parameters and audio for effects (see [`effectcraft_effects::EffectHost`]). What it
 /// hands out is in effect space (see [`effect_bounds`]): the other layer's for its pixels, the
@@ -13,6 +34,7 @@ pub(crate) struct FxHost<'r, 'a, 'c> {
     pub(crate) origin: [f64; 2],
     /// Index of the effect being rendered (bounds `self_at` to effects before it).
     pub(crate) index: usize,
+    pub(crate) echo_source: EchoSource,
     pub(crate) original: Option<&'c Buf>,
 }
 
@@ -110,13 +132,43 @@ impl EffectHost for FxHost<'_, '_, '_> {
     }
 
     fn self_at(&self, layer_time: f64, effects: usize) -> Option<Buf> {
-        if self.r.depth > MAX_FX_DEPTH || self.layer.switches.adjustment {
+        if self.r.depth > MAX_FX_DEPTH || (self.layer.switches.adjustment && self.echo_source != EchoSource::Backdrop) {
             return None;
         }
         let n = effects.min(self.index);
         let t = self.layer.comp_time(Tick::from_seconds_f64(layer_time));
+        let at = self.ctx.at(t);
+        if self.echo_source == EchoSource::Backdrop {
+            return self.r.adjustment_input(&at, self.layer, n);
+        }
         let sub = self.r.nested();
-        sub.layer_input(&self.ctx.at(t), self.layer, n).map(|b| (*b).clone())
+        sub.layer_input(&at, self.layer, n).map(|b| (*b).clone())
+    }
+
+    fn time_sample_shift(&self, layer_time: f64) -> Option<[f64; 2]> {
+        if self.echo_source != EchoSource::PositionedShape {
+            return None;
+        }
+        // Contents and earlier effects already belong to the sampled time. Place their anchor
+        // at its historical comp position, relative to the transform applied after the stack.
+        let tr = self.layer.transform()?;
+        let anchor = |ctx: &EvalCtx| {
+            let [x, y, _] = ctx.v3(self.layer, tr, "anchor", [0.0; 3]);
+            vec2(x, y)
+        };
+        let at = self.ctx.at(self.layer.comp_time(Tick::from_seconds_f64(layer_time)));
+        let now = self.ctx.layer_to_comp(self.layer).0;
+        let past = at.layer_to_comp(self.layer).0.apply(anchor(&at));
+        let shift = now.inverse()?.apply_vec(past - now.apply(anchor(self.ctx)));
+        (shift.x.is_finite() && shift.y.is_finite() && (shift.x != 0.0 || shift.y != 0.0)).then_some([shift.x, shift.y])
+    }
+
+    fn time_sample_view(&self) -> Option<Rect> {
+        if self.echo_source != EchoSource::PositionedShape {
+            return None;
+        }
+        let to_effect = self.ctx.effect_to_comp(self.layer).inverse()?;
+        Some(to_effect.map_rect(&Rect::from_size(self.ctx.comp.width as f64, self.ctx.comp.height as f64)).inflate(2.0))
     }
 
     fn aux(&self) -> Option<Arc<effectcraft_raster::AuxChannels>> {

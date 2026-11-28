@@ -2019,7 +2019,7 @@ fn decode_layer(p: &[u8]) -> Option<Buf> {
 // ---------------------------------------------------------------- content keys
 
 /// Bump when rendering changes in a way that makes old disk entries wrong.
-const RENDER_VERSION: &str = "effectcraft-render-7";
+const RENDER_VERSION: &str = "effectcraft-render-9";
 
 /// Feeds the `Debug` form of `v` into the hash, followed by a separator byte.
 fn hash_debug(h: &mut Hash128, v: &impl std::fmt::Debug) {
