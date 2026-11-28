@@ -124,6 +124,16 @@ fn level_gains(layer: &Layer, levels: Option<&Property>, t: Tick) -> [f32; 2] {
     }
 }
 
+/// The vertical span a column's sample draws in one channel lane, as `(top, bottom)`.
+///
+/// `lo`/`hi` are the channel's sample bounds after Audio Levels and the ±1 clamp, `mid` the
+/// lane's centre line and `half` its reach. `left` selects the upper lane; the lower lane grows
+/// the other way. The span always reaches at least one pixel so a silent column still shows.
+fn channel_span(lo: f32, hi: f32, mid: f32, half: f32, left: bool) -> (f32, f32) {
+    let mag = lo.abs().max(hi.abs());
+    if left { ((mid - mag * half).min(mid - 1.0), mid) } else { (mid, (mid + mag * half).max(mid + 1.0)) }
+}
+
 /// Draw `layer`'s waveform in `rect` (left channel above right), columns mapped through the
 /// timeline's time map and the layer's time mapping, limited to its [in, out) span and drawn as
 /// the layer plays (see [`played`]).
@@ -150,8 +160,8 @@ pub(crate) fn draw(p: &Painter, rect: Rect, tm: &TMap, layer: &Layer, s: &Summar
         let gain = level_gains(layer, levels, Tick::from_seconds_f64((ta + tb) * 0.5));
         for c in 0..2 {
             let (lo, hi) = ((agg[c * 2] * gain[c]).clamp(-1.0, 1.0), (agg[c * 2 + 1] * gain[c]).clamp(-1.0, 1.0));
-            let (ya, yb) = (mid[c] - hi * half, mid[c] - lo * half);
-            p.line_segment([pos2(x as f32 + 0.5, ya), pos2(x as f32 + 0.5, yb.max(ya + 1.0))], Stroke::new(1.0, color));
+            let (ya, yb) = channel_span(lo, hi, mid[c], half, c == 0);
+            p.line_segment([pos2(x as f32 + 0.5, ya), pos2(x as f32 + 0.5, yb)], Stroke::new(1.0, color));
         }
     }
 }
@@ -381,5 +391,47 @@ mod played_tests {
             assert!(edge < 1.001, "{name}: the edge column draws {edge}, past the out point");
             assert_eq!(drawn(&l, &s, 1.0, 1.005), None, "{name}: a column after the out point");
         }
+    }
+}
+
+/// #3979: the Timeline waveform is single-sided (rectified), like After Effects' Rectified Audio —
+/// each lane's span starts at its centre line and reaches one way, by the sample's magnitude,
+/// instead of mirroring above and below it.
+#[cfg(test)]
+mod single_sided {
+    use super::*;
+
+    /// A loud sample draws from the lane's centre line outward, using the larger of |min|, |max|.
+    #[test]
+    fn a_column_draws_from_its_lane_centre_line_one_way() {
+        let (mid, half) = (50.0, 24.0);
+        let (top, bottom) = channel_span(-0.8, 0.9, mid, half, true);
+        assert_eq!(bottom, mid, "the left lane starts at its centre line");
+        assert!((mid - top - 0.9 * half).abs() < 1e-4, "left lane reaches {top}, not 0.9 of half");
+        let (top, bottom) = channel_span(-0.8, 0.9, mid, half, false);
+        assert_eq!(top, mid, "the right lane starts at its centre line");
+        assert!((bottom - mid - 0.9 * half).abs() < 1e-4, "right lane reaches {bottom}, not 0.9 of half");
+    }
+
+    /// A sample that stays below zero is rectified, so it still reaches its full magnitude.
+    #[test]
+    fn a_negative_only_sample_is_rectified() {
+        let (mid, half) = (50.0, 24.0);
+        let (top, bottom) = channel_span(-0.8, -0.2, mid, half, true);
+        assert_eq!(bottom, mid);
+        assert!((mid - top - 0.8 * half).abs() < 1e-4, "a negative-only sample reaches {top}");
+        let (top, bottom) = channel_span(-0.8, -0.2, mid, half, false);
+        assert_eq!(top, mid);
+        assert!((bottom - mid - 0.8 * half).abs() < 1e-4);
+    }
+
+    /// Silence keeps the old one-pixel tick, on the same side as a loud sample.
+    #[test]
+    fn a_silent_column_still_draws_one_pixel() {
+        let (mid, half) = (50.0, 24.0);
+        let (top, bottom) = channel_span(0.0, 0.0, mid, half, true);
+        assert_eq!((top, bottom), (mid - 1.0, mid));
+        let (top, bottom) = channel_span(0.0, 0.0, mid, half, false);
+        assert_eq!((top, bottom), (mid, mid + 1.0));
     }
 }
