@@ -634,9 +634,16 @@ impl EffectCtx<'_> {
     /// `masks_and_effects` is the effect's built-in choice, used when the instance has no
     /// source companion parameter (see [`layer_source_id`]).
     pub fn layer_param(&self, id: &str, masks_and_effects: bool) -> Option<LayerPixels> {
+        self.layer_param_source(id, None, masks_and_effects)
+    }
+
+    /// Like [`layer_param`], reading the source companion from `source` (`None`: `idSource`). A
+    /// plug-in may declare its own companion in another group; the caller resolves its path.
+    pub fn layer_param_source(&self, id: &str, source: Option<&str>, masks_and_effects: bool) -> Option<LayerPixels> {
         let lid = self.params.get(id)?.as_layer()?;
         let host = self.env.host?;
-        match self.params.get(&layer_source_id(id)).map(Value::as_enum) {
+        let mode = source.and_then(|s| self.params.get(s)).or_else(|| self.params.get(&layer_source_id(id)));
+        match mode.map(Value::as_enum) {
             Some(0) => host.layer(lid, false),
             Some(1) => host.layer_masks(lid),
             Some(_) => host.layer(lid, true),
@@ -901,6 +908,14 @@ pub fn layer_source_id(id: &str) -> String {
     format!("{id}Source")
 }
 
+/// The spec id of the source companion a spec declares for layer parameter `leaf`, if any: a
+/// parameter whose leaf id is `<leaf>Source`, in any group. Built-ins declare it at the layer
+/// parameter's own path; a plug-in may declare it ungrouped or elsewhere.
+pub(crate) fn explicit_source(spec: &EffectSpec, leaf: &str) -> Option<&'static str> {
+    let sid = layer_source_id(leaf);
+    spec.params.iter().map(|q| q.id).find(|q| q.rsplit('/').next() == Some(sid.as_str()))
+}
+
 /// Build the property group for a new instance of an effect.
 pub fn instantiate(spec: &EffectSpec, ids: &mut Ids, instance_name: &str, layer_size: [f64; 2]) -> PropGroup {
     let mut g = ids.group(spec.id, instance_name);
@@ -919,19 +934,18 @@ pub fn instantiate(spec: &EffectSpec, ids: &mut Ids, instance_name: &str, layer_
         }
         // (the channels an effect reads: not animatable, as in After Effects)
         pr.static_only = channel3d::selects_channels(spec.id, ps.id);
-        match path.and_then(|path| nested_group(&mut g, ids, path)) {
+        match path.and_then(|path| nested_group(&mut g, ids, path, spec.id)) {
             Some(sub) => sub.children.push(pr.into()),
             None => g.children.push(pr.into()),
         }
         // Layer parameters carry a source choice (Source / Masks / Effects & Masks) unless the
-        // effect declares its own (with its own default).
+        // effect declares its own (with its own default), in any group.
         // A grouped layer parameter's companion sits next to it in its group, so it flattens
         // to `group/paramSource` = `layer_source_id("group/param")`.
-        let sid = layer_source_id(ps.id);
-        if matches!(ps.ui, ParamUi::Layer) && !spec.params.iter().any(|q| q.id == sid) {
+        if matches!(ps.ui, ParamUi::Layer) && explicit_source(spec, leaf).is_none() {
             let mut src = Property::new(ids.alloc(), &layer_source_id(leaf), &format!("{} Source", ps.name), Value::Enum(2)).with_ui(ParamUi::Hidden);
             src.hold_only = true;
-            match path.and_then(|path| nested_group(&mut g, ids, path)) {
+            match path.and_then(|path| nested_group(&mut g, ids, path, spec.id)) {
                 Some(sub) => sub.children.push(src.into()),
                 None => g.children.push(src.into()),
             }
@@ -1128,8 +1142,13 @@ pub const PARAM_GROUPS: &[(&str, &str)] = &[
     ("strokeOptions", "Stroke Options"),
 ];
 
-/// Display names of nested parameter groups by match id.
-fn group_name(m: &str) -> &str {
+/// Display names of nested parameter groups by match id (built-in tables and plug-in manifests),
+/// scoped to the owning effect `owner` so two plug-ins may normalize different names to one key.
+fn group_name<'a>(owner: &str, m: &'a str) -> &'a str {
+    // Groups declared by this plug-in's manifest (`group` field).
+    if let Some(n) = plugin::plugin_group_name(owner, m) {
+        return n;
+    }
     warp_stab::GROUPS
         .iter()
         .chain(roto::GROUPS)
@@ -1142,17 +1161,17 @@ fn group_name(m: &str) -> &str {
 }
 
 /// The nested group at `path` (`borders/autoScale`) under `g`, created on first use.
-fn nested_group<'a>(g: &'a mut PropGroup, ids: &mut Ids, path: &str) -> Option<&'a mut PropGroup> {
+fn nested_group<'a>(g: &'a mut PropGroup, ids: &mut Ids, path: &str, owner: &str) -> Option<&'a mut PropGroup> {
     let (first, rest) = match path.split_once('/') {
         Some((a, b)) => (a, Some(b)),
         None => (path, None),
     };
     if g.sub(first).is_none() {
-        g.children.push(ids.group(first, group_name(first)).into());
+        g.children.push(ids.group(first, group_name(owner, first)).into());
     }
     let sub = g.sub_mut(first)?;
     match rest {
-        Some(r) => nested_group(sub, ids, r),
+        Some(r) => nested_group(sub, ids, r, owner),
         None => Some(sub),
     }
 }

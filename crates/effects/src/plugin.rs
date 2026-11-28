@@ -21,6 +21,8 @@
 //!   slot and are read with [`PluginParams::text`];
 //! * `time` is layer time in seconds; `scale` is the buffer's pixels per layer pixel (scale
 //!   pixel distances like blur radii by it);
+//! * a parameter's optional `group` path (`"Advanced/Edges"`) nests it in a twirl-down group: its
+//!   property id becomes `pg_<group>/<id>`, and the group shows the manifest's words as its name;
 //! * rendering must be deterministic (same inputs, same output) and may run on several threads
 //!   at once.
 //!
@@ -469,6 +471,67 @@ fn leak(s: &str) -> &'static str {
     Box::leak(s.to_string().into_boxed_str())
 }
 
+/// Display names of plug-in parameter groups (`group` field) per owning effect, keyed by their
+/// match id (`pg_border` → `Border`). Registered with each plug-in and read by `group_name`, so
+/// the twirl-downs show that manifest's words (two plug-ins may normalize different names to the
+/// same key).
+static PLUGIN_GROUP_NAMES: RwLock<Vec<(&'static str, &'static str, &'static str)>> = RwLock::new(Vec::new());
+
+/// The display name of group `key` in plug-in `owner`, if that plug-in registered it.
+pub(crate) fn plugin_group_name(owner: &str, key: &str) -> Option<&'static str> {
+    let names = PLUGIN_GROUP_NAMES.read().unwrap_or_else(|e| e.into_inner());
+    names.iter().find(|(o, k, _)| *o == owner && *k == key).map(|(_, _, n)| *n)
+}
+
+/// A group path segment as a property id: `Individual Expansion` → `pg_individual_expansion`
+/// (prefixed so it never matches a built-in group key such as `master`).
+fn group_key(segment: &str) -> String {
+    let mut k = String::from("pg_");
+    for c in segment.chars() {
+        k.push(if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '_' });
+    }
+    k
+}
+
+/// The non-empty segments of a `group` path (`Advanced//Edges` skips the empty one).
+fn group_keys(group: &str) -> Vec<String> {
+    group.split('/').map(str::trim).filter(|s| !s.is_empty()).map(group_key).collect()
+}
+
+/// The spec / property id of plug-in parameter `p`: its `id`, or `group/sub/id` when the manifest
+/// gives it a `group` path (`Advanced/Edges`), so it nests in twirl-down groups like the parameters
+/// of built-in effects. Parameters without a group keep their plain id, so existing plug-ins and
+/// saved projects are unaffected.
+fn param_path(p: &PluginParam) -> String {
+    let segs = group_keys(&p.group);
+    if segs.is_empty() { p.id.clone() } else { format!("{}/{}", segs.join("/"), p.id) }
+}
+
+/// Remember the display names of `m`'s parameter groups.
+fn register_group_names(m: &PluginManifest) {
+    let mut names = PLUGIN_GROUP_NAMES.write().unwrap_or_else(|e| e.into_inner());
+    let owner = leak(&m.id);
+    for p in &m.params {
+        for seg in p.group.split('/').map(str::trim).filter(|s| !s.is_empty()) {
+            let key = leak(&group_key(seg));
+            if !names.iter().any(|(o, k, _)| *o == owner && *k == key) {
+                names.push((owner, key, leak(seg)));
+            }
+        }
+    }
+}
+
+/// The property path of the source companion of manifest layer parameter `id`: an explicitly
+/// declared companion parameter's own path when the manifest has one (its id is `<id>Source`,
+/// with or without a group), else `<group path>/<id>Source`.
+pub(crate) fn source_path(m: &PluginManifest, id: &str) -> Option<String> {
+    let p = m.params.iter().find(|p| p.id == id)?;
+    Some(match m.params.iter().find(|q| q.id == crate::layer_source_id(id)) {
+        Some(q) => param_path(q),
+        None => crate::layer_source_id(&param_path(p)),
+    })
+}
+
 fn param_spec(p: &PluginParam) -> ParamSpec {
     let (default, ui) = match &p.kind {
         PluginParamKind::Slider { default, min, max, slider_min, slider_max, decimals, integer } => (
@@ -491,7 +554,7 @@ fn param_spec(p: &PluginParam) -> ParamSpec {
         PluginParamKind::Text { default } => (Value::Str(default.clone()), ParamUi::Text),
         PluginParamKind::Hidden { default } => (Value::Str(default.clone()), ParamUi::Hidden),
     };
-    ParamSpec { id: leak(&p.id), name: leak(&p.name), default, ui }
+    ParamSpec { id: leak(&param_path(p)), name: leak(&p.name), default, ui }
 }
 
 /// Register a plug-in effect: it appears in Effects & Presets under its category and is
@@ -509,6 +572,7 @@ pub fn register_plugin(plugin: Arc<dyn EffectPlugin>) -> Result<&'static EffectS
         .position(|s| s.get().is_none())
         .ok_or_else(|| format!("too many plug-in effects: a session registers at most {MAX_PLUGINS}; remove some plug-ins and restart EffectCraft"))?;
     SLOTS[slot].set(plugin).map_err(|_| "plug-in slot taken".to_string())?;
+    register_group_names(&m);
     let spec: &'static EffectSpec = Box::leak(Box::new(EffectSpec {
         id: leak(&m.id),
         name: leak(&m.name),
@@ -596,7 +660,7 @@ pub fn flatten_params(m: &PluginManifest, params: &Params, offset: [f64; 2], sca
     let to_px = |q: [f64; 2]| (q[0] * scale + offset[0], q[1] * scale + offset[1]);
     let mut out = Vec::with_capacity(m.flat_len());
     for p in &m.params {
-        let v = params.get(&p.id);
+        let v = params.get(&param_path(p));
         match &p.kind {
             PluginParamKind::Point { .. } => {
                 let (x, y) = to_px(v.map(Value::as_vec2).unwrap_or([0.0; 2]));
@@ -626,7 +690,7 @@ pub fn flatten_texts(m: &PluginManifest, params: &Params) -> Vec<String> {
     m.params
         .iter()
         .filter_map(|p| match &p.kind {
-            PluginParamKind::Text { default } | PluginParamKind::Hidden { default } => Some(match params.get(&p.id) {
+            PluginParamKind::Text { default } | PluginParamKind::Hidden { default } => Some(match params.get(&param_path(p)) {
                 Some(Value::Str(s)) => s.clone(),
                 _ => default.clone(),
             }),
@@ -660,13 +724,19 @@ impl PluginHost for RenderHost<'_, '_> {
 
     fn layer_input(&self, param_id: &str, layer_time: f64) -> Option<PluginImage> {
         let ctx = self.ctx;
-        let lid = ctx.params.get(param_id)?.as_layer()?;
+        // A grouped layer parameter lives at `pg_<group>/<id>`; its source companion sits where
+        // the manifest declares it, else next to it ([`param_path`] / [`source_path`]).
+        let owned = self.manifest.params.iter().find(|p| p.id == param_id);
+        let key = owned.map(param_path);
+        let key = key.as_deref().unwrap_or(param_id);
+        let src = owned.and_then(|p| source_path(self.manifest, &p.id)).unwrap_or_else(|| crate::layer_source_id(key));
+        let lid = ctx.params.get(key)?.as_layer()?;
         let other = if (layer_time - ctx.time).abs() < 1e-9 {
-            ctx.layer_param(param_id, true)?
+            ctx.layer_param_source(key, Some(&src), true)?
         } else {
             let host = ctx.env.host?;
             // Source / Masks show no effects; the default (Effects & Masks) does.
-            let with_effects = !matches!(ctx.params.get(&crate::layer_source_id(param_id)).map(Value::as_enum), Some(0 | 1));
+            let with_effects = !matches!(ctx.params.get(&src).map(Value::as_enum), Some(0 | 1));
             host.layer_at(lid, ctx.env.comp_time + (layer_time - ctx.time), with_effects)?
         };
         let img = crate::util::fit_layer(ctx, &self.grid(), &other, false);
@@ -723,4 +793,173 @@ fn run_slot(slot: usize, ctx: &EffectCtx, mut buf: Buf) -> Buf {
         set_plugin_error(&m.id, None);
     }
     buf
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::instantiate;
+    use effectcraft_project::build::Ids;
+    use effectcraft_project::{ParamUi, PropGroup};
+
+    struct Fake {
+        m: PluginManifest,
+    }
+
+    impl EffectPlugin for Fake {
+        fn manifest(&self) -> &PluginManifest {
+            &self.m
+        }
+        fn render(&self, _: &mut PluginFrame, _: &PluginParams, _: f64) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    fn slider(id: &str, name: &str, group: &str, default: f64) -> PluginParam {
+        PluginParam {
+            id: id.into(),
+            name: name.into(),
+            group: group.into(),
+            kind: PluginParamKind::Slider { default, min: 0.0, max: 10.0, slider_min: None, slider_max: None, decimals: 2, integer: false },
+        }
+    }
+
+    fn manifest(id: &str, params: Vec<PluginParam>) -> PluginManifest {
+        PluginManifest {
+            api: 2,
+            id: id.into(),
+            name: "Grouped".into(),
+            category: "Test Plug-ins".into(),
+            version: "1.0".into(),
+            author: String::new(),
+            description: String::new(),
+            params,
+        }
+    }
+
+    #[test]
+    fn grouped_parameters_nest_under_their_display_names() {
+        let m = manifest(
+            "dev.effectcraft.test.grouped",
+            vec![
+                slider("gain", "Gain", "", 0.5),
+                slider("width", "Width", "Border", 2.0),
+                PluginParam {
+                    id: "tint".into(),
+                    name: "Tint".into(),
+                    group: "Advanced/Edges".into(),
+                    kind: PluginParamKind::Color { default: [1.0, 0.0, 0.0, 1.0] },
+                },
+            ],
+        );
+        let spec = register_plugin(Arc::new(Fake { m: m.clone() })).expect("register");
+        let ids: Vec<&str> = spec.params.iter().map(|p| p.id).collect();
+        assert_eq!(ids, vec!["gain", "pg_border/width", "pg_advanced/pg_edges/tint"]);
+        let mut uid = 0u64;
+        let g = instantiate(spec, &mut Ids(&mut uid), "Grouped", [100.0, 100.0]);
+        assert!(g.prop("gain").is_some(), "an ungrouped parameter keeps its plain id");
+        let border = g.sub("pg_border").expect("Border group");
+        assert_eq!(border.name, "Border");
+        assert!(border.prop("width").is_some());
+        let advanced = g.sub("pg_advanced").expect("Advanced group");
+        assert_eq!(advanced.name, "Advanced");
+        let edges = advanced.sub("pg_edges").expect("Edges group");
+        assert_eq!(edges.name, "Edges");
+        assert!(edges.prop("tint").is_some());
+        // The flattened values still follow declaration order and read the nested keys.
+        let mut values = std::collections::HashMap::new();
+        values.insert("gain".to_string(), Value::Scalar(0.25));
+        values.insert("pg_border/width".to_string(), Value::Scalar(3.0));
+        values.insert("pg_advanced/pg_edges/tint".to_string(), Value::Color([0.0, 1.0, 0.0, 1.0]));
+        let params = Params { values };
+        let flat = flatten_params(&m, &params, [0.0, 0.0], 1.0);
+        assert_eq!(flat.len(), 6);
+        assert!((flat[0] - 0.25).abs() < 1e-9);
+        assert!((flat[1] - 3.0).abs() < 1e-9);
+        assert_eq!(&flat[2..6], &[0.0, 1.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn a_grouped_layer_parameter_keeps_its_source_companion_next_to_it() {
+        let m = manifest(
+            "dev.effectcraft.test.grouped-layer",
+            vec![PluginParam { id: "src".into(), name: "Layer".into(), group: "Input".into(), kind: PluginParamKind::Layer }],
+        );
+        let spec = register_plugin(Arc::new(Fake { m: m.clone() })).expect("register");
+        assert_eq!(spec.params[0].id, "pg_input/src");
+        let mut uid = 0u64;
+        let g = instantiate(spec, &mut Ids(&mut uid), "Grouped", [100.0, 100.0]);
+        let input = g.sub("pg_input").expect("Input group");
+        assert!(input.prop("src").is_some());
+        assert!(input.prop("srcSource").is_some(), "the source companion nests with its layer");
+        // `RenderHost::layer_input` resolves the layer and its source by this same path.
+        assert_eq!(crate::layer_source_id("pg_input/src"), "pg_input/srcSource");
+    }
+
+    fn popup(id: &str, name: &str, group: &str, default: u32) -> PluginParam {
+        PluginParam {
+            id: id.into(),
+            name: name.into(),
+            group: group.into(),
+            kind: PluginParamKind::Popup { options: vec!["Source".into(), "Masks".into(), "Effects & Masks".into()], default },
+        }
+    }
+
+    #[test]
+    fn each_plugin_keeps_its_own_group_display_name() {
+        let mut uid = 0u64;
+        let mut ids = Ids(&mut uid);
+        for (effect, group, expected) in
+            [("dev.effectcraft.test.group-name-a", "Fine Tuning", "Fine Tuning"), ("dev.effectcraft.test.group-name-b", "Fine-Tuning", "Fine-Tuning")]
+        {
+            let m = manifest(effect, vec![slider("width", "Width", group, 1.0)]);
+            let spec = register_plugin(Arc::new(Fake { m })).expect("register");
+            let g = instantiate(spec, &mut ids, "Grouped", [100.0, 100.0]);
+            assert_eq!(g.sub("pg_fine_tuning").expect("group").name, expected, "{effect}");
+        }
+    }
+
+    #[test]
+    fn an_explicit_source_companion_is_used_where_the_manifest_puts_it() {
+        let m = manifest(
+            "dev.effectcraft.test.explicit-source",
+            vec![
+                PluginParam { id: "src".into(), name: "Layer".into(), group: "Input".into(), kind: PluginParamKind::Layer },
+                popup("srcSource", "Source", "", 0),
+            ],
+        );
+        let mut uid = 0u64;
+        let mut ids = Ids(&mut uid);
+        let spec = register_plugin(Arc::new(Fake { m: m.clone() })).expect("register");
+        let ids_in_spec: Vec<&str> = spec.params.iter().map(|p| p.id).collect();
+        assert_eq!(ids_in_spec, vec!["pg_input/src", "srcSource"]);
+        let g = instantiate(spec, &mut ids, "Grouped", [100.0, 100.0]);
+        assert!(g.prop("srcSource").is_some(), "the explicit companion keeps its own place");
+        let input = g.sub("pg_input").expect("Input group");
+        assert!(input.prop("src").is_some());
+        assert!(input.prop("srcSource").is_none(), "no hidden companion shadows the explicit one");
+        assert_eq!(source_path(&m, "src").as_deref(), Some("srcSource"));
+    }
+
+    #[test]
+    fn a_saved_top_level_source_companion_moves_into_the_group() {
+        let m = manifest(
+            "dev.effectcraft.test.migrate-source",
+            vec![PluginParam { id: "src".into(), name: "Layer".into(), group: "Input".into(), kind: PluginParamKind::Layer }],
+        );
+        let spec = register_plugin(Arc::new(Fake { m })).expect("register");
+        let mut uid = 0u64;
+        let mut ids = Ids(&mut uid);
+        // A project saved before plug-ins had groups: the layer and its source sit at the root.
+        let mut g = PropGroup::new(ids.alloc(), spec.id, "Grouped");
+        g.children.push(ids.prop("src", "Layer", Value::Layer(None)).into());
+        let mut saved = ids.prop("srcSource", "Layer Source", Value::Enum(0));
+        saved.ui = ParamUi::Hidden;
+        g.children.push(saved.into());
+        assert!(crate::migrate::upgrade_instance(spec, &mut g, &mut ids, [100.0, 100.0]));
+        assert!(g.prop("srcSource").is_none(), "the old top-level companion moved");
+        let input = g.sub("pg_input").expect("Input group");
+        assert!(input.prop("src").is_some());
+        assert_eq!(input.prop("srcSource").map(|p| p.value.clone()), Some(Value::Enum(0)));
+    }
 }
