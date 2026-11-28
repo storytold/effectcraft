@@ -11,6 +11,9 @@ use crate::{Error, Result};
 
 /// Slightly longer than the app's own 60 s per-request timeout, so its error reply wins.
 const READ_TIMEOUT: Duration = Duration::from_secs(65);
+/// The desktop control protocol's request-line limit, excluding the newline.
+/// Reject locally before writing, since closing an oversized request can reset the TCP stream.
+const MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
 
 pub struct BridgeClient {
     addr: String,
@@ -56,13 +59,16 @@ impl BridgeClient {
         let unknown = |error| Error::Bridge(format!("`{method}` request outcome is unknown: {error}; inspect the app before retrying"));
         let mut last = Error::Bridge("not attempted".into());
         for attempt in 0..2 {
+            let id = self.next_id;
+            let line = format!("{}\n", json!({"id": id, "method": method, "params": params}));
+            if line.len() - 1 > MAX_REQUEST_BYTES {
+                return Err(Error::BadArgs(format!("control request exceeds {MAX_REQUEST_BYTES} bytes; it was not sent; split the script into smaller calls")));
+            }
             if self.conn.is_none() {
                 self.conn = Some(self.connect()?);
             }
-            let id = self.next_id;
             self.next_id = self.next_id.checked_add(1).ok_or_else(|| Error::Bridge("control request id space exhausted".into()))?;
             let Some((r, w)) = self.conn.as_mut() else { continue };
-            let line = format!("{}\n", json!({"id": id, "method": method, "params": params}));
             // `Ok(Err(_))`: transmission/reply failed (the app may have applied the request);
             // `Err(_)`: a timeout or bad reply (never resent: the app may have run the request).
             let res = (|| -> Result<std::result::Result<Value, Error>> {
@@ -102,5 +108,23 @@ impl BridgeClient {
             }
         }
         Err(last)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn oversized_serialized_script_is_refused_before_connecting() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let mut client = BridgeClient::new(&listener.local_addr().unwrap().to_string()).unwrap();
+        // Escaping doubles the bytes: checking the source length alone is insufficient.
+        let code = "\"".repeat(MAX_REQUEST_BYTES / 2);
+        let error = client.call("engine.execute", json!({"command": "script.run", "params": {"code": code}})).unwrap_err();
+        assert!(error.to_string().contains("not sent"), "{error}");
+        assert!(matches!(listener.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock));
+        assert_eq!(client.next_id, 1);
     }
 }
