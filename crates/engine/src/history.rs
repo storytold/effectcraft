@@ -33,6 +33,11 @@ pub struct History {
     pub merge_key: Option<String>,
     /// Alternative futures kept when a new step was made after undoing.
     pub branches: Vec<Branch>,
+    /// Open `engine.batch` calls. While a batch runs its steps record without trimming: the
+    /// state before the batch is the anchor the batch folds its steps onto, and the undo limit
+    /// must not trim it away first (a batch larger than the limit would otherwise stay separate
+    /// steps). The batch trims once, when it closes.
+    pub batch_depth: u32,
 }
 
 /// A line of states that grows from another state of the history.
@@ -194,7 +199,11 @@ impl History {
         self.abandon_redo(&before);
         self.undo.push((label.to_string(), before.clone()));
         self.merge_key = None;
-        self.trim(levels, &before);
+        // An open batch keeps every step it records: its pre-state is the fold anchor, and
+        // trimming here could drop it before the batch closes (see `batch_depth`).
+        if self.batch_depth == 0 {
+            self.trim(levels, &before);
+        }
     }
 
     /// Keep the undone states as a branch growing from `from` (the state a new step starts from).

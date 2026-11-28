@@ -9,9 +9,26 @@ use serde_json::{Value, json};
 use super::{CommandSpec, always, bad, str_p};
 use crate::{EngineError, Result, Session};
 
-/// Commands that can't run inside a batch (they nest batches), besides the commands that run
-/// scripts ([`super::scripts::RUNS_SCRIPTS`]).
-const NOT_IN_BATCH: &[&str] = &["engine.batch"];
+/// Commands that can't run inside a batch (they nest batches or discard the history the batch
+/// folds onto), besides the commands that run scripts ([`super::scripts::RUNS_SCRIPTS`]).
+///
+/// The project-replacing commands (`file.*`, `templates.create`) reset history
+/// ([`crate::Session::replace_project`]) and with it the anchor the batch folds its steps onto.
+/// `edit.undo` and `edit.history.goto` walk the project across the undo line, which moves that
+/// anchor out of `History::undo` before `fold` runs.
+const NOT_IN_BATCH: &[&str] = &[
+    "engine.batch",
+    "edit.purgeUndo",
+    "edit.undo",
+    "edit.history.goto",
+    "file.newProject",
+    "file.open",
+    "file.openDemoProject",
+    "file.closeProject",
+    "file.revert",
+    "file.openRecent",
+    "templates.create",
+];
 
 /// Resolve a `$N` / `$N.key.0.key` reference against the results so far.
 fn reference(s: &str, results: &[Value]) -> Option<Result<Value>> {
@@ -68,6 +85,10 @@ fn batch(s: &mut Session, p: &Value) -> Result<Value> {
     let label = str_p(p, "label").unwrap_or("Batch").to_string();
     let atomic = p.get("atomic").and_then(Value::as_bool).unwrap_or(true);
     let (project, history, state) = (s.project.clone(), s.history.clone(), s.state.clone());
+    // The batch is one undo level however many steps it has: while it runs, its steps record
+    // without trimming, so the pre-batch state stays reachable as `fold`'s anchor (a batch larger
+    // than the undo limit would otherwise stay separate steps). `close_batch` trims once.
+    s.history.batch_depth += 1;
     // Rolled-back steps may have queued events (an `OpenComp`, a Toast) for the state that is
     // about to be dropped: the UI must not act on them.
     let event_mark = s.events.len();
@@ -108,14 +129,14 @@ fn batch(s: &mut Session, p: &Value) -> Result<Value> {
                     s.bump();
                     "; the batch was rolled back (nothing changed)".to_string()
                 } else {
-                    fold(s, &project, &label);
+                    close_batch(s, &project, &label);
                     format!("; steps 1–{i} were applied")
                 };
                 return Err(EngineError::Other(format!("step {} ({id}): {e}{note}", i + 1)));
             }
         }
     }
-    fold(s, &project, &label);
+    close_batch(s, &project, &label);
     Ok(json!({"steps": results.len(), "results": results}))
 }
 
@@ -127,6 +148,18 @@ fn fold(s: &mut Session, snap: &Arc<effectcraft_project::Project>, label: &str) 
     h.undo.truncate(start);
     h.undo.push((label.to_string(), first));
     h.merge_key = None;
+}
+
+/// End a batch: leave the transaction, fold its steps into one undo level named `label`, then
+/// apply the undo-level limit once. The limit was suspended while the batch ran so its pre-state
+/// stayed reachable as the fold anchor; trimming here keeps the history at `general.undoLevels`.
+fn close_batch(s: &mut Session, snap: &Arc<effectcraft_project::Project>, label: &str) {
+    s.history.batch_depth = s.history.batch_depth.saturating_sub(1);
+    fold(s, snap, label);
+    if s.history.batch_depth == 0 {
+        let levels = s.prefs.general.undo_levels.max(1) as usize;
+        s.history.trim(levels, &s.project);
+    }
 }
 
 pub fn specs() -> Vec<CommandSpec> {
@@ -220,5 +253,64 @@ mod tests {
         // Bad references are reported.
         let e = s.execute_checked("engine.batch", json!({"steps": [{"command": "layer.rename", "params": {"layer": "$3.layer", "name": "x"}}]})).unwrap_err();
         assert!(e.to_string().contains("refers to step 3"), "{e}");
+    }
+
+    /// A purge would clear the history the batch folds onto, so it is refused like a nested batch.
+    #[test]
+    fn a_purge_cannot_run_inside_a_batch() {
+        let mut s = Session::default();
+        s.execute("comp.new", json!({"name": "B", "width": 100, "height": 100})).unwrap();
+        let e = s
+            .execute_checked(
+                "engine.batch",
+                json!({"steps": [
+                    {"command": "layer.newNull", "params": {}},
+                    {"command": "edit.purgeUndo", "params": {}}
+                ]}),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("edit.purgeUndo") && e.contains("can't run inside a batch"), "{e}");
+    }
+
+    /// A project-replacing command resets history, discarding the fold anchor the batch's single
+    /// undo step rests on, so it is refused like a nested batch or a purge.
+    #[test]
+    fn a_batch_refuses_commands_that_replace_the_project() {
+        let mut s = Session::default();
+        s.execute("comp.new", json!({"name": "B", "width": 100, "height": 100})).unwrap();
+        s.execute("layer.newSolid", json!({"name": "Box", "color": "#ff0000"})).unwrap();
+        let before_batch = s.project.clone();
+        for id in ["file.newProject", "file.open", "file.openDemoProject", "file.closeProject", "file.revert", "file.openRecent", "templates.create"] {
+            let e = s.execute_checked("engine.batch", json!({"label": "switch", "steps": [{"command": id, "params": {}}]})).unwrap_err().to_string();
+            assert!(e.contains(id) && e.contains("can't run inside a batch"), "{id}: {e}");
+        }
+        // Every attempt was refused, so nothing replaced the project and the anchor survives.
+        assert!(std::sync::Arc::ptr_eq(&s.project, &before_batch));
+        assert_eq!(s.history.batch_depth, 0);
+        assert!(s.undo(), "the pre-batch state stays reachable");
+    }
+
+    /// Undo and history jumps walk the project across the undo line, which moves the batch's fold
+    /// anchor out of `History::undo` before `fold` runs, so they are refused too.
+    #[test]
+    fn a_batch_refuses_history_navigation() {
+        for (id, params) in [("edit.undo", json!({})), ("edit.history.goto", json!({"steps": -1}))] {
+            let mut s = Session::default();
+            s.execute("comp.new", json!({"name": "B", "width": 100, "height": 100})).unwrap();
+            s.execute("layer.newSolid", json!({"name": "Box", "color": "#ff0000"})).unwrap();
+            let before_batch = s.project.clone();
+            let e = s
+                .execute_checked(
+                    "engine.batch",
+                    json!({"label": "nav", "steps": [{"command": "layer.newNull", "params": {}}, {"command": id, "params": params}]}),
+                )
+                .unwrap_err()
+                .to_string();
+            assert!(e.contains(id) && e.contains("can't run inside a batch"), "{id}: {e}");
+            // Refused and rolled back: the project and its anchor are exactly as before.
+            assert!(std::sync::Arc::ptr_eq(&s.project, &before_batch));
+            assert_eq!(s.history.batch_depth, 0);
+        }
     }
 }

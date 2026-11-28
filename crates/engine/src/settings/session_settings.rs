@@ -37,10 +37,13 @@ impl Session {
             self.layer_cache.clear();
             self.events.push(crate::Event::PurgeCaches);
         }
-        // Fewer undo levels apply right away.
-        let levels = self.prefs.general.undo_levels.max(1) as usize;
-        let current = self.project.clone();
-        self.history.trim(levels, &current);
+        // Fewer undo levels apply right away, except during a batch: its pre-state is the anchor the
+        // batch folds onto, and `close_batch` applies the limit once the batch closes.
+        if self.history.batch_depth == 0 {
+            let levels = self.prefs.general.undo_levels.max(1) as usize;
+            let current = self.project.clone();
+            self.history.trim(levels, &current);
+        }
         // Settings ▸ Roto Brush / Face Tracking: load (or drop) the chosen trained models.
         self.apply_models();
         self.prefs_revision += 1;
