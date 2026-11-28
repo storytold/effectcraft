@@ -1,5 +1,5 @@
 //! The Home screen, laid out like After Effects' (shown over the whole workspace at launch, from
-//! the Tools bar's Home button and by the Learn workspace). A left rail holds New Project / Open
+//! the Tools bar's Home button and by the Learn workspace). A side rail holds New Project / Open
 //! Project, the Home / Templates / Learn pages and, at its foot, the ArtCraft community links.
 //! The Home page welcomes you with quick-start tiles (New Composition, the demo project, Import,
 //! New from Template) over the recent projects (File ▸ Open Recent, from Settings): a filterable
@@ -218,8 +218,21 @@ fn thumb_texture(app: &mut EffectcraftApp, ctx: &egui::Context, path: &str) -> O
     tex
 }
 
-/// Width of the Home screen's left rail.
+/// Width of the Home screen's navigation rail.
 const RAIL_W: f32 = 236.0;
+
+/// Mirror the Home rail and content for Hebrew without changing click/action IDs
+/// or mirroring filename/path data. Other interface languages retain the original geometry.
+fn home_regions(rect: Rect, rtl: bool) -> (Rect, Rect) {
+    let w = RAIL_W.min(rect.width() * 0.4);
+    let rail = if rtl { Rect::from_min_max(pos2(rect.max.x - w, rect.min.y), rect.max) } else { Rect::from_min_size(rect.min, vec2(w, rect.height())) };
+    let main = if rtl {
+        Rect::from_min_max(pos2(rect.min.x + 40.0, rect.min.y + 32.0), pos2(rail.min.x - 40.0, rect.max.y - 16.0))
+    } else {
+        Rect::from_min_max(pos2(rail.max.x + 40.0, rect.min.y + 32.0), pos2(rect.max.x - 40.0, rect.max.y - 16.0))
+    };
+    (rail, main)
+}
 
 /// Draw the Home screen over `rect` (the whole workspace).
 pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
@@ -228,11 +241,12 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     let p = ui.painter().with_clip_rect(rect);
     p.rect_filled(rect, 0.0, t.app_bg);
     let mut actions: Vec<(&str, serde_json::Value)> = vec![];
-    let rail = Rect::from_min_size(rect.min, vec2(RAIL_W.min(rect.width() * 0.4), rect.height()));
+    let rtl = crate::i18n::language(app) == "he";
+    let (rail, main) = home_regions(rect, rtl);
     p.rect_filled(rail, 0.0, t.panel_bg);
-    p.line_segment([rail.right_top(), rail.right_bottom()], Stroke::new(1.0, t.separator));
-    rail_ui(app, ui, &p, rail, &mut actions);
-    let main = Rect::from_min_max(pos2(rail.max.x + 40.0, rect.min.y + 32.0), pos2(rect.max.x - 40.0, rect.max.y - 16.0));
+    let (top, bottom) = if rtl { (rail.left_top(), rail.left_bottom()) } else { (rail.right_top(), rail.right_bottom()) };
+    p.line_segment([top, bottom], Stroke::new(1.0, t.separator));
+    rail_ui(app, ui, &p, rail, rtl, &mut actions);
     if app.ui.home_learn {
         super::learn::home_tab(app, ui, main);
     } else if app.ui.home_templates {
@@ -243,8 +257,8 @@ pub fn show(app: &mut EffectcraftApp, ui: &mut egui::Ui, rect: Rect) {
     run_actions(app, &ctx, actions);
 }
 
-/// The left rail: New / Open Project, the pages, and the community links at its foot.
-fn rail_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, rail: Rect, actions: &mut Vec<(&'static str, serde_json::Value)>) {
+/// The navigation rail: New / Open Project, pages, and community links.
+fn rail_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, rail: Rect, rtl: bool, actions: &mut Vec<(&'static str, serde_json::Value)>) {
     let t = app.tokens;
     let x0 = rail.min.x + 16.0;
     let w = rail.width() - 32.0;
@@ -274,8 +288,11 @@ fn rail_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, rail:
             p.rect_filled(r, 6.0, if on { t.row_selected } else { t.hover });
         }
         let col = if on { t.tab_text_active } else { t.text_dim };
-        icons::paint(p, Rect::from_center_size(pos2(r.min.x + 20.0, r.center().y), vec2(16.0, 16.0)), icon, col);
-        p.text(pos2(r.min.x + 40.0, r.center().y), Align2::LEFT_CENTER, tr(label), Tokens::medium(13.0), col);
+        let icon_x = if rtl { r.max.x - 20.0 } else { r.min.x + 20.0 };
+        let text_x = if rtl { r.max.x - 40.0 } else { r.min.x + 40.0 };
+        let text_align = if rtl { Align2::RIGHT_CENTER } else { Align2::LEFT_CENTER };
+        icons::paint(p, Rect::from_center_size(pos2(icon_x, r.center().y), vec2(16.0, 16.0)), icon, col);
+        p.text(pos2(text_x, r.center().y), text_align, tr(label), Tokens::medium(13.0), col);
         app.auto.add(&format!("home.tab.{}", label.to_ascii_lowercase()), r, label);
         if resp.clicked() {
             app.ui.home_learn = k == 2;
@@ -295,7 +312,9 @@ fn rail_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, rail:
     let foot_h = 22.0 + links.len() as f32 * 30.0 + 22.0 + sib_rows * 26.0;
     let mut cy = (rail.max.y - 16.0 - foot_h).max(y + 16.0);
     p.line_segment([pos2(x0, cy - 10.0), pos2(x0 + w, cy - 10.0)], Stroke::new(1.0, t.separator));
-    p.text(pos2(x0, cy + 6.0), Align2::LEFT_CENTER, tr("Community"), Tokens::semibold(12.0), t.text_dim);
+    let label_x = if rtl { rail.max.x - 16.0 } else { x0 };
+    let label_align = if rtl { Align2::RIGHT_CENTER } else { Align2::LEFT_CENTER };
+    p.text(pos2(label_x, cy + 6.0), label_align, tr("Community"), Tokens::semibold(12.0), t.text_dim);
     cy += 22.0;
     for (icon, label, cmd) in links {
         let r = Rect::from_min_size(pos2(x0, cy), vec2(w, 26.0));
@@ -307,15 +326,17 @@ fn rail_ui(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, rail:
             p.rect_filled(r, 13.0, t.hover);
         }
         let col = if discord { Color32::WHITE } else { t.text };
-        icons::paint(p, Rect::from_center_size(pos2(r.min.x + 16.0, r.center().y), vec2(13.0, 13.0)), icon, col);
-        p.text(pos2(r.min.x + 30.0, r.center().y), Align2::LEFT_CENTER, tr(label), Tokens::medium(12.0), col);
+        let icon_x = if rtl { r.max.x - 16.0 } else { r.min.x + 16.0 };
+        let text_x = if rtl { r.max.x - 30.0 } else { r.min.x + 30.0 };
+        icons::paint(p, Rect::from_center_size(pos2(icon_x, r.center().y), vec2(13.0, 13.0)), icon, col);
+        p.text(pos2(text_x, r.center().y), label_align, tr(label), Tokens::medium(12.0), col);
         app.auto.add(&format!("home.{cmd}"), r, label);
         if resp.clicked() {
             let _ = app.session.execute(cmd, json!({}));
         }
         cy += 30.0;
     }
-    p.text(pos2(x0, cy + 8.0), Align2::LEFT_CENTER, tr("More ArtCraft apps"), Tokens::ui(11.0), t.text_faint);
+    p.text(pos2(label_x, cy + 8.0), label_align, tr("More ArtCraft apps"), Tokens::ui(11.0), t.text_faint);
     cy += 20.0;
     let sw = (w - 6.0) / 2.0;
     for (i, (name, slug)) in sib.iter().enumerate() {
@@ -498,6 +519,40 @@ fn run_actions(app: &mut EffectcraftApp, ctx: &egui::Context, actions: Vec<(&str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hebrew_home_regions_mirror_navigation_but_preserve_content_size() {
+        let rect = Rect::from_min_size(pos2(100.0, 70.0), vec2(1200.0, 800.0));
+        let (left, ltr_main) = home_regions(rect, false);
+        let (right, rtl_main) = home_regions(rect, true);
+        assert_eq!(left.width(), right.width());
+        assert_eq!(ltr_main.size(), rtl_main.size());
+        assert_eq!(left.min.x, rect.min.x);
+        assert_eq!(right.max.x, rect.max.x);
+        assert!(ltr_main.min.x > left.max.x);
+        assert!(rtl_main.max.x < right.min.x);
+        assert!((left.center().x - rect.min.x) < (right.center().x - rect.min.x));
+    }
+
+    #[test]
+    fn hebrew_home_open_project_button_is_physically_on_the_right() {
+        for (locale, should_be_right) in [("he", true), ("en", false), ("fr", false)] {
+            let mut session = effectcraft_engine::Session::default();
+            session.prefs.general.language = locale.to_string();
+            let mut app = EffectcraftApp::new(session);
+            let ctx = egui::Context::default();
+            crate::theme::install(&ctx, &app.tokens, crate::i18n::language(&app));
+            ctx.run_ui(Default::default(), |ui| {
+                app.auto.begin_frame();
+                show(&mut app, ui, Rect::from_min_size(pos2(0.0, 0.0), vec2(1200.0, 800.0)));
+            })
+            .textures_delta
+            .clear();
+            let rect = app.auto.find("home.file.open").expect("Open Project control").rect;
+            assert_eq!(rect[0] > 600.0, should_be_right, "{locale}: misplaced Open Project");
+            assert!(rect[2] > 100.0, "{locale}: Open Project must remain clickable");
+        }
+    }
 
     #[test]
     fn non_ascii_thumbnail_is_rejected_without_panicking() {
