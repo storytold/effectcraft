@@ -486,3 +486,64 @@ fn abi_v2_without_a_host_gets_zeroed_neighbours() {
     assert!(!effectcraft_effects::is_time_dependent("org.test.neighbours.v1"));
     assert!(gain.id.starts_with("org.test."));
 }
+
+/// #3741: a WASM plug-in with `"overlay": true` exports `ec_overlay` and returns sanitized
+/// viewer primitives (polyline, circle, label); a module declaring `"overlay": true` without the
+/// export fails to load cleanly.
+#[test]
+fn wasm_plugin_overlay_emits_sanitized_primitives_and_validates_export() {
+    let manifest_missing = r#"{"api":1,"id":"org.test.overlay.missing","name":"Missing Overlay","category":"Test Plug-ins","overlay":true,"params":[]}"#;
+    let err = load_err(load_wasm(module_with(manifest_missing, "").as_bytes(), "missing.wat"));
+    assert!(err.contains("ec_overlay"), "{err}");
+
+    let manifest = r#"{"api":1,"id":"org.test.overlay.ok","name":"Overlay OK","category":"Test Plug-ins","overlay":true,"params":[]}"#;
+    let payload = r#"[{"kind":"polyline","points":[[10,20],[100,20]],"dashed":true},{"kind":"circle","center":[55,20],"radius":6,"fill":true},{"kind":"label","at":[55,10],"text":"Baseline"}]"#;
+    let m_len = manifest.len();
+    let p_len = payload.len();
+    let m_esc = manifest.replace('\\', "\\\\").replace('"', "\\\"");
+    let p_esc = payload.replace('\\', "\\\\").replace('"', "\\\"");
+    let wat = format!(
+        r#"(module
+  (memory (export "memory") 8)
+  (data (i32.const 16) "{m_esc}")
+  (data (i32.const 4096) "{p_esc}")
+  (func (export "ec_api_version") (result i32) i32.const 1)
+  (func (export "ec_manifest_ptr") (result i32) i32.const 16)
+  (func (export "ec_manifest_len") (result i32) i32.const {m_len})
+  (func (export "ec_alloc") (param $n i32) (result i32) i32.const 65536)
+  (func (export "ec_render") (param i32 i32 i32 i32 i32 f64 f64) (result i32) i32.const 0)
+  (func (export "ec_overlay") (param $params i32) (param $np i32) (param $t f64) (param $lw f64) (param $lh f64) (param $out i32) (param $cap i32) (result i32)
+    (local $i i32)
+    (block $done
+      (loop $l
+        local.get $i
+        i32.const {p_len}
+        i32.ge_u
+        br_if $done
+        local.get $out
+        local.get $i
+        i32.add
+        i32.const 4096
+        local.get $i
+        i32.add
+        i32.load8_u
+        i32.store8
+        local.get $i
+        i32.const 1
+        i32.add
+        local.set $i
+        br $l
+      )
+    )
+    i32.const {p_len}))"#
+    );
+    load_wasm(wat.as_bytes(), "overlay.wat").unwrap();
+    let p = effectcraft_effects::plugin::plugin("org.test.overlay.ok").unwrap();
+    assert!(p.manifest().overlay);
+    let pp = effectcraft_effects::plugin::PluginParams { manifest: p.manifest(), flat: &[], texts: &[] };
+    let ops = p.overlay(&pp, 0.0, [1920.0, 1080.0]).unwrap();
+    assert_eq!(ops.len(), 3, "{ops:?}");
+    assert!(matches!(&ops[0], effectcraft_effects::plugin::OverlayOp::Polyline { points, dashed: true, .. } if points.len() == 2));
+    assert!(matches!(&ops[1], effectcraft_effects::plugin::OverlayOp::Circle { fill: true, .. }));
+    assert!(matches!(&ops[2], effectcraft_effects::plugin::OverlayOp::Label { text, .. } if text == "Baseline"));
+}

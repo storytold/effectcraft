@@ -5,7 +5,7 @@ use std::sync::Mutex;
 use wasmi::{Config, Engine, Instance, Linker, Memory, Module, Store, StoreLimits, StoreLimitsBuilder, TypedFunc, WasmParams, WasmResults};
 
 use crate::{EffectPlugin, MIN_WASM_API_VERSION, PluginFrame, PluginManifest, PluginParams, WASM_API_VERSION};
-use effectcraft_effects::plugin::{PluginHost, PluginImage};
+use effectcraft_effects::plugin::{OverlayOp, PluginHost, PluginImage, sanitize_overlay_ops};
 
 /// Instruction budget per frame: a fixed allowance plus some per pixel. Generous for per-pixel
 /// work, but a runaway loop stops instead of hanging the render.
@@ -22,6 +22,14 @@ const MAX_MANIFEST: i32 = 1 << 20;
 type RenderFn = TypedFunc<(i32, i32, i32, i32, i32, f64, f64), i32>;
 /// ABI 2: the same call plus the previous and next frame buffers and their layer times.
 type Render2Fn = TypedFunc<(i32, i32, i32, i32, i32, f64, f64, i32, f64, i32, f64, i32), i32>;
+/// Optional viewer overlay export (#3741):
+/// `ec_overlay(params_ptr, nparams, time, layer_w, layer_h, out_ptr, out_cap) -> i32`.
+/// Writes UTF-8 JSON (`Vec<OverlayOp>`) into `out_ptr[..len]` and returns `len >= 0`, or `< 0` on error.
+type OverlayFn = TypedFunc<(i32, i32, f64, f64, f64, i32, i32), i32>;
+/// Maximum UTF-8 JSON bytes accepted from `ec_overlay`.
+const MAX_OVERLAY_JSON: usize = 256 * 1024;
+/// Fuel allowance for one `ec_overlay` call (UI-frame budget; overlays must stay lightweight).
+const OVERLAY_FUEL: u64 = 5_000_000;
 
 enum Renderer {
     V1(RenderFn),
@@ -34,6 +42,7 @@ struct Inst {
     memory: Memory,
     alloc: TypedFunc<i32, i32>,
     render: Renderer,
+    overlay: Option<OverlayFn>,
 }
 
 /// An instance whose ABI version (and so its render export) is not selected yet.
@@ -50,14 +59,19 @@ impl Pending {
         self.instance.get_typed_func::<P, R>(&self.store, name).map_err(|_| missing(name))
     }
 
-    /// Select the render export for `abi`.
-    fn finish(self, abi: u32) -> Result<Inst, String> {
+    /// Select the render export for `abi` (and the optional `ec_overlay` export when `want_overlay`).
+    fn finish(self, abi: u32, want_overlay: bool) -> Result<Inst, String> {
         let render = match abi {
             1 => Renderer::V1(self.instance.get_typed_func::<_, i32>(&self.store, "ec_render").map_err(|_| missing("ec_render"))?),
             2 => Renderer::V2(self.instance.get_typed_func::<_, i32>(&self.store, "ec_render2").map_err(|_| missing("ec_render2"))?),
             v => return Err(unsupported(v as i32)),
         };
-        Ok(Inst { store: self.store, memory: self.memory, alloc: self.alloc, render })
+        let overlay = if want_overlay {
+            Some(self.instance.get_typed_func::<_, i32>(&self.store, "ec_overlay").map_err(|_| missing("ec_overlay"))?)
+        } else {
+            self.instance.get_typed_func::<_, i32>(&self.store, "ec_overlay").ok()
+        };
+        Ok(Inst { store: self.store, memory: self.memory, alloc: self.alloc, render, overlay })
     }
 }
 
@@ -100,8 +114,8 @@ fn begin(engine: &Engine, module: &Module) -> Result<Pending, String> {
 }
 
 /// Instantiate `module` and select the render export for `abi`.
-fn instantiate(engine: &Engine, module: &Module, abi: u32) -> Result<Inst, String> {
-    begin(engine, module)?.finish(abi)
+fn instantiate(engine: &Engine, module: &Module, abi: u32, want_overlay: bool) -> Result<Inst, String> {
+    begin(engine, module)?.finish(abi, want_overlay)
 }
 
 /// A loaded WebAssembly effect plug-in.
@@ -141,7 +155,7 @@ impl WasmPlugin {
         if let Some(p) = manifest.params.iter().find(|p| p.kind.needs_v2()) {
             return Err(format!("parameter `{}`: WebAssembly plug-ins use plug-in API 1 parameter types (no point3, layer, text or hidden)", p.id));
         }
-        let inst = pending.finish(abi)?;
+        let inst = pending.finish(abi, manifest.overlay)?;
         Ok(WasmPlugin { manifest, source: source.to_string(), abi, engine, module, pool: Mutex::new(vec![inst]) })
     }
 
@@ -150,7 +164,7 @@ impl WasmPlugin {
         if let Some(i) = self.pool.lock().ok().and_then(|mut p| p.pop()) {
             return Ok(i);
         }
-        instantiate(&self.engine, &self.module, self.abi)
+        instantiate(&self.engine, &self.module, self.abi, self.manifest.overlay)
     }
 
     /// Return a working instance to the pool.
@@ -345,6 +359,50 @@ impl EffectPlugin for WasmPlugin {
         let prev = prev.as_ref().map(|img| (prev_time, img));
         let next = next.as_ref().map(|img| (next_time, img));
         self.render_v2(frame, params, time, prev, next)
+    }
+
+    fn overlay(&self, params: &PluginParams, time: f64, layer_size: [f64; 2]) -> Result<Vec<OverlayOp>, String> {
+        if !self.manifest.overlay {
+            return Ok(Vec::new());
+        }
+        let params_bytes = params.flat.len() * 8;
+        let total = params_bytes + MAX_OVERLAY_JSON;
+        if total > i32::MAX as usize {
+            return Err("overlay buffer exceeds 32-bit address space".into());
+        }
+        let mut inst = self.take()?;
+        let Some(overlay_fn) = inst.overlay else {
+            self.give_back(inst);
+            return Ok(Vec::new());
+        };
+        inst.store.set_fuel(OVERLAY_FUEL).map_err(err)?;
+        let base = inst.alloc.call(&mut inst.store, total as i32).map_err(err)? as u32 as usize;
+        let mut pbuf = Vec::with_capacity(params_bytes);
+        for v in params.flat {
+            pbuf.extend_from_slice(&v.to_le_bytes());
+        }
+        if !pbuf.is_empty() {
+            inst.memory.write(&mut inst.store, base, &pbuf).map_err(|e| format!("ec_alloc returned a buffer out of bounds: {e}"))?;
+        }
+        let out_ptr = (base + params_bytes) as i32;
+        let res = overlay_fn
+            .call(&mut inst.store, (base as i32, params.flat.len() as i32, time, layer_size[0], layer_size[1], out_ptr, MAX_OVERLAY_JSON as i32))
+            .map_err(|e| format!("ec_overlay trapped: {e}"));
+        let out = match res {
+            Ok(0) => Ok(Vec::new()),
+            Ok(len) if len > 0 && (len as usize) <= MAX_OVERLAY_JSON => {
+                let mut raw = vec![0u8; len as usize];
+                inst.memory.read(&inst.store, base + params_bytes, &mut raw).map_err(err)?;
+                let ops: Vec<OverlayOp> = serde_json::from_slice(&raw).map_err(|e| format!("bad ec_overlay JSON: {e}"))?;
+                Ok(sanitize_overlay_ops(ops))
+            }
+            Ok(code) => Err(format!("ec_overlay returned invalid length/error {code}")),
+            Err(e) => Err(e),
+        };
+        if out.is_ok() {
+            self.give_back(inst);
+        }
+        out
     }
 }
 
