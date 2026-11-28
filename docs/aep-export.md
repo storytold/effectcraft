@@ -115,7 +115,7 @@ at all.
 | `project_settings` | a working space other than None, sRGB and Rec.709 Gamma 2.4 (written as sRGB: After Effects needs the profile data, `export-tests\settings\g4`, and the exporter has its own profiles for sRGB and Rec.709 Gamma 2.4 only, R49), the OCIO colour engine, HDR handling, an output space other than the working space (an equal one is After Effects' normal case: it renders in the working space, 902), a frame count start other than 0 / 1 |
 | `time_remapping` | a Time Remap on a layer After Effects cannot remap (solid, text, shape, null, camera, light: 319): not written |
 | `layer_styles` | the whole Layer Styles group switched off, an edited gradient, keys on a colour, point, popup or checkbox (the value is written), Knockout, styles on a layer that takes none |
-| `layer_switches` | per layer: Wireframe quality (written as Best), Bicubic sampling, frame blending, Preserve Transparency, Auto-Orient on a layer other than a camera or light, the environment layer setting, Lock Markers |
+| `layer_switches` | per layer: Wireframe quality (written as Best), Bicubic sampling, frame blending, Auto-Orient on a layer other than a camera or light, the environment layer setting, Lock Markers |
 | `render_queue` | each render queue item (the render queue is written empty) |
 
 ## Rules discovered (what After Effects needs for the file to open and read back right)

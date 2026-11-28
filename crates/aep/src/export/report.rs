@@ -86,7 +86,7 @@ pub enum LossCategory {
     /// gradients, keys on colours, points, popups and checkboxes, Knockout.
     LayerStyles,
     /// Layer switches and options that are not written: Wireframe quality, Bicubic sampling,
-    /// frame blending, Preserve Transparency, Auto-Orient on a layer other than a camera or light
+    /// frame blending, Auto-Orient on a layer other than a camera or light
     /// (theirs is reported as [`Cameras`](Self::Cameras) / [`Lights`](Self::Lights)), an
     /// environment layer, locked markers.
     LayerSwitches,

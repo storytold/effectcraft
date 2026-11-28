@@ -205,6 +205,31 @@ fn layer_header_fields() {
     assert_eq!(ids.len(), 4);
 }
 
+/// Preserve Underlying Transparency is written to `ldta` byte 103 (1 on, 0 off, as After Effects
+/// 2026 stores it). It used to be reported and left off.
+#[test]
+fn preserve_transparency_is_written_to_the_layer_header() {
+    let mut p = Project::default();
+    let c = add_comp(&mut p, "C", 100, 100, FrameRate::new(25, 1), 1.0, None);
+    let s = add_solid(&mut p, "Sol", 100, 100, [0.1, 0.2, 0.3], None);
+    for name in ["Below", "Atop"] {
+        add_layer(&mut p, c, name, LayerSource::Solid { item: s }, (100, 100));
+    }
+    with_layer(&mut p, c, 0, |l| l.preserve_transparency = true);
+    let r = export_all(&p);
+    assert!(r.report.is_lossless(), "{:?}", r.report.losses);
+    let file = parse(&r.bytes).expect("parse");
+    let view = effectcraft_aep::Project::new(&file).expect("project");
+    let comp = view.all_items().into_iter().find(|i| i.comp().is_some()).expect("comp");
+    let pt: Vec<_> = comp
+        .comp()
+        .expect("c")
+        .layers()
+        .map(|l| (l.name().unwrap_or_default(), l.chunk().child(b"ldta").and_then(|c| c.bytes()).and_then(|b| b.get(103).copied())))
+        .collect();
+    assert_eq!(pt, [("Atop".to_string(), Some(1)), ("Below".to_string(), Some(0))]);
+}
+
 #[test]
 fn solids_and_items() {
     let mut p = Project::default();
@@ -560,12 +585,11 @@ fn unwritten_layer_switches_and_off_frame_times_are_reported() {
     let (mut p, c, _) = simple();
     with_layer(&mut p, c, 0, |l| {
         l.switches.quality = Quality::Wireframe;
-        l.preserve_transparency = true;
         l.auto_orient = effectcraft_project::AutoOrient::AlongPath;
         l.in_point = secs(0.013);
     });
     let r = export_all(&p);
-    assert_eq!(r.report.count(LossCategory::LayerSwitches), 3, "{:?}", r.report.losses);
+    assert_eq!(r.report.count(LossCategory::LayerSwitches), 2, "{:?}", r.report.losses);
     assert_eq!(r.report.count(LossCategory::RoundedTimes), 1, "{:?}", r.report.losses);
     assert!(matches!(export(&p, &ExportOptions { allow_losses: false }), Err(AepExportError::Refused(_))));
 }

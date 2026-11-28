@@ -573,6 +573,9 @@ fn build_layer(cx: &mut Cx<'_>, id: u32, lp: &LayerPlan, cp: &CompPlan, layer_id
         put_u8(ldta, 61, lp.label)?;
         put_cstr(ldta, 64, 32, &lp.name)?;
         put_u8(ldta, 99, lp.blend)?;
+        // Preserve Underlying Transparency: 1 on, 0 off (3.1; After Effects 2026 writes it on
+        // solid, shape, text, precomp and 3D layers).
+        put_u8(ldta, 103, u8::from(lp.preserve_transparency))?;
         // Layer type: 3 text, 2 camera, 1 light, 0 AV (solid, footage, precomposition, null) (3.1);
         // the light type at 136 (1 spot, 2 point); auto-orient towards the point of interest is
         // byte 38 bit 0x40 (two-node camera 256 vs one-node 251; set on every light).
