@@ -168,9 +168,8 @@ fn channel_popup(
     p.text(pos2(x, cy), Align2::LEFT_CENTER, crate::i18n::tr("Channel:"), Tokens::ui(12.0), t.text_dim);
     let dr = Rect::from_min_size(pos2(x + 58.0, cy - 9.0), vec2(80.0, 18.0));
     let pop = id.with("pop");
-    if widgets::dropdown(ui, dr, names.get(cur).copied().unwrap_or(""), &t, id).clicked() {
-        widgets::open_popup(ui, pop);
-    }
+    let dresp = widgets::dropdown(ui, dr, names.get(cur).copied().unwrap_or(""), &t, id);
+    widgets::open_on_press(ui, &dresp, pop);
     app.auto.add(auto, dr, "Channel");
     let opts: Vec<String> = names.iter().map(|s| s.to_string()).collect();
     widgets::popup_menu(ui, pop, dr.left_bottom(), &opts, Some(cur))
