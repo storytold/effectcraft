@@ -268,6 +268,10 @@ impl std::ops::DerefMut for SessionParcel {
 }
 
 impl SessionParcel {
+    pub(crate) fn recoverable(&self) -> bool {
+        self.recovery.is_some()
+    }
+
     fn handoff(session: &mut Session, recovery: &Recovery) -> Self {
         Self { session: std::mem::take(session), recovery: Some(recovery.clone()) }
     }
@@ -449,13 +453,21 @@ fn host_main(host: u32, name: String, code: String, link: Link) {
         }
         crate::tasks::drop_host(host);
     }));
+    finish_host(file, name, body.is_err());
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn finish_host(file: String, name: String, panicked: bool) {
     // A panic: give the session back all the same.
+    // Close the outer undo group before its saved pre-group history is dropped with Active.
+    let output = if panicked { settle() } else { vec![] };
     let left = ACTIVE.with(|c| c.borrow_mut().take());
     if let Some(mut a) = left
         && let Some(link) = a.link.take()
     {
-        let message = if body.is_err() { "the script engine stopped unexpectedly" } else { "the script ended" };
-        let out = crate::Outcome { error: Some(ScriptError { message: message.into(), file, ..Default::default() }), ..Default::default() };
+        crate::tasks::drop_host(a.host);
+        let message = if panicked { "the script engine stopped unexpectedly" } else { "the script ended" };
+        let out = crate::Outcome { output, error: Some(ScriptError { message: message.into(), file, ..Default::default() }), ..Default::default() };
         let _ = link.tx.send(FromHost {
             session: std::mem::take(&mut a.session),
             outcome: out,
@@ -788,10 +800,37 @@ mod handoff_tests {
     use serde_json::json;
 
     #[test]
+    fn failed_host_closes_a_group_that_exceeded_the_undo_limit() {
+        let mut session = Session::default();
+        session.prefs.general.undo_levels = 2;
+        session.execute("comp.new", json!({"name": "Before", "width": 64, "height": 64})).unwrap();
+        let before = session.project.clone();
+        let mut active = Active::new(session, "failed script", new_host_id());
+        active.groups.push(("Partial script".into(), before.clone(), active.session.history.clone(), active.session.saved_project.clone()));
+        for _ in 0..4 {
+            active.session.execute("layer.newNull", json!({})).unwrap();
+        }
+        let (_tx, rx) = std::sync::mpsc::channel();
+        let (tx, replies) = std::sync::mpsc::channel();
+        active.link = Some(Link { rx, tx });
+        ACTIVE.with(|slot| *slot.borrow_mut() = Some(active));
+        finish_host("failed script".into(), "failed script".into(), true);
+        let reply = replies.recv().unwrap();
+        assert!(reply.outcome.error.is_some());
+        let mut session = reply.session.into_session();
+        assert_eq!(session.active_comp().unwrap().layers.len(), 4);
+        session.undo();
+        assert_eq!(session.project, before, "partial script edits undo as one group");
+        session.undo();
+        assert_eq!(session.project.comps().count(), 0, "history from before the group survives");
+    }
+
+    #[test]
     fn a_disconnected_script_host_returns_the_actual_session_and_history() {
         for edited in [false, true] {
             let mut session = Session::default();
             crate::install(&mut session);
+            session.prefs.general.undo_levels = 2;
             session.execute("comp.new", json!({"name": "Before", "width": 64, "height": 64})).unwrap();
             let before = session.project.clone();
             let services = session.services.clone();
@@ -800,9 +839,18 @@ mod handoff_tests {
             let (from_host, rx) = std::sync::mpsc::channel();
             let host = new_host_id();
             let thread = std::thread::spawn(move || {
-                let ToHost::Start(mut parcel) = to_host.recv().unwrap() else { panic!("expected start") };
+                let ToHost::Start(parcel) = to_host.recv().unwrap() else { panic!("expected start") };
+                let mut active = Active::new(parcel, "failed script", host);
                 if edited {
-                    parcel.execute("layer.newNull", json!({"name": "During script"})).unwrap();
+                    active.groups.push((
+                        "Partial script".into(),
+                        active.session.project.clone(),
+                        active.session.history.clone(),
+                        active.session.saved_project.clone(),
+                    ));
+                    for _ in 0..4 {
+                        active.session.execute("layer.newNull", json!({"name": "During script"})).unwrap();
+                    }
                 }
                 // Disconnect first: receive must wait for the parcel's unwind before recovery.
                 drop(from_host);
@@ -814,7 +862,7 @@ mod handoff_tests {
             assert!(std::sync::Arc::ptr_eq(&session.services, &services), "host services survive too");
             assert!(session.script.is_some());
             if edited {
-                assert_eq!(session.active_comp().unwrap().layers[0].name, "During script");
+                assert_eq!(session.active_comp().unwrap().layers.len(), 4, "partial script edits survive");
                 session.undo();
             }
             assert_eq!(session.project, before, "the project and its prior undo history survive");

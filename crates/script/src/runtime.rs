@@ -93,6 +93,18 @@ impl Active {
     }
 }
 
+impl Drop for Active {
+    fn drop(&mut self) {
+        // An unexpected host unwind can bypass normal settlement. Preserve the outer group's
+        // pre-script history before the parcel returns the actual session to its caller.
+        if self.session.recoverable()
+            && let Some((name, snap, prior, saved)) = self.groups.first()
+        {
+            collapse(&mut self.session, name, snap, prior, saved);
+        }
+    }
+}
+
 thread_local! {
     pub(crate) static ACTIVE: RefCell<Option<Active>> = const { RefCell::new(None) };
     /// The Script Console's persistent context (never dropped, like the expression runtime: boa's
@@ -704,8 +716,8 @@ pub(crate) struct Restore<'a> {
 
 impl Drop for Restore<'_> {
     fn drop(&mut self) {
-        if let Some(a) = ACTIVE.with(|c| c.borrow_mut().take()) {
-            *self.target = a.session.into_session();
+        if let Some(mut a) = ACTIVE.with(|c| c.borrow_mut().take()) {
+            *self.target = std::mem::take(&mut a.session).into_session();
         }
     }
 }
