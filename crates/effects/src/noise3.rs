@@ -17,7 +17,7 @@ use effectcraft_keyframe::Value;
 use effectcraft_project::ParamUi;
 use rayon::prelude::*;
 
-use crate::generate::lattice;
+use crate::generate::{LatticePoint, scaled_lattice_coordinate};
 use crate::{Buf, EffectCtx, EffectSpec, ParamSpec, num, p, popup, slider};
 
 /// Fractal Type options (shared by both effects).
@@ -84,6 +84,10 @@ pub const OCTAVE_SCALE_MAX: f32 = 1e20;
 /// 6700 px (Scale 10000 %), it is still over 10^12 lattice cells, past where the lattice index
 /// saturates (2^31), so the output is the same.
 const OCTAVE_OFFSET_MAX: f32 = 1e36;
+
+pub fn noise_offset_px(px: f64) -> f32 {
+    px.clamp(-f64::from(OCTAVE_OFFSET_MAX), f64::from(OCTAVE_OFFSET_MAX)) as f32
+}
 
 /// The next octave's (frequency, depth) from this one's, for a Sub Scaling ratio `s`.
 #[inline]
@@ -180,13 +184,11 @@ fn bspline(t: f32) -> [f32; 3] {
 pub fn typed_noise(x: f32, y: f32, z: f32, seed: u32, noise_type: u32) -> f32 {
     // Soft Linear's taps are centred on the nearest lattice point, the others start at the cell's.
     let h = if noise_type == NOISE_SOFT_LINEAR { 0.5 } else { 0.0 };
-    let (x0, y0, z0) = ((x + h).floor(), (y + h).floor(), z.floor());
-    let (tx, ty, fz) = (x + h - x0, y + h - y0, z - z0);
-    let (ix, iy, iz) = (x0 as i32, y0 as i32, z0 as i32);
+    let p = LatticePoint::new(x + h, y + h, z);
+    let [tx, ty, fz] = p.frac;
     let l = |a: f32, b: f32, t: f32| a + (b - a) * t;
     let slice = |dz: i32| -> f32 {
-        // Coordinates past the i32 range saturate; the neighbours wrap, as on the GPU (#3486).
-        let c = |dx: i32, dy: i32| lattice(ix.wrapping_add(dx), iy.wrapping_add(dy), iz.wrapping_add(dz), seed);
+        let c = |dx: i32, dy: i32| p.value(dx, dy, dz, seed);
         match noise_type {
             0 => c(0, 0),
             1 => l(l(c(0, 0), c(1, 0), tx), l(c(0, 1), c(1, 1), tx), ty),
@@ -271,14 +273,14 @@ impl Fractal {
             invert: pr.b("invert"),
             rot: rot.sin_cos(),
             size: [(sw * NOISE_CELL * b.scale).max(1.0) as f32, (sh * NOISE_CELL * b.scale).max(1.0) as f32],
-            origin: [ox as f32, oy as f32],
+            origin: [noise_offset_px(ox), noise_offset_px(oy)],
             center: [cx as f32, cy as f32],
             perspective: pr.b("transform/perspectiveOffset"),
             octaves: pr.f("complexity").clamp(1.0, 20.0) as f32,
             influence: (pr.f("subSettings/subInfluence") as f32 / 100.0).clamp(0.0, 1.0),
             sub_scaling: sub_scaling_ratio(pr.f("subSettings/subScaling")) as f32,
             sub_rotation: (pr.f("subSettings/subRotation") as f32).to_radians(),
-            sub_offset: [(so[0] * b.scale) as f32, (so[1] * b.scale) as f32],
+            sub_offset: [noise_offset_px(so[0] * b.scale), noise_offset_px(so[1] * b.scale)],
             center_subscale: pr.b("subSettings/centerSubscale"),
             evolution: pr.f("evolution") as f32 / 360.0,
             cycle,
@@ -337,7 +339,7 @@ impl Fractal {
                 let (s, c) = (self.sub_rotation * of).sin_cos();
                 (u, v) = (u * c + v * s, -u * s + v * c);
             }
-            let (mut u, mut v) = (u * f, v * f);
+            let (mut u, mut v) = (scaled_lattice_coordinate(u, f), scaled_lattice_coordinate(v, f));
             let z = of * 7.31;
             let seed = self.seed.wrapping_add(o as u32);
             if (4..=6).contains(&self.kind) {
@@ -516,9 +518,9 @@ mod tests {
     #[test]
     fn noise_past_the_i32_range_is_finite() {
         for noise_type in [0, 1, 2, 3] {
-            for (x, y) in [(1e30, -1e30), (f32::MAX, f32::MIN), (3e9, 2.5e9)] {
-                let n = typed_noise(x, y, 1e12, 7, noise_type);
-                assert!(n.is_finite(), "type {noise_type} at ({x}, {y}): {n}");
+            for (x, y, z) in [(1e30, -1e30, 1e12), (f32::MAX, f32::MIN, 1e12), (3e9, 2.5e9, 1e12), (f32::INFINITY, f32::NEG_INFINITY, f32::INFINITY)] {
+                let n = typed_noise(x, y, z, 7, noise_type);
+                assert!(n.is_finite(), "type {noise_type} at ({x}, {y}, {z}): {n}");
             }
         }
     }
@@ -756,6 +758,92 @@ mod tests {
                     }
                     let img = run(id, &vals);
                     assert!(img.data.iter().flatten().all(|c| c.is_finite()), "{id} sub {sub} perspective {perspective} offset {offset:?}: non-finite output");
+                }
+            }
+        }
+    }
+
+    fn bits_hash(values: impl IntoIterator<Item = f32>) -> u64 {
+        values.into_iter().fold(0xcbf2_9ce4_8422_2325u64, |h, v| (h ^ u64::from(v.to_bits())).wrapping_mul(0x0100_0000_01b3))
+    }
+
+    fn ordinary_coordinates() -> impl Iterator<Item = (f32, f32, f32)> {
+        let grid = (0..400).map(|i| {
+            let i = i as f32;
+            (i * 0.37 - 70.0, i * 0.53 - 40.0, i * 0.011 - 1.5)
+        });
+        let large = [(1e6 + 0.25, -2e6 - 0.75, 3.5), (2.1e9, -2.1e9, 1e7 + 0.5), (-8_388_607.5, 8_388_607.25, -0.125)];
+        grid.chain(large)
+    }
+
+    #[test]
+    fn lattice_noise_at_ordinary_coordinates_is_unchanged() {
+        let all = ordinary_coordinates().flat_map(|(x, y, z)| {
+            let typed = [0, 1, 2, 3].map(|t| typed_noise(x, y, z, 11, t));
+            let value = [crate::generate::value_noise(x, y, z, 11), crate::generate::value_noise_linear_z(x, y, z, 11)];
+            typed.into_iter().chain(value)
+        });
+        assert_eq!(bits_hash(all), 12_489_186_610_488_224_231);
+    }
+
+    #[test]
+    fn fractal_renders_at_ordinary_settings_are_unchanged() {
+        let cases: Vec<(&str, Vec<(&str, Value)>)> = vec![
+            ("ec.noise.fractal", vec![]),
+            ("ec.noise.fractal", vec![("fractalType", Value::Enum(2)), ("noiseType", Value::Enum(3)), ("transform/offset", Value::Vec2([-300.0, 125.5]))]),
+            ("ec.noise.fractal", vec![("fractalType", Value::Enum(6)), ("noiseType", Value::Enum(0)), ("subSettings/subOffset", Value::Vec2([40.0, -12.0]))]),
+            (
+                "ec.noise.fractal",
+                vec![("fractalType", Value::Enum(4)), ("noiseType", Value::Enum(1)), ("subSettings/subScaling", num(10.0)), ("complexity", num(9.0))],
+            ),
+            ("ec.noise.fractal", vec![("transform/perspectiveOffset", Value::Bool(true)), ("fractalType", Value::Enum(8)), ("evolution", num(275.0))]),
+            (
+                "ec.noise.turbulent",
+                vec![("fractalType", Value::Enum(3)), ("evolutionOptions/turbulenceFactor", num(2.0)), ("subSettings/subScaling", num(250.0))],
+            ),
+        ];
+        let hashes: Vec<u64> = cases
+            .iter()
+            .map(|(id, vals)| {
+                let mut vals = vals.clone();
+                vals.push(("blendingMode", Value::Enum(BLEND_NONE)));
+                bits_hash(run(id, &vals).data.into_iter().flatten())
+            })
+            .collect();
+        assert_eq!(
+            hashes,
+            [
+                14_820_215_278_946_423_483,
+                15_667_682_713_800_055_601,
+                18_081_240_588_472_799_263,
+                16_357_480_310_507_214_489,
+                13_725_828_349_026_147_724,
+                4_670_050_784_813_517_094
+            ]
+        );
+    }
+
+    #[test]
+    fn huge_offsets_render_finite_noise() {
+        let offsets = [([1e25, 0.0], [0.0, 0.0]), ([1e39, -1e39], [0.0, 0.0]), ([0.5, 0.5], [1e39, -1e37])];
+        for id in ["ec.noise.fractal", "ec.noise.turbulent"] {
+            for kind in 0..FRACTAL_TYPES.len() as u32 {
+                for (offset, sub_offset) in offsets {
+                    let mut vals = vec![
+                        ("fractalType", Value::Enum(kind)),
+                        ("subSettings/subScaling", num(10.0)),
+                        ("complexity", num(20.0)),
+                        ("transform/offset", Value::Vec2(offset)),
+                        ("blendingMode", Value::Enum(BLEND_NONE)),
+                    ];
+                    if id == "ec.noise.fractal" {
+                        vals.push(("subSettings/subOffset", Value::Vec2(sub_offset)));
+                    }
+                    let img = run(id, &vals);
+                    assert!(
+                        img.data.iter().flatten().all(|c| c.is_finite()),
+                        "{id} type {kind} offset {offset:?} sub offset {sub_offset:?}: non-finite output"
+                    );
                 }
             }
         }

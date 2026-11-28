@@ -605,7 +605,7 @@ fn pointwise(e: &mut Enc, id: &str, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
                 (sw * effectcraft_effects::NOISE_CELL * b.scale).max(1.0) as f32,
                 (octaves - octaves.floor()) as f32,
             ];
-            p.f[1] = [ox as f32, oy as f32, sr, cr];
+            p.f[1] = [effectcraft_effects::noise_offset_px(ox), effectcraft_effects::noise_offset_px(oy), sr, cr];
             p.f[2] = [
                 f("evolution") as f32 / 360.0,
                 f("blend") as f32 / 100.0,

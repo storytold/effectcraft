@@ -110,9 +110,10 @@ pub use noise::{GrainLook, MEDIAN_MAX_RADIUS};
 pub use textfx::{BoltPlan, TextLook, TextPass, bolt_plan, glyph_strokes, text_passes};
 pub use transition::{GridWipe, place_layer};
 // effectcraft-gpu fx_noise.
+pub use generate::LATTICE_COORDINATE_MAX;
 pub use keying2::{InnerOuterPlan, inner_outer_plan};
 pub use noise::remove_grain_level;
-pub use noise3::{FractalGpu, NOISE_CELL, OCTAVE_SCALE_MAX, fractal_gpu, sub_scaling_ratio};
+pub use noise3::{FractalGpu, NOISE_CELL, OCTAVE_SCALE_MAX, fractal_gpu, noise_offset_px, sub_scaling_ratio};
 pub use stylize3::{BumpLight, HexTile, bump_layer_id};
 pub use textfx::{TextLayer, text_layer};
 pub use time_fx::{PixelMotion, TimewarpPlan, TwStep, pmb_plan, posterized_time, time_frames, timewarp_crop, timewarp_plan};

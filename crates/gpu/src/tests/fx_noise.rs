@@ -8,7 +8,7 @@ use effectcraft_project::{BitDepth, Comp, ItemKind, LayerSource};
 use effectcraft_render::RenderOpts;
 use effectcraft_time::{FrameRate, Tick};
 
-use crate::tests::{Scene, c, check, compare_at, effect_case, n, opts, set};
+use crate::tests::{Scene, c, check, compare_at, direct_renders, effect_case, n, opts, set};
 
 fn e(v: u32) -> Value {
     Value::Enum(v)
@@ -154,6 +154,40 @@ fn fractal_noise_sub_scaling_above_100() {
             &[("subSettings/subScaling", n(sub)), ("complexity", n(20.0)), ("evolution", n(120.0)), ("evolutionOptions/turbulenceFactor", n(10.0))],
         );
     }
+}
+
+fn assert_direct_renders_are_finite(id: &str, vals: &[(&str, Value)]) {
+    for adjustment in [false, true] {
+        for r in direct_renders(id, vals, adjustment) {
+            for (side, out) in [("CPU", &r.cpu), ("GPU", &r.gpu)] {
+                assert!(out.img.data.iter().flatten().all(|c| c.is_finite()), "{id} {vals:?} adj {adjustment} scale {}: non-finite {side} output", r.scale);
+            }
+        }
+    }
+}
+
+#[test]
+fn fractal_noise_huge_offset() {
+    for x in [1e25, -1e25] {
+        let huge = [("subSettings/subScaling", n(10.0)), ("complexity", n(20.0)), ("transform/offset", pt(x, 0.0))];
+        let cases = [
+            ("ec.noise.fractal", huge.to_vec()),
+            ("ec.noise.fractal", [huge.as_slice(), &[("transform/perspectiveOffset", on()), ("fractalType", e(4))]].concat()),
+            ("ec.noise.turbulent", [huge.as_slice(), &[("evolutionOptions/turbulenceFactor", n(10.0))]].concat()),
+        ];
+        for (id, vals) in cases {
+            assert_direct_renders_are_finite(id, &vals);
+            effect_case(id, &vals);
+        }
+    }
+}
+
+#[test]
+fn wgsl_lattice_coordinate_bound_is_the_cpu_bound() {
+    let declared = include_str!("../shaders/kernels.wgsl")
+        .lines()
+        .find_map(|line| line.strip_prefix("const LATTICE_COORDINATE_MAX: f32 = ")?.strip_suffix(';')?.parse::<f32>().ok());
+    assert_eq!(declared, Some(effectcraft_effects::LATTICE_COORDINATE_MAX));
 }
 
 #[test]

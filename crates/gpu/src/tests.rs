@@ -651,8 +651,14 @@ fn layer_styles_collapsed_precomps_and_cpu_fallbacks() {
 
 /// The effect alone on a buffer: GPU kernels vs the CPU effect (32-bit float), including the
 /// buffer geometry (padding, offset).
-pub(crate) fn effect_direct(id: &str, vals: &[(&str, Value)], adjustment: bool) {
-    let Some(g) = gpu() else { return };
+pub(crate) struct DirectRender {
+    pub(crate) scale: f64,
+    pub(crate) cpu: effectcraft_effects::Buf,
+    pub(crate) gpu: effectcraft_effects::Buf,
+}
+
+pub(crate) fn direct_renders(id: &str, vals: &[(&str, Value)], adjustment: bool) -> Vec<DirectRender> {
+    let Some(g) = gpu() else { return vec![] };
     let spec = effectcraft_effects::find(id).unwrap();
     let size = [70.0, 44.0];
     let mut params =
@@ -660,22 +666,31 @@ pub(crate) fn effect_direct(id: &str, vals: &[(&str, Value)], adjustment: bool) 
     for (k, v) in vals {
         params.values.insert(k.to_string(), v.clone());
     }
+    [1.0, 0.5]
+        .into_iter()
+        .map(|scale| {
+            let img = pattern(7, (size[0] * scale) as u32, (size[1] * scale) as u32);
+            let buf = effectcraft_effects::Buf { img, offset: [0.0, 0.0], scale };
+            let ctx = || effectcraft_effects::EffectCtx { params: &params, time: 0.25, layer_size: size, seed: 11, adjustment, env: Default::default() };
+            let cpu = (spec.render)(&ctx(), buf.clone());
+            let started = std::time::Instant::now();
+            let gpu = effectcraft_render::Accelerator::effects(g, &[effectcraft_render::FxStep { spec, ctx: ctx() }], &buf, None).unwrap_or_else(|| {
+                panic!(
+                    "the GPU runs {id} {vals:?} adj {adjustment} scale {scale}; elapsed={:?}, health={:?}, unavailable={:?}, transfers={:?}",
+                    started.elapsed(),
+                    g.ctx.check_health(),
+                    g.ctx.unavailable_kernels(),
+                    g.ctx.transfer_stats()
+                )
+            });
+            DirectRender { scale, cpu, gpu }
+        })
+        .collect()
+}
+
+pub(crate) fn effect_direct(id: &str, vals: &[(&str, Value)], adjustment: bool) {
     let expect_empty = id == "ec.distort.ccblobbylize" && vals.iter().any(|(k, v)| *k == "cutAway" && matches!(v, Value::Scalar(x) if *x == 100.0));
-    for scale in [1.0, 0.5] {
-        let img = pattern(7, (size[0] * scale) as u32, (size[1] * scale) as u32);
-        let buf = effectcraft_effects::Buf { img, offset: [0.0, 0.0], scale };
-        let ctx = || effectcraft_effects::EffectCtx { params: &params, time: 0.25, layer_size: size, seed: 11, adjustment, env: Default::default() };
-        let cpu = (spec.render)(&ctx(), buf.clone());
-        let started = std::time::Instant::now();
-        let out = effectcraft_render::Accelerator::effects(g, &[effectcraft_render::FxStep { spec, ctx: ctx() }], &buf, None).unwrap_or_else(|| {
-            panic!(
-                "the GPU runs {id} {vals:?} adj {adjustment} scale {scale}; elapsed={:?}, health={:?}, unavailable={:?}, transfers={:?}",
-                started.elapsed(),
-                g.ctx.check_health(),
-                g.ctx.unavailable_kernels(),
-                g.ctx.transfer_stats()
-            )
-        });
+    for DirectRender { scale, cpu, gpu: out } in direct_renders(id, vals, adjustment) {
         if expect_empty {
             assert!(out.img.data.iter().all(|p| p[3] == 0.0), "{id} {vals:?} adj {adjustment} scale {scale}: Cut Away 100 produced non-zero alpha");
         }
