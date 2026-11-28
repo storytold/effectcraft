@@ -21,11 +21,11 @@ use serde_json::{Value, json};
 use super::{CommandSpec, bad, comp_id, f_p, has_comp, str_p};
 use crate::{EngineError, Result, Session, cmd};
 
-/// One isolated layer of a frame: name, blend mode, opacity (0..1), premultiplied pixels.
+/// One isolated layer of a frame: identity, blend mode and premultiplied pixels.
 struct Isolated {
+    id: LayerId,
     name: String,
     blend: BlendMode,
-    opacity: f64,
     image: Image,
 }
 
@@ -65,9 +65,7 @@ fn isolate(s: &Session, cid: ItemId, t: Tick, scale: f64, skip_hdr_step: bool) -
         for l in c.layers.iter_mut() {
             l.switches.solo = l.id == id;
             if l.id == id {
-                let lt = l.layer_time(t);
-                let opacity = l.props.prop("transform/opacity").map(|o| o.value_at(lt).as_f64() / 100.0).unwrap_or(1.0);
-                info = Some((l.name.clone(), l.blend_mode, opacity.clamp(0.0, 1.0)));
+                info = Some((l.name.clone(), l.blend_mode));
                 l.blend_mode = BlendMode::Normal;
                 if let Some(o) = l.props.prop_mut("transform/opacity") {
                     o.keys.clear();
@@ -76,9 +74,9 @@ fn isolate(s: &Session, cid: ItemId, t: Tick, scale: f64, skip_hdr_step: bool) -
                 }
             }
         }
-        let Some((name, blend, opacity)) = info else { continue };
+        let Some((name, blend)) = info else { continue };
         let image = render_with(s, &p, cid, t, scale, skip_hdr_step);
-        out.push(Isolated { name, blend, opacity, image });
+        out.push(Isolated { id, name, blend, image });
     }
     Ok((full, out))
 }
@@ -116,6 +114,8 @@ fn alpha_bounds(img: &Image) -> Option<(u32, u32, u32, u32)> {
 pub fn layered_psd(s: &Session, cid: ItemId, t: Tick, scale: f64) -> Result<(Vec<u8>, usize, u32, u32)> {
     use effectcraft_psd::Rect;
     use effectcraft_psd::write::{WDoc, WLayer, write};
+    let comp = s.project.comp(cid).ok_or(EngineError::NoComp)?;
+    let ctx = super::expr_tools::eval_ctx(s, cid, comp, t);
     let (full, layers) = isolate(s, cid, t, scale, false)?;
     let mut doc = WDoc::new(full.width, full.height);
     let n = layers.len();
@@ -134,7 +134,8 @@ pub fn layered_psd(s: &Session, cid: ItemId, t: Tick, scale: f64) -> Result<(Vec
             None => WLayer::pixels(&l.name, Rect::default(), vec![]),
         };
         w.blend = psd_blend_key(l.blend);
-        w.opacity = (l.opacity * 255.0).round() as u8;
+        let opacity = comp.layer(l.id).map_or(1.0, |layer| ctx.opacity(layer));
+        w.opacity = (opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
         doc.layers.push(w);
     }
     doc.composite = Some(full.data.iter().map(|p| straight(*p)).collect());
