@@ -70,6 +70,32 @@ fn a_hostile_project_opens_within_the_limits_and_says_what_changed() {
 }
 
 #[test]
+fn a_project_whose_id_counter_is_exhausted_is_refused_and_the_session_carries_on() {
+    // A saved project whose id counter is at the top of the range: the next new layer, key or
+    // effect would overflow it, or wrap to ids already in use (#1251).
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Main", "width": 64, "height": 32, "frameRate": 30, "duration": 2})).unwrap();
+    s.execute("layer.newSolid", json!({"color": "#ff0000", "width": 64, "height": 2})).unwrap();
+    let mut v: Value = serde_json::from_str(&s.project.to_file_json().unwrap()).unwrap();
+    v["next_id"] = json!(u64::MAX);
+    let path = tmp("exhausted.ecproj");
+    std::fs::write(&path, v.to_string()).unwrap();
+
+    let mut s = Session::default();
+    s.execute("comp.new", json!({"name": "Mine", "width": 64, "height": 32, "frameRate": 30, "duration": 2})).unwrap();
+    let before = s.project.next_id;
+    for cmd in ["file.open", "file.importProject"] {
+        let e = s.execute(cmd, json!({"path": path})).expect_err(cmd);
+        assert!(e.to_string().contains("ids"), "{cmd}: {e}");
+        assert_eq!(s.project.next_id, before, "{cmd} left the open project alone");
+    }
+    // New ids keep coming from the open project's own counter.
+    let l = s.execute("layer.newSolid", json!({"color": "#00ff00", "width": 8, "height": 8})).unwrap()["layer"].as_u64().unwrap();
+    assert!(l >= before && l < limits::MAX_NEXT_ID);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
 fn a_project_within_the_limits_opens_unchanged() {
     let mut s = Session::default();
     s.execute("comp.new", json!({"name": "Main", "width": 64, "height": 32, "frameRate": 24, "duration": 2})).unwrap();
