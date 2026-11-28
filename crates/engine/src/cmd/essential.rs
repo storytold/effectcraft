@@ -890,7 +890,7 @@ pub fn read_template(bytes: &[u8]) -> std::result::Result<(Value, Project, Vec<(
     let mut project = Project::from_json(&text).map_err(|e| e.to_string())?;
     // (channel selection can't be animated, as in After Effects: a template made before that
     // keeps its first value; read for listings and thumbnails too, so not said each time)
-    let _static_channels = crate::upgrade_effects(&mut project);
+    let _static_channels = crate::upgrade_effects(&mut project, effectcraft_project::saved_by(&text).as_deref());
     Ok((manifest, project, entries))
 }
 

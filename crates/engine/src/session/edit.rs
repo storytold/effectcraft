@@ -195,7 +195,14 @@ impl Session {
     }
 
     /// Replace the whole project (open/new), resetting history and state.
-    pub fn replace_project(&mut self, mut p: Project, path: Option<String>) {
+    pub fn replace_project(&mut self, p: Project, path: Option<String>) {
+        self.replace_project_written_by(p, path, None);
+    }
+
+    /// [`Session::replace_project`] for a project read from a file: `written_by` is the version
+    /// the file names (`savedBy`), for the upgrades that depend on which version wrote it
+    /// ([`upgrade_effects`]).
+    pub fn replace_project_written_by(&mut self, mut p: Project, path: Option<String>, written_by: Option<&str>) {
         // Work still running for the closed project stops reading it (see `project_closed`).
         self.project_closed.store(true, std::sync::atomic::Ordering::SeqCst);
         self.project_closed = Arc::default();
@@ -223,7 +230,7 @@ impl Session {
         self.drop_tasks();
         self.script_ui.project_epoch = self.script_ui.project_epoch.wrapping_add(1);
         p.fix_next_id();
-        let lost = upgrade_effects(&mut p);
+        let lost = upgrade_effects(&mut p, written_by);
         // Let go of what the closed project's footage and proxies decoded (frames, decoders,
         // models), and of what the new project's files decoded under an earlier project: the
         // media layer keys them by path, and the files may have changed since (#1070).
@@ -266,10 +273,17 @@ impl Session {
 /// current schema. Channel-selection parameters are made static
 /// ([`effectcraft_effects::migrate::static_channel_params`]); returns what lost its animation
 /// (`Layer: Effect: Parameter`).
+///
+/// `written_by` is the `savedBy` version of the file the project came from, when it came from one
+/// ([`Session::replace_project_written_by`]); the upgrade that depends on the version that wrote it
+/// (`compositeWithOriginal`) only runs on evidence of an old project.
 #[must_use = "what lost its animation is reported to the user"]
-pub fn upgrade_effects(p: &mut Project) -> Vec<String> {
+pub fn upgrade_effects(p: &mut Project, written_by: Option<&str>) -> Vec<String> {
     let mut lost = vec![];
     let to_effect_space = p.schema < effectcraft_project::SCHEMA_EFFECT_SPACE;
+    // v0.10.0 made the CC particle systems replace their layer; projects written before it
+    // composited the particles over the layer, and must keep doing so (#1898).
+    let legacy_particles = written_before(written_by, "0.10.0");
     // Effect bounds per layer: (size, top-left in layer coordinates).
     let mut bounds = std::collections::HashMap::new();
     for (cid, c) in p.comps() {
@@ -296,15 +310,8 @@ pub fn upgrade_effects(p: &mut Project) -> Vec<String> {
             let Some(fx) = l.props.sub_mut("effects") else { continue };
             for n in &mut fx.children {
                 let effectcraft_project::Node::Group(g) = n else { continue };
-                let effectcraft_project::GroupKind::Effect { effect } = &g.kind else { continue };
-                if let Some(spec) = effectcraft_effects::find(effect) {
-                    effectcraft_effects::migrate::upgrade_instance(spec, g, &mut effectcraft_project::build::Ids(&mut next), size);
-                    if to_effect_space {
-                        effectcraft_effects::migrate::to_effect_space(spec, g, size, d, &clone_d);
-                    }
-                    for name in effectcraft_effects::migrate::static_channel_params(spec, g) {
-                        lost.push(format!("{}: {}: {name}", l.name, g.name));
-                    }
+                for name in upgrade_effect(g, legacy_particles, to_effect_space, size, d, &clone_d, &mut next) {
+                    lost.push(format!("{}: {}: {name}", l.name, g.name));
                 }
             }
         }
@@ -312,4 +319,53 @@ pub fn upgrade_effects(p: &mut Project) -> Vec<String> {
     p.next_id = next;
     p.schema = effectcraft_project::SCHEMA_VERSION;
     lost
+}
+
+/// The CC particle systems, which v0.10.0 made replace their layer instead of compositing the
+/// particles over it (#1898).
+const LEGACY_COMPOSITE_EFFECTS: [&str; 2] = ["ec.sim.ccparticlesystems2", "ec.sim.ccparticleworld"];
+
+/// The control that gives a project from before v0.10.0 the particles' old compositing.
+const COMPOSITE_WITH_ORIGINAL: &str = "compositeWithOriginal";
+
+/// One effect instance of a layer: refresh it from the registry, give a project from before
+/// v0.10.0 the particle systems' old compositing, and move it into effect space.
+fn upgrade_effect(
+    g: &mut effectcraft_project::PropGroup,
+    legacy_particles: bool,
+    to_effect_space: bool,
+    size: [f64; 2],
+    d: [f64; 2],
+    clone_d: &dyn Fn(Option<u64>) -> [f64; 2],
+    next: &mut u64,
+) -> Vec<String> {
+    let effectcraft_project::GroupKind::Effect { effect } = &g.kind else { return vec![] };
+    let Some(spec) = effectcraft_effects::find(effect) else { return vec![] };
+    // A property the instance already has is the artist's own choice; only an instance old enough
+    // to predate it keeps the legacy behaviour.
+    let composite = legacy_particles && LEGACY_COMPOSITE_EFFECTS.contains(&spec.id) && g.get(COMPOSITE_WITH_ORIGINAL).is_none();
+    effectcraft_effects::migrate::upgrade_instance(spec, g, &mut effectcraft_project::build::Ids(next), size);
+    if composite && let Some(pr) = g.get_mut(COMPOSITE_WITH_ORIGINAL) {
+        pr.value = effectcraft_project::Value::Bool(true);
+    }
+    if to_effect_space {
+        effectcraft_effects::migrate::to_effect_space(spec, g, size, d, clone_d);
+    }
+    effectcraft_effects::migrate::static_channel_params(spec, g)
+}
+
+/// Whether a file whose `savedBy` is `saved_by` predates `version` (`major.minor.patch`). A file
+/// that doesn't name a plain three-part writer version is no evidence of an old project, so
+/// nothing is migrated on a guess.
+fn written_before(saved_by: Option<&str>, version: &str) -> bool {
+    let (Some(wrote), Some(than)) = (saved_by.and_then(plain_version), plain_version(version)) else { return false };
+    wrote < than
+}
+
+/// `major.minor.patch` as numbers, ignoring a pre-release or build suffix; `None` unless the
+/// version is exactly those three parts (`"0.6"` and `"unknown"` are none).
+fn plain_version(v: &str) -> Option<[u64; 3]> {
+    let mut parts = v.split(['-', '+']).next().unwrap_or("").split('.');
+    let n = [parts.next()?.parse().ok()?, parts.next()?.parse().ok()?, parts.next()?.parse().ok()?];
+    parts.next().is_none().then_some(n)
 }

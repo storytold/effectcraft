@@ -227,15 +227,28 @@ pub(super) fn particle_world_plan(ctx: &EffectCtx, b: &Buf) -> Option<SpritePlan
         .collect();
     list.sort_by(|a, b| b.0.total_cmp(&a.0));
     let sprites: Vec<Sprite> = list.into_iter().map(|(_, s)| s).collect();
-    Some(particle_sprites(sprites, pr.e("particle/transferMode")))
+    Some(particle_sprites(sprites, pr.e("particle/transferMode"), pr.b("compositeWithOriginal")))
 }
 
 /// The CC particle systems' sprites with their Transfer Mode (Composite, Screen, Add, Black
-/// Background).
-fn particle_sprites(sprites: Vec<Sprite>, mode: u32) -> SpritePlan {
-    // The particles replace the layer (After Effects shows no trace of the source in any
-    // Transfer Mode, which sets how the particles meet each other).
-    SpritePlan { sprites, tints: vec![], acc: if mode == 2 { Acc::Add } else { Acc::Over }, post: Post::Replace }
+/// Background) and whether they composite over the layer.
+fn particle_sprites(sprites: Vec<Sprite>, mode: u32, with_original: bool) -> SpritePlan {
+    // A new instance replaces the layer: After Effects 2026 shows no trace of the source in any
+    // Transfer Mode, which sets how the particles meet each other. A project written before
+    // v0.10.0 composited them over it instead, and gets that behaviour back when it is upgraded
+    // (#1898, `compositeWithOriginal`).
+    let post = if with_original { Post::Combine(transfer_combine(mode)) } else { Post::Replace };
+    SpritePlan { sprites, tints: vec![], acc: if mode == 2 { Acc::Add } else { Acc::Over }, post }
+}
+
+/// A Transfer Mode as the `combine` mode the particles meet the layer by, as before v0.10.0:
+/// Composite, Screen and Add are themselves, Black Matte draws the particles alone.
+fn transfer_combine(mode: u32) -> u32 {
+    match mode {
+        0..=2 => mode,
+        3 => 5,
+        _ => 0,
+    }
 }
 
 // ------------------------------------------------------------------ CC Particle Systems II
@@ -296,7 +309,7 @@ pub(super) fn particle_systems2_plan(ctx: &EffectCtx, b: &Buf) -> SpritePlan {
             type_sprite(kind, bx as f32, by as f32, r, c, [q.v[0] * unit * s, q.v[1] * unit * s], (q.id % 628) as f32 * 0.01 + q.age * 2.0)
         })
         .collect();
-    particle_sprites(sprites, pr.e("particle/transferMode"))
+    particle_sprites(sprites, pr.e("particle/transferMode"), pr.b("compositeWithOriginal"))
 }
 
 // ------------------------------------------------------------------ CC Mr. Mercury

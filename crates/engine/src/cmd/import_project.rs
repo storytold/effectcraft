@@ -62,7 +62,7 @@ fn import_project(s: &mut Session, p: &Value) -> Result<Value> {
     let path = str_p(p, "path").ok_or_else(|| bad(C, "missing `path` (.ecproj)"))?.to_string();
     let (mut sub, saved_by) = read_project(s, &path)?;
     // (channel selection can't be animated, as in After Effects: said with the import's warnings)
-    let lost = crate::upgrade_effects(&mut sub);
+    let lost = crate::upgrade_effects(&mut sub, saved_by.as_deref());
     let file = std::path::Path::new(&path);
     let missing = resolve_footage(s, &mut sub, &path);
     s.stored_paths.add(&sub, Some(&path));

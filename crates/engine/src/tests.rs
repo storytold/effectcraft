@@ -32,6 +32,7 @@ mod key_time;
 mod keyframe_text;
 mod keylight;
 mod legacy_analysis_keys;
+mod legacy_particles;
 mod limits;
 mod lottie;
 mod lut_files;

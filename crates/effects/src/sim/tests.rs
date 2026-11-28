@@ -535,6 +535,25 @@ fn cc_particles_replace_their_layer() {
     }
 }
 
+/// #1898: a project written before v0.10.0 keeps the particles composited over the layer, as the
+/// Transfer Mode did then, so the artwork and any earlier effect stay visible.
+#[test]
+fn composite_with_original_restores_the_old_particle_transfer_modes() {
+    for id in ["ec.sim.ccparticlesystems2", "ec.sim.ccparticleworld"] {
+        for (mode, combine_mode) in [(0, 0), (1, 1), (2, 2), (3, 5)] {
+            let base = ramp(48, 48);
+            let v = [("birthRate", num(3.0)), ("particle/transferMode", Value::Enum(mode))];
+            let particles = run(id, &v, base.clone(), 1.0);
+            let legacy = [("birthRate", num(3.0)), ("particle/transferMode", Value::Enum(mode)), ("compositeWithOriginal", Value::Bool(true))];
+            assert_eq!(run(id, &legacy, base.clone(), 1.0), super::sprites::combine(&base, &particles, combine_mode), "{id}, transfer mode {mode}");
+        }
+        // With nothing born the layer shows as it was, where a new instance's is replaced.
+        let base = grey(20, 20);
+        let none = [("birthRate", num(0.0)), ("compositeWithOriginal", Value::Bool(true))];
+        assert_eq!(run(id, &none, base.clone(), 1.0), base, "{id}: the source stays visible");
+    }
+}
+
 #[test]
 fn mercury_blobs_and_seek() {
     let v = vec![("producer", pt(24.0, 16.0)), ("radiusX", num(5.0)), ("radiusY", num(5.0)), ("birthRate", num(3.0))];
