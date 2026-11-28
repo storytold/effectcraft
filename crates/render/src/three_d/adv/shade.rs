@@ -475,14 +475,16 @@ pub fn shade(s: &Scene, f: &Frag) -> Option<[f32; 4]> {
             base[k] *= t[k];
         }
     }
-    let alpha = base[3] * m.opacity;
-    if m.alpha_mode == 1 && alpha < m.alpha_cutoff {
+    // Mask mode tests the material's alpha (factor × texture) against the cutoff, and a
+    // fragment that passes keeps only the layer's opacity. Blend mode multiplies the two.
+    if m.alpha_mode == 1 && base[3] < m.alpha_cutoff {
         return None;
     }
-    if alpha <= 1e-5 && m.alpha_mode != 0 {
+    let blend = m.alpha_mode > 1;
+    let alpha = if blend { base[3] * m.opacity } else { m.opacity };
+    if blend && alpha <= 1e-5 {
         return None;
     }
-    let alpha = if m.alpha_mode == 0 { m.opacity } else { alpha };
     let rgb = [base[0], base[1], base[2]];
     let mut emissive = m.emissive;
     if let Some(t) = tex(m.tex_emissive) {

@@ -198,6 +198,22 @@ fn gpu_matches_cpu_shadow_catcher() {
 }
 
 #[test]
+fn gpu_masked_surfaces_cover_fully_where_they_pass_the_cutoff() {
+    // Every material in mask mode with alpha 0.6 at the default cutoff of 0.5: each sample is
+    // either fully covered or empty, as on the CPU.
+    let Some(g) = gpu() else { return };
+    let (p, cid) = scene_project();
+    let mut s = scene(&p, cid);
+    for m in &mut s.materials {
+        (m.alpha_mode, m.base[3], m.opacity, m.shadows_only) = (1, 0.6, 1.0, false);
+    }
+    let gt = g.raster_3d(&s).expect("gpu raster");
+    assert!(gt.color.iter().all(|c| c[3] < 1e-3 || c[3] > 0.999), "masked samples are opaque or empty");
+    assert!(gt.color.iter().filter(|c| c[3] > 0.999).count() > gt.color.len() / 10);
+    compare(&s, &g);
+}
+
+#[test]
 fn gpu_matches_cpu_wide_penumbrae() {
     // Both lights cast with wide Shadow Diffusion. Penumbrae cover much of the frame, so a
     // backend drift in the PCF (jitter hash, tap grid, receiver-plane compare) would hide
