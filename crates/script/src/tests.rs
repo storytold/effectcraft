@@ -2124,3 +2124,53 @@ fn set_value_stores_a_string_parameter() {
     let (_, c) = comp_named(&s, "Str");
     assert_eq!(layer(c, "s").props.prop("effects/#1/lut").unwrap().value, KV::Str("/luts/other.cube".into()));
 }
+
+#[test]
+fn combined_title_script_keeps_the_project_and_undo_history() {
+    let mut s = session();
+    let before = s.project.clone();
+    let out = ok(
+        &mut s,
+        r#"
+        app.beginUndoGroup("Combined title");
+        var comp = app.project.items.addComp("Combined title", 640, 360, 1, 5, 30);
+        var shape = comp.layers.addShape();
+        var contents = shape.property("ADBE Root Vectors Group");
+        contents.addProperty("ADBE Vector Shape - Rect");
+        var pathGroup = contents.addProperty("ADBE Vector Shape - Group");
+        var path = new Shape();
+        path.vertices = [[0,0],[160,0],[160,80],[0,80]];
+        path.inTangents = [[0,0],[0,0],[0,0],[0,0]];
+        path.outTangents = [[0,0],[0,0],[0,0],[0,0]];
+        path.closed = true;
+        pathGroup.property("ADBE Vector Shape").setValue(path);
+        contents.addProperty("ADBE Vector Graphic - Fill").property("ADBE Vector Fill Color").setValue([0.2,0.4,0.6]);
+        for (var i = 0; i < 2; i++) {
+            var text = comp.layers.addText("Title " + i);
+            var source = text.property("ADBE Text Properties").property("ADBE Text Document");
+            var doc = source.value;
+            doc.font = "Inter";
+            doc.tracking = 20;
+            source.setValue(doc);
+            var mask = text.property("ADBE Mask Parade").addProperty("ADBE Mask Atom");
+            mask.property("ADBE Mask Shape").setValue(path);
+            var animator = text.property("ADBE Text Properties").property("ADBE Text Animators").addProperty("ADBE Text Animator");
+            var position = animator.property("ADBE Text Animator Properties").addProperty("ADBE Text Position 3D");
+            position.setValueAtTime(0, [0,50,0]);
+            position.setValueAtTime(1, [0,0,0]);
+            position.setTemporalEaseAtKey(1, [new KeyframeEase(0,60)], [new KeyframeEase(0,60)]);
+            var opacity = text.property("ADBE Transform Group").property("ADBE Opacity");
+            opacity.setValueAtTime(0, 0);
+            opacity.setValueAtTime(1, 100);
+            opacity.setTemporalEaseAtKey(2, [new KeyframeEase(0,60)], [new KeyframeEase(0,60)]);
+        }
+        app.endUndoGroup();
+        comp.numLayers;
+    "#,
+    );
+    assert_eq!(out.result, json!(3));
+    let (_, comp) = comp_named(&s, "Combined title");
+    assert_eq!(comp.layers.len(), 3);
+    s.undo();
+    assert_eq!(s.project, before);
+}
