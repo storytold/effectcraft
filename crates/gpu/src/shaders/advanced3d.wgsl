@@ -517,7 +517,9 @@ fn fs(i: VOut, @builtin(front_facing) front: bool) -> FOut {
         let t = sample_tex(tex_n, i.uv);
         let ns = m2.y;
         let tn = vec3<f32>((t.x * 2.0 - 1.0) * ns, (t.y * 2.0 - 1.0) * ns, t.z * 2.0 - 1.0);
-        let tg = norm3(i.tangent.xyz - n * dot(n, i.tangent.xyz));
+        // A back face reverses the whole tangent frame (tangent, bitangent and normal).
+        let t3 = select(-i.tangent.xyz, i.tangent.xyz, front);
+        let tg = norm3(t3 - n * dot(n, t3));
         let sign = select(-i.tangent.w, i.tangent.w, front);
         let bt = cross(n, tg) * sign;
         n = norm3(tg * tn.x + bt * tn.y + n * tn.z);

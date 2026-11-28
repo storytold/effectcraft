@@ -237,6 +237,62 @@ fn textures_sample_bilinear_with_wrap_modes() {
     assert_eq!(shade::sample(&c, &texels, 1.0, 0.5)[0], 1.0);
 }
 
+/// A lit 4×4 quad whose one-texel normal map holds `texel`, seen from the front or, with its
+/// winding reversed and the camera and light mirrored through the quad's plane, from behind.
+fn normal_mapped_quad(texel: [f32; 4], tangent_w: f32, light_dir: [f32; 3], back: bool) -> Scene {
+    let mut s = quad_scene(4, 4, &[([0.0, 0.0, 4.0, 4.0], 100.0, [0.8, 0.6, 0.4, 1.0])]);
+    s.texels = vec![texel];
+    s.textures = vec![TexInfo { offset: 0, width: 1, height: 1, wrap_u: 0, wrap_v: 0 }];
+    (s.materials[0].unlit, s.materials[0].tex_normal) = (false, 0);
+    for v in &mut s.vertices {
+        v.tangent[3] = tangent_w;
+    }
+    let mut dir = light_dir;
+    if back {
+        for t in s.indices.chunks_mut(3) {
+            t.swap(1, 2);
+        }
+        s.cam_fwd = [0.0, 0.0, -1.0];
+        dir = dir.map(|v| -v);
+    }
+    s.lights = vec![Light {
+        kind: 0,
+        pos: [0.0; 3],
+        dir,
+        color: [1.0; 3],
+        cos_inner: 0.0,
+        cos_outer: 0.0,
+        falloff: 0,
+        radius: 0.0,
+        falloff_distance: 0.0,
+        shadow: -1,
+        shadow_darkness: 0.0,
+        shadow_diffusion: 0.0,
+    }];
+    s
+}
+
+#[test]
+fn a_normal_mapped_back_face_shades_with_the_front_normal_reversed() {
+    // glTF reverses a double-sided material's normal on its back faces, so the mapped normal
+    // there is the front one reversed: the mirrored view shades the same. An X tilt with a
+    // right-handed tangent, then a Y tilt with a left-handed one (tangent W = −1).
+    for (texel, w, dir) in [([0.8, 0.5, 0.9, 1.0], 1.0, [-0.6, 0.0, 0.8]), ([0.5, 0.8, 0.9, 1.0], -1.0, [0.0, -0.6, 0.8])] {
+        let px = |back| raster::render(&normal_mapped_quad(texel, w, dir, back)).color[4 + 1];
+        let (front, back) = (px(false), px(true));
+        assert!(front[0] > 0.1, "{front:?}");
+        assert!(front.iter().zip(back).all(|(a, b)| (a - b).abs() < 1e-5), "front {front:?} back {back:?}");
+    }
+    // A single-sided material still draws no back faces.
+    let single = |back| {
+        let mut s = normal_mapped_quad([0.8, 0.5, 0.9, 1.0], 1.0, [-0.6, 0.0, 0.8], back);
+        s.materials[0].double_sided = false;
+        raster::render(&s).color[4 + 1]
+    };
+    assert!(single(false)[3] > 0.0);
+    assert_eq!(single(true), [0.0; 4]);
+}
+
 // ---------------------------------------------------------------- full renderer
 
 fn project(w: u32, h: u32) -> (Project, ItemId) {

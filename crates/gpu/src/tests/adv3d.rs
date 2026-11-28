@@ -197,6 +197,49 @@ fn gpu_matches_cpu_shadow_catcher() {
     compare(&s, &g);
 }
 
+/// A lit, double-sided 32×32 quad filling an orthographic frame, with a one-texel normal map
+/// tilted along the tangent; `back` reverses its winding so the back face shows.
+fn normal_mapped_quad(back: bool) -> Scene {
+    let (w, h) = (32u32, 32u32);
+    let mut s = Scene { width: w, height: h, ssaa: 1, linear_io: true, ortho: true, cam_fwd: [0.0, 0.0, 1.0], ..Scene::default() };
+    s.clip = [[2.0 / w as f32, 0.0, 0.0, -1.0], [0.0, -2.0 / h as f32, 0.0, 1.0], [0.0, 0.0, -0.001, 1.0], [0.0, 0.0, 0.0, 1.0]];
+    s.view = [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]];
+    s.materials = vec![adv::Material { base: [0.8, 0.6, 0.4, 1.0], double_sided: true, tex_normal: 0, ..adv::Material::default() }];
+    s.textures = vec![adv::TexInfo { offset: 0, width: 1, height: 1, wrap_u: 0, wrap_v: 0 }];
+    s.texels = vec![[0.8, 0.5, 0.9, 1.0]];
+    for (x, y) in [(0.0, 0.0), (32.0, 0.0), (32.0, 32.0), (0.0, 32.0)] {
+        s.vertices.push(adv::Vertex { pos: [x, y, 100.0], normal: [0.0, 0.0, -1.0], uv: [0.0; 2], tangent: [1.0, 0.0, 0.0, 1.0], material: 0 });
+    }
+    s.indices = if back { vec![0, 1, 2, 0, 2, 3] } else { vec![0, 2, 1, 0, 3, 2] };
+    s.opaque_count = 6;
+    s.lights = vec![adv::Light {
+        kind: 0,
+        pos: [0.0; 3],
+        dir: [-0.6, 0.0, if back { -0.8 } else { 0.8 }],
+        color: [1.0; 3],
+        cos_inner: 0.0,
+        cos_outer: 0.0,
+        falloff: 0,
+        radius: 0.0,
+        falloff_distance: 0.0,
+        shadow: -1,
+        shadow_darkness: 0.0,
+        shadow_diffusion: 0.0,
+    }];
+    s
+}
+
+#[test]
+fn gpu_matches_cpu_normal_mapped_back_faces() {
+    // Both backends reverse the whole tangent frame on a back face.
+    let Some(g) = gpu() else { return };
+    for back in [false, true] {
+        let s = normal_mapped_quad(back);
+        assert!(adv::raster::render(&s).color[16 * 32 + 16][0] > 0.05, "the quad is lit");
+        compare(&s, &g);
+    }
+}
+
 #[test]
 fn gpu_matches_cpu_wide_penumbrae() {
     // Both lights cast with wide Shadow Diffusion. Penumbrae cover much of the frame, so a
