@@ -210,7 +210,7 @@ fn effect_index(effect: &str, fx: &PropGroup, uid: Uid) -> Option<usize> {
     fn count(effect: &str, g: &PropGroup, prefix: &str, uid: Uid, n: &mut usize) -> bool {
         for c in &g.children {
             match c {
-                Node::Prop(p) if is_layer_source(g, p) => {}
+                Node::Prop(p) if is_layer_companion(g, p) => {}
                 Node::Prop(p) => {
                     let path = format!("{prefix}{}", p.match_id);
                     *n = keyframe_text_effects::INDICES.iter().find(|(e, q, _)| *e == effect && *q == path).map_or(*n + 1, |a| a.2);
@@ -233,8 +233,14 @@ fn effect_index(effect: &str, fx: &PropGroup, uid: Uid) -> Option<usize> {
     count(effect, fx, "", uid, &mut n).then_some(n)
 }
 
-fn is_layer_source(g: &PropGroup, p: &Property) -> bool {
-    p.ui == ParamUi::Hidden && g.props().any(|l| l.ui == ParamUi::Layer && effectcraft_effects::layer_source_id(&l.match_id) == p.match_id)
+/// A layer parameter's hidden companion (its Source choice or Sampling Space), which After
+/// Effects doesn't number.
+fn is_layer_companion(g: &PropGroup, p: &Property) -> bool {
+    p.ui == ParamUi::Hidden
+        && g.props().any(|l| {
+            l.ui == ParamUi::Layer
+                && (effectcraft_effects::layer_source_id(&l.match_id) == p.match_id || effectcraft_effects::layer_space_id(&l.match_id) == p.match_id)
+        })
 }
 
 /// 1-based position of a child in its group.

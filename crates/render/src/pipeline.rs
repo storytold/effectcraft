@@ -63,8 +63,13 @@ const MAX_SOLID_PIXELS: f64 = 16.0e6;
 
 /// The scale and whole-pixel size of a `width`×`height` solid rendered at `scale`, lowered until
 /// the rounded size (each side at least one pixel) is within [`MAX_SOLID_PIXELS`].
-pub(crate) fn solid_size(width: u32, height: u32, mut scale: f64) -> (f64, u32, u32) {
-    let size = |s: f64| (((width as f64 * s).ceil() as u32).max(1), ((height as f64 * s).ceil() as u32).max(1));
+pub(crate) fn solid_size(width: u32, height: u32, scale: f64) -> (f64, u32, u32) {
+    capped_size(f64::from(width), f64::from(height), scale)
+}
+
+/// [`solid_size`] of any `width`×`height` rectangle (layer pixels, finite and not negative).
+pub(crate) fn capped_size(width: f64, height: f64, mut scale: f64) -> (f64, u32, u32) {
+    let size = |s: f64| (((width * s).ceil() as u32).max(1), ((height * s).ceil() as u32).max(1));
     // Rounding up leaves an elongated solid over the cap after one step; each step shrinks the
     // overshoot geometrically, so a few are enough.
     for i in 0..64 {
@@ -857,7 +862,7 @@ impl<'a> Renderer<'a> {
                 buf
             });
         }
-        let host = FxHost { r: self, ctx, layer, origin, index: 0, original: original.as_ref() };
+        let host = FxHost { r: self, ctx, layer, origin, adjustment, index: 0, original: original.as_ref() };
         let env = EffectEnv {
             masks: &mask_shapes,
             host: Some(&host),
@@ -869,6 +874,7 @@ impl<'a> Renderer<'a> {
             float_depth: self.pipe.levels.is_none(),
             shutter: self.mb_on(ctx, layer).then_some((ctx.comp.shutter_angle, ctx.comp.shutter_phase, ctx.comp.motion_blur_samples)),
             layer_span: crate::eval::layer_span(self.project, layer),
+            input: None,
         };
         // Video effects in stack order (index, group, spec); disabled and audio effects skipped.
         let stack: Vec<(usize, &effectcraft_project::PropGroup, &'static effectcraft_effects::EffectSpec)> = fx

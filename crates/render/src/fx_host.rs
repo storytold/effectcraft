@@ -1,5 +1,8 @@
 use super::frames::frame_blend_mode;
-use super::{Arc, Buf, EffectHost, EvalCtx, FrameBlend, ItemKind, Layer, LayerPixels, LayerSource, Params, Renderer, Tick, three_d};
+use super::{
+    Arc, Buf, EffectHost, EvalCtx, FrameBlend, Image, ItemKind, Layer, LayerPixels, LayerSource, Mat3, ParallelIterator, Params, Renderer, Tick, three_d, vec2,
+};
+use effectcraft_effects::BufGrid;
 
 /// Layer parameters and audio for effects (see [`effectcraft_effects::EffectHost`]). What it
 /// hands out is in effect space (see [`effect_bounds`]): the other layer's for its pixels, the
@@ -11,6 +14,9 @@ pub(crate) struct FxHost<'r, 'a, 'c> {
     /// Where the stack's effect space starts in layer coordinates (zero on adjustment layers,
     /// whose effects run on the comp below).
     pub(crate) origin: [f64; 2],
+    /// The stack runs on the comp below (an adjustment layer composited), not on the layer's
+    /// own source (any layer's content, an adjustment layer's too when another effect reads it).
+    pub(crate) adjustment: bool,
     /// Index of the effect being rendered (bounds `self_at` to effects before it).
     pub(crate) index: usize,
     pub(crate) original: Option<&'c Buf>,
@@ -26,6 +32,29 @@ impl FxHost<'_, '_, '_> {
         }
         LayerPixels { buf, size }
     }
+}
+
+/// The grid a Comp-space read ([`EffectHost::to_comp_space`]) is resampled onto: the effect's
+/// `input` grown by whole pixels to cover the stack's rectangle too (`extent` pixels from the
+/// effect-space origin), so the read lines up pixel for pixel with the buffer it is fitted to
+/// and reaches what earlier effects added around the layer. With no input known, the rectangle
+/// at `scale` (the read's own). The input's grid is used as it is, a buffer the renderer already
+/// holds; a larger one is held to a solid's pixel count by lowering its scale
+/// ([`capped_size`]: whoever reads it resamples by its scale). `None` when it has no finite size.
+pub(crate) fn comp_space_grid(extent: [f64; 2], input: Option<BufGrid>, scale: f64) -> Option<BufGrid> {
+    let g = input.unwrap_or(BufGrid { width: 0, height: 0, offset: [0.0; 2], scale });
+    // In the input's pixels: it spans 0..its size, the rectangle `offset..offset + extent·scale`.
+    let span = |offset: f64, extent: f64, n: u32| (offset.floor().min(0.0), (offset + extent * g.scale).ceil().max(f64::from(n)));
+    let ((x0, x1), (y0, y1)) = (span(g.offset[0], extent[0], g.width), span(g.offset[1], extent[1], g.height));
+    let (w, h) = (x1 - x0, y1 - y0);
+    if !(g.scale.is_finite() && g.scale > 0.0 && w.is_finite() && h.is_finite() && w >= 1.0 && h >= 1.0) {
+        return None;
+    }
+    if (w, h) == (f64::from(g.width), f64::from(g.height)) {
+        return Some(g);
+    }
+    let (k, width, height) = super::pipeline::capped_size(w, h, 1.0);
+    Some(BufGrid { width, height, offset: [(g.offset[0] - x0) * k, (g.offset[1] - y0) * k], scale: g.scale * k })
 }
 
 /// The comp's camera and first light relative to `layer`, in its layer pixels (see
@@ -94,6 +123,43 @@ impl EffectHost for FxHost<'_, '_, '_> {
         let sub = self.r.nested();
         let buf = (*sub.layer_input(self.ctx, other, 0)?).clone();
         Some(self.pixels(other, buf, false))
+    }
+
+    fn to_comp_space(&self, id: u64, px: LayerPixels, input: Option<BufGrid>) -> LayerPixels {
+        let Some(other) = self.ctx.layer(effectcraft_project::LayerId(id)) else { return px };
+        // Where each effect space sits in the comp, and the rectangle the stack works on. A
+        // stack run on the comp below is already in comp space; its effects still fit a layer
+        // parameter to the adjustment layer's own size (`fit_layer`), so the result reports that
+        // size to be used as it is.
+        let (size, _) = self.ctx.effect_bounds(self.layer);
+        let (own_to_comp, extent) = if self.adjustment {
+            (Mat3::default(), [self.ctx.comp.width as f64, self.ctx.comp.height as f64])
+        } else {
+            (self.ctx.layer_to_comp(self.layer).0 * Mat3::translate(vec2(self.origin[0], self.origin[1])), size)
+        };
+        // A 3D model or primitive is read as the comp's pixels already (`Renderer::solo_3d`).
+        let other_to_comp = if other.source.is_model() { Mat3::default() } else { self.ctx.effect_to_comp(other) };
+        // Both effect spaces sit in the same place in the comp: the read already lines up.
+        if own_to_comp == other_to_comp && px.size == size {
+            return px;
+        }
+        // Nothing finite to resample onto: keep the layer-space read.
+        let Some(grid) = comp_space_grid(extent, input, px.buf.scale) else { return px };
+        let mut img = Image::new(grid.width, grid.height);
+        // A layer with no extent in the comp (a zero scale) covers none of it: transparent.
+        if let Some(to_other) = other_to_comp.inverse().map(|inv| inv * own_to_comp) {
+            let src = &px.buf;
+            img.rows_mut().for_each(|(y, row)| {
+                for (x, out) in row.iter_mut().enumerate() {
+                    let q = to_other.apply(vec2((x as f64 + 0.5 - grid.offset[0]) / grid.scale, (y as f64 + 0.5 - grid.offset[1]) / grid.scale));
+                    let (sx, sy) = (q.x * src.scale + src.offset[0], q.y * src.scale + src.offset[1]);
+                    if sx.is_finite() && sy.is_finite() {
+                        *out = src.img.sample_bilinear(sx, sy);
+                    }
+                }
+            });
+        }
+        LayerPixels { buf: Buf { img, offset: grid.offset, scale: grid.scale }, size }
     }
 
     /// The audio of footage layer `id` from `start`, or `None` when the layer is not footage.

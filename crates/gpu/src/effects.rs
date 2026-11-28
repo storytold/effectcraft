@@ -208,6 +208,9 @@ impl effectcraft_render::FxTarget for GpuFx<'_, '_> {
 }
 
 fn apply(e: &mut Enc, id: &str, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
+    // As `effectcraft_effects::apply`: the effect knows the grid of the buffer it was handed.
+    let input = effectcraft_effects::BufGrid { width: b.img.width, height: b.img.height, offset: b.offset, scale: b.scale };
+    let ctx = &EffectCtx { env: effectcraft_effects::EffectEnv { input: Some(input), ..ctx.env }, ..*ctx };
     // Controls the kernels do not implement render on the CPU.
     if !effectcraft_effects::catalog::gpu_supported(id, ctx) {
         return None;

@@ -253,6 +253,24 @@ fn effect_properties_have_after_effects_indices() {
 }
 
 #[test]
+fn a_layer_parameters_sampling_space_takes_no_after_effects_index() {
+    // Camera Lens Blur's Blur Map group ends with its layer's hidden Sampling Space (#603), which
+    // After Effects doesn't have: Highlight's Gain, after the group, is numbered as without it.
+    let (mut s, l) = session();
+    s.execute("effect.apply", json!({"layer": l.0, "effect": "Camera Lens Blur"})).unwrap();
+    let paths = ["effects/#1/blurMap/invertBlurMap", "effects/#1/highlight/specularBrightness"];
+    let with = copy_props(&mut s, l, &paths);
+    let space = effectcraft_effects::layer_space_id("blurMapLayer");
+    edit_layer(&mut s, l, |layer| {
+        let g = layer.props.group_mut("effects/#1/blurMap").unwrap();
+        assert!(g.get(&space).is_some(), "the companion is there to skip");
+        g.children.retain(|c| c.match_id() != space);
+    });
+    assert_eq!(with, copy_props(&mut s, l, &paths));
+    assert!(with.contains("Effects\tCamera Lens Blur #1\tGain #"), "{with}");
+}
+
+#[test]
 fn effect_parameters_after_effects_numbers_or_labels_otherwise_follow_it() {
     // After Effects 2019: Radial Blur counts a hidden parameter before Amount, which has no
     // unit; 3D Channel Extract lists Anti-alias before Clamp Output; Selective Color's per-color
