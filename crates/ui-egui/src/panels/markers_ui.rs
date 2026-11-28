@@ -314,6 +314,10 @@ fn marker(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui::Painter, comp: 
     let tip = if m.comment.is_empty() { "Marker".to_string() } else { m.comment.clone() };
     let resp = resp.on_hover_text(tip);
     let mods = ui.input(|i| i.modifiers);
+    let hot = resp.hovered() || resp.dragged();
+    if hot {
+        ui.ctx().set_cursor_icon(if resp.dragged() { egui::CursorIcon::Grabbing } else { egui::CursorIcon::Grab });
+    }
     if resp.double_clicked() {
         if let Err(e) = open_dialog(app, r) {
             app.ui.status = e;
