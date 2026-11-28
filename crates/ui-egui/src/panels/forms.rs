@@ -11,6 +11,19 @@ use serde_json::{Map, Value, json};
 use crate::theme::Tokens;
 use crate::{Dialog, EffectcraftApp};
 
+/// One draft item. The editor keeps its cursor and undo history when the list is reordered.
+#[derive(Clone, Debug)]
+pub struct StringListItem {
+    text: String,
+    editor: Option<egui::Id>,
+}
+
+impl StringListItem {
+    fn new(text: String) -> Self {
+        Self { text, editor: None }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum FieldKind {
     Number {
@@ -18,6 +31,11 @@ pub enum FieldKind {
         speed: f64,
     },
     Text(String),
+    /// Ordered, nonempty item names. Each item has its own editor so its text remains verbatim.
+    StringList {
+        items: Vec<StringListItem>,
+        next_editor: u64,
+    },
     /// A file path with a Browse… button (the host's open dialog, these extensions).
     Path {
         value: String,
@@ -49,6 +67,10 @@ impl Field {
     }
     pub fn text(key: &str, label: &str, value: &str) -> Field {
         Field { key: key.into(), label: label.into(), kind: FieldKind::Text(value.into()) }
+    }
+    pub fn string_list(key: &str, label: &str, items: Vec<String>) -> Field {
+        let items = items.into_iter().map(StringListItem::new).collect();
+        Field { key: key.into(), label: label.into(), kind: FieldKind::StringList { items, next_editor: 0 } }
     }
     pub fn path(key: &str, label: &str, value: &str, exts: &[&str]) -> Field {
         Field { key: key.into(), label: label.into(), kind: FieldKind::Path { value: value.into(), exts: exts.iter().map(|e| e.to_string()).collect() } }
@@ -87,6 +109,7 @@ impl Form {
             let v = match &f.kind {
                 FieldKind::Number { value, .. } => json!(value),
                 FieldKind::Text(s) | FieldKind::Path { value: s, .. } | FieldKind::SavePath(s) => json!(s),
+                FieldKind::StringList { items, .. } => items.iter().map(|item| Value::String(item.text.clone())).collect(),
                 FieldKind::Note(_) => continue,
                 FieldKind::Bool(b) => json!(b),
                 FieldKind::Choice { options, sel } => options.get(*sel).map(|o| o.1.clone()).unwrap_or(Value::Null),
@@ -864,6 +887,63 @@ pub fn open_form(app: &mut EffectcraftApp, id: &str, p: &Value) -> bool {
     true
 }
 
+/// Edit a list in the form draft. In particular, a comma or newline within a label is ordinary text.
+fn string_list(
+    ui: &mut egui::Ui,
+    key: &str,
+    items: &mut Vec<StringListItem>,
+    next_editor: &mut u64,
+    regs: &mut Vec<(String, egui::Rect, String)>,
+) -> egui::Rect {
+    let prefix = format!("form.field.{key}");
+    let len = items.len();
+    let mut remove = None;
+    let mut swap = None;
+    ui.vertical(|ui| {
+        for (i, item) in items.iter_mut().enumerate() {
+            ui.horizontal(|ui| {
+                let id = *item.editor.get_or_insert_with(|| {
+                    // Reuse IDs between dialogs, but never their previous text edit state.
+                    let id = egui::Id::unique(("form-string-list", key, *next_editor));
+                    *next_editor = next_editor.saturating_add(1);
+                    ui.data_mut(|d| d.remove::<egui::text_edit::TextEditState>(id));
+                    id
+                });
+                let edit = ui.add(egui::TextEdit::multiline(&mut item.text).id(id).desired_rows(1).desired_width(160.0).hint_text(tr("Item name")));
+                regs.push((format!("{prefix}.{i}"), edit.rect, item.text.clone()));
+                let mut button = |action: &str, symbol: &str, label: &str, enabled: bool| {
+                    let b = ui.add_enabled(enabled, egui::Button::new(symbol)).on_hover_text(tr(label));
+                    regs.push((format!("{prefix}.{action}.{i}"), b.rect, label.into()));
+                    b.clicked()
+                };
+                if button("up", "↑", "Move Up", i > 0) {
+                    swap = Some((i, i.saturating_sub(1)));
+                }
+                if button("down", "↓", "Move Down", i + 1 < len) {
+                    swap = Some((i, i + 1));
+                }
+                if button("remove", "−", "Remove", len > 1) {
+                    remove = Some(i);
+                }
+            });
+        }
+        if let Some(i) = remove {
+            if let Some(id) = items.remove(i).editor {
+                ui.data_mut(|d| d.remove::<egui::text_edit::TextEditState>(id));
+            }
+        } else if let Some((from, to)) = swap {
+            items.swap(from, to);
+        }
+        let add = ui.button(tr("Add Item"));
+        regs.push((format!("{prefix}.add"), add.rect, "Add Item".into()));
+        if add.clicked() {
+            items.push(StringListItem::new(String::new()));
+        }
+    })
+    .response
+    .rect
+}
+
 /// The label and control rows of a form: the part of [`show_form`] that scrolls.
 fn form_grid(ui: &mut egui::Ui, f: &mut Form, regs: &mut Vec<(String, egui::Rect, String)>, browse: &mut Option<usize>, focused: &mut bool) {
     egui::Grid::new("form-grid").num_columns(2).spacing([14.0, 10.0]).show(ui, |ui| {
@@ -887,6 +967,7 @@ fn form_grid(ui: &mut egui::Ui, f: &mut Form, regs: &mut Vec<(String, egui::Rect
                     }
                     r.rect
                 }
+                FieldKind::StringList { items, next_editor } => string_list(ui, &fl.key, items, next_editor, regs),
                 FieldKind::Path { value, .. } => {
                     ui.horizontal(|ui| {
                         let r = ui.add(egui::TextEdit::singleline(value).desired_width(150.0)).rect;
@@ -948,12 +1029,14 @@ fn form_grid(ui: &mut egui::Ui, f: &mut Form, regs: &mut Vec<(String, egui::Rect
 pub fn show_form(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
     let mut f = app.dialog_state.form.clone();
     let (mut ok, mut close) = (false, false);
+    let mut valid = true;
     // Rows are 30 px; a note wraps at about 40 characters a line, so OK and Cancel stay in view.
     let rows: f32 = f
         .fields
         .iter()
         .map(|fl| match &fl.kind {
             FieldKind::Note(text) => 10.0 + 15.0 * (text.chars().count() as f32 / 40.0).ceil().max(1.0),
+            FieldKind::StringList { items, .. } => 30.0 * (items.len() as f32 + 1.0),
             _ => 30.0,
         })
         .sum();
@@ -969,9 +1052,13 @@ pub fn show_form(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
         egui::ScrollArea::vertical().max_height(max_height).auto_shrink([false, true]).show(ui, |ui| {
             form_grid(ui, &mut f, &mut regs, &mut browse, &mut focused);
         });
+        valid = f.fields.iter().all(|field| match &field.kind {
+            FieldKind::StringList { items, .. } => !items.is_empty() && items.iter().all(|item| !item.text.is_empty()),
+            _ => true,
+        });
         ui.add_space(14.0);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let b = ui.add(egui::Button::new(egui::RichText::new(tr("   OK   ")).color(Color32::WHITE)).fill(t.accent));
+            let b = ui.add_enabled(valid, egui::Button::new(egui::RichText::new(tr("   OK   ")).color(Color32::WHITE)).fill(t.accent));
             regs.push(("form.ok".into(), b.rect, "OK".into()));
             if b.clicked() {
                 ok = true;
@@ -1010,7 +1097,7 @@ pub fn show_form(app: &mut EffectcraftApp, ctx: &egui::Context, t: &Tokens) {
     }
     let enter = !ctx.egui_wants_keyboard_input() && ctx.input(|i| i.key_pressed(egui::Key::Enter));
     app.dialog_state.form = f.clone();
-    if ok || enter {
+    if valid && (ok || enter) {
         app.dialog = None;
         let params = f.params();
         match app.session.execute(&f.command, params) {
