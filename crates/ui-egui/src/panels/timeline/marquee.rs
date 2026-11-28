@@ -18,6 +18,35 @@ struct Marquee {
     layout: (Rect, f32, f32),
     anchor: Anchor,
     dragging: bool,
+    /// The selection from before the press: Shift and Cmd/Ctrl add to it, and Escape (or a drag
+    /// that ends any way but its release) puts it back (#2858).
+    before: Before,
+    /// What the box last selected: the layers and keys it touched, Shift and Cmd/Ctrl. The box
+    /// selects as it moves, and runs again only when one of these changes.
+    applied: Option<(Vec<u64>, Vec<effectcraft_engine::KeyRef>, bool, bool)>,
+}
+
+#[derive(Clone)]
+struct Before {
+    keys: Vec<effectcraft_engine::KeyRef>,
+    props: Vec<(effectcraft_engine::project::LayerId, u64)>,
+    layers: Vec<effectcraft_engine::project::LayerId>,
+    vertices: Vec<effectcraft_engine::VertexRef>,
+}
+
+impl Before {
+    fn of(app: &EffectcraftApp) -> Self {
+        let st = &app.session.state;
+        Before { keys: st.selected_keys.clone(), props: st.selected_props.clone(), layers: st.selected_layers.clone(), vertices: st.selected_vertices.clone() }
+    }
+
+    fn restore(&self, app: &mut EffectcraftApp) {
+        let st = &mut app.session.state;
+        st.selected_keys.clone_from(&self.keys);
+        st.selected_props.clone_from(&self.props);
+        st.selected_layers.clone_from(&self.layers);
+        st.selected_vertices.clone_from(&self.vertices);
+    }
 }
 
 /// The pressed corner in content coordinates: a time (or an outline x) and a scroll-free y.
@@ -49,7 +78,7 @@ fn id() -> Id {
 }
 
 /// Capture on press, before wheel handling, even if the drag threshold is not crossed yet.
-pub(super) fn prepare(app: &EffectcraftApp, ui: &egui::Ui, g: &Rw) {
+pub(super) fn prepare(app: &mut EffectcraftApp, ui: &egui::Ui, g: &Rw) {
     let ctx = &g.tl.ctx;
     let (pressed, down, released, escape, focused) =
         ctx.input(|i| (i.pointer.primary_pressed(), i.pointer.primary_down(), i.pointer.primary_released(), i.key_pressed(egui::Key::Escape), i.focused));
@@ -65,13 +94,15 @@ pub(super) fn prepare(app: &EffectcraftApp, ui: &egui::Ui, g: &Rw) {
             && drag.layout == (g.tl.rect, g.tl.rh, g.tl.graph_x0)
             && (dropped || (down && (owned || (!drag.dragging && ctx.dragged_id().is_none()))));
         drag.dragging |= owned;
-        ctx.data_mut(|d| {
-            if valid {
-                d.insert_temp(id(), drag);
-            } else {
-                d.remove::<Marquee>(id());
+        if valid {
+            ctx.data_mut(|d| d.insert_temp(id(), drag));
+        } else {
+            ctx.data_mut(|d| d.remove::<Marquee>(id()));
+            if drag.applied.is_some() {
+                drag.before.restore(app);
+                ctx.request_repaint();
             }
-        });
+        }
     }
     if pressed && ui.is_enabled() && focused && !escape {
         let owner = [&g.outline_empty, &g.empty].into_iter().find(|r| r.is_pointer_button_down_on());
@@ -89,6 +120,8 @@ pub(super) fn prepare(app: &EffectcraftApp, ui: &egui::Ui, g: &Rw) {
                         layout: (g.tl.rect, g.tl.rh, g.tl.graph_x0),
                         anchor: Anchor::press(&View::of(g), app.ui.timeline.scroll_y, p),
                         dragging: false,
+                        before: Before::of(app),
+                        applied: None,
                     },
                 );
             });
@@ -163,10 +196,11 @@ pub(super) fn targets(
     (layers, keys_in_box(comp, rows, tm, top, rh, selection.keys))
 }
 
-/// Commit an owned primary release; otherwise paint without changing selection.
-pub(super) fn finish(app: &EffectcraftApp, ui: &egui::Ui, g: &mut Rw) {
-    let ctx = &g.tl.ctx;
-    let Some(drag) = ctx.data(|d| d.get_temp::<Marquee>(id())) else { return };
+/// Select what the box touches as it is dragged, from the selection before it (#2858), and paint
+/// it; the release keeps what it showed.
+pub(super) fn finish(app: &mut EffectcraftApp, ui: &egui::Ui, g: &mut Rw) {
+    let ctx = g.tl.ctx.clone();
+    let Some(mut drag) = ctx.data(|d| d.get_temp::<Marquee>(id())) else { return };
     let released = ctx.input(|i| i.pointer.primary_released());
     let dropped = released && ctx.drag_stopped_id() == Some(drag.owner);
     if ctx.dragged_id() != Some(drag.owner) && !dropped {
@@ -174,19 +208,28 @@ pub(super) fn finish(app: &EffectcraftApp, ui: &egui::Ui, g: &mut Rw) {
     }
     let Some(pointer) = ctx.input(|i| i.pointer.latest_pos()) else { return };
     let (paint, selection) = drag.anchor.selection(&View::of(g), app.ui.timeline.scroll_y, pointer);
-    if dropped {
-        ctx.data_mut(|d| d.remove::<Marquee>(id()));
-        let (layers, keys) = targets(&g.tl.comp, &g.tl.rows, &g.tl.tm, g.tl.rows_rect.min.y - app.ui.timeline.scroll_y, g.tl.rh, paint, &selection);
-        let add = ui.input(|i| i.modifiers.shift || i.modifiers.command);
-        g.tl.actions.push(("layer.select".into(), json!({"layers": layers, "add": add})));
-        if !keys.is_empty() {
-            let keys: Vec<_> = keys.iter().map(|k| json!({"layer": k.layer.0, "prop": k.prop, "time": k.time.seconds()})).collect();
+    let (layers, keys) = targets(&g.tl.comp, &g.tl.rows, &g.tl.tm, g.tl.rows_rect.min.y - app.ui.timeline.scroll_y, g.tl.rh, paint, &selection);
+    let mods = ui.input(|i| i.modifiers);
+    let applied = (layers, keys, mods.shift, mods.command);
+    if drag.applied.as_ref() != Some(&applied) {
+        drag.before.restore(app);
+        let add = mods.shift || mods.command;
+        // A box that catches nothing leaves nothing selected (layers included), unless it adds.
+        g.tl.actions.push(("layer.select".into(), json!({"layers": applied.0, "add": add})));
+        if !applied.1.is_empty() {
+            let keys: Vec<_> = applied.1.iter().map(|k| json!({"layer": k.layer.0, "prop": k.prop, "time": k.time.seconds()})).collect();
             g.tl.actions.push(("keys.select".into(), json!({"keys": keys, "add": true, "selectProperties": true})));
         }
+        drag.applied = Some(applied);
+        ctx.request_repaint();
+    }
+    if dropped {
+        ctx.data_mut(|d| d.remove::<Marquee>(id()));
     } else {
         let clip = if selection.outline { g.tl.rows_rect } else { g.right_clip };
         let painter = g.tl.p.with_clip_rect(clip);
         painter.rect_filled(paint, 0.0, g.tl.t.accent.gamma_multiply(0.12));
         painter.rect_stroke(paint, 0.0, Stroke::new(1.0, g.tl.t.accent), StrokeKind::Inside);
+        ctx.data_mut(|d| d.insert_temp(id(), drag));
     }
 }
