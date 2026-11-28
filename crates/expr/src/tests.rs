@@ -2368,3 +2368,25 @@ fn sample_image_reads_3d_shape_behind_camera_before_and_after_effects() {
         assert!(pixel[0] > 0.99 && pixel[3] > 0.99, "postEffect={post}: {pixel:?}");
     }
 }
+
+/// `String.prototype.substr` (ES3, Annex B) exists in After Effects' engines and is used by
+/// published expressions (a marker-comment parser takes the last character with
+/// `comment.substr(-1)`); the engine is built without Annex B, so it is defined in the prelude.
+#[test]
+fn string_substr_takes_a_start_and_a_length() {
+    let f = fx();
+    assert_eq!(f.text("'ab}'.substr(-1)", 0.0), "}");
+    assert_eq!(f.text("'abcdef'.substr(1, 3)", 0.0), "bcd");
+    assert_eq!(f.text("'abcdef'.substr(-3, 2)", 0.0), "de");
+    assert_eq!(f.text("'abcdef'.substr(2)", 0.0), "cdef");
+    assert_eq!(f.text("'abc'.substr(-10, 2)", 0.0), "ab");
+    assert_eq!(f.text("'abc'.substr(1, -1) + '|' + 'abc'.substr(5) + '|' + 'abc'.substr(NaN, 1)", 0.0), "||a");
+    assert_close!(f.num("Object.keys(String.prototype).indexOf('substr') < 0 ? 1 : 0", 0.0), 1.0);
+    // A fractional start is truncated first: -0.5 is 0, not the end of the string.
+    assert_eq!(f.text("'abc'.substr(-0.5, 1) + '|' + 'abc'.substr(1.9, 1.9) + '|' + 'abc'.substr(-1.5)", 0.0), "a|b|c");
+    // Called on null or undefined it throws a TypeError rather than reading the global object.
+    let throws =
+        |this: &str| format!("var r; try {{ String.prototype.substr.call({this}, 0, 1); r = 0; }} catch (e) {{ r = e instanceof TypeError ? 1 : 2; }} r");
+    assert_close!(f.num(&throws("null"), 0.0), 1.0);
+    assert_close!(f.num(&throws("undefined"), 0.0), 1.0);
+}
