@@ -656,3 +656,61 @@ fn a_font_file_replaced_at_the_same_path_is_read_again() {
     assert_eq!(new_meta.len(), 11);
     assert_eq!(old.as_slice(), b"old");
 }
+
+/// A font added while the app runs (a web page's `effectcraft.addFont`, #3996) is used by text
+/// laid out before it was there: by text set in its family, and by text that fell back to no face
+/// at all for a character it covers. Neither the layout cache nor the fallback search keeps the
+/// old result. In a child process, so the fixture's faces reach no other test.
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn a_font_added_later_replaces_cached_layouts_and_fallbacks() {
+    const CHILD: &str = "EFFECTCRAFT_TEST_ISOLATED_LATE_FONT";
+    if std::env::var_os(CHILD).is_none() {
+        run_in_child(CHILD, "fonts::tests::a_font_added_later_replaces_cached_layouts_and_fallbacks");
+        return;
+    }
+    {
+        let mut d = db().write().unwrap();
+        d.scanned = true; // This test process uses only bundled and synthetic fonts.
+    }
+    use crate::layout::{ParagraphStyle, TextStyle, layout};
+    let st = |family: &str| TextStyle { family: family.into(), style: "Regular".into(), size: 50.0, ..Default::default() };
+    let para = ParagraphStyle::default();
+    // Before: the family is missing, and nothing installed draws U+E001.
+    let named = layout("\u{e001}", &st("Late Font Test"), &para);
+    let fallback = layout("\u{e001}", &st(DEFAULT_FAMILY), &para);
+    assert!(named.glyphs.iter().chain(&fallback.glyphs).all(|g| g.id == 0), "no face draws it yet");
+
+    let ids = add_font_data(test_font("Late Font Test"));
+    let &[id] = ids.as_slice() else { panic!("one face expected: {ids:?}") };
+    // The fallback first: once the named layout loads the new face, the search over loaded faces
+    // would find it even with a stale fallback cache.
+    let fallback = layout("\u{e001}", &st(DEFAULT_FAMILY), &para);
+    assert!(!fallback.glyphs.is_empty() && fallback.glyphs.iter().all(|g| g.face == id && g.id != 0), "the fallback finds it");
+    let named = layout("\u{e001}", &st("Late Font Test"), &para);
+    assert!(!named.glyphs.is_empty() && named.glyphs.iter().all(|g| g.face == id && g.id != 0), "its family now draws with it");
+}
+
+/// The interleaving from the #3998 review: a lookup that starts after the count advances but
+/// before the caches are cleared may read an entry that is about to be dropped, so it must not
+/// store its result, and neither may one that started before the faces arrived.
+#[test]
+fn a_lookup_during_or_before_an_invalidation_does_not_cache() {
+    let before = faces_generation();
+    let mut seen = None;
+    // Inside the clear, as a lookup that read the count mid-way would check it before storing.
+    invalidate(|| {
+        let during = faces_generation();
+        seen = Some((during, may_cache(during), may_cache(before)));
+    });
+    let (during, during_ok, before_ok_mid) = seen.unwrap();
+    assert!(!during.is_multiple_of(2), "the count is odd while the caches are being cleared");
+    assert!(!during_ok, "a lookup that started while the caches were being cleared");
+    assert!(!before_ok_mid && !may_cache(before), "a lookup that started before the faces arrived");
+    // Other tests in this process may add fonts at the same time, so a later count is only
+    // checked when nothing else moved it.
+    let after = faces_generation();
+    if after.is_multiple_of(2) {
+        assert!(may_cache(after) || faces_generation() != after, "a lookup that starts afterwards may cache");
+    }
+}
