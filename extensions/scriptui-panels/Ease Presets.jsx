@@ -94,10 +94,15 @@
       return out;
     }
     var list = doc && doc.presets instanceof Array ? doc.presets : [];
+    // Names taken so far, by lower case: looking each one up in the list made loading quadratic.
+    var taken = {};
+    for (var b = 0; b < BUILT_IN.length; b++) taken["k" + BUILT_IN[b].name.toLowerCase()] = true;
     for (var i = 0; i < list.length; i++) {
       var name = cleanName(list[i] && list[i].name);
       var c = sanitized(list[i] && list[i].curve);
-      if (name && c && find(BUILT_IN, name) < 0 && find(out, name) < 0) out.push({ name: name, curve: c });
+      if (!name || !c || taken["k" + name.toLowerCase()]) continue;
+      taken["k" + name.toLowerCase()] = true;
+      out.push({ name: name, curve: c });
     }
     return out;
   }
