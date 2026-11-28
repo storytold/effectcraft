@@ -7,10 +7,10 @@
 //! channels: silence), converting to the device's sample format.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SizedSample};
@@ -20,6 +20,64 @@ use effectcraft_ui_egui::audio::{AudioDevice, AudioFeed, AudioOutput};
 /// multi-hundred-millisecond default buffer that plays as silence at the start of preview (#554).
 fn preferred_buffer_frames(rate: u32) -> u32 {
     (rate / 100).clamp(256, 2048)
+}
+
+/// EffectCraft's usable A/V sync window, in seconds. A bound the app sets for itself, not a
+/// claim about hardware: holding the preview picture still behind the sound for longer than
+/// this is past the point where a sync is worth applying, so past it there is nothing a sync
+/// could do — at any stream age, including once the stream's own age and the tablet's uptime
+/// look alike. It is what rejects an uptime-sized reading once age alone cannot tell it apart;
+/// [implausible_device_latency] names why.
+const MAX_SYNC_WINDOW_SECS: f64 = 2.0;
+
+/// How far past its own age a stream's reading can legitimately be. The stream is opened after
+/// the mixer has already filled its buffer, which the device plays ahead of the first callback,
+/// and a wireless output adds codec delay on top; together that is the slack a real delay can
+/// carry beyond the stream's lifetime. Anything further ahead cannot be this stream's delay,
+/// whatever its value looks like.
+const MIXER_SLACK_SECS: f64 = 0.5;
+
+/// Why a reported device delay cannot be used, or `None` when it can. Two bounds, each catching
+/// what the other cannot. The stream bound rejects a reading ahead of what this stream could
+/// have produced — its own age, plus the buffer already handed over, plus [MIXER_SLACK_SECS] —
+/// because cpal's AAudio backend (Android) builds `playback` from `Clockid::Monotonic`
+/// (absolute, since boot) while `callback` counts from stream creation, so their difference
+/// carries the time between boot and this stream: a stream opened seconds after boot reports
+/// roughly that many seconds of latency, which is why a value that merely looks
+/// hardware-plausible is not enough (#2845). The window bound rejects anything past
+/// EffectCraft's own sync horizon even once the stream is old enough for its age to look
+/// compatible with the reading. A delay inside both bounds keeps being used.
+fn implausible_device_latency(dev_lat: f64, elapsed: f64, buffer_frames: usize, rate: f64) -> Option<&'static str> {
+    if !dev_lat.is_finite() {
+        return Some("not a finite duration");
+    }
+    if dev_lat < 0.0 {
+        return Some("negative, the playback timestamp sitting before the callback");
+    }
+    // rate comes from the stream config; bound the division rather than trust it to be nonzero.
+    let stream_bound = elapsed + (buffer_frames as f64 / rate.max(1.0)) + MIXER_SLACK_SECS;
+    if dev_lat > stream_bound {
+        return Some("ahead of a stream that only just started — AAudio reports playback since boot, callback since stream creation");
+    }
+    if dev_lat > MAX_SYNC_WINDOW_SECS {
+        return Some("past the sync window EffectCraft can apply, so the picture would sit frozen behind the sound");
+    }
+    None
+}
+
+/// Frames between "handed over" and "audible": the device's output latency plus one callback's
+/// buffer. An uptime-sized latency holds the preview's audio clock behind the frames the device
+/// consumed — the picture freezes on the first frame while the sound plays on — so a reading
+/// [implausible_device_latency] rejects is dropped and the buffer alone still counts.
+fn sync_latency_frames(dev_lat: f64, elapsed: f64, rate: f64, buffer_frames: usize) -> u64 {
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    if let Some(reason) = implausible_device_latency(dev_lat, elapsed, buffer_frames, rate) {
+        if !WARNED.swap(true, Ordering::Relaxed) {
+            log::warn!("audio output: device latency {dev_lat}s is {reason}; syncing A/V to this buffer alone");
+        }
+        return buffer_frames as u64;
+    }
+    (dev_lat * rate) as u64 + buffer_frames as u64
 }
 
 /// Wait until the feeder has mixed a block, or until preview is stopped. Starting the stream
@@ -91,6 +149,9 @@ fn run<T: SizedSample + FromSample<f32>>(
     let (left, right) = if map.0 < ch && map.1 < ch { map } else { (0, 1) };
     let rate = cfg.sample_rate.0 as f64;
     let mut stereo: Vec<f32> = Vec::new();
+    // How long this stream has been alive, which tells an uptime-sized timestamp pair apart from
+    // a real output delay (see [implausible_device_latency]).
+    let started = Instant::now();
     dev.build_output_stream(
         cfg,
         move |out: &mut [T], info: &cpal::OutputCallbackInfo| {
@@ -115,7 +176,7 @@ fn run<T: SizedSample + FromSample<f32>>(
             // Frames between "handed over" and "audible": device latency plus this buffer.
             let ts = info.timestamp();
             let dev_lat = ts.playback.duration_since(&ts.callback).map(|d| d.as_secs_f64()).unwrap_or(0.0);
-            latency.store((dev_lat * rate) as u64 + frames as u64, Ordering::Relaxed);
+            latency.store(sync_latency_frames(dev_lat, started.elapsed().as_secs_f64(), rate, frames), Ordering::Relaxed);
         },
         |e| log::warn!("audio output: {e}"),
         None,
@@ -228,6 +289,61 @@ mod tests {
         assert_eq!(preferred_buffer_frames(48_000), 480);
         assert_eq!(preferred_buffer_frames(8_000), 256);
         assert_eq!(preferred_buffer_frames(192_000), 1920);
+    }
+
+    /// Real device latencies (ALSA/Pulse/PipeWire report a few to a few hundred milliseconds)
+    /// are used as they are, plus the callback's own buffer.
+    #[test]
+    fn sync_latency_keeps_a_plausible_device_latency() {
+        assert_eq!(sync_latency_frames(0.02, 0.5, 48_000.0, 480), 960 + 480);
+        assert_eq!(sync_latency_frames(0.0, 0.5, 48_000.0, 480), 480);
+        assert_eq!(sync_latency_frames(0.3, 1.0, 44_100.0, 441), 13_230 + 441);
+    }
+
+    /// A delay over one second keeps being used when the stream has been alive long enough to
+    /// have had it — a Pulse/PipeWire period can be a second or more — as long as it stays
+    /// inside EffectCraft's sync horizon.
+    #[test]
+    fn sync_latency_keeps_a_long_device_latency_on_an_old_stream() {
+        assert_eq!(sync_latency_frames(1.5, 2.5, 48_000.0, 480), 72_000 + 480);
+        assert_eq!(sync_latency_frames(2.0, 3_600.0, 48_000.0, 480), 96_000 + 480);
+    }
+
+    /// A multi-second reading is dropped when the stream could not have produced it yet: a
+    /// stream opened about five seconds after boot reports about five seconds of latency
+    /// because AAudio subtracts since-boot playback from since-creation callback (#2845), and
+    /// holding the picture there is exactly the freeze this guards against. Passing the stream
+    /// its own buffer and sample rate is what makes the bound the stream's, not the hardware's.
+    #[test]
+    fn sync_latency_drops_a_reading_a_young_stream_cannot_have() {
+        assert_eq!(sync_latency_frames(5.0, 0.1, 48_000.0, 480), 480);
+        assert_eq!(sync_latency_frames(2.5, 1.0, 48_000.0, 480), 480);
+        // A reading inside the stream's own bound is still used: the buffer-only fallback is
+        // for the impossible readings, not for a plausible young-stream delay.
+        assert_eq!(sync_latency_frames(0.3, 0.1, 48_000.0, 480), 14_400 + 480);
+    }
+
+    /// cpal's AAudio backend (Android) subtracts two different clocks — `playback` is
+    /// CLOCK_MONOTONIC since boot, `callback` since the stream was created — so the difference
+    /// is the tablet's uptime. That must not become the A/V-sync latency: pinned there, the
+    /// preview's clock never leaves its first frame (picture frozen while the sound plays). The
+    /// stream bound rejects it while the stream is young; EffectCraft's own sync horizon rejects
+    /// it once age and uptime look alike, which is also what drops a multi-second reading from a
+    /// stream opened after boot that never had one.
+    #[test]
+    fn sync_latency_drops_an_uptime_sized_device_latency() {
+        // A tablet up ~5 days at 48 kHz would otherwise ask for ~2e10 frames of latency.
+        // Young stream: the uptime-sized reading is ahead of the stream's own age.
+        assert_eq!(sync_latency_frames(432_000.0, 0.05, 48_000.0, 480), 480);
+        assert_eq!(sync_latency_frames(10.5, 0.05, 48_000.0, 480), 480);
+        // Old stream: uptime and stream age now look alike, so the sync window catches it.
+        assert_eq!(sync_latency_frames(432_000.0, 432_000.0, 48_000.0, 480), 480);
+        // An uptime-sized reading below the old 10 s ceiling: once boot-to-stream and stream
+        // age look alike, age cannot tell it apart, so the sync horizon catches it instead.
+        assert_eq!(sync_latency_frames(5.0, 6.0, 48_000.0, 480), 480);
+        assert_eq!(sync_latency_frames(f64::INFINITY, 1.0, 48_000.0, 480), 480);
+        assert_eq!(sync_latency_frames(f64::NAN, 1.0, 48_000.0, 480), 480);
+        assert_eq!(sync_latency_frames(-0.5, 1.0, 48_000.0, 480), 480);
     }
 
     #[test]
