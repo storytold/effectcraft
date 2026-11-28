@@ -495,7 +495,11 @@ function __uiProto() {
       if (!ctor || t === "window") throw __err("add(): unknown control type " + type);
       var c = Object.create(__ecGlobal[ctor].prototype);
       // Value arguments after `text`: slider (value, min, max), progressbar (value, max), lists (items).
-      var arg = t === "image" || t === "iconbutton" ? text : typeof text === "object" && text !== null && !(text instanceof Array) ? "" : text;
+      var takesImage = t === "image" || t === "iconbutton";
+      var objectText = typeof text === "object" && text !== null && !(text instanceof Array);
+      var arg = takesImage ? text : objectText ? "" : text;
+      // No text argument, as for a group: `add("group", bounds, {creation_properties})` (#3781).
+      if (!takesImage && objectText && props === undefined && Object.getPrototypeOf(text) === Object.prototype) props = text;
       __uiInit(c, t, this.window, this, bounds, arg, props);
       if ((t === "dropdownlist" || t === "listbox") && text instanceof Array) {
         for (const elem of text) c.add("item", elem);
