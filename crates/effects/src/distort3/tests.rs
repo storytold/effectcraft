@@ -7,6 +7,10 @@ fn img(w: u32, h: u32) -> Image {
 
 /// Run with Point defaults scaled to the layer (like `instantiate`).
 fn run(id: &str, set: &[(&str, Value)], im: Image, masks: &[MaskShape]) -> Buf {
+    run_as(id, set, im, masks, false)
+}
+
+fn run_as(id: &str, set: &[(&str, Value)], im: Image, masks: &[MaskShape], adjustment: bool) -> Buf {
     let s = crate::find(id).unwrap();
     let ls = [im.width as f64, im.height as f64];
     let mut params = Params { values: s.params.iter().map(|p| (p.id.to_string(), p.default.clone())).collect() };
@@ -20,7 +24,7 @@ fn run(id: &str, set: &[(&str, Value)], im: Image, masks: &[MaskShape]) -> Buf {
         params.values.insert(k.to_string(), v.clone());
     }
     let env = EffectEnv { masks, ..Default::default() };
-    let ctx = EffectCtx { params: &params, time: 0.5, layer_size: ls, seed: 1, adjustment: false, env };
+    let ctx = EffectCtx { params: &params, time: 0.5, layer_size: ls, seed: 1, adjustment, env };
     crate::apply(s, &ctx, Buf { img: im, offset: [0.0, 0.0], scale: 1.0 })
 }
 
@@ -220,6 +224,59 @@ fn every_warp_style_runs_and_bends() {
     let pad = o.offset[1] as i64;
     assert!(o.img.get(o.offset[0] as i64 + 20, pad - 3)[3] > 0.5);
     assert!(o.img.get(o.offset[0] as i64 + 1, pad - 3)[3] < 0.5);
+}
+
+#[test]
+fn fisheye_full_negative_bend_leaves_no_hole() {
+    // Fisheye at Bend -100 maps radius r to r^3, so the centre has a zero Jacobian; the inverse
+    // must still find a source for every pixel inside the unit ellipse (no transparent oval).
+    let im = crate::util::gen_image(160, 90, |_, _| [0.8, 0.4, 0.2, 1.0]);
+    for adjustment in [true, false] {
+        for bend in [-100.0, -99.0] {
+            let set = [("warpStyle", Value::Enum(11)), ("bend", num(bend))];
+            let o = run_as("ec.distort.warp", &set, im.clone(), &[], adjustment);
+            let (ox, oy) = (o.offset[0], o.offset[1]);
+            let mut holes = 0;
+            for y in 0..90i64 {
+                for x in 0..160i64 {
+                    let (u, v) = ((x as f64 + 0.5 - 80.0) / 80.0, (y as f64 + 0.5 - 45.0) / 45.0);
+                    if u * u + v * v < 0.9 && o.img.get(x + ox as i64, y + oy as i64)[3] < 0.99 {
+                        holes += 1;
+                    }
+                }
+            }
+            assert_eq!(holes, 0, "bend={bend} adjustment={adjustment}");
+        }
+    }
+}
+
+#[test]
+fn fisheye_fallback_leaves_newton_solutions_unchanged() {
+    // Where plain Newton already finds a source (Bend 0 and +100), the fallback must not alter
+    // or add anything where it succeeds, and it succeeds across the centre.
+    let (w, h) = (96u32, 54u32);
+    let s = crate::find("ec.distort.warp").unwrap();
+    for bend in [0.0, 100.0] {
+        let mut params = Params { values: s.params.iter().map(|p| (p.id.to_string(), p.default.clone())).collect() };
+        params.values.insert("warpStyle".into(), Value::Enum(11));
+        params.values.insert("bend".into(), num(bend));
+        let env = EffectEnv { masks: &[], ..Default::default() };
+        let ctx = EffectCtx { params: &params, time: 0.5, layer_size: [w as f64, h as f64], seed: 1, adjustment: false, env };
+        let b = Buf { img: img(w, h), offset: [0.0, 0.0], scale: 1.0 };
+        let (with, newton) = (warp_inverse_with(&ctx, &b, true), warp_inverse_with(&ctx, &b, false));
+        for y in 0..h {
+            for x in 0..w {
+                let (px, py) = (x as f64 + 0.5, y as f64 + 0.5);
+                let (u, v) = ((px - w as f64 / 2.0) / (w as f64 / 2.0), (py - h as f64 / 2.0) / (h as f64 / 2.0));
+                let n = newton(px, py);
+                if let Some(n) = n {
+                    assert_eq!(with(px, py), Some(n), "bend={bend} ({x},{y})");
+                } else if u * u + v * v < 0.5 {
+                    panic!("bend={bend}: Newton alone leaves ({x},{y}) empty");
+                }
+            }
+        }
+    }
 }
 
 #[test]
