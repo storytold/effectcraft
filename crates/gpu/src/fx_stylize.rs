@@ -255,7 +255,8 @@ fn spherize(e: &mut Enc, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
 
 fn polar(e: &mut Enc, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
     let amt = ctx.params.f("interpolation") / 100.0;
-    let to_polar = ctx.params.e("conversion") == 1;
+    // Rect to Polar is the popup's first item, as in `distort::polar` (#3708).
+    let to_polar = ctx.params.e("conversion") == 0;
     let (w, h) = (b.img.width as f64, b.img.height as f64);
     let (cx, cy) = (w / 2.0, h / 2.0);
     let rmax = cx.min(cy);
