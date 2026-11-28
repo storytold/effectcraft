@@ -18,7 +18,7 @@ use effectcraft_project::{
 use effectcraft_time::Tick;
 
 use crate::import::ImportOptions;
-use crate::import::camera::{import_camera_options, import_light_options};
+use crate::import::camera::{import_camera, import_light_options};
 use crate::import::effects::{LayerCtx, PendingLayerRef, import_effects, resolve_layer_refs};
 use crate::import::markers::{import_markers, import_time_remap, insert_time_remap};
 use crate::import::masks::{MaskLayer, import_masks};
@@ -645,6 +645,8 @@ fn build_layers(project: &mut Project, cx: &mut Ctx<'_>, defs: &EffectDefinition
         // Text and shape layers store their anchor in pixels (385, 462); cameras and lights their
         // point of interest.
         let anchor = anchor_unit(is_camera || light.is_some(), is_text || is_shape, is_null, size);
+        // The new camera's Position, put back when the file's cannot be derived (import_camera).
+        let camera_default = l.props.prop("transform/position").filter(|_| is_camera).map(|p| p.value.clone());
         if let Some(tr) = l.props.sub_mut("transform") {
             import_transform(&layer, &name, comp_size, anchor, &tm, tr, &mut cx.col);
         }
@@ -653,8 +655,8 @@ fn build_layers(project: &mut Project, cx: &mut Ctx<'_>, defs: &EffectDefinition
             // one-node camera does not (251, 256).
             l.auto_orient = camera_light_orient(h.is_auto_oriented(), light);
         }
-        if is_camera && let Some(options) = l.props.sub_mut("cameraOptions") {
-            import_camera_options(&layer, &what, comp.width, &tm, options, &mut cx.col);
+        if is_camera {
+            import_camera(&layer, &what, (comp.width, comp.height), &tm, camera_default, &mut l.props, &mut cx.col);
         }
         if light.is_some()
             && let Some(options) = l.props.sub_mut("lightOptions")
