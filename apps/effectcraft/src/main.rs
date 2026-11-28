@@ -506,7 +506,21 @@ fn run_desktop(reporter: &crash_report::Shutdown, arguments: &[std::ffi::OsStrin
                 // WebAssembly effect plug-ins in <config>/Plug-ins load before the menus are built.
                 let plugins = dir.join(effectcraft_engine::commands::PLUGINS_DIR);
                 if plugins.is_dir() {
-                    let _ = session.execute("effect.plugins.load", json!({"folder": plugins.to_string_lossy()}));
+                    // A plug-in that fails to load used to disappear without a trace: the
+                    // command returns the per-file errors and this call threw them away, so a
+                    // user who installed one saw neither a toast nor a log line. A plug-in
+                    // built against a newer ABI fails here by design (the loader refuses
+                    // imports), and that is exactly the case that needs to be visible.
+                    match session.execute("effect.plugins.load", json!({"folder": plugins.to_string_lossy()})) {
+                        Ok(v) => {
+                            for e in v["errors"].as_array().into_iter().flatten() {
+                                let file = e["path"].as_str().unwrap_or("plug-in");
+                                let why = e["error"].as_str().unwrap_or("failed to load");
+                                log::warn!("effect plug-in {file}: {why}");
+                            }
+                        }
+                        Err(e) => log::warn!("effect plug-ins in {}: {e}", plugins.display()),
+                    }
                     // Packages installed from the Plug-in Library (<config>/Plug-ins/Library).
                     // Each package that fails to load is logged by the library itself.
                     if let Err(e) = session.execute("library.loadInstalled", json!({})) {
