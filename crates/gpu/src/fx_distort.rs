@@ -185,26 +185,18 @@ fn turbulent(e: &mut Enc, ctx: &EffectCtx, mut b: GBuf) -> Option<GBuf> {
     }
     let off = b.to_px(ctx.params.v2("offset"));
     let oct = ctx.params.f("complexity").clamp(1.0, 10.0);
-    let evo = ctx.params.f("evolution") / 360.0;
-    let cycle = ctx.params.b("evolutionOptions/cycleEvolution").then(|| ctx.params.f("evolutionOptions/cycle").round().max(1.0));
+    let evolution = effectcraft_effects::TurbulentEvolution::new(ctx);
     let falloff = if (3..=5).contains(&kind) { 0.3 } else { 0.5 };
     let (x0, y0, lw, lh) = util::layer_rect_at(ctx, b.offset, b.scale);
     let edge = (lw.min(lh) * 0.1).max(1.0);
     let seed = (ctx.seed ^ 0x7d15).wrapping_add((ctx.params.f("evolutionOptions/randomSeed") as i64 as u32).wrapping_mul(0x9e37_79b9));
-    let (z0, z1, t) = match cycle {
-        Some(c) => {
-            let z = evo.rem_euclid(c);
-            (z as f32, (z - c) as f32, (z / c) as f32)
-        }
-        None => (evo as f32, 0.0, 0.0),
-    };
     let mut p = Params::default();
     p.u[0] = [kind, ctx.params.e("pinning"), seed, oct.ceil().max(1.0) as u32];
-    p.u[1][0] = cycle.is_some() as u32;
+    p.u[1] = evolution.seeds;
     p.f[0] = [off.0 as f32, off.1 as f32, size as f32, amount as f32];
-    p.f[1] = [z0, z1, t, (oct - oct.floor()) as f32];
+    p.f[1] = evolution.weights;
     p.f[2] = [x0 as f32, y0 as f32, lw as f32, lh as f32];
-    p.f[3] = [edge as f32, falloff, 0.0, 0.0];
+    p.f[3] = [edge as f32, falloff, (oct - oct.floor()) as f32, 0.0];
     run(e, "dst_turbulent", &p, b, None)
 }
 

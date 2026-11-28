@@ -224,10 +224,10 @@ fn dst_cclens(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 // ---------------------------------------------------------------- Turbulent Displace (distort2)
 
-// distort2::fbm. u[0].w = octave count; f[1].w = fraction of the last octave; f[3].y = falloff.
-fn dst_fbm(u: f32, v: f32, z: f32, seed: u32) -> f32 {
+// Centred fractional-octave noise (distort2::fbm), using the frame's shared temporal spline.
+fn dst_turb_n(u: f32, v: f32, s: u32) -> f32 {
     let n = P.u[0].w;
-    let frac = P.f[1].w;
+    let frac = P.f[3].z;
     let falloff = P.f[3].y;
     var sum = 0.0;
     var norm = 0.0;
@@ -238,28 +238,25 @@ fn dst_fbm(u: f32, v: f32, z: f32, seed: u32) -> f32 {
         if (o + 1u == n && frac > 0.0) {
             w = frac;
         }
-        sum += value_noise_linear_z(u * f, v * f, z + f32(o) * 5.17, seed + o * 101u) * amp * w;
+        let octave_seed = P.u[0].z + s + o * 101u;
+        var noise = 0.0;
+        for (var j = 0u; j < 4u; j++) {
+            let weight = P.f[1][j];
+            if (weight != 0.0) {
+                noise += weight * value_noise_linear_z(u * f, v * f, f32(o) * 5.17, octave_seed + P.u[1][j]);
+            }
+        }
+        sum += noise * amp * w;
         norm += amp * w;
         amp *= falloff;
         f *= 2.0;
     }
-    return sum / max(norm, 1e-6);
+    return sum / max(norm, 1e-6) - 0.5;
 }
 
-// The centred noise `n(u, v, s)` (cross-faded over the evolution cycle when u[1].x is set).
-// f[1] = (z, z - cycle, cycle position t).
-fn dst_turb_n(u: f32, v: f32, s: u32) -> f32 {
-    let seed = P.u[0].z + s;
-    if (P.u[1].x != 0u) {
-        let t = P.f[1].z;
-        return dst_fbm(u, v, P.f[1].x, seed) * (1.0 - t) + dst_fbm(u, v, P.f[1].y, seed) * t - 0.5;
-    }
-    return dst_fbm(u, v, P.f[1].x, seed) - 0.5;
-}
-
-// u[0] = (displacement kind, pinning, seed, octaves); u[1].x = cycle evolution;
-// f[0] = (offset x, offset y, size, amount); f[1] = (z0, z1, t, last-octave fraction);
-// f[2] = layer rect (x, y, w, h); f[3] = (edge, falloff)
+// u[0] = (displacement kind, pinning, seed, octaves); u[1] = knot seed offsets;
+// f[0] = (offset x, offset y, size, amount); f[1] = knot weights;
+// f[2] = layer rect (x, y, w, h); f[3] = (edge, falloff, last-octave fraction, unused)
 @compute @workgroup_size(16, 16)
 fn dst_turbulent(@builtin(global_invocation_id) gid: vec3<u32>) {
     let p = vec2<i32>(gid.xy);

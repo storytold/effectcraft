@@ -332,8 +332,12 @@ fn value_noise_z(x: f32, y: f32, z: f32, seed: u32, ease_z: bool) -> f32 {
     let (fx, fy, fz) = (fade(x - x0), fade(y - y0), if ease_z { fade(z - z0) } else { z - z0 });
     let (ix, iy, iz) = (x0 as i32, y0 as i32, z0 as i32);
     let l = |a: f32, b: f32, t: f32| a + (b - a) * t;
-    let c = |dx: i32, dy: i32, dz: i32| lattice(ix + dx, iy + dy, iz + dz, seed);
+    let c = |dx: i32, dy: i32, dz: i32| lattice(ix.wrapping_add(dx), iy.wrapping_add(dy), iz.wrapping_add(dz), seed);
     let a = l(l(c(0, 0, 0), c(1, 0, 0), fx), l(c(0, 1, 0), c(1, 1, 0), fx), fy);
+    // Turbulent Displace's first octave lies entirely in one lattice plane.
+    if fz == 0.0 {
+        return a;
+    }
     let b = l(l(c(0, 0, 1), c(1, 0, 1), fx), l(c(0, 1, 1), c(1, 1, 1), fx), fy);
     l(a, b, fz)
 }
