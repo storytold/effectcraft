@@ -171,16 +171,17 @@ fn key_list_header(size: u32, count: u32) -> Fixed {
     lhd3
 }
 
-/// Sets the count words of a key list header for `count` keys of `size` bytes.
+/// Sets the count words of a key list header for `count` keys of `size` bytes. Word 5 is 4 for
+/// any number of keys (After Effects 2026: 1 to 17 keys) and 2 in an empty list (`Gide`).
 pub(crate) fn put_key_counts(lhd3: &mut [u8], count: u32, size: u32) -> R<()> {
     let capacity = count.div_ceil(4).saturating_mul(4).max(2);
-    put_counts(lhd3, count, count.div_ceil(4).max(1), size, capacity, capacity)
+    put_counts(lhd3, count, count.div_ceil(4).max(1), size, capacity.min(4), capacity)
 }
 
 /// Sets the count words of a list header: word 2 the record count, word 3 `blocks`, word 4 the
-/// record size, word 5 `w5`, word 7 the capacity. A key list has `w5` = the capacity; a path
-/// list counts vertices: `blocks` = `w5` = the vertex count, the capacity four times it (090:
-/// 12 points, 4, 4 and 16; aep-format.md 3.5).
+/// record size, word 5 `w5`, word 7 the capacity. A key list has `w5` = 4 (2 when empty); a path
+/// list counts vertices: `blocks` = the vertex count, `w5` = 4, the capacity four times the
+/// vertex count (090: 12 points, 4, 4 and 16; aep-format.md 3.5).
 pub(crate) fn put_counts(lhd3: &mut [u8], count: u32, blocks: u32, size: u32, w5: u32, capacity: u32) -> R<()> {
     put_u32(lhd3, 8, count)?;
     put_u32(lhd3, 12, blocks)?;
@@ -268,7 +269,8 @@ mod tests {
         let l = key_list(48, 5, vec![0; 240]);
         let h = l.child(b"lhd3").and_then(|c| c.bytes()).unwrap();
         let w = |i: usize| u32::from_be_bytes(h[i * 4..i * 4 + 4].try_into().unwrap());
-        assert_eq!((w(0), w(2), w(3), w(4), w(5), w(6), w(7)), (0x00d0_0bee, 5, 2, 48, 8, 1, 8));
+        // After Effects 2026 writes 5 keys as 5 / 2 / size / 4 / 1 / 8: word 5 stays 4.
+        assert_eq!((w(0), w(2), w(3), w(4), w(5), w(6), w(7)), (0x00d0_0bee, 5, 2, 48, 4, 1, 8));
         assert_eq!(h.len(), 52);
     }
 }
