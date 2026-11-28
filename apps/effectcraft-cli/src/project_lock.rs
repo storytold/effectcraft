@@ -10,7 +10,9 @@
 //! the process ends, however it ends, so a crash leaves nothing stale. The file itself stays, since
 //! removing it would let one run wait on the old file while another locks a new one.
 
-use crate::{Args, Failure};
+use crate::args::SaveArgs;
+use crate::commands::Sel;
+use crate::error::{CliError, Result};
 use std::fs::{File, TryLockError};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -40,17 +42,17 @@ fn same_file(a: &str, b: &str) -> bool {
 /// edit and save it with no lock. Checking first also means the paths compared below exist, so
 /// `canonicalize` tells exactly whether they are one file, however they are spelt. A project that
 /// exists but isn't a file gets no lock file beside it, and opening it reports why.
-fn saved_in_place(a: &Args) -> Result<Option<&Path>, String> {
-    // `--bridge` with a project is a usage error, which `backend` reports
-    let Some(project) = a.project.as_deref().filter(|_| a.opt("--bridge").is_none()) else { return Ok(None) };
+fn saved_in_place<'a>(sel: &Sel<'a>, save: &'a SaveArgs) -> Result<Option<&'a Path>> {
+    // `--bridge` with a project is a usage error, which clap reports
+    let Some(project) = sel.project.filter(|_| sel.bridge.is_none()) else { return Ok(None) };
     match Path::new(project).metadata() {
         Ok(meta) if meta.is_file() => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(format!("cannot read {project}: {e}")),
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Err(CliError::ReadProject { path: project.to_string(), source }),
         _ => return Ok(None),
     }
-    match a.opt("--save-as") {
+    match save.save_as.as_deref() {
         Some(target) if same_file(target, project) => Ok(Some(Path::new(target))),
-        None if a.flag("--save") => Ok(Some(Path::new(project))),
+        None if save.save => Ok(Some(Path::new(project))),
         _ => Ok(None),
     }
 }
@@ -74,8 +76,8 @@ fn lock(project: &Path, waiting: impl FnOnce()) -> std::io::Result<File> {
 /// while another run holds the lock, which is fine here: nothing else is running yet. A lock that
 /// can't be had (a read-only folder, a file system without locks) is a warning and not an error, so
 /// that saving works where it did.
-pub(crate) fn for_save(a: &Args) -> Result<Option<File>, Failure> {
-    let Some(project) = saved_in_place(a).map_err(Failure::Error)? else { return Ok(None) };
+pub(crate) fn for_save(sel: &Sel, save: &SaveArgs) -> Result<Option<File>> {
+    let Some(project) = saved_in_place(sel, save)? else { return Ok(None) };
     let shown = project.display();
     let waiting = || {
         let _ = writeln!(std::io::stderr(), "effectcraft-cli: waiting for another run saving {shown}");
@@ -93,8 +95,14 @@ pub(crate) fn for_save(a: &Args) -> Result<Option<File>, Failure> {
 mod tests {
     use super::*;
 
-    fn args(list: &[&str]) -> Args {
-        Args::parse(list.iter().map(|s| s.to_string()).collect()).unwrap()
+    /// What `saved_in_place` makes of a run on `project` with these save options.
+    fn decide<'a>(project: Option<&'a str>, bridge: Option<&'a str>, save: &'a SaveArgs) -> Result<Option<&'a Path>> {
+        let sel = Sel { project, demo: false, empty: false, bridge, gpu: false, autosave: false };
+        saved_in_place(&sel, save)
+    }
+
+    fn save(flag: bool, save_as: Option<&str>) -> SaveArgs {
+        SaveArgs { save: flag, save_as: save_as.map(String::from) }
     }
 
     #[test]
@@ -130,21 +138,20 @@ mod tests {
         let in_new_dir = in_new_dir.to_str().unwrap();
         let in_new_dir_alias = new_dir.join(".").join("p.ecproj");
         let in_new_dir_alias = in_new_dir_alias.to_str().unwrap();
-        for (project, list) in [
-            (gone, &["exec", "--project", gone, "--save"][..]),
-            (gone, &["exec", gone, "--save"]),
-            (gone, &["exec", "--project", gone, "--save-as", gone]),
-            (gone, &["exec", "--project", gone, "--save-as", alias]),
-            (name.as_str(), &["exec", "--project", &name, "--save-as", &dotted]),
-            (in_new_dir, &["exec", "--project", in_new_dir, "--save-as", in_new_dir_alias]),
-            (gone, &["exec", "--project", gone, "--save-as", "other.ecproj"]),
-            (gone, &["exec", "--project", gone]),
+        for (project, save) in [
+            (gone, save(true, None)),
+            (gone, save(false, Some(gone))),
+            (gone, save(false, Some(alias))),
+            (name.as_str(), save(false, Some(&dotted))),
+            (in_new_dir, save(false, Some(in_new_dir_alias))),
+            (gone, save(false, Some("other.ecproj"))),
+            (gone, save(false, None)),
         ] {
-            let error = saved_in_place(&args(list)).unwrap_err();
-            assert_eq!(error.split_once(": ").map(|(head, _)| head), Some(format!("cannot read {project}").as_str()), "{list:?}: {error}");
+            let error = decide(Some(project), None, &save).unwrap_err().to_string();
+            assert_eq!(error.split_once(": ").map(|(head, _)| head), Some(format!("cannot read {project}").as_str()), "{project} {save:?}: {error}");
         }
-        // a project with --bridge is a usage error, which `backend` reports; no project, no lock
-        assert_eq!(saved_in_place(&args(&["exec", "--bridge", "9877", "--project", gone, "--save"])), Ok(None));
-        assert_eq!(saved_in_place(&args(&["exec", "--demo", "--save-as", gone])), Ok(None));
+        // a project with --bridge is a usage error, which clap reports; no project, no lock
+        assert!(matches!(decide(Some(gone), Some("9877"), &save(true, None)), Ok(None)));
+        assert!(matches!(decide(None, None, &save(false, Some(gone))), Ok(None)));
     }
 }

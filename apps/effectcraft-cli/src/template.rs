@@ -8,80 +8,63 @@ use effectcraft_engine::{
 };
 use serde_json::{Map, Value, json};
 
-use crate::{Args, Failure, usage_err};
+use crate::error::TemplateError;
 
-pub(super) fn validate(cmd: &str, args: &Args) -> Result<(), Failure> {
-    if args.opt("--values").is_some() && args.opt("--template").is_none() {
-        return usage_err("--values requires --template");
-    }
-    if args.opt("--template").is_none() {
-        return Ok(());
-    }
-    if !matches!(cmd, "render" | "render-frame" | "frame") {
-        return usage_err("--template is available for render and render-frame");
-    }
-    if args.project.is_some() || args.flag("--demo") || args.opt("--bridge").is_some() || args.flag("--queue") || args.opt("--comp").is_some() {
-        return usage_err("--template renders a new instance; it cannot be combined with --project, --demo, --bridge, --queue or --comp");
-    }
-    if !args.pos.is_empty() {
-        return usage_err("template rendering takes --template FILE.ectemplate, without positional arguments");
-    }
-    if cmd == "render" && args.opt("--out").is_none() {
-        return usage_err("render: --out FILE is required (or --queue)");
-    }
-    // Resolve existing outputs before importing or rendering can overwrite an input.
-    let out = args.opt("--out").or_else(|| matches!(cmd, "render-frame" | "frame").then_some("frame.png"));
-    if let Some(out) = out
-        && let Ok(output) = std::fs::canonicalize(out)
-    {
-        for input in ["--template", "--values"] {
-            if let Some(path) = args.opt(input)
-                && std::fs::canonicalize(path).is_ok_and(|path| {
-                    if path == output {
-                        return true;
+type Result<T = ()> = std::result::Result<T, TemplateError>;
+
+/// Refuse an `--out` that is the template or the values file, before importing or rendering can
+/// overwrite an input. Whether `--template` may be combined with other options, and what it needs,
+/// is the command line's (`args`).
+pub(super) fn check_output(out: &str, template: &str, values: Option<&str>) -> Result {
+    let Ok(output) = std::fs::canonicalize(out) else { return Ok(()) };
+    for (input, path) in [("--template", Some(template)), ("--values", values)] {
+        if let Some(path) = path
+            && std::fs::canonicalize(path).is_ok_and(|path| {
+                if path == output {
+                    return true;
+                }
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::MetadataExt;
+                    // Distinct canonical paths can still name the same file through hard links.
+                    if let (Ok(input), Ok(output)) = (std::fs::metadata(&path), std::fs::metadata(&output)) {
+                        return input.dev() == output.dev() && input.ino() == output.ino();
                     }
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::MetadataExt;
-                        // Distinct canonical paths can still name the same file through hard links.
-                        if let (Ok(input), Ok(output)) = (std::fs::metadata(&path), std::fs::metadata(&output)) {
-                            return input.dev() == output.dev() && input.ino() == output.ino();
-                        }
-                    }
-                    false
-                })
-            {
-                return Err(Failure::Error(format!("--out {out} would overwrite {input} {path}")));
-            }
+                }
+                false
+            })
+        {
+            return Err(TemplateError::OutIsInput { out: out.to_owned(), input, path: path.to_owned() });
         }
     }
     Ok(())
 }
 
-fn values(args: &Args) -> Result<Map<String, Value>, Failure> {
-    let Some(path) = args.opt("--values") else { return Ok(Map::new()) };
+fn values(path: Option<&str>) -> Result<Map<String, Value>> {
+    let Some(path) = path else { return Ok(Map::new()) };
     // A bounded read also handles a file that grows after opening.
     const MAX_BYTES: u64 = 1024 * 1024;
-    let file = std::fs::File::open(path).map_err(|e| Failure::Error(format!("cannot read values {path}: {e}")))?;
+    let read_err = |source| TemplateError::ReadValues { path: path.to_owned(), source };
+    let file = std::fs::File::open(path).map_err(read_err)?;
     let mut bytes = Vec::new();
-    file.take(MAX_BYTES + 1).read_to_end(&mut bytes).map_err(|e| Failure::Error(format!("cannot read values {path}: {e}")))?;
+    file.take(MAX_BYTES + 1).read_to_end(&mut bytes).map_err(read_err)?;
     if bytes.len() as u64 > MAX_BYTES {
-        return Err(Failure::Error(format!("values {path}: JSON exceeds 1 MiB")));
+        return Err(TemplateError::ValuesTooBig(path.to_owned()));
     }
-    let value: Value = serde_json::from_slice(&bytes).map_err(|e| Failure::Error(format!("values {path}: invalid JSON: {e}")))?;
+    let value: Value = serde_json::from_slice(&bytes).map_err(|source| TemplateError::ValuesJson { path: path.to_owned(), source })?;
     match value {
         Value::Object(values) => Ok(values),
-        _ => Err(Failure::Error(format!("values {path}: expected a JSON object mapping control names to values"))),
+        _ => Err(TemplateError::ValuesNotAnObject(path.to_owned())),
     }
 }
 
-fn execute(s: &mut Session, command: &str, params: Value) -> Result<Value, Failure> {
-    s.execute_checked(command, params).map_err(|e| Failure::Error(e.to_string()))
+fn execute(s: &mut Session, command: &str, params: Value) -> Result<Value> {
+    Ok(s.execute_checked(command, params)?)
 }
 
 // Use the same instance commands to reject invalid values before import extracts media.
-fn preflight(s: &Session, path: &str, values: &Map<String, Value>) -> Result<(), Failure> {
-    let bytes = s.services.read_file(path).map_err(|e| Failure::Error(format!("cannot read {path}: {e}")))?;
+fn preflight(s: &Session, path: &str, values: &Map<String, Value>) -> Result {
+    let bytes = s.services.read_file(path).map_err(|e| TemplateError::ReadTemplate { path: path.to_owned(), message: e.to_string() })?;
     effectcraft_engine::guard::guarded("template value validation", || {
         let bad = |msg: String| EngineError::BadParams { cmd: "essential.importTemplate".into(), msg };
         let (manifest, mut project, _) = effectcraft_engine::commands::essential::read_template(&bytes).map_err(bad)?;
@@ -94,17 +77,16 @@ fn preflight(s: &Session, path: &str, values: &Map<String, Value>) -> Result<(),
         check.project = project.into();
         Ok(instantiate(&mut check, source, values, false))
     })
-    .map_err(|e| Failure::Error(e.to_string()))?
+    .map_err(|e| TemplateError::Engine(EngineError::Other(e.to_string())))?
 }
 
-pub(super) fn prepare(s: &mut Session, args: &Args) -> Result<(), Failure> {
-    let Some(path) = args.opt("--template") else { return Ok(()) };
-    let values = values(args)?;
+pub(super) fn prepare(s: &mut Session, path: &str, values_path: Option<&str>) -> Result {
+    let values = values(values_path)?;
     if !values.is_empty() {
         preflight(s, path, &values)?;
     }
     let imported = execute(s, "essential.importTemplate", json!({"path": path, "addToComp": false}))?;
-    let source = imported.get("comp").and_then(Value::as_u64).ok_or_else(|| Failure::Error("template import did not return a composition".into()))?;
+    let source = imported.get("comp").and_then(Value::as_u64).ok_or(TemplateError::NoImportedComp)?;
     instantiate(s, source, &values, true)
 }
 
@@ -125,31 +107,19 @@ fn is_media_control(s: &Session, source: u64, name: &str) -> bool {
     control.is_some_and(|c| matches!(c.kind, EgKind::Media { .. }))
 }
 
-fn instantiate(s: &mut Session, source: u64, values: &Map<String, Value>, import_media: bool) -> Result<(), Failure> {
+fn instantiate(s: &mut Session, source: u64, values: &Map<String, Value>, import_media: bool) -> Result {
     // Duplicate and empty the source with commands: this preserves exact rational frame rate,
     // Tick duration, background, work area and renderer settings without round-tripping floats.
     let duplicate = execute(s, "project.duplicate", json!({"items": [source]}))?;
-    let parent = duplicate
-        .get("items")
-        .and_then(Value::as_array)
-        .and_then(|items| items.first())
-        .and_then(Value::as_u64)
-        .ok_or_else(|| Failure::Error("cannot create template render composition".into()))?;
+    let parent = duplicate.get("items").and_then(Value::as_array).and_then(|items| items.first()).and_then(Value::as_u64).ok_or(TemplateError::NoRenderComp)?;
     execute(s, "comp.open", json!({"comp": parent}))?;
-    let layers: Vec<u64> = s
-        .project
-        .comp(ItemId(parent))
-        .ok_or_else(|| Failure::Error("template render composition is missing".into()))?
-        .layers
-        .iter()
-        .map(|layer| layer.id.0)
-        .collect();
+    let layers: Vec<u64> = s.project.comp(ItemId(parent)).ok_or(TemplateError::RenderCompMissing)?.layers.iter().map(|layer| layer.id.0).collect();
     if !layers.is_empty() {
         execute(s, "layer.setSwitch", json!({"comp": parent, "layers": layers, "switch": "lock", "value": false}))?;
         execute(s, "edit.clear", json!({"comp": parent, "layers": layers}))?;
     }
     let added = execute(s, "layer.addItem", json!({"comp": parent, "item": source, "time": 0}))?;
-    let instance = added.get("layer").and_then(Value::as_u64).ok_or_else(|| Failure::Error("cannot create template instance".into()))?;
+    let instance = added.get("layer").and_then(Value::as_u64).ok_or(TemplateError::NoInstance)?;
     // Keep a partial final frame: layer.addItem snaps its default end to the frame grid. Give the
     // wrapper the source's exact name, not Duplicate's numbered one, for `[compName]` outputs.
     s.edit("Template Duration", None, |project, _| {
@@ -161,26 +131,26 @@ fn instantiate(s: &mut Session, source: u64, values: &Map<String, Value>, import
         layer.out_point = duration;
         Ok(())
     })
-    .map_err(|e| Failure::Error(e.to_string()))?;
+    .map_err(|e| TemplateError::Engine(EngineError::Other(e.to_string())))?;
     // Let the wrapper carry the source composition's authored motion blur.
     execute(s, "layer.setSwitch", json!({"comp": parent, "layers": [instance], "switch": "motionBlur", "value": true}))?;
     for (control, value) in values {
         if is_media_control(s, source, control) {
-            let path = media_path(value).ok_or_else(|| Failure::Error(format!("control `{control}` is a media control: give it a file path")))?;
+            let path = media_path(value).ok_or_else(|| TemplateError::MediaNeedsPath(control.clone()))?;
             // The preflight session cannot import files; the real run reports a bad path.
             if !import_media {
                 continue;
             }
             let imported = execute(s, "file.import", json!({"paths": [path]}))?;
             if let Some(err) = imported.get("errors").and_then(Value::as_array).and_then(|e| e.first()) {
-                return Err(Failure::Error(format!("control `{control}`: cannot import {path}: {err}")));
+                return Err(TemplateError::MediaImport { control: control.clone(), path: path.to_owned(), error: err.clone() });
             }
             let item = imported
                 .get("items")
                 .and_then(Value::as_array)
                 .and_then(|items| items.first())
                 .and_then(Value::as_u64)
-                .ok_or_else(|| Failure::Error(format!("control `{control}`: {path} did not import as footage")))?;
+                .ok_or_else(|| TemplateError::MediaNotFootage { control: control.clone(), path: path.to_owned() })?;
             execute(s, "essential.set", json!({"comp": parent, "layer": instance, "control": control, "item": item}))?;
             continue;
         }
