@@ -388,8 +388,24 @@ fn repetile(ctx: &EffectCtx, b: Buf) -> Buf {
         return b;
     }
     let mode = ctx.params.e("tiling");
-    let (x0, y0, w, h) = layer_rect(ctx, &b);
-    if w < 1.0 || h < 1.0 {
+    let (lx0, ly0, lw, lh) = layer_rect(ctx, &b);
+    // The copies repeat the layer's painted content, not its comp-sized rectangle: a shape or
+    // text layer's buffer surrounds only that content (this effect grows its own buffer, so the
+    // renderer leaves it content-sized), while a sized source's buffer is its layer rectangle
+    // (#3866). The renderer measures the content in effect space (`EffectEnv::content`); without
+    // it (a later repeat, or a unit test's context) measure this buffer directly, unless it already
+    // spans the whole layer rectangle.
+    let (tx0, ty0, w, h) = match ctx.env.content {
+        Some([cx0, cy0, cx1, cy1]) => (cx0 * s + b.offset[0], cy0 * s + b.offset[1], (cx1 - cx0) * s, (cy1 - cy0) * s),
+        None if !crate::util::buffer_is_layer_rect(b.img.width, b.img.height, lw, lh) => match crate::util::painted_bounds(&b.img) {
+            Some((x, y, w, h)) => (f64::from(x), f64::from(y), f64::from(w), f64::from(h)),
+            None => return b,
+        },
+        None => (lx0, ly0, lw, lh),
+    };
+    if w < 1.0 - 1e-6 || h < 1.0 - 1e-6 {
+        // The width is rebuilt from two rounded effect-space endpoints, so a one-pixel region can
+        // come out a rounding error under 1; only a genuinely sub-pixel region is skipped.
         return b;
     }
     let (nw, nh) = ((w + l + r).round().max(1.0) as u32, (h + u + d).round().max(1.0) as u32);
@@ -413,10 +429,12 @@ fn repetile(ctx: &EffectCtx, b: Buf) -> Buf {
             if flip_y {
                 fy = h - fy;
             }
-            *px = src.sample_bilinear(x0 + fx, y0 + fy);
+            *px = src.sample_bilinear(tx0 + fx, ty0 + fy);
         }
     });
-    Buf { img: out, offset: [l, u], scale: s }
+    // The output starts `l`/`u` before the tile origin, so place it there (the input's own
+    // offset is part of that: image coordinate `tx0` is effect point `(tx0 - b.offset) / s`).
+    Buf { img: out, offset: [l - tx0 + b.offset[0], u - ty0 + b.offset[1]], scale: s }
 }
 
 // ---- Motion Tile ----
@@ -917,6 +935,22 @@ mod tests {
         lv.sort();
         lv.dedup();
         assert!(lv.len() <= 6, "{lv:?}");
+    }
+
+    /// A one-pixel painted region must not be skipped because rebuilding its width from two
+    /// rounded effect-space endpoints lands a rounding error under one pixel (#3866).
+    #[test]
+    fn repetile_repeats_a_single_pixel_region() {
+        let img = Image::filled(8, 8, [1.0; 4]);
+        let s = crate::find("ec.stylize.ccrepetile").unwrap();
+        let params = Params {
+            values: [("expandRight".into(), num(1.0)), ("expandLeft".into(), num(1.0)), ("expandUp".into(), num(1.0)), ("expandDown".into(), num(1.0))].into(),
+        };
+        // Effect-space endpoints whose rebuilt width is one pixel minus a rounding error.
+        let env = crate::EffectEnv { content: Some([4.0 / 3.0, 4.0 / 3.0, 1.6666666666666665, 1.6666666666666665]), ..Default::default() };
+        let ctx = EffectCtx { params: &params, time: 0.0, layer_size: [8.0, 8.0], seed: 1, adjustment: false, env };
+        let out = crate::apply(s, &ctx, Buf { img, offset: [-4.0, -4.0], scale: 3.0 });
+        assert_eq!((out.img.width, out.img.height), (7, 7));
     }
 
     /// A host whose every layer is `img`.

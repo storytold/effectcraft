@@ -24,6 +24,7 @@ mod paint;
 mod proxy_cache;
 mod raster_clip;
 mod remap;
+mod repetile;
 mod roi;
 mod stretch_limits;
 mod styles;

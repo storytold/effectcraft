@@ -164,6 +164,46 @@ fn tiles_kaleida_repetile() {
     effect_case("ec.distort.ccgriddler", &[("cutTiles", on()), ("horizontalScale", n(120.0)), ("verticalScale", n(80.0)), ("tileSize", n(17.0))]);
 }
 
+/// #3866: Edge Tile Repeat repeats the painted content of a shape or text layer, not the
+/// comp-sized layer rectangle. A 10×8 opaque block in a 14×12 buffer (its transparent margin) in
+/// a 40×30 layer: both paths must tile the block, at the same place and size.
+#[test]
+fn repetile_tiles_the_painted_content_on_the_gpu_too() {
+    let Some(g) = crate::tests::gpu() else { return };
+    let spec = effectcraft_effects::find("ec.stylize.ccrepetile").unwrap();
+    let params = effectcraft_effects::Params {
+        values: [("expandRight".to_string(), n(5.0)), ("expandLeft".to_string(), n(5.0)), ("expandUp".to_string(), n(4.0)), ("expandDown".to_string(), n(4.0))]
+            .into(),
+    };
+    let ctx = effectcraft_effects::EffectCtx {
+        params: &params,
+        time: 0.0,
+        layer_size: [40.0, 30.0],
+        seed: 1,
+        adjustment: false,
+        env: effectcraft_effects::EffectEnv { content: Some([2.0, 2.0, 12.0, 10.0]), ..Default::default() },
+    };
+    let mut img = effectcraft_raster::Image::new(14, 12);
+    for y in 2..10 {
+        for x in 2..12 {
+            img.set(x, y, [0.9, 0.2, 0.4, 1.0]);
+        }
+    }
+    let input = effectcraft_effects::Buf { img, offset: [0.0; 2], scale: 1.0 };
+    let cpu = (spec.render)(&ctx, input.clone());
+    let gpu = effectcraft_render::Accelerator::effects(g, &[effectcraft_render::FxStep { spec, ctx }], &input, None).unwrap();
+    assert_eq!((cpu.img.width, cpu.img.height), (20, 16), "the block plus 5 px on each side");
+    assert_eq!((cpu.img.width, cpu.img.height), (gpu.img.width, gpu.img.height));
+    for (i, (want, got)) in cpu.img.data.iter().zip(&gpu.img.data).enumerate() {
+        for ch in 0..4 {
+            assert!((want[ch] - got[ch]).abs() <= 1e-3, "pixel {i}: CPU {want:?}, GPU {got:?}");
+        }
+    }
+    for (x, y) in [(10, 8), (1, 8), (10, 1), (18, 14), (0, 0), (19, 15)] {
+        assert!(cpu.img.get(x, y)[3] > 0.99, "copy at ({x}, {y}) is transparent");
+    }
+}
+
 #[test]
 fn mirror_offset_polar_spherize_corner_pin() {
     effect_case("ec.distort.mirror", &[("angle", n(30.0))]);

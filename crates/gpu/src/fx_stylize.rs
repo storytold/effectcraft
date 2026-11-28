@@ -664,8 +664,19 @@ fn repetile(e: &mut Enc, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
     if ctx.adjustment || r + l + d + u < 0.5 {
         return Some(b);
     }
-    let (x0, y0, w, h) = layer_rect(ctx, &b);
-    if w < 1.0 || h < 1.0 {
+    // stylize2::repetile: the copies repeat the layer's painted content, not its comp-sized
+    // rectangle (#3866). The renderer measured that content in effect space
+    // (`EffectEnv::content`); a buffer that does not span the layer rectangle (a later repeat, or
+    // an unmeasured authored layer) falls back to the CPU, which measures its own input.
+    let (lx0, ly0, lw, lh) = layer_rect(ctx, &b);
+    let (tx0, ty0, w, h) = match ctx.env.content {
+        Some([cx0, cy0, cx1, cy1]) => (cx0 * s + b.offset[0], cy0 * s + b.offset[1], (cx1 - cx0) * s, (cy1 - cy0) * s),
+        None if !effectcraft_effects::util::buffer_is_layer_rect(b.img.width, b.img.height, lw, lh) => return None,
+        None => (lx0, ly0, lw, lh),
+    };
+    if w < 1.0 - 1e-6 || h < 1.0 - 1e-6 {
+        // The width is rebuilt from two rounded effect-space endpoints, so a one-pixel region can
+        // come out a rounding error under 1; only a genuinely sub-pixel region is skipped.
         return Some(b);
     }
     let (nw, nh) = ((w + l + r).round().max(1.0) as u32, (h + u + d).round().max(1.0) as u32);
@@ -680,11 +691,11 @@ fn repetile(e: &mut Enc, ctx: &EffectCtx, b: GBuf) -> Option<GBuf> {
     let data = axis_table(nw, nh, |x| tile(x - l, w), |y| tile(y - u, h));
     let mut p = Params::default();
     p.u[0] = [nw, ctx.params.e("tiling"), 0, 0];
-    p.f[0] = [x0 as f32, y0 as f32, w as f32, h as f32];
+    p.f[0] = [tx0 as f32, ty0 as f32, w as f32, h as f32];
     let buf = e.data(&data);
     let out = e.scratch(nw, nh);
     e.pixels("fxs_repetile", &p, &b.img, None, &out, Some(&buf));
-    Some(GBuf { img: out, offset: [l, u], scale: s })
+    Some(GBuf { img: out, offset: [l - tx0 + b.offset[0], u - ty0 + b.offset[1]], scale: s })
 }
 
 fn magnify(e: &mut Enc, ctx: &EffectCtx, mut b: GBuf) -> Option<GBuf> {

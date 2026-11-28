@@ -649,7 +649,7 @@ fn fxs_motiontile(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 
 // CC RepeTile (stylize2::repetile) into a new output size. data: per output column (tile index,
-// position in the tile), then per row. u[0] = (output width, tiling); f[0] = layer rect (x0, y0, w, h)
+// position in the tile), then per row. u[0] = (output width, tiling); f[0] = tile rect (x0, y0, w, h)
 @compute @workgroup_size(16, 16)
 fn fxs_repetile(@builtin(global_invocation_id) gid: vec3<u32>) {
     let p = vec2<i32>(gid.xy);
