@@ -515,6 +515,19 @@ fn spawn(
     }
 }
 
+/// Forget the lane's error if it is `id`'s: verified weights for that model are now in place, so
+/// a failed download or load of it no longer stands. Only retrying the chosen model cleared it,
+/// so after a failed download of a model that wasn't chosen yet, `models` kept reporting the
+/// download's error next to an installed model (#3052). Another model's error stays.
+fn clear_error_of(lane: &Arc<Mutex<Status>>, id: &str) {
+    set(lane, |s| {
+        if s.error_model == Some(id) {
+            s.error = None;
+            s.error_model = None;
+        }
+    });
+}
+
 /// The notice kept next to `m`'s weights.
 fn notice_path(dir: &Path, m: &ModelInfo) -> PathBuf {
     dir.join(format!("{}.NOTICE.txt", m.file_name))
@@ -631,6 +644,7 @@ fn install(s: &mut Session, p: &Value, task: Task) -> Result<Value> {
         }
     };
     let dest = install_bytes(&dir, m, &bytes).map_err(|e| bad(&cmd, e))?;
+    clear_error_of(s.models.lane(task), m.id);
     let wait = b_p(p, "wait").unwrap_or(false);
     s.retry_installed_model(task, m.id, wait).map_err(|error| bad(&cmd, error))?;
     Ok(json!({"id": m.id, "path": dest.display().to_string()}))
@@ -755,6 +769,50 @@ pub fn specs() -> Vec<CommandSpec> {
 #[cfg(test)]
 mod availability_tests {
     use super::*;
+
+    /// Installing a model's weights forgets that model's failed download or load, not another's (#3052).
+    #[test]
+    fn installed_weights_clear_only_their_models_error() {
+        let session = Session::default();
+        let lane = session.models.lane(Task::Mask);
+        for (failed, installed, cleared) in [("mobilesam", "mobilesam", true), (seg::SAM2_TINY.id, "mobilesam", false)] {
+            set(lane, |s| {
+                s.error = Some("downloading needs curl".into());
+                s.error_model = Some(failed);
+            });
+            clear_error_of(lane, installed);
+            let st = session.models.status(Task::Mask);
+            assert_eq!(st.error.is_none(), cleared, "{failed}'s error after installing {installed}");
+            assert_eq!(st.error_model.is_none(), cleared);
+        }
+    }
+
+    /// A failed download of a model that isn't chosen yet, then a successful install of its
+    /// weights: the install succeeds and `roto.models` no longer reports the download's error,
+    /// which only a later selection used to clear (#3052). With the real weights
+    /// (EFFECTCRAFT_MOBILESAM=path/to/mobile_sam.pt).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn installing_after_a_failed_download_clears_its_error() {
+        let Ok(weights) = std::env::var("EFFECTCRAFT_MOBILESAM") else { return };
+        crate::tests::roto::hold_roto_cache_test_lock();
+        let d = std::env::temp_dir().join(format!("ec-models-stale-{}", std::process::id()));
+        let store: Arc<dyn crate::config::ConfigStore> = Arc::new(crate::config::DirConfig::new(d.join("config")));
+        let mut session = Session { config: Some(store), ..Default::default() };
+        assert_eq!(session.chosen_model(Task::Mask), seg::CLASSICAL);
+        // What `spawn` leaves after `roto.model.download` fails without curl.
+        set(session.models.lane(Task::Mask), |s| {
+            s.error = Some("downloading needs curl (No such file or directory (os error 2))".into());
+            s.error_model = Some("mobilesam");
+        });
+        session.execute("roto.model.install", json!({"path": weights, "id": "mobilesam", "wait": true})).unwrap();
+        let list = session.execute("roto.models", json!({})).unwrap();
+        assert_eq!(list["error"], Value::Null, "{list}");
+        let row = list["models"].as_array().unwrap().iter().find(|m| m["id"] == "mobilesam").unwrap();
+        assert_eq!(row["installed"], true);
+        assert_eq!(session.chosen_model(Task::Mask), seg::CLASSICAL, "installing chooses nothing");
+        let _ = std::fs::remove_dir_all(d);
+    }
 
     /// SAM 2 cannot start a network operation; file installation still verifies the published hash.
     #[cfg(not(target_arch = "wasm32"))]
