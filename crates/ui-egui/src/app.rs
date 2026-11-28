@@ -160,6 +160,11 @@ impl EffectcraftApp {
 
 impl eframe::App for EffectcraftApp {
     fn on_exit(&mut self) {
+        // The frame workers must be off the GPU before `main` returns (see `Frames::shutdown`).
+        #[cfg(not(target_arch = "wasm32"))]
+        while !self.frames.shutdown(std::time::Duration::from_secs(5)) {
+            log::warn!("waiting for frame renders to stop before GPU teardown");
+        }
         self.save_workspace_state();
         // Clean exit: no crash recovery next launch (unless the graphics device was lost with
         // unsaved changes, which are in the auto-save it offers).
