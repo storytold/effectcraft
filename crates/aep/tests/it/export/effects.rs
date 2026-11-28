@@ -749,3 +749,63 @@ fn mesh_handles_moved_on_their_own_survive_the_round_trip() {
     }
     assert!(found);
 }
+
+/// Keys on an angle, a checkbox, a popup and an integer slider are written as After Effects
+/// stores them (lab keyed-param-kinds: one-component 48-byte records with the value as shown, a
+/// popup 1-based, a checkbox 0 / 1; every checkbox and popup key held).
+#[test]
+fn keys_on_angles_checkboxes_popups_and_integer_sliders_are_written() {
+    let mut p = Project::default();
+    let c = add_comp(&mut p, "C", 640, 360, effectcraft_time::FrameRate::new(25, 1), 4.0, None);
+    let s = add_solid(&mut p, "L", 640, 360, [0.2, 0.3, 0.4], None);
+    add_layer(&mut p, c, "L", effectcraft_project::LayerSource::Solid { item: s }, (640, 360));
+    let spec = effectcraft_effects::find("ec.noise.fractal").expect("fractal noise");
+    let mut next = p.next_id;
+    let mut g = effectcraft_effects::instantiate(spec, &mut effectcraft_project::build::Ids(&mut next), "Fractal Noise", [640.0, 360.0]);
+    p.next_id = next;
+    let mut evo = vec![key(0.0, Value::Scalar(0.0)), key(1.0, Value::Scalar(720.0)), key(2.0, Value::Scalar(90.0))];
+    evo[2].in_interp = Interp::Bezier;
+    evo[2].in_ease = vec![effectcraft_keyframe::Ease { speed: -100.0, influence: 0.5 }];
+    g.prop_mut("evolution").expect("evolution").keys = evo;
+    // A linear checkbox or popup key is held, as After Effects holds them.
+    g.prop_mut("invert").expect("invert").keys = vec![key(0.0, Value::Bool(false)), key(1.0, Value::Bool(true))];
+    g.prop_mut("fractalType").expect("type").keys = vec![key(0.0, Value::Enum(0)), key(2.0, Value::Enum(2))];
+    g.prop_mut("evolutionOptions/cycle").expect("cycle").keys = vec![key(0.0, Value::Scalar(1.0)), key(1.0, Value::Scalar(40.0))];
+    with_layer(&mut p, c, 0, |l| l.props.sub_mut("effects").expect("effects").children.push(Node::Group(g)));
+    let r = export_all(&p);
+    assert_eq!(r.report.count(LossCategory::Effects), 0, "{:?}", r.report.losses);
+    assert!(r.report.is_lossless(), "{:?}", r.report.losses);
+    let file = parse(&r.bytes).expect("parse");
+    let seen = effects_of(&file);
+    let fx = &seen.first().expect("layer").1[0];
+    let keys = |i: usize| fx.params.iter().find(|p| p.0 == i).map(|p| p.2.iter().map(|k| (k.0, k.1.clone(), k.2)).collect::<Vec<_>>()).expect("param");
+    assert_eq!(keys(24), [(0, vec![0.0], (1, 1)), (25_600, vec![720.0], (1, 1)), (51_200, vec![90.0], (2, 1))]);
+    assert_eq!(keys(3), [(0, vec![0.0], (3, 3)), (25_600, vec![1.0], (3, 3))]);
+    // The third EffectCraft item is After Effects' fourth: its list has a separator after Basic.
+    assert_eq!(keys(1), [(0, vec![1.0], (3, 3)), (51_200, vec![4.0], (3, 3))]);
+    assert_eq!(keys(27), [(0, vec![1.0], (1, 1)), (25_600, vec![40.0], (1, 1))]);
+    // The Evolution key's incoming ease is written as set (degrees per second).
+    {
+        let view = effectcraft_aep::Project::new(&file).expect("project");
+        let comp = view.all_items().into_iter().find_map(|i| i.comp()).expect("comp");
+        let layer = comp.layers().next().expect("layer");
+        let fx = layer.effects().into_iter().next().expect("effect");
+        let evo = view.effect_params(&fx).into_iter().find(|p| p.index == 24).expect("evolution");
+        let written: Vec<_> = evo.keys().expect("keys").keyframes().collect();
+        let e = written[2].ease_components().expect("ease");
+        assert_eq!((e[0].in_speed, e[0].in_influence), (-100.0, 0.5));
+    }
+    // And back: the same keys, the popup ones held (the importer does not read checkbox keys).
+    let q = import_bytes(&r.bytes);
+    let back = q
+        .items
+        .values()
+        .find_map(|i| if let ItemKind::Comp(c) = &i.kind { c.layers.first().and_then(|l| l.effects()).and_then(|e| e.groups().next().cloned()) } else { None })
+        .expect("effect");
+    let values = |id: &str| back.prop(id).expect(id).keys.iter().map(|k| (k.value.clone(), k.out_interp)).collect::<Vec<_>>();
+    assert_eq!(values("evolution").iter().map(|v| v.0.clone()).collect::<Vec<_>>(), [Value::Scalar(0.0), Value::Scalar(720.0), Value::Scalar(90.0)]);
+    let evo_in = &back.prop("evolution").expect("evolution").keys[2];
+    assert_eq!((evo_in.in_interp, evo_in.in_ease.clone()), (Interp::Bezier, vec![effectcraft_keyframe::Ease { speed: -100.0, influence: 0.5 }]));
+    assert_eq!(values("fractalType"), [(Value::Enum(0), Interp::Hold), (Value::Enum(2), Interp::Hold)]);
+    assert_eq!(values("evolutionOptions/cycle").iter().map(|v| v.0.clone()).collect::<Vec<_>>(), [Value::Scalar(1.0), Value::Scalar(40.0)]);
+}
