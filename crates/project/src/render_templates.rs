@@ -6,6 +6,8 @@
 //! carry their name in [`RenderSettings::name`] / [`OutputModule::name`], which the Render Queue
 //! shows like After Effects does.
 
+use std::sync::LazyLock;
+
 use serde::{Deserialize, Serialize};
 
 use crate::render_queue::{
@@ -220,10 +222,20 @@ impl RenderTemplates {
         self.output_module_list().into_iter().find(|t| same(&t.name, name))
     }
     pub fn is_builtin(kind: TemplateKind, name: &str) -> bool {
-        match kind {
-            TemplateKind::RenderSettings => builtin_render_settings().iter().any(|t| same(&t.name, name)),
-            TemplateKind::OutputModule => builtin_output_modules().iter().any(|t| same(&t.name, name)),
-        }
+        static RENDER_NAMES: LazyLock<Vec<String>> = LazyLock::new(|| builtin_render_settings().into_iter().map(|t| t.name).collect());
+        static OUTPUT_NAMES: LazyLock<Vec<String>> = LazyLock::new(|| builtin_output_modules().into_iter().map(|t| t.name).collect());
+        let names = match kind {
+            TemplateKind::RenderSettings => &*RENDER_NAMES,
+            TemplateKind::OutputModule => &*OUTPUT_NAMES,
+        };
+        names.iter().any(|builtin| same(builtin, name))
+    }
+    fn has_template(&self, kind: TemplateKind, name: &str) -> bool {
+        let custom = match kind {
+            TemplateKind::RenderSettings => self.render_settings.iter().any(|t| same(&t.name, name)),
+            TemplateKind::OutputModule => self.output_modules.iter().any(|t| same(&t.name, name)),
+        };
+        custom || Self::is_builtin(kind, name)
     }
     /// Save (or replace) a template under `name`.
     pub fn save_render_settings(&mut self, name: &str, mut s: RenderSettings) {
@@ -245,6 +257,13 @@ impl RenderTemplates {
             TemplateKind::OutputModule => self.output_modules.retain(|t| !same(&t.name, name)),
         }
         if before != (self.render_settings.len(), self.output_modules.len()) {
+            if !Self::is_builtin(kind, name) {
+                let defaults = match kind {
+                    TemplateKind::RenderSettings => &mut self.defaults.render_settings,
+                    TemplateKind::OutputModule => &mut self.defaults.output_modules,
+                };
+                defaults.retain(|(_, template)| !same(template, name));
+            }
             return Ok(());
         }
         if Self::is_builtin(kind, name) { Err(format!("“{name}” is a built-in template")) } else { Err(format!("no template “{name}”")) }
@@ -255,18 +274,17 @@ impl RenderTemplates {
             TemplateKind::RenderSettings => &self.defaults.render_settings,
             TemplateKind::OutputModule => &self.defaults.output_modules,
         };
-        list.iter().find(|(s, _)| *s == slot).map(|(_, n)| n.clone()).unwrap_or_else(|| {
-            let d = TemplateDefaults::default();
-            let l = if kind == TemplateKind::RenderSettings { d.render_settings } else { d.output_modules };
-            l.into_iter().find(|(s, _)| *s == slot).map(|(_, n)| n).unwrap_or_default()
+        list.iter().find(|(s, _)| *s == slot).filter(|(_, name)| self.has_template(kind, name)).map(|(_, name)| name.clone()).unwrap_or_else(|| {
+            static FACTORY_DEFAULTS: LazyLock<TemplateDefaults> = LazyLock::new(TemplateDefaults::default);
+            let defaults = match kind {
+                TemplateKind::RenderSettings => &FACTORY_DEFAULTS.render_settings,
+                TemplateKind::OutputModule => &FACTORY_DEFAULTS.output_modules,
+            };
+            defaults.iter().find(|(s, _)| *s == slot).map(|(_, name)| name.clone()).unwrap_or_default()
         })
     }
     pub fn set_default(&mut self, kind: TemplateKind, slot: TemplateSlot, name: &str) -> Result<(), String> {
-        let exists = match kind {
-            TemplateKind::RenderSettings => self.render_settings(name).is_some(),
-            TemplateKind::OutputModule => self.output_module(name).is_some(),
-        };
-        if !exists {
+        if !self.has_template(kind, name) {
             return Err(format!("no template “{name}”"));
         }
         let list = match kind {
@@ -319,9 +337,46 @@ mod tests {
         assert!(t.output_module("Web Crop").is_none());
         // Overriding a built-in, then deleting the override, restores it.
         t.save_output_module("High Quality", OutputModule::for_format(OutputFormat::Gif));
-        assert_eq!(t.output_module("High Quality").unwrap().format, OutputFormat::Gif);
+        t.set_default(TemplateKind::OutputModule, TemplateSlot::Movie, "High Quality").unwrap();
+        assert_eq!(t.default_output_module(TemplateSlot::Movie).format, OutputFormat::Gif);
         t.delete(TemplateKind::OutputModule, "High Quality").unwrap();
-        assert_eq!(t.output_module("High Quality").unwrap().format, OutputFormat::ProRes);
+        assert_eq!(t.default_output_module(TemplateSlot::Movie).format, OutputFormat::ProRes);
+    }
+
+    #[test]
+    fn deleting_a_custom_template_restores_each_slot_default() {
+        let factory = RenderTemplates::default();
+        let mut t = factory.clone();
+        let slots = [TemplateSlot::PreRender, TemplateSlot::Still];
+        t.save_output_module("Temporary", OutputModule::for_format(OutputFormat::Gif));
+        for slot in slots {
+            t.set_default(TemplateKind::OutputModule, slot, "Temporary").unwrap();
+            assert_eq!(t.default_output_module(slot).format, OutputFormat::Gif);
+        }
+        t.save_render_settings("Temporary", RenderSettings::default());
+        t.set_default(TemplateKind::RenderSettings, TemplateSlot::Still, "Temporary").unwrap();
+        t.delete(TemplateKind::OutputModule, " temporary ").unwrap();
+        for slot in slots {
+            assert_eq!(t.default_output_module(slot), factory.default_output_module(slot));
+        }
+        assert_eq!(t.default_name(TemplateKind::RenderSettings, TemplateSlot::Still), "Temporary");
+        t.save_output_module("Temporary", OutputModule::for_format(OutputFormat::Gif));
+        for slot in slots {
+            assert_eq!(t.default_output_module(slot), factory.default_output_module(slot));
+        }
+    }
+
+    #[test]
+    fn missing_saved_defaults_use_the_factory_slot_values() {
+        let factory = RenderTemplates::default();
+        let mut t = factory.clone();
+        let slot = TemplateSlot::Still;
+        for defaults in [&mut t.defaults.render_settings, &mut t.defaults.output_modules] {
+            defaults.retain(|(entry, _)| *entry != slot);
+            defaults.push((slot, "Gone".into()));
+        }
+        assert_eq!(t.default_render_settings(slot), factory.default_render_settings(slot));
+        assert_eq!(t.default_output_module(slot), factory.default_output_module(slot));
     }
 
     /// An Output Module template keeps its OpenEXR compression and bit depth through a save and
