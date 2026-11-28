@@ -19,7 +19,7 @@
 //! * Payloads are LZ4-compressed (`lz4_flex`, MIT): frames as 8-bit premultiplied RGBA (or, for
 //!   32 bpc viewer frames, half-float RGBA with the bytes shuffled into planes; the entry
 //!   header's format byte tells them apart: 2 and 3, both with their source files first), layer
-//!   buffers (format 4, their source files first) as `f32` RGBA with the bytes shuffled into
+//!   buffers (format 7, their source files first) as `f32` RGBA with the bytes shuffled into
 //!   planes (exact, so cached and fresh renders are bit-identical), Roto Brush / Object Matte segmentations as
 //!   `FrameSeg::to_bytes` (keyed by their content-keyed chain key and scale, so they are
 //!   reused whenever the same frames, settings and prompt come back, also after a restart). Every file ends in a checksum; damaged files read as misses and
@@ -123,9 +123,9 @@ const FORMAT_RGBA8: u8 = 0;
 /// formats before them (0: 8-bit, 1: half float, without files) read as misses and are deleted.
 const FORMAT_RGBA8_FILES: u8 = 2;
 const FORMAT_F16_FILES: u8 = 3;
-/// Layer entries: their source files ([`EntryFiles`]), then the buffer. The format before it
-/// (0, without files) reads as a miss and is deleted.
-const FORMAT_LAYER_FILES: u8 = 4;
+/// Layer entries: their source files ([`EntryFiles`]), then the buffer. Format 4 predates
+/// Object Matte mismatch warnings, so its buffers may hide a stale freeze. It reads as a miss.
+const FORMAT_LAYER_FILES: u8 = 7;
 /// Plane entries: their source file ([`EntryFiles`]), then one named plane ([`encode_plane_after`]).
 /// (5, several `f32` planes per entry, reads as a miss and is deleted.)
 const FORMAT_PLANES_FILES: u8 = 6;
@@ -3011,7 +3011,14 @@ mod tests {
         dc.flush();
         assert!(dc.get_layer(lk, Some(&two)).is_none() && !dc.contains(Kind::Layer, lk), "replaced: a miss, deleted");
         // The browser's sealed layer entries carry the same list.
-        let e = layer_entry(&buf(2, 3, 2), &EntryFiles::of(&files, Some(&one)).unwrap());
+        let entry_files = EntryFiles::of(&files, Some(&one)).unwrap();
+        let buffer = buf(2, 3, 2);
+        let old_payload = with_files(&entry_files, encode_layer(&buffer));
+        let old = seal_format(Kind::Layer, 4, &old_payload);
+        assert!(read_layer_entry(&old).is_none(), "layer entries predating Object Matte warnings are misses");
+        dc.write_format(Kind::Layer, lk, 4, &old_payload);
+        assert!(dc.get_layer(lk, Some(&one)).is_none(), "old desktop entries are also misses");
+        let e = layer_entry(&buffer, &entry_files);
         let (b, list) = read_layer_entry(&e).unwrap();
         assert!(b.img == buf(2, 3, 2).img && list.unchanged(Some(&one)) && !list.unchanged(Some(&two)));
         assert!(read_layer_entry(&seal_format(Kind::Layer, FORMAT_RGBA8, &encode_layer(&buf(2, 3, 2)))).is_none(), "the format before #3184");

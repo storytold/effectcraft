@@ -137,7 +137,7 @@ fn effect_editor(app: &mut EffectcraftApp, ui: &mut egui::Ui, cx: &EditorCx, g: 
         effectcraft_engine::effects::warp_stab::ID => warp_editor(app, ui, cx.bp, cx.layer, g, er, actions),
         effectcraft_engine::effects::camera_tracker::ID => crate::panels::camera_tracker_ui::editor(app, ui, cx.bp, cx.layer, g, er, actions),
         effectcraft_engine::effects::roto::ID => roto_editor(app, ui, cx.bp, cx.layer, g, er, actions),
-        effectcraft_engine::effects::object_matte::ID => object_matte_editor(app, ui, cx.bp, cx.layer, g, er, actions),
+        effectcraft_engine::effects::object_matte::ID => object_matte_editor(app, ui, cx.ectx, cx.layer, g, er, actions),
         "ec.color.levels" | "ec.color.levelsic" => levels_editor(app, ui, cx.bp, cx.layer, g, effect, cx.ectx, er, actions),
         crate::panels::fx_editors::GLOW | crate::panels::fx_editors::RESHAPE | crate::panels::fx_editors::EXTRACTOR => {
             crate::panels::fx_editors::header_editor(app, ui, cx.bp, cx.layer, g, effect, cx.ectx, er, actions)

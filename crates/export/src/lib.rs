@@ -121,6 +121,9 @@ pub struct JobOptions<'a> {
     /// the compositor it chose there, so the item's other output modules encode the same
     /// frames. `None`: the job decides alone.
     pub renderer: Option<&'a std::sync::Mutex<Option<effectcraft_render::Backend>>>,
+    /// The saved-matte warning shared by the output modules of one item. One-off jobs keep
+    /// their own warning.
+    pub object_matte_warning: Option<&'a std::sync::Once>,
     /// Settings ▸ Memory & CPU ▸ GPU Frames Rendered at Once: 1 to 3, or `None` for Auto (from
     /// the device memory a frame measured, #3335). `EFFECTCRAFT_GPU_INFLIGHT` overrides it.
     pub gpu_frames: Option<usize>,

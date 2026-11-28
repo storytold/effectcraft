@@ -11,7 +11,10 @@ use effectcraft_ui_egui::EffectcraftApp;
 use effectcraft_ui_egui::dock::PanelKind;
 use effectcraft_ui_egui::state::Tool;
 use egui::{Event, Modifiers, Pos2, Rect, pos2, vec2};
-use egui_kittest::Harness;
+use egui_kittest::{
+    Harness,
+    kittest::{NodeT, Queryable},
+};
 use serde_json::json;
 
 fn harness() -> Harness<'static, EffectcraftApp> {
@@ -185,4 +188,24 @@ fn object_matte_effect_controls_track_and_freeze() {
     h.run_steps(2);
     assert!(status(&h).is_some_and(|s| s.starts_with("Frozen")), "{:?}", status(&h));
     assert_eq!(h.state().auto.find(&format!("effectControls.objectMatte.{uid}.freeze")).map(|e| e.label.as_str()), Some("Unfreeze"));
+    let layer = box_layer(&h);
+    h.state_mut().session.execute("prop.set", json!({"layer": layer.0, "path": "effects/#1/objectMatte/feather", "value": 1})).unwrap();
+    h.run_steps(2);
+    assert!(status(&h).is_some_and(|s| s.contains("freeze again")), "{:?}", status(&h));
+    let warning = h.get_by_role_and_label(egui::Role::Status, "Unfreeze and freeze again");
+    assert_eq!(warning.accesskit_node().data().live(), Some(egui::accesskit::Live::Polite));
+    h.state_mut().session.execute("edit.undo", json!({})).unwrap();
+    h.run_steps(2);
+    assert!(status(&h).is_some_and(|s| s.starts_with("Frozen")), "{:?}", status(&h));
+
+    let feather = "effects/#1/objectMatte/feather";
+    for (time, value) in [(0.0, 0), (0.5, 10)] {
+        h.state_mut().session.execute("prop.addKey", json!({"layer": layer.0, "path": feather, "time": time, "value": value})).unwrap();
+    }
+    h.state_mut().session.execute("time.set", json!({"time": 0.5})).unwrap();
+    h.run_steps(2);
+    assert_eq!(status(&h).as_deref(), Some("Animated settings use a live matte"));
+    let reply = h.state_mut().session.execute("objectMatte.status", json!({"layer": layer.0, "effect": uid})).unwrap();
+    assert_eq!(reply["needsRefreeze"], false, "freezing again uses the unchanged reference frame");
+    assert_eq!(reply["animatedMismatch"], true);
 }

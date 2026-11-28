@@ -59,19 +59,13 @@ pub(super) fn roto_editor(app: &mut EffectcraftApp, ui: &mut egui::Ui, p: &egui:
 
 /// Object Matte: Freeze / Unfreeze and Track / Stop buttons (the background job that computes
 /// the matte over the tracked frames) and its status.
-pub(super) fn object_matte_editor(
-    app: &mut EffectcraftApp,
-    ui: &mut egui::Ui,
-    p: &egui::Painter,
-    layer: &Layer,
-    g: &PropGroup,
-    r: Rect,
-    actions: &mut Actions,
-) {
+pub(super) fn object_matte_editor(app: &mut EffectcraftApp, ui: &mut egui::Ui, ectx: &EvalCtx, layer: &Layer, g: &PropGroup, r: Rect, actions: &mut Actions) {
     use effectcraft_engine::effects::object_matte as om;
+    use effectcraft_engine::roto::ObjectMatteFreezeStatus::{AnimatedMismatch, NeedsRefreeze, NoMismatch};
     let t = app.tokens;
-    let params = effectcraft_engine::effects::flatten_params(g, &mut |pr| pr.value.clone());
+    let params = effectcraft_engine::effects::flatten_params(g, &mut |pr| ectx.value(layer, pr));
     let frozen = om::is_frozen(&params);
+    let freeze_status = app.session.object_matte_freeze_status(ectx.comp_id, layer, g, &params);
     let mine = app.session.roto_target().is_some_and(|(_, l, u, _)| l == layer.id && u == g.uid);
     let running = mine && app.session.is_roto_running();
     let busy = app.session.is_roto_running();
@@ -91,16 +85,25 @@ pub(super) fn object_matte_editor(
     let base = om::reference_frame(&params);
     let status = match app.session.roto_progress() {
         Some(pr) if running => pr.banner(),
+        _ if freeze_status == NeedsRefreeze => crate::i18n::tr("Unfreeze and freeze again").to_string(),
+        _ if freeze_status == AnimatedMismatch => crate::i18n::tr("Animated settings use a live matte").to_string(),
         _ if frozen => format!("Frozen from reference frame {base}"),
         _ if app.session.roto_pending.iter().any(|(_, l, u)| *l == layer.id && *u == g.uid) => "Waiting to track".to_string(),
         _ => format!("Reference frame {base}: Track computes the matte ahead of playback"),
     };
-    p.text(pos2(r.min.x + 24.0, r.min.y + 38.0), Align2::LEFT_CENTER, &status, Tokens::ui(11.5), t.text_dim);
-    app.auto.add(
-        &format!("effectControls.objectMatte.{}.status", g.uid),
-        Rect::from_min_size(pos2(r.min.x + 24.0, r.min.y + 30.0), vec2(r.width() - 24.0, 16.0)),
-        &status,
-    );
+    let status_rect = Rect::from_min_size(pos2(r.min.x + 24.0, r.min.y + 30.0), vec2((r.width() - 24.0).max(0.0), 16.0));
+    let warning = freeze_status != NoMismatch && !running;
+    let color = if warning { t.text } else { t.text_dim };
+    let response = ui.put(status_rect, egui::Label::new(egui::RichText::new(&status).font(Tokens::ui(11.5)).color(color)).truncate().selectable(false));
+    if !running {
+        ui.ctx().accesskit_node_builder(response.id, |node| {
+            node.set_role(egui::Role::Status);
+            node.clear_value();
+            node.set_label(status.as_str());
+            node.set_live(egui::accesskit::Live::Polite);
+        });
+    }
+    app.auto.add(&format!("effectControls.objectMatte.{}.status", g.uid), status_rect, &status);
 }
 
 // ---------------------------------------------------------------------------------------------

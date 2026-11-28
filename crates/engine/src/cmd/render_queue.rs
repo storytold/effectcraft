@@ -867,6 +867,7 @@ fn save_current_preview(s: &mut Session, p: &Value) -> Result<Value> {
 
         caches: None,
         renderer: None,
+        object_matte_warning: None,
         gpu_frames: s.prefs.memory.gpu_frames(),
         cache_budget: Some(s.export_cache_budget()),
     };

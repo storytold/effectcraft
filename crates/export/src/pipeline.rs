@@ -257,6 +257,7 @@ impl Beside {
 pub(crate) struct Cx<'a> {
     pub job: &'a Job<'a>,
     pub project: Project,
+    object_matte_warning: std::sync::Once,
     /// Processed layer buffers shared by the job's frames, as the viewer's layer cache: static
     /// and transform-only layers render once per job (the GPU compositor then uploads them
     /// once). One per compositor; the job's own (dropped with it) or a Render Queue run's.
@@ -400,6 +401,7 @@ impl<'a> Cx<'a> {
         let cx = Cx {
             job,
             project,
+            object_matte_warning: std::sync::Once::new(),
             caches,
             choice: Mutex::new(None),
             gpu_frames: Mutex::new(None),
@@ -559,6 +561,7 @@ impl<'a> Cx<'a> {
         r.expr = self.job.expr;
         r.accel = self.job.accel;
         r.cache = Some(self.caches.of(on));
+        r.object_matte_warning = self.job.options.object_matte_warning.or(Some(&self.object_matte_warning));
         r
     }
 

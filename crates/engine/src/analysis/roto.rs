@@ -85,6 +85,17 @@ pub enum RotoTask {
     Freeze,
 }
 
+/// Whether Object Matte can use its saved matte with the evaluated settings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ObjectMatteFreezeStatus {
+    /// The current parameters match, or there is no saved freeze to check.
+    NoMismatch,
+    /// Freezing again would update the saved parameters at the reference frame.
+    NeedsRefreeze,
+    /// The reference settings still match, but animated settings differ on this frame.
+    AnimatedMismatch,
+}
+
 /// Which way to propagate.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -618,6 +629,27 @@ impl Session {
         let c = self.project.comp(comp)?;
         let t = comp_time_of(c, l, om::reference_frame(&params_static(g)));
         Some(params_at(&self.project, comp, l, g, t, self.expr.as_deref()))
+    }
+
+    /// Compare against the frame that Freeze actually uses, then check the frame on screen.
+    pub fn object_matte_freeze_status(&self, comp: ItemId, l: &Layer, g: &PropGroup, current: &Params) -> ObjectMatteFreezeStatus {
+        use ObjectMatteFreezeStatus::{AnimatedMismatch, NeedsRefreeze, NoMismatch};
+        if !om::is_frozen(current) {
+            return NoMismatch;
+        }
+        let Some(c) = self.project.comp(comp) else { return NoMismatch };
+        let size = layer_size(&self.project, c, l);
+        let fps = c.frame_rate.as_f64();
+        let current_mismatch = om::frozen_settings_mismatch(current, size, fps);
+        let mut animated = false;
+        g.walk("", &mut |_, p| animated |= p.is_animated() || p.has_expression());
+        let reference_mismatch =
+            if animated { self.om_params(comp, l, g).is_some_and(|params| om::frozen_settings_mismatch(&params, size, fps)) } else { current_mismatch };
+        match (reference_mismatch, current_mismatch) {
+            (true, _) => NeedsRefreeze,
+            (false, true) => AnimatedMismatch,
+            (false, false) => NoMismatch,
+        }
     }
 
     pub fn stop_roto(&mut self) -> bool {

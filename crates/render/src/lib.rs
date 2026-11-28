@@ -81,6 +81,8 @@ pub struct Renderer<'a> {
     /// from the footage source and from the buffers the layer cache serves. `None` records
     /// nothing for the frame (buffers kept in the layer cache still record theirs).
     pub reads: Option<&'a reads::ReadLog>,
+    /// Warn once about a stale Object Matte in this frame or across one export job.
+    pub object_matte_warning: Option<&'a std::sync::Once>,
     /// Optional per-layer timing sink (`frame --bench` / perf readouts).
     pub profile: Option<&'a std::sync::Mutex<Vec<LayerTiming>>>,
     /// GPU backend used when [`RenderOpts::backend`] asks for it.

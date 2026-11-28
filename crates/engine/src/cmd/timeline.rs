@@ -150,6 +150,7 @@ fn prerender(
 
         caches: None,
         renderer: None,
+        object_matte_warning: None,
         gpu_frames: None,
         cache_budget: Some(cx.cache_budget),
     };

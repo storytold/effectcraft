@@ -85,7 +85,7 @@ pub fn specs() -> Vec<CommandSpec> {
         query!(
             "objectMatte.status",
             "Object Matte Status",
-            "{layer?, effect?}: the job's progress, whether the instance is frozen, its frames and which are computed",
+            "{layer?, effect?}: the job's progress, freeze state (including mismatched animation at the current frame), its frames and which are computed",
             object_matte_status
         ),
         query!(
@@ -691,13 +691,21 @@ fn object_matte_status(s: &mut Session, p: &Value) -> Result<Value> {
     let running = s.is_roto_running();
     let mut out = json!({"running": running, "progress": s.roto_progress(), "banner": s.roto_progress().map(|p| p.banner())});
     let Ok((cid, lid, uid)) = object_matte_p(s, p, "objectMatte.status") else { return Ok(out) };
-    let (_, g) = group(s, cid, lid, uid)?;
+    let (l, g) = group(s, cid, lid, uid)?;
     let frozen = frozen_of(g);
+    let freeze_status = if frozen {
+        let params = rt::params_at(&s.project, cid, l, g, s.time_of(cid), s.expr.as_deref());
+        s.object_matte_freeze_status(cid, l, g, &params)
+    } else {
+        rt::ObjectMatteFreezeStatus::NoMismatch
+    };
     let (track, before, after) = object_matte_reach(s, cid, lid, uid);
     let computed = s.roto_computed(cid, lid, uid);
     out["layer"] = json!(lid.0);
     out["effect"] = json!(uid);
     out["frozen"] = json!(frozen);
+    out["needsRefreeze"] = json!(freeze_status == rt::ObjectMatteFreezeStatus::NeedsRefreeze);
+    out["animatedMismatch"] = json!(freeze_status == rt::ObjectMatteFreezeStatus::AnimatedMismatch);
     out["track"] = json!(track);
     out["reach"] = json!([before, after]);
     out["mine"] = json!(running && s.roto_target().is_some_and(|(c, l, u, _)| (c, l, u) == (cid, lid, uid)));

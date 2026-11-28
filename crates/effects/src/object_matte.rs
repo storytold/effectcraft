@@ -282,22 +282,43 @@ pub fn is_frozen(params: &Params) -> bool {
     !s(params, FROZEN).is_empty()
 }
 
+enum FrozenMatch {
+    Missing,
+    Stale,
+    Current(Arc<FrozenCache>),
+}
+
+fn frozen_match(params: &Params, layer_size: [f64; 2], fps: f64, model: Option<&dyn MaskModel>) -> FrozenMatch {
+    let j = s(params, FROZEN);
+    if j.is_empty() {
+        return FrozenMatch::Missing;
+    }
+    let Some(cache) = frozen_cache(j) else { return FrozenMatch::Missing };
+    if cache.key == frozen_key(params, layer_size, fps, model) {
+        return FrozenMatch::Current(cache);
+    }
+    let mut ids = std::iter::once(effectcraft_segment::CLASSICAL).chain(effectcraft_segment::MODELS.iter().map(|m| m.id));
+    if ids.any(|id| cache.key == frozen_key_of(params, layer_size, fps, id)) { FrozenMatch::Current(cache) } else { FrozenMatch::Stale }
+}
+
+/// Whether a saved freeze no longer matches the evaluated inputs and matte settings.
+pub fn frozen_settings_mismatch(params: &Params, layer_size: [f64; 2], fps: f64) -> bool {
+    if !is_frozen(params) {
+        return false;
+    }
+    matches!(frozen_match(params, layer_size, fps, roto::installed_model().as_deref()), FrozenMatch::Stale)
+}
+
 /// Frame `f`'s frozen matte on a `w`×`h` grid, when the instance is frozen, the mattes still
 /// match ([`frozen_key`]) and `f` is one of them. The mattes match under the session's `model`
 /// or under the model that froze them (which this session may not have loaded, e.g. a fresh
 /// headless render): frozen mattes need no segmentation.
 pub fn frozen_alpha(params: &Params, layer_size: [f64; 2], fps: f64, f: i64, w: usize, h: usize, model: Option<&dyn MaskModel>) -> Option<Vec<f32>> {
-    let j = s(params, FROZEN);
-    if j.is_empty() {
-        return None;
-    }
-    let fc = frozen_cache(j)?;
-    if fc.key != frozen_key(params, layer_size, fps, model) {
-        let ids = std::iter::once(effectcraft_segment::CLASSICAL).chain(effectcraft_segment::MODELS.iter().map(|m| m.id));
-        if !ids.into_iter().any(|id| fc.key == frozen_key_of(params, layer_size, fps, id)) {
-            return None;
-        }
-    }
+    let FrozenMatch::Current(cache) = frozen_match(params, layer_size, fps, model) else { return None };
+    decode_frozen(&cache, layer_size, f, w, h)
+}
+
+fn decode_frozen(fc: &FrozenCache, layer_size: [f64; 2], f: i64, w: usize, h: usize) -> Option<Vec<f32>> {
     let fr = fc.frames.get(&f)?;
     let [fw, fh] = fc.size;
     let expected = fw.checked_mul(fh)?;
@@ -425,7 +446,17 @@ fn render(ctx: &EffectCtx, buf: Buf) -> Buf {
     };
     let model = roto::installed_model();
     // Frozen mattes are used as they are (no segmentation).
-    if let Some(a) = frozen_alpha(ctx.params, layer_size, fps, f, w, h, model.as_deref()) {
+    let frozen = match frozen_match(ctx.params, layer_size, fps, model.as_deref()) {
+        FrozenMatch::Current(cache) => decode_frozen(&cache, layer_size, f, w, h),
+        FrozenMatch::Missing => None,
+        FrozenMatch::Stale => {
+            if let Some(host) = host {
+                host.note_object_matte_mismatch();
+            }
+            None
+        }
+    };
+    if let Some(a) = frozen {
         return compose(&buf, Some(&a), w, h, b(ctx.params, "invert"), param(ctx.params, "view").map(Value::as_enum).unwrap_or(0) == 1);
     }
     let alpha = match frame_matte(ctx.params, &MatteFrame { layer_size, fps, frame: f, scale: sc, img: &img }, model, &mut frame, &|| false) {
