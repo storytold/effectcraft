@@ -223,6 +223,12 @@ const ROT90: Affine = Affine::new([0.0, 1.0, -1.0, 0.0, 0.0, 0.0]);
 /// baseline (left), its centre (centre) or end (right). Paragraph text fills `box_size` from
 /// `box_pos`. Vertical text runs down from the origin (point) or the box's top-right corner.
 pub fn layout_doc(doc: &TextDoc) -> TextLayout {
+    layout_doc_with(doc, true)
+}
+
+/// [`layout_doc`]; without `clip_to_box` every line shows, also those past a paragraph box (the
+/// text being edited: its glyphs then match the carets and selections of `layout`).
+pub fn layout_doc_with(doc: &TextDoc, clip_to_box: bool) -> TextLayout {
     let text = doc.text.as_str();
     let byte_of_char: Vec<usize> = text.char_indices().map(|(b, _)| b).chain(std::iter::once(text.len())).collect();
     let nchars = byte_of_char.len() - 1;
@@ -276,7 +282,22 @@ pub fn layout_doc(doc: &TextDoc) -> TextLayout {
     out.chars_no_space = nospace;
     out.words = words;
     let mut b = [f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY];
+    // Paragraph text is clipped by its box: lines that end below it are not drawn. The first
+    // stays, cut at the box's far edge (bottom; left in vertical type) when it overflows.
+    let depth = doc.box_size.filter(|_| clip_to_box).map(|b| if doc.vertical { b[0] } else { b[1] } as f32);
+    let far_edge = match (doc.vertical, doc.box_size) {
+        (false, Some(b)) => Some((kurbo::Vec2::new(0.0, 1.0), doc.box_pos[1] + b[1])),
+        (true, Some(_)) => Some((kurbo::Vec2::new(-1.0, 0.0), -doc.box_pos[0])),
+        (_, None) => None,
+    };
+    // Horizontal paragraph text is also cut at the box's right edge (a glyph wider than the box).
+    let width_edge = doc.box_size.filter(|_| clip_to_box && !doc.vertical).map(|b| doc.box_pos[0] + b[0]);
     for (li, line) in lay.lines.iter().enumerate() {
+        let overflows = depth.is_some_and(|d| line.baseline + line.descent > d + 0.5);
+        if li > 0 && overflows {
+            break;
+        }
+        let clip = far_edge.filter(|_| overflows);
         let o = to_layer * Point::new(line.x as f64, line.baseline as f64);
         out.line_boxes.push([o.x, o.y, line.width as f64, (line.ascent + line.descent) as f64]);
         // Vertical type: Tate-Chu-Yoko groups (consecutive glyphs of tcy runs) take one em of
@@ -336,6 +357,12 @@ pub fn layout_doc(doc: &TextDoc) -> TextLayout {
                     outline_xf = ROT90 * outline_xf;
                 }
             }
+            if let Some(x) = width_edge {
+                path = clip_half_plane(&path, kurbo::Vec2::new(1.0, 0.0), x - origin.x);
+            }
+            if let Some((n, c)) = clip.filter(|_| !path.elements().is_empty()) {
+                path = clip_half_plane(&path, n, c - n.dot(origin.to_vec2()));
+            }
             if let Some(r) = (!path.elements().is_empty()).then(|| kurbo::Shape::bounding_box(&path)) {
                 b[0] = b[0].min(origin.x + r.x0);
                 b[1] = b[1].min(origin.y + r.y0);
@@ -368,6 +395,45 @@ pub fn layout_doc(doc: &TextDoc) -> TextLayout {
     out.styles = styles;
     out.byte_of_char = byte_of_char;
     out.layout = lay;
+    out
+}
+
+/// `path` cut to the half-plane `n · p <= c`; contours crossing the edge are flattened.
+fn clip_half_plane(path: &BezPath, n: kurbo::Vec2, c: f64) -> BezPath {
+    let d = |p: Point| n.dot(p.to_vec2()) - c;
+    let r = kurbo::Shape::bounding_box(path);
+    let corners = [Point::new(r.x0, r.y0), Point::new(r.x1, r.y0), Point::new(r.x0, r.y1), Point::new(r.x1, r.y1)];
+    if corners.iter().all(|p| d(*p) <= 0.0) {
+        return path.clone();
+    }
+    let mut out = BezPath::new();
+    if corners.iter().all(|p| d(*p) > 0.0) {
+        return out;
+    }
+    let mut contours: Vec<Vec<Point>> = Vec::new();
+    kurbo::flatten(path, 0.01, |el| match el {
+        kurbo::PathEl::MoveTo(p) => contours.push(vec![p]),
+        kurbo::PathEl::LineTo(p) => contours.last_mut().into_iter().for_each(|v| v.push(p)),
+        _ => {}
+    });
+    // Sutherland–Hodgman against one edge: a convex clip keeps every contour's winding.
+    for poly in contours {
+        let mut kept = Vec::with_capacity(poly.len() + 2);
+        for (&a, &b) in poly.iter().zip(poly.iter().cycle().skip(1)) {
+            let (da, db) = (d(a), d(b));
+            if da <= 0.0 {
+                kept.push(a);
+            }
+            if (da <= 0.0) != (db <= 0.0) {
+                kept.push(a.lerp(b, da / (da - db)));
+            }
+        }
+        if let Some((first, rest)) = kept.split_first() {
+            out.move_to(*first);
+            rest.iter().for_each(|p| out.line_to(*p));
+            out.close_path();
+        }
+    }
     out
 }
 
@@ -652,6 +718,90 @@ mod tests {
         let q = l.selection_quads(3, 12);
         assert_eq!(q.len(), 2);
         assert_eq!(l.char_of_byte(doc.byte_of(12)), 12);
+    }
+
+    /// #2660: a word wider than the box breaks at the box edge instead of running past it.
+    #[test]
+    fn overlong_word_wraps_inside_the_box() {
+        let doc =
+            TextDoc { text: "fkdslfkdslfkdslfksdlfkdsdsdfkdslfkdslfkdslfksdlfkdsdsd".into(), size: 20.0, box_size: Some([100.0, 200.0]), ..Default::default() };
+        let l = layout_doc(&doc);
+        assert!(l.line_boxes.len() > 1, "{} lines", l.line_boxes.len());
+        assert!(l.line_boxes.iter().all(|b| b[2] <= 100.5), "{:?}", l.line_boxes);
+    }
+
+    /// Review of #2840: lines that end below the box are not drawn.
+    #[test]
+    fn lines_below_the_box_are_clipped() {
+        let text = "one two three four five six seven eight nine ten".to_string();
+        let tall = layout_doc(&TextDoc { text: text.clone(), size: 20.0, box_size: Some([80.0, 400.0]), ..Default::default() });
+        let short = layout_doc(&TextDoc { text, size: 20.0, box_size: Some([80.0, 50.0]), ..Default::default() });
+        assert!(short.glyphs.len() < tall.glyphs.len() && !short.glyphs.is_empty(), "{} vs {}", short.glyphs.len(), tall.glyphs.len());
+        assert!(short.line_boxes.iter().all(|b| b[1] < 50.0 + 20.0), "{:?}", short.line_boxes);
+    }
+
+    /// Review of #2840: the text being edited keeps every line (they hold the caret), uncut.
+    #[test]
+    fn unclipped_layout_keeps_lines_past_the_box() {
+        let doc = TextDoc { text: "one\ntwo\nthree".into(), size: 20.0, box_size: Some([80.0, 10.0]), ..Default::default() };
+        let (clipped, whole) = (layout_doc(&doc), layout_doc_with(&doc, false));
+        assert_eq!(clipped.line_boxes.len(), 1);
+        assert_eq!(whole.line_boxes.len(), whole.layout.lines.len());
+        assert_eq!(whole.glyphs.iter().map(|g| g.line_index).max(), Some(2));
+        let full = layout_doc(&TextDoc { box_size: Some([80.0, 400.0]), ..doc });
+        assert!(whole.glyphs.iter().zip(&full.glyphs).all(|(a, b)| a.path == b.path && a.origin == b.origin), "not cut");
+    }
+
+    /// Review of #2840: a box shorter than the first line keeps it, cut at the box's bottom
+    /// (left edge in vertical type).
+    #[test]
+    fn first_line_is_cut_at_a_short_box() {
+        for vertical in [false, true] {
+            let doc = TextDoc { text: "Hgj".into(), size: 40.0, vertical, box_size: Some([20.0, 20.0]), ..Default::default() };
+            let l = layout_doc(&doc);
+            assert_eq!(l.line_boxes.len(), 1);
+            let ink: Vec<kurbo::Rect> =
+                l.glyphs.iter().filter(|g| !g.path.elements().is_empty()).map(|g| kurbo::Shape::bounding_box(&g.path) + g.origin.to_vec2()).collect();
+            assert!(!ink.is_empty(), "vertical={vertical}");
+            if vertical {
+                assert!(ink.iter().all(|r| r.x0 >= -1e-6), "{ink:?}");
+            } else {
+                assert!(ink.iter().all(|r| r.y1 <= 20.0 + 1e-6), "{ink:?}");
+                assert!(ink.iter().any(|r| r.y1 > 19.0), "ink reaches the box bottom: {ink:?}");
+            }
+        }
+    }
+
+    /// Review of #2840: a glyph wider than the box is cut at its right edge, except while editing.
+    #[test]
+    fn glyph_wider_than_the_box_is_cut_at_its_right_edge() {
+        let doc = TextDoc { text: "Hgj".into(), size: 40.0, box_size: Some([20.0, 400.0]), box_pos: [10.0, 0.0], ..Default::default() };
+        let right = |l: &TextLayout| {
+            l.glyphs
+                .iter()
+                .filter(|g| !g.path.elements().is_empty())
+                .map(|g| (kurbo::Shape::bounding_box(&g.path) + g.origin.to_vec2()).x1)
+                .fold(f64::MIN, f64::max)
+        };
+        let clipped = layout_doc(&doc);
+        assert!(right(&clipped) > 29.0 && right(&clipped) <= 30.0 + 1e-6, "{}", right(&clipped));
+        assert!(right(&layout_doc_with(&doc, false)) > 30.0 + 1e-6, "editing keeps the glyphs whole");
+    }
+
+    /// Review of #2840: a wide word never splits a combining sequence across lines.
+    #[test]
+    fn overlong_word_keeps_combining_marks_with_base() {
+        let doc = TextDoc {
+            text: "e\u{301}e\u{301}e\u{301}e\u{301}e\u{301}e\u{301}e\u{301}e\u{301}".into(),
+            size: 20.0,
+            box_size: Some([30.0, 400.0]),
+            ..Default::default()
+        };
+        let l = layout_doc(&doc);
+        assert!(l.line_boxes.len() > 1);
+        // No line starts at a combining mark, and every base character still has a glyph.
+        assert!(l.layout.lines.iter().all(|line| !doc.text[line.range.start..].starts_with('\u{301}')), "a line begins at a mark");
+        assert!((0..doc.char_len()).step_by(2).all(|ci| l.glyphs.iter().any(|g| g.char_index == ci)), "a base character lost its glyph");
     }
 
     #[test]

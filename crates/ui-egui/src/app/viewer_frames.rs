@@ -236,7 +236,15 @@ impl EffectcraftApp {
             // the viewer's exposure (#2797).
             skip_hdr_step: frames::f16_frames(&self.session.project.settings),
             proxy: Default::default(),
+            edited_text: self.edited_text(comp),
         }
+    }
+
+    /// The text layer of `comp` being edited: viewer frames draw it whole (no masks, every line of
+    /// a paragraph box) so the text typed shows where the caret is (`RenderOpts::edited_text`).
+    fn edited_text(&self, comp: ItemId) -> Option<u64> {
+        let id = self.session.state.text_edit.as_ref()?.layer;
+        self.session.project.comp(comp)?.layer(id).map(|_| id.0)
     }
 
     fn request_frame_with(
@@ -250,7 +258,8 @@ impl EffectcraftApp {
         let key = self.frame_key(comp, frame, scale);
         let t = c.frame_rate.tick_of(frame);
         let opts = self.frame_opts(comp, scale);
-        request(&self.frames, &self.render_source(), key, comp, t, opts);
+        let src = self.render_source();
+        request(&self.frames, &src, key, comp, t, opts);
     }
 }
 
