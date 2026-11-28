@@ -1430,15 +1430,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "craft-command"
-version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=81669a0c5c656207abf6df59ea2f93dcca328e24#81669a0c5c656207abf6df59ea2f93dcca328e24"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "craft-doc"
 version = "0.1.0"
 source = "git+https://github.com/storytold/craft-libs?rev=8fa4db64a9bb943520259ea95331a303ba788f21#8fa4db64a9bb943520259ea95331a303ba788f21"
@@ -1646,21 +1637,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "craft-ipc"
-version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=a346c50303129490218ffc2e8f7e646435bd8efe#a346c50303129490218ffc2e8f7e646435bd8efe"
-dependencies = [
- "chrono",
- "getrandom 0.2.17",
- "interprocess",
- "libc",
- "serde",
- "serde_json",
- "sha2",
- "widestring",
-]
-
-[[package]]
 name = "craft-jpeg"
 version = "0.1.0"
 source = "git+https://github.com/storytold/craft-libs?rev=33be35625e252cc4f06aa375b3b428521faea37d#33be35625e252cc4f06aa375b3b428521faea37d"
@@ -1813,8 +1789,8 @@ version = "0.1.0"
 source = "git+https://github.com/storytold/craft-libs?rev=0800de6e8a3c1947f52650cf81906d54b0b89061#0800de6e8a3c1947f52650cf81906d54b0b89061"
 dependencies = [
  "bitflags 2.13.2",
- "craft-command 0.1.0 (git+https://github.com/storytold/craft-libs?rev=0800de6e8a3c1947f52650cf81906d54b0b89061)",
- "craft-ipc 0.1.0 (git+https://github.com/storytold/craft-libs?rev=0800de6e8a3c1947f52650cf81906d54b0b89061)",
+ "craft-command",
+ "craft-ipc",
  "craft-plugin-abi",
  "serde",
  "serde_json",
@@ -2605,7 +2581,7 @@ version = "0.25.1"
 dependencies = [
  "chrono",
  "cpal",
- "craft-ipc 0.1.0 (git+https://github.com/storytold/craft-libs?rev=a346c50303129490218ffc2e8f7e646435bd8efe)",
+ "craft-ipc",
  "craft-update",
  "effectcraft-engine",
  "effectcraft-host",
@@ -2717,7 +2693,7 @@ name = "effectcraft-engine"
 version = "0.25.1"
 dependencies = [
  "chrono",
- "craft-command 0.1.0 (git+https://github.com/storytold/craft-libs?rev=81669a0c5c656207abf6df59ea2f93dcca328e24)",
+ "craft-command",
  "craft-doc",
  "craft-docpath",
  "craft-plugin-host",
@@ -2908,8 +2884,8 @@ dependencies = [
 name = "effectcraft-link"
 version = "0.25.1"
 dependencies = [
- "craft-command 0.1.0 (git+https://github.com/storytold/craft-libs?rev=81669a0c5c656207abf6df59ea2f93dcca328e24)",
- "craft-ipc 0.1.0 (git+https://github.com/storytold/craft-libs?rev=a346c50303129490218ffc2e8f7e646435bd8efe)",
+ "craft-command",
+ "craft-ipc",
  "effectcraft-engine",
  "effectcraft-export",
  "effectcraft-host",
@@ -3049,8 +3025,8 @@ name = "effectcraft-plugins"
 version = "0.25.1"
 dependencies = [
  "bytemuck",
- "craft-command 0.1.0 (git+https://github.com/storytold/craft-libs?rev=81669a0c5c656207abf6df59ea2f93dcca328e24)",
- "craft-ipc 0.1.0 (git+https://github.com/storytold/craft-libs?rev=a346c50303129490218ffc2e8f7e646435bd8efe)",
+ "craft-command",
+ "craft-ipc",
  "craft-plugin-abi",
  "craft-plugin-host",
  "craft-plugin-ui",
@@ -3224,7 +3200,7 @@ dependencies = [
  "chrono",
  "craft-behavior",
  "craft-host",
- "craft-ipc 0.1.0 (git+https://github.com/storytold/craft-libs?rev=a346c50303129490218ffc2e8f7e646435bd8efe)",
+ "craft-ipc",
  "craft-keymap",
  "craft-mime",
  "craft-theme",
